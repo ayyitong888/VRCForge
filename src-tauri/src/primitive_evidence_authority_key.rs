@@ -1,6 +1,36 @@
 use sha2::{Digest, Sha256};
 use std::fmt;
 
+struct PendingCreatedResource<T> {
+    value: Option<T>,
+    cleanup: fn(&mut T),
+}
+
+impl<T> PendingCreatedResource<T> {
+    fn new(value: T, cleanup: fn(&mut T)) -> Self {
+        Self {
+            value: Some(value),
+            cleanup,
+        }
+    }
+
+    fn value(&self) -> &T {
+        self.value.as_ref().expect("pending resource is armed")
+    }
+
+    fn commit(mut self) -> T {
+        self.value.take().expect("pending resource is armed")
+    }
+}
+
+impl<T> Drop for PendingCreatedResource<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.as_mut() {
+            (self.cleanup)(value);
+        }
+    }
+}
+
 pub const AUTHORITY_KEY_NAME_PREFIX: &str = "VRCForge.PrimitiveEvidence.Authority.P256.v1.";
 
 const DIGEST_SIZE: usize = 32;
@@ -95,6 +125,17 @@ impl VerifiedAuthorityKeyReadback {
     pub fn public_key_sec1(&self) -> &[u8; PUBLIC_KEY_SIZE] {
         &self.public_key_sec1
     }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(public_key_sec1: [u8; PUBLIC_KEY_SIZE]) -> Self {
+        assert_eq!(public_key_sec1[0], 0x04);
+        assert!(public_key_sec1[1..].iter().any(|value| *value != 0));
+        Self {
+            key_name: "test-only-authority-key".to_string(),
+            signer_key_id: Sha256::digest(public_key_sec1).into(),
+            public_key_sec1,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +175,24 @@ pub fn inspect_existing_machine_key(
 ) -> Result<AuthorityKeyReadback, AuthorityKeyError> {
     windows::inspect_existing_machine_key(policy)
 }
+
+#[cfg(windows)]
+pub fn provision_new_machine_key(
+    authority_generation_digest: [u8; DIGEST_SIZE],
+    service_sid: &str,
+) -> Result<ProvisionedAuthorityKey, AuthorityKeyError> {
+    windows::provision_new_machine_key(authority_generation_digest, service_sid)
+}
+
+#[cfg(windows)]
+pub fn open_verified_machine_key(
+    policy: &AuthorityKeyPolicy,
+) -> Result<OpenedAuthorityKey, AuthorityKeyError> {
+    windows::open_verified_machine_key(policy)
+}
+
+#[cfg(windows)]
+pub use windows::{OpenedAuthorityKey, ProvisionedAuthorityKey};
 
 #[cfg(not(windows))]
 pub fn inspect_existing_machine_key(
@@ -316,20 +375,22 @@ mod windows {
     use windows_sys::{
         core::{PCWSTR, PWSTR},
         Win32::{
-            Foundation::{LocalFree, NTE_BAD_KEYSET},
+            Foundation::{LocalFree, NTE_BAD_KEYSET, NTE_EXISTS},
             Security::{
                 Authorization::{
                     ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
                 },
                 Cryptography::{
-                    NCryptExportKey, NCryptFreeObject, NCryptGetProperty, NCryptOpenKey,
-                    NCryptOpenStorageProvider, BCRYPT_ECCPUBLIC_BLOB,
+                    NCryptCreatePersistedKey, NCryptDeleteKey, NCryptExportKey, NCryptFinalizeKey,
+                    NCryptFreeObject, NCryptGetProperty, NCryptOpenKey, NCryptOpenStorageProvider,
+                    NCryptSetProperty, NCryptSignHash, NCryptVerifySignature,
+                    BCRYPT_ECCPUBLIC_BLOB, BCRYPT_ECDSA_P256_ALGORITHM,
                     BCRYPT_ECDSA_PUBLIC_P256_MAGIC, MS_KEY_STORAGE_PROVIDER,
                     NCRYPT_ALGORITHM_GROUP_PROPERTY, NCRYPT_ALGORITHM_PROPERTY,
                     NCRYPT_EXPORT_POLICY_PROPERTY, NCRYPT_KEY_HANDLE, NCRYPT_KEY_TYPE_PROPERTY,
                     NCRYPT_KEY_USAGE_PROPERTY, NCRYPT_LENGTH_PROPERTY, NCRYPT_MACHINE_KEY_FLAG,
-                    NCRYPT_NAME_PROPERTY, NCRYPT_PROV_HANDLE, NCRYPT_SECURITY_DESCR_PROPERTY,
-                    NCRYPT_SILENT_FLAG,
+                    NCRYPT_NAME_PROPERTY, NCRYPT_PERSIST_FLAG, NCRYPT_PROV_HANDLE,
+                    NCRYPT_SECURITY_DESCR_PROPERTY, NCRYPT_SILENT_FLAG,
                 },
                 DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
                 PSECURITY_DESCRIPTOR,
@@ -341,6 +402,17 @@ mod windows {
     const MAX_SECURITY_DESCRIPTOR_BYTES: u32 = 16_384;
     const SECURITY_INFORMATION: u32 =
         OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    const P256_SIGNATURE_SIZE: usize = 64;
+    pub(super) const P256_ORDER: [u8; 32] = [
+        0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xbc, 0xe6, 0xfa, 0xad, 0xa7, 0x17, 0x9e, 0x84, 0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63,
+        0x25, 0x51,
+    ];
+    pub(super) const P256_HALF_ORDER: [u8; 32] = [
+        0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xde, 0x73, 0x7d, 0x56, 0xd3, 0x8b, 0xcf, 0x42, 0x79, 0xdc, 0xe5, 0x61, 0x7e, 0x31,
+        0x92, 0xa8,
+    ];
 
     struct Provider(NCRYPT_PROV_HANDLE);
 
@@ -377,6 +449,47 @@ mod windows {
             }
             Ok(Some(Key(handle)))
         }
+
+        fn create_new_machine_key(
+            &self,
+            key_name: &str,
+            security_descriptor_sddl: &str,
+        ) -> Result<PendingCreatedResource<Key>, AuthorityKeyError> {
+            let wide_name = wide_null(key_name)?;
+            let mut handle = 0;
+            let flags = NCRYPT_MACHINE_KEY_FLAG | NCRYPT_SILENT_FLAG;
+            let status = unsafe {
+                NCryptCreatePersistedKey(
+                    self.0,
+                    &mut handle,
+                    BCRYPT_ECDSA_P256_ALGORITHM,
+                    wide_name.as_ptr(),
+                    0,
+                    flags,
+                )
+            };
+            if status == NTE_EXISTS {
+                return Err(AuthorityKeyError("authority_key_already_exists"));
+            }
+            check(status, "authority_key_create_failed")?;
+            if handle == 0 {
+                return Err(AuthorityKeyError("authority_key_create_failed"));
+            }
+            let key = PendingCreatedResource::new(Key(handle), delete_pending_key);
+            key.value()
+                .set_u32_property(NCRYPT_LENGTH_PROPERTY, P256_KEY_LENGTH_BITS)?;
+            key.value()
+                .set_u32_property(NCRYPT_KEY_USAGE_PROPERTY, SIGN_ONLY_USAGE)?;
+            key.value()
+                .set_u32_property(NCRYPT_EXPORT_POLICY_PROPERTY, NO_EXPORT_POLICY)?;
+            key.value()
+                .set_security_descriptor(security_descriptor_sddl)?;
+            check(
+                unsafe { NCryptFinalizeKey(key.value().0, NCRYPT_SILENT_FLAG) },
+                "authority_key_finalize_failed",
+            )?;
+            Ok(key)
+        }
     }
 
     impl Drop for Provider {
@@ -391,6 +504,16 @@ mod windows {
     }
 
     struct Key(NCRYPT_KEY_HANDLE);
+
+    fn delete_pending_key(key: &mut Key) {
+        let handle = key.0;
+        key.0 = 0;
+        if handle != 0 {
+            unsafe {
+                NCryptDeleteKey(handle, 0);
+            }
+        }
+    }
 
     impl Key {
         fn snapshot(&self) -> Result<AuthorityKeyPropertySnapshot, AuthorityKeyError> {
@@ -420,6 +543,147 @@ mod windows {
             Ok(u32::from_le_bytes(bytes.as_slice().try_into().map_err(
                 |_| AuthorityKeyError("authority_key_property_shape_invalid"),
             )?))
+        }
+
+        fn set_u32_property(&self, property: PCWSTR, value: u32) -> Result<(), AuthorityKeyError> {
+            check(
+                unsafe {
+                    NCryptSetProperty(
+                        self.0,
+                        property,
+                        value.to_le_bytes().as_ptr(),
+                        4,
+                        NCRYPT_PERSIST_FLAG | NCRYPT_SILENT_FLAG,
+                    )
+                },
+                "authority_key_property_write_failed",
+            )
+        }
+
+        fn set_security_descriptor(&self, sddl: &str) -> Result<(), AuthorityKeyError> {
+            let encoded = wide_null(sddl)?;
+            let mut descriptor = null_mut();
+            let mut descriptor_length = 0u32;
+            let converted = unsafe {
+                windows_sys::Win32::Security::Authorization::
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                        encoded.as_ptr(),
+                        SDDL_REVISION_1,
+                        &mut descriptor,
+                        &mut descriptor_length,
+                    )
+            };
+            if converted == 0 || descriptor.is_null() || descriptor_length == 0 {
+                if !descriptor.is_null() {
+                    unsafe {
+                        LocalFree(descriptor);
+                    }
+                }
+                return Err(AuthorityKeyError(
+                    "authority_key_security_descriptor_invalid",
+                ));
+            }
+            let status = unsafe {
+                NCryptSetProperty(
+                    self.0,
+                    NCRYPT_SECURITY_DESCR_PROPERTY,
+                    descriptor.cast::<u8>(),
+                    descriptor_length,
+                    SECURITY_INFORMATION | NCRYPT_PERSIST_FLAG | NCRYPT_SILENT_FLAG,
+                )
+            };
+            unsafe {
+                LocalFree(descriptor);
+            }
+            check(status, "authority_key_security_descriptor_write_failed")
+        }
+
+        fn sign_digest(&self, digest: &[u8; 32]) -> Result<[u8; 64], AuthorityKeyError> {
+            if digest.iter().all(|value| *value == 0) {
+                return Err(AuthorityKeyError("authority_signature_digest_zero"));
+            }
+            let mut required = 0u32;
+            check(
+                unsafe {
+                    NCryptSignHash(
+                        self.0,
+                        null(),
+                        digest.as_ptr(),
+                        digest.len() as u32,
+                        null_mut(),
+                        0,
+                        &mut required,
+                        NCRYPT_SILENT_FLAG,
+                    )
+                },
+                "authority_key_sign_failed",
+            )?;
+            if required != P256_SIGNATURE_SIZE as u32 {
+                return Err(AuthorityKeyError("authority_signature_shape_invalid"));
+            }
+            let mut signature = [0u8; P256_SIGNATURE_SIZE];
+            let mut written = 0u32;
+            check(
+                unsafe {
+                    NCryptSignHash(
+                        self.0,
+                        null(),
+                        digest.as_ptr(),
+                        digest.len() as u32,
+                        signature.as_mut_ptr(),
+                        signature.len() as u32,
+                        &mut written,
+                        NCRYPT_SILENT_FLAG,
+                    )
+                },
+                "authority_key_sign_failed",
+            )?;
+            if written != signature.len() as u32 {
+                return Err(AuthorityKeyError("authority_signature_shape_invalid"));
+            }
+            normalize_low_s(&mut signature);
+            check(
+                unsafe {
+                    NCryptVerifySignature(
+                        self.0,
+                        null(),
+                        digest.as_ptr(),
+                        digest.len() as u32,
+                        signature.as_ptr(),
+                        signature.len() as u32,
+                        NCRYPT_SILENT_FLAG,
+                    )
+                },
+                "authority_key_signature_self_verify_failed",
+            )?;
+            Ok(signature)
+        }
+
+        fn verify_digest_signature(
+            &self,
+            digest: &[u8; 32],
+            signature: &[u8; P256_SIGNATURE_SIZE],
+        ) -> Result<(), AuthorityKeyError> {
+            if digest.iter().all(|value| *value == 0) {
+                return Err(AuthorityKeyError("authority_signature_digest_zero"));
+            }
+            if !signature_is_canonical(signature) {
+                return Err(AuthorityKeyError("authority_signature_scalar_invalid"));
+            }
+            check(
+                unsafe {
+                    NCryptVerifySignature(
+                        self.0,
+                        null(),
+                        digest.as_ptr(),
+                        digest.len() as u32,
+                        signature.as_ptr(),
+                        signature.len() as u32,
+                        NCRYPT_SILENT_FLAG,
+                    )
+                },
+                "authority_signature_verification_failed",
+            )
         }
 
         fn string_property(&self, property: PCWSTR) -> Result<String, AuthorityKeyError> {
@@ -595,6 +859,164 @@ mod windows {
         )
     }
 
+    pub struct ProvisionedAuthorityKey {
+        key: Key,
+        readback: VerifiedAuthorityKeyReadback,
+    }
+
+    pub struct OpenedAuthorityKey {
+        key: Key,
+        readback: VerifiedAuthorityKeyReadback,
+    }
+
+    impl OpenedAuthorityKey {
+        pub fn readback(&self) -> &VerifiedAuthorityKeyReadback {
+            &self.readback
+        }
+
+        /// Revalidates every security and cryptographic property through the
+        /// retained key handle. No key-name lookup or replacement handle is
+        /// permitted after the authenticated boundary has adopted this key.
+        pub(crate) fn verify_current(
+            &self,
+            policy: &AuthorityKeyPolicy,
+        ) -> Result<(), AuthorityKeyError> {
+            let current = match validate_snapshot(
+                policy,
+                AuthorityKeySnapshot::Present(Box::new(self.key.snapshot()?)),
+            )? {
+                AuthorityKeyReadback::Verified(value) => value,
+                AuthorityKeyReadback::Absent { .. } => {
+                    return Err(AuthorityKeyError("authority_key_missing"))
+                }
+            };
+            if current != self.readback {
+                return Err(AuthorityKeyError("authority_key_readback_changed"));
+            }
+            Ok(())
+        }
+
+        /// Signs with the already-opened, policy-verified machine key.
+        ///
+        /// This deliberately has no path/name based fallback: the protected
+        /// service boundary must retain this unique handle and revalidate its
+        /// surrounding FinalCommit boundary before each use.
+        pub(crate) fn sign_digest(
+            &self,
+            digest: &[u8; 32],
+        ) -> Result<[u8; P256_SIGNATURE_SIZE], AuthorityKeyError> {
+            self.key.sign_digest(digest)
+        }
+
+        pub fn verify_digest_signature(
+            &self,
+            digest: &[u8; 32],
+            signature: &[u8; P256_SIGNATURE_SIZE],
+        ) -> Result<(), AuthorityKeyError> {
+            self.key.verify_digest_signature(digest, signature)
+        }
+    }
+
+    pub(super) fn open_verified_machine_key(
+        policy: &AuthorityKeyPolicy,
+    ) -> Result<OpenedAuthorityKey, AuthorityKeyError> {
+        let provider = Provider::open()?;
+        let key = provider
+            .open_existing_machine_key(policy.key_name())?
+            .ok_or(AuthorityKeyError("authority_key_missing"))?;
+        let readback = match validate_snapshot(
+            policy,
+            AuthorityKeySnapshot::Present(Box::new(key.snapshot()?)),
+        )? {
+            AuthorityKeyReadback::Verified(value) => value,
+            AuthorityKeyReadback::Absent { .. } => {
+                return Err(AuthorityKeyError("authority_key_missing"))
+            }
+        };
+        Ok(OpenedAuthorityKey { key, readback })
+    }
+
+    impl ProvisionedAuthorityKey {
+        pub fn readback(&self) -> &VerifiedAuthorityKeyReadback {
+            &self.readback
+        }
+
+        pub fn sign_digest(&self, digest: &[u8; 32]) -> Result<[u8; 64], AuthorityKeyError> {
+            self.key.sign_digest(digest)
+        }
+    }
+
+    pub(super) fn provision_new_machine_key(
+        authority_generation_digest: [u8; DIGEST_SIZE],
+        service_sid: &str,
+    ) -> Result<ProvisionedAuthorityKey, AuthorityKeyError> {
+        let key_name = derive_machine_key_name(&authority_generation_digest)?;
+        validate_service_sid(service_sid)?;
+        let security_descriptor = format!("O:SYG:SYD:P(A;;GA;;;SY)(A;;GA;;;{service_sid})");
+        let provider = Provider::open()?;
+        if provider.open_existing_machine_key(&key_name)?.is_some() {
+            return Err(AuthorityKeyError("authority_key_already_exists"));
+        }
+        let pending = provider.create_new_machine_key(&key_name, &security_descriptor)?;
+        let reopened = provider
+            .open_existing_machine_key(&key_name)?
+            .ok_or(AuthorityKeyError("authority_key_stable_reopen_failed"))?;
+        let snapshot = reopened.snapshot()?;
+        let public_key = snapshot
+            .public_key_sec1
+            .as_deref()
+            .ok_or(AuthorityKeyError("authority_key_public_key_missing"))?;
+        let expected_signer_key_id: [u8; DIGEST_SIZE] = Sha256::digest(public_key).into();
+        let policy = AuthorityKeyPolicy::new(
+            authority_generation_digest,
+            expected_signer_key_id,
+            service_sid,
+        )?;
+        let readback =
+            match validate_snapshot(&policy, AuthorityKeySnapshot::Present(Box::new(snapshot)))? {
+                AuthorityKeyReadback::Verified(value) => value,
+                AuthorityKeyReadback::Absent { .. } => {
+                    return Err(AuthorityKeyError("authority_key_finalize_failed"))
+                }
+            };
+        let key = pending.commit();
+        Ok(ProvisionedAuthorityKey { key, readback })
+    }
+
+    pub(super) fn normalize_low_s(signature: &mut [u8; P256_SIGNATURE_SIZE]) {
+        let s: &mut [u8; 32] = (&mut signature[32..])
+            .try_into()
+            .expect("fixed P-256 signature shape");
+        if *s <= P256_HALF_ORDER {
+            return;
+        }
+        let mut borrow = 0u16;
+        for index in (0..32).rev() {
+            let left = P256_ORDER[index] as u16;
+            let right = s[index] as u16 + borrow;
+            if left >= right {
+                s[index] = (left - right) as u8;
+                borrow = 0;
+            } else {
+                s[index] = (left + 256 - right) as u8;
+                borrow = 1;
+            }
+        }
+    }
+
+    pub(super) fn signature_is_canonical(signature: &[u8; P256_SIGNATURE_SIZE]) -> bool {
+        let r: [u8; 32] = signature[..32]
+            .try_into()
+            .expect("fixed P-256 signature shape");
+        let s: [u8; 32] = signature[32..]
+            .try_into()
+            .expect("fixed P-256 signature shape");
+        r.iter().any(|value| *value != 0)
+            && r < P256_ORDER
+            && s.iter().any(|value| *value != 0)
+            && s <= P256_HALF_ORDER
+    }
+
     fn wide_null(value: &str) -> Result<Vec<u16>, AuthorityKeyError> {
         if value.is_empty() || value.encode_utf16().any(|word| word == 0) {
             return Err(AuthorityKeyError("authority_key_name_invalid"));
@@ -614,6 +1036,7 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{cell::Cell, rc::Rc};
 
     const SERVICE_SID: &str = "S-1-5-80-1-2-3-4-5";
 
@@ -634,6 +1057,66 @@ mod tests {
             SERVICE_SID,
         )
         .expect("valid policy")
+    }
+
+    #[derive(Clone)]
+    struct MockPendingKey {
+        delete_count: Rc<Cell<u32>>,
+    }
+
+    fn delete_mock_pending_key(key: &mut MockPendingKey) {
+        key.delete_count.set(key.delete_count.get() + 1);
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ProvisionFault {
+        Configure,
+        Finalize,
+        StableReopen,
+        ExactReadback,
+        None,
+    }
+
+    fn simulate_pending_key_provision(
+        fault: ProvisionFault,
+        delete_count: Rc<Cell<u32>>,
+    ) -> Result<(), ()> {
+        let pending =
+            PendingCreatedResource::new(MockPendingKey { delete_count }, delete_mock_pending_key);
+        if fault == ProvisionFault::Configure {
+            return Err(());
+        }
+        let _configured = pending.value();
+        if fault == ProvisionFault::Finalize {
+            return Err(());
+        }
+        if fault == ProvisionFault::StableReopen {
+            return Err(());
+        }
+        if fault == ProvisionFault::ExactReadback {
+            return Err(());
+        }
+        let _accepted = pending.commit();
+        Ok(())
+    }
+
+    #[test]
+    fn pending_key_guard_deletes_once_at_every_pre_acceptance_failure() {
+        for fault in [
+            ProvisionFault::Configure,
+            ProvisionFault::Finalize,
+            ProvisionFault::StableReopen,
+            ProvisionFault::ExactReadback,
+        ] {
+            let delete_count = Rc::new(Cell::new(0));
+            assert!(simulate_pending_key_provision(fault, delete_count.clone()).is_err());
+            assert_eq!(delete_count.get(), 1);
+        }
+
+        let delete_count = Rc::new(Cell::new(0));
+        simulate_pending_key_provision(ProvisionFault::None, delete_count.clone())
+            .expect("accepted key disarms pending deletion");
+        assert_eq!(delete_count.get(), 0);
     }
 
     fn valid_properties(policy: &AuthorityKeyPolicy) -> AuthorityKeyPropertySnapshot {
@@ -941,5 +1424,40 @@ mod tests {
         let second = inspect_existing_machine_key(&policy).expect("repeat read-only probe");
         assert!(first.is_absent());
         assert_eq!(first, second);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn p256_signature_normalization_is_low_s_and_idempotent() {
+        let mut signature = [0u8; 64];
+        signature[..32].fill(0x31);
+        signature[32..].copy_from_slice(&windows::P256_ORDER);
+        signature[63] -= 1;
+        windows::normalize_low_s(&mut signature);
+        let normalized: [u8; 32] = signature[32..].try_into().unwrap();
+        assert!(normalized <= windows::P256_HALF_ORDER);
+        let once = signature;
+        windows::normalize_low_s(&mut signature);
+        assert_eq!(signature, once);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn p256_signature_verifier_rejects_zero_out_of_range_and_high_s_scalars() {
+        let mut signature = [0u8; 64];
+        signature[31] = 1;
+        signature[63] = 1;
+        assert!(windows::signature_is_canonical(&signature));
+
+        signature[..32].fill(0);
+        assert!(!windows::signature_is_canonical(&signature));
+        signature[..32].copy_from_slice(&windows::P256_ORDER);
+        assert!(!windows::signature_is_canonical(&signature));
+
+        signature[..32].fill(0);
+        signature[31] = 1;
+        signature[32..].copy_from_slice(&windows::P256_ORDER);
+        signature[63] -= 1;
+        assert!(!windows::signature_is_canonical(&signature));
     }
 }

@@ -1,6 +1,9 @@
 use super::*;
+use crate::primitive_evidence_child_protocol::{
+    ChildBootstrapRole, RoleRawHandleListDigest, CHILD_STANDARD_HANDLE_SLOT_COUNT,
+};
 
-fn digest(seed: u8) -> Digest {
+pub(crate) fn digest(seed: u8) -> Digest {
     [seed; 32]
 }
 
@@ -18,9 +21,40 @@ fn process_key(index: u32) -> ProcessKey {
     }
 }
 
-fn policy() -> SupervisorPolicy {
+fn raw_handle_list(role: ProcessRole) -> RoleRawHandleListDigest {
+    let (role, handles): (
+        ChildBootstrapRole,
+        [usize; CHILD_STANDARD_HANDLE_SLOT_COUNT],
+    ) = match role {
+        ProcessRole::Driver => (ChildBootstrapRole::LifecycleDriver, [0x101, 0x102, 0x103]),
+        ProcessRole::BridgeLauncher => (ChildBootstrapRole::BridgeLauncher, [0x201, 0x202, 0x203]),
+        _ => panic!("raw handle list is defined only for protected child roots"),
+    };
+    RoleRawHandleListDigest::derive(role, &handles).unwrap()
+}
+
+pub(crate) fn policy() -> SupervisorPolicy {
+    let child_transport_projection =
+        policy_source::child_transport_contract_projection_for_test(digest(23));
+    let child_transport_contract_digest =
+        policy_source::child_transport_contract_digest_from_projection(&child_transport_projection);
+    let process_executable_digests = [
+        digest(10),
+        digest(11),
+        digest(12),
+        digest(13),
+        digest(14),
+        digest(15),
+        digest(16),
+    ];
+    let protected_evidence_source = PreparedProtectedEvidenceSource::for_policy_test(
+        digest(7),
+        process_executable_digests,
+        digest(23),
+    );
     let mut policy = SupervisorPolicy {
         authority_identity_digest: digest(9),
+        authority_generation_digest: digest(7),
         ticket_digest: digest(1),
         run_binding_digest: [0; 32],
         service_instance_digest: digest(8),
@@ -32,22 +66,19 @@ fn policy() -> SupervisorPolicy {
             pid: 90,
             creation_time: 900,
         },
-        process_executable_digests: [
-            digest(10),
-            digest(11),
-            digest(12),
-            digest(13),
-            digest(14),
-            digest(15),
-            digest(16),
-        ],
+        process_executable_digests,
+        bridge_target_manifest_digest: digest(17),
+        bridge_target_tree_digest: digest(18),
         runner_identity_digest: digest(20),
         runner_account_digest: digest(21),
         runner_profile_digest: digest(22),
-        inherited_handle_allowlist_digest: digest(23),
+        child_transport_projection,
+        child_transport_contract_digest,
         deterministic_job_name_digest: digest(24),
-        private_root_binding_digest: digest(25),
+        job_security_binding_digest: digest(25),
+        private_root_binding_digest: digest(26),
         job_object_id: 500,
+        protected_evidence_source,
         artifacts: vec![
             ArtifactExpectation {
                 binding_digest: digest(30),
@@ -149,7 +180,7 @@ fn socket_verifications(
         .collect()
 }
 
-fn completed_observation(policy: &SupervisorPolicy) -> AuthorityOwnedRunObservation {
+pub(crate) fn completed_observation(policy: &SupervisorPolicy) -> AuthorityOwnedRunObservation {
     let canonical_result_bytes = b"canonical-result".to_vec();
     let canonical_result_digest: Digest = Sha256::digest(&canonical_result_bytes).into();
     let processes = vec![
@@ -165,8 +196,8 @@ fn completed_observation(policy: &SupervisorPolicy) -> AuthorityOwnedRunObservat
         process(policy, ProcessRole::Desktop, 101, 1_001, 101, 40),
         process(policy, ProcessRole::Backend, 102, 1_002, 102, 50),
         process(policy, ProcessRole::Unity, 101, 1_001, 101, 45),
-        process(policy, ProcessRole::BridgeLauncher, 104, 1_004, 104, 60),
-        process(policy, ProcessRole::BridgeListener, 105, 1_005, 105, 70),
+        process(policy, ProcessRole::BridgeLauncher, 100, 1_000, 100, 27),
+        process(policy, ProcessRole::BridgeListener, 105, 1_005, 105, 28),
     ];
     let candidate_keys = CANDIDATE_ROLES
         .iter()
@@ -230,17 +261,32 @@ fn completed_observation(policy: &SupervisorPolicy) -> AuthorityOwnedRunObservat
                 service_handle_held_through_terminal: true,
             },
         ],
-        launches: vec![RootLaunchObservation {
-            role: ProcessRole::Driver,
-            created_suspended_at: 30,
-            assigned_to_job_at: 31,
-            resumed_at: 32,
-            job_object_id: policy.job_object_id,
-            runner_identity_digest: policy.runner_identity_digest,
-            inherited_handle_allowlist_digest: policy.inherited_handle_allowlist_digest,
-            all_other_handles_non_inheritable: true,
-            breakaway_requested: false,
-        }],
+        launches: vec![
+            RootLaunchObservation {
+                role: ProcessRole::BridgeLauncher,
+                created_suspended_at: 24,
+                job_membership_verified_at: 25,
+                resumed_at: 26,
+                job_object_id: policy.job_object_id,
+                runner_identity_digest: policy.runner_identity_digest,
+                child_transport_contract_digest: policy.child_transport_contract_digest,
+                raw_handle_list: raw_handle_list(ProcessRole::BridgeLauncher),
+                all_other_handles_non_inheritable: true,
+                breakaway_requested: false,
+            },
+            RootLaunchObservation {
+                role: ProcessRole::Driver,
+                created_suspended_at: 30,
+                job_membership_verified_at: 31,
+                resumed_at: 32,
+                job_object_id: policy.job_object_id,
+                runner_identity_digest: policy.runner_identity_digest,
+                child_transport_contract_digest: policy.child_transport_contract_digest,
+                raw_handle_list: raw_handle_list(ProcessRole::Driver),
+                all_other_handles_non_inheritable: true,
+                breakaway_requested: false,
+            },
+        ],
         processes,
         helpers: Vec::new(),
         job: JobObservation {
@@ -283,7 +329,7 @@ fn completed_observation(policy: &SupervisorPolicy) -> AuthorityOwnedRunObservat
                 local_port: policy.socket_policies[1].local_port,
                 prelaunch_idle_observed_at: 21,
                 prelaunch_competing_owner: None,
-                listener_ready_at: 90,
+                listener_ready_at: 35,
                 listener_socket_id: 801,
                 owner: process_key(6),
                 owner_job_object_id: policy.job_object_id,
@@ -298,7 +344,7 @@ fn completed_observation(policy: &SupervisorPolicy) -> AuthorityOwnedRunObservat
                     SocketRole::Bridge,
                     process_key(6),
                     file_identity(56),
-                    90,
+                    35,
                 ),
             },
         ],
@@ -376,7 +422,7 @@ fn align_terminal_and_cleanup_times(observation: &mut AuthorityOwnedRunObservati
     }
 }
 
-fn empty_abort_observation(policy: &SupervisorPolicy) -> AuthorityOwnedAbortObservation {
+pub(crate) fn empty_abort_observation(policy: &SupervisorPolicy) -> AuthorityOwnedAbortObservation {
     let complete = completed_observation(policy);
     AuthorityOwnedAbortObservation {
         ticket_consumed_at: 15,
@@ -463,6 +509,12 @@ fn production_status_never_claims_the_source_contract_is_ready() {
     assert!(status
         .blockers()
         .contains(&"isolated_runner_identity_not_provisioned"));
+    assert!(status
+        .blockers()
+        .contains(&"authority_bridge_target_request_auth_not_connected"));
+    assert!(status
+        .blockers()
+        .contains(&"authority_bridge_target_in_memory_startup_not_connected"));
 }
 
 #[test]
@@ -598,7 +650,7 @@ fn process_graph_cannot_hide_or_reorder_a_role() {
 }
 
 #[test]
-fn driver_is_exactly_one_candidate_and_the_only_supervised_root() {
+fn driver_and_bridge_launcher_are_the_exact_supervised_roots() {
     let policy = policy();
 
     let mut missing = completed_observation(&policy);
@@ -634,15 +686,38 @@ fn driver_is_exactly_one_candidate_and_the_only_supervised_root() {
         assert_error(&policy, &wrong_parent, "authority_process_parent_mismatch");
     }
 
+    let mut bridge_from_unity = completed_observation(&policy);
+    let unity = bridge_from_unity.processes[role_index(ProcessRole::Unity)].key;
+    let bridge = &mut bridge_from_unity.processes[role_index(ProcessRole::BridgeLauncher)];
+    bridge.parent_pid = unity.pid;
+    bridge.parent_creation_time = unity.creation_time;
+    bridge.supervisor_pid = unity.pid;
+    assert_error(
+        &policy,
+        &bridge_from_unity,
+        "authority_process_parent_mismatch",
+    );
+
+    let mut missing_bridge_root = completed_observation(&policy);
+    missing_bridge_root
+        .launches
+        .retain(|launch| launch.role != ProcessRole::BridgeLauncher);
+    assert_error(
+        &policy,
+        &missing_bridge_root,
+        "authority_root_launch_set_invalid",
+    );
+
     let mut extra_root = completed_observation(&policy);
     extra_root.launches.push(RootLaunchObservation {
         role: ProcessRole::Desktop,
         created_suspended_at: 33,
-        assigned_to_job_at: 34,
+        job_membership_verified_at: 34,
         resumed_at: 35,
         job_object_id: policy.job_object_id,
         runner_identity_digest: policy.runner_identity_digest,
-        inherited_handle_allowlist_digest: policy.inherited_handle_allowlist_digest,
+        child_transport_contract_digest: policy.child_transport_contract_digest,
+        raw_handle_list: raw_handle_list(ProcessRole::Driver),
         all_other_handles_non_inheritable: true,
         breakaway_requested: false,
     });
@@ -662,10 +737,18 @@ fn breakaway_or_unrestricted_handle_inheritance_is_rejected() {
 }
 
 #[test]
+fn raw_handle_measurements_reject_cross_role_substitution() {
+    let policy = policy();
+    let mut substituted = completed_observation(&policy);
+    substituted.launches[0].raw_handle_list = substituted.launches[1].raw_handle_list;
+    assert_error(&policy, &substituted, "authority_launch_policy_mismatch");
+}
+
+#[test]
 fn root_must_be_suspended_then_assigned_then_resumed() {
     let policy = policy();
     let mut observation = completed_observation(&policy);
-    observation.launches[0].assigned_to_job_at = observation.launches[0].resumed_at + 1;
+    observation.launches[0].job_membership_verified_at = observation.launches[0].resumed_at + 1;
     assert_error(&policy, &observation, "authority_launch_sequence_invalid");
 }
 
@@ -919,6 +1002,12 @@ fn canonical_policy_snapshot_round_trips_and_rejects_every_security_field_substi
         value.process_executable_digests[index] = digest(100 + index as u8);
         mutations.push(value);
     }
+    let mut value = baseline.clone();
+    value.bridge_target_manifest_digest = digest(107);
+    mutations.push(value);
+    let mut value = baseline.clone();
+    value.bridge_target_tree_digest = digest(108);
+    mutations.push(value);
     for mut value in [baseline.clone(), baseline.clone(), baseline.clone()] {
         let slot = mutations.len() % 3;
         match slot {
@@ -928,17 +1017,44 @@ fn canonical_policy_snapshot_round_trips_and_rejects_every_security_field_substi
         }
         mutations.push(value);
     }
+    for index in 0..GLOBAL_CAPABILITY_SOURCE_COUNT {
+        let mut value = baseline.clone();
+        value.child_transport_projection.global_source_identities[index][0] ^= 0x80;
+        mutations.push(value);
+    }
     let mut value = baseline.clone();
-    value.inherited_handle_allowlist_digest = digest(113);
+    value
+        .child_transport_projection
+        .global_source_identities
+        .swap(0, 1);
+    mutations.push(value);
+    let mut value = baseline.clone();
+    value.child_transport_projection.roles.swap(0, 1);
+    mutations.push(value);
+    let mut value = baseline.clone();
+    value.child_transport_projection.roles[0].slots[0].purpose ^= 1;
+    mutations.push(value);
+    let mut value = baseline.clone();
+    value.child_transport_contract_digest = digest(113);
     mutations.push(value);
     let mut value = baseline.clone();
     value.deterministic_job_name_digest = digest(114);
     mutations.push(value);
     let mut value = baseline.clone();
-    value.private_root_binding_digest = digest(115);
+    value.job_security_binding_digest = digest(115);
+    mutations.push(value);
+    let mut value = baseline.clone();
+    value.private_root_binding_digest = digest(116);
     mutations.push(value);
     let mut value = baseline.clone();
     value.job_object_id += 1;
+    mutations.push(value);
+    let mut value = baseline.clone();
+    let mut changed_source = value.protected_evidence_source.canonical_bytes();
+    let last = changed_source.len() - 1;
+    changed_source[last] ^= 0x80;
+    value.protected_evidence_source =
+        PreparedProtectedEvidenceSource::decode(&changed_source).unwrap();
     mutations.push(value);
     let mut value = baseline.clone();
     value.artifacts[0].binding_digest = digest(118);
@@ -947,7 +1063,7 @@ fn canonical_policy_snapshot_round_trips_and_rejects_every_security_field_substi
     value.artifacts[0].direction = ArtifactDirection::Output;
     mutations.push(value);
     let mut value = baseline.clone();
-    value.artifacts[0].expected_content_digest = Some(digest(116));
+    value.artifacts[0].expected_content_digest = Some(digest(122));
     mutations.push(value);
     let mut value = baseline.clone();
     value.socket_policies[0].role = SocketRole::Bridge;
@@ -992,6 +1108,66 @@ fn canonical_policy_snapshot_round_trips_and_rejects_every_security_field_substi
 }
 
 #[test]
+fn prepared_evidence_source_is_ticket_isolated_and_snapshot_tamper_evident() {
+    let first = policy();
+    let first_prepared = PreparedRun::from_policy(&first);
+    let repeated = PreparedRun::from_policy(&first);
+    assert_eq!(first_prepared.policy_snapshot(), repeated.policy_snapshot());
+    assert_eq!(first_prepared.receipt(), repeated.receipt());
+
+    let mut second = first.clone();
+    second.ticket_digest = digest(0x91);
+    rebind_policy(&mut second);
+    let second_prepared = PreparedRun::from_policy(&second);
+    assert_eq!(
+        first.protected_evidence_source.canonical_bytes(),
+        second.protected_evidence_source.canonical_bytes()
+    );
+    assert_ne!(
+        first_prepared.policy_snapshot(),
+        second_prepared.policy_snapshot()
+    );
+    assert_ne!(
+        first_prepared.receipt().digest(),
+        second_prepared.receipt().digest()
+    );
+
+    let source = first.protected_evidence_source.canonical_bytes();
+    let source_offset = first_prepared
+        .policy_snapshot()
+        .windows(source.len())
+        .position(|candidate| candidate == source.as_slice())
+        .unwrap();
+    let mut held_digest_tamper = first_prepared.policy_snapshot().to_vec();
+    held_digest_tamper[source_offset + source.len() - 1] ^= 0x01;
+    assert!(!first_prepared
+        .receipt()
+        .verifies_policy_snapshot(&held_digest_tamper));
+    assert_ne!(
+        prepared_protected_evidence_policy_readback(first_prepared.policy_snapshot())
+            .unwrap()
+            .source()
+            .digest(),
+        prepared_protected_evidence_policy_readback(&held_digest_tamper)
+            .unwrap()
+            .source()
+            .digest()
+    );
+
+    let mut process_tamper = first_prepared.policy_snapshot().to_vec();
+    let service_offset = source
+        .windows(32)
+        .position(|candidate| candidate == first.process_executable_digests[0].as_slice())
+        .unwrap();
+    process_tamper[source_offset + service_offset] ^= 0x01;
+    assert!(prepared_protected_evidence_policy_readback(&process_tamper).is_err());
+
+    let mut legacy = first_prepared.policy_snapshot().to_vec();
+    legacy[..8].copy_from_slice(b"VRCPOL05");
+    assert!(prepared_protected_evidence_policy_readback(&legacy).is_err());
+}
+
+#[test]
 fn prepared_and_armed_receipts_reject_zeroed_or_tampered_security_digests() {
     let policy = policy();
     let prepared = PreparedRecoveryReceipt::from_policy(&policy);
@@ -1000,26 +1176,55 @@ fn prepared_and_armed_receipts_reject_zeroed_or_tampered_security_digests() {
         PreparedRecoveryReceipt::decode(&prepared_bytes).unwrap(),
         prepared
     );
-    for offset in (8..8 + 10 * 32).step_by(32) {
+    for offset in (8..8 + 13 * 32).step_by(32) {
         let mut tampered = prepared_bytes.clone();
         tampered[offset..offset + 32].fill(0);
         assert!(PreparedRecoveryReceipt::decode(&tampered).is_err());
     }
+    let mut legacy_prepared = prepared_bytes.clone();
+    legacy_prepared[..8].copy_from_slice(b"VRCPRP01");
+    legacy_prepared.drain(8 + 5 * 32..8 + 6 * 32);
+    assert!(PreparedRecoveryReceipt::decode(&legacy_prepared).is_err());
 
     let observation = completed_observation(&policy);
+    let driver_launch = observation
+        .launches
+        .iter()
+        .find(|launch| launch.role == ProcessRole::Driver)
+        .unwrap();
     let armed = ArmedRecoveryReceipt::from_armed_launch(
         &policy,
         &prepared,
         &observation.processes[role_index(ProcessRole::Driver)],
-        &observation.launches[0],
+        driver_launch,
     );
     let armed_bytes = armed.encode();
     assert_eq!(ArmedRecoveryReceipt::decode(&armed_bytes).unwrap(), armed);
-    for offset in (8..8 + 11 * 32).step_by(32) {
+    for offset in (8..8 + 14 * 32).step_by(32) {
         let mut tampered = armed_bytes.clone();
         tampered[offset..offset + 32].fill(0);
         assert!(ArmedRecoveryReceipt::decode(&tampered).is_err());
     }
+    let mut copied_policy_digest = armed.clone();
+    copied_policy_digest.raw_handle_list_digest =
+        copied_policy_digest.child_transport_contract_digest;
+    copied_policy_digest.seal_digest = armed_receipt_seal(&copied_policy_digest);
+    assert!(ArmedRecoveryReceipt::decode(&copied_policy_digest.encode()).is_err());
+    let mut wrong_role = armed.clone();
+    wrong_role.raw_handle_role = ChildBootstrapRole::BridgeLauncher;
+    wrong_role.seal_digest = armed_receipt_seal(&wrong_role);
+    assert!(ArmedRecoveryReceipt::decode(&wrong_role.encode()).is_err());
+
+    let mut legacy_v3 = armed_bytes.clone();
+    legacy_v3[..8].copy_from_slice(b"VRCARM03");
+    legacy_v3.drain(8 + 12 * 32..8 + 13 * 32);
+    legacy_v3.remove(8 + 12 * 32);
+    assert!(ArmedRecoveryReceipt::decode(&legacy_v3).is_err());
+
+    let mut missing_raw_witness = armed_bytes;
+    missing_raw_witness.drain(8 + 12 * 32..8 + 13 * 32);
+    missing_raw_witness.remove(8 + 12 * 32);
+    assert!(ArmedRecoveryReceipt::decode(&missing_raw_witness).is_err());
 }
 
 #[test]
@@ -1090,7 +1295,12 @@ fn sealed_abort_validator_covers_no_launch_partial_launch_and_restart_cleanup() 
 
     let complete = completed_observation(&policy);
     let driver = complete.processes[role_index(ProcessRole::Driver)].clone();
-    let launch = complete.launches[0].clone();
+    let launch = complete
+        .launches
+        .iter()
+        .find(|launch| launch.role == ProcessRole::Driver)
+        .unwrap()
+        .clone();
     let armed = ArmedRecoveryReceipt::from_armed_launch(&policy, &prepared, &driver, &launch);
     let mut partial = empty_abort_observation(&policy);
     partial.runner = Some(complete.runner.clone());
@@ -1110,6 +1320,43 @@ fn sealed_abort_validator_covers_no_launch_partial_launch_and_restart_cleanup() 
     )
     .unwrap();
     assert_eq!(recovered.reason(), BurnReason::RestartRecovery);
+
+    let mut substituted_armed = armed.clone();
+    substituted_armed.raw_handle_list_digest = digest(0xd1);
+    substituted_armed.seal_digest = armed_receipt_seal(&substituted_armed);
+    assert_eq!(
+        validate_authority_owned_abort(
+            &policy,
+            &prepared,
+            Some(&substituted_armed),
+            &partial,
+            BurnReason::RestartRecovery,
+        )
+        .unwrap_err()
+        .code(),
+        "authority_armed_root_mismatch"
+    );
+
+    let bridge_raw = complete
+        .launches
+        .iter()
+        .find(|launch| launch.role == ProcessRole::BridgeLauncher)
+        .unwrap()
+        .raw_handle_list;
+    let mut swapped_launch = partial.clone();
+    swapped_launch.launches[0].raw_handle_list = bridge_raw;
+    assert_eq!(
+        validate_authority_owned_abort(
+            &policy,
+            &prepared,
+            Some(&armed),
+            &swapped_launch,
+            BurnReason::RestartRecovery,
+        )
+        .unwrap_err()
+        .code(),
+        "authority_abort_launch_invalid"
+    );
 
     let mut unknown_residue = partial;
     unknown_residue.cleanup.unknown_processes.push(ProcessKey {

@@ -1169,12 +1169,8 @@ def _load_and_verify_fixture_set(
         or not fixture.digest
     ):
         raise PrimitiveBasisLiveRuntimeError("The fixed model-part fixture is unavailable.")
-    if any(
-        item.materialized
-        for item in fixtures.fixtures
-        if item.scenario_id != MODEL_SCENARIO_ID
-    ):
-        raise PrimitiveBasisLiveRuntimeError("Unexpected live fixture rows were materialized.")
+    # The fixed fixture template materializes all four scenario rows (frozen
+    # materialization design, 2026-07-31); only the model-part row is live-run.
     return fixtures
 
 

@@ -1,0 +1,63 @@
+{
+  "schema": "vrcforge.primitive_basis_parameter_optimization_fixture.v1",
+  "scenarioId": "parameter_optimization",
+  "unity": {
+    "version": "2022.3.22f1",
+    "revision": "887be4894c44"
+  },
+  "sourceMode": "isolated_runtime_generation",
+  "scene": {
+    "assetPath": "Assets/VRCForge/PrimitiveBasis/RuntimeParameterOptimization/ParameterOptimization.unity",
+    "avatarPath": "Avatar",
+    "parametersPath": "Assets/VRCForge/PrimitiveBasis/RuntimeParameterOptimization/Parameters.asset",
+    "menuRootPath": "Assets/VRCForge/PrimitiveBasis/RuntimeParameterOptimization/MenuRoot.asset",
+    "fxControllerPath": "Assets/VRCForge/PrimitiveBasis/RuntimeParameterOptimization/FixtureFX.controller",
+    "motionClipPath": "Assets/VRCForge/PrimitiveBasis/RuntimeParameterOptimization/SafeToggleMotion.anim",
+    "parameterCount": 263,
+    "safeNetworkedBoolCount": 260,
+    "eligibleCostBits": 260,
+    "budgetBits": 256,
+    "menuAssetCount": 41,
+    "excludedParameterNames": [
+      "FT/JawOpen",
+      "Puppet/X",
+      "OSC/Raw"
+    ],
+    "baselineFeatureComponentCount": 1
+  },
+  "requiredPackages": [
+    {
+      "id": "com.coplaydev.unity-mcp",
+      "version": "9.6.9-beta.7",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrchat.avatars",
+      "version": "3.10.3",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrchat.base",
+      "version": "3.10.3",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrcfury.vrcfury",
+      "version": "1.1334.0",
+      "provisioning": "external_exact_artifact"
+    },
+    {
+      "id": "nadena.dev.ndmf",
+      "version": "1.13.1",
+      "provisioning": "exact_artifact"
+    }
+  ],
+  "runtime": {
+    "bootstrapType": "VRCForge.PrimitiveBasisFixtures.ParameterOptimizationFixtureBootstrap",
+    "runIdEnvironment": "VRCFORGE_PRIMITIVE_PARAMETER_OPTIMIZATION_RUN_ID",
+    "generatedRoot": "Assets/VRCForge/PrimitiveBasis/RuntimeParameterOptimization",
+    "generatedRootPrecondition": "absent",
+    "readyMarker": "Library/VRCForge/primitive-basis-parameter-optimization-ready.json",
+    "cleanup": "remove_generated_root_and_ready_marker"
+  }
+}

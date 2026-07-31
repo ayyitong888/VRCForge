@@ -946,6 +946,66 @@ def test_unity_tool_uses_only_the_fixed_reference_matrix() -> None:
     assert "BindingFlags" not in source
 
 
+def test_unity_tool_allows_only_clean_readonly_package_subscenes() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "Assets"
+        / "VRCForge"
+        / "Editor"
+        / "AtomicReferenceRenameTool.cs"
+    ).read_text(encoding="utf-8")
+
+    assert 'scenePath.StartsWith("Assets/", StringComparison.Ordinal)' in source
+    assert 'scenePath.StartsWith("Packages/", StringComparison.Ordinal)' in source
+    assert "isProjectScene =" in source
+    assert "&& !scene.isSubScene" in source
+    assert "isReadOnlyPackageSubScene =" in source
+    assert "&& scene.isSubScene" in source
+    assert "isProjectScene || isReadOnlyPackageSubScene" in source
+    assert "AssetDatabase.LoadAssetAtPath<SceneAsset>(scenePath)" in source
+    assert "|| scene.isDirty" in source
+
+
+def test_unity_tool_checks_loaded_assets_without_forcing_every_file_to_load() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "Assets"
+        / "VRCForge"
+        / "Editor"
+        / "AtomicReferenceRenameTool.cs"
+    ).read_text(encoding="utf-8")
+    guard_start = source.index("private static void RequireNoDirtyProjectAssets")
+    guard_end = source.index("private static bool IsProjectOwnedAssetPath", guard_start)
+    guard = source[guard_start:guard_end]
+
+    assert "new HashSet<string>(paths, StringComparer.Ordinal)" in guard
+    assert "Resources.FindObjectsOfTypeAll<UnityEngine.Object>()" in guard
+    assert "projectPathSet.Contains(path)" in guard
+    assert "AssetDatabase.Contains(asset)" in guard
+    assert "EditorUtility.IsPersistent(asset)" in guard
+    assert "AssetDatabase.IsNativeAsset(asset) && EditorUtility.IsDirty(asset)" in guard
+    assert "AssetDatabase.LoadAllAssetsAtPath(path)" not in guard
+
+
+def test_unity_tool_allows_only_empty_unregistered_gitkeep_placeholders() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "Assets"
+        / "VRCForge"
+        / "Editor"
+        / "AtomicReferenceRenameTool.cs"
+    ).read_text(encoding="utf-8")
+    verify_start = source.index("private static void VerifyRegisteredAssetsInFileSystem")
+    verify_end = source.index("private static FileSystemEntry ReadStableAssetsFileEvidence", verify_start)
+    verify = source[verify_start:verify_end]
+
+    assert "registeredOnly.Any()" in verify
+    assert "unregistered.Any(entry => !IsAllowedUnregisteredPlaceholder(entry))" in verify
+    assert 'entry.Path.EndsWith("/.gitkeep", StringComparison.Ordinal)' in verify
+    assert "entry.Length == 0" in verify
+    assert "entry.Digest == Sha256Bytes(new byte[0])" in verify
+
+
 def test_unity_tool_binds_complete_evidence_and_exact_restore() -> None:
     source = (
         Path(__file__).parents[1]
@@ -1004,9 +1064,85 @@ def test_unity_tool_binds_complete_evidence_and_exact_restore() -> None:
     assert "current.Meta.Identity == expected.Meta.Identity" in restore_contract
     assert "scene.FileIdentity != snapshot.Scene.FileIdentity" not in restore_contract
     assert "left.FileIdentity != right.FileIdentity" not in restore_contract
+    restored_scene_start = source.index("private static bool RestoredSceneMatches")
+    restored_scene_end = source.index("private static bool RestoredTargetMatches", restored_scene_start)
+    restored_scene = source[restored_scene_start:restored_scene_end]
+    assert "left.Handle == right.Handle" not in restored_scene
+    assert "left.Guid == right.Guid" in restored_scene
+    assert "left.FileDigest == right.FileDigest" in restored_scene
+    assert "left.MetaIdentity == right.MetaIdentity" in restored_scene
     assert "expected.AssetInventoryDigest != actual.AssetInventoryDigest" not in restore_contract
     assert "expected.BeforeStateDigest != actual.BeforeStateDigest" not in restore_contract
     assert "current.File.Identity == expected.File.Identity" not in restore_contract
+    assert "WriteExactFile(absolute, backup.FileBytes, true)" in restore_contract
+    assert 'WriteExactFile(absolute + ".meta", backup.MetaBytes, false)' in restore_contract
+    exact_write_start = source.index("private static void WriteExactFile")
+    exact_write_end = source.index("private static JObject BuildApplyPayload", exact_write_start)
+    exact_write = source[exact_write_start:exact_write_end]
+    assert "MaxExactWriteAttempts" in exact_write
+    assert "ExactWriteRetryMilliseconds" in exact_write
+    assert "code != 32 && code != 33" in exact_write
+    assert "FileMode.CreateNew" in exact_write
+    assert "FileOptions.WriteThrough" in exact_write
+    assert "File.Replace(temporaryPath, path, null)" in exact_write
+    assert "File.Delete(temporaryPath)" in exact_write
+    assert '" (assetIndex=" + index.ToString(CultureInfo.InvariantCulture)' in source
+    assert '",fields=" + string.Join(",", mismatches)' in source
+    for mismatch_code in (
+        "baseline",
+        "path",
+        "guid",
+        "meta_digest",
+        "mutation_count",
+        "replacement_count",
+        "target_digest",
+        "target_length",
+        "reverse_digest",
+        "reverse_length",
+        "baseline_length",
+        "meta_identity",
+    ):
+        assert f'mismatches.Add("{mismatch_code}")' in source
+
+
+def test_unity_tool_projects_animation_binding_hash_bytes_before_approval() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "Assets"
+        / "VRCForge"
+        / "Editor"
+        / "AtomicReferenceRenameTool.cs"
+    ).read_text(encoding="utf-8")
+    projection_start = source.index("private static byte[] ProjectAnimationBindingPathHashes")
+    projection_end = source.index("private static byte[] ReplaceBytesExact", projection_start)
+    projection = source[projection_start:projection_end]
+
+    assert 'item.Kind == "animation_binding"' in projection
+    assert "Animator.StringToHash(beforePath)" in projection
+    assert "Animator.StringToHash(afterPath)" in projection
+    assert 'Encoding.UTF8.GetBytes("path: " + replacement.Before)' in projection
+    assert 'Encoding.UTF8.GetBytes("path: " + replacement.After)' in projection
+    assert "group.Count()" in projection
+    assert "path hash collides with its target" in projection
+
+
+def test_unity_tool_mutates_only_the_serialized_animator_parameter_name() -> None:
+    source = (
+        Path(__file__).parents[1]
+        / "Assets"
+        / "VRCForge"
+        / "Editor"
+        / "AtomicReferenceRenameTool.cs"
+    ).read_text(encoding="utf-8")
+    scan_start = source.index("private static void ScanAnimatorControllerParameters")
+    scan_end = source.index("private static void ScanStateMachine", scan_start)
+    scan = source[scan_start:scan_end]
+
+    assert '"m_AnimatorParameters"' in scan
+    assert '.FindPropertyRelative("m_Name")' in scan
+    assert "serializedName.stringValue != parameter.name" in scan
+    assert "AddSerializedStringReference(" in scan
+    assert "controller.parameters = current" not in scan
 
 
 def test_disposable_fixture_covers_success_failure_and_cleanup() -> None:
@@ -1052,6 +1188,7 @@ def test_disposable_fixture_covers_success_failure_and_cleanup() -> None:
         "VRCFORGE_ATOMIC_REFERENCE_RENAME_PROBE_OK",
     ):
         assert scenario in fixture
+    assert '"planned concurrent-write scene finalize"' in fixture
 
 
 def test_dashboard_fastapi_preview_request_approval_and_apply_are_one_bound_chain(

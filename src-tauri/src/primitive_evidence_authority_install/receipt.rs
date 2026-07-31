@@ -1,5 +1,23 @@
 use super::*;
 
+const SOURCE_FULL_READBACK_DOMAIN: &[u8] = b"vrcforge-authority-source-full-readback-v1\0";
+
+pub(super) fn source_full_readback_receipt(
+    descriptor: &AuthorityPayloadDigest,
+    volume_serial: u64,
+    file_id: &[u8; 16],
+    link_count: u32,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(SOURCE_FULL_READBACK_DOMAIN);
+    digest.update(descriptor.sha256());
+    digest.update(descriptor.byte_length().to_be_bytes());
+    digest.update(volume_serial.to_be_bytes());
+    digest.update(file_id);
+    digest.update(link_count.to_be_bytes());
+    digest.finalize().into()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RawHeldPayloadObservation {
     pub(super) descriptor: AuthorityPayloadDigest,
@@ -77,14 +95,20 @@ pub(crate) struct VerifiedPayloadSet {
     pub(super) service: VerifiedPayloadHandle,
     pub(super) controller: VerifiedPayloadHandle,
     pub(super) install_helper: VerifiedPayloadHandle,
+    pub(super) lifecycle_driver: VerifiedPayloadHandle,
+    pub(super) bridge_launcher: VerifiedPayloadHandle,
+    pub(super) runtime_source_manifest: VerifiedPayloadHandle,
     pub(super) binding_sha256: [u8; 32],
 }
 
-#[cfg(all(windows, not(test)))]
+#[cfg(windows)]
 pub(super) struct NativeHeldPayloadLease {
     pub(super) _service: std::os::windows::io::OwnedHandle,
     pub(super) _controller: std::os::windows::io::OwnedHandle,
     pub(super) _install_helper: std::os::windows::io::OwnedHandle,
+    pub(super) _lifecycle_driver: std::os::windows::io::OwnedHandle,
+    pub(super) _bridge_launcher: std::os::windows::io::OwnedHandle,
+    pub(super) _runtime_source_manifest: std::os::windows::io::OwnedHandle,
     pub(super) _bootstrap_process: std::os::windows::io::OwnedHandle,
     pub(super) _bootstrap_running_image: std::os::windows::io::OwnedHandle,
 }
@@ -97,7 +121,7 @@ pub(super) struct TestHeldPayloadLease {
 }
 
 pub(super) enum HeldPayloadLease {
-    #[cfg(all(windows, not(test)))]
+    #[cfg(windows)]
     Native(NativeHeldPayloadLease),
     #[cfg(test)]
     Test(TestHeldPayloadLease),
@@ -120,7 +144,7 @@ pub(crate) struct VerifiedMaintenanceLease {
 impl VerifiedMaintenanceLease {
     pub(super) fn is_live(&self) -> bool {
         match &self.held_payloads {
-            #[cfg(all(windows, not(test)))]
+            #[cfg(windows)]
             HeldPayloadLease::Native(_) => true,
             #[cfg(test)]
             HeldPayloadLease::Test(value) => {
@@ -133,6 +157,30 @@ impl VerifiedMaintenanceLease {
         }
     }
 
+    #[cfg(windows)]
+    pub(super) fn native_source_handles(
+        &self,
+    ) -> Result<
+        [windows_sys::Win32::Foundation::HANDLE; PROTECTED_GENERATION_PAYLOAD_COUNT],
+        AuthorityMaintenanceError,
+    > {
+        use std::os::windows::io::AsRawHandle;
+        match &self.held_payloads {
+            HeldPayloadLease::Native(value) => Ok([
+                value._service.as_raw_handle().cast(),
+                value._controller.as_raw_handle().cast(),
+                value._install_helper.as_raw_handle().cast(),
+                value._lifecycle_driver.as_raw_handle().cast(),
+                value._bridge_launcher.as_raw_handle().cast(),
+                value._runtime_source_manifest.as_raw_handle().cast(),
+            ]),
+            #[cfg(test)]
+            HeldPayloadLease::Test(_) => Err(AuthorityMaintenanceError(
+                "authority_native_payload_handles_unavailable",
+            )),
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn for_test(
         preview: &AuthorityMaintenancePreview,
@@ -141,12 +189,18 @@ impl VerifiedMaintenanceLease {
         service: RawHeldPayloadObservation,
         controller: RawHeldPayloadObservation,
         install_helper: RawHeldPayloadObservation,
+        lifecycle_driver: RawHeldPayloadObservation,
+        bridge_launcher: RawHeldPayloadObservation,
+        runtime_source_manifest: RawHeldPayloadObservation,
     ) -> Result<Self, AuthorityMaintenanceError> {
         let payloads = VerifiedPayloadSet::from_held_observations(
             expected,
             service,
             controller,
             install_helper,
+            lifecycle_driver,
+            bridge_launcher,
+            runtime_source_manifest,
         )?;
         if bootstrap_helper.image != expected.install_helper {
             return Err(AuthorityMaintenanceError(
@@ -173,22 +227,49 @@ impl VerifiedPayloadSet {
         service: RawHeldPayloadObservation,
         controller: RawHeldPayloadObservation,
         install_helper: RawHeldPayloadObservation,
+        lifecycle_driver: RawHeldPayloadObservation,
+        bridge_launcher: RawHeldPayloadObservation,
+        runtime_source_manifest: RawHeldPayloadObservation,
     ) -> Result<Self, AuthorityMaintenanceError> {
         let service = VerifiedPayloadHandle::from_observation(expected.service, service)?;
         let controller = VerifiedPayloadHandle::from_observation(expected.controller, controller)?;
         let install_helper =
             VerifiedPayloadHandle::from_observation(expected.install_helper, install_helper)?;
+        let lifecycle_driver =
+            VerifiedPayloadHandle::from_observation(expected.lifecycle_driver, lifecycle_driver)?;
+        let bridge_launcher =
+            VerifiedPayloadHandle::from_observation(expected.bridge_launcher, bridge_launcher)?;
+        let runtime_source_manifest = VerifiedPayloadHandle::from_observation(
+            expected.runtime_source_manifest,
+            runtime_source_manifest,
+        )?;
         let identities = [
             (service.volume_serial, service.file_id),
             (controller.volume_serial, controller.file_id),
             (install_helper.volume_serial, install_helper.file_id),
+            (lifecycle_driver.volume_serial, lifecycle_driver.file_id),
+            (bridge_launcher.volume_serial, bridge_launcher.file_id),
+            (
+                runtime_source_manifest.volume_serial,
+                runtime_source_manifest.file_id,
+            ),
         ];
-        if identities[0] == identities[1]
-            || identities[0] == identities[2]
-            || identities[1] == identities[2]
-            || service.handle_identity == controller.handle_identity
-            || service.handle_identity == install_helper.handle_identity
-            || controller.handle_identity == install_helper.handle_identity
+        let handle_identities = [
+            service.handle_identity,
+            controller.handle_identity,
+            install_helper.handle_identity,
+            lifecycle_driver.handle_identity,
+            bridge_launcher.handle_identity,
+            runtime_source_manifest.handle_identity,
+        ];
+        if identities
+            .iter()
+            .enumerate()
+            .any(|(index, identity)| identities[..index].contains(identity))
+            || handle_identities
+                .iter()
+                .enumerate()
+                .any(|(index, identity)| handle_identities[..index].contains(identity))
         {
             return Err(AuthorityMaintenanceError(
                 "authority_payload_handle_identity_collision",
@@ -196,7 +277,14 @@ impl VerifiedPayloadSet {
         }
         let mut digest = Sha256::new();
         digest.update(PAYLOAD_SET_DOMAIN);
-        for payload in [service, controller, install_helper] {
+        for payload in [
+            service,
+            controller,
+            install_helper,
+            lifecycle_driver,
+            bridge_launcher,
+            runtime_source_manifest,
+        ] {
             digest.update(payload.descriptor.sha256);
             digest.update(payload.descriptor.byte_length.to_be_bytes());
             digest.update(payload.volume_serial.to_be_bytes());
@@ -209,6 +297,9 @@ impl VerifiedPayloadSet {
             service,
             controller,
             install_helper,
+            lifecycle_driver,
+            bridge_launcher,
+            runtime_source_manifest,
             binding_sha256: digest.finalize().into(),
         })
     }
@@ -217,6 +308,9 @@ impl VerifiedPayloadSet {
         self.service.descriptor == content.service
             && self.controller.descriptor == content.controller
             && self.install_helper.descriptor == content.install_helper
+            && self.lifecycle_driver.descriptor == content.lifecycle_driver
+            && self.bridge_launcher.descriptor == content.bridge_launcher
+            && self.runtime_source_manifest.descriptor == content.runtime_source_manifest
     }
 }
 
@@ -231,6 +325,8 @@ pub(super) struct RawBootstrapHelperObservation {
     pub(super) image_handle_held: bool,
     pub(super) elevated_token: bool,
     pub(super) high_integrity: bool,
+    pub(super) local_system: bool,
+    pub(super) session_id: u32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -238,6 +334,12 @@ pub(crate) struct VerifiedBootstrapHelperIdentity {
     pub(super) process_id: u32,
     pub(super) process_creation_time: u64,
     pub(super) image: AuthorityPayloadDigest,
+    pub(super) image_volume_serial: u64,
+    pub(super) image_file_id: [u8; 16],
+    pub(super) elevated_token: bool,
+    pub(super) high_integrity: bool,
+    pub(super) local_system: bool,
+    pub(super) session_id: u32,
     pub(super) binding_sha256: [u8; 32],
 }
 
@@ -255,6 +357,8 @@ impl VerifiedBootstrapHelperIdentity {
             || !observed.image_handle_held
             || !observed.elevated_token
             || !observed.high_integrity
+            || observed.local_system
+            || observed.session_id == 0
         {
             return Err(AuthorityMaintenanceError(
                 "authority_bootstrap_helper_identity_not_verified",
@@ -268,10 +372,20 @@ impl VerifiedBootstrapHelperIdentity {
         digest.update(observed.image_file_id);
         digest.update(observed.image_sha256);
         digest.update(observed.image_byte_length.to_be_bytes());
+        digest.update([u8::from(observed.elevated_token)]);
+        digest.update([u8::from(observed.high_integrity)]);
+        digest.update([u8::from(observed.local_system)]);
+        digest.update(observed.session_id.to_be_bytes());
         Ok(Self {
             process_id: observed.process_id,
             process_creation_time: observed.process_creation_time,
             image: expected,
+            image_volume_serial: observed.image_volume_serial,
+            image_file_id: observed.image_file_id,
+            elevated_token: observed.elevated_token,
+            high_integrity: observed.high_integrity,
+            local_system: observed.local_system,
+            session_id: observed.session_id,
             binding_sha256: digest.finalize().into(),
         })
     }
@@ -326,6 +440,9 @@ pub(super) struct VerifiedPayloadFilesProof {
     pub(super) service: AuthorityPayloadDigest,
     pub(super) controller: AuthorityPayloadDigest,
     pub(super) install_helper: AuthorityPayloadDigest,
+    pub(super) lifecycle_driver: AuthorityPayloadDigest,
+    pub(super) bridge_launcher: AuthorityPayloadDigest,
+    pub(super) runtime_source_manifest: AuthorityPayloadDigest,
     pub(super) receipt_sha256: [u8; 32],
 }
 
@@ -352,12 +469,25 @@ pub(super) struct SealedInstalledGenerationReadback {
     pub(super) manifests: RawManifestChainReadback,
 }
 
+/// Supplies one exact installed generation from a protected authority source.
+/// The expected generation is an input to the source so implementations cannot
+/// silently substitute whichever generation happens to be easiest to read.
+pub(super) trait SealedInstalledGenerationSource {
+    fn read_sealed_generation(
+        &mut self,
+        expected_generation: [u8; 32],
+    ) -> Result<SealedInstalledGenerationReadback, AuthorityMaintenanceError>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedInstalledGeneration {
     pub(super) generation: [u8; 32],
     pub(super) service: AuthorityPayloadDigest,
     pub(super) controller: AuthorityPayloadDigest,
     pub(super) install_helper: AuthorityPayloadDigest,
+    pub(super) lifecycle_driver: AuthorityPayloadDigest,
+    pub(super) bridge_launcher: AuthorityPayloadDigest,
+    pub(super) runtime_source_manifest: AuthorityPayloadDigest,
     pub(super) signer_key_id: [u8; 32],
     pub(super) signer_public_key_sec1: [u8; 65],
     pub(super) trust_manifest_sha256: [u8; 32],
@@ -403,6 +533,9 @@ impl VerifiedInstalledGeneration {
             service: readback.payload_files.service,
             controller: readback.payload_files.controller,
             install_helper: readback.payload_files.install_helper,
+            lifecycle_driver: readback.payload_files.lifecycle_driver,
+            bridge_launcher: readback.payload_files.bridge_launcher,
+            runtime_source_manifest: readback.payload_files.runtime_source_manifest,
             signer_key_id: manifests.signer_key_id,
             signer_public_key_sec1: manifests.signer_public_key_sec1,
             trust_manifest_sha256: manifests.trust_manifest_sha256,
@@ -410,6 +543,30 @@ impl VerifiedInstalledGeneration {
             activation_epoch: manifests.activation_epoch,
             service_runtime,
         })
+    }
+
+    pub(super) fn from_expected_sealed_source<S: SealedInstalledGenerationSource>(
+        source: &mut S,
+        expected_generation: [u8; 32],
+    ) -> Result<Self, AuthorityMaintenanceError> {
+        if expected_generation.iter().all(|value| *value == 0) {
+            return Err(AuthorityMaintenanceError(
+                "authority_prior_generation_expected_invalid",
+            ));
+        }
+        let readback = source.read_sealed_generation(expected_generation)?;
+        if readback.generation != expected_generation {
+            return Err(AuthorityMaintenanceError(
+                "authority_prior_generation_source_mismatch",
+            ));
+        }
+        let verified = Self::from_sealed_readback(readback)?;
+        if verified.generation != expected_generation {
+            return Err(AuthorityMaintenanceError(
+                "authority_prior_generation_source_mismatch",
+            ));
+        }
+        Ok(verified)
     }
 }
 

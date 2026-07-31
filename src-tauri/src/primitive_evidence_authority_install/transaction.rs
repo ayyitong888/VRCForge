@@ -117,8 +117,7 @@ pub(super) trait MaintenanceExecutor {
     ) -> Result<IdempotentWriteDisposition, ()>;
 }
 
-#[cfg(test)]
-pub(super) fn execute_with_test_executor<E: MaintenanceExecutor>(
+pub(super) fn execute_with_executor<E: MaintenanceExecutor>(
     preview: &AuthorityMaintenancePreview,
     lease: &mut VerifiedMaintenanceLease,
     executor: &mut E,
@@ -146,7 +145,15 @@ pub(super) fn execute_with_test_executor<E: MaintenanceExecutor>(
         }
         if let Err(apply_failure) = executor.apply(step, lease) {
             let mut rollback_failures = Vec::new();
+            let current_step_is_roll_forward_only = matches!(
+                &step.action,
+                AuthorityMaintenanceAction::SealCandidateGenerationForFinalCommit {
+                    irreversible_roll_forward_boundary: true,
+                    ..
+                }
+            );
             let post_commit = crossed_irreversible_commit(preview, completed.len())
+                || current_step_is_roll_forward_only
                 || apply_failure == MaintenanceApplyFailure::AfterIrreversibleCommit;
             let failed_step_cleanup;
             let mut recovery_seal_required;
@@ -261,7 +268,6 @@ pub(super) fn execute_with_test_executor<E: MaintenanceExecutor>(
     }
 }
 
-#[cfg(test)]
 fn crossed_irreversible_commit(
     preview: &AuthorityMaintenancePreview,
     completed_len: usize,
@@ -272,12 +278,14 @@ fn crossed_irreversible_commit(
             AuthorityMaintenanceAction::FinalizeRetirementTombstoneAtomic {
                 irreversible_commit: true,
                 ..
+            } | AuthorityMaintenanceAction::SealCandidateGenerationForFinalCommit {
+                irreversible_roll_forward_boundary: true,
+                ..
             }
         )
     })
 }
 
-#[cfg(test)]
 fn journal_failure_report(
     startup_recovery: Option<&'static str>,
     failed_step: Option<&'static str>,
@@ -301,6 +309,15 @@ fn journal_failure_report(
     }
 }
 
+#[cfg(test)]
+pub(super) fn execute_with_test_executor<E: MaintenanceExecutor>(
+    preview: &AuthorityMaintenancePreview,
+    lease: &mut VerifiedMaintenanceLease,
+    executor: &mut E,
+) -> AuthorityMaintenanceExecutionReport {
+    execute_with_executor(preview, lease, executor)
+}
+
 pub(super) fn rollback_resolution(rollback: &AuthorityRollbackAction) -> &'static str {
     match rollback {
         AuthorityRollbackAction::None => "noMutation",
@@ -312,11 +329,9 @@ pub(super) fn rollback_resolution(rollback: &AuthorityRollbackAction) -> &'stati
         | AuthorityRollbackAction::RemoveNewServiceRegistration { .. }
         | AuthorityRollbackAction::RestorePriorServiceConfiguration { .. }
         | AuthorityRollbackAction::RestoreRetiredServiceConfiguration { .. }
+        | AuthorityRollbackAction::StopCandidateValidationServiceExact { .. }
         | AuthorityRollbackAction::DiscardCreatedManifest { .. }
         | AuthorityRollbackAction::MarkRetirementAbortedNoReuse { .. } => "rolledBack",
-        AuthorityRollbackAction::RestoreActiveHeadAndSealGenerationConsumed { .. } => {
-            "headRestoredAndRecoverySealed"
-        }
     }
 }
 
@@ -325,7 +340,6 @@ pub(super) fn rollback_requires_recovery_seal(rollback: &AuthorityRollbackAction
         rollback,
         AuthorityRollbackAction::SealGenerationConsumed { .. }
             | AuthorityRollbackAction::DiscardManifestAndSealGenerationConsumed { .. }
-            | AuthorityRollbackAction::RestoreActiveHeadAndSealGenerationConsumed { .. }
     )
 }
 

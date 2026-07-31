@@ -28,6 +28,15 @@ mod backend;
 mod capture_helper;
 mod commands;
 mod event_bridge;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod primitive_evidence_authority_client;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod primitive_evidence_authority_windows;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod primitive_evidence_controller_launcher_windows;
 mod sanitize;
 
 use backend::*;

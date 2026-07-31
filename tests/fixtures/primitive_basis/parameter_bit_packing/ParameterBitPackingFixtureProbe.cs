@@ -25,6 +25,7 @@ public static class ParameterBitPackingFixtureProbe
     private const string FxControllerPath = ProbeFolder + "/FixtureFX.controller";
     private const string DirtyGuardAssetPath = "Assets/VRCForge/ParameterBitPackingUnrelatedGuard.anim";
     private const string GeneratedBuildRoot = "Packages/com.vrcfury.temp/Builds";
+    private const string AuxiliaryGeneratedRoot = "Packages/nadena.dev.ndmf/__Generated";
     private const string CacheSeedRoot = GeneratedBuildRoot + "/Fixture Baseline";
     private const string CacheSeedAssetPath = CacheSeedRoot + "/Baseline.anim";
     private const string OutputCloneName = "Packed Clone";
@@ -44,6 +45,7 @@ public static class ParameterBitPackingFixtureProbe
             SeedGeneratedCache();
             var cacheBaseline = CaptureCacheReceipt();
             Require(cacheBaseline.EntryCount > 0 && cacheBaseline.ByteCount > 0, "fixture cache baseline nonempty");
+            var auxiliaryBaseline = CaptureAuxiliaryReceipt();
             var descriptor = CreateSourceFixture(includeInvalidBuildFeature: false);
             var sourceSceneDigest = Sha256(AbsoluteProjectPath(ScenePath));
             var sourceParamsDigest = Sha256(AbsoluteProjectPath(ParamsPath));
@@ -68,6 +70,7 @@ public static class ParameterBitPackingFixtureProbe
             Require(Sha256(AbsoluteProjectPath(ParamsPath)) == sourceParamsDigest, "preview parameter bytes");
             Require(Sha256(AbsoluteProjectPath(MenuRootPath)) == sourceMenuDigest, "preview menu bytes");
             Require(CaptureCacheReceipt().Digest == cacheBaseline.Digest, "preview cache changed");
+            RequireAuxiliaryEquals(auxiliaryBaseline, "preview auxiliary tree changed");
             Require(!IsSceneLoaded(OutputSceneName), "preview output scene");
 
             VerifyDirtyRegisteredAssetBlocksApprovedApply(
@@ -110,17 +113,22 @@ public static class ParameterBitPackingFixtureProbe
             Require((int)apply["generated"]["addedEntryCount"] == 0, "apply generated additions");
             Require((int)apply["generated"]["removedEntryCount"] == 0, "apply generated removal");
             Require((string)apply["generated"]["contentDigestBefore"] == (string)apply["generated"]["contentDigestAfter"], "apply cache content receipt");
+            Require((string)apply["auxiliaryGenerated"]["root"] == AuxiliaryGeneratedRoot, "apply auxiliary root");
+            Require((bool)apply["auxiliaryGenerated"]["restoreVerified"], "apply auxiliary restore");
+            Require((bool)apply["auxiliaryGenerated"]["journalClosed"], "apply auxiliary journal closed");
             Require(CaptureCacheReceipt().Digest == cacheBaseline.Digest, "apply cache bytes changed");
+            RequireAuxiliaryEquals(auxiliaryBaseline, "apply auxiliary tree restoration");
             VerifyDangerousExclusions((JArray)apply["excludedParameters"]);
             VerifyBehaviorAndMigrationProof(preview, apply);
             VerifySourceUnchanged(descriptor, sourceSceneDigest, sourceParamsDigest, sourceMenuDigest);
             Require(!string.IsNullOrWhiteSpace((string)apply["applyReceiptDigest"]), "apply receipt digest");
 
             VerifyDurableOutputAfterApprovedApply(cacheBaseline);
-            VerifyNoResidueAfterFailure(cacheBaseline);
+            VerifyNoResidueAfterFailure(cacheBaseline, auxiliaryBaseline);
             CleanupBestEffort();
             EnsureGeneratedRootEmpty();
             Require(!Directory.EnumerateFileSystemEntries(AbsoluteProjectPath(GeneratedBuildRoot)).Any(), "fixture final cache cleanup");
+            RequireAuxiliaryEquals(auxiliaryBaseline, "fixture final auxiliary tree readback");
             Debug.Log("VRCFORGE_PARAMETER_BIT_PACKING_PROBE_OK");
             EditorApplication.Exit(0);
         }
@@ -417,6 +425,7 @@ public static class ParameterBitPackingFixtureProbe
         var source = (JObject)preview["source"];
         var capability = (JObject)preview["capability"];
         var generated = (JObject)preview["generated"];
+        var auxiliary = (JObject)preview["auxiliaryGenerated"];
         var output = (JObject)preview["output"];
         return new JObject
         {
@@ -453,6 +462,14 @@ public static class ParameterBitPackingFixtureProbe
             ["expectedGeneratedEntryCountBefore"] = generated["entryCountBefore"],
             ["expectedGeneratedContentDigestBefore"] = generated["contentDigestBefore"],
             ["expectedGeneratedByteCountBefore"] = generated["byteCountBefore"],
+            ["expectedAuxiliaryPackageRootIdentityDigest"] = auxiliary["packageRootIdentityDigestBefore"],
+            ["expectedAuxiliaryPackageManifestDigest"] = auxiliary["packageManifestDigestBefore"],
+            ["expectedAuxiliaryPackageManifestIdentityDigest"] = auxiliary["packageManifestIdentityDigestBefore"],
+            ["expectedAuxiliaryRootExistsBefore"] = auxiliary["rootExistsBefore"],
+            ["expectedAuxiliaryTreeDigestBefore"] = auxiliary["treeDigestBefore"],
+            ["expectedAuxiliaryContentDigestBefore"] = auxiliary["contentDigestBefore"],
+            ["expectedAuxiliaryEntryCountBefore"] = auxiliary["entryCountBefore"],
+            ["expectedAuxiliaryByteCountBefore"] = auxiliary["byteCountBefore"],
             ["expectedPreferenceDigest"] = preview["preferences"]["receiptDigest"],
             ["expectedProtectedTreeDigestBefore"] = generated["protectedTreeDigestBefore"],
             ["expectedProtectedEntryCountBefore"] = generated["protectedEntryCountBefore"],
@@ -627,7 +644,9 @@ public static class ParameterBitPackingFixtureProbe
         Require(AssetDatabase.IsValidFolder(DurableOutputRoot), "durable output tree missing");
     }
 
-    private static void VerifyNoResidueAfterFailure(CacheReceipt cacheBaseline)
+    private static void VerifyNoResidueAfterFailure(
+        CacheReceipt cacheBaseline,
+        AuxiliaryReceipt auxiliaryBaseline)
     {
         CleanupBestEffort();
         RequireCacheEquals(cacheBaseline, "failure precondition cache");
@@ -640,10 +659,12 @@ public static class ParameterBitPackingFixtureProbe
         Require((bool)details["restored"], "failure restore state");
         Require(!(bool)details["cleanupRequired"], "failure cleanup state");
         Require(!(bool)details["checkpointRestoreRequired"], "failure checkpoint state");
+        Require((string)details["failureStage"] == "clone_asset_staging", "unsupported asset staging failure stage");
         Require(!IsSceneLoaded(OutputSceneName), "failure output scene residue");
         Require(!AssetDatabase.IsValidFolder(TemporaryOutputRoot), "failure temporary output residue");
         Require(!AssetDatabase.IsValidFolder(DurableOutputRoot), "failure durable output residue");
         RequireCacheEquals(cacheBaseline, "failure cache restore");
+        RequireAuxiliaryEquals(auxiliaryBaseline, "failure auxiliary tree restore");
         RequireNoActiveCacheTransaction("failure cache journal residue");
     }
 
@@ -664,8 +685,14 @@ public static class ParameterBitPackingFixtureProbe
     private static void RequireNoActiveCacheTransaction(string label)
     {
         var transactionRoot = AbsoluteProjectPath("Library/VRCForge/transactions");
+        Require(!File.Exists(Path.Combine(transactionRoot, "parameter-bit-packing.lock")),
+            label + " cache lock");
+        Require(!File.Exists(Path.Combine(transactionRoot, "parameter-auxiliary-generated.lock")),
+            label + " auxiliary lock");
         Require(!Directory.Exists(transactionRoot)
-            || !Directory.EnumerateDirectories(transactionRoot, "parameter-bit-packing-*", SearchOption.TopDirectoryOnly).Any(),
+            || !Directory.EnumerateDirectories(transactionRoot, "parameter-*", SearchOption.TopDirectoryOnly)
+                .Any(path => Path.GetFileName(path).StartsWith("parameter-bit-packing-", StringComparison.Ordinal)
+                    || Path.GetFileName(path).StartsWith("parameter-auxiliary-generated-", StringComparison.Ordinal)),
             label);
     }
 
@@ -766,6 +793,68 @@ public static class ParameterBitPackingFixtureProbe
         Require(actual.ByteCount == expected.ByteCount, label + " byte count");
     }
 
+    private static AuxiliaryReceipt CaptureAuxiliaryReceipt()
+    {
+        var root = AbsoluteProjectPath(AuxiliaryGeneratedRoot)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var meta = root + ".meta";
+        if (!Directory.Exists(root))
+        {
+            Require(!File.Exists(root), "auxiliary receipt root changed to a file");
+            Require(!File.Exists(meta), "auxiliary receipt has orphaned root metadata");
+            return new AuxiliaryReceipt
+            {
+                Exists = false,
+                Digest = Sha256Text("vrcforge.parameter_fixture_auxiliary.v1\nabsent"),
+                EntryCount = 0,
+                ByteCount = 0
+            };
+        }
+        Require(File.Exists(meta), "auxiliary receipt root metadata missing");
+        Require((File.GetAttributes(root) & FileAttributes.ReparsePoint) == 0,
+            "auxiliary receipt root is a reparse point");
+        Require((File.GetAttributes(meta) & FileAttributes.ReparsePoint) == 0,
+            "auxiliary receipt metadata is a reparse point");
+        var prefix = root + Path.DirectorySeparatorChar;
+        var metaLength = new FileInfo(meta).Length;
+        var rows = new List<string> { "D|.", "F|../__Generated.meta|" + metaLength + "|" + Sha256(meta) };
+        var byteCount = metaLength;
+        foreach (var path in Directory.EnumerateFileSystemEntries(root, "*", SearchOption.AllDirectories)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+        {
+            var attributes = File.GetAttributes(path);
+            Require((attributes & FileAttributes.ReparsePoint) == 0,
+                "auxiliary receipt contains a reparse point");
+            var relative = path.Substring(prefix.Length).Replace('\\', '/');
+            if ((attributes & FileAttributes.Directory) != 0)
+            {
+                rows.Add("D|" + relative);
+            }
+            else
+            {
+                var length = new FileInfo(path).Length;
+                byteCount += length;
+                rows.Add("F|" + relative + "|" + length + "|" + Sha256(path));
+            }
+        }
+        return new AuxiliaryReceipt
+        {
+            Exists = true,
+            Digest = Sha256Text(string.Join("\n", rows)),
+            EntryCount = rows.Count,
+            ByteCount = byteCount
+        };
+    }
+
+    private static void RequireAuxiliaryEquals(AuxiliaryReceipt expected, string label)
+    {
+        var actual = CaptureAuxiliaryReceipt();
+        Require(actual.Exists == expected.Exists, label + " existence");
+        Require(actual.Digest == expected.Digest, label + " digest");
+        Require(actual.EntryCount == expected.EntryCount, label + " entry count");
+        Require(actual.ByteCount == expected.ByteCount, label + " byte count");
+    }
+
     private static void EnsureGeneratedRootEmpty()
     {
         var absolute = AbsoluteProjectPath(GeneratedBuildRoot);
@@ -830,6 +919,14 @@ public static class ParameterBitPackingFixtureProbe
 
     private sealed class CacheReceipt
     {
+        internal string Digest;
+        internal int EntryCount;
+        internal long ByteCount;
+    }
+
+    private sealed class AuxiliaryReceipt
+    {
+        internal bool Exists;
         internal string Digest;
         internal int EntryCount;
         internal long ByteCount;

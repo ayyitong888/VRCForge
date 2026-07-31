@@ -447,6 +447,19 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "outputs": ["Tool counts, VRCForge tool counts, and missing required Unity tools."],
         "sideEffects": "none",
     },
+    "vrcforge_know_yourself": {
+        "title": "Know Yourself",
+        "inputs": [
+            "Optional editorFocusConfirmed plus the report's editorFocusScope after "
+            "the user explicitly activates the intended Unity editor."
+        ],
+        "outputs": [
+            "Ordered Unity work-start evidence, current abilities, capability groups, "
+            "structured gaps, boundaries, and the next safe action."
+        ],
+        "sideEffects": "none",
+        "tags": ["self-check", "work-start", "unity", "readiness"],
+    },
     "vrcforge_list_avatars": {
         "title": "Avatar Discovery",
         "outputs": ["Avatar names and scene paths from the active Unity instance."],
@@ -1004,6 +1017,54 @@ for _optimization_apply_tool in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES:
     }
 
 BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
+    {
+        "name": "know-yourself",
+        "title": "Know Yourself",
+        "description": (
+            "Understand VRCForge readiness, current capabilities, missing preparation, "
+            "and safe operating boundaries before starting Unity project work."
+        ),
+        "category": "work-start",
+        "permissionMode": "read_only",
+        "riskLevel": "low",
+        "whenToUse": (
+            "after connecting a provider, before opening or changing a Unity project, "
+            "after dependency installation, or whenever the agent must explain what it "
+            "can and cannot currently do"
+        ),
+        "inputs": [
+            "Optional editorFocusConfirmed and the current editorFocusScope only after "
+            "the user explicitly clicks inside the intended Unity editor window."
+        ],
+        "outputs": [
+            "One ordered readiness sequence, evidence freshness, current and post-baseline "
+            "abilities, bounded tool and capability groups, structured gaps, write "
+            "boundaries, and one next safe action."
+        ],
+        "sideEffects": (
+            "none; this Skill only reads existing VRCForge, Doctor, registry, and Unity "
+            "MCP state"
+        ),
+        "backupRestore": "not required; the Skill never writes, installs, launches, closes, or repairs",
+        "allowedTools": ["vrcforge_know_yourself"],
+        "entrypointTool": "vrcforge_know_yourself",
+        "instructions": (
+            "Run this Skill before the first project operation and whenever the selected "
+            "project, dependencies, Unity process, connection, permissions, or Skill "
+            "registry changes. Treat only observed evidence in the current report as fact. "
+            "If dependencies are installed and the report requests editor activation, ask "
+            "the user to click once inside the intended Unity editor window, then run the "
+            "Skill again with editorFocusConfirmed=true and the exact editorFocusScope "
+            "returned by the prior report. A stale or claimed acknowledgement never proves "
+            "readiness: require fresh bridge, selected-instance, compile, and required-tool "
+            "readback. Complete the recommended read-only baseline before task planning or "
+            "any guarded write request. Explain abilities only from the returned bounded "
+            "tools and capability groups, state structured blockers and unavailable "
+            "reasons, and preserve approval, checkpoint, validation, and rollback "
+            "boundaries for every later write."
+        ),
+        "tags": ["builtin", "group", "self-check", "work-start", "unity", "readiness"],
+    },
     {
         "name": "runtime-diagnostics",
         "title": "Runtime Diagnostics",
@@ -11299,6 +11360,53 @@ class AgentGateway:
             invocation_name, invocation_args = direct_invocation
             invocation_params = {**skill_params, "arguments": invocation_args, "rawArguments": invocation_args}
             return self._runtime_skill_route(invocation_name, invocation_params, "direct skill invocation")
+
+        know_yourself_requested = has_any(
+            lowered,
+            text,
+            [
+                "know yourself",
+                "work-start check",
+                "self check",
+                "self-check",
+                "了解自己",
+                "自我检查",
+                "我能做什么",
+                "你能做什么",
+                "现在能做什么",
+                "还缺什么",
+                "开始前要准备什么",
+            ],
+        )
+        unity_project_work_start = (
+            has_any(lowered, text, ["unity", "project", "editor", "工程", "项目", "编辑器"])
+            and has_any(
+                lowered,
+                text,
+                [
+                    "setup",
+                    "prepare",
+                    "ready",
+                    "start",
+                    "open",
+                    "work on",
+                    "before work",
+                    "准备",
+                    "开始",
+                    "打开",
+                    "开工程",
+                    "进入工程",
+                    "开工",
+                    "动手",
+                ],
+            )
+        )
+        dependency_focus_follow_up = (
+            has_any(lowered, text, ["dependency installed", "dependencies installed", "依赖装好", "依赖安装完成"])
+            and has_any(lowered, text, ["unity", "editor", "窗口", "编辑器"])
+        )
+        if know_yourself_requested or unity_project_work_start or dependency_focus_follow_up:
+            return self._runtime_skill_route("know-yourself", skill_params, "work-start self check")
 
         user_route = self._match_package_skill_route(lowered, text, skill_params)
         if user_route:

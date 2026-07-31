@@ -51,6 +51,8 @@ namespace VRCForge.Editor
         private const int MaxReferences = 16384;
         private const long MaxBackupAssetBytes = 64L * 1024L * 1024L;
         private const long MaxBackupTotalBytes = 256L * 1024L * 1024L;
+        private const int MaxExactWriteAttempts = 4;
+        private const int ExactWriteRetryMilliseconds = 25;
 
         private static readonly HashSet<string> CommonKeys = new HashSet<string>(
             new[] { "operationKind", "scenePath", "avatarPath", "preview", "saveScene" },
@@ -284,22 +286,27 @@ namespace VRCForge.Editor
             for (var index = 0; index < SceneManager.sceneCount; index++)
             {
                 var scene = SceneManager.GetSceneAt(index);
+                var scenePath = scene.path ?? string.Empty;
+                var isProjectScene = scenePath.StartsWith("Assets/", StringComparison.Ordinal)
+                    && !scene.isSubScene;
+                var isReadOnlyPackageSubScene = scenePath.StartsWith("Packages/", StringComparison.Ordinal)
+                    && scene.isSubScene;
                 if (!scene.IsValid()
                     || !scene.isLoaded
-                    || string.IsNullOrWhiteSpace(scene.path)
-                    || scene.path != scene.path.Replace('\\', '/')
-                    || !scene.path.StartsWith("Assets/", StringComparison.Ordinal)
-                    || !scene.path.EndsWith(".unity", StringComparison.Ordinal)
-                    || scene.path.Split('/').Any(part =>
+                    || string.IsNullOrWhiteSpace(scenePath)
+                    || scenePath != scenePath.Replace('\\', '/')
+                    || !(isProjectScene || isReadOnlyPackageSubScene)
+                    || !scenePath.EndsWith(".unity", StringComparison.Ordinal)
+                    || scenePath.Split('/').Any(part =>
                         string.IsNullOrWhiteSpace(part) || part == "." || part == ".."))
                 {
                     throw new AtomicReferenceRenameException(
                         "An open project scene has incomplete persistent state.");
                 }
-                var sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(scene.path);
+                var sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(scenePath);
                 if (sceneAsset == null
                     || !EditorUtility.IsPersistent(sceneAsset)
-                    || AssetDatabase.GetAssetPath(sceneAsset) != scene.path
+                    || AssetDatabase.GetAssetPath(sceneAsset) != scenePath
                     || scene.isDirty)
                 {
                     throw new AtomicReferenceRenameException(
@@ -324,6 +331,7 @@ namespace VRCForge.Editor
                 throw new AtomicReferenceRenameException(
                     "The registered project asset set is incomplete.");
             }
+            var projectPathSet = new HashSet<string>(paths, StringComparer.Ordinal);
 
             var objectCount = 0;
             foreach (var path in paths)
@@ -363,26 +371,41 @@ namespace VRCForge.Editor
                 {
                     continue;
                 }
+            }
 
-                var assets = AssetDatabase.LoadAllAssetsAtPath(path);
-                if (assets == null
-                    || assets.Length == 0
-                    || objectCount > MaxRegisteredAssetObjects - assets.Length)
+            var loadedObjects = Resources.FindObjectsOfTypeAll<UnityEngine.Object>();
+            if (loadedObjects == null || loadedObjects.Length > MaxRegisteredAssetObjects)
+            {
+                throw new AtomicReferenceRenameException(
+                    "The loaded asset object set exceeds the bounded cleanliness scan.");
+            }
+            foreach (var asset in loadedObjects)
+            {
+                if (asset == null)
+                {
+                    continue;
+                }
+                var path = AssetDatabase.GetAssetPath(asset);
+                if (string.IsNullOrWhiteSpace(path))
+                {
+                    continue;
+                }
+                path = path.Replace('\\', '/');
+                if (!IsProjectOwnedAssetPath(path))
+                {
+                    continue;
+                }
+                if (!projectPathSet.Contains(path)
+                    || !AssetDatabase.Contains(asset)
+                    || !EditorUtility.IsPersistent(asset))
                 {
                     throw new AtomicReferenceRenameException(
-                        "A registered project asset has incomplete persistent objects.");
+                        "A loaded project asset has incomplete persistent registration.");
                 }
-                objectCount += assets.Length;
-                foreach (var asset in assets)
+                if (AssetDatabase.IsNativeAsset(asset) && EditorUtility.IsDirty(asset))
                 {
-                    if (asset == null
-                        || !EditorUtility.IsPersistent(asset)
-                        || AssetDatabase.GetAssetPath(asset) != path
-                        || EditorUtility.IsDirty(asset))
-                    {
-                        throw new AtomicReferenceRenameException(
-                            "All project assets must be saved before atomic reference rename.");
-                    }
+                    throw new AtomicReferenceRenameException(
+                        "All project assets must be saved before atomic reference rename.");
                 }
             }
         }
@@ -764,34 +787,44 @@ namespace VRCForge.Editor
             RequireMutableAsset(controller, "animator controller");
             var request = context.Snapshot.Request;
             var parameters = controller.parameters;
+            var serialized = new SerializedObject(controller);
+            var serializedParameters = RequireArray(
+                serialized,
+                "m_AnimatorParameters",
+                "animator controller parameters");
+            if (serializedParameters.arraySize != parameters.Length)
+            {
+                throw new AtomicReferenceRenameException(
+                    "The animator controller parameter layout is inconsistent.");
+            }
             for (var index = 0; index < parameters.Length; index++)
             {
                 var parameter = parameters[index];
-                if (parameter.name == request.NewParameterName)
+                var serializedName = serializedParameters.GetArrayElementAtIndex(index)
+                    .FindPropertyRelative("m_Name");
+                if (serializedName == null
+                    || serializedName.propertyType != SerializedPropertyType.String
+                    || serializedName.stringValue != parameter.name)
+                {
+                    throw new AtomicReferenceRenameException(
+                        "The animator controller parameter layout is unsupported.");
+                }
+                if (serializedName.stringValue == request.NewParameterName)
                 {
                     throw new AtomicReferenceRenameException(
                         "The new parameter already exists in an animator controller.");
                 }
-                if (parameter.name != request.OldParameterName)
+                if (serializedName.stringValue != request.OldParameterName)
                 {
                     continue;
                 }
-                var capturedIndex = index;
-                context.AddReference(
-                    "animator_parameter",
-                    AssetPath(controller),
+                AddSerializedStringReference(
+                    context,
                     controller,
+                    serializedName,
                     "parameters[" + index.ToString(CultureInfo.InvariantCulture) + "].name",
-                    request.OldParameterName,
-                    request.NewParameterName,
-                    () =>
-                    {
-                        Undo.RegisterCompleteObjectUndo(controller, "Rename VRCForge animator parameter");
-                        var current = controller.parameters;
-                        current[capturedIndex].name = request.NewParameterName;
-                        controller.parameters = current;
-                        EditorUtility.SetDirty(controller);
-                    });
+                    "animator_parameter",
+                    AssetPath(controller));
             }
 
             for (var layerIndex = 0; layerIndex < controller.layers.Length; layerIndex++)
@@ -1458,7 +1491,10 @@ namespace VRCForge.Editor
                     asset,
                     token,
                     replacement,
-                    replacementCount);
+                    replacementCount,
+                    snapshot.Request,
+                    context.References.Where(reference =>
+                        reference.AssetPath == asset.AssetPath));
                 asset.RawReplacementCount = replacementCount;
                 asset.TargetFileDigest = target.Digest;
                 asset.TargetFileLength = target.Length;
@@ -1628,21 +1664,35 @@ namespace VRCForge.Editor
             {
                 var expected = before.Assets[index];
                 var actual = reverse.Assets[index];
-                if (!baselineAssets.TryGetValue(expected.AssetPath, out var baseline)
-                    || expected.AssetPath != actual.AssetPath
-                    || expected.AssetGuid != actual.AssetGuid
-                    || expected.MetaDigest != actual.MetaDigest
-                    || expected.MutationCount != actual.MutationCount
-                    || expected.RawReplacementCount != actual.RawReplacementCount
-                    || actual.FileDigest != expected.TargetFileDigest
-                    || actual.FileLength != expected.TargetFileLength
-                    || actual.TargetFileDigest != expected.FileDigest
-                    || actual.TargetFileLength != expected.FileLength
-                    || actual.TargetFileLength != (long)baseline.Evidence.File.Length
-                    || expected.MetaIdentity != actual.MetaIdentity)
+                var mismatches = new List<string>();
+                if (!baselineAssets.TryGetValue(expected.AssetPath, out var baseline))
+                {
+                    mismatches.Add("baseline");
+                }
+                if (expected.AssetPath != actual.AssetPath) mismatches.Add("path");
+                if (expected.AssetGuid != actual.AssetGuid) mismatches.Add("guid");
+                if (expected.MetaDigest != actual.MetaDigest) mismatches.Add("meta_digest");
+                if (expected.MutationCount != actual.MutationCount) mismatches.Add("mutation_count");
+                if (expected.RawReplacementCount != actual.RawReplacementCount)
+                {
+                    mismatches.Add("replacement_count");
+                }
+                if (actual.FileDigest != expected.TargetFileDigest) mismatches.Add("target_digest");
+                if (actual.FileLength != expected.TargetFileLength) mismatches.Add("target_length");
+                if (actual.TargetFileDigest != expected.FileDigest) mismatches.Add("reverse_digest");
+                if (actual.TargetFileLength != expected.FileLength) mismatches.Add("reverse_length");
+                if (baseline != null
+                    && actual.TargetFileLength != (long)baseline.Evidence.File.Length)
+                {
+                    mismatches.Add("baseline_length");
+                }
+                if (expected.MetaIdentity != actual.MetaIdentity) mismatches.Add("meta_identity");
+                if (mismatches.Count != 0)
                 {
                     throw new AtomicReferenceRenameException(
-                        "Atomic reference rename persisted asset projection is not exact.");
+                        "Atomic reference rename persisted asset projection is not exact"
+                        + " (assetIndex=" + index.ToString(CultureInfo.InvariantCulture)
+                        + ",fields=" + string.Join(",", mismatches) + ").");
                 }
             }
         }
@@ -1860,8 +1910,8 @@ namespace VRCForge.Editor
                 foreach (var backup in backups)
                 {
                     var absolute = SceneObjectCopyCore.ToAbsoluteAssetPath(backup.AssetPath);
-                    WriteExactFile(absolute, backup.FileBytes);
-                    WriteExactFile(absolute + ".meta", backup.MetaBytes);
+                    WriteExactFile(absolute, backup.FileBytes, true);
+                    WriteExactFile(absolute + ".meta", backup.MetaBytes, false);
                 }
                 foreach (var backup in backups)
                 {
@@ -2048,7 +2098,6 @@ namespace VRCForge.Editor
                 && right != null
                 && left.Path == right.Path
                 && left.Guid == right.Guid
-                && left.Handle == right.Handle
                 && left.FileDigest == right.FileDigest
                 && left.MetaDigest == right.MetaDigest
                 && left.MetaIdentity == right.MetaIdentity
@@ -2135,16 +2184,67 @@ namespace VRCForge.Editor
                 && left.Length == right.Length;
         }
 
-        private static void WriteExactFile(string path, byte[] bytes)
+        private static void WriteExactFile(
+            string path,
+            byte[] bytes,
+            bool allowIdentityReplacement)
         {
-            using (var stream = new FileStream(
-                path,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None))
+            IOException sharingFailure = null;
+            for (var attempt = 0; attempt < MaxExactWriteAttempts; attempt++)
             {
-                stream.Write(bytes, 0, bytes.Length);
-                stream.Flush(true);
+                try
+                {
+                    using (var stream = new FileStream(
+                        path,
+                        FileMode.Create,
+                        FileAccess.Write,
+                        FileShare.None))
+                    {
+                        stream.Write(bytes, 0, bytes.Length);
+                        stream.Flush(true);
+                    }
+                    return;
+                }
+                catch (IOException exception)
+                {
+                    var code = exception.HResult & 0xffff;
+                    if ((code != 32 && code != 33)
+                        || attempt == MaxExactWriteAttempts - 1)
+                    {
+                        sharingFailure = exception;
+                        break;
+                    }
+                    System.Threading.Thread.Sleep(ExactWriteRetryMilliseconds);
+                }
+            }
+            if (!allowIdentityReplacement || sharingFailure == null)
+            {
+                throw sharingFailure ?? new IOException(
+                    "Exact file restoration did not complete.");
+            }
+            var temporaryPath = path + ".vrcforge-restore-"
+                + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                using (var stream = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    4096,
+                    FileOptions.WriteThrough))
+                {
+                    stream.Write(bytes, 0, bytes.Length);
+                    stream.Flush(true);
+                }
+                File.Replace(temporaryPath, path, null);
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
             }
         }
 
@@ -2570,7 +2670,10 @@ namespace VRCForge.Editor
             var files = fileSystem.Entries
                 .Where(entry => entry.Kind == "file")
                 .ToDictionary(entry => entry.Path, StringComparer.Ordinal);
-            if (!expectedFiles.SetEquals(files.Keys))
+            var registeredOnly = expectedFiles.Except(files.Keys, StringComparer.Ordinal);
+            var unregistered = files.Values
+                .Where(entry => !expectedFiles.Contains(entry.Path));
+            if (registeredOnly.Any() || unregistered.Any(entry => !IsAllowedUnregisteredPlaceholder(entry)))
             {
                 throw new AtomicReferenceRenameException(
                     "The AssetDatabase file inventory does not match the Assets filesystem.");
@@ -2588,6 +2691,15 @@ namespace VRCForge.Editor
                         "The registered asset inventory does not match the Assets filesystem.");
                 }
             }
+        }
+
+        private static bool IsAllowedUnregisteredPlaceholder(FileSystemEntry entry)
+        {
+            return entry != null
+                && entry.Kind == "file"
+                && entry.Path.EndsWith("/.gitkeep", StringComparison.Ordinal)
+                && entry.Length == 0
+                && entry.Digest == Sha256Bytes(new byte[0]);
         }
 
         private static FileSystemEntry ReadStableAssetsFileEvidence(
@@ -2944,7 +3056,9 @@ namespace VRCForge.Editor
             RenameAssetReceipt asset,
             string before,
             string after,
-            int expectedCount)
+            int expectedCount,
+            RenameRequest request,
+            IEnumerable<RenameReference> references)
         {
             var stableBefore = SceneObjectCopyCore.ReadStableAssetEvidence(
                 asset.AssetPath,
@@ -2974,6 +3088,10 @@ namespace VRCForge.Editor
                 Encoding.UTF8.GetBytes(before),
                 Encoding.UTF8.GetBytes(after),
                 expectedCount);
+            target = ProjectAnimationBindingPathHashes(
+                target,
+                request,
+                references);
             var stableAfter = SceneObjectCopyCore.ReadStableAssetEvidence(
                 asset.AssetPath,
                 "atomic reference rename target projection readback");
@@ -2987,6 +3105,57 @@ namespace VRCForge.Editor
                 Digest = Sha256Bytes(target),
                 Length = target.LongLength
             };
+        }
+
+        private static byte[] ProjectAnimationBindingPathHashes(
+            byte[] source,
+            RenameRequest request,
+            IEnumerable<RenameReference> references)
+        {
+            if (request.OperationKind != ObjectOperation)
+            {
+                return source;
+            }
+            var avatarPrefix = request.AvatarPath + "/";
+            var replacements = new List<AnimationPathHashReplacement>();
+            foreach (var reference in references.Where(item =>
+                item.Kind == "animation_binding"))
+            {
+                if (!reference.Before.StartsWith(avatarPrefix, StringComparison.Ordinal)
+                    || !reference.After.StartsWith(avatarPrefix, StringComparison.Ordinal))
+                {
+                    throw new AtomicReferenceRenameException(
+                        "An animation binding escaped the selected avatar path.");
+                }
+                var beforePath = reference.Before.Substring(avatarPrefix.Length);
+                var afterPath = reference.After.Substring(avatarPrefix.Length);
+                var beforeHash = unchecked((uint)Animator.StringToHash(beforePath))
+                    .ToString(CultureInfo.InvariantCulture);
+                var afterHash = unchecked((uint)Animator.StringToHash(afterPath))
+                    .ToString(CultureInfo.InvariantCulture);
+                if (beforeHash == afterHash)
+                {
+                    throw new AtomicReferenceRenameException(
+                        "An animation binding path hash collides with its target.");
+                }
+                replacements.Add(new AnimationPathHashReplacement
+                {
+                    Before = beforeHash,
+                    After = afterHash
+                });
+            }
+            foreach (var group in replacements
+                .GroupBy(item => item.Before + "|" + item.After, StringComparer.Ordinal)
+                .OrderBy(item => item.Key, StringComparer.Ordinal))
+            {
+                var replacement = group.First();
+                source = ReplaceBytesExact(
+                    source,
+                    Encoding.UTF8.GetBytes("path: " + replacement.Before),
+                    Encoding.UTF8.GetBytes("path: " + replacement.After),
+                    group.Count());
+            }
+            return source;
         }
 
         private static byte[] ReplaceBytesExact(
@@ -3765,6 +3934,12 @@ namespace VRCForge.Editor
         {
             internal string Digest = string.Empty;
             internal long Length;
+        }
+
+        private sealed class AnimationPathHashReplacement
+        {
+            internal string Before = string.Empty;
+            internal string After = string.Empty;
         }
 
         private sealed class AssetBackup

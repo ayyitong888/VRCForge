@@ -64,6 +64,59 @@ fn layout_is_fixed_below_machine_roots() {
             "24".repeat(32)
         ))
     );
+    let capsule = [0x35; 32];
+    let capsule_hex = "35".repeat(32);
+    assert_eq!(
+        layout
+            .maintenance_worker_source_stage_root(&capsule)
+            .unwrap(),
+        PathBuf::from(format!(
+            r"C:\ProgramData\VRCForgeEvidenceAuthority\v1\maintenance\{capsule_hex}\stage.{capsule_hex}"
+        ))
+    );
+    assert_eq!(
+        layout
+            .maintenance_worker_source_identity_ledger_file(&capsule)
+            .unwrap(),
+        PathBuf::from(format!(
+            r"C:\ProgramData\VRCForgeEvidenceAuthority\v1\maintenance\{capsule_hex}\stage.{capsule_hex}\source-identities.json"
+        ))
+    );
+    assert_eq!(
+        layout
+            .maintenance_worker_source_staging_receipt_file(&capsule)
+            .unwrap(),
+        PathBuf::from(format!(
+            r"C:\ProgramData\VRCForgeEvidenceAuthority\v1\maintenance\{capsule_hex}\source-staging-receipt.json"
+        ))
+    );
+    assert_eq!(
+        layout.candidate_activation_root(),
+        PathBuf::from(r"C:\ProgramData\VRCForgeEvidenceAuthority\v1\candidate-activation")
+    );
+    assert_eq!(
+        layout.worker_nonce_root(),
+        PathBuf::from(r"C:\ProgramData\VRCForgeEvidenceAuthority\v1\worker-nonce-receipts")
+    );
+    assert_eq!(
+        layout.candidate_consumption_root(),
+        PathBuf::from(
+            r"C:\ProgramData\VRCForgeEvidenceAuthority\v1\candidate-consumption-tombstones"
+        )
+    );
+    assert_eq!(
+        layout.finalizer_commits_root(),
+        PathBuf::from(r"C:\ProgramData\VRCForgeEvidenceAuthority\v1\finalizer-commits")
+    );
+    assert_eq!(
+        layout
+            .ledger_anchor_file_for_generation(&[0x24; 32])
+            .unwrap(),
+        PathBuf::from(format!(
+            r"C:\ProgramData\VRCForgeEvidenceAuthority\v1\generations\{}\ledger.bin.anchor",
+            "24".repeat(32)
+        ))
+    );
     assert_eq!(
         layout
             .controller_executable_for_generation(&[0; 32])
@@ -154,7 +207,14 @@ fn plan_is_non_mutating_and_never_ready() {
         assert!(value["layout"].get(forbidden).is_none());
         assert!(value.get(forbidden).is_none());
     }
-    assert!(value["blockers"].as_array().unwrap().len() >= 18);
+    let blockers = value["blockers"].as_array().unwrap();
+    assert_eq!(blockers.len(), 17);
+    assert!(blockers
+        .iter()
+        .any(|value| value == "process_supervision_not_implemented"));
+    assert!(blockers
+        .iter()
+        .any(|value| value == "private_finalization_not_implemented"));
 }
 
 #[test]
@@ -247,6 +307,59 @@ fn unbound_readback_is_explicitly_diagnostic_only() {
 }
 
 #[test]
+fn candidate_and_committed_service_states_have_separate_exact_readbacks() {
+    let mut readback = AuthorityReadback::absent("test", Some(&[0x31; 32]));
+    readback.service_installed = true;
+    readback.service_binary_path_exact = true;
+    readback.service_executable_path_exact = true;
+    readback.service_arguments_exact = true;
+    readback.service_account_exact = true;
+    readback.service_type_exact = true;
+    readback.service_start_exact = true;
+    readback.service_error_control_exact = true;
+    readback.service_dacl_exact = true;
+    readback.service_sid_restricted = true;
+    readback.required_privileges_exact = true;
+    readback.service_current_state = SERVICE_STATE_START_PENDING;
+    readback.observed_service_process_id = Some(77);
+
+    assert!(readback.candidate_service_configuration_exact_for_start_pending_process(77));
+    assert!(!readback.candidate_service_configuration_exact_for_start_pending_process(0));
+    assert!(!readback.candidate_service_configuration_exact_for_start_pending_process(78));
+    assert!(!readback.bootstrap_service_configuration_exact_for_process(77));
+    assert!(!readback.candidate_service_configuration_exact_for_stopped_success());
+
+    readback.service_dacl_exact = false;
+    assert!(!readback.candidate_service_configuration_exact_for_start_pending_process(77));
+    readback.service_dacl_exact = true;
+
+    readback.service_current_state = SERVICE_STATE_STOPPED;
+    readback.observed_service_process_id = None;
+    readback.service_win32_exit_code = 0;
+    readback.service_specific_exit_code = 0;
+    assert!(readback.candidate_service_configuration_exact_for_stopped_success());
+    readback.service_win32_exit_code = 1;
+    assert!(!readback.candidate_service_configuration_exact_for_stopped_success());
+    readback.service_win32_exit_code = 0;
+    readback.service_specific_exit_code = 1;
+    assert!(!readback.candidate_service_configuration_exact_for_stopped_success());
+    readback.service_specific_exit_code = 0;
+
+    readback.service_current_state = 4;
+    readback.service_running = true;
+    readback.running_process_id = Some(77);
+    assert!(!readback.candidate_service_configuration_exact_for_start_pending_process(77));
+    assert!(readback.bootstrap_service_configuration_exact_for_process(77));
+
+    readback.service_dacl_exact = false;
+    assert!(!readback.bootstrap_service_configuration_exact_for_process(77));
+
+    let serialized = serde_json::to_value(&readback).unwrap();
+    assert!(serialized.get("serviceCurrentState").is_none());
+    assert!(serialized.get("observedServiceProcessId").is_none());
+}
+
+#[test]
 fn pipe_policy_excludes_unprivileged_principals_and_create_instance_access() {
     assert!(AUTHORITY_PIPE_SDDL.contains(";;;SY"));
     assert!(AUTHORITY_PIPE_SDDL.contains(";;;BA"));
@@ -255,6 +368,18 @@ fn pipe_policy_excludes_unprivileged_principals_and_create_instance_access() {
         assert!(!AUTHORITY_PIPE_SDDL.contains(forbidden));
     }
     assert!(AUTHORITY_PIPE_SDDL.contains("0x0012019b"));
+}
+
+#[test]
+fn candidate_service_policy_grants_the_worker_only_query_and_start() {
+    assert!(AUTHORITY_SERVICE_SECURITY_SDDL.contains("(A;;0x000f01ff;;;SY)"));
+    assert!(AUTHORITY_SERVICE_SECURITY_SDDL.contains("(A;;0x00070037;;;BA)"));
+    assert!(AUTHORITY_SERVICE_SECURITY_SDDL.contains(
+        "(A;;0x00020015;;;S-1-5-80-1152445285-3302248683-2168573404-3713171798-555061439)"
+    ));
+    for forbidden in ["(A;;FA;;;BA)", ";;;WD)", ";;;AU)", ";;;BU)"] {
+        assert!(!AUTHORITY_SERVICE_SECURITY_SDDL.contains(forbidden));
+    }
 }
 
 #[test]

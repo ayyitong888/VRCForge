@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-pub const AUTHORITY_POLICY_SCHEMA: &str = "vrcforge.primitive_evidence_authority_policy.v1";
+pub const AUTHORITY_POLICY_SCHEMA: &str = "vrcforge.primitive_evidence_authority_policy.v2";
 pub const AUTHORITY_READBACK_SCHEMA: &str = "vrcforge.primitive_evidence_authority_readback.v1";
 pub const AUTHORITY_SERVICE_NAME: &str = "VRCForgePrimitiveEvidence";
 pub const AUTHORITY_SERVICE_DISPLAY_NAME: &str = "VRCForge Primitive Evidence Authority";
@@ -12,16 +12,20 @@ pub const AUTHORITY_SERVICE_ACCOUNT: &str = "LocalSystem";
 pub const AUTHORITY_PIPE_NAME: &str = r"\\.\pipe\VRCForge.PrimitiveEvidence.v1";
 pub const AUTHORITY_PIPE_SDDL: &str = "O:SYG:SYD:P(A;;FA;;;SY)(A;;0x0012019b;;;BA)S:(ML;;NW;;;HI)";
 pub const AUTHORITY_SERVICE_SECURITY_SDDL: &str =
-    "O:SYG:SYD:P(A;;FA;;;SY)(A;;0x000f01ff;;;BA)S:(ML;;NW;;;HI)";
+    "O:SYG:SYD:P(A;;0x000f01ff;;;SY)(A;;0x00070037;;;BA)(A;;0x00020015;;;S-1-5-80-1152445285-3302248683-2168573404-3713171798-555061439)S:(ML;;NW;;;HI)";
 pub const AUTHORITY_SERVICE_SID_TYPE_RESTRICTED: u32 = 3;
+pub const AUTHORITY_RUNTIME_SOURCE_MANIFEST_FILE_NAME: &str = "runtime-source-manifest.json";
+pub const AUTHORITY_RUNNER_POLICY_STATE_FILE_NAME: &str = "runner-policy.json";
+pub const AUTHORITY_PROTECTED_BLOB_NAMESPACE_DIRECTORY_NAME: &str = "protected-blobs";
 pub const AUTHORITY_REQUIRED_PRIVILEGES: [&str; 3] = [
     "SeAssignPrimaryTokenPrivilege",
     "SeIncreaseQuotaPrivilege",
     "SeTcbPrivilege",
 ];
+const SERVICE_STATE_START_PENDING: u32 = 2;
+const SERVICE_STATE_STOPPED: u32 = 1;
 
-const PERMANENT_BLOCKERS: [&str; 18] = [
-    "authority_service_dacl_not_verified",
+const PERMANENT_BLOCKERS: [&str; 17] = [
     "authority_service_running_process_not_verified",
     "authority_service_running_image_not_verified",
     "authority_service_generation_handshake_not_verified",
@@ -163,6 +167,205 @@ impl AuthorityLayout {
             .join(hex_lower(authority_generation_sha256)))
     }
 
+    pub(crate) fn activations_root(&self) -> PathBuf {
+        self.state_root.join("activations")
+    }
+
+    pub(crate) fn active_head_path(&self) -> PathBuf {
+        self.activations_root().join("head.json")
+    }
+
+    pub(crate) fn finalizer_commits_root(&self) -> PathBuf {
+        self.state_root.join("finalizer-commits")
+    }
+
+    pub(crate) fn ledger_file_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .generation_state_root(authority_generation_sha256)?
+            .join("ledger.bin"))
+    }
+
+    pub(crate) fn ledger_anchor_file_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .generation_state_root(authority_generation_sha256)?
+            .join("ledger.bin.anchor"))
+    }
+
+    pub(crate) fn trust_manifest_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .generation_state_root(authority_generation_sha256)?
+            .join("trust.json"))
+    }
+
+    pub(crate) fn runtime_source_manifest_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .generation_state_root(authority_generation_sha256)?
+            .join(AUTHORITY_RUNTIME_SOURCE_MANIFEST_FILE_NAME))
+    }
+
+    pub(crate) fn runner_policy_state_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .generation_state_root(authority_generation_sha256)?
+            .join(AUTHORITY_RUNNER_POLICY_STATE_FILE_NAME))
+    }
+
+    pub(crate) fn protected_blob_root_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .generation_state_root(authority_generation_sha256)?
+            .join(AUTHORITY_PROTECTED_BLOB_NAMESPACE_DIRECTORY_NAME))
+    }
+
+    pub(crate) fn activation_manifest_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        require_nonzero_digest(
+            authority_generation_sha256,
+            "authority_generation_digest_invalid",
+        )?;
+        Ok(self
+            .activations_root()
+            .join(format!("{}.json", hex_lower(authority_generation_sha256))))
+    }
+
+    pub(crate) fn maintenance_worker_root(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        require_nonzero_digest(capsule_sha256, "authority_worker_capsule_digest_invalid")?;
+        Ok(self
+            .binary_root
+            .join("maintenance")
+            .join(hex_lower(capsule_sha256)))
+    }
+
+    pub(crate) fn maintenance_worker_executable(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .maintenance_worker_root(capsule_sha256)?
+            .join("vrcforge_primitive_evidence_install_helper.exe"))
+    }
+
+    pub(crate) fn maintenance_worker_state_root(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        require_nonzero_digest(capsule_sha256, "authority_worker_capsule_digest_invalid")?;
+        Ok(self
+            .state_root
+            .join("maintenance")
+            .join(hex_lower(capsule_sha256)))
+    }
+
+    pub(crate) fn worker_nonce_root(&self) -> PathBuf {
+        self.state_root.join("worker-nonce-receipts")
+    }
+
+    pub(crate) fn candidate_consumption_root(&self) -> PathBuf {
+        self.state_root.join("candidate-consumption-tombstones")
+    }
+
+    pub(crate) fn candidate_activation_root(&self) -> PathBuf {
+        self.state_root.join("candidate-activation")
+    }
+
+    pub(crate) fn worker_nonce_receipt_file(
+        &self,
+        transaction_nonce_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        require_nonzero_digest(
+            transaction_nonce_sha256,
+            "authority_worker_transaction_nonce_invalid",
+        )?;
+        Ok(self.worker_nonce_root().join(format!(
+            "nonce.{}.consumed.json",
+            hex_lower(transaction_nonce_sha256)
+        )))
+    }
+
+    pub(crate) fn maintenance_worker_capsule_file(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .maintenance_worker_state_root(capsule_sha256)?
+            .join("capsule.json"))
+    }
+
+    pub(crate) fn maintenance_worker_intent_file(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .maintenance_worker_state_root(capsule_sha256)?
+            .join("bootstrap-intent.json"))
+    }
+
+    pub(crate) fn maintenance_worker_bootstrap_receipt_file(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .maintenance_worker_state_root(capsule_sha256)?
+            .join("bootstrap-receipt.json"))
+    }
+
+    pub(crate) fn maintenance_worker_journal_file(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .maintenance_worker_state_root(capsule_sha256)?
+            .join("journal.jsonl"))
+    }
+
+    pub(crate) fn maintenance_worker_source_stage_root(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .maintenance_worker_state_root(capsule_sha256)?
+            .join(format!("stage.{}", hex_lower(capsule_sha256))))
+    }
+
+    pub(crate) fn maintenance_worker_source_identity_ledger_file(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .maintenance_worker_source_stage_root(capsule_sha256)?
+            .join("source-identities.json"))
+    }
+
+    pub(crate) fn maintenance_worker_source_staging_receipt_file(
+        &self,
+        capsule_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .maintenance_worker_state_root(capsule_sha256)?
+            .join("source-staging-receipt.json"))
+    }
+
     pub(crate) fn controller_executable_for_generation(
         &self,
         authority_generation_sha256: &[u8; 32],
@@ -188,6 +391,24 @@ impl AuthorityLayout {
         Ok(self
             .generation_binary_root(authority_generation_sha256)?
             .join("vrcforge_primitive_evidence_install_helper.exe"))
+    }
+
+    pub(crate) fn lifecycle_driver_executable_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .generation_binary_root(authority_generation_sha256)?
+            .join("vrcforge_primitive_lifecycle_driver.exe"))
+    }
+
+    pub(crate) fn bridge_launcher_executable_for_generation(
+        &self,
+        authority_generation_sha256: &[u8; 32],
+    ) -> Result<PathBuf, AuthorityWindowsError> {
+        Ok(self
+            .generation_binary_root(authority_generation_sha256)?
+            .join("vrcforge_primitive_bridge_launcher.exe"))
     }
 
     fn service_command_for_generation(
@@ -238,6 +459,11 @@ struct AuthorityLayoutProjection {
     service_executable_pattern: String,
     controller_executable_pattern: String,
     install_helper_executable_pattern: String,
+    lifecycle_driver_executable_pattern: String,
+    bridge_launcher_executable_pattern: String,
+    runtime_source_manifest_pattern: String,
+    runner_policy_state_pattern: String,
+    protected_blob_namespace_pattern: String,
 }
 
 impl From<&AuthorityLayout> for AuthorityLayoutProjection {
@@ -280,6 +506,41 @@ impl From<&AuthorityLayout> for AuthorityLayoutProjection {
                 .join("generations")
                 .join("{authority-generation-sha256-lower}")
                 .join("vrcforge_primitive_evidence_install_helper.exe")
+                .to_string_lossy()
+                .into_owned(),
+            lifecycle_driver_executable_pattern: value
+                .binary_root
+                .join("generations")
+                .join("{authority-generation-sha256-lower}")
+                .join("vrcforge_primitive_lifecycle_driver.exe")
+                .to_string_lossy()
+                .into_owned(),
+            bridge_launcher_executable_pattern: value
+                .binary_root
+                .join("generations")
+                .join("{authority-generation-sha256-lower}")
+                .join("vrcforge_primitive_bridge_launcher.exe")
+                .to_string_lossy()
+                .into_owned(),
+            runtime_source_manifest_pattern: value
+                .state_root
+                .join("generations")
+                .join("{authority-generation-sha256-lower}")
+                .join(AUTHORITY_RUNTIME_SOURCE_MANIFEST_FILE_NAME)
+                .to_string_lossy()
+                .into_owned(),
+            runner_policy_state_pattern: value
+                .state_root
+                .join("generations")
+                .join("{authority-generation-sha256-lower}")
+                .join(AUTHORITY_RUNNER_POLICY_STATE_FILE_NAME)
+                .to_string_lossy()
+                .into_owned(),
+            protected_blob_namespace_pattern: value
+                .state_root
+                .join("generations")
+                .join("{authority-generation-sha256-lower}")
+                .join(AUTHORITY_PROTECTED_BLOB_NAMESPACE_DIRECTORY_NAME)
                 .to_string_lossy()
                 .into_owned(),
         }
@@ -348,6 +609,14 @@ pub struct AuthorityReadback {
     service_dacl_exact: bool,
     service_sid_restricted: bool,
     required_privileges_exact: bool,
+    #[serde(skip)]
+    service_current_state: u32,
+    #[serde(skip)]
+    observed_service_process_id: Option<u32>,
+    #[serde(skip)]
+    service_win32_exit_code: u32,
+    #[serde(skip)]
+    service_specific_exit_code: u32,
     running_process_id: Option<u32>,
     running_process_creation_time: Option<u64>,
     running_process_identity_exact: bool,
@@ -394,6 +663,10 @@ impl AuthorityReadback {
             service_dacl_exact: false,
             service_sid_restricted: false,
             required_privileges_exact: false,
+            service_current_state: 0,
+            observed_service_process_id: None,
+            service_win32_exit_code: u32::MAX,
+            service_specific_exit_code: u32::MAX,
             running_process_id: None,
             running_process_creation_time: None,
             running_process_identity_exact: false,
@@ -420,6 +693,53 @@ impl AuthorityReadback {
         if !value {
             self.blockers.push(code.to_string());
         }
+    }
+
+    pub(crate) fn bootstrap_service_configuration_exact_for_process(
+        &self,
+        process_id: u32,
+    ) -> bool {
+        self.service_configuration_exact()
+            && self.service_running
+            && self.running_process_id == Some(process_id)
+    }
+
+    pub(crate) fn candidate_service_configuration_exact_for_start_pending_process(
+        &self,
+        process_id: u32,
+    ) -> bool {
+        process_id != 0
+            && self.service_configuration_exact()
+            && !self.service_running
+            && self.service_current_state == SERVICE_STATE_START_PENDING
+            && self.observed_service_process_id == Some(process_id)
+    }
+
+    pub(crate) fn candidate_service_configuration_exact_for_stopped_success(&self) -> bool {
+        self.service_configuration_exact()
+            && !self.service_running
+            && self.service_current_state == SERVICE_STATE_STOPPED
+            && self.observed_service_process_id.is_none()
+            && self.running_process_id.is_none()
+            && self.service_win32_exit_code == 0
+            && self.service_specific_exit_code == 0
+    }
+
+    fn service_configuration_exact(&self) -> bool {
+        self.schema == AUTHORITY_READBACK_SCHEMA
+            && self.generation_bound
+            && !self.diagnostic_only
+            && self.service_installed
+            && self.service_binary_path_exact
+            && self.service_executable_path_exact
+            && self.service_arguments_exact
+            && self.service_account_exact
+            && self.service_type_exact
+            && self.service_start_exact
+            && self.service_error_control_exact
+            && self.service_dacl_exact
+            && self.service_sid_restricted
+            && self.required_privileges_exact
     }
 }
 
@@ -504,20 +824,33 @@ mod windows {
         ptr,
     };
     use windows_sys::Win32::{
-        Foundation::{GetLastError, ERROR_INSUFFICIENT_BUFFER, ERROR_SERVICE_DOES_NOT_EXIST},
+        Foundation::{
+            GetLastError, LocalFree, ERROR_INSUFFICIENT_BUFFER, ERROR_SERVICE_DOES_NOT_EXIST,
+        },
+        Security::{
+            Authorization::{
+                ConvertSecurityDescriptorToStringSecurityDescriptorW,
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            },
+            DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR,
+        },
         System::Com::CoTaskMemFree,
         System::Services::{
             CloseServiceHandle, OpenSCManagerW, OpenServiceW, QueryServiceConfig2W,
-            QueryServiceConfigW, QueryServiceStatusEx, QUERY_SERVICE_CONFIGW, SC_HANDLE,
-            SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO, SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO,
-            SERVICE_CONFIG_SERVICE_SID_INFO, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL,
-            SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS, SERVICE_REQUIRED_PRIVILEGES_INFOW,
-            SERVICE_RUNNING, SERVICE_SID_INFO, SERVICE_STATUS_PROCESS, SERVICE_WIN32_OWN_PROCESS,
+            QueryServiceConfigW, QueryServiceObjectSecurity, QueryServiceStatusEx,
+            QUERY_SERVICE_CONFIGW, SC_HANDLE, SC_MANAGER_CONNECT, SC_STATUS_PROCESS_INFO,
+            SERVICE_CONFIG_REQUIRED_PRIVILEGES_INFO, SERVICE_CONFIG_SERVICE_SID_INFO,
+            SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, SERVICE_QUERY_CONFIG, SERVICE_QUERY_STATUS,
+            SERVICE_REQUIRED_PRIVILEGES_INFOW, SERVICE_RUNNING, SERVICE_SID_INFO,
+            SERVICE_STATUS_PROCESS, SERVICE_WIN32_OWN_PROCESS,
         },
         UI::Shell::{FOLDERID_ProgramData, FOLDERID_ProgramFiles, SHGetKnownFolderPath},
     };
 
     const READ_CONTROL_ACCESS: u32 = 0x0002_0000;
+    const SERVICE_SECURITY_INFORMATION: u32 =
+        OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
 
     pub(super) fn known_folder_roots() -> Result<(PathBuf, PathBuf), AuthorityWindowsError> {
         Ok((
@@ -664,6 +997,17 @@ mod windows {
             .as_ref()
             .filter(|value| value.dwCurrentState == SERVICE_RUNNING && value.dwProcessId != 0)
             .map(|value| value.dwProcessId);
+        let service_current_state = status.as_ref().map_or(0, |value| value.dwCurrentState);
+        let observed_service_process_id = status
+            .as_ref()
+            .filter(|value| value.dwProcessId != 0)
+            .map(|value| value.dwProcessId);
+        let service_win32_exit_code = status
+            .as_ref()
+            .map_or(u32::MAX, |value| value.dwWin32ExitCode);
+        let service_specific_exit_code = status
+            .as_ref()
+            .map_or(u32::MAX, |value| value.dwServiceSpecificExitCode);
 
         let (service_executable_path_exact, service_arguments_exact) = match expected_generation {
             Some(generation) => compare_service_command(
@@ -677,10 +1021,7 @@ mod windows {
         let service_type_exact = config.dwServiceType == SERVICE_WIN32_OWN_PROCESS;
         let service_start_exact = config.dwStartType == SERVICE_DEMAND_START;
         let service_error_control_exact = config.dwErrorControl == SERVICE_ERROR_NORMAL;
-        // The source checkpoint intentionally has no service-object DACL or
-        // running-image verifier. These fields remain false until readback is
-        // derived from held service/process/image handles and a launch receipt.
-        let service_dacl_exact = false;
+        let service_dacl_exact = service_security_exact(service.0)?;
         let service_sid_restricted = sid.dwServiceSidType == AUTHORITY_SERVICE_SID_TYPE_RESTRICTED;
         let required_privileges_exact = privileges == AUTHORITY_REQUIRED_PRIVILEGES;
         let mut readback = AuthorityReadback {
@@ -701,6 +1042,10 @@ mod windows {
             service_dacl_exact,
             service_sid_restricted,
             required_privileges_exact,
+            service_current_state,
+            observed_service_process_id,
+            service_win32_exit_code,
+            service_specific_exit_code,
             running_process_id,
             running_process_creation_time: None,
             running_process_identity_exact: false,
@@ -744,6 +1089,7 @@ mod windows {
             service_error_control_exact,
             "authority_service_error_control_mismatch",
         );
+        readback.push_if_false(service_dacl_exact, "authority_service_dacl_mismatch");
         readback.push_if_false(service_sid_restricted, "authority_service_sid_mismatch");
         readback.push_if_false(
             required_privileges_exact,
@@ -751,6 +1097,120 @@ mod windows {
         );
         readback.push_if_false(status_ok, "authority_service_status_unavailable");
         Ok(readback)
+    }
+
+    fn service_security_exact(service: SC_HANDLE) -> Result<bool, AuthorityWindowsError> {
+        Ok(query_service_security_sddl(service)?
+            == project_security_sddl(AUTHORITY_SERVICE_SECURITY_SDDL)?)
+    }
+
+    fn query_service_security_sddl(service: SC_HANDLE) -> Result<String, AuthorityWindowsError> {
+        let mut required = 0u32;
+        unsafe {
+            QueryServiceObjectSecurity(
+                service,
+                SERVICE_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                0,
+                &mut required,
+            );
+        }
+        if required == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
+            return Err(AuthorityWindowsError(
+                "authority_service_security_readback_failed",
+            ));
+        }
+        let mut buffer = AlignedBuffer::new(required)?;
+        if unsafe {
+            QueryServiceObjectSecurity(
+                service,
+                SERVICE_SECURITY_INFORMATION,
+                buffer.as_mut_u8().cast(),
+                required,
+                &mut required,
+            )
+        } == 0
+        {
+            return Err(AuthorityWindowsError(
+                "authority_service_security_readback_failed",
+            ));
+        }
+        descriptor_sddl(buffer.as_mut_u8().cast())
+    }
+
+    fn project_security_sddl(value: &str) -> Result<String, AuthorityWindowsError> {
+        let words = value
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mut descriptor = ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                words.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        } == 0
+            || descriptor.is_null()
+        {
+            return Err(AuthorityWindowsError(
+                "authority_service_security_descriptor_invalid",
+            ));
+        }
+        descriptor_sddl(OwnedSecurityDescriptor(descriptor).0)
+    }
+
+    struct OwnedSecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+    impl Drop for OwnedSecurityDescriptor {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    LocalFree(self.0.cast());
+                }
+            }
+        }
+    }
+
+    fn descriptor_sddl(descriptor: PSECURITY_DESCRIPTOR) -> Result<String, AuthorityWindowsError> {
+        let mut text = ptr::null_mut::<u16>();
+        let mut length = 0u32;
+        if unsafe {
+            ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                descriptor,
+                SDDL_REVISION_1,
+                SERVICE_SECURITY_INFORMATION,
+                &mut text,
+                &mut length,
+            )
+        } == 0
+            || text.is_null()
+            || length == 0
+        {
+            if !text.is_null() {
+                unsafe {
+                    LocalFree(text.cast());
+                }
+            }
+            return Err(AuthorityWindowsError(
+                "authority_service_security_readback_failed",
+            ));
+        }
+        let mut words = unsafe { std::slice::from_raw_parts(text, length as usize) }.to_vec();
+        unsafe {
+            LocalFree(text.cast());
+        }
+        if words.last() == Some(&0) {
+            words.pop();
+        }
+        if words.is_empty() || words.contains(&0) {
+            return Err(AuthorityWindowsError(
+                "authority_service_security_readback_failed",
+            ));
+        }
+        String::from_utf16(&words)
+            .map_err(|_| AuthorityWindowsError("authority_service_security_readback_failed"))
     }
 
     fn query_primary_config(

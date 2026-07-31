@@ -5,6 +5,7 @@ import copy
 import hashlib
 import hmac
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 import pytest
@@ -14,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 import primitive_basis_live_attestation as live
 import primitive_basis_matrix as matrix
 import primitive_basis_origin_attestation as origin
+import primitive_basis_protected_evidence as protected
 
 
 BASE_TIME = datetime(2026, 7, 24, 0, 0, tzinfo=timezone.utc)
@@ -38,6 +40,13 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _digest_json(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _run_admission_digest(*digests: str) -> str:
+    value = hashlib.sha256(b"vrcforge-primitive-basis-run-admission-v1\0")
+    for digest in digests:
+        value.update(bytes.fromhex(digest))
+    return value.hexdigest()
 
 
 def _timestamp(value: datetime) -> str:
@@ -448,7 +457,7 @@ def _make_signed_sample() -> SignedSample:
         "observedAt": _timestamp(BASE_TIME + timedelta(seconds=20)),
     }
     envelope: dict[str, object] = {
-        "schema": origin.ORIGIN_ENVELOPE_SCHEMA,
+        "schema": origin.ORIGIN_ENVELOPE_SCHEMA_V1,
         "proofAlgorithm": origin.ORIGIN_PROOF_ALGORITHM,
         "originTrust": origin.ORIGIN_TRUST_KIND,
         "signerKeyId": signer_key_id,
@@ -502,6 +511,67 @@ def _verify(
         verified_at=sample.verified_at if verified_at is None else verified_at,
         replay_guard=replay_guard,
     )
+
+
+def _v2_origin_envelope(
+    sample: SignedSample,
+    authority_ticket_digest: str,
+) -> dict[str, object]:
+    envelope = copy.deepcopy(sample.envelope)
+    envelope["schema"] = origin.ORIGIN_ENVELOPE_SCHEMA_V2
+    envelope["authorityTicketDigest"] = authority_ticket_digest
+    _sign_envelope(envelope, sample.private_key)
+    return envelope
+
+
+def test_v1_origin_envelope_remains_verifiable(sample: SignedSample) -> None:
+    verified = _verify(sample)
+
+    assert type(verified) is live.VerifiedLiveRun
+    assert verified.origin_ticket_digest == sample.envelope["ticketDigest"]
+
+
+def test_v2_origin_envelope_carries_two_signed_ticket_digests(
+    sample: SignedSample,
+) -> None:
+    authority_ticket_digest = _digest("authority-runtime-ticket:v2")
+    envelope = _v2_origin_envelope(sample, authority_ticket_digest)
+
+    verified = _verify(sample, envelope=envelope)
+
+    assert isinstance(verified, origin.VerifiedOriginLiveRun)
+    assert verified.origin_envelope_schema == origin.ORIGIN_ENVELOPE_SCHEMA_V2
+    assert verified.origin_ticket_digest == _digest_json(envelope["ticket"])
+    assert verified.authority_ticket_digest == authority_ticket_digest
+    assert verified.origin_ticket_digest != verified.authority_ticket_digest
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "zero"])
+def test_v2_origin_envelope_requires_exact_nonzero_authority_ticket(
+    sample: SignedSample,
+    mutation: str,
+) -> None:
+    envelope = _v2_origin_envelope(sample, _digest("authority-runtime-ticket:v2"))
+    if mutation == "missing":
+        envelope.pop("authorityTicketDigest")
+    elif mutation == "extra":
+        envelope["authorityTicket"] = "unexpected"
+    else:
+        envelope["authorityTicketDigest"] = "0" * 64
+    _sign_envelope(envelope, sample.private_key)
+
+    with pytest.raises(live.LiveAttestationError):
+        _verify(sample, envelope=envelope)
+
+
+def test_v2_authority_ticket_is_covered_by_the_origin_signature(
+    sample: SignedSample,
+) -> None:
+    envelope = _v2_origin_envelope(sample, _digest("authority-runtime-ticket:v2"))
+    envelope["authorityTicketDigest"] = _digest("tampered-runtime-ticket")
+
+    with pytest.raises(live.LiveAttestationError, match="origin signature mismatch"):
+        _verify(sample, envelope=envelope)
 
 
 def test_valid_external_origin_verifies_but_full_gate_remains_closed(
@@ -884,3 +954,952 @@ def test_private_key_material_never_enters_origin_envelope(sample: SignedSample)
     assert private_value.hex() not in serialized
     assert _base64url(private_value) not in serialized
     assert "signerPublicKey" not in sample.envelope
+
+
+@dataclass
+class ProtectedSourceContractSample:
+    signed: SignedSample
+    authority_binding: protected.ProtectedAuthorityBinding
+    package_binding: protected.ProtectedPackageBinding
+    row_binding: protected.ProtectedRowBinding
+    bundle: dict[str, object]
+    ledger: dict[str, object]
+    raw_bundle: bytes
+    raw_ledger: bytes
+    origin_ticket_digest: str
+    authority_ticket_digest: str
+
+
+def _parse_timestamp(value: object) -> datetime:
+    assert isinstance(value, str) and value.endswith("Z")
+    return datetime.fromisoformat(value[:-1] + "+00:00").astimezone(timezone.utc)
+
+
+def _make_protected_source_contract_sample(
+    sample: SignedSample,
+    *,
+    request_id: str | None = None,
+    legacy_v1: bool = False,
+) -> ProtectedSourceContractSample:
+    authority_binding = protected.ProtectedAuthorityBinding(
+        policy_id=sample.trust_context.policy_id,
+        authority_generation_digest=_digest("authority-generation"),
+        protected_manifest_digest=_digest("protected-manifest"),
+        installed_layout_digest=_digest("installed-layout"),
+        service_executable_digest=sample.trust_context.attestor_executable_digest,
+        controller_executable_digest=_digest("authority-controller"),
+        install_helper_executable_digest=_digest("authority-install-helper"),
+        ledger_identity_digest=_digest("authority-ledger"),
+    )
+    expected = sample.expected
+    package_binding = protected.ProtectedPackageBinding(
+        version="1.4.0",
+        manifest_digest=expected.manifest_digest,
+        portable_digest=expected.portable_digest,
+        desktop_executable_digest=expected.desktop_executable_digest,
+        backend_executable_digest=expected.backend_executable_digest,
+        backend_tree_digest=expected.backend_tree_digest,
+        runner_digest=expected.runner_digest,
+        unity_package_digest=expected.unity_package_digest,
+        packaged_unity_tool_tree_digest=expected.packaged_unity_tool_tree_digest,
+        runtime_unity_tool_tree_digest=expected.runtime_unity_tool_tree_digest,
+        unity_editor_digest=expected.unity_editor_digest,
+        bridge_launcher_executable_digest=expected.bridge_launcher_executable_digest,
+        bridge_listener_executable_digest=expected.bridge_listener_executable_digest,
+        connector_digest=expected.connector_digest,
+        server_digest=expected.server_digest,
+        dependency_set_digest=expected.dependency_set_digest,
+        runtime_binding_digest=expected.runtime_binding_digest,
+    )
+    row_binding = protected.ProtectedRowBinding(
+        scenario_id=live.MODEL_SCENARIO_ID,
+        primitive_id=live.MODEL_PRIMITIVE_ID,
+        fixture_project_input_digest=expected.fixture_project_input_digest,
+        project_binding_digest=PROJECT_DIGEST,
+    )
+    fixture = next(
+        item
+        for item in sample.fixtures.fixtures
+        if item.scenario_id == row_binding.scenario_id
+    )
+    finalization = copy.deepcopy(sample.finalization)
+    envelope = copy.deepcopy(sample.envelope)
+    origin_ticket_digest = str(envelope["ticketDigest"])
+    if legacy_v1:
+        authority_ticket_digest = origin_ticket_digest
+    else:
+        authority_ticket_digest = (
+            protected._projection_runtime_ticket_digest(
+                authority_binding=authority_binding,
+                signer_key_id=sample.trust_context.signer_key_id,
+                request_id=request_id,
+            )
+            if request_id is not None
+            else _digest("authority-runtime-ticket")
+        )
+        envelope["schema"] = origin.ORIGIN_ENVELOPE_SCHEMA_V2
+        envelope["authorityTicketDigest"] = authority_ticket_digest
+        _sign_envelope(envelope, sample.private_key)
+    row: dict[str, object] = {
+        "schema": protected.AUTHORITY_ROW_SCHEMA,
+        "scenarioId": row_binding.scenario_id,
+        "primitiveId": row_binding.primitive_id,
+        "fixtureDescriptorDigest": fixture.descriptor_digest,
+        "fixtureDigest": fixture.digest,
+        "fixtureProjectInputDigest": row_binding.fixture_project_input_digest,
+        "projectBindingDigest": row_binding.project_binding_digest,
+        "finalization": finalization,
+        "finalizationDigest": _digest_json(finalization),
+        "originEnvelope": envelope,
+        "originEnvelopeDigest": _digest_json(envelope),
+    }
+    inner_started_at = _parse_timestamp(finalization["attestation"]["startedAt"])
+    origin_signed_at = _parse_timestamp(envelope["signedAt"])
+    bundle_signed_at = origin_signed_at + timedelta(seconds=1)
+    run_binding_digest = _digest("run-binding")
+    prepared_receipt_digest = _digest("prepared-receipt")
+    armed_receipt_digest = _digest("armed-receipt")
+    policy_snapshot_digest = _digest("policy-snapshot")
+    recovery_bundle_digest = _digest("recovery-bundle")
+    predecessor_frame_digest = _digest("binary-predecessor-frame")
+    terminal_frame_digest = _digest("binary-terminal-frame")
+    anchor_record_digest = _digest("binary-anchor-record")
+    readback: dict[str, object] = {
+        "schema": protected.BINARY_LEDGER_READBACK_SCHEMA,
+        "readbackKind": "heldAndReopenedStable",
+        "authorityGenerationDigest": authority_binding.authority_generation_digest,
+        "ledgerIdentityDigest": authority_binding.ledger_identity_digest,
+        "ledgerFileDigest": _digest("ledger-file"),
+        "anchorFileDigest": _digest("anchor-file"),
+        "ledgerFileIdentityDigest": _digest("ledger-file-identity"),
+        "anchorFileIdentityDigest": _digest("anchor-file-identity"),
+        "ledgerLength": 1024,
+        "anchorLength": 2048,
+        "frameCount": 102,
+        "activeTicketCount": 0,
+        "latestFrameDigest": terminal_frame_digest,
+        "anchorRecordDigest": anchor_record_digest,
+        "terminalSequence": 101,
+        "terminalFrameDigest": terminal_frame_digest,
+        "terminalTicketDigest": authority_ticket_digest,
+    }
+    binary_terminal: dict[str, object] = {
+        "schema": protected.BINARY_LEDGER_TERMINAL_SCHEMA,
+        "event": "resultCommit",
+        "authorityGenerationDigest": authority_binding.authority_generation_digest,
+        "ledgerIdentityDigest": authority_binding.ledger_identity_digest,
+        "predecessorSequence": 100,
+        "terminalSequence": 101,
+        "predecessorFrameDigest": predecessor_frame_digest,
+        "terminalFrameDigest": terminal_frame_digest,
+        "terminalTicketDigest": authority_ticket_digest,
+        "terminalResultDigest": row["finalizationDigest"],
+        "anchorSequence": 101,
+        "anchorFrameDigest": terminal_frame_digest,
+        "anchorTicketDigest": authority_ticket_digest,
+        "runBindingDigest": run_binding_digest,
+        "preparedReceiptDigest": prepared_receipt_digest,
+        "armedReceiptDigest": armed_receipt_digest,
+        "policySnapshotDigest": policy_snapshot_digest,
+        "recoveryBundleDigest": recovery_bundle_digest,
+        "runAdmissionDigest": _run_admission_digest(
+            run_binding_digest,
+            prepared_receipt_digest,
+            armed_receipt_digest,
+            policy_snapshot_digest,
+            recovery_bundle_digest,
+        ),
+        "originEnvelopeDigest": row["originEnvelopeDigest"],
+        "cleanupDigest": envelope["cleanupDigest"],
+        "anchorRecordDigest": anchor_record_digest,
+        "reopenReadback": readback,
+        "reopenReadbackDigest": _digest_json(readback),
+    }
+    initial_receipt_digest = _digest("derived-receipt-start")
+    receipt: dict[str, object] = {
+        "schema": (
+            protected.LEDGER_RECEIPT_SCHEMA_V1
+            if legacy_v1
+            else protected.LEDGER_RECEIPT_SCHEMA_V2
+        ),
+        "ordinal": 1,
+        "previousReceiptDigest": initial_receipt_digest,
+        "ticketDigest": authority_ticket_digest,
+        "runId": envelope["ticket"]["runId"],
+        "scenarioId": row_binding.scenario_id,
+        "primitiveId": row_binding.primitive_id,
+        "state": "completed",
+        "resultDigest": row["finalizationDigest"],
+        "originEnvelopeDigest": row["originEnvelopeDigest"],
+        "cleanupDigest": envelope["cleanupDigest"],
+        "issuedAt": envelope["ticket"]["issuedAt"],
+        "consumedAt": _timestamp(inner_started_at - timedelta(microseconds=1)),
+        "completedAt": _timestamp(origin_signed_at + timedelta(microseconds=1)),
+        "binaryLedgerTerminal": binary_terminal,
+        "binaryLedgerTerminalDigest": _digest_json(binary_terminal),
+    }
+    if not legacy_v1:
+        receipt["originTicketDigest"] = origin_ticket_digest
+    receipt["receiptDigest"] = _digest_json(receipt)
+    ledger: dict[str, object] = {
+        "schema": protected.LEDGER_SNAPSHOT_SCHEMA,
+        "authorityGenerationDigest": authority_binding.authority_generation_digest,
+        "ledgerIdentityDigest": authority_binding.ledger_identity_digest,
+        "firstReceiptOrdinal": 1,
+        "lastReceiptOrdinal": 1,
+        "initialReceiptDigest": initial_receipt_digest,
+        "terminalReceiptDigest": receipt["receiptDigest"],
+        "receipts": [receipt],
+    }
+    raw_ledger = _canonical_bytes(ledger)
+    authority_payload = authority_binding.to_payload()
+    package_payload = package_binding.to_payload()
+    bundle: dict[str, object] = {
+        "schema": protected.AUTHORITY_BUNDLE_SCHEMA,
+        "bundleId": "authority-source-contract-1",
+        "proofAlgorithm": origin.ORIGIN_PROOF_ALGORITHM,
+        "policyId": sample.trust_context.policy_id,
+        "signerKeyId": sample.trust_context.signer_key_id,
+        "authorityBinding": authority_payload,
+        "authorityBindingDigest": _digest_json(authority_payload),
+        "packageBinding": package_payload,
+        "packageBindingDigest": _digest_json(package_payload),
+        "fixtureSetDescriptorDigest": sample.fixtures.descriptor_digest,
+        "fixtureSetDigest": sample.fixtures.digest,
+        "ledgerSnapshotDigest": hashlib.sha256(raw_ledger).hexdigest(),
+        "rows": [row],
+        "signedAt": _timestamp(bundle_signed_at),
+        "signature": "",
+    }
+    _sign_envelope(bundle, sample.private_key)
+    return ProtectedSourceContractSample(
+        signed=sample,
+        authority_binding=authority_binding,
+        package_binding=package_binding,
+        row_binding=row_binding,
+        bundle=bundle,
+        ledger=ledger,
+        raw_bundle=_canonical_bytes(bundle),
+        raw_ledger=raw_ledger,
+        origin_ticket_digest=origin_ticket_digest,
+        authority_ticket_digest=authority_ticket_digest,
+    )
+
+
+def _protected_report(
+    value: ProtectedSourceContractSample,
+    *,
+    raw_bundle: object | None = None,
+    raw_ledger: object | None = None,
+    trust_context: origin.OriginTrustContext | None = None,
+    package_binding: protected.ProtectedPackageBinding | None = None,
+    replay_guard: protected.ProtectedEvidenceReplayGuard | None = None,
+) -> dict[str, object]:
+    return protected.verify_and_project_protected_matrix(
+        value.raw_bundle if raw_bundle is None else raw_bundle,
+        value.raw_ledger if raw_ledger is None else raw_ledger,
+        trust_context=value.signed.trust_context if trust_context is None else trust_context,
+        authority_binding=value.authority_binding,
+        package_binding=value.package_binding if package_binding is None else package_binding,
+        fixtures=value.signed.fixtures,
+        expected_rows=(value.row_binding,),
+        replay_guard=(
+            protected.ProtectedEvidenceReplayGuard()
+            if replay_guard is None
+            else replay_guard
+        ),
+        verified_at=value.signed.verified_at,
+    )
+
+
+def _assert_protected_blocked(report: Mapping[str, object], reason: str) -> None:
+    assert report["ok"] is False
+    runtime = report["runtimeBinding"]
+    assert isinstance(runtime, Mapping)
+    assert runtime["protectedAuthorityVerified"] is False
+    assert runtime["liveRunnerAttested"] is False
+    assert runtime["reasons"] == [reason]
+    rows = report["rows"]
+    assert isinstance(rows, list) and len(rows) == 6
+    assert all(row["status"] == "blocked" for row in rows)
+    assert all(row["reasons"] == [reason] for row in rows)
+
+
+def _resign_protected_bundle(
+    bundle: dict[str, object], private_key: ec.EllipticCurvePrivateKey
+) -> bytes:
+    _sign_envelope(bundle, private_key)
+    return _canonical_bytes(bundle)
+
+
+def _refresh_ledger_snapshot(
+    ledger: dict[str, object], bundle: dict[str, object]
+) -> bytes:
+    receipts = ledger["receipts"]
+    assert isinstance(receipts, list) and receipts
+    previous_receipt = ledger["initialReceiptDigest"]
+    previous_ordinal = ledger["firstReceiptOrdinal"]
+    assert isinstance(previous_ordinal, int)
+    previous_ordinal -= 1
+    for receipt in receipts:
+        assert isinstance(receipt, dict)
+        previous_ordinal += 1
+        receipt["ordinal"] = previous_ordinal
+        receipt["previousReceiptDigest"] = previous_receipt
+        unsigned = copy.deepcopy(receipt)
+        unsigned.pop("receiptDigest", None)
+        receipt["receiptDigest"] = _digest_json(unsigned)
+        previous_receipt = receipt["receiptDigest"]
+    ledger["lastReceiptOrdinal"] = previous_ordinal
+    ledger["terminalReceiptDigest"] = previous_receipt
+    raw = _canonical_bytes(ledger)
+    bundle["ledgerSnapshotDigest"] = hashlib.sha256(raw).hexdigest()
+    return raw
+
+
+@pytest.fixture
+def protected_sample(sample: SignedSample) -> ProtectedSourceContractSample:
+    return _make_protected_source_contract_sample(sample)
+
+
+def test_legacy_v1_protected_source_cannot_enter_the_raw_matrix_projection(
+    sample: SignedSample,
+) -> None:
+    legacy = _make_protected_source_contract_sample(sample, legacy_v1=True)
+
+    report = _protected_report(legacy)
+
+    _assert_protected_blocked(
+        report,
+        "authority_projection_dual_ticket_v2_required",
+    )
+
+
+def test_source_contract_model_adapter_proves_projection_without_release_acceptance(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    report = _protected_report(protected_sample)
+
+    full_rows = [row for row in report["rows"] if row["status"] == "full"]
+    assert [(row["scenarioId"], row["primitiveId"]) for row in full_rows] == [
+        (live.MODEL_SCENARIO_ID, live.MODEL_PRIMITIVE_ID)
+    ]
+    assert report["ok"] is False
+    assert report["summary"]["status"] == "partial"
+    assert report["summary"]["fullRowCount"] == 1
+    assert report["runtimeBinding"]["protectedAuthorityVerified"] is True
+    assert report["runtimeBinding"]["liveRunnerAttested"] is True
+
+    public_value = _verify(protected_sample.signed)
+    legacy = live.build_live_matrix_report(protected_sample.signed.fixtures, public_value)
+    assert legacy["runtimeBinding"]["liveRunnerAttested"] is False
+    assert all(row["status"] == "blocked" for row in legacy["rows"])
+
+
+@pytest.mark.parametrize("raw_value", [{}, True, object()])
+def test_protected_entry_requires_raw_bundle_bytes(
+    protected_sample: ProtectedSourceContractSample, raw_value: object
+) -> None:
+    report = _protected_report(protected_sample, raw_bundle=raw_value)
+    _assert_protected_blocked(report, "authority_raw_bundle_required")
+
+
+@pytest.mark.parametrize("raw_value", [{}, True, object()])
+def test_protected_entry_requires_raw_ledger_bytes(
+    protected_sample: ProtectedSourceContractSample, raw_value: object
+) -> None:
+    report = _protected_report(protected_sample, raw_ledger=raw_value)
+    _assert_protected_blocked(report, "authority_raw_ledger_required")
+
+
+def test_public_verified_value_cannot_enter_the_raw_protected_gate(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    report = _protected_report(
+        protected_sample,
+        raw_bundle=_verify(protected_sample.signed),
+    )
+    _assert_protected_blocked(report, "authority_raw_bundle_required")
+
+
+def test_duplicate_json_fields_are_blocked_before_projection(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    report = _protected_report(
+        protected_sample,
+        raw_bundle=b'{"schema":"a","schema":"b"}',
+    )
+    _assert_protected_blocked(report, "authority_duplicate_json_field")
+
+
+def test_noncanonical_raw_bytes_are_blocked(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    pretty = json.dumps(protected_sample.bundle, ensure_ascii=True, indent=2).encode()
+    report = _protected_report(protected_sample, raw_bundle=pretty)
+    _assert_protected_blocked(report, "authority_bundle_not_canonical")
+
+
+def test_non_finite_json_numbers_are_blocked(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    report = _protected_report(
+        protected_sample,
+        raw_bundle=b'{"schema":NaN}',
+    )
+    _assert_protected_blocked(report, "authority_bundle_invalid")
+
+
+def test_near_parser_limit_nesting_cannot_escape_the_public_entry(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    depth = 900
+    nested = b'{"a":' * depth + b"0" + b"}" * depth
+    raw_bundle = b'{"a":' + nested + b"," + protected_sample.raw_bundle[1:]
+
+    report = _protected_report(protected_sample, raw_bundle=raw_bundle)
+
+    assert report["ok"] is False
+    assert report["summary"]["fullRowCount"] == 0
+    runtime = report["runtimeBinding"]
+    assert isinstance(runtime, Mapping)
+    assert runtime["protectedAuthorityVerified"] is False
+    assert runtime["reasons"] in (
+        ["authority_bundle_invalid"],
+        ["authority_bundle_nesting_invalid"],
+        ["authority_bundle_private_value"],
+        ["authority_bundle_shape_invalid"],
+    )
+
+
+@pytest.mark.parametrize("mutation", ["duplicate", "noncanonical", "unknown"])
+def test_raw_ledger_snapshot_requires_unique_canonical_exact_fields(
+    protected_sample: ProtectedSourceContractSample, mutation: str
+) -> None:
+    if mutation == "duplicate":
+        raw_ledger = b'{"schema":"a","schema":"b"}'
+        reason = "authority_duplicate_json_field"
+    elif mutation == "noncanonical":
+        raw_ledger = json.dumps(
+            protected_sample.ledger,
+            ensure_ascii=True,
+            indent=2,
+        ).encode()
+        reason = "authority_ledger_snapshot_not_canonical"
+    else:
+        ledger = copy.deepcopy(protected_sample.ledger)
+        ledger["accepted"] = True
+        raw_ledger = _canonical_bytes(ledger)
+        bundle = copy.deepcopy(protected_sample.bundle)
+        bundle["ledgerSnapshotDigest"] = hashlib.sha256(raw_ledger).hexdigest()
+        raw_bundle = _resign_protected_bundle(
+            bundle, protected_sample.signed.private_key
+        )
+        _assert_protected_blocked(
+            _protected_report(
+                protected_sample,
+                raw_bundle=raw_bundle,
+                raw_ledger=raw_ledger,
+            ),
+            "authority_ledger_snapshot_shape_invalid",
+        )
+        return
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_ledger=raw_ledger),
+        reason,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("originVerified", True, "authority_bundle_shape_invalid"),
+        ("signerPublicKey", "report-key", "authority_bundle_shape_invalid"),
+    ],
+)
+def test_unknown_fields_and_report_supplied_trust_are_blocked(
+    protected_sample: ProtectedSourceContractSample,
+    field: str,
+    value: object,
+    reason: str,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    bundle[field] = value
+    raw = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw), reason
+    )
+
+
+def test_external_install_bundle_schema_cannot_alias_run_evidence(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    bundle["schema"] = "vrcforge.primitive_evidence_authority_bundle.v1"
+    raw = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw),
+        "authority_bundle_schema_invalid",
+    )
+
+
+def test_wrong_outer_signer_is_blocked(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    attacker = ec.generate_private_key(ec.SECP256R1())
+    bundle = copy.deepcopy(protected_sample.bundle)
+    bundle["signerKeyId"] = hashlib.sha256(_public_key_bytes(attacker)).hexdigest()
+    raw = _resign_protected_bundle(bundle, attacker)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw),
+        "authority_bundle_signer_mismatch",
+    )
+
+
+def test_revoked_outer_signer_is_blocked(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    trust = copy.deepcopy(protected_sample.signed.trust_payload)
+    trust["revokedSignerKeyIds"] = [protected_sample.signed.trust_context.signer_key_id]
+    revoked = origin.parse_origin_trust_context(trust)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, trust_context=revoked),
+        "authority_bundle_signer_revoked",
+    )
+
+
+def test_outer_algorithm_downgrade_is_blocked_even_when_resigned(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    bundle["proofAlgorithm"] = "ecdsa-sha256-v0"
+    raw = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw),
+        "authority_bundle_algorithm_invalid",
+    )
+
+
+def test_protected_bindings_reject_all_zero_digests(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    with pytest.raises(
+        protected.ProtectedEvidenceError, match="authority_binding_invalid"
+    ):
+        replace(
+            protected_sample.authority_binding,
+            authority_generation_digest="0" * 64,
+        )
+
+
+@pytest.mark.parametrize(
+    "signed_at",
+    [
+        "2026-07-24T00:00:03Z",
+        "2026-07-24T00:00:03.000Z",
+        "2026-07-24T00:00:03.0000000Z",
+    ],
+)
+def test_outer_timestamp_requires_the_exact_cross_runtime_format(
+    protected_sample: ProtectedSourceContractSample,
+    signed_at: str,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    bundle["signedAt"] = signed_at
+    raw = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw),
+        "authority_bundle_timestamp_invalid",
+    )
+
+
+def test_outer_high_s_signature_is_blocked(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    raw_signature = base64.urlsafe_b64decode(
+        str(bundle["signature"])
+        + "=" * ((4 - len(str(bundle["signature"])) % 4) % 4)
+    )
+    low_s = int.from_bytes(raw_signature[32:], "big")
+    high_s = P256_ORDER - low_s
+    bundle["signature"] = _base64url(
+        raw_signature[:32] + high_s.to_bytes(32, "big")
+    )
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=_canonical_bytes(bundle)),
+        "authority_bundle_signature_invalid",
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "schema",
+        "bundleId",
+        "proofAlgorithm",
+        "policyId",
+        "signerKeyId",
+        "authorityBinding",
+        "authorityBindingDigest",
+        "packageBinding",
+        "packageBindingDigest",
+        "fixtureSetDescriptorDigest",
+        "fixtureSetDigest",
+        "ledgerSnapshotDigest",
+        "rows",
+        "signedAt",
+    ],
+)
+def test_any_unsigned_change_to_a_signed_bundle_field_is_blocked(
+    protected_sample: ProtectedSourceContractSample, field: str
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    if field == "schema":
+        bundle[field] = "vrcforge.primitive_basis_authority_evidence_bundle.v0"
+    elif field in {"bundleId", "policyId"}:
+        bundle[field] = f"tampered-{field}"
+    elif field == "proofAlgorithm":
+        bundle[field] = "ecdsa-sha256-v0"
+    elif field == "signerKeyId":
+        bundle[field] = _digest("tampered-signer")
+    elif field == "authorityBinding":
+        authority_binding = bundle[field]
+        assert isinstance(authority_binding, dict)
+        authority_binding["ledgerIdentityDigest"] = _digest("tampered-ledger")
+    elif field == "packageBinding":
+        package_binding = bundle[field]
+        assert isinstance(package_binding, dict)
+        package_binding["manifestDigest"] = _digest("tampered-manifest")
+    elif field == "rows":
+        rows = bundle[field]
+        assert isinstance(rows, list) and isinstance(rows[0], dict)
+        rows[0]["fixtureDigest"] = _digest("tampered-fixture")
+    elif field == "signedAt":
+        bundle[field] = _timestamp(
+            _parse_timestamp(bundle[field]) + timedelta(microseconds=1)
+        )
+    else:
+        bundle[field] = _digest(f"tampered:{field}")
+
+    report = _protected_report(
+        protected_sample,
+        raw_bundle=_canonical_bytes(bundle),
+    )
+    assert report["ok"] is False
+    assert report["summary"]["fullRowCount"] == 0
+    assert report["runtimeBinding"]["protectedAuthorityVerified"] is False
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "schema",
+        "policyId",
+        "authorityGenerationDigest",
+        "protectedManifestDigest",
+        "installedLayoutDigest",
+        "serviceExecutableDigest",
+        "controllerExecutableDigest",
+        "installHelperExecutableDigest",
+        "ledgerIdentityDigest",
+    ],
+)
+def test_any_authority_binding_drift_is_blocked_after_valid_signature(
+    protected_sample: ProtectedSourceContractSample, field: str
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    authority_binding = bundle["authorityBinding"]
+    assert isinstance(authority_binding, dict)
+    if field == "schema":
+        authority_binding[field] = "vrcforge.primitive_basis_authority_binding.v0"
+    elif field == "policyId":
+        authority_binding[field] = "other-policy"
+    else:
+        authority_binding[field] = _digest(f"drift:{field}")
+    bundle["authorityBindingDigest"] = _digest_json(authority_binding)
+    raw = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw),
+        "authority_binding_mismatch",
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "schema",
+        "version",
+        "manifestDigest",
+        "portableDigest",
+        "desktopExecutableDigest",
+        "backendExecutableDigest",
+        "backendTreeDigest",
+        "runnerDigest",
+        "unityPackageDigest",
+        "packagedUnityToolTreeDigest",
+        "runtimeUnityToolTreeDigest",
+        "unityEditorDigest",
+        "bridgeLauncherExecutableDigest",
+        "bridgeListenerExecutableDigest",
+        "connectorDigest",
+        "serverDigest",
+        "dependencySetDigest",
+        "runtimeBindingDigest",
+    ],
+)
+def test_any_package_binding_field_drift_is_blocked_after_valid_signature(
+    protected_sample: ProtectedSourceContractSample, field: str
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    package = bundle["packageBinding"]
+    assert isinstance(package, dict)
+    if field == "schema":
+        package[field] = "vrcforge.primitive_basis_package_binding.v0"
+    elif field == "version":
+        package[field] = "1.4.1"
+    else:
+        package[field] = _digest(f"drift:{field}")
+    bundle["packageBindingDigest"] = _digest_json(package)
+    raw = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw),
+        "authority_package_binding_mismatch",
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "fixtureDescriptorDigest",
+        "fixtureDigest",
+        "fixtureProjectInputDigest",
+        "projectBindingDigest",
+    ],
+)
+def test_any_fixture_or_project_digest_drift_is_blocked_after_valid_signature(
+    protected_sample: ProtectedSourceContractSample, field: str
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    bundle["rows"][0][field] = _digest(f"drift:{field}")
+    raw = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw),
+        "authority_fixture_binding_mismatch",
+    )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "ticketDigest",
+        "originTicketDigest",
+        "resultDigest",
+        "originEnvelopeDigest",
+        "cleanupDigest",
+    ],
+)
+def test_completed_ledger_receipt_binds_ticket_result_origin_and_cleanup(
+    protected_sample: ProtectedSourceContractSample, field: str
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    ledger = copy.deepcopy(protected_sample.ledger)
+    ledger["receipts"][0][field] = _digest(f"drift:{field}")
+    raw_ledger = _refresh_ledger_snapshot(ledger, bundle)
+    raw_bundle = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(
+            protected_sample,
+            raw_bundle=raw_bundle,
+            raw_ledger=raw_ledger,
+        ),
+        "authority_ledger_binding_mismatch",
+    )
+
+
+def test_v2_completed_receipt_requires_the_origin_ticket_field(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    ledger = copy.deepcopy(protected_sample.ledger)
+    receipt = ledger["receipts"][0]
+    assert isinstance(receipt, dict)
+    receipt.pop("originTicketDigest")
+    raw_ledger = _refresh_ledger_snapshot(ledger, bundle)
+    raw_bundle = _resign_protected_bundle(
+        bundle, protected_sample.signed.private_key
+    )
+
+    _assert_protected_blocked(
+        _protected_report(
+            protected_sample,
+            raw_bundle=raw_bundle,
+            raw_ledger=raw_ledger,
+        ),
+        "authority_ledger_receipt_invalid",
+    )
+
+
+def test_resigned_origin_authority_ticket_cannot_reframe_the_ledger_ticket(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    ledger = copy.deepcopy(protected_sample.ledger)
+    row = bundle["rows"][0]
+    assert isinstance(row, dict)
+    envelope = row["originEnvelope"]
+    assert isinstance(envelope, dict)
+    envelope["authorityTicketDigest"] = _digest("resigned-attacker-ticket")
+    _sign_envelope(envelope, protected_sample.signed.private_key)
+    row["originEnvelopeDigest"] = _digest_json(envelope)
+
+    receipt = ledger["receipts"][0]
+    assert isinstance(receipt, dict)
+    receipt["originEnvelopeDigest"] = row["originEnvelopeDigest"]
+    terminal = receipt["binaryLedgerTerminal"]
+    assert isinstance(terminal, dict)
+    terminal["originEnvelopeDigest"] = row["originEnvelopeDigest"]
+    receipt["binaryLedgerTerminalDigest"] = _digest_json(terminal)
+    raw_ledger = _refresh_ledger_snapshot(ledger, bundle)
+    raw_bundle = _resign_protected_bundle(
+        bundle, protected_sample.signed.private_key
+    )
+
+    _assert_protected_blocked(
+        _protected_report(
+            protected_sample,
+            raw_bundle=raw_bundle,
+            raw_ledger=raw_ledger,
+        ),
+        "authority_ledger_binding_mismatch",
+    )
+
+
+def test_swapping_the_two_v2_ticket_fields_is_rejected_after_resigning(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    ledger = copy.deepcopy(protected_sample.ledger)
+    receipt = ledger["receipts"][0]
+    assert isinstance(receipt, dict)
+    receipt["ticketDigest"], receipt["originTicketDigest"] = (
+        receipt["originTicketDigest"],
+        receipt["ticketDigest"],
+    )
+    terminal = receipt["binaryLedgerTerminal"]
+    assert isinstance(terminal, dict)
+    terminal["terminalTicketDigest"] = receipt["ticketDigest"]
+    terminal["anchorTicketDigest"] = receipt["ticketDigest"]
+    readback = terminal["reopenReadback"]
+    assert isinstance(readback, dict)
+    readback["terminalTicketDigest"] = receipt["ticketDigest"]
+    terminal["reopenReadbackDigest"] = _digest_json(readback)
+    receipt["binaryLedgerTerminalDigest"] = _digest_json(terminal)
+    raw_ledger = _refresh_ledger_snapshot(ledger, bundle)
+    raw_bundle = _resign_protected_bundle(
+        bundle, protected_sample.signed.private_key
+    )
+
+    _assert_protected_blocked(
+        _protected_report(
+            protected_sample,
+            raw_bundle=raw_bundle,
+            raw_ledger=raw_ledger,
+        ),
+        "authority_ledger_binding_mismatch",
+    )
+
+
+def test_ledger_rollback_is_blocked_even_when_bundle_is_resigned(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    ledger = copy.deepcopy(protected_sample.ledger)
+    ledger["terminalReceiptDigest"] = ledger["initialReceiptDigest"]
+    raw_ledger = _canonical_bytes(ledger)
+    bundle["ledgerSnapshotDigest"] = hashlib.sha256(raw_ledger).hexdigest()
+    raw_bundle = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(
+            protected_sample,
+            raw_bundle=raw_bundle,
+            raw_ledger=raw_ledger,
+        ),
+        "authority_ledger_receipt_chain_invalid",
+    )
+
+
+@pytest.mark.parametrize("location", ["first", "last", "receipt"])
+def test_derived_receipt_ordinals_are_limited_to_the_u64_domain(
+    protected_sample: ProtectedSourceContractSample, location: str
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    ledger = copy.deepcopy(protected_sample.ledger)
+    oversized = 1 << 64
+    if location == "first":
+        ledger["firstReceiptOrdinal"] = oversized
+    elif location == "last":
+        ledger["lastReceiptOrdinal"] = oversized
+    else:
+        receipts = ledger["receipts"]
+        assert isinstance(receipts, list) and isinstance(receipts[0], dict)
+        receipts[0]["ordinal"] = oversized
+        unsigned = copy.deepcopy(receipts[0])
+        unsigned.pop("receiptDigest", None)
+        receipts[0]["receiptDigest"] = _digest_json(unsigned)
+    raw_ledger = _canonical_bytes(ledger)
+    bundle["ledgerSnapshotDigest"] = hashlib.sha256(raw_ledger).hexdigest()
+    raw_bundle = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+
+    _assert_protected_blocked(
+        _protected_report(
+            protected_sample,
+            raw_bundle=raw_bundle,
+            raw_ledger=raw_ledger,
+        ),
+        "authority_ledger_ordinal_invalid",
+    )
+
+
+def test_bundle_replay_is_blocked(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    guard = protected.ProtectedEvidenceReplayGuard()
+    first = _protected_report(protected_sample, replay_guard=guard)
+    assert first["summary"]["fullRowCount"] == 1
+    second = _protected_report(protected_sample, replay_guard=guard)
+    _assert_protected_blocked(second, "authority_bundle_replayed")
+
+
+def test_ticket_and_terminal_frame_cannot_be_reused_by_another_bundle(
+    protected_sample: ProtectedSourceContractSample,
+) -> None:
+    guard = protected.ProtectedEvidenceReplayGuard()
+    assert _protected_report(protected_sample, replay_guard=guard)["summary"][
+        "fullRowCount"
+    ] == 1
+    bundle = copy.deepcopy(protected_sample.bundle)
+    bundle["bundleId"] = "authority-source-contract-2"
+    raw_bundle = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    report = _protected_report(
+        protected_sample,
+        raw_bundle=raw_bundle,
+        replay_guard=guard,
+    )
+    _assert_protected_blocked(report, "authority_bundle_replayed")
+
+
+@pytest.mark.parametrize("mutation", ["unknown", "duplicate"])
+def test_unknown_or_duplicate_rows_block_the_whole_bundle(
+    protected_sample: ProtectedSourceContractSample, mutation: str
+) -> None:
+    bundle = copy.deepcopy(protected_sample.bundle)
+    if mutation == "unknown":
+        bundle["rows"][0]["primitiveId"] = "unknown_primitive"
+    else:
+        bundle["rows"].append(copy.deepcopy(bundle["rows"][0]))
+    raw = _resign_protected_bundle(bundle, protected_sample.signed.private_key)
+    _assert_protected_blocked(
+        _protected_report(protected_sample, raw_bundle=raw),
+        "authority_row_set_invalid",
+    )

@@ -35,3 +35,7 @@
 *.mp3   binary
 *.ogg   binary
 *.pdf   binary
+
+# Pinned Unity-generated fixture bytes are byte-exact and digest-bound;
+# their trailing blank lines are part of the frozen materialization evidence.
+tests/fixtures/primitive_basis/projects/model_part_composition/Assets/VRCForge/PrimitiveBasis/** whitespace=-blank-at-eof

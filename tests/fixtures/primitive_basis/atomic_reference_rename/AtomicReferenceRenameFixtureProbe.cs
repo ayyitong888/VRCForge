@@ -665,6 +665,11 @@ public static class AtomicReferenceRenameFixtureProbe
         Require(EditorSceneManager.SaveScene(SceneManager.GetActiveScene()),
             "planned concurrent-write scene save");
         Undo.CollapseUndoOperations(undoGroup);
+        if (SceneManager.GetActiveScene().isDirty)
+        {
+            Require(EditorSceneManager.SaveScene(SceneManager.GetActiveScene()),
+                "planned concurrent-write scene finalize");
+        }
 
         var reverseParsed = parse.Invoke(
             null,

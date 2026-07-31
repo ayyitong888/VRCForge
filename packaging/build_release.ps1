@@ -10,7 +10,12 @@ param(
     [switch]$AllowDirty,
     [switch]$AllowUnpushed,
     [switch]$AllowVersionMismatch,
-    [switch]$StrictEvidence
+    [switch]$StrictEvidence,
+    [string]$ProtectedRuntimeProjectRoot = "",
+    [string]$ProtectedRuntimeUnityEditorPath = "",
+    [string]$ProtectedRuntimeEditorBuiltinsRoot = "",
+    [string]$ProtectedRuntimeServerTree = "",
+    [string[]]$ProtectedRuntimePackageRoot = @()
 )
 
 Set-StrictMode -Version Latest
@@ -90,6 +95,21 @@ function Resolve-CargoExe {
     }
 
     throw "Rust cargo is required to build the Tauri desktop app."
+}
+
+function Resolve-PythonExe {
+    $command = Get-Command python.exe -ErrorAction SilentlyContinue
+    if (-not $command) {
+        $command = Get-Command python -ErrorAction SilentlyContinue
+    }
+    if (-not $command) {
+        $command = Get-Command py.exe -ErrorAction SilentlyContinue
+    }
+    if ($command) {
+        return $command.Source
+    }
+
+    throw "Python is required to build and verify the fixed bridge runtime tree."
 }
 
 function Resolve-MakeNsisExe {
@@ -493,6 +513,63 @@ try {
     $strictSourceBuild = -not ($AllowDirty -or $AllowUnpushed -or $AllowVersionMismatch)
     $strictEvidenceBuild = $strictSourceBuild -and [bool]$StrictEvidence
     $strictReleaseBuild = $strictSourceBuild -and -not $strictEvidenceBuild
+    $protectedRuntimeInputs = @(
+        $ProtectedRuntimeProjectRoot,
+        $ProtectedRuntimeUnityEditorPath,
+        $ProtectedRuntimeEditorBuiltinsRoot,
+        $ProtectedRuntimeServerTree
+    )
+    if ($strictEvidenceBuild) {
+        if (
+            @($protectedRuntimeInputs | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0 -or
+            @($ProtectedRuntimePackageRoot).Count -eq 0
+        ) {
+            throw (
+                "Strict evidence builds require the protected-runtime project, Unity editor, " +
+                "editor built-ins, server tree, and complete package-root map."
+            )
+        }
+        if (
+            @($protectedRuntimeInputs | Where-Object { -not [System.IO.Path]::IsPathRooted($_) }).Count -ne 0 -or
+            -not (Test-Path -LiteralPath $ProtectedRuntimeProjectRoot -PathType Container) -or
+            -not (Test-Path -LiteralPath $ProtectedRuntimeUnityEditorPath -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $ProtectedRuntimeEditorBuiltinsRoot -PathType Container) -or
+            -not (Test-Path -LiteralPath $ProtectedRuntimeServerTree -PathType Container)
+        ) {
+            throw "Strict evidence protected-runtime roots must be existing absolute paths of the required type."
+        }
+        $protectedRuntimeFixtureDescriptorRoot = Join-Path $ProtectedRuntimeProjectRoot "VRCForgeFixture\descriptors"
+        $protectedRuntimeFixtureRoot = Join-Path $ProtectedRuntimeProjectRoot "Assets\VRCForge\PrimitiveBasis"
+        foreach ($protectedRuntimeScenarioId in @(
+            "component_feature_application",
+            "parameter_optimization",
+            "cross_avatar_accessory_copy",
+            "model_part_composition"
+        )) {
+            if (
+                -not (Test-Path -LiteralPath (Join-Path $protectedRuntimeFixtureDescriptorRoot "$protectedRuntimeScenarioId.json") -PathType Leaf) -or
+                -not (Test-Path -LiteralPath (Join-Path $protectedRuntimeFixtureRoot $protectedRuntimeScenarioId) -PathType Container)
+            ) {
+                throw "Strict evidence requires all four materialized protected-runtime fixtures and descriptors."
+            }
+        }
+        foreach ($protectedPackageRoot in $ProtectedRuntimePackageRoot) {
+            $protectedPackageParts = @($protectedPackageRoot -split "=", 2)
+            if (
+                $protectedPackageParts.Count -ne 2 -or
+                [string]::IsNullOrWhiteSpace([string]$protectedPackageParts[0]) -or
+                -not [System.IO.Path]::IsPathRooted([string]$protectedPackageParts[1]) -or
+                -not (Test-Path -LiteralPath ([string]$protectedPackageParts[1]) -PathType Container)
+            ) {
+                throw "Strict evidence package roots must use id=absolute-existing-directory entries."
+            }
+        }
+    } elseif (
+        @($protectedRuntimeInputs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count -ne 0 -or
+        @($ProtectedRuntimePackageRoot).Count -ne 0
+    ) {
+        throw "Protected-runtime source inputs are accepted only with -StrictEvidence."
+    }
     if ([string]::IsNullOrWhiteSpace($Version)) {
         $Version = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
     }
@@ -569,7 +646,6 @@ try {
     }
     Build-TauriDesktopApp -DestinationExe (Join-Path $payloadRoot "VRCForge.exe")
     $evidenceAttestor = $null
-    $evidenceAuthority = $null
     if ($strictEvidenceBuild) {
         Write-Host "Building external evidence attestor..."
         $cargoExe = Resolve-CargoExe
@@ -604,7 +680,9 @@ try {
         $authorityBinNames = @(
             "vrcforge_primitive_evidence_service",
             "vrcforge_primitive_evidence_controller",
-            "vrcforge_primitive_evidence_install_helper"
+            "vrcforge_primitive_evidence_install_helper",
+            "vrcforge_primitive_lifecycle_driver",
+            "vrcforge_primitive_bridge_launcher"
         )
         $authorityBuildArguments = @(
             "build",
@@ -621,7 +699,7 @@ try {
         }
 
         $authorityRelativeRoot = "artifacts/primitive-evidence-authority/$headCommit/$evidenceRunId"
-        $authorityFiles = @()
+        $authorityRoot = Join-Path $repoRoot ($authorityRelativeRoot.Replace("/", "\"))
         $authorityFileMetadata = @{}
         $authorityCopiedPaths = @{}
         foreach ($authorityBinName in $authorityBinNames) {
@@ -645,7 +723,6 @@ try {
                 sha256 = $authorityCopy.sha256
                 length = $authorityCopy.length
             }
-            $authorityFiles += $authorityFile
             $authorityFileMetadata[$authorityBinName] = $authorityFile
         }
 
@@ -660,7 +737,7 @@ try {
             throw "Evidence authority install-helper plan was not valid JSON."
         }
         if (
-            $authorityPlan.schema -ne "vrcforge.primitive_evidence_authority_policy.v1" -or
+            $authorityPlan.schema -ne "vrcforge.primitive_evidence_authority_policy.v2" -or
             $authorityPlan.mutationSupported -ne $false -or
             $authorityPlan.trustedBoundaryReady -ne $false -or
             $authorityPlan.candidatePayloadIncludesAuthority -ne $false -or
@@ -700,136 +777,12 @@ try {
             serviceExecutablePattern = Join-Path $authorityGenerationBinaryPattern "vrcforge_primitive_evidence_service.exe"
             controllerExecutablePattern = Join-Path $authorityGenerationBinaryPattern "vrcforge_primitive_evidence_controller.exe"
             installHelperExecutablePattern = Join-Path $authorityGenerationBinaryPattern "vrcforge_primitive_evidence_install_helper.exe"
+            lifecycleDriverExecutablePattern = Join-Path $authorityGenerationBinaryPattern "vrcforge_primitive_lifecycle_driver.exe"
+            bridgeLauncherExecutablePattern = Join-Path $authorityGenerationBinaryPattern "vrcforge_primitive_bridge_launcher.exe"
         }
         foreach ($authorityPatternName in $authorityExpectedPatterns.Keys) {
             if ([string]$authorityPlan.layout.$authorityPatternName -cne [string]$authorityExpectedPatterns[$authorityPatternName]) {
                 throw "Evidence authority plan layout pattern mismatch: $authorityPatternName"
-            }
-        }
-
-        $authorityPreviewLines = @(& $authorityInstallHelperPath `
-            --preview-install `
-            $authorityCopiedPaths["vrcforge_primitive_evidence_service"] `
-            $authorityCopiedPaths["vrcforge_primitive_evidence_controller"] `
-            $authorityCopiedPaths["vrcforge_primitive_evidence_install_helper"])
-        if ($LASTEXITCODE -ne 0) {
-            throw "Evidence authority install-helper preview was rejected."
-        }
-        try {
-            $authorityPreview = ($authorityPreviewLines -join [Environment]::NewLine) | ConvertFrom-Json
-        } catch {
-            throw "Evidence authority install-helper preview was not valid JSON."
-        }
-        if (
-            $authorityPreview.schema -ne "vrcforge.primitive_evidence_authority_maintenance_preview.v1" -or
-            $authorityPreview.operation -ne "install" -or
-            $authorityPreview.automaticExecutionAllowed -ne $false -or
-            $authorityPreview.nativeMutationBackendAvailable -ne $false -or
-            $authorityPreview.executionRequiresVerifiedElevatedMaintenanceCapability -ne $true -or
-            $authorityPreview.trustedBoundaryReady -ne $false -or
-            @($authorityPreview.blockers).Count -eq 0 -or
-            @($authorityPreview.steps).Count -eq 0
-        ) {
-            throw "Evidence authority install-helper preview violated the fail-closed maintenance policy."
-        }
-        foreach ($authorityDigestName in @("generation", "policySha256", "planSha256")) {
-            if ([string]$authorityPreview.$authorityDigestName -cnotmatch '^[0-9a-f]{64}$') {
-                throw "Evidence authority preview digest was not canonical: $authorityDigestName"
-            }
-        }
-
-        $authorityContentBindings = @(
-            @("vrcforge_primitive_evidence_service", "service"),
-            @("vrcforge_primitive_evidence_controller", "controller"),
-            @("vrcforge_primitive_evidence_install_helper", "installHelper")
-        )
-        foreach ($authorityContentBinding in $authorityContentBindings) {
-            $authorityBinName = [string]$authorityContentBinding[0]
-            $authorityContentName = [string]$authorityContentBinding[1]
-            $authorityExpectedFile = $authorityFileMetadata[$authorityBinName]
-            $authorityPreviewFile = $authorityPreview.content.$authorityContentName
-            if (
-                [string]$authorityPreviewFile.sha256 -cne [string]$authorityExpectedFile.sha256 -or
-                [uint64]$authorityPreviewFile.byteLength -ne [uint64]$authorityExpectedFile.length
-            ) {
-                throw "Evidence authority preview content mismatch: $authorityBinName"
-            }
-        }
-
-        $authorityGeneration = [string]$authorityPreview.generation
-        $authorityGenerationBinaryRoot = Join-Path `
-            ([string]$authorityPlan.layout.binaryVersionRoot) `
-            (Join-Path "generations" $authorityGeneration)
-        $authorityGenerationStateRoot = Join-Path `
-            ([string]$authorityPlan.layout.stateVersionRoot) `
-            (Join-Path "generations" $authorityGeneration)
-        $authorityInstalledPaths = [ordered]@{
-            service = Join-Path $authorityGenerationBinaryRoot "vrcforge_primitive_evidence_service.exe"
-            controller = Join-Path $authorityGenerationBinaryRoot "vrcforge_primitive_evidence_controller.exe"
-            installHelper = Join-Path $authorityGenerationBinaryRoot "vrcforge_primitive_evidence_install_helper.exe"
-        }
-        if (
-            [string]$authorityPreview.layout.binaryAnchor -cne [string]$authorityPlan.layout.binaryAnchor -or
-            [string]$authorityPreview.layout.stateAnchor -cne [string]$authorityPlan.layout.stateAnchor -or
-            [string]$authorityPreview.layout.binaryBase -cne [string]$authorityPlan.layout.binaryBase -or
-            [string]$authorityPreview.layout.stateBase -cne [string]$authorityPlan.layout.stateBase -or
-            [string]$authorityPreview.layout.binaryVersionRoot -cne [string]$authorityPlan.layout.binaryVersionRoot -or
-            [string]$authorityPreview.layout.stateVersionRoot -cne [string]$authorityPlan.layout.stateVersionRoot -or
-            [string]$authorityPreview.layout.generationBinaryRoot -cne $authorityGenerationBinaryRoot -or
-            [string]$authorityPreview.layout.generationStateRoot -cne $authorityGenerationStateRoot -or
-            [string]$authorityPreview.layout.serviceExecutable -cne [string]$authorityInstalledPaths.service -or
-            [string]$authorityPreview.layout.controllerExecutable -cne [string]$authorityInstalledPaths.controller -or
-            [string]$authorityPreview.layout.installHelperExecutable -cne [string]$authorityInstalledPaths.installHelper -or
-            [string]$authorityPreview.fixedPolicy.service.binaryCommand -cne ('"' + [string]$authorityInstalledPaths.service + '" --service') -or
-            [string]$authorityPreview.fixedPolicy.service.securitySddl -cne [string]$authorityPlan.serviceSecuritySddl
-        ) {
-            throw "Evidence authority preview generation layout or service command mismatch."
-        }
-        $authorityInstalledFiles = @(
-            [ordered]@{
-                name = "vrcforge_primitive_evidence_service.exe"
-                sha256 = [string]$authorityFileMetadata["vrcforge_primitive_evidence_service"].sha256
-                length = [uint64]$authorityFileMetadata["vrcforge_primitive_evidence_service"].length
-                installedPath = [string]$authorityInstalledPaths.service
-            },
-            [ordered]@{
-                name = "vrcforge_primitive_evidence_controller.exe"
-                sha256 = [string]$authorityFileMetadata["vrcforge_primitive_evidence_controller"].sha256
-                length = [uint64]$authorityFileMetadata["vrcforge_primitive_evidence_controller"].length
-                installedPath = [string]$authorityInstalledPaths.controller
-            },
-            [ordered]@{
-                name = "vrcforge_primitive_evidence_install_helper.exe"
-                sha256 = [string]$authorityFileMetadata["vrcforge_primitive_evidence_install_helper"].sha256
-                length = [uint64]$authorityFileMetadata["vrcforge_primitive_evidence_install_helper"].length
-                installedPath = [string]$authorityInstalledPaths.installHelper
-            }
-        )
-        $evidenceAuthority = [ordered]@{
-            schema = "vrcforge.primitive_evidence_authority_bundle.v1"
-            repositoryRelativeRoot = $authorityRelativeRoot
-            files = $authorityFiles
-            planSchema = [string]$authorityPlan.schema
-            previewSchema = [string]$authorityPreview.schema
-            installationSupported = $false
-            trustedBoundaryReady = $false
-            candidatePayloadIncluded = $false
-            layout = [ordered]@{
-                binaryAnchor = [string]$authorityPlan.layout.binaryAnchor
-                stateAnchor = [string]$authorityPlan.layout.stateAnchor
-                binaryBase = [string]$authorityPlan.layout.binaryBase
-                stateBase = [string]$authorityPlan.layout.stateBase
-                binaryVersionRoot = [string]$authorityPlan.layout.binaryVersionRoot
-                stateVersionRoot = [string]$authorityPlan.layout.stateVersionRoot
-            }
-            generation = [ordered]@{
-                sha256 = $authorityGeneration
-                policySha256 = [string]$authorityPreview.policySha256
-                planSha256 = [string]$authorityPreview.planSha256
-                binaryRoot = $authorityGenerationBinaryRoot
-                stateRoot = $authorityGenerationStateRoot
-                installMode = "create-new-never-reuse"
-                files = $authorityInstalledFiles
             }
         }
     }
@@ -917,6 +870,105 @@ try {
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "LICENSE-APACHE") -Destination (Join-Path $payloadRoot "licenses\uv-LICENSE-APACHE-2.0.txt") -Force
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\uv-DISTRIBUTION-NOTES.txt") -Force
 
+    $bridgeTargetRuntime = $null
+    if ($strictSourceBuild) {
+        $bridgeTargetRoot = Join-Path $payloadRoot "bridge_target"
+        $bridgeTargetManifestPath = Join-Path $payloadRoot "bridge-target-manifest.json"
+        $bridgeBuildLines = @(& .\packaging\build_bridge_target.ps1 `
+            -OutputDir $bridgeTargetRoot `
+            -ManifestPath $bridgeTargetManifestPath 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "The fixed bridge runtime tree build failed."
+        }
+        try {
+            $bridgeBuildReceipt = ($bridgeBuildLines -join [Environment]::NewLine) | ConvertFrom-Json
+        } catch {
+            throw "The fixed bridge runtime tree build receipt was not valid JSON."
+        }
+        if (
+            $bridgeBuildReceipt.ok -ne $true -or
+            $bridgeBuildReceipt.schema -cne "vrcforge.bridge_target_build_receipt.v1" -or
+            $bridgeBuildReceipt.manifestSchema -cne "vrcforge.bridge_target_tree_manifest.v1" -or
+            [string]$bridgeBuildReceipt.manifestSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+            [string]$bridgeBuildReceipt.treeDigest -cnotmatch '^[0-9a-f]{64}$' -or
+            [uint64]$bridgeBuildReceipt.entryCount -eq 0 -or
+            [uint64]$bridgeBuildReceipt.byteCount -eq 0 -or
+            $bridgeBuildReceipt.verifiedAfterBuild -ne $true
+        ) {
+            throw "The fixed bridge runtime tree build receipt was invalid."
+        }
+
+        $pythonExe = Resolve-PythonExe
+        $bridgeManifestTool = Join-Path $PSScriptRoot "bridge_target_manifest.py"
+        $bridgeVerifyLines = @(& $pythonExe `
+            $bridgeManifestTool `
+            "--tree" $bridgeTargetRoot `
+            "--manifest" $bridgeTargetManifestPath 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "The fixed bridge runtime tree read-only verification failed."
+        }
+        try {
+            $bridgeTargetVerifyReceipt = (
+                $bridgeVerifyLines -join [Environment]::NewLine
+            ) | ConvertFrom-Json
+        } catch {
+            throw "The fixed bridge runtime tree verification receipt was not valid JSON."
+        }
+        $bridgeTargetManifestSha256 = (
+            Get-FileHash -Algorithm SHA256 -LiteralPath $bridgeTargetManifestPath
+        ).Hash.ToLowerInvariant()
+        try {
+            $bridgeTreeManifest = Get-Content -LiteralPath $bridgeTargetManifestPath -Raw | ConvertFrom-Json
+        } catch {
+            throw "The fixed bridge runtime tree manifest was not valid JSON."
+        }
+        $bridgeExecutablePath = Join-Path $bridgeTargetRoot "vrcforge_bridge_target.exe"
+        $bridgeExecutableSha256 = (
+            Get-FileHash -Algorithm SHA256 -LiteralPath $bridgeExecutablePath
+        ).Hash.ToLowerInvariant()
+        $bridgeExecutableRecords = @(
+            $bridgeTreeManifest.files | Where-Object {
+                [string]$_.path -ceq "vrcforge_bridge_target.exe"
+            }
+        )
+        if (
+            $bridgeTargetVerifyReceipt.ok -ne $true -or
+            $bridgeTargetVerifyReceipt.mode -ne "verify" -or
+            $bridgeTargetVerifyReceipt.schema -cne "vrcforge.bridge_target_tree_manifest.v1" -or
+            $bridgeTargetVerifyReceipt.treeDigest -cne $bridgeBuildReceipt.treeDigest -or
+            $bridgeTargetVerifyReceipt.directoryCount -ne $bridgeBuildReceipt.directoryCount -or
+            $bridgeTargetVerifyReceipt.entryCount -ne $bridgeBuildReceipt.entryCount -or
+            $bridgeTargetVerifyReceipt.byteCount -ne $bridgeBuildReceipt.byteCount -or
+            $bridgeTargetManifestSha256 -cne [string]$bridgeBuildReceipt.manifestSha256 -or
+            $bridgeTreeManifest.schema -cne "vrcforge.bridge_target_tree_manifest.v1" -or
+            $bridgeTreeManifest.treeDigest -cne $bridgeTargetVerifyReceipt.treeDigest -or
+            $bridgeTreeManifest.directoryCount -ne $bridgeTargetVerifyReceipt.directoryCount -or
+            $bridgeTreeManifest.entryCount -ne $bridgeTargetVerifyReceipt.entryCount -or
+            $bridgeTreeManifest.byteCount -ne $bridgeTargetVerifyReceipt.byteCount -or
+            $bridgeExecutableRecords.Count -ne 1 -or
+            [string]$bridgeExecutableRecords[0].sha256 -cne $bridgeExecutableSha256
+        ) {
+            throw "The fixed bridge runtime tree binding was inconsistent."
+        }
+        $bridgeTargetRuntime = [ordered]@{
+            schema = "vrcforge.bridge_target_runtime.v1"
+            runtimeRelativeRoot = "bridge_target"
+            executableRelativePath = "bridge_target/vrcforge_bridge_target.exe"
+            executableSha256 = $bridgeExecutableSha256
+            manifestRelativePath = "bridge-target-manifest.json"
+            manifestSha256 = $bridgeTargetManifestSha256
+            treeDigest = [string]$bridgeTargetVerifyReceipt.treeDigest
+            directoryCount = [uint64]$bridgeTargetVerifyReceipt.directoryCount
+            entryCount = [uint64]$bridgeTargetVerifyReceipt.entryCount
+            byteCount = [uint64]$bridgeTargetVerifyReceipt.byteCount
+            candidatePayloadIncluded = $true
+            strictSourceBound = $true
+            verifiedAfterBuild = $true
+        }
+    } else {
+        Write-Warning "LOCAL acceptance build omits the fixed bridge runtime tree; no relaxed target artifact is produced."
+    }
+
     $payloadIntegrityManifest = [ordered]@{
         schema = "vrcforge.payload-integrity.v1"
         version = $Version
@@ -934,6 +986,9 @@ try {
                 sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payloadRoot "VERSION")).Hash.ToLowerInvariant()
             }
         }
+    }
+    if ($null -ne $bridgeTargetRuntime) {
+        $payloadIntegrityManifest.bridgeTargetRuntime = $bridgeTargetRuntime
     }
     $payloadIntegrityPath = Join-Path $payloadRoot "payload-integrity.json"
     $payloadIntegrityJson = ($payloadIntegrityManifest | ConvertTo-Json -Depth 6) + [Environment]::NewLine
@@ -1021,13 +1076,146 @@ try {
                 [uint64]$authorityFinalItem.Length -ne [uint64]$authorityExpectedFile.length -or
                 (Get-FileHash -Algorithm SHA256 -LiteralPath $authorityFinalPath).Hash.ToLowerInvariant() -cne [string]$authorityExpectedFile.sha256
             ) {
-                throw "Evidence authority bundle changed after maintenance preview: $authorityBinName"
+                throw "Evidence authority input changed after its initial copy: $authorityBinName"
             }
         }
         $manifest.evidenceAttestor = $evidenceAttestor
-        $manifest.evidenceAuthority = $evidenceAuthority
     }
-    $manifest | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $releaseRoot "release-manifest.json") -Encoding UTF8
+    if ($null -ne $bridgeTargetRuntime) {
+        $manifest.bridgeTargetRuntime = $bridgeTargetRuntime
+    }
+    $releaseManifestPath = Join-Path $releaseRoot "release-manifest.json"
+    $releaseManifestJson = $manifest | ConvertTo-Json -Depth 7
+    [System.IO.File]::WriteAllText(
+        $releaseManifestPath,
+        $releaseManifestJson,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    if ($strictSourceBuild) {
+        $bridgeArchiveVerifier = Join-Path $PSScriptRoot "verify_bridge_target_release.py"
+        $bridgeArchiveLines = @(& $pythonExe `
+            $bridgeArchiveVerifier `
+            "--release-manifest" $releaseManifestPath `
+            "--payload-zip" $payloadZip 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "The compressed fixed bridge runtime readback failed."
+        }
+        try {
+            $bridgeArchiveReceipt = (
+                $bridgeArchiveLines -join [Environment]::NewLine
+            ) | ConvertFrom-Json
+        } catch {
+            throw "The compressed fixed bridge runtime receipt was not valid JSON."
+        }
+        if (
+            $bridgeArchiveReceipt.ok -ne $true -or
+            $bridgeArchiveReceipt.schema -cne "vrcforge.bridge_target_release_verification.v1" -or
+            $bridgeArchiveReceipt.verifiedFromArchive -ne $true -or
+            [string]$bridgeArchiveReceipt.payloadSha256 -cne $payloadSha256 -or
+            [string]$bridgeArchiveReceipt.manifestSha256 -cne [string]$bridgeTargetRuntime.manifestSha256 -or
+            [string]$bridgeArchiveReceipt.executableSha256 -cne [string]$bridgeTargetRuntime.executableSha256 -or
+            [string]$bridgeArchiveReceipt.treeDigest -cne [string]$bridgeTargetRuntime.treeDigest -or
+            [uint64]$bridgeArchiveReceipt.directoryCount -ne [uint64]$bridgeTargetRuntime.directoryCount -or
+            [uint64]$bridgeArchiveReceipt.entryCount -ne [uint64]$bridgeTargetRuntime.entryCount -or
+            [uint64]$bridgeArchiveReceipt.byteCount -ne [uint64]$bridgeTargetRuntime.byteCount
+        ) {
+            throw "The compressed fixed bridge runtime receipt was inconsistent."
+        }
+    }
+    if ($strictEvidenceBuild) {
+        $releaseManifestSha256BeforeAuthority = (
+            Get-FileHash -Algorithm SHA256 -LiteralPath $releaseManifestPath
+        ).Hash.ToLowerInvariant()
+        $authorityBundleTool = Join-Path $PSScriptRoot "build_protected_runtime_authority_bundle.py"
+        $authorityBundleArguments = @(
+            $authorityBundleTool,
+            "--authority-root", $authorityRoot,
+            "--repository-relative-root", $authorityRelativeRoot,
+            "--version", $Version,
+            "--source-commit", $finalHeadCommit,
+            "--authority-service", $authorityCopiedPaths["vrcforge_primitive_evidence_service"],
+            "--authority-controller", $authorityCopiedPaths["vrcforge_primitive_evidence_controller"],
+            "--authority-install-helper", $authorityCopiedPaths["vrcforge_primitive_evidence_install_helper"],
+            "--driver", $authorityCopiedPaths["vrcforge_primitive_lifecycle_driver"],
+            "--bridge-launcher", $authorityCopiedPaths["vrcforge_primitive_bridge_launcher"],
+            "--desktop", (Join-Path $payloadRoot "VRCForge.exe"),
+            "--backend", (Join-Path $payloadRoot "backend\vrcforge_backend.exe"),
+            "--unity", $ProtectedRuntimeUnityEditorPath,
+            "--bridge-listener", (Join-Path $bridgeTargetRoot "vrcforge_bridge_target.exe"),
+            "--bridge-tree", $bridgeTargetRoot,
+            "--bridge-manifest", $bridgeTargetManifestPath,
+            "--strict-release-manifest", $releaseManifestPath,
+            "--portable-archive", $payloadZip,
+            "--unity-package", $UnityPackagePath,
+            "--backend-tree", (Join-Path $payloadRoot "backend"),
+            "--packaged-tool-tree", (Join-Path $unityPluginRoot "Assets\VRCForge\Editor"),
+            "--connector-tree", $unityMcpPayloadRoot,
+            "--server-tree", $ProtectedRuntimeServerTree,
+            "--project-root", $ProtectedRuntimeProjectRoot,
+            "--editor-builtins-root", $ProtectedRuntimeEditorBuiltinsRoot
+        )
+        foreach ($protectedPackageRoot in $ProtectedRuntimePackageRoot) {
+            $authorityBundleArguments += @("--package-root", $protectedPackageRoot)
+        }
+        $authorityBundleLines = @(& $pythonExe @authorityBundleArguments 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "The protected-runtime private authority bundle finalization failed."
+        }
+        try {
+            $authorityBundleReceipt = (
+                $authorityBundleLines -join [Environment]::NewLine
+            ) | ConvertFrom-Json
+        } catch {
+            throw "The protected-runtime private authority receipt was not valid JSON."
+        }
+        if (
+            $authorityBundleReceipt.ok -ne $true -or
+            [string]$authorityBundleReceipt.schema -cne "vrcforge.primitive_evidence_authority_bundle_receipt.v3" -or
+            [string]$authorityBundleReceipt.bundleSchema -cne "vrcforge.primitive_evidence_authority_bundle.v3" -or
+            [uint64]$authorityBundleReceipt.previewPayloadCount -ne 6
+        ) {
+            throw "The protected-runtime private authority receipt was inconsistent."
+        }
+        foreach ($authorityDigestName in @(
+            "sidecarSha256",
+            "dependencySetSha256",
+            "runtimeSourceManifestSha256",
+            "strictReleaseManifestSha256",
+            "generation"
+        )) {
+            if ([string]$authorityBundleReceipt.$authorityDigestName -cnotmatch '^[0-9a-f]{64}$') {
+                throw "The protected-runtime private authority digest was not canonical: $authorityDigestName"
+            }
+        }
+        $releaseManifestSha256AfterAuthority = (
+            Get-FileHash -Algorithm SHA256 -LiteralPath $releaseManifestPath
+        ).Hash.ToLowerInvariant()
+        if (
+            $releaseManifestSha256AfterAuthority -cne $releaseManifestSha256BeforeAuthority -or
+            [string]$authorityBundleReceipt.strictReleaseManifestSha256 -cne $releaseManifestSha256BeforeAuthority
+        ) {
+            throw "The final release manifest changed during private authority finalization."
+        }
+        $authorityPrivateDigests = [ordered]@{
+            "protected-runtime-dependency-set.json" = [string]$authorityBundleReceipt.dependencySetSha256
+            "protected-runtime-source-manifest.json" = [string]$authorityBundleReceipt.runtimeSourceManifestSha256
+            "authority-bundle.json" = [string]$authorityBundleReceipt.sidecarSha256
+        }
+        foreach ($authorityPrivateFileName in $authorityPrivateDigests.Keys) {
+            $authorityPrivatePath = Resolve-SafeRepositoryPath -Path (
+                Join-Path $authorityRoot $authorityPrivateFileName
+            )
+            $authorityPrivateItem = Get-Item -LiteralPath $authorityPrivatePath -Force -ErrorAction Stop
+            if (
+                $authorityPrivateItem.PSIsContainer -or
+                ($authorityPrivateItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                [uint64]$authorityPrivateItem.Length -eq 0 -or
+                (Get-FileHash -Algorithm SHA256 -LiteralPath $authorityPrivatePath).Hash.ToLowerInvariant() -cne [string]$authorityPrivateDigests[$authorityPrivateFileName]
+            ) {
+                throw "The protected-runtime private authority output was invalid: $authorityPrivateFileName"
+            }
+        }
+    }
 
     Write-Host "Release payload built: $payloadRoot"
     Write-Host "Release artifacts: $releaseRoot"

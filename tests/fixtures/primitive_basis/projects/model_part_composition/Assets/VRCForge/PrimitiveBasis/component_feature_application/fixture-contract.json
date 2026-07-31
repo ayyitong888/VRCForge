@@ -1,0 +1,51 @@
+{
+  "schema": "vrcforge.primitive_basis_component_feature_fixture.v1",
+  "scenarioId": "component_feature_application",
+  "unity": {
+    "version": "2022.3.22f1",
+    "revision": "887be4894c44"
+  },
+  "sourceMode": "isolated_runtime_generation",
+  "scene": {
+    "assetPath": "Assets/VRCForge/PrimitiveBasis/RuntimeComponentFeatureApplication/ComponentFeatureApplication.unity",
+    "avatarPath": "Avatar",
+    "featureHostPath": "Avatar/FeatureHost",
+    "armatureFeatureHostPath": "Avatar/ArmatureFeatureHost",
+    "targetPaths": [
+      "Avatar/PropRoot",
+      "Avatar/ChestTarget"
+    ],
+    "baselineFeatureComponentCount": 0
+  },
+  "requiredPackages": [
+    {
+      "id": "com.coplaydev.unity-mcp",
+      "version": "9.6.9-beta.7",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrchat.avatars",
+      "version": "3.10.3",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrchat.base",
+      "version": "3.10.3",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrcfury.vrcfury",
+      "version": "1.1334.0",
+      "provisioning": "external_exact_artifact"
+    }
+  ],
+  "runtime": {
+    "bootstrapType": "VRCForge.PrimitiveBasisFixtures.ComponentFeatureApplicationFixtureBootstrap",
+    "runIdEnvironment": "VRCFORGE_PRIMITIVE_COMPONENT_FEATURE_APPLICATION_RUN_ID",
+    "generatedRoot": "Assets/VRCForge/PrimitiveBasis/RuntimeComponentFeatureApplication",
+    "generatedRootPrecondition": "absent",
+    "readyMarker": "Library/VRCForge/primitive-basis-component-feature-application-ready.json",
+    "cleanup": "remove_generated_root_and_ready_marker"
+  }
+}
+

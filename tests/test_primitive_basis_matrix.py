@@ -238,7 +238,7 @@ def test_fixed_descriptors_are_exact_but_unmaterialized_by_default() -> None:
     assert [fixture.scenario_id for fixture in fixtures.fixtures] == list(
         matrix.SCENARIO_ORDER
     )
-    assert fixtures.descriptor_digest == "7189e1945ec594813371a628ae093f3d4c73892bd3b1102f545b0a9486887ae6"
+    assert fixtures.descriptor_digest == "e1e1422cdc40af2a3a0a7aef7d43ddac21e0961c8edaad31bae38ed792f28ea6"
     assert fixtures.digest == ""
     assert all(not fixture.materialized for fixture in fixtures.fixtures)
     assert fixtures.fixtures[0].required_primitives == (

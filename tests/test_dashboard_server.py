@@ -10069,6 +10069,11 @@ class DashboardServerTests(unittest.TestCase):
                 "unityInstanceRegistered": True,
                 "selectedInstanceMatched": True,
                 "activeInstanceCount": 1,
+                "activeInstance": {
+                    "project": project.name,
+                    "projectPath": str(project),
+                    "hash": "abc123",
+                },
                 "vrcForgeToolsRegistered": True,
                 "missingRequiredVrcForgeTools": [],
                 "tools": {"totalTools": 78, "vrcForgeToolsCount": 48},
@@ -10087,6 +10092,52 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(result["status"], "healthy")
         mock_popen.assert_not_called()
 
+    def test_repair_unity_mcp_bridge_does_not_accept_another_selected_project_as_healthy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project = root / "selected" / "SharedProject"
+            other = root / "other" / "SharedProject"
+            for candidate in (project, other):
+                (candidate / "Assets").mkdir(parents=True)
+                (candidate / "Packages").mkdir()
+                (candidate / "ProjectSettings").mkdir()
+                (candidate / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                    "m_EditorVersion: 2022.3.22f1\n",
+                    encoding="utf-8",
+                )
+            healthy_other = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "activeInstance": {
+                    "project": other.name,
+                    "projectPath": str(other),
+                    "hash": "other123",
+                },
+                "vrcForgeToolsRegistered": True,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 78, "vrcForgeToolsCount": 48},
+                "error": "",
+            }
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", return_value=healthy_other) as mock_status,
+                patch("dashboard_server.recent_unity_mcp_execution_error", return_value={}),
+                patch("dashboard_server.ensure_unity_mcp_server_running", return_value=False),
+                patch("dashboard_server.verify_unity_mcp_execution_connection") as mock_probe,
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), allowUnityRelaunch=False)
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["before"]["selectedInstanceMatched"])
+        self.assertTrue(mock_status.call_args_list)
+        self.assertTrue(all(call.args[1] == project for call in mock_status.call_args_list))
+        mock_probe.assert_not_called()
+
     def test_repair_unity_mcp_bridge_returns_busy_when_repair_running(self) -> None:
         acquired = dashboard_server.UNITY_MCP_REPAIR_LOCK.acquire(blocking=False)
         self.assertTrue(acquired)
@@ -10104,8 +10155,8 @@ class DashboardServerTests(unittest.TestCase):
     def test_repair_unity_mcp_bridge_refuses_to_close_unmatched_unity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            project = root / "AvatarProject"
-            other = root / "OtherProject"
+            project = root / "selected" / "SharedProject"
+            other = root / "other" / "SharedProject"
             editor = root / "Unity.exe"
             for candidate in (project, other):
                 (candidate / "Assets").mkdir(parents=True)
@@ -10148,6 +10199,25 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(result["status"], "needs_user_action")
         self.assertIn("did not close any editor", json.dumps(result["phases"]))
         mock_launch.assert_not_called()
+
+    def test_close_unity_project_fails_closed_when_process_evidence_is_unavailable(self) -> None:
+        with (
+            patch(
+                "dashboard_server.list_running_unity_processes",
+                side_effect=dashboard_server.UnityProcessDiscoveryUnavailable("unavailable"),
+            ) as mock_list,
+            patch("dashboard_server.request_windows_process_close") as mock_close,
+        ):
+            ok, message, detail = dashboard_server.close_unity_project_gracefully(
+                Path(r"C:\Unity\AvatarProject"),
+                5,
+            )
+
+        self.assertFalse(ok)
+        self.assertIn("evidence is unavailable", message)
+        self.assertFalse(detail["evidenceAvailable"])
+        mock_list.assert_called_once_with(require_discovery_evidence=True)
+        mock_close.assert_not_called()
 
     def test_repair_unity_mcp_bridge_registered_without_tools_needs_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -10304,8 +10374,20 @@ namespace VRCForge.Editor
                 "unityInstanceRegistered": True,
                 "selectedInstanceMatched": True,
                 "activeInstanceCount": 1,
-                "activeInstance": {"project": project.name, "hash": "abc123", "cliInstanceId": "abc123"},
-                "instances": [{"project": project.name, "hash": "abc123", "cliInstanceId": "abc123"}],
+                "activeInstance": {
+                    "project": project.name,
+                    "projectPath": str(project),
+                    "hash": "abc123",
+                    "cliInstanceId": "abc123",
+                },
+                "instances": [
+                    {
+                        "project": project.name,
+                        "projectPath": str(project),
+                        "hash": "abc123",
+                        "cliInstanceId": "abc123",
+                    }
+                ],
                 "vrcForgeToolsRegistered": False,
                 "missingRequiredVrcForgeTools": ["vrc_export_blendshapes"],
                 "tools": {"totalTools": 0, "vrcForgeToolsCount": 0},
@@ -10443,6 +10525,11 @@ namespace VRCForge.Editor
                 "unityInstanceRegistered": True,
                 "selectedInstanceMatched": True,
                 "activeInstanceCount": 1,
+                "activeInstance": {
+                    "project": project.name,
+                    "projectPath": str(project),
+                    "hash": "abc123",
+                },
                 "vrcForgeToolsRegistered": True,
                 "missingRequiredVrcForgeTools": [],
                 "tools": {"totalTools": 78, "vrcForgeToolsCount": 48},
@@ -10500,7 +10587,11 @@ namespace VRCForge.Editor
                 "unityInstanceRegistered": True,
                 "selectedInstanceMatched": True,
                 "activeInstanceCount": 1,
-                "activeInstance": {"project": project.name, "hash": "abc123"},
+                "activeInstance": {
+                    "project": project.name,
+                    "projectPath": str(project),
+                    "hash": "abc123",
+                },
                 "vrcForgeToolsRegistered": False,
                 "missingRequiredVrcForgeTools": ["vrc_export_blendshapes"],
                 "tools": {"totalTools": 0, "vrcForgeToolsCount": 0, "error": "tool list timed out"},
@@ -10512,7 +10603,11 @@ namespace VRCForge.Editor
                 "unityInstanceRegistered": True,
                 "selectedInstanceMatched": True,
                 "activeInstanceCount": 1,
-                "activeInstance": {"project": project.name, "hash": "abc123"},
+                "activeInstance": {
+                    "project": project.name,
+                    "projectPath": str(project),
+                    "hash": "abc123",
+                },
                 "vrcForgeToolsRegistered": True,
                 "missingRequiredVrcForgeTools": [],
                 "tools": {"totalTools": 78, "vrcForgeToolsCount": 48},
@@ -10521,7 +10616,10 @@ namespace VRCForge.Editor
             status_snapshots = [offline, tool_list_timeout, healthy]
             observed_timeouts: list[int] = []
 
-            def fake_status_snapshot(snapshot_settings: SimpleNamespace) -> dict[str, object]:
+            def fake_status_snapshot(
+                snapshot_settings: SimpleNamespace,
+                _project_root: Path | None = None,
+            ) -> dict[str, object]:
                 observed_timeouts.append(snapshot_settings.unity_mcp_timeout_seconds)
                 return status_snapshots.pop(0)
 
@@ -12731,7 +12829,9 @@ namespace VRCForge.Editor
                         "projectPath": "",
                         "unityVersion": "2022.3.22f1",
                         "sessionId": "session-123",
+                        "hash": "hash-456",
                         "cliInstanceId": "hash-456",
+                        "cliSelectorStable": True,
                     }
                 ]
             }

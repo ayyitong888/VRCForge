@@ -73,7 +73,7 @@ def test_model_part_fixture_is_pinned_and_materializes() -> None:
     )
 
     assert fixtures.descriptor_digest == (
-        "7189e1945ec594813371a628ae093f3d4c73892bd3b1102f545b0a9486887ae6"
+        "e1e1422cdc40af2a3a0a7aef7d43ddac21e0961c8edaad31bae38ed792f28ea6"
     )
     assert fixture.descriptor_digest == (
         "80be020fb612159898506a69b1e4c32ca9665b951b5704da06931b0c1f16db5d"
@@ -83,15 +83,13 @@ def test_model_part_fixture_is_pinned_and_materializes() -> None:
     )
     assert fixture.materialized is True
     assert fixture.materialization_error == ""
-    assert [item.scenario_id for item in fixtures.fixtures if item.materialized] == [
-        "model_part_composition"
-    ]
-    assert all(
-        item.materialization_error == "fixture_digest_unpinned"
-        for item in fixtures.fixtures
-        if item.scenario_id != "model_part_composition"
+    assert [item.scenario_id for item in fixtures.fixtures if item.materialized] == list(
+        matrix.SCENARIO_ORDER
     )
-    assert fixtures.digest == ""
+    assert all(not item.materialization_error for item in fixtures.fixtures)
+    assert fixtures.digest == (
+        "8c6a3cd60ed64b819f0f4fbe33a7e81772d14ba4394866e277b3329c31f60471"
+    )
 
 
 def test_model_part_fixture_contract_binds_project_files_and_dependencies() -> None:

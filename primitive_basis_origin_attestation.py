@@ -7,7 +7,7 @@ import os
 import re
 import stat
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -27,7 +27,9 @@ from primitive_basis_live_attestation import (
 
 ORIGIN_TRUST_SCHEMA = "vrcforge.primitive_basis_origin_trust.v1"
 ORIGIN_TICKET_SCHEMA = "vrcforge.primitive_basis_origin_ticket.v1"
-ORIGIN_ENVELOPE_SCHEMA = "vrcforge.primitive_basis_live_origin.v1"
+ORIGIN_ENVELOPE_SCHEMA_V1 = "vrcforge.primitive_basis_live_origin.v1"
+ORIGIN_ENVELOPE_SCHEMA_V2 = "vrcforge.primitive_basis_live_origin.v2"
+ORIGIN_ENVELOPE_SCHEMA = ORIGIN_ENVELOPE_SCHEMA_V2
 ORIGIN_PROOF_ALGORITHM = "ecdsa-p256-sha256-raw-v1"
 ORIGIN_TRUST_KIND = "pinned_external_supervisor"
 
@@ -123,7 +125,7 @@ _CLEANUP_FIELDS = {
     "projectRemoved",
     "observedAt",
 }
-_ENVELOPE_FIELDS = {
+_ENVELOPE_FIELDS_V1 = {
     "schema",
     "proofAlgorithm",
     "originTrust",
@@ -142,6 +144,7 @@ _ENVELOPE_FIELDS = {
     "signedAt",
     "signature",
 }
+_ENVELOPE_FIELDS_V2 = _ENVELOPE_FIELDS_V1 | {"authorityTicketDigest"}
 
 
 @dataclass(frozen=True)
@@ -187,6 +190,23 @@ class OriginExpectedBinding:
             field_name: getattr(self, _camel_to_snake(field_name))
             for field_name in _TICKET_BINDING_FIELDS
         }
+
+
+@dataclass(frozen=True)
+class VerifiedOriginLiveRun(VerifiedLiveRun):
+    """A v2 origin result carrying the separately authenticated runtime ticket."""
+
+    authority_ticket_digest: str = ""
+    origin_envelope_schema: str = ""
+
+    def __post_init__(self) -> None:
+        if self.origin_envelope_schema != ORIGIN_ENVELOPE_SCHEMA_V2:
+            raise LiveAttestationError("origin envelope schema mismatch")
+        digest = _require_digest(
+            self.authority_ticket_digest, "origin authority ticket digest"
+        )
+        if not any(character != "0" for character in digest):
+            raise LiveAttestationError("origin authority ticket digest is invalid")
 
 
 class OriginReplayGuard:
@@ -277,9 +297,23 @@ def verify_trusted_live_origin(
         raise LiveAttestationError("origin evidence must be an object")
     _require_public_safe(finalization)
     _require_public_safe(envelope)
-    _require_exact_fields(envelope, _ENVELOPE_FIELDS, "origin envelope")
-    if envelope.get("schema") != ORIGIN_ENVELOPE_SCHEMA:
+    envelope_schema = envelope.get("schema")
+    if envelope_schema == ORIGIN_ENVELOPE_SCHEMA_V1:
+        envelope_fields = _ENVELOPE_FIELDS_V1
+        authority_ticket_digest = ""
+    elif envelope_schema == ORIGIN_ENVELOPE_SCHEMA_V2:
+        envelope_fields = _ENVELOPE_FIELDS_V2
+        authority_ticket_digest = ""
+    else:
         raise LiveAttestationError("origin envelope schema mismatch")
+    _require_exact_fields(envelope, envelope_fields, "origin envelope")
+    if envelope_schema == ORIGIN_ENVELOPE_SCHEMA_V2:
+        authority_ticket_digest = _require_digest(
+            envelope.get("authorityTicketDigest"),
+            "origin authority ticket digest",
+        )
+        if not any(character != "0" for character in authority_ticket_digest):
+            raise LiveAttestationError("origin authority ticket digest is invalid")
     if envelope.get("proofAlgorithm") != ORIGIN_PROOF_ALGORITHM:
         raise LiveAttestationError("origin proof algorithm mismatch")
     if envelope.get("originTrust") != ORIGIN_TRUST_KIND:
@@ -419,17 +453,24 @@ def verify_trusted_live_origin(
     if replay_guard is not None:
         replay_guard.consume(ticket_digest)
     inner_digest = inner.attestation_digest
-    return replace(
-        inner,
-        origin_verified=True,
-        attestation_digest=_digest_json(envelope),
-        inner_attestation_digest=inner_digest,
-        origin_signer_key_id=trust_context.signer_key_id,
-        origin_ticket_digest=ticket_digest,
-        origin_process_graph_digest=process_digest,
-        origin_network_binding_digest=network_digest,
-        origin_cleanup_digest=cleanup_digest,
-    )
+    verified_values = {
+        **inner.__dict__,
+        "origin_verified": True,
+        "attestation_digest": _digest_json(envelope),
+        "inner_attestation_digest": inner_digest,
+        "origin_signer_key_id": trust_context.signer_key_id,
+        "origin_ticket_digest": ticket_digest,
+        "origin_process_graph_digest": process_digest,
+        "origin_network_binding_digest": network_digest,
+        "origin_cleanup_digest": cleanup_digest,
+    }
+    if envelope_schema == ORIGIN_ENVELOPE_SCHEMA_V2:
+        return VerifiedOriginLiveRun(
+            **verified_values,
+            authority_ticket_digest=authority_ticket_digest,
+            origin_envelope_schema=envelope_schema,
+        )
+    return VerifiedLiveRun(**verified_values)
 
 
 def _validate_ticket(
@@ -765,6 +806,8 @@ def _camel_to_snake(value: str) -> str:
 
 __all__ = [
     "ORIGIN_ENVELOPE_SCHEMA",
+    "ORIGIN_ENVELOPE_SCHEMA_V1",
+    "ORIGIN_ENVELOPE_SCHEMA_V2",
     "ORIGIN_PROOF_ALGORITHM",
     "ORIGIN_TICKET_SCHEMA",
     "ORIGIN_TRUST_KIND",
@@ -772,6 +815,7 @@ __all__ = [
     "OriginExpectedBinding",
     "OriginReplayGuard",
     "OriginTrustContext",
+    "VerifiedOriginLiveRun",
     "load_origin_trust_context",
     "parse_origin_trust_context",
     "verify_trusted_live_origin",

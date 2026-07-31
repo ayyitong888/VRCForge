@@ -24,8 +24,11 @@ namespace VRCForge.Editor
         private const string ParameterDriverType =
             "VRC.SDK3.Avatars.Components.VRCAvatarParameterDriver";
 
-        internal static ParameterBehaviorEvidence Capture(GameObject avatar)
+        internal static ParameterBehaviorEvidence Capture(
+            GameObject avatar,
+            Action<string> setStage = null)
         {
+            setStage?.Invoke("root");
             Require(avatar != null, "The avatar evidence root is missing.");
             var descriptor = avatar.GetComponent<VRCAvatarDescriptor>();
             Require(descriptor != null, "The avatar evidence root has no descriptor.");
@@ -34,10 +37,20 @@ namespace VRCForge.Editor
                     && descriptor.expressionParameters.parameters != null,
                 "The avatar expression parameters are unavailable.");
 
+            setStage?.Invoke("parameters");
             var parameters = CaptureParameters(descriptor.expressionParameters);
+            setStage?.Invoke("menu");
             var menuRows = CaptureMenuRows(descriptor.expressionsMenu);
-            var animatorRows = CaptureAnimatorRows(descriptor);
-            var portableRows = CapturePortableRows(avatar);
+            setStage?.Invoke("animator");
+            var animatorRows = CaptureAnimatorRows(descriptor, setStage);
+            setStage?.Invoke("portable");
+            var portablePropertyCategories = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            var descriptorPropertyGroups = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+            var portableRows = CapturePortableRows(
+                avatar,
+                portablePropertyCategories,
+                descriptorPropertyGroups);
+            setStage?.Invoke("digests");
             return new ParameterBehaviorEvidence
             {
                 Parameters = parameters,
@@ -46,6 +59,44 @@ namespace VRCForge.Editor
                 PortableAvatarDigest = DigestRows(
                     "vrcforge.portable_avatar.v1",
                     portableRows),
+                PortableObjectDigest = DigestRows(
+                    "vrcforge.portable_avatar.objects.v1",
+                    portableRows.Where(row => row.StartsWith(Frame("object"), StringComparison.Ordinal))),
+                PortableComponentDigest = DigestRows(
+                    "vrcforge.portable_avatar.components.v1",
+                    portableRows.Where(row => row.StartsWith(Frame("component"), StringComparison.Ordinal))),
+                PortablePropertyDigest = DigestRows(
+                    "vrcforge.portable_avatar.properties.v1",
+                    portableRows.Where(row => row.StartsWith(Frame("property"), StringComparison.Ordinal))),
+                PortableTransformEditorPropertyDigest = DigestRows(
+                    "vrcforge.portable_avatar.properties.transform_editor.v1",
+                    portablePropertyCategories["transform_editor"]),
+                PortableTransformRuntimePropertyDigest = DigestRows(
+                    "vrcforge.portable_avatar.properties.transform_runtime.v1",
+                    portablePropertyCategories["transform_spatial"]
+                        .Concat(portablePropertyCategories["transform_hierarchy"])
+                        .Concat(portablePropertyCategories["transform_other"])),
+                PortableTransformSpatialPropertyDigest = DigestRows(
+                    "vrcforge.portable_avatar.properties.transform_spatial.v1",
+                    portablePropertyCategories["transform_spatial"]),
+                PortableTransformHierarchyPropertyDigest = DigestRows(
+                    "vrcforge.portable_avatar.properties.transform_hierarchy.v1",
+                    portablePropertyCategories["transform_hierarchy"]),
+                PortableTransformOtherPropertyDigest = DigestRows(
+                    "vrcforge.portable_avatar.properties.transform_other.v1",
+                    portablePropertyCategories["transform_other"]),
+                PortableDescriptorPropertyDigest = DigestRows(
+                    "vrcforge.portable_avatar.properties.descriptor.v1",
+                    portablePropertyCategories["descriptor"]),
+                PortableDescriptorPropertyGroupDigests = descriptorPropertyGroups.ToDictionary(
+                    pair => pair.Key,
+                    pair => DigestRows(
+                        "vrcforge.portable_avatar.properties.descriptor_group.v1",
+                        pair.Value),
+                    StringComparer.Ordinal),
+                PortableOtherPropertyDigest = DigestRows(
+                    "vrcforge.portable_avatar.properties.other.v1",
+                    portablePropertyCategories["other"]),
                 OrderedParameterDigest = DigestRows(
                     "vrcforge.ordered_parameters.v1",
                     parameters.Select(row => row.Canonical)),
@@ -62,14 +113,18 @@ namespace VRCForge.Editor
             ParameterBehaviorEvidence source,
             ParameterBehaviorEvidence output,
             IReadOnlyCollection<string> compressedNames,
-            IReadOnlyCollection<string> excludedNames)
+            IReadOnlyCollection<string> excludedNames,
+            Action<string> setStage = null)
         {
+            setStage?.Invoke("evidence");
             Require(source != null && output != null, "Behavior evidence is incomplete.");
             var compressed = new HashSet<string>(compressedNames ?? Array.Empty<string>(), StringComparer.Ordinal);
             var excluded = new HashSet<string>(excludedNames ?? Array.Empty<string>(), StringComparer.Ordinal);
+            setStage?.Invoke("parameter_sets");
             Require(compressed.Count > 0, "No compressed parameter was available for behavior proof.");
             Require(!compressed.Overlaps(excluded), "A compressed parameter is excluded from compression.");
 
+            setStage?.Invoke("parameter_index");
             var outputByName = output.Parameters.ToDictionary(row => row.Name, StringComparer.Ordinal);
             var sourceNames = new HashSet<string>(source.Parameters.Select(row => row.Name), StringComparer.Ordinal);
             var lastOutputIndex = -1;
@@ -93,16 +148,127 @@ namespace VRCForge.Editor
                 }
             }
 
+            setStage?.Invoke("menu_subset");
             RequireMultisetSubset(
                 source.MenuRows.Select(row => row.Canonical),
                 output.MenuRows.Select(row => row.Canonical),
                 "The output changed a source menu control.");
+            var sourceControllerParameters = source.AnimatorRows
+                .Where(row => row.Kind == "controller_parameter")
+                .ToArray();
+            var outputControllerParameters = output.AnimatorRows
+                .Where(row => row.Kind == "controller_parameter")
+                .ToArray();
+            setStage?.Invoke("animator_subset_controller_parameter_name");
+            RequireMultisetSubset(
+                sourceControllerParameters.Select(row => Frame(row.SemanticName)),
+                outputControllerParameters.Select(row => Frame(row.SemanticName)),
+                "The output changed an existing animator parameter name.");
+            setStage?.Invoke("animator_subset_controller_parameter_scope");
+            RequireMultisetSubset(
+                sourceControllerParameters.Select(row => Frame(row.Scope) + Frame(row.SemanticName)),
+                outputControllerParameters.Select(row => Frame(row.Scope) + Frame(row.SemanticName)),
+                "The output moved an existing animator parameter to another controller role.");
+            setStage?.Invoke("animator_subset_controller_parameter_type");
+            RequireMultisetSubset(
+                sourceControllerParameters.Select(row =>
+                    Frame(row.Scope) + Frame(row.SemanticName) + Frame(row.SemanticType)),
+                outputControllerParameters.Select(row =>
+                    Frame(row.Scope) + Frame(row.SemanticName) + Frame(row.SemanticType)),
+                "The output changed an existing animator parameter type.");
+            setStage?.Invoke("animator_subset_controller_parameter_default");
+            RequireMultisetSubset(
+                sourceControllerParameters.Select(row =>
+                    Frame(row.Scope) + Frame(row.SemanticName) + Frame(row.SemanticType)
+                        + Frame(row.SemanticDefault)),
+                outputControllerParameters.Select(row =>
+                    Frame(row.Scope) + Frame(row.SemanticName) + Frame(row.SemanticType)
+                        + Frame(row.SemanticDefault)),
+                "The output changed an existing animator parameter default.");
+            var sourceLayers = source.AnimatorRows.Where(row => row.Kind == "layer").ToArray();
+            var outputLayers = output.AnimatorRows.Where(row => row.Kind == "layer").ToArray();
+            setStage?.Invoke("animator_subset_layer_scope");
+            RequireMultisetSubset(
+                sourceLayers.Select(row => Frame(row.Scope)),
+                outputLayers.Select(row => Frame(row.Scope)),
+                "The output removed an existing animator layer role.");
+            setStage?.Invoke("animator_subset_layer_name");
+            RequireMultisetSubset(
+                sourceLayers.Select(row => Frame(row.Scope) + Frame(row.SemanticName)),
+                outputLayers.Select(row => Frame(row.Scope) + Frame(row.SemanticName)),
+                "The output renamed an existing animator layer.");
+            var layerFieldNames = new[] { "weight", "blending", "mask", "ik", "sync_target", "sync_timing" };
+            for (var fieldIndex = 0; fieldIndex < layerFieldNames.Length; fieldIndex++)
+            {
+                var fieldCount = fieldIndex + 1;
+                var fieldStage = "animator_subset_layer_" + layerFieldNames[fieldIndex];
+                if (fieldIndex == 2)
+                {
+                    var mismatchCategory = FirstLayerMaskMismatchCategory(sourceLayers, outputLayers);
+                    if (mismatchCategory != "none") fieldStage += "_" + mismatchCategory;
+                }
+                setStage?.Invoke(fieldStage);
+                RequireMultisetSubset(
+                    sourceLayers.Select(row =>
+                        Frame(row.Scope) + Frame(row.SemanticName)
+                            + string.Concat(row.SemanticFields.Take(fieldCount).Select(Frame))),
+                    outputLayers.Select(row =>
+                        Frame(row.Scope) + Frame(row.SemanticName)
+                            + string.Concat(row.SemanticFields.Take(fieldCount).Select(Frame))),
+                    "The output changed existing animator layer settings.");
+            }
+            var sourceTransitions = source.AnimatorRows.Where(row => row.Kind == "transition").ToArray();
+            var outputTransitions = output.AnimatorRows.Where(row => row.Kind == "transition").ToArray();
+            setStage?.Invoke("animator_subset_transition_identity");
+            RequireMultisetSubset(
+                sourceTransitions.Select(row => Frame(row.Scope) + Frame(row.SemanticName)),
+                outputTransitions.Select(row => Frame(row.Scope) + Frame(row.SemanticName)),
+                "The output removed or reordered an existing animator transition.");
+            var transitionFieldNames = new[]
+            {
+                "destination", "exit", "mute", "solo", "conditions", "duration", "exit_time",
+                "has_exit_time", "fixed_duration", "interruption", "offset", "ordered", "self"
+            };
+            for (var fieldIndex = 0; fieldIndex < transitionFieldNames.Length; fieldIndex++)
+            {
+                var fieldCount = fieldIndex + 1;
+                setStage?.Invoke("animator_subset_transition_" + transitionFieldNames[fieldIndex]);
+                RequireMultisetSubset(
+                    sourceTransitions.Select(row =>
+                        Frame(row.Scope) + Frame(row.SemanticName)
+                            + string.Concat(row.SemanticFields.Take(fieldCount).Select(Frame))),
+                    outputTransitions.Select(row =>
+                        Frame(row.Scope) + Frame(row.SemanticName)
+                            + string.Concat(row.SemanticFields.Take(fieldCount).Select(Frame))),
+                    "The output changed an existing animator transition.");
+            }
+            foreach (var kind in new[]
+            {
+                "override_controller",
+                "state_machine",
+                "state_machine_position",
+                "state",
+                "behaviour",
+                "driver",
+                "motion",
+                "blend_tree",
+                "blend_child"
+            })
+            {
+                setStage?.Invoke("animator_subset_" + kind);
+                RequireMultisetSubset(
+                    source.AnimatorRows.Where(row => row.Kind == kind).Select(row => row.Canonical),
+                    output.AnimatorRows.Where(row => row.Kind == kind).Select(row => row.Canonical),
+                    "The output changed existing animator behavior.");
+            }
+            setStage?.Invoke("animator_subset_complete");
             RequireMultisetSubset(
                 source.AnimatorRows.Select(row => row.Canonical),
                 output.AnimatorRows.Select(row => row.Canonical),
                 "The output changed existing animator behavior.");
 
             var addedAnimatorRows = SubtractRows(source.AnimatorRows, output.AnimatorRows);
+            setStage?.Invoke("excluded_codec_references");
             foreach (var name in excluded)
             {
                 Require(
@@ -110,12 +276,14 @@ namespace VRCForge.Editor
                     "The generated codec references an excluded parameter.");
             }
 
+            setStage?.Invoke("codec_edges");
             var edges = addedAnimatorRows
                 .Where(row => row.Kind == "driver" && !string.IsNullOrWhiteSpace(row.SourceParameter)
                     && !string.IsNullOrWhiteSpace(row.DestinationParameter))
                 .ToArray();
             var outputParameters = output.Parameters.ToDictionary(row => row.Name, StringComparer.Ordinal);
             var mappingRows = new List<string>();
+            setStage?.Invoke("carrier_graph");
             foreach (var name in compressed.OrderBy(value => value, StringComparer.Ordinal))
             {
                 var forward = Reachable(name, edges, reverse: false);
@@ -140,18 +308,22 @@ namespace VRCForge.Editor
                     + Frame(DigestRows("vrcforge.codec_parameter_rows.v1", relevantRows)));
             }
 
+            setStage?.Invoke("excluded_state");
             var excludedBefore = source.Parameters
                 .Where(row => excluded.Contains(row.Name))
                 .OrderBy(row => row.Name, StringComparer.Ordinal)
-                .Select(row => row.Canonical)
+                .Select(row => Frame(row.Name) + Frame(row.Type) + Frame(row.DefaultValue)
+                    + Frame(row.Saved) + Frame(row.NetworkSynced))
                 .ToArray();
             var excludedAfter = output.Parameters
                 .Where(row => excluded.Contains(row.Name))
                 .OrderBy(row => row.Name, StringComparer.Ordinal)
-                .Select(row => row.Canonical)
+                .Select(row => Frame(row.Name) + Frame(row.Type) + Frame(row.DefaultValue)
+                    + Frame(row.Saved) + Frame(row.NetworkSynced))
                 .ToArray();
             Require(excludedBefore.SequenceEqual(excludedAfter, StringComparer.Ordinal), "Excluded parameter state changed.");
 
+            setStage?.Invoke("codec_graph");
             var codecRows = addedAnimatorRows
                 .Where(row => row.ParameterNames.Any(parameter => compressed.Contains(parameter)
                     || !sourceNames.Contains(parameter)))
@@ -160,6 +332,7 @@ namespace VRCForge.Editor
                 .ToArray();
             Require(codecRows.Length > 0, "No generated codec graph was proven.");
 
+            setStage?.Invoke("receipt");
             return new ParameterBehaviorProof
             {
                 Status = "verified",
@@ -253,25 +426,33 @@ namespace VRCForge.Editor
             return rows.OrderBy(row => row.Path, StringComparer.Ordinal).ToList();
         }
 
-        private static List<AnimatorEvidenceRow> CaptureAnimatorRows(VRCAvatarDescriptor descriptor)
+        private static List<AnimatorEvidenceRow> CaptureAnimatorRows(
+            VRCAvatarDescriptor descriptor,
+            Action<string> setStage)
         {
             var rows = new List<AnimatorEvidenceRow>();
-            CaptureLayers(descriptor.baseAnimationLayers, "base", rows);
-            CaptureLayers(descriptor.specialAnimationLayers, "special", rows);
+            setStage?.Invoke("animator_base");
+            CaptureLayers(descriptor.baseAnimationLayers, "base", rows, setStage);
+            setStage?.Invoke("animator_special");
+            CaptureLayers(descriptor.specialAnimationLayers, "special", rows, setStage);
             return rows.OrderBy(row => row.Canonical, StringComparer.Ordinal).ToList();
         }
 
         private static void CaptureLayers(
             VRCAvatarDescriptor.CustomAnimLayer[] layers,
             string group,
-            ICollection<AnimatorEvidenceRow> rows)
+            ICollection<AnimatorEvidenceRow> rows,
+            Action<string> setStage)
         {
             var values = layers ?? Array.Empty<VRCAvatarDescriptor.CustomAnimLayer>();
+            var activeRoles = new HashSet<string>(StringComparer.Ordinal);
             for (var layerSlot = 0; layerSlot < values.Length; layerSlot++)
             {
                 var value = values[layerSlot];
                 if (value.animatorController == null) continue;
-                var role = group + ":" + value.type + ":" + layerSlot.ToString(CultureInfo.InvariantCulture);
+                var role = group + ":" + value.type;
+                Require(activeRoles.Add(role), "Animator controller roles must be unique within a layer group.");
+                setStage?.Invoke("animator_" + group + "_controller_type");
                 AnimatorController controller;
                 if (value.animatorController is AnimatorController directController)
                 {
@@ -293,30 +474,77 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("The animator controller type is unsupported by behavior proof.");
                 }
+                setStage?.Invoke("animator_" + group + "_controller_parameters");
                 var controllerParameters = controller.parameters ?? Array.Empty<AnimatorControllerParameter>();
                 for (var parameterIndex = 0; parameterIndex < controllerParameters.Length; parameterIndex++)
                 {
                     var parameter = controllerParameters[parameterIndex];
-                    rows.Add(AnimatorEvidenceRow.Simple(
-                        "controller_parameter",
-                        Frame(role) + Frame(parameterIndex) + Frame(parameter.name) + Frame(parameter.type)
-                            + Frame(FloatText(parameter.defaultFloat)) + Frame(parameter.defaultInt)
-                            + Frame(parameter.defaultBool),
-                        parameter.name));
+                    var semanticDefault = ControllerParameterDefault(parameter);
+                    rows.Add(new AnimatorEvidenceRow
+                    {
+                        Kind = "controller_parameter",
+                        Body = Frame(role) + Frame(parameter.name) + Frame(parameter.type)
+                            + Frame(semanticDefault),
+                        ParameterNames = new HashSet<string>(new[] { parameter.name }, StringComparer.Ordinal),
+                        Scope = role,
+                        SemanticName = parameter.name,
+                        SemanticType = parameter.type.ToString(),
+                        SemanticDefault = semanticDefault
+                    });
                 }
+                setStage?.Invoke("animator_" + group + "_controller_layers");
                 var controllerLayers = controller.layers ?? Array.Empty<AnimatorControllerLayer>();
+                var layerNames = new HashSet<string>(StringComparer.Ordinal);
                 for (var index = 0; index < controllerLayers.Length; index++)
                 {
                     var layer = controllerLayers[index];
                     Require(layer.stateMachine != null, "An animator layer has no state machine.");
-                    var layerPath = role + "/layer:" + index.ToString(CultureInfo.InvariantCulture) + ":" + layer.name;
-                    rows.Add(AnimatorEvidenceRow.Simple(
-                        "layer",
-                        Frame(layerPath) + Frame(FloatText(layer.defaultWeight))
-                            + Frame(layer.blendingMode) + Frame(ObjectToken(layer.avatarMask, null))
-                            + Frame(layer.iKPass) + Frame(layer.syncedLayerIndex)
-                            + Frame(layer.syncedLayerAffectsTiming)));
-                    CaptureStateMachine(layer.stateMachine, layerPath, controller, rows, new HashSet<int>());
+                    Require(layerNames.Add(layer.name ?? string.Empty), "Animator layer names must be unique within a controller.");
+                    var layerPath = role + "/layer:" + layer.name;
+                    var synchronizedLayer = string.Empty;
+                    var synchronizedTiming = string.Empty;
+                    if (layer.syncedLayerIndex >= 0)
+                    {
+                        Require(layer.syncedLayerIndex < controllerLayers.Length,
+                            "An animator layer synchronization target is out of range.");
+                        synchronizedLayer = controllerLayers[layer.syncedLayerIndex].name ?? string.Empty;
+                        synchronizedTiming = layer.syncedLayerAffectsTiming ? "true" : "false";
+                    }
+                    var avatarMaskToken = AvatarMaskToken(layer.avatarMask, out var avatarMaskSummary);
+                    var layerSettings = Frame(FloatText(layer.defaultWeight))
+                        + Frame(layer.blendingMode) + Frame(avatarMaskToken)
+                        + Frame(layer.iKPass) + Frame(synchronizedLayer)
+                        + Frame(synchronizedTiming);
+                    var layerFields = new[]
+                    {
+                        FloatText(layer.defaultWeight),
+                        layer.blendingMode.ToString(),
+                        avatarMaskToken,
+                        layer.iKPass ? "true" : "false",
+                        synchronizedLayer,
+                        synchronizedTiming
+                    };
+                    rows.Add(new AnimatorEvidenceRow
+                    {
+                        Kind = "layer",
+                        Body = Frame(layerPath) + layerSettings,
+                        Scope = role,
+                        SemanticName = layer.name ?? string.Empty,
+                        SemanticType = layerSettings,
+                        SemanticFields = layerFields,
+                        SemanticMaskSummary = avatarMaskSummary
+                    });
+                    setStage?.Invoke("animator_" + group + "_state_machine");
+                    var animatorPathIndex = BuildAnimatorPathIndex(layer.stateMachine, layerPath);
+                    CaptureStateMachine(
+                        layer.stateMachine,
+                        layerPath,
+                        controller,
+                        animatorPathIndex,
+                        rows,
+                        new HashSet<int>(),
+                        group,
+                        setStage);
                 }
             }
         }
@@ -325,28 +553,34 @@ namespace VRCForge.Editor
             AnimatorStateMachine machine,
             string path,
             AnimatorController controller,
+            AnimatorPathIndex animatorPathIndex,
             ICollection<AnimatorEvidenceRow> rows,
-            ISet<int> visited)
+            ISet<int> visited,
+            string group,
+            Action<string> setStage)
         {
+            setStage?.Invoke("animator_" + group + "_state_machine_header");
             Require(visited.Add(machine.GetInstanceID()), "The animator state-machine graph contains a cycle.");
+            var states = machine.states;
+            var defaultStateToken = StateWithinMachineToken(machine.defaultState, states);
             rows.Add(AnimatorEvidenceRow.Simple(
                 "state_machine",
                 Frame(path) + Frame(machine.name)
-                    + Frame(ControllerObjectToken(machine.defaultState, controller))
+                    + Frame(defaultStateToken)
                     + Frame(VectorText(machine.anyStatePosition))
                     + Frame(VectorText(machine.entryPosition))
                     + Frame(VectorText(machine.exitPosition))
                     + Frame(VectorText(machine.parentStateMachinePosition))));
+            setStage?.Invoke("animator_" + group + "_machine_behaviours");
             CaptureBehaviours(machine.behaviours, path + "/machine_behaviour", controller, rows);
-            var states = machine.states;
-            Require(states.Select(value => value.state == null ? string.Empty : value.state.name).Distinct(StringComparer.Ordinal).Count() == states.Length,
-                "Animator state names must be unique within a state machine.");
+            setStage?.Invoke("animator_" + group + "_state_names");
             for (var stateIndex = 0; stateIndex < states.Length; stateIndex++)
             {
                 var child = states[stateIndex];
                 Require(child.state != null, "An animator state is unresolved.");
                 var state = child.state;
                 var statePath = path + "/state:" + stateIndex.ToString(CultureInfo.InvariantCulture) + ":" + state.name;
+                setStage?.Invoke("animator_" + group + "_state_header");
                 rows.Add(AnimatorEvidenceRow.Simple(
                     "state",
                     Frame(statePath) + Frame(FloatText(state.speed)) + Frame(state.speedParameter)
@@ -361,23 +595,33 @@ namespace VRCForge.Editor
                     state.mirrorParameter,
                     state.cycleOffsetParameter,
                     state.timeParameter));
-                CaptureTransitions(state.transitions, statePath + "/transition", controller, rows);
+                setStage?.Invoke("animator_" + group + "_state_transitions");
+                CaptureTransitions(state.transitions, statePath + "/transition", controller, animatorPathIndex, rows);
+                setStage?.Invoke("animator_" + group + "_state_behaviours");
                 CaptureBehaviours(state.behaviours, statePath, controller, rows);
+                setStage?.Invoke("animator_" + group + "_state_motion");
                 CaptureMotion(state.motion, statePath + "/motion", controller, rows, new HashSet<int>());
             }
-            CaptureTransitions(machine.anyStateTransitions, path + "/any", controller, rows);
-            CaptureTransitions(machine.entryTransitions, path + "/entry", controller, rows);
+            setStage?.Invoke("animator_" + group + "_any_transitions");
+            CaptureTransitions(machine.anyStateTransitions, path + "/any", controller, animatorPathIndex, rows);
+            setStage?.Invoke("animator_" + group + "_entry_transitions");
+            CaptureTransitions(machine.entryTransitions, path + "/entry", controller, animatorPathIndex, rows);
             var stateMachines = machine.stateMachines;
-            Require(stateMachines.Select(value => value.stateMachine == null ? string.Empty : value.stateMachine.name).Distinct(StringComparer.Ordinal).Count() == stateMachines.Length,
-                "Animator child state-machine names must be unique.");
+            setStage?.Invoke("animator_" + group + "_child_state_machine_names");
             for (var machineIndex = 0; machineIndex < stateMachines.Length; machineIndex++)
             {
                 var child = stateMachines[machineIndex];
                 Require(child.stateMachine != null, "A child animator state machine is unresolved.");
                 var childPath = path + "/machine:" + machineIndex.ToString(CultureInfo.InvariantCulture) + ":" + child.stateMachine.name;
                 rows.Add(AnimatorEvidenceRow.Simple("state_machine_position", Frame(childPath) + Frame(VectorText(child.position))));
-                CaptureTransitions(machine.GetStateMachineTransitions(child.stateMachine), childPath + "/transition", controller, rows);
-                CaptureStateMachine(child.stateMachine, childPath, controller, rows, visited);
+                setStage?.Invoke("animator_" + group + "_child_transitions");
+                CaptureTransitions(
+                    machine.GetStateMachineTransitions(child.stateMachine),
+                    childPath + "/transition",
+                    controller,
+                    animatorPathIndex,
+                    rows);
+                CaptureStateMachine(child.stateMachine, childPath, controller, animatorPathIndex, rows, visited, group, setStage);
             }
             visited.Remove(machine.GetInstanceID());
         }
@@ -386,6 +630,7 @@ namespace VRCForge.Editor
             AnimatorTransitionBase[] transitions,
             string path,
             AnimatorController controller,
+            AnimatorPathIndex animatorPathIndex,
             ICollection<AnimatorEvidenceRow> rows)
         {
             var values = transitions ?? Array.Empty<AnimatorTransitionBase>();
@@ -403,25 +648,36 @@ namespace VRCForge.Editor
                 }
                 conditionRows.Sort(StringComparer.Ordinal);
                 var destination = transition.destinationState != null
-                    ? ControllerObjectToken(transition.destinationState, controller)
+                    ? AnimatorStatePathToken(transition.destinationState, animatorPathIndex)
                     : transition.destinationStateMachine != null
-                        ? ControllerObjectToken(transition.destinationStateMachine, controller)
+                        ? AnimatorStateMachinePathToken(transition.destinationStateMachine, animatorPathIndex)
                         : "exit:" + transition.isExit;
                 var stateTransition = transition as AnimatorStateTransition;
-                rows.Add(AnimatorEvidenceRow.Simple(
-                    "transition",
-                    Frame(path) + Frame(index) + Frame(transition.name) + Frame(destination)
-                        + Frame(transition.isExit) + Frame(transition.mute) + Frame(transition.solo)
-                        + Frame(string.Concat(conditionRows))
-                        + Frame(stateTransition == null ? string.Empty : FloatText(stateTransition.duration))
-                        + Frame(stateTransition == null ? string.Empty : FloatText(stateTransition.exitTime))
-                        + Frame(stateTransition != null && stateTransition.hasExitTime)
-                        + Frame(stateTransition != null && stateTransition.hasFixedDuration)
-                        + Frame(stateTransition == null ? string.Empty : stateTransition.interruptionSource.ToString())
-                        + Frame(stateTransition == null ? string.Empty : FloatText(stateTransition.offset))
-                        + Frame(stateTransition != null && stateTransition.orderedInterruption)
-                        + Frame(stateTransition != null && stateTransition.canTransitionToSelf),
-                    names.ToArray()));
+                var semanticFields = new[]
+                {
+                    destination,
+                    transition.isExit ? "true" : "false",
+                    transition.mute ? "true" : "false",
+                    transition.solo ? "true" : "false",
+                    string.Concat(conditionRows),
+                    stateTransition == null ? string.Empty : FloatText(stateTransition.duration),
+                    stateTransition == null ? string.Empty : FloatText(stateTransition.exitTime),
+                    stateTransition != null && stateTransition.hasExitTime ? "true" : "false",
+                    stateTransition != null && stateTransition.hasFixedDuration ? "true" : "false",
+                    stateTransition == null ? string.Empty : stateTransition.interruptionSource.ToString(),
+                    stateTransition == null ? string.Empty : FloatText(stateTransition.offset),
+                    stateTransition != null && stateTransition.orderedInterruption ? "true" : "false",
+                    stateTransition != null && stateTransition.canTransitionToSelf ? "true" : "false"
+                };
+                rows.Add(new AnimatorEvidenceRow
+                {
+                    Kind = "transition",
+                    Scope = path,
+                    SemanticName = index.ToString(CultureInfo.InvariantCulture),
+                    SemanticFields = semanticFields,
+                    ParameterNames = new HashSet<string>(names, StringComparer.Ordinal),
+                    Body = Frame(path) + Frame(index) + string.Concat(semanticFields.Select(Frame))
+                });
             }
         }
 
@@ -550,8 +806,19 @@ namespace VRCForge.Editor
             visited.Remove(tree.GetInstanceID());
         }
 
-        private static List<string> CapturePortableRows(GameObject root)
+        private static List<string> CapturePortableRows(
+            GameObject root,
+            IDictionary<string, List<string>> propertyCategories,
+            IDictionary<string, List<string>> descriptorPropertyGroups)
         {
+            foreach (var category in new[]
+                     {
+                         "transform_editor", "transform_spatial", "transform_hierarchy", "transform_other",
+                         "descriptor", "other"
+                     })
+            {
+                propertyCategories[category] = new List<string>();
+            }
             var rows = new List<string>();
             void Walk(Transform transform, string path)
             {
@@ -570,6 +837,7 @@ namespace VRCForge.Editor
                     var componentPath = path + "/component:" + component.GetType().AssemblyQualifiedName
                         + ":" + index.ToString(CultureInfo.InvariantCulture);
                     rows.Add(Frame("component") + Frame(componentPath));
+                    if (component is Transform) continue;
                     var serialized = new SerializedObject(component);
                     var iterator = serialized.GetIterator();
                     var enterChildren = true;
@@ -577,16 +845,43 @@ namespace VRCForge.Editor
                     {
                         enterChildren = true;
                         if (iterator.propertyPath == "m_ObjectHideFlags"
+                            || iterator.propertyPath == "m_GameObject"
+                            || iterator.propertyPath.StartsWith("m_GameObject.", StringComparison.Ordinal)
+                            || iterator.propertyPath.StartsWith("m_GameObject[", StringComparison.Ordinal)
                             || iterator.propertyPath == "m_CorrespondingSourceObject"
+                            || iterator.propertyPath.StartsWith("m_CorrespondingSourceObject.", StringComparison.Ordinal)
+                            || iterator.propertyPath.StartsWith("m_CorrespondingSourceObject[", StringComparison.Ordinal)
                             || iterator.propertyPath == "m_PrefabInstance"
-                            || iterator.propertyPath == "m_PrefabAsset")
+                            || iterator.propertyPath.StartsWith("m_PrefabInstance.", StringComparison.Ordinal)
+                            || iterator.propertyPath.StartsWith("m_PrefabInstance[", StringComparison.Ordinal)
+                            || iterator.propertyPath == "m_PrefabAsset"
+                            || iterator.propertyPath.StartsWith("m_PrefabAsset.", StringComparison.Ordinal)
+                            || iterator.propertyPath.StartsWith("m_PrefabAsset[", StringComparison.Ordinal)
+                            || iterator.propertyPath == "serializedVersion")
                         {
                             continue;
                         }
                         if (iterator.propertyType == SerializedPropertyType.Generic) continue;
-                        rows.Add(
+                        var propertyRow =
                             Frame("property") + Frame(componentPath) + Frame(iterator.propertyPath)
-                            + Frame(iterator.propertyType) + Frame(PropertyValue(iterator, root)));
+                            + Frame(iterator.propertyType) + Frame(PropertyValue(iterator, root));
+                        rows.Add(propertyRow);
+                        var category = component is Transform
+                            ? TransformPropertyCategory(iterator.propertyPath)
+                            : component is VRCAvatarDescriptor
+                                ? "descriptor"
+                                : "other";
+                        propertyCategories[category].Add(propertyRow);
+                        if (category == "descriptor")
+                        {
+                            var group = DescriptorPropertyGroup(iterator.propertyPath);
+                            if (!descriptorPropertyGroups.TryGetValue(group, out var groupRows))
+                            {
+                                groupRows = new List<string>();
+                                descriptorPropertyGroups[group] = groupRows;
+                            }
+                            groupRows.Add(propertyRow);
+                        }
                     }
                 }
                 for (var index = 0; index < transform.childCount; index++)
@@ -596,6 +891,46 @@ namespace VRCForge.Editor
             }
             Walk(root.transform, "0");
             return rows;
+        }
+
+        private static string DescriptorPropertyGroup(string propertyPath)
+        {
+            var separator = propertyPath.IndexOf('.');
+            var bracket = propertyPath.IndexOf('[');
+            if (separator < 0 || bracket >= 0 && bracket < separator) separator = bracket;
+            var root = separator < 0 ? propertyPath : propertyPath.Substring(0, separator);
+            var token = new string(root.Select(character =>
+                char.IsLetterOrDigit(character) || character == '_'
+                    ? char.ToLowerInvariant(character)
+                    : '_').ToArray());
+            return string.IsNullOrWhiteSpace(token) ? "unclassified" : token;
+        }
+
+        private static bool IsTransformEditorHint(string propertyPath)
+        {
+            return propertyPath == "m_LocalEulerAnglesHint"
+                || propertyPath.StartsWith("m_LocalEulerAnglesHint.", StringComparison.Ordinal)
+                || propertyPath == "m_RootOrder"
+                || propertyPath == "m_ConstrainProportionsScale"
+                || propertyPath == "serializedVersion";
+        }
+
+        private static string TransformPropertyCategory(string propertyPath)
+        {
+            if (IsTransformEditorHint(propertyPath)) return "transform_editor";
+            if (propertyPath.StartsWith("m_LocalPosition", StringComparison.Ordinal)
+                || propertyPath.StartsWith("m_LocalRotation", StringComparison.Ordinal)
+                || propertyPath.StartsWith("m_LocalScale", StringComparison.Ordinal))
+            {
+                return "transform_spatial";
+            }
+            if (propertyPath == "m_GameObject"
+                || propertyPath == "m_Father"
+                || propertyPath.StartsWith("m_Children", StringComparison.Ordinal))
+            {
+                return "transform_hierarchy";
+            }
+            return "transform_other";
         }
 
         private static string PropertyValue(
@@ -810,6 +1145,170 @@ namespace VRCForge.Editor
             return ObjectToken(value, null);
         }
 
+        private static string ControllerParameterDefault(AnimatorControllerParameter parameter)
+        {
+            switch (parameter.type)
+            {
+                case AnimatorControllerParameterType.Float:
+                    return FloatText(parameter.defaultFloat);
+                case AnimatorControllerParameterType.Int:
+                    return parameter.defaultInt.ToString(CultureInfo.InvariantCulture);
+                case AnimatorControllerParameterType.Bool:
+                    return parameter.defaultBool ? "true" : "false";
+                case AnimatorControllerParameterType.Trigger:
+                    return string.Empty;
+                default:
+                    throw new InvalidOperationException("The animator controller parameter type is unsupported.");
+            }
+        }
+
+        private static AnimatorPathIndex BuildAnimatorPathIndex(
+            AnimatorStateMachine root,
+            string rootPath)
+        {
+            Require(root != null && !string.IsNullOrWhiteSpace(rootPath), "Animator path-index input is incomplete.");
+            var index = new AnimatorPathIndex();
+            IndexAnimatorStateMachine(root, rootPath, index, new HashSet<int>());
+            return index;
+        }
+
+        private static void IndexAnimatorStateMachine(
+            AnimatorStateMachine machine,
+            string path,
+            AnimatorPathIndex index,
+            ISet<int> active)
+        {
+            var machineId = machine.GetInstanceID();
+            Require(active.Add(machineId), "The animator state-machine graph contains a cycle.");
+            Require(!index.StateMachinePaths.ContainsKey(machineId),
+                "An animator state machine has more than one structural path.");
+            index.StateMachinePaths.Add(machineId, path);
+            var states = machine.states;
+            for (var stateIndex = 0; stateIndex < states.Length; stateIndex++)
+            {
+                var state = states[stateIndex].state;
+                Require(state != null, "An animator state is unresolved while indexing paths.");
+                var stateId = state.GetInstanceID();
+                Require(!index.StatePaths.ContainsKey(stateId),
+                    "An animator state has more than one structural path.");
+                index.StatePaths.Add(
+                    stateId,
+                    path + "/state:" + stateIndex.ToString(CultureInfo.InvariantCulture) + ":" + state.name);
+            }
+            var stateMachines = machine.stateMachines;
+            for (var machineIndex = 0; machineIndex < stateMachines.Length; machineIndex++)
+            {
+                var child = stateMachines[machineIndex].stateMachine;
+                Require(child != null, "A child animator state machine is unresolved while indexing paths.");
+                IndexAnimatorStateMachine(
+                    child,
+                    path + "/machine:" + machineIndex.ToString(CultureInfo.InvariantCulture) + ":" + child.name,
+                    index,
+                    active);
+            }
+            active.Remove(machineId);
+        }
+
+        private static string AnimatorStatePathToken(AnimatorState state, AnimatorPathIndex index)
+        {
+            Require(state != null && index != null, "An animator transition state target is unresolved.");
+            Require(index.StatePaths.TryGetValue(state.GetInstanceID(), out var path),
+                "An animator transition state target is outside its layer state machine.");
+            return "state:" + path;
+        }
+
+        private static string AnimatorStateMachinePathToken(
+            AnimatorStateMachine stateMachine,
+            AnimatorPathIndex index)
+        {
+            Require(stateMachine != null && index != null, "An animator transition state-machine target is unresolved.");
+            Require(index.StateMachinePaths.TryGetValue(stateMachine.GetInstanceID(), out var path),
+                "An animator transition state-machine target is outside its layer state machine.");
+            return "machine:" + path;
+        }
+
+        private static string StateWithinMachineToken(
+            AnimatorState state,
+            IReadOnlyList<ChildAnimatorState> states)
+        {
+            if (state == null) return "null";
+            for (var index = 0; index < states.Count; index++)
+            {
+                if (states[index].state != state) continue;
+                return "state:" + index.ToString(CultureInfo.InvariantCulture) + ":" + (state.name ?? string.Empty);
+            }
+            throw new InvalidOperationException("An animator default state is outside its state machine.");
+        }
+
+        private sealed class AnimatorPathIndex
+        {
+            internal readonly Dictionary<int, string> StatePaths = new Dictionary<int, string>();
+            internal readonly Dictionary<int, string> StateMachinePaths = new Dictionary<int, string>();
+        }
+
+        private static string AvatarMaskToken(AvatarMask mask, out string summary)
+        {
+            if (mask == null)
+            {
+                summary = "null";
+                return "null";
+            }
+            var rows = new List<string>();
+            var activeBodyPartCount = 0;
+            for (var index = 0; index < (int)AvatarMaskBodyPart.LastBodyPart; index++)
+            {
+                var part = (AvatarMaskBodyPart)index;
+                var active = mask.GetHumanoidBodyPartActive(part);
+                if (active) activeBodyPartCount++;
+                rows.Add(Frame("body") + Frame(part) + Frame(active));
+            }
+            var activeTransformCount = 0;
+            for (var index = 0; index < mask.transformCount; index++)
+            {
+                var active = mask.GetTransformActive(index);
+                if (active) activeTransformCount++;
+                rows.Add(
+                    Frame("transform") + Frame(index) + Frame(mask.GetTransformPath(index))
+                        + Frame(active));
+            }
+            summary = "mask_body_" + activeBodyPartCount.ToString(CultureInfo.InvariantCulture)
+                + "_of_" + ((int)AvatarMaskBodyPart.LastBodyPart).ToString(CultureInfo.InvariantCulture)
+                + "_transform_" + activeTransformCount.ToString(CultureInfo.InvariantCulture)
+                + "_of_" + mask.transformCount.ToString(CultureInfo.InvariantCulture);
+            return "mask:" + DigestRows("vrcforge.animator_avatar_mask.v1", rows);
+        }
+
+        private static string FirstLayerMaskMismatchCategory(
+            IEnumerable<AnimatorEvidenceRow> sourceLayers,
+            IEnumerable<AnimatorEvidenceRow> outputLayers)
+        {
+            var outputByIdentity = outputLayers.ToDictionary(
+                row => Frame(row.Scope) + Frame(row.SemanticName),
+                StringComparer.Ordinal);
+            foreach (var sourceLayer in sourceLayers)
+            {
+                var identity = Frame(sourceLayer.Scope) + Frame(sourceLayer.SemanticName);
+                if (!outputByIdentity.TryGetValue(identity, out var outputLayer)) return "missing";
+                var sourceToken = sourceLayer.SemanticFields.ElementAtOrDefault(2) ?? string.Empty;
+                var outputToken = outputLayer.SemanticFields.ElementAtOrDefault(2) ?? string.Empty;
+                if (sourceToken == outputToken) continue;
+                var sourceSummary = string.IsNullOrWhiteSpace(sourceLayer.SemanticMaskSummary)
+                    ? AvatarMaskTokenCategory(sourceToken)
+                    : sourceLayer.SemanticMaskSummary;
+                var outputSummary = string.IsNullOrWhiteSpace(outputLayer.SemanticMaskSummary)
+                    ? AvatarMaskTokenCategory(outputToken)
+                    : outputLayer.SemanticMaskSummary;
+                return sourceSummary + "_to_" + outputSummary;
+            }
+            return "none";
+        }
+
+        private static string AvatarMaskTokenCategory(string token)
+        {
+            if (token == "null") return "null";
+            return token != null && token.StartsWith("mask:", StringComparison.Ordinal) ? "mask" : "invalid";
+        }
+
         private static string DigestRows(string schema, IEnumerable<string> rows)
         {
             return Sha256(schema + "\n" + string.Concat(rows.Select(Frame)));
@@ -854,6 +1353,17 @@ namespace VRCForge.Editor
         internal List<MenuEvidenceRow> MenuRows;
         internal List<AnimatorEvidenceRow> AnimatorRows;
         internal string PortableAvatarDigest;
+        internal string PortableObjectDigest;
+        internal string PortableComponentDigest;
+        internal string PortablePropertyDigest;
+        internal string PortableTransformEditorPropertyDigest;
+        internal string PortableTransformRuntimePropertyDigest;
+        internal string PortableTransformSpatialPropertyDigest;
+        internal string PortableTransformHierarchyPropertyDigest;
+        internal string PortableTransformOtherPropertyDigest;
+        internal string PortableDescriptorPropertyDigest;
+        internal Dictionary<string, string> PortableDescriptorPropertyGroupDigests;
+        internal string PortableOtherPropertyDigest;
         internal string OrderedParameterDigest;
         internal string MenuGraphDigest;
         internal string AnimatorBehaviorDigest;
@@ -927,6 +1437,12 @@ namespace VRCForge.Editor
         internal HashSet<string> ParameterNames = new HashSet<string>(StringComparer.Ordinal);
         internal string SourceParameter;
         internal string DestinationParameter;
+        internal string Scope;
+        internal string SemanticName;
+        internal string SemanticType;
+        internal string SemanticDefault;
+        internal string[] SemanticFields = Array.Empty<string>();
+        internal string SemanticMaskSummary;
         internal string Canonical => Kind + "|" + Body;
 
         internal static AnimatorEvidenceRow Simple(string kind, string body, params string[] names)

@@ -215,8 +215,8 @@ class LiveAttestationError(ValueError):
 
 @dataclass(frozen=True)
 class LiveBootstrap:
-    key: bytes
-    challenge: bytes
+    key: bytes | bytearray
+    challenge: bytes | bytearray
     runtime_binding_digest: str
     desktop_executable_digest: str
     backend_executable_digest: str
@@ -333,7 +333,9 @@ class PrimitiveBasisLiveSession:
         *,
         now: Callable[[], datetime] | None = None,
     ) -> None:
-        self._bootstrap = bootstrap
+        # Retain only public binding data. Keeping the bootstrap here would
+        # retain its proof key and raw challenge for the backend lifetime.
+        self._binding = LivePublicBinding.from_bootstrap(bootstrap)
         self._key = bytearray(bootstrap.key)
         self._now = now or (lambda: datetime.now(timezone.utc))
         self._state = "issued"
@@ -350,27 +352,31 @@ class PrimitiveBasisLiveSession:
 
     @property
     def run_id(self) -> str:
-        return self._bootstrap.run_id
+        return self._binding.run_id
 
     @property
     def challenge_digest(self) -> str:
-        return self._bootstrap.challenge_digest
+        return self._binding.challenge_digest
+
+    @property
+    def backend_executable_digest(self) -> str:
+        return self._binding.backend_executable_digest
 
     @property
     def fixture_set_descriptor_digest(self) -> str:
-        return self._bootstrap.fixture_set_descriptor_digest
+        return self._binding.fixture_set_descriptor_digest
 
     @property
     def fixture_descriptor_digest(self) -> str:
-        return self._bootstrap.fixture_descriptor_digest
+        return self._binding.fixture_descriptor_digest
 
     @property
     def unity_editor_digest(self) -> str:
-        return self._bootstrap.unity_editor_digest
+        return self._binding.unity_editor_digest
 
     @property
     def fixture_project_input_digest(self) -> str:
-        return self._bootstrap.fixture_project_input_digest
+        return self._binding.fixture_project_input_digest
 
     @property
     def receipt_count(self) -> int:
@@ -385,7 +391,7 @@ class PrimitiveBasisLiveSession:
         )
         self._started_at = _utc_now(self._now)
         self._state = "running"
-        return self._bootstrap.run_id
+        return self._binding.run_id
 
     def record(
         self,
@@ -404,13 +410,13 @@ class PrimitiveBasisLiveSession:
         safe_event = _copy_public_mapping(authoritative_event, "authoritative event")
         _validate_facts(phase, safe_facts)
         event_binding = {
-            "runId": self._bootstrap.run_id,
+            "runId": self._binding.run_id,
             "phase": phase,
             "sequence": sequence,
             "event": safe_event,
         }
-        if self._bootstrap.origin_ticket_digest:
-            event_binding["originTicketDigest"] = self._bootstrap.origin_ticket_digest
+        if self._binding.origin_ticket_digest:
+            event_binding["originTicketDigest"] = self._binding.origin_ticket_digest
         event_digest = _digest_json(event_binding)
         timestamp = _utc_now(lambda: observed_at or self._now())
         if self._receipts:
@@ -420,10 +426,10 @@ class PrimitiveBasisLiveSession:
         receipt = {
             "schema": (
                 TRUSTED_LIVE_RECEIPT_SCHEMA
-                if self._bootstrap.origin_ticket_digest
+                if self._binding.origin_ticket_digest
                 else LIVE_RECEIPT_SCHEMA
             ),
-            "runId": self._bootstrap.run_id,
+            "runId": self._binding.run_id,
             "scenarioId": MODEL_SCENARIO_ID,
             "primitiveId": MODEL_PRIMITIVE_ID,
             "phase": phase,
@@ -431,14 +437,14 @@ class PrimitiveBasisLiveSession:
             "monotonicOrdinal": sequence,
             "observedAt": _format_utc(timestamp),
             "fixtureDigest": self._fixture_digest,
-            "runtimeBindingDigest": self._bootstrap.runtime_binding_digest,
+            "runtimeBindingDigest": self._binding.runtime_binding_digest,
             "projectBindingDigest": self._project_binding_digest,
             "status": "passed",
             "facts": safe_facts,
             "authoritativeEventDigest": event_digest,
         }
-        if self._bootstrap.origin_ticket_digest:
-            receipt["originTicketDigest"] = self._bootstrap.origin_ticket_digest
+        if self._binding.origin_ticket_digest:
+            receipt["originTicketDigest"] = self._binding.origin_ticket_digest
         self._receipts.append(receipt)
         self._event_digests.append(event_digest)
         return json.loads(json.dumps(receipt))
@@ -453,7 +459,7 @@ class PrimitiveBasisLiveSession:
         _validate_receipt_invariants(
             self._receipts,
             expected_fixture_project_input_digest=(
-                self._bootstrap.fixture_project_input_digest
+                self._binding.fixture_project_input_digest
             ),
         )
         finished_at = _parse_utc(self._receipts[-1]["observedAt"])
@@ -472,31 +478,31 @@ class PrimitiveBasisLiveSession:
         ]
         attestation_schema = (
             TRUSTED_LIVE_ATTESTATION_SCHEMA
-            if self._bootstrap.origin_ticket_digest
+            if self._binding.origin_ticket_digest
             else LIVE_ATTESTATION_SCHEMA
         )
         evidence_schema = (
             TRUSTED_LIVE_EVIDENCE_SCHEMA
-            if self._bootstrap.origin_ticket_digest
+            if self._binding.origin_ticket_digest
             else LIVE_EVIDENCE_SCHEMA
         )
         attestation = {
             "schema": attestation_schema,
-            "runId": self._bootstrap.run_id,
-            "challengeDigest": self._bootstrap.challenge_digest,
+            "runId": self._binding.run_id,
+            "challengeDigest": self._binding.challenge_digest,
             "scenarioId": MODEL_SCENARIO_ID,
             "primitiveId": MODEL_PRIMITIVE_ID,
-            "fixtureSetDescriptorDigest": self._bootstrap.fixture_set_descriptor_digest,
-            "fixtureDescriptorDigest": self._bootstrap.fixture_descriptor_digest,
+            "fixtureSetDescriptorDigest": self._binding.fixture_set_descriptor_digest,
+            "fixtureDescriptorDigest": self._binding.fixture_descriptor_digest,
             "fixtureDigest": self._fixture_digest,
             "projectBindingDigest": self._project_binding_digest,
-            "runtimeBindingDigest": self._bootstrap.runtime_binding_digest,
-            "desktopExecutableDigest": self._bootstrap.desktop_executable_digest,
-            "backendExecutableDigest": self._bootstrap.backend_executable_digest,
-            "runnerDigest": self._bootstrap.runner_digest,
-            "unityPackageDigest": self._bootstrap.unity_package_digest,
-            "unityEditorDigest": self._bootstrap.unity_editor_digest,
-            "fixtureProjectInputDigest": self._bootstrap.fixture_project_input_digest,
+            "runtimeBindingDigest": self._binding.runtime_binding_digest,
+            "desktopExecutableDigest": self._binding.desktop_executable_digest,
+            "backendExecutableDigest": self._binding.backend_executable_digest,
+            "runnerDigest": self._binding.runner_digest,
+            "unityPackageDigest": self._binding.unity_package_digest,
+            "unityEditorDigest": self._binding.unity_editor_digest,
+            "fixtureProjectInputDigest": self._binding.fixture_project_input_digest,
             "orderedReceiptSetDigest": _digest_json(ordered_receipts),
             "authoritativeEventChainDigest": _digest_json(self._event_digests),
             "startedAt": _format_utc(self._started_at),
@@ -506,10 +512,10 @@ class PrimitiveBasisLiveSession:
             "originTrust": LIVE_ORIGIN_TRUST,
             "originVerified": False,
         }
-        if self._bootstrap.origin_ticket_digest:
-            attestation["originTicketDigest"] = self._bootstrap.origin_ticket_digest
+        if self._binding.origin_ticket_digest:
+            attestation["originTicketDigest"] = self._binding.origin_ticket_digest
         proof = hmac.new(
-            bytes(self._key),
+            self._key,
             _canonical_bytes(attestation),
             hashlib.sha256,
         ).hexdigest()
@@ -518,7 +524,7 @@ class PrimitiveBasisLiveSession:
             "schema": attestation_schema,
             "evidence": {
                 "schema": evidence_schema,
-                "runId": self._bootstrap.run_id,
+                "runId": self._binding.run_id,
                 "rows": [
                     {
                         "scenarioId": MODEL_SCENARIO_ID,
@@ -536,6 +542,13 @@ class PrimitiveBasisLiveSession:
         for index in range(len(self._key)):
             self._key[index] = 0
         return json.loads(json.dumps(finalization))
+
+    def close(self) -> None:
+        """Erase the one-run proof key when startup or execution is abandoned."""
+        for index in range(len(self._key)):
+            self._key[index] = 0
+        if self._state != "finalized":
+            self._state = "closed"
 
 
 def verify_live_finalization(
@@ -850,19 +863,27 @@ def encode_bootstrap_frame(bootstrap: LiveBootstrap) -> bytes:
     return LIVE_BOOTSTRAP_MAGIC + b"".join(values)
 
 
-def read_bootstrap_frame(stream: BinaryIO) -> LiveBootstrap:
+def parse_bootstrap_bytes(payload: bytes | bytearray | memoryview) -> LiveBootstrap:
     legacy_size = len(LIVE_BOOTSTRAP_MAGIC) + (2 + len(_BOOTSTRAP_DIGEST_FIELDS)) * 32
     trusted_size = legacy_size + 32
-    payload = stream.read(trusted_size + 1)
-    if payload.startswith(LIVE_BOOTSTRAP_MAGIC) and len(payload) == legacy_size:
+    if not isinstance(payload, (bytes, bytearray, memoryview)):
+        raise LiveAttestationError("live bootstrap frame is invalid")
+    try:
+        frame = memoryview(payload).cast("B")
+    except (TypeError, ValueError) as exc:
+        raise LiveAttestationError("live bootstrap frame is invalid") from exc
+    prefix = frame[: len(LIVE_BOOTSTRAP_MAGIC)].tobytes()
+    if prefix == LIVE_BOOTSTRAP_MAGIC and len(frame) == legacy_size:
         trusted = False
-    elif payload.startswith(TRUSTED_LIVE_BOOTSTRAP_MAGIC) and len(payload) == trusted_size:
+    elif prefix == TRUSTED_LIVE_BOOTSTRAP_MAGIC and len(frame) == trusted_size:
         trusted = True
     else:
         raise LiveAttestationError("live bootstrap frame is invalid")
     offset = len(LIVE_BOOTSTRAP_MAGIC)
-    chunks = [payload[index : index + 32] for index in range(offset, len(payload), 32)]
-    key, challenge, *digests = chunks
+    chunks = [frame[index : index + 32] for index in range(offset, len(frame), 32)]
+    key = bytearray(chunks[0])
+    challenge = bytearray(chunks[1])
+    digests = chunks[2:]
     origin_ticket_digest = digests.pop().hex() if trusted else ""
     values = dict(zip(_BOOTSTRAP_DIGEST_FIELDS, (item.hex() for item in digests), strict=True))
     return LiveBootstrap(
@@ -871,6 +892,54 @@ def read_bootstrap_frame(stream: BinaryIO) -> LiveBootstrap:
         origin_ticket_digest=origin_ticket_digest,
         **values,
     )
+
+
+def read_bootstrap_frame(stream: BinaryIO) -> LiveBootstrap:
+    legacy_size = len(LIVE_BOOTSTRAP_MAGIC) + (2 + len(_BOOTSTRAP_DIGEST_FIELDS)) * 32
+    trusted_size = legacy_size + 32
+    return parse_bootstrap_bytes(stream.read(trusted_size + 1))
+
+
+def _create_packaged_live_session(
+    bootstrap: LiveBootstrap,
+    *,
+    executable_path: Path | str | None,
+    frozen: bool | None,
+    now: Callable[[], datetime] | None,
+) -> PrimitiveBasisLiveSession:
+    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else bool(frozen)
+    if not is_frozen:
+        raise LiveAttestationError("packaged live bootstrap requires a frozen runtime")
+    backend_path = Path(sys.executable if executable_path is None else executable_path)
+    if _stable_file_digest(backend_path) != bootstrap.backend_executable_digest:
+        raise LiveAttestationError("packaged live backend digest mismatch")
+    return PrimitiveBasisLiveSession(bootstrap, now=now)
+
+
+def create_packaged_live_session_from_bytes(
+    payload: bytes | bytearray | memoryview,
+    *,
+    executable_path: Path | str | None = None,
+    frozen: bool | None = None,
+    now: Callable[[], datetime] | None = None,
+) -> PrimitiveBasisLiveSession:
+    bootstrap = parse_bootstrap_bytes(payload)
+    try:
+        return _create_packaged_live_session(
+            bootstrap,
+            executable_path=executable_path,
+            frozen=frozen,
+            now=now,
+        )
+    finally:
+        _erase_mutable_secret(bootstrap.key)
+        _erase_mutable_secret(bootstrap.challenge)
+
+
+def _erase_mutable_secret(value: bytes | bytearray) -> None:
+    if isinstance(value, bytearray):
+        for index in range(len(value)):
+            value[index] = 0
 
 
 def load_packaged_live_session_from_stdin(
@@ -887,17 +956,21 @@ def load_packaged_live_session_from_stdin(
         return None
     if mode != "1":
         raise LiveAttestationError("packaged live bootstrap mode is invalid")
-    is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else bool(frozen)
-    if not is_frozen:
-        raise LiveAttestationError("packaged live bootstrap requires a frozen runtime")
     input_stream = sys.stdin.buffer if stream is None else stream
     bootstrap = read_bootstrap_frame(input_stream)
-    backend_path = Path(sys.executable if executable_path is None else executable_path)
-    if _stable_file_digest(backend_path) != bootstrap.backend_executable_digest:
-        raise LiveAttestationError("packaged live backend digest mismatch")
+    try:
+        session = _create_packaged_live_session(
+            bootstrap,
+            executable_path=executable_path,
+            frozen=frozen,
+            now=now,
+        )
+    finally:
+        _erase_mutable_secret(bootstrap.key)
+        _erase_mutable_secret(bootstrap.challenge)
     if environ is None:
         os.environ.pop(LIVE_STDIN_ENV, None)
-    return PrimitiveBasisLiveSession(bootstrap, now=now)
+    return session
 
 
 def _validate_receipt(

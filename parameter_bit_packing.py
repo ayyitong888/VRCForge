@@ -11,11 +11,13 @@ from typing import Any
 RESULT_SCHEMA = "vrcforge.parameter_bit_packing.v2"
 APPROVAL_SCHEMA = "vrcforge.parameter_bit_packing_approval.v1"
 APPLY_RECEIPT_SCHEMA = "vrcforge.parameter_bit_packing_apply_receipt.v2"
+CAPABILITY_SCHEMA = "vrcforge.parameter_capability.v2"
 TOOL_NAME = "vrc_build_parameter_bit_packed_clone"
 
 BEHAVIOR_EVIDENCE_SCHEMA = "vrcforge.parameter_behavior_evidence.v1"
 BEHAVIOR_PROOF_SCHEMA = "vrcforge.parameter_behavior_proof.v1"
 CACHE_JOURNAL_SCHEMA = "vrcforge.parameter_cache_journal.v1"
+AUXILIARY_JOURNAL_SCHEMA = "vrcforge.parameter_auxiliary_journal.v1"
 OUTPUT_MANIFEST_SCHEMA = "vrcforge.parameter_output_manifest.v1"
 PREFERENCE_SCHEMA = "vrcforge.parameter_preferences.v1"
 CACHE_BACKUP_MAX_ENTRIES = 100000
@@ -30,12 +32,12 @@ PACKAGE_ARCHIVE_SHA256 = "01c750a3f87d3003ac31e23345e0e3afb43a790c2aeb2c43ed933c
 PACKAGE_TREE_SHA256 = "230340bd6eef1e633b18cc9587c91b71ff30143e85cb9732b5208fffcdd076d2"
 PACKAGE_FILE_COUNT = 1255
 
-# Filled from a clean Unity 2022.3.22f1 compile of the exact package tree above.
-# The package assembly is intentionally unsigned; its complete bytes are pinned.
+# Filled from clean Unity 2022.3.22f1 compiles of the exact package tree above.
+# The package assembly is intentionally unsigned; each allowlisted profile pins
+# its complete bytes and the complete callback assembly set.
 CALLBACK_ASSEMBLY_NAME = "VRCFury-Editor-Avatars"
 CALLBACK_ASSEMBLY_VERSION = "0.0.0.0"
 CALLBACK_ASSEMBLY_PUBLIC_KEY_TOKEN = ""
-CALLBACK_ASSEMBLY_SHA256 = "e568293abe29428b7fb35d805cb3053cc8437621a19ae714d5fc76931d9fe10f"
 
 SDK_CALLBACK_ASSEMBLY_NAME = "VRCSDKBase-Editor"
 SDK_CALLBACK_ASSEMBLY_VERSION = "1.0.0.0"
@@ -44,11 +46,51 @@ SDK_CALLBACK_ASSEMBLY_SHA256 = "952abdd2e9f696acba1fa773402d824fac4f0c6dd0b1b348
 CALLBACK_TYPE = "VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks"
 CALLBACK_SIGNATURE = "public static System.Boolean OnPreprocessAvatar(UnityEngine.GameObject)"
 REGISTERED_HOOK_TYPE = "VF.Hooks.ParameterCompressorHook"
-CALLBACK_ROSTER_COUNT = 16
-CALLBACK_ROSTER_DIGEST = "305bc43e713cc76fe13f16d99e6e1d7137d87c066d6a46a6917196b909de10ba"
+
+MINIMAL_CAPABILITY_PROFILE_ID = "embedded-minimal-v1"
+MINIMAL_CALLBACK_ASSEMBLY_SHA256 = "e568293abe29428b7fb35d805cb3053cc8437621a19ae714d5fc76931d9fe10f"
+MINIMAL_CALLBACK_ROSTER_COUNT = 16
+MINIMAL_CALLBACK_ROSTER_DIGEST = "305bc43e713cc76fe13f16d99e6e1d7137d87c066d6a46a6917196b909de10ba"
+MINIMAL_CALLBACK_ASSEMBLY_SET_COUNT = 3
+MINIMAL_CALLBACK_ASSEMBLY_SET_DIGEST = "1884970046bc7b2f7194cef03c3c085dffb02df8cc6eddc9173e90fd231794d1"
+
+EXTENDED_CAPABILITY_PROFILE_ID = "embedded-extended-v1"
+EXTENDED_CALLBACK_ASSEMBLY_SHA256 = "c220c73e91f69aa88425c8cd81cf271a6b484eb5b34cca15a33f6edcde89c8f4"
+EXTENDED_CALLBACK_ROSTER_COUNT = 23
+EXTENDED_CALLBACK_ROSTER_DIGEST = "a345576b0aad61991a4518413a5685d3b9df85e9ad33af50ff6b04a71d0f920e"
+EXTENDED_CALLBACK_ASSEMBLY_SET_COUNT = 7
+EXTENDED_CALLBACK_ASSEMBLY_SET_DIGEST = "2eebf5d668c881ac7b208191e488c6a69c896549473fb44281d12c07404dc221"
+
+_CAPABILITY_PROFILES = {
+    MINIMAL_CAPABILITY_PROFILE_ID: {
+        "callbackAssemblySha256": MINIMAL_CALLBACK_ASSEMBLY_SHA256,
+        "callbackRosterCount": MINIMAL_CALLBACK_ROSTER_COUNT,
+        "callbackRosterDigest": MINIMAL_CALLBACK_ROSTER_DIGEST,
+        "callbackAssemblySetCount": MINIMAL_CALLBACK_ASSEMBLY_SET_COUNT,
+        "callbackAssemblySetDigest": MINIMAL_CALLBACK_ASSEMBLY_SET_DIGEST,
+    },
+    EXTENDED_CAPABILITY_PROFILE_ID: {
+        "callbackAssemblySha256": EXTENDED_CALLBACK_ASSEMBLY_SHA256,
+        "callbackRosterCount": EXTENDED_CALLBACK_ROSTER_COUNT,
+        "callbackRosterDigest": EXTENDED_CALLBACK_ROSTER_DIGEST,
+        "callbackAssemblySetCount": EXTENDED_CALLBACK_ASSEMBLY_SET_COUNT,
+        "callbackAssemblySetDigest": EXTENDED_CALLBACK_ASSEMBLY_SET_DIGEST,
+    },
+}
+
+# Compatibility aliases preserve the prior single-profile constants while new
+# payloads identify the profile explicitly.
+CAPABILITY_PROFILE_ID = MINIMAL_CAPABILITY_PROFILE_ID
+CALLBACK_ASSEMBLY_SHA256 = MINIMAL_CALLBACK_ASSEMBLY_SHA256
+CALLBACK_ROSTER_COUNT = MINIMAL_CALLBACK_ROSTER_COUNT
+CALLBACK_ROSTER_DIGEST = MINIMAL_CALLBACK_ROSTER_DIGEST
+CALLBACK_ASSEMBLY_SET_COUNT = MINIMAL_CALLBACK_ASSEMBLY_SET_COUNT
+CALLBACK_ASSEMBLY_SET_DIGEST = MINIMAL_CALLBACK_ASSEMBLY_SET_DIGEST
 
 GENERATED_ROOT = "Packages/com.vrcfury.temp/Builds"
 STAGING_ROOT = GENERATED_ROOT + "/VRCForge Input"
+AUXILIARY_PACKAGE_ROOT = "Packages/nadena.dev.ndmf"
+AUXILIARY_GENERATED_ROOT = AUXILIARY_PACKAGE_ROOT + "/__Generated"
 OUTPUT_ROOT = "Assets/VRCForge/Generated"
 OUTPUT_KIND_ROOT = OUTPUT_ROOT + "/ParameterBitPacking"
 EMPTY_GENERATED_TREE_DIGEST = hashlib.sha256(
@@ -65,7 +107,7 @@ _PREVIEW_RESULT_KEYS = frozenset(
     {
         "schema", "ok", "preview", "verified", "changed", "saved",
         "callbacksInvoked", "mutationStarted", "mutationCount", "projectPath",
-        "source", "capability", "generated", "preferences", "platformProof",
+        "source", "capability", "generated", "auxiliaryGenerated", "preferences", "platformProof",
         "output", "previewDigest",
     }
 )
@@ -87,6 +129,15 @@ _PREVIEW_GENERATED_KEYS = frozenset(
         "rootIdentityDigestBefore", "rootIdentityCountBefore", "exists", "reparseFree",
     }
 )
+_PREVIEW_AUXILIARY_KEYS = frozenset(
+    {
+        "root", "packageRoot", "packageRootIdentityDigestBefore",
+        "packageManifestDigestBefore", "packageManifestIdentityDigestBefore",
+        "rootExistsBefore", "treeDigestBefore", "contentDigestBefore",
+        "entryCountBefore", "byteCountBefore", "backupMaxEntries",
+        "backupMaxBytes", "journalSchema", "reparseFree",
+    }
+)
 _PREVIEW_OUTPUT_KEYS = frozenset(
     {
         "root", "kindRoot", "cloneName", "sceneName", "temporaryPrefabPath",
@@ -105,7 +156,8 @@ _APPLY_RESULT_KEYS = frozenset(
         "costAfterBits", "compressedParameterNames", "approvedSafeCandidateNames",
         "excludedParameters", "sourceUnchanged", "sourceSceneDirtyAfter",
         "sourceStateDigestAfter", "sourceAssetSetDigestAfter", "source", "output",
-        "generated", "managedOutput", "protectedProjectTree", "applyReceiptDigest",
+        "generated", "auxiliaryGenerated", "managedOutput", "protectedProjectTree",
+        "applyReceiptDigest",
     }
 )
 _APPLY_SOURCE_KEYS = frozenset(
@@ -139,6 +191,21 @@ _APPLY_GENERATED_KEYS = frozenset(
         "journalSchema", "journalId", "journalClosed",
     }
 )
+_APPLY_AUXILIARY_KEYS = frozenset(
+    {
+        "root", "packageRoot", "packageRootIdentityDigestBefore",
+        "packageRootIdentityDigestAfter", "packageManifestDigestBefore",
+        "packageManifestDigestAfter", "packageManifestIdentityDigestBefore",
+        "packageManifestIdentityDigestAfter", "rootExistsBefore", "rootExistsAfter",
+        "treeDigestBefore", "treeDigestAfter", "contentDigestBefore",
+        "contentDigestAfter", "entryCountBefore", "entryCountAfter",
+        "byteCountBefore", "byteCountAfter", "observedRootExists",
+        "observedTreeDigest", "observedContentDigest", "observedEntryCount",
+        "observedByteCount", "ownedRootIdentityDigest", "createdByOperation",
+        "restorationMode", "restoreVerified", "backupBounded", "backupMaxEntries",
+        "backupMaxBytes", "journalSchema", "journalId", "journalClosed",
+    }
+)
 _APPLY_MANAGED_OUTPUT_KEYS = frozenset(
     {
         "root", "kindRoot", "targetRoot", "rootExistsBefore", "rootExistsAfter",
@@ -164,11 +231,13 @@ _CAPABILITY_KEYS = frozenset(
     {
         "packageId", "packageVersion", "packageAuthor", "packageArchiveSha256",
         "packageTreeSha256", "packageFileCount", "packageRootIdentityDigest",
-        "callbackAssemblyName", "callbackAssemblyVersion", "callbackAssemblyPublicKeyToken",
-        "callbackAssemblySha256", "sdkCallbackAssemblyName", "sdkCallbackAssemblyVersion",
-        "sdkCallbackAssemblyPublicKeyToken", "sdkCallbackAssemblySha256", "callbackType",
-        "callbackSignature", "registeredHookType", "registeredHookCount",
-        "callbackRosterCount", "callbackRosterDigest", "capabilityDigest",
+        "profileId", "callbackAssemblyName", "callbackAssemblyVersion",
+        "callbackAssemblyPublicKeyToken", "callbackAssemblySha256",
+        "sdkCallbackAssemblyName", "sdkCallbackAssemblyVersion",
+        "sdkCallbackAssemblyPublicKeyToken", "sdkCallbackAssemblySha256",
+        "callbackType", "callbackSignature", "registeredHookType",
+        "registeredHookCount", "callbackRosterCount", "callbackRosterDigest",
+        "callbackAssemblySetCount", "callbackAssemblySetDigest", "capabilityDigest",
     }
 )
 _BEHAVIOR_EVIDENCE_KEYS = frozenset(
@@ -235,6 +304,7 @@ _ALLOWED_EXCLUSION_REASONS = {
 }
 _PARAMETER_TYPES = {"Bool", "Int", "Float"}
 _CACHE_JOURNAL_ID = re.compile(r"^parameter-bit-packing-[0-9a-f]{32}$")
+_AUXILIARY_JOURNAL_ID = re.compile(r"^parameter-auxiliary-generated-[0-9a-f]{32}$")
 
 
 class ParameterBitPackingError(ValueError):
@@ -321,6 +391,7 @@ def bind_authoritative_preview(
 
     capability = _capability(result.get("capability"))
     generated = _generated_before(result.get("generated"))
+    auxiliary = _auxiliary_before(result.get("auxiliaryGenerated"))
     preferences = _preferences(result.get("preferences"))
     platform = _platform_proof(result.get("platformProof"))
     output = _output_preview(result.get("output"), requested_clone)
@@ -370,6 +441,20 @@ def bind_authoritative_preview(
             "expectedGeneratedEntryCountBefore": generated["entryCountBefore"],
             "expectedGeneratedContentDigestBefore": generated["contentDigestBefore"],
             "expectedGeneratedByteCountBefore": generated["byteCountBefore"],
+            "expectedAuxiliaryPackageRootIdentityDigest": auxiliary[
+                "packageRootIdentityDigestBefore"
+            ],
+            "expectedAuxiliaryPackageManifestDigest": auxiliary[
+                "packageManifestDigestBefore"
+            ],
+            "expectedAuxiliaryPackageManifestIdentityDigest": auxiliary[
+                "packageManifestIdentityDigestBefore"
+            ],
+            "expectedAuxiliaryRootExistsBefore": auxiliary["rootExistsBefore"],
+            "expectedAuxiliaryTreeDigestBefore": auxiliary["treeDigestBefore"],
+            "expectedAuxiliaryContentDigestBefore": auxiliary["contentDigestBefore"],
+            "expectedAuxiliaryEntryCountBefore": auxiliary["entryCountBefore"],
+            "expectedAuxiliaryByteCountBefore": auxiliary["byteCountBefore"],
             "expectedPreferenceDigest": preferences["receiptDigest"],
             "expectedProtectedTreeDigestBefore": generated["protectedTreeDigestBefore"],
             "expectedProtectedEntryCountBefore": generated["protectedEntryCountBefore"],
@@ -388,6 +473,7 @@ def bind_authoritative_preview(
         "source": source,
         "capability": capability,
         "generated": generated,
+        "auxiliaryGenerated": auxiliary,
         "preferences": preferences,
         "platformProof": platform,
         "output": output,
@@ -675,6 +761,8 @@ def validate_apply_result(
     if not _CACHE_JOURNAL_ID.fullmatch(journal_id) or generated.get("journalClosed") is not True:
         raise ParameterBitPackingError("Parameter bit-packing cache journal is not durably closed.")
 
+    _validate_auxiliary_apply(args, result.get("auxiliaryGenerated"))
+
     managed = _exact_dict(
         result.get("managedOutput"),
         "managedOutput",
@@ -825,11 +913,158 @@ def validate_apply_result(
     return deepcopy(result)
 
 
+def _validate_auxiliary_apply(args: dict[str, Any], value: Any) -> None:
+    auxiliary = _exact_dict(value, "auxiliaryGenerated", _APPLY_AUXILIARY_KEYS)
+    if auxiliary.get("root") != AUXILIARY_GENERATED_ROOT:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary generated root is invalid.")
+    if auxiliary.get("packageRoot") != AUXILIARY_PACKAGE_ROOT:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary package root is invalid.")
+
+    expected_parent = _hex(
+        args.get("expectedAuxiliaryPackageRootIdentityDigest"),
+        "expectedAuxiliaryPackageRootIdentityDigest",
+    )
+    expected_manifest = _hex(
+        args.get("expectedAuxiliaryPackageManifestDigest"),
+        "expectedAuxiliaryPackageManifestDigest",
+    )
+    expected_manifest_identity = _hex(
+        args.get("expectedAuxiliaryPackageManifestIdentityDigest"),
+        "expectedAuxiliaryPackageManifestIdentityDigest",
+    )
+    for key, expected in (
+        ("packageRootIdentityDigestBefore", expected_parent),
+        ("packageRootIdentityDigestAfter", expected_parent),
+        ("packageManifestDigestBefore", expected_manifest),
+        ("packageManifestDigestAfter", expected_manifest),
+        ("packageManifestIdentityDigestBefore", expected_manifest_identity),
+        ("packageManifestIdentityDigestAfter", expected_manifest_identity),
+    ):
+        if _hex(auxiliary.get(key), f"auxiliary {key}") != expected:
+            raise ParameterBitPackingError(
+                "Parameter bit-packing auxiliary package identity changed."
+            )
+
+    expected_exists = args.get("expectedAuxiliaryRootExistsBefore")
+    if type(expected_exists) is not bool:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary approval state is invalid.")
+    if (
+        auxiliary.get("rootExistsBefore") is not expected_exists
+        or auxiliary.get("rootExistsAfter") is not expected_exists
+    ):
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary root was not restored.")
+
+    expected_tree = _hex(
+        args.get("expectedAuxiliaryTreeDigestBefore"), "expectedAuxiliaryTreeDigestBefore"
+    )
+    expected_content = _hex(
+        args.get("expectedAuxiliaryContentDigestBefore"),
+        "expectedAuxiliaryContentDigestBefore",
+    )
+    expected_count = _strict_int(
+        args.get("expectedAuxiliaryEntryCountBefore"),
+        "expectedAuxiliaryEntryCountBefore",
+        0,
+        CACHE_BACKUP_MAX_ENTRIES,
+    )
+    expected_bytes = _strict_int(
+        args.get("expectedAuxiliaryByteCountBefore"),
+        "expectedAuxiliaryByteCountBefore",
+        0,
+        CACHE_BACKUP_MAX_BYTES,
+    )
+    if _hex(auxiliary.get("treeDigestBefore"), "auxiliary treeDigestBefore") != expected_tree:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary tree changed before apply.")
+    tree_after = _hex(auxiliary.get("treeDigestAfter"), "auxiliary treeDigestAfter")
+    content_before = _hex(auxiliary.get("contentDigestBefore"), "auxiliary contentDigestBefore")
+    content_after = _hex(auxiliary.get("contentDigestAfter"), "auxiliary contentDigestAfter")
+    count_before = _strict_int(
+        auxiliary.get("entryCountBefore"), "auxiliary entryCountBefore", 0, CACHE_BACKUP_MAX_ENTRIES
+    )
+    count_after = _strict_int(
+        auxiliary.get("entryCountAfter"), "auxiliary entryCountAfter", 0, CACHE_BACKUP_MAX_ENTRIES
+    )
+    bytes_before = _strict_int(
+        auxiliary.get("byteCountBefore"), "auxiliary byteCountBefore", 0, CACHE_BACKUP_MAX_BYTES
+    )
+    bytes_after = _strict_int(
+        auxiliary.get("byteCountAfter"), "auxiliary byteCountAfter", 0, CACHE_BACKUP_MAX_BYTES
+    )
+    if (
+        content_before != expected_content
+        or content_after != expected_content
+        or count_before != expected_count
+        or count_after != expected_count
+        or bytes_before != expected_bytes
+        or bytes_after != expected_bytes
+        or (not expected_exists and tree_after != expected_tree)
+    ):
+        raise ParameterBitPackingError(
+            "Parameter bit-packing auxiliary root bytes were not restored exactly."
+        )
+
+    observed_exists = auxiliary.get("observedRootExists")
+    if type(observed_exists) is not bool:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary observation is invalid.")
+    _hex(auxiliary.get("observedTreeDigest"), "auxiliary observedTreeDigest")
+    _hex(auxiliary.get("observedContentDigest"), "auxiliary observedContentDigest")
+    observed_count = _strict_int(
+        auxiliary.get("observedEntryCount"),
+        "auxiliary observedEntryCount",
+        0,
+        CACHE_BACKUP_MAX_ENTRIES,
+    )
+    observed_bytes = _strict_int(
+        auxiliary.get("observedByteCount"),
+        "auxiliary observedByteCount",
+        0,
+        CACHE_BACKUP_MAX_BYTES,
+    )
+    owned_identity = auxiliary.get("ownedRootIdentityDigest")
+    if observed_exists:
+        _hex(owned_identity, "auxiliary ownedRootIdentityDigest")
+        if observed_count < 2 or observed_bytes < 1:
+            raise ParameterBitPackingError("Parameter bit-packing auxiliary observation is incomplete.")
+    elif observed_count != 0 or observed_bytes != 0 or owned_identity != "":
+        raise ParameterBitPackingError("Parameter bit-packing absent auxiliary observation has residue.")
+
+    created = auxiliary.get("createdByOperation")
+    if type(created) is not bool or created is not (not expected_exists and observed_exists):
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary ownership proof is invalid.")
+    expected_mode = (
+        "restored_baseline"
+        if expected_exists
+        else "removed_created_root"
+        if observed_exists
+        else "no_auxiliary_root"
+    )
+    if expected_exists and not observed_exists:
+        raise ParameterBitPackingError("Parameter bit-packing present auxiliary root disappeared.")
+    if auxiliary.get("restorationMode") != expected_mode:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary restoration mode is invalid.")
+    if auxiliary.get("restoreVerified") is not True or auxiliary.get("backupBounded") is not True:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary restoration proof is incomplete.")
+    if auxiliary.get("backupMaxEntries") != CACHE_BACKUP_MAX_ENTRIES:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary entry limit changed.")
+    if auxiliary.get("backupMaxBytes") != CACHE_BACKUP_MAX_BYTES:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary byte limit changed.")
+    if auxiliary.get("journalSchema") != AUXILIARY_JOURNAL_SCHEMA:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary journal schema changed.")
+    journal_id = _bounded_string(auxiliary.get("journalId"), "auxiliary journalId", 62, 62)
+    if not _AUXILIARY_JOURNAL_ID.fullmatch(journal_id) or auxiliary.get("journalClosed") is not True:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary journal is not durably closed.")
+
+
 def compute_preview_digest(payload: dict[str, Any]) -> str:
     value = payload if isinstance(payload, dict) else {}
     source = value.get("source") if isinstance(value.get("source"), dict) else {}
     capability = value.get("capability") if isinstance(value.get("capability"), dict) else {}
     generated = value.get("generated") if isinstance(value.get("generated"), dict) else {}
+    auxiliary = (
+        value.get("auxiliaryGenerated")
+        if isinstance(value.get("auxiliaryGenerated"), dict)
+        else {}
+    )
     preferences = value.get("preferences") if isinstance(value.get("preferences"), dict) else {}
     platform = value.get("platformProof") if isinstance(value.get("platformProof"), dict) else {}
     output = value.get("output") if isinstance(value.get("output"), dict) else {}
@@ -877,6 +1112,20 @@ def compute_preview_digest(payload: dict[str, Any]) -> str:
         generated.get("protectedEntryCountBefore"),
         generated.get("rootIdentityDigestBefore"),
         generated.get("rootIdentityCountBefore"),
+        auxiliary.get("root"),
+        auxiliary.get("packageRoot"),
+        auxiliary.get("packageRootIdentityDigestBefore"),
+        auxiliary.get("packageManifestDigestBefore"),
+        auxiliary.get("packageManifestIdentityDigestBefore"),
+        auxiliary.get("rootExistsBefore"),
+        auxiliary.get("treeDigestBefore"),
+        auxiliary.get("contentDigestBefore"),
+        auxiliary.get("entryCountBefore"),
+        auxiliary.get("byteCountBefore"),
+        auxiliary.get("backupMaxEntries"),
+        auxiliary.get("backupMaxBytes"),
+        auxiliary.get("journalSchema"),
+        auxiliary.get("reparseFree"),
         preferences.get("receiptDigest"),
         platform.get("buildTarget"),
         platform.get("scope"),
@@ -910,6 +1159,11 @@ def compute_apply_receipt_digest(payload: dict[str, Any]) -> str:
     platform = value.get("platformProof") if isinstance(value.get("platformProof"), dict) else {}
     behavior = value.get("behaviorProof") if isinstance(value.get("behaviorProof"), dict) else {}
     generated = value.get("generated") if isinstance(value.get("generated"), dict) else {}
+    auxiliary = (
+        value.get("auxiliaryGenerated")
+        if isinstance(value.get("auxiliaryGenerated"), dict)
+        else {}
+    )
     managed = value.get("managedOutput") if isinstance(value.get("managedOutput"), dict) else {}
     staged_manifest = managed.get("stagedManifest") if isinstance(managed.get("stagedManifest"), dict) else {}
     final_manifest = managed.get("finalManifest") if isinstance(managed.get("finalManifest"), dict) else {}
@@ -1006,6 +1260,39 @@ def compute_apply_receipt_digest(payload: dict[str, Any]) -> str:
         generated.get("journalSchema"),
         generated.get("journalId"),
         generated.get("journalClosed"),
+        auxiliary.get("root"),
+        auxiliary.get("packageRoot"),
+        auxiliary.get("packageRootIdentityDigestBefore"),
+        auxiliary.get("packageRootIdentityDigestAfter"),
+        auxiliary.get("packageManifestDigestBefore"),
+        auxiliary.get("packageManifestDigestAfter"),
+        auxiliary.get("packageManifestIdentityDigestBefore"),
+        auxiliary.get("packageManifestIdentityDigestAfter"),
+        auxiliary.get("rootExistsBefore"),
+        auxiliary.get("rootExistsAfter"),
+        auxiliary.get("treeDigestBefore"),
+        auxiliary.get("treeDigestAfter"),
+        auxiliary.get("contentDigestBefore"),
+        auxiliary.get("contentDigestAfter"),
+        auxiliary.get("entryCountBefore"),
+        auxiliary.get("entryCountAfter"),
+        auxiliary.get("byteCountBefore"),
+        auxiliary.get("byteCountAfter"),
+        auxiliary.get("observedRootExists"),
+        auxiliary.get("observedTreeDigest"),
+        auxiliary.get("observedContentDigest"),
+        auxiliary.get("observedEntryCount"),
+        auxiliary.get("observedByteCount"),
+        auxiliary.get("ownedRootIdentityDigest"),
+        auxiliary.get("createdByOperation"),
+        auxiliary.get("restorationMode"),
+        auxiliary.get("restoreVerified"),
+        auxiliary.get("backupBounded"),
+        auxiliary.get("backupMaxEntries"),
+        auxiliary.get("backupMaxBytes"),
+        auxiliary.get("journalSchema"),
+        auxiliary.get("journalId"),
+        auxiliary.get("journalClosed"),
         managed.get("root"),
         managed.get("kindRoot"),
         managed.get("targetRoot"),
@@ -1068,6 +1355,7 @@ def compute_capability_digest(capability: dict[str, Any]) -> str:
         capability.get("packageTreeSha256"),
         capability.get("packageFileCount"),
         capability.get("packageRootIdentityDigest"),
+        capability.get("profileId"),
         capability.get("callbackAssemblyName"),
         capability.get("callbackAssemblyVersion"),
         capability.get("callbackAssemblyPublicKeyToken"),
@@ -1082,9 +1370,11 @@ def compute_capability_digest(capability: dict[str, Any]) -> str:
         capability.get("registeredHookCount"),
         capability.get("callbackRosterCount"),
         capability.get("callbackRosterDigest"),
+        capability.get("callbackAssemblySetCount"),
+        capability.get("callbackAssemblySetDigest"),
     ]
     return hashlib.sha256(
-        ("vrcforge.parameter_capability.v1\n" + "".join(_frame(item) for item in fields)).encode("utf-8")
+        (CAPABILITY_SCHEMA + "\n" + "".join(_frame(item) for item in fields)).encode("utf-8")
     ).hexdigest()
 
 
@@ -1129,6 +1419,13 @@ def _source(value: Any) -> dict[str, Any]:
 
 def _capability(value: Any) -> dict[str, Any]:
     capability = _exact_dict(value, "capability", _CAPABILITY_KEYS)
+    profile_id = capability.get("profileId")
+    if not isinstance(profile_id, str) or profile_id not in _CAPABILITY_PROFILES:
+        raise ParameterBitPackingError("Parameter bit-packing capability profileId is not allowlisted.")
+    profile = _CAPABILITY_PROFILES[profile_id]
+    package_root_identity_digest = _hex(
+        capability.get("packageRootIdentityDigest"), "packageRootIdentityDigest"
+    )
     expected = {
         "packageId": PACKAGE_ID,
         "packageVersion": PACKAGE_VERSION,
@@ -1136,10 +1433,12 @@ def _capability(value: Any) -> dict[str, Any]:
         "packageArchiveSha256": PACKAGE_ARCHIVE_SHA256,
         "packageTreeSha256": PACKAGE_TREE_SHA256,
         "packageFileCount": PACKAGE_FILE_COUNT,
+        "packageRootIdentityDigest": package_root_identity_digest,
+        "profileId": profile_id,
         "callbackAssemblyName": CALLBACK_ASSEMBLY_NAME,
         "callbackAssemblyVersion": CALLBACK_ASSEMBLY_VERSION,
         "callbackAssemblyPublicKeyToken": CALLBACK_ASSEMBLY_PUBLIC_KEY_TOKEN,
-        "callbackAssemblySha256": CALLBACK_ASSEMBLY_SHA256,
+        "callbackAssemblySha256": profile["callbackAssemblySha256"],
         "sdkCallbackAssemblyName": SDK_CALLBACK_ASSEMBLY_NAME,
         "sdkCallbackAssemblyVersion": SDK_CALLBACK_ASSEMBLY_VERSION,
         "sdkCallbackAssemblyPublicKeyToken": SDK_CALLBACK_ASSEMBLY_PUBLIC_KEY_TOKEN,
@@ -1148,16 +1447,16 @@ def _capability(value: Any) -> dict[str, Any]:
         "callbackSignature": CALLBACK_SIGNATURE,
         "registeredHookType": REGISTERED_HOOK_TYPE,
         "registeredHookCount": 1,
-        "callbackRosterCount": CALLBACK_ROSTER_COUNT,
-        "callbackRosterDigest": CALLBACK_ROSTER_DIGEST,
+        "callbackRosterCount": profile["callbackRosterCount"],
+        "callbackRosterDigest": profile["callbackRosterDigest"],
+        "callbackAssemblySetCount": profile["callbackAssemblySetCount"],
+        "callbackAssemblySetDigest": profile["callbackAssemblySetDigest"],
     }
     for key, expected_value in expected.items():
-        if capability.get(key) != expected_value:
+        actual_value = capability.get(key)
+        if type(actual_value) is not type(expected_value) or actual_value != expected_value:
             raise ParameterBitPackingError(f"Parameter bit-packing capability {key} is not allowlisted.")
     result = deepcopy(expected)
-    result["packageRootIdentityDigest"] = _hex(
-        capability.get("packageRootIdentityDigest"), "packageRootIdentityDigest"
-    )
     result["capabilityDigest"] = _hex(capability.get("capabilityDigest"), "capabilityDigest")
     digest_input = deepcopy(result)
     digest_input.pop("capabilityDigest")
@@ -1206,6 +1505,70 @@ def _generated_before(value: Any) -> dict[str, Any]:
         "protectedEntryCountBefore": protected_count,
         "rootIdentityDigestBefore": root_identity_digest,
         "rootIdentityCountBefore": root_identity_count,
+    }
+
+
+def _auxiliary_before(value: Any) -> dict[str, Any]:
+    auxiliary = _exact_dict(value, "auxiliaryGenerated", _PREVIEW_AUXILIARY_KEYS)
+    if auxiliary.get("root") != AUXILIARY_GENERATED_ROOT:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary generated root is invalid.")
+    if auxiliary.get("packageRoot") != AUXILIARY_PACKAGE_ROOT:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary package root is invalid.")
+    package_root_identity = _hex(
+        auxiliary.get("packageRootIdentityDigestBefore"),
+        "auxiliary packageRootIdentityDigestBefore",
+    )
+    package_manifest_digest = _hex(
+        auxiliary.get("packageManifestDigestBefore"),
+        "auxiliary packageManifestDigestBefore",
+    )
+    package_manifest_identity = _hex(
+        auxiliary.get("packageManifestIdentityDigestBefore"),
+        "auxiliary packageManifestIdentityDigestBefore",
+    )
+    exists = auxiliary.get("rootExistsBefore")
+    if type(exists) is not bool:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary baseline state is invalid.")
+    tree_digest = _hex(auxiliary.get("treeDigestBefore"), "auxiliary treeDigestBefore")
+    content_digest = _hex(auxiliary.get("contentDigestBefore"), "auxiliary contentDigestBefore")
+    entry_count = _strict_int(
+        auxiliary.get("entryCountBefore"), "auxiliary entryCountBefore", 0, CACHE_BACKUP_MAX_ENTRIES
+    )
+    byte_count = _strict_int(
+        auxiliary.get("byteCountBefore"), "auxiliary byteCountBefore", 0, CACHE_BACKUP_MAX_BYTES
+    )
+    if exists:
+        if entry_count < 2 or byte_count < 1:
+            raise ParameterBitPackingError(
+                "Parameter bit-packing present auxiliary baseline is incomplete."
+            )
+    elif entry_count != 0 or byte_count != 0:
+        raise ParameterBitPackingError(
+            "Parameter bit-packing absent auxiliary baseline has filesystem residue."
+        )
+    if auxiliary.get("backupMaxEntries") != CACHE_BACKUP_MAX_ENTRIES:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary entry limit is invalid.")
+    if auxiliary.get("backupMaxBytes") != CACHE_BACKUP_MAX_BYTES:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary byte limit is invalid.")
+    if auxiliary.get("journalSchema") != AUXILIARY_JOURNAL_SCHEMA:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary journal schema is invalid.")
+    if auxiliary.get("reparseFree") is not True:
+        raise ParameterBitPackingError("Parameter bit-packing auxiliary baseline is not reparse-free.")
+    return {
+        "root": AUXILIARY_GENERATED_ROOT,
+        "packageRoot": AUXILIARY_PACKAGE_ROOT,
+        "packageRootIdentityDigestBefore": package_root_identity,
+        "packageManifestDigestBefore": package_manifest_digest,
+        "packageManifestIdentityDigestBefore": package_manifest_identity,
+        "rootExistsBefore": exists,
+        "treeDigestBefore": tree_digest,
+        "contentDigestBefore": content_digest,
+        "entryCountBefore": entry_count,
+        "byteCountBefore": byte_count,
+        "backupMaxEntries": CACHE_BACKUP_MAX_ENTRIES,
+        "backupMaxBytes": CACHE_BACKUP_MAX_BYTES,
+        "journalSchema": AUXILIARY_JOURNAL_SCHEMA,
+        "reparseFree": True,
     }
 
 

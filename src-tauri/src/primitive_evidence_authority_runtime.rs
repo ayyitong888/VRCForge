@@ -1,6 +1,21 @@
-use crate::primitive_evidence_authority_ledger::compute_recovery_bundle_digest;
+use crate::primitive_basis_protected_evidence_bundle::{
+    DurableBinaryLedgerTerminal, ProtectedEvidenceBundleProducer, ProtectedEvidenceBundleSigner,
+    ServiceOwnedVerifiedRuntimeResult, VerifiedAuthorityResultProjection,
+};
+#[cfg(windows)]
+use crate::primitive_evidence_authority_ledger::TicketBurnReason;
+use crate::primitive_evidence_authority_ledger::{
+    compute_recovery_bundle_digest, DurableProjectionCommitReceipt, DurableVerifiedResult,
+    LedgerIdentity, RecoveredBurnProof,
+};
+#[cfg(windows)]
+use crate::primitive_evidence_authority_supervisor::native_windows::{
+    NativeAdmissionBinding, NativeBurnedRunProof, NativeCompletedRunProof,
+    ValidatedNativeTerminalRun,
+};
 use crate::primitive_evidence_authority_supervisor::{
-    derive_run_binding_digest, ArmedRecoveryReceipt, BurnReason, BurnedRunProof, CompletedRunProof,
+    derive_run_binding_digest, prepared_protected_evidence_policy_readback, ArmedRecoveryReceipt,
+    BurnReason, BurnedRunProof, CompletedRunProof, PreparedProtectedEvidencePolicyReadback,
     PreparedRecoveryReceipt, PreparedRun, VerifiedReadinessProof,
 };
 use sha2::{Digest, Sha256};
@@ -10,16 +25,24 @@ const BLOCKER_RUNTIME_STARTUP: &str = "authority_runtime_startup_failed";
 const BLOCKER_RUNTIME_INTEGRITY: &str = "authority_runtime_integrity_failed";
 const BLOCKER_SUPERVISOR_NOT_CONNECTED: &str = "authority_supervisor_not_connected";
 const BLOCKER_SUPERVISOR_UNAVAILABLE: &str = "authority_supervisor_unavailable";
-const MAX_EXACT_RESULT_BYTES: usize = 64 * 1024;
+const BLOCKER_PROJECTION_NOT_CONNECTED: &str = "authority_projection_not_connected";
+const MAX_RAW_FINALIZATION_BYTES: usize = 64 * 1024;
 const RUNTIME_IDENTITY_DOMAIN: &[u8] = b"vrcforge-authority-runtime-identity-v1\0";
 const RUNTIME_TICKET_DOMAIN: &[u8] = b"vrcforge-authority-runtime-ticket-v1\0";
 const SUPERVISOR_NOT_CONNECTED_CODE: &str = "fixed_model_part_supervisor_not_connected";
+const PROJECTION_NOT_CONNECTED_CODE: &str = "protected_projection_producer_not_connected";
+const CANCEL_ACKNOWLEDGEMENT_UNCERTAIN_CODE: &str = "authority_cancel_acknowledgement_uncertain";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorityRuntimeError(&'static str);
 
 impl AuthorityRuntimeError {
     fn new(code: &'static str) -> Self {
+        Self(code)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_contract_test(code: &'static str) -> Self {
         Self(code)
     }
 
@@ -168,6 +191,17 @@ impl RuntimeTicketRef {
 
     pub fn digest(&self) -> [u8; 32] {
         self.digest
+    }
+
+    /// Verifies that this opaque ticket was derived for the exact runtime
+    /// identity and request. Callers cannot manufacture or recover the ticket
+    /// preimage from a persisted digest.
+    pub(crate) fn matches_request(
+        &self,
+        identity: &AuthorityRuntimeIdentity,
+        request_id: &str,
+    ) -> bool {
+        *self == Self::for_request(identity, request_id)
     }
 }
 
@@ -330,8 +364,155 @@ impl RuntimeRecoveryContext {
 pub enum RuntimeTicketState {
     Issued,
     Consumed,
+    ResultPendingProjection,
     Result,
     Burned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimePendingVerifiedResult {
+    ticket: RuntimeTicketRef,
+    run_binding_digest: [u8; 32],
+    result: ServiceOwnedVerifiedRuntimeResult,
+    prepared_receipt: Vec<u8>,
+    canonical_policy_snapshot: Vec<u8>,
+    recovery_bundle_digest: [u8; 32],
+    armed_receipt: Vec<u8>,
+    result_committed: bool,
+    projection: Option<VerifiedAuthorityResultProjection>,
+}
+
+impl RuntimePendingVerifiedResult {
+    pub(crate) fn new(
+        ticket: RuntimeTicketRef,
+        run_binding_digest: [u8; 32],
+        result: ServiceOwnedVerifiedRuntimeResult,
+        prepared_receipt: Vec<u8>,
+        canonical_policy_snapshot: Vec<u8>,
+        recovery_bundle_digest: [u8; 32],
+        armed_receipt: Vec<u8>,
+        result_committed: bool,
+        projection: Option<VerifiedAuthorityResultProjection>,
+    ) -> Result<Self, RuntimeDependencyError> {
+        if ticket.digest() != *result.ticket_digest()
+            || run_binding_digest != *result.run_binding_digest()
+            || Sha256::digest(&prepared_receipt)[..] != *result.prepared_receipt_digest()
+            || Sha256::digest(&canonical_policy_snapshot)[..] != *result.policy_snapshot_digest()
+            || recovery_bundle_digest != *result.recovery_bundle_digest()
+            || Sha256::digest(&armed_receipt)[..] != *result.armed_receipt_digest()
+            || projection.is_some() && !result_committed
+        {
+            return Err(RuntimeDependencyError::new(
+                "pending_verified_result_binding_mismatch",
+            ));
+        }
+        Ok(Self {
+            ticket,
+            run_binding_digest,
+            result,
+            prepared_receipt,
+            canonical_policy_snapshot,
+            recovery_bundle_digest,
+            armed_receipt,
+            result_committed,
+            projection,
+        })
+    }
+
+    pub(crate) fn from_durable(
+        ticket: RuntimeTicketRef,
+        record: &DurableVerifiedResult,
+        prepared_receipt: &[u8],
+        canonical_policy_snapshot: &[u8],
+        recovery_bundle_digest: &[u8; 32],
+        armed_receipt: &[u8],
+        result_committed: bool,
+        projection: Option<VerifiedAuthorityResultProjection>,
+    ) -> Result<Self, RuntimeDependencyError> {
+        let result = ServiceOwnedVerifiedRuntimeResult::from_verified_terminal(
+            record.finalization_bytes().to_vec(),
+            record.origin_envelope_bytes().to_vec(),
+            *record.ticket_digest(),
+            *record.run_binding_digest(),
+            *record.cleanup_digest(),
+            *record.prepared_receipt_digest(),
+            *record.armed_receipt_digest(),
+            *record.policy_snapshot_digest(),
+            *record.recovery_bundle_digest(),
+        )
+        .map_err(|error| RuntimeDependencyError::new(error.code()))?;
+        if result.finalization_digest() != record.finalization_digest()
+            || result.origin_envelope_digest() != record.origin_envelope_digest()
+        {
+            return Err(RuntimeDependencyError::new(
+                "pending_verified_result_digest_mismatch",
+            ));
+        }
+        Self::new(
+            ticket,
+            *record.run_binding_digest(),
+            result,
+            prepared_receipt.to_vec(),
+            canonical_policy_snapshot.to_vec(),
+            *recovery_bundle_digest,
+            armed_receipt.to_vec(),
+            result_committed,
+            projection,
+        )
+    }
+
+    pub(crate) fn durable_record(&self) -> Result<DurableVerifiedResult, RuntimeDependencyError> {
+        DurableVerifiedResult::new(
+            self.result.finalization_bytes().to_vec(),
+            self.result.origin_envelope_bytes().to_vec(),
+            self.ticket.digest(),
+            self.run_binding_digest,
+            *self.result.finalization_digest(),
+            *self.result.origin_envelope_digest(),
+            *self.result.cleanup_digest(),
+            *self.result.prepared_receipt_digest(),
+            *self.result.armed_receipt_digest(),
+            *self.result.policy_snapshot_digest(),
+            *self.result.recovery_bundle_digest(),
+        )
+        .map_err(|error| RuntimeDependencyError::new(error.code()))
+    }
+
+    pub fn ticket(&self) -> &RuntimeTicketRef {
+        &self.ticket
+    }
+
+    pub fn run_binding_digest(&self) -> &[u8; 32] {
+        &self.run_binding_digest
+    }
+
+    pub(crate) fn result(&self) -> &ServiceOwnedVerifiedRuntimeResult {
+        &self.result
+    }
+
+    pub(crate) fn prepared_receipt(&self) -> &[u8] {
+        &self.prepared_receipt
+    }
+
+    pub(crate) fn canonical_policy_snapshot(&self) -> &[u8] {
+        &self.canonical_policy_snapshot
+    }
+
+    pub(crate) fn recovery_bundle_digest(&self) -> &[u8; 32] {
+        &self.recovery_bundle_digest
+    }
+
+    pub(crate) fn armed_receipt(&self) -> &[u8] {
+        &self.armed_receipt
+    }
+
+    pub fn result_committed(&self) -> bool {
+        self.result_committed
+    }
+
+    pub fn projection(&self) -> Option<&VerifiedAuthorityResultProjection> {
+        self.projection.as_ref()
+    }
 }
 
 pub trait InstalledBoundaryVerifier: Send {
@@ -386,10 +567,82 @@ pub trait RuntimeTicketLedger: Send {
         result_bytes: &[u8],
     ) -> Result<(), RuntimeDependencyError>;
 
+    fn record_verified_result_pending_exact(
+        &mut self,
+        _ticket: &RuntimeTicketRef,
+        _run_binding_digest: &[u8; 32],
+        _result: &ServiceOwnedVerifiedRuntimeResult,
+    ) -> Result<(), RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(
+            "verified_result_pending_ledger_not_connected",
+        ))
+    }
+
+    fn pending_verified_results(
+        &mut self,
+    ) -> Result<Vec<RuntimePendingVerifiedResult>, RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(
+            "verified_result_pending_ledger_not_connected",
+        ))
+    }
+
     fn result_exact(
         &mut self,
         ticket: &RuntimeTicketRef,
     ) -> Result<Option<Vec<u8>>, RuntimeDependencyError>;
+
+    fn reopen_result_commit_terminal(
+        &mut self,
+        _ticket: &RuntimeTicketRef,
+        _run_binding_digest: &[u8; 32],
+        _result: &ServiceOwnedVerifiedRuntimeResult,
+    ) -> Result<DurableBinaryLedgerTerminal, RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(
+            "protected_binary_terminal_readback_not_connected",
+        ))
+    }
+
+    fn record_projection_pending_exact(
+        &mut self,
+        _ticket: &RuntimeTicketRef,
+        _run_binding_digest: &[u8; 32],
+        _projection: &VerifiedAuthorityResultProjection,
+    ) -> Result<(), RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(
+            "protected_projection_ledger_not_connected",
+        ))
+    }
+
+    fn commit_projection_exact(
+        &mut self,
+        _ticket: &RuntimeTicketRef,
+        _run_binding_digest: &[u8; 32],
+        _projection_digest: &[u8; 32],
+    ) -> Result<(), RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(
+            "protected_projection_ledger_not_connected",
+        ))
+    }
+
+    fn projection_exact(
+        &mut self,
+        _ticket: &RuntimeTicketRef,
+    ) -> Result<Option<VerifiedAuthorityResultProjection>, RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(
+            "protected_projection_ledger_not_connected",
+        ))
+    }
+
+    fn projection_commit_receipt_exact(
+        &mut self,
+        _ticket: &RuntimeTicketRef,
+        _run_binding_digest: &[u8; 32],
+        _projection: &VerifiedAuthorityResultProjection,
+    ) -> Result<Option<DurableProjectionCommitReceipt>, RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(
+            "protected_projection_receipt_not_connected",
+        ))
+    }
 
     fn burn(
         &mut self,
@@ -404,10 +657,119 @@ pub trait RuntimeTicketLedger: Send {
         run_binding_digest: &[u8; 32],
     ) -> Result<(), RuntimeDependencyError>;
 
+    fn burn_recovered_with_reason(
+        &mut self,
+        _ticket: &RuntimeTicketRef,
+        _run_binding_digest: &[u8; 32],
+        _reason: RuntimeTerminalKind,
+        _proof: &RecoveredBurnProof,
+    ) -> Result<(), RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(
+            "recovered_terminal_reason_ledger_not_connected",
+        ))
+    }
+
     fn terminal_reason(
         &mut self,
         ticket: &RuntimeTicketRef,
     ) -> Result<Option<RuntimeTerminalKind>, RuntimeDependencyError>;
+}
+
+pub trait ProtectedEvidenceProjectionProducer: Send {
+    fn verify_runtime_identity(
+        &mut self,
+        identity: &AuthorityRuntimeIdentity,
+    ) -> Result<(), RuntimeDependencyError>;
+
+    fn produce_projection(
+        &mut self,
+        policy: &PreparedProtectedEvidencePolicyReadback,
+        result: &ServiceOwnedVerifiedRuntimeResult,
+        terminal: &DurableBinaryLedgerTerminal,
+    ) -> Result<VerifiedAuthorityResultProjection, RuntimeDependencyError>;
+
+    fn verify_projection(
+        &mut self,
+        policy: &PreparedProtectedEvidencePolicyReadback,
+        result: &ServiceOwnedVerifiedRuntimeResult,
+        terminal: &DurableBinaryLedgerTerminal,
+        projection: &VerifiedAuthorityResultProjection,
+    ) -> Result<(), RuntimeDependencyError>;
+}
+
+impl<S: ProtectedEvidenceBundleSigner> ProtectedEvidenceProjectionProducer
+    for ProtectedEvidenceBundleProducer<S>
+{
+    fn verify_runtime_identity(
+        &mut self,
+        identity: &AuthorityRuntimeIdentity,
+    ) -> Result<(), RuntimeDependencyError> {
+        if self.matches_runtime_identity(
+            identity.authority_generation_digest(),
+            identity.signer_key_id(),
+            identity.protected_manifest_digest(),
+            identity.installed_layout_digest(),
+            identity.service_binary_digest(),
+        ) {
+            Ok(())
+        } else {
+            Err(RuntimeDependencyError::new(
+                "protected_projection_identity_mismatch",
+            ))
+        }
+    }
+
+    fn produce_projection(
+        &mut self,
+        policy: &PreparedProtectedEvidencePolicyReadback,
+        result: &ServiceOwnedVerifiedRuntimeResult,
+        terminal: &DurableBinaryLedgerTerminal,
+    ) -> Result<VerifiedAuthorityResultProjection, RuntimeDependencyError> {
+        self.produce(policy.source(), result, terminal)
+            .map_err(|error| RuntimeDependencyError::new(error.code()))
+    }
+
+    fn verify_projection(
+        &mut self,
+        policy: &PreparedProtectedEvidencePolicyReadback,
+        result: &ServiceOwnedVerifiedRuntimeResult,
+        terminal: &DurableBinaryLedgerTerminal,
+        projection: &VerifiedAuthorityResultProjection,
+    ) -> Result<(), RuntimeDependencyError> {
+        self.verify_existing_projection(policy.source(), result, terminal, projection)
+            .map_err(|error| RuntimeDependencyError::new(error.code()))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct DisconnectedProtectedEvidenceProjectionProducer;
+
+impl ProtectedEvidenceProjectionProducer for DisconnectedProtectedEvidenceProjectionProducer {
+    fn verify_runtime_identity(
+        &mut self,
+        _identity: &AuthorityRuntimeIdentity,
+    ) -> Result<(), RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(PROJECTION_NOT_CONNECTED_CODE))
+    }
+
+    fn produce_projection(
+        &mut self,
+        _policy: &PreparedProtectedEvidencePolicyReadback,
+        _result: &ServiceOwnedVerifiedRuntimeResult,
+        _terminal: &DurableBinaryLedgerTerminal,
+    ) -> Result<VerifiedAuthorityResultProjection, RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(PROJECTION_NOT_CONNECTED_CODE))
+    }
+
+    fn verify_projection(
+        &mut self,
+        _policy: &PreparedProtectedEvidencePolicyReadback,
+        _result: &ServiceOwnedVerifiedRuntimeResult,
+        _terminal: &DurableBinaryLedgerTerminal,
+        _projection: &VerifiedAuthorityResultProjection,
+    ) -> Result<(), RuntimeDependencyError> {
+        Err(RuntimeDependencyError::new(PROJECTION_NOT_CONNECTED_CODE))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,11 +780,38 @@ pub enum RuntimeTerminalKind {
     RestartRecovery,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupervisorCancelAcknowledgement {
+    Recorded(RuntimeTerminalKind),
+    AlreadyRecorded(RuntimeTerminalKind),
+    AlreadyTerminal,
+    Uncertain,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorPoll {
+    Starting,
+    Armed(ArmedRecoveryReceipt),
     Running,
-    Completed(CompletedRunProof),
-    Terminated(BurnedRunProof),
+    #[cfg(windows)]
+    Terminal(ValidatedNativeTerminalRun),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorRecovery {
+    #[cfg(windows)]
+    Completed(NativeCompletedRunProof),
+    #[cfg(windows)]
+    Burned(NativeBurnedRunProof),
+    #[cfg(not(windows))]
+    Burned(BurnedRunProof),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorStart {
+    Starting,
+    Armed(ArmedRecoveryReceipt),
+    Burned(BurnedRunProof),
 }
 
 pub trait FixedModelPartSupervisor: Send {
@@ -459,14 +848,17 @@ pub trait FixedModelPartSupervisor: Send {
         &mut self,
         prepared: PreparedRun,
         context: &RuntimeRunContext,
-    ) -> Result<ArmedRecoveryReceipt, RuntimeDependencyError>;
+    ) -> Result<SupervisorStart, RuntimeDependencyError>;
 
     fn poll(
         &mut self,
         context: &RuntimeRunContext,
     ) -> Result<SupervisorPoll, RuntimeDependencyError>;
 
-    fn cancel(&mut self, context: &RuntimeRunContext) -> Result<(), RuntimeDependencyError>;
+    fn cancel(
+        &mut self,
+        context: &RuntimeRunContext,
+    ) -> Result<SupervisorCancelAcknowledgement, RuntimeDependencyError>;
 
     fn abort_and_wait_cleanup(
         &mut self,
@@ -476,7 +868,11 @@ pub trait FixedModelPartSupervisor: Send {
     fn recover_and_wait_cleanup(
         &mut self,
         context: &RuntimeRecoveryContext,
-    ) -> Result<BurnedRunProof, RuntimeDependencyError>;
+    ) -> Result<SupervisorRecovery, RuntimeDependencyError>;
+
+    fn shutdown_and_wait(&mut self) -> Result<(), RuntimeDependencyError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -517,7 +913,7 @@ impl FixedModelPartSupervisor for DisconnectedModelPartSupervisor {
         &mut self,
         _prepared: PreparedRun,
         _context: &RuntimeRunContext,
-    ) -> Result<ArmedRecoveryReceipt, RuntimeDependencyError> {
+    ) -> Result<SupervisorStart, RuntimeDependencyError> {
         Err(RuntimeDependencyError::new(
             "fixed_model_part_supervisor_not_connected",
         ))
@@ -532,7 +928,10 @@ impl FixedModelPartSupervisor for DisconnectedModelPartSupervisor {
         ))
     }
 
-    fn cancel(&mut self, _context: &RuntimeRunContext) -> Result<(), RuntimeDependencyError> {
+    fn cancel(
+        &mut self,
+        _context: &RuntimeRunContext,
+    ) -> Result<SupervisorCancelAcknowledgement, RuntimeDependencyError> {
         Err(RuntimeDependencyError::new(
             "fixed_model_part_supervisor_not_connected",
         ))
@@ -550,7 +949,7 @@ impl FixedModelPartSupervisor for DisconnectedModelPartSupervisor {
     fn recover_and_wait_cleanup(
         &mut self,
         _context: &RuntimeRecoveryContext,
-    ) -> Result<BurnedRunProof, RuntimeDependencyError> {
+    ) -> Result<SupervisorRecovery, RuntimeDependencyError> {
         Err(RuntimeDependencyError::new(SUPERVISOR_NOT_CONNECTED_CODE))
     }
 }
@@ -600,7 +999,8 @@ pub enum AuthorityRuntimeReply {
     },
     ResultExact {
         request_id: String,
-        bytes: Vec<u8>,
+        projection: VerifiedAuthorityResultProjection,
+        receipt: DurableProjectionCommitReceipt,
     },
     ResultTerminated {
         request_id: String,
@@ -622,6 +1022,7 @@ struct RuntimeInner {
     boundary: Box<dyn InstalledBoundaryVerifier>,
     ledger: Box<dyn RuntimeTicketLedger>,
     supervisor: Box<dyn FixedModelPartSupervisor>,
+    projection_producer: Box<dyn ProtectedEvidenceProjectionProducer>,
     identity: Option<AuthorityRuntimeIdentity>,
     active: Option<ActiveRun>,
     startup_burned_tickets: usize,
@@ -635,10 +1036,31 @@ impl AuthorityRuntime {
         L: RuntimeTicketLedger + 'static,
         S: FixedModelPartSupervisor + 'static,
     {
+        Self::start_with_projection_producer(
+            boundary,
+            ledger,
+            supervisor,
+            DisconnectedProtectedEvidenceProjectionProducer,
+        )
+    }
+
+    pub(crate) fn start_with_projection_producer<B, L, S, P>(
+        boundary: B,
+        ledger: L,
+        supervisor: S,
+        projection_producer: P,
+    ) -> Self
+    where
+        B: InstalledBoundaryVerifier + 'static,
+        L: RuntimeTicketLedger + 'static,
+        S: FixedModelPartSupervisor + 'static,
+        P: ProtectedEvidenceProjectionProducer + 'static,
+    {
         let mut inner = RuntimeInner {
             boundary: Box::new(boundary),
             ledger: Box::new(ledger),
             supervisor: Box::new(supervisor),
+            projection_producer: Box::new(projection_producer),
             identity: None,
             active: None,
             startup_burned_tickets: 0,
@@ -673,6 +1095,17 @@ impl AuthorityRuntime {
             .lock()
             .map_err(|_| AuthorityRuntimeError::new("authority_runtime_lock_failed"))
     }
+
+    pub(crate) fn shutdown_and_wait(&self) -> Result<(), AuthorityRuntimeError> {
+        let mut inner = self.lock()?;
+        if inner.supervisor.shutdown_and_wait().is_err() {
+            inner.latch_global(BLOCKER_RUNTIME_INTEGRITY);
+            return Err(AuthorityRuntimeError::new(
+                "authority_runtime_shutdown_failed",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl RuntimeInner {
@@ -689,6 +1122,15 @@ impl RuntimeInner {
             return;
         }
         if self.supervisor.contain_all_orphans(&identity).is_err() {
+            self.latch_global(BLOCKER_RUNTIME_INTEGRITY);
+            return;
+        }
+        // Recovery may need to finish an already sealed successful run and
+        // project its exact result. Keep the verified identity available to
+        // that commit path, while readiness remains blocked until the entire
+        // startup recovery pass succeeds.
+        self.identity = Some(identity.clone());
+        if self.recover_pending_verified_results(&identity).is_err() {
             self.latch_global(BLOCKER_RUNTIME_INTEGRITY);
             return;
         }
@@ -748,28 +1190,74 @@ impl RuntimeInner {
                 canonical_policy_snapshot: active.canonical_policy_snapshot().to_vec(),
                 armed_receipt,
             };
-            let proof = match self.supervisor.recover_and_wait_cleanup(&recovery) {
-                Ok(proof)
+            match self.supervisor.recover_and_wait_cleanup(&recovery) {
+                #[cfg(windows)]
+                Ok(SupervisorRecovery::Completed(completed)) => {
+                    let context = run_context_from_recovery(&recovery);
+                    if !completed_proof_matches_context(completed.terminal(), &context)
+                        || !native_admission_matches_context(completed.admission(), &context)
+                        || self.commit_native_completed(&context, completed).is_err()
+                    {
+                        recovery_failed = true;
+                    }
+                }
+                #[cfg(windows)]
+                Ok(SupervisorRecovery::Burned(proof)) => {
+                    let terminal = proof.terminal();
+                    let committed = match terminal.reason() {
+                        BurnReason::RestartRecovery
+                            if proof.normal_termination_recovery().is_none()
+                                && burned_proof_matches_recovery(terminal, &recovery)
+                                && terminal.cleanup_observed_at()
+                                    >= terminal.terminal_ready_at() =>
+                        {
+                            self.ledger
+                                .burn_recovered(recovery.ticket(), recovery.run_binding_digest())
+                                .is_ok()
+                        }
+                        BurnReason::Cancelled | BurnReason::TimedOut => {
+                            recovered_normal_burn_proof(&proof, &recovery).is_some_and(
+                                |(reason, recovered_proof)| {
+                                    self.ledger
+                                        .burn_recovered_with_reason(
+                                            recovery.ticket(),
+                                            recovery.run_binding_digest(),
+                                            reason,
+                                            &recovered_proof,
+                                        )
+                                        .is_ok()
+                                },
+                            )
+                        }
+                        _ => false,
+                    };
+                    if committed {
+                        burned += 1;
+                    } else {
+                        recovery_failed = true;
+                    }
+                }
+                #[cfg(not(windows))]
+                Ok(SupervisorRecovery::Burned(proof))
                     if burned_proof_matches_recovery(&proof, &recovery)
                         && proof.reason() == BurnReason::RestartRecovery =>
                 {
-                    proof
+                    if proof.cleanup_observed_at() < proof.terminal_ready_at()
+                        || self
+                            .ledger
+                            .burn_recovered(recovery.ticket(), recovery.run_binding_digest())
+                            .is_err()
+                    {
+                        recovery_failed = true;
+                        continue;
+                    }
+                    burned += 1;
                 }
-                Ok(_) | Err(_) => {
-                    recovery_failed = true;
-                    continue;
-                }
-            };
-            if proof.cleanup_observed_at() < proof.terminal_ready_at()
-                || self
-                    .ledger
-                    .burn_recovered(recovery.ticket(), recovery.run_binding_digest())
-                    .is_err()
-            {
-                recovery_failed = true;
-                continue;
+                #[cfg(windows)]
+                Err(_) => recovery_failed = true,
+                #[cfg(not(windows))]
+                Ok(_) | Err(_) => recovery_failed = true,
             }
-            burned += 1;
         }
         if recovery_failed {
             self.latch_global(BLOCKER_RUNTIME_INTEGRITY);
@@ -781,6 +1269,195 @@ impl RuntimeInner {
         }
         self.identity = Some(identity);
         self.startup_burned_tickets = burned;
+    }
+
+    fn recover_pending_verified_results(
+        &mut self,
+        identity: &AuthorityRuntimeIdentity,
+    ) -> Result<(), RuntimeDependencyError> {
+        let pending = self.ledger.pending_verified_results()?;
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.projection_producer.verify_runtime_identity(identity)?;
+        for value in pending {
+            self.complete_pending_projection(value, identity)?;
+        }
+        Ok(())
+    }
+
+    fn complete_pending_projection(
+        &mut self,
+        mut pending: RuntimePendingVerifiedResult,
+        identity: &AuthorityRuntimeIdentity,
+    ) -> Result<(), RuntimeDependencyError> {
+        if pending.ticket().digest() != *pending.result().ticket_digest()
+            || pending.run_binding_digest() != pending.result().run_binding_digest()
+        {
+            return Err(RuntimeDependencyError::new(
+                "pending_verified_result_binding_mismatch",
+            ));
+        }
+        let prepared_receipt = PreparedRecoveryReceipt::decode(pending.prepared_receipt())
+            .map_err(|error| RuntimeDependencyError::new(error.code()))?;
+        let armed_receipt = ArmedRecoveryReceipt::decode(pending.armed_receipt())
+            .map_err(|error| RuntimeDependencyError::new(error.code()))?;
+        let policy =
+            prepared_protected_evidence_policy_readback(pending.canonical_policy_snapshot())
+                .map_err(|error| RuntimeDependencyError::new(error.code()))?;
+        let recovery_bundle_digest = compute_recovery_bundle_digest(
+            pending.ticket().as_str(),
+            &hex_encode(pending.run_binding_digest()),
+            pending.prepared_receipt(),
+            pending.canonical_policy_snapshot(),
+        )
+        .map_err(|_| RuntimeDependencyError::new("pending_recovery_bundle_invalid"))?;
+        if prepared_receipt.digest() != *pending.result().prepared_receipt_digest()
+            || !prepared_receipt.verifies_policy_snapshot(pending.canonical_policy_snapshot())
+            || !armed_receipt.verifies_for(&prepared_receipt, pending.run_binding_digest())
+            || recovery_bundle_digest != hex_encode(pending.recovery_bundle_digest())
+            || policy.authority_identity_digest() != &identity.binding_digest()
+            || policy.authority_generation_digest() != identity.authority_generation_digest()
+            || policy.ticket_digest() != &pending.ticket().digest()
+            || policy.run_binding_digest() != pending.run_binding_digest()
+            || policy.prepared_receipt_digest() != pending.result().prepared_receipt_digest()
+            || policy.policy_snapshot_digest() != pending.result().policy_snapshot_digest()
+            || !policy.source().matches_runtime_identity(
+                identity.authority_generation_digest(),
+                identity.protected_manifest_digest(),
+                identity.installed_layout_digest(),
+                identity.service_binary_digest(),
+            )
+        {
+            return Err(RuntimeDependencyError::new(
+                "pending_verified_result_policy_binding_mismatch",
+            ));
+        }
+        if !pending.result_committed() {
+            self.ledger.record_result_exact(
+                pending.ticket(),
+                pending.run_binding_digest(),
+                pending.result().finalization_bytes(),
+            )?;
+            let readback = self.pending_verified_result_exact(pending.ticket())?;
+            if !readback.result_committed()
+                || readback.result() != pending.result()
+                || readback.projection().is_some()
+            {
+                return Err(RuntimeDependencyError::new(
+                    "pending_verified_result_readback_mismatch",
+                ));
+            }
+            pending = readback;
+        }
+        let terminal = self.ledger.reopen_result_commit_terminal(
+            pending.ticket(),
+            pending.run_binding_digest(),
+            pending.result(),
+        )?;
+        let projection = match pending.projection() {
+            Some(projection) => {
+                self.projection_producer.verify_projection(
+                    &policy,
+                    pending.result(),
+                    &terminal,
+                    projection,
+                )?;
+                projection.clone()
+            }
+            None => {
+                let projection = self.projection_producer.produce_projection(
+                    &policy,
+                    pending.result(),
+                    &terminal,
+                )?;
+                self.projection_producer.verify_projection(
+                    &policy,
+                    pending.result(),
+                    &terminal,
+                    &projection,
+                )?;
+                self.ledger.record_projection_pending_exact(
+                    pending.ticket(),
+                    pending.run_binding_digest(),
+                    &projection,
+                )?;
+                let readback = self.pending_verified_result_exact(pending.ticket())?;
+                if !readback.result_committed()
+                    || readback.result() != pending.result()
+                    || readback.projection() != Some(&projection)
+                {
+                    return Err(RuntimeDependencyError::new(
+                        "pending_projection_readback_mismatch",
+                    ));
+                }
+                self.projection_producer.verify_projection(
+                    &policy,
+                    readback.result(),
+                    &terminal,
+                    &projection,
+                )?;
+                projection
+            }
+        };
+        self.ledger.commit_projection_exact(
+            pending.ticket(),
+            pending.run_binding_digest(),
+            projection.sha256(),
+        )?;
+        let readback = self
+            .ledger
+            .projection_exact(pending.ticket())?
+            .filter(|readback| readback == &projection)
+            .ok_or_else(|| RuntimeDependencyError::new("projection_commit_readback_mismatch"))?;
+        let ledger_identity_digest = expected_ledger_identity_digest(identity)?;
+        if readback.authority_generation_digest() != identity.authority_generation_digest()
+            || readback.ledger_identity_digest() != &ledger_identity_digest
+        {
+            return Err(RuntimeDependencyError::new(
+                "projection_commit_identity_mismatch",
+            ));
+        }
+        let receipt = self
+            .ledger
+            .projection_commit_receipt_exact(
+                pending.ticket(),
+                pending.run_binding_digest(),
+                &readback,
+            )?
+            .ok_or_else(|| RuntimeDependencyError::new("projection_commit_receipt_missing"))?;
+        if !receipt.verifies_for(
+            identity.authority_generation_digest(),
+            &ledger_identity_digest,
+            &pending.ticket().digest(),
+            pending.run_binding_digest(),
+            readback.canonical_bytes(),
+        ) {
+            return Err(RuntimeDependencyError::new(
+                "projection_commit_receipt_mismatch",
+            ));
+        }
+        Ok(())
+    }
+
+    fn pending_verified_result_exact(
+        &mut self,
+        ticket: &RuntimeTicketRef,
+    ) -> Result<RuntimePendingVerifiedResult, RuntimeDependencyError> {
+        let mut matches = self
+            .ledger
+            .pending_verified_results()?
+            .into_iter()
+            .filter(|pending| pending.ticket() == ticket);
+        let value = matches
+            .next()
+            .ok_or_else(|| RuntimeDependencyError::new("pending_verified_result_missing"))?;
+        if matches.next().is_some() {
+            return Err(RuntimeDependencyError::new(
+                "pending_verified_result_duplicate",
+            ));
+        }
+        Ok(value)
     }
 
     fn status(&mut self) -> AuthorityRuntimeStatus {
@@ -840,6 +1517,9 @@ impl RuntimeInner {
                 return Err(AuthorityRuntimeError::new(
                     "authority_runtime_integrity_failed",
                 ));
+            }
+            Err(BLOCKER_PROJECTION_NOT_CONNECTED) => {
+                return Err(AuthorityRuntimeError::new("authority_projection_not_ready"));
             }
             Err(_) => return Err(AuthorityRuntimeError::new("authority_supervisor_not_ready")),
         };
@@ -901,29 +1581,42 @@ impl RuntimeInner {
         {
             return self.abort_after_uncertain_supervisor_error(&context, false);
         }
-        let armed_receipt = match self.supervisor.start(prepared, &context) {
-            Ok(receipt)
+        let context = match self.supervisor.start(prepared, &context) {
+            Ok(SupervisorStart::Starting) => context,
+            Ok(SupervisorStart::Armed(receipt))
                 if receipt.verifies_for(&prepared_receipt, context.run_binding_digest()) =>
             {
-                receipt
+                let context = context.with_armed_receipt(receipt.clone());
+                if self
+                    .ledger
+                    .record_armed_receipt(&ticket, context.run_binding_digest(), &receipt.encode())
+                    .is_err()
+                {
+                    return self.abort_after_uncertain_supervisor_error(&context, false);
+                }
+                context
             }
-            Ok(_) => {
-                return self.abort_after_uncertain_supervisor_error(&context, true);
+            Ok(SupervisorStart::Burned(proof)) => {
+                if !burned_proof_matches_context(&proof, &context)
+                    || proof.cleanup_observed_at() < proof.terminal_ready_at()
+                    || self
+                        .ledger
+                        .burn(
+                            context.ticket(),
+                            context.run_binding_digest(),
+                            runtime_terminal_reason(proof.reason()),
+                        )
+                        .is_err()
+                {
+                    return self.fail_ledger_integrity();
+                }
+                return Err(AuthorityRuntimeError::new("authority_run_terminated"));
+            }
+            Ok(SupervisorStart::Armed(_)) => {
+                return self.fail_ledger_integrity();
             }
             Err(_) => return self.abort_after_uncertain_supervisor_error(&context, true),
         };
-        let context = context.with_armed_receipt(armed_receipt.clone());
-        if self
-            .ledger
-            .record_armed_receipt(
-                &ticket,
-                context.run_binding_digest(),
-                &armed_receipt.encode(),
-            )
-            .is_err()
-        {
-            return self.abort_after_uncertain_supervisor_error(&context, false);
-        }
         self.active = Some(ActiveRun {
             request_id: request_id.clone(),
             context,
@@ -959,16 +1652,69 @@ impl RuntimeInner {
                 .as_ref()
                 .map(|active| active.context.clone())
                 .ok_or_else(|| AuthorityRuntimeError::new("authority_runtime_invariant_failed"))?;
-            if self.supervisor.cancel(&context).is_err() {
-                return self.abort_after_uncertain_supervisor_error(&context, true);
-            }
-            if let Some(active) = self.active.as_mut() {
-                active.cancel_requested = true;
-            }
-            return Ok(AuthorityRuntimeReply::CancelRequested {
-                request_id,
-                already_requested: false,
-            });
+            return match self.supervisor.cancel(&context) {
+                Ok(SupervisorCancelAcknowledgement::Recorded(kind))
+                    if matches!(
+                        kind,
+                        RuntimeTerminalKind::Cancelled | RuntimeTerminalKind::TimedOut
+                    ) =>
+                {
+                    if let Some(active) = self.active.as_mut() {
+                        active.cancel_requested = true;
+                    }
+                    Ok(AuthorityRuntimeReply::CancelRequested {
+                        request_id,
+                        already_requested: false,
+                    })
+                }
+                Ok(SupervisorCancelAcknowledgement::AlreadyRecorded(kind))
+                    if matches!(
+                        kind,
+                        RuntimeTerminalKind::Cancelled | RuntimeTerminalKind::TimedOut
+                    ) =>
+                {
+                    if let Some(active) = self.active.as_mut() {
+                        active.cancel_requested = true;
+                    }
+                    Ok(AuthorityRuntimeReply::CancelRequested {
+                        request_id,
+                        already_requested: true,
+                    })
+                }
+                Ok(SupervisorCancelAcknowledgement::AlreadyTerminal) => {
+                    self.refresh_active()?;
+                    if self
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| active.request_id == request_id)
+                    {
+                        return self.fail_ledger_integrity();
+                    }
+                    match self.ledger.state(context.ticket()) {
+                        Ok(Some(RuntimeTicketState::Burned)) => {
+                            Ok(AuthorityRuntimeReply::AlreadyTerminated {
+                                reason: self.persisted_terminal_reason(context.ticket())?,
+                                request_id,
+                            })
+                        }
+                        Ok(Some(
+                            RuntimeTicketState::ResultPendingProjection
+                            | RuntimeTicketState::Result,
+                        )) => Err(AuthorityRuntimeError::new("authority_result_already_final")),
+                        Ok(Some(RuntimeTicketState::Issued | RuntimeTicketState::Consumed))
+                        | Ok(None)
+                        | Err(_) => self.fail_ledger_integrity(),
+                    }
+                }
+                Ok(SupervisorCancelAcknowledgement::Uncertain) => Err(AuthorityRuntimeError::new(
+                    CANCEL_ACKNOWLEDGEMENT_UNCERTAIN_CODE,
+                )),
+                Ok(
+                    SupervisorCancelAcknowledgement::Recorded(_)
+                    | SupervisorCancelAcknowledgement::AlreadyRecorded(_),
+                ) => self.fail_ledger_integrity(),
+                Err(_) => self.abort_after_uncertain_supervisor_error(&context, true),
+            };
         }
 
         let ticket = self.ticket_for_request(&request_id)?;
@@ -977,7 +1723,7 @@ impl RuntimeInner {
                 reason: self.persisted_terminal_reason(&ticket)?,
                 request_id,
             }),
-            Ok(Some(RuntimeTicketState::Result)) => {
+            Ok(Some(RuntimeTicketState::ResultPendingProjection | RuntimeTicketState::Result)) => {
                 Err(AuthorityRuntimeError::new("authority_result_already_final"))
             }
             Ok(Some(RuntimeTicketState::Issued | RuntimeTicketState::Consumed)) => {
@@ -999,16 +1745,56 @@ impl RuntimeInner {
         self.ensure_integrity()?;
         self.refresh_active()?;
         let ticket = self.ticket_for_request(&request_id)?;
+        let identity = match self.identity.clone() {
+            Some(identity) => identity,
+            None => return self.fail_ledger_integrity(),
+        };
+        let ledger_identity_digest = match expected_ledger_identity_digest(&identity) {
+            Ok(digest) => digest,
+            Err(_) => return self.fail_ledger_integrity(),
+        };
         match self.ledger.state(&ticket) {
-            Ok(Some(RuntimeTicketState::Issued | RuntimeTicketState::Consumed)) => {
-                Ok(AuthorityRuntimeReply::ResultPending { request_id })
+            Ok(Some(
+                RuntimeTicketState::Issued
+                | RuntimeTicketState::Consumed
+                | RuntimeTicketState::ResultPendingProjection,
+            )) => Ok(AuthorityRuntimeReply::ResultPending { request_id }),
+            Ok(Some(RuntimeTicketState::Result)) => {
+                let projection = match self.ledger.projection_exact(&ticket) {
+                    Ok(Some(projection))
+                        if projection.authority_generation_digest()
+                            == identity.authority_generation_digest()
+                            && projection.ledger_identity_digest() == &ledger_identity_digest =>
+                    {
+                        projection
+                    }
+                    Ok(None) | Err(_) => return self.fail_ledger_integrity(),
+                    Ok(Some(_)) => return self.fail_ledger_integrity(),
+                };
+                let receipt = match self.ledger.projection_commit_receipt_exact(
+                    &ticket,
+                    projection.run_binding_digest(),
+                    &projection,
+                ) {
+                    Ok(Some(receipt))
+                        if receipt.verifies_for(
+                            identity.authority_generation_digest(),
+                            &ledger_identity_digest,
+                            &ticket.digest(),
+                            projection.run_binding_digest(),
+                            projection.canonical_bytes(),
+                        ) =>
+                    {
+                        receipt
+                    }
+                    Ok(_) | Err(_) => return self.fail_ledger_integrity(),
+                };
+                Ok(AuthorityRuntimeReply::ResultExact {
+                    request_id,
+                    projection,
+                    receipt,
+                })
             }
-            Ok(Some(RuntimeTicketState::Result)) => match self.ledger.result_exact(&ticket) {
-                Ok(Some(bytes)) if !bytes.is_empty() && bytes.len() <= MAX_EXACT_RESULT_BYTES => {
-                    Ok(AuthorityRuntimeReply::ResultExact { request_id, bytes })
-                }
-                Ok(_) | Err(_) => self.fail_ledger_integrity(),
-            },
             Ok(Some(RuntimeTicketState::Burned)) => Ok(AuthorityRuntimeReply::ResultTerminated {
                 reason: self.persisted_terminal_reason(&ticket)?,
                 request_id,
@@ -1057,61 +1843,147 @@ impl RuntimeInner {
             Err(_) => return self.abort_after_uncertain_supervisor_error(&context, true),
         };
         match poll {
-            SupervisorPoll::Running => Ok(()),
-            SupervisorPoll::Completed(completed) => {
-                let computed_result_digest: [u8; 32] =
-                    Sha256::digest(completed.result_bytes()).into();
-                if !completed_proof_matches_context(&completed, &context)
-                    || completed.cleanup_observed_at() < completed.finalized_at()
-                    || completed
-                        .cleanup_receipt_digest()
-                        .iter()
-                        .all(|byte| *byte == 0)
-                    || completed.result_bytes().is_empty()
-                    || completed.result_bytes().len() > MAX_EXACT_RESULT_BYTES
-                    || completed.result_digest() != &computed_result_digest
-                    || self
-                        .ledger
-                        .record_result_exact(
-                            context.ticket(),
-                            context.run_binding_digest(),
-                            completed.result_bytes(),
-                        )
-                        .is_err()
-                {
-                    self.latch_global(BLOCKER_RUNTIME_INTEGRITY);
-                    return Err(AuthorityRuntimeError::new(
-                        "authority_runtime_integrity_failed",
-                    ));
-                }
-                self.active = None;
-                Ok(())
-            }
-            SupervisorPoll::Terminated(terminated) => {
-                if !burned_proof_matches_context(&terminated, &context)
-                    || terminated.cleanup_observed_at() < terminated.terminal_ready_at()
-                    || terminated
-                        .cleanup_receipt_digest()
-                        .iter()
-                        .all(|byte| *byte == 0)
-                {
-                    self.latch_global(BLOCKER_RUNTIME_INTEGRITY);
-                    return Err(AuthorityRuntimeError::new(
-                        "authority_runtime_integrity_failed",
-                    ));
-                }
-                let reason = runtime_terminal_reason(terminated.reason());
+            SupervisorPoll::Starting if context.armed_receipt().is_none() => Ok(()),
+            SupervisorPoll::Armed(receipt)
+                if context.armed_receipt().is_none()
+                    && receipt
+                        .verifies_for(context.prepared_receipt(), context.run_binding_digest()) =>
+            {
                 if self
                     .ledger
-                    .burn(context.ticket(), context.run_binding_digest(), reason)
+                    .record_armed_receipt(
+                        context.ticket(),
+                        context.run_binding_digest(),
+                        &receipt.encode(),
+                    )
                     .is_err()
                 {
-                    return self.fail_ledger_integrity();
+                    return self.abort_after_uncertain_supervisor_error(&context, false);
                 }
-                self.active = None;
+                let armed_context = context.with_armed_receipt(receipt);
+                let Some(active) = self.active.as_mut() else {
+                    return self.fail_ledger_integrity();
+                };
+                active.context = armed_context;
                 Ok(())
             }
+            SupervisorPoll::Running if context.armed_receipt().is_some() => Ok(()),
+            SupervisorPoll::Starting | SupervisorPoll::Armed(_) | SupervisorPoll::Running => {
+                self.fail_ledger_integrity()
+            }
+            #[cfg(windows)]
+            SupervisorPoll::Terminal(ValidatedNativeTerminalRun::Completed(completed)) => {
+                self.commit_native_completed(&context, completed)
+            }
+            #[cfg(windows)]
+            SupervisorPoll::Terminal(ValidatedNativeTerminalRun::Burned(terminated)) => {
+                self.commit_native_burned(&context, terminated)
+            }
         }
+    }
+
+    #[cfg(windows)]
+    fn commit_native_completed(
+        &mut self,
+        context: &RuntimeRunContext,
+        completed: NativeCompletedRunProof,
+    ) -> Result<(), AuthorityRuntimeError> {
+        let terminal_proof = completed.terminal();
+        let computed_result_digest: [u8; 32] = Sha256::digest(completed.result_bytes()).into();
+        let computed_origin_digest: [u8; 32] =
+            Sha256::digest(completed.canonical_origin_envelope_bytes()).into();
+        if !completed_proof_matches_context(terminal_proof, context)
+            || terminal_proof.cleanup_observed_at() < terminal_proof.finalized_at()
+            || completed.origin_sealed_at() <= terminal_proof.cleanup_observed_at()
+            || terminal_proof
+                .cleanup_receipt_digest()
+                .iter()
+                .all(|byte| *byte == 0)
+            || completed.result_bytes().is_empty()
+            || completed.result_bytes().len() > MAX_RAW_FINALIZATION_BYTES
+            || completed.result_digest() != &computed_result_digest
+            || completed.canonical_origin_envelope_digest() != &computed_origin_digest
+            || !native_admission_matches_context(completed.admission(), context)
+        {
+            return self.fail_ledger_integrity();
+        }
+        let identity = match self.identity.clone() {
+            Some(identity) => identity,
+            None => return self.fail_ledger_integrity(),
+        };
+        if self
+            .projection_producer
+            .verify_runtime_identity(&identity)
+            .is_err()
+        {
+            return self.fail_ledger_integrity();
+        }
+        let result = match ServiceOwnedVerifiedRuntimeResult::from_native_completed(&completed) {
+            Ok(result) => result,
+            Err(_) => return self.fail_ledger_integrity(),
+        };
+        if self
+            .ledger
+            .record_verified_result_pending_exact(
+                context.ticket(),
+                context.run_binding_digest(),
+                &result,
+            )
+            .is_err()
+        {
+            return self.fail_ledger_integrity();
+        }
+        let pending = match self.pending_verified_result_exact(context.ticket()) {
+            Ok(pending)
+                if pending.run_binding_digest() == context.run_binding_digest()
+                    && pending.result() == &result
+                    && !pending.result_committed()
+                    && pending.projection().is_none() =>
+            {
+                pending
+            }
+            Ok(_) | Err(_) => return self.fail_ledger_integrity(),
+        };
+        if self
+            .complete_pending_projection(pending, &identity)
+            .is_err()
+        {
+            return self.fail_ledger_integrity();
+        }
+        self.active = None;
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn commit_native_burned(
+        &mut self,
+        context: &RuntimeRunContext,
+        terminated: NativeBurnedRunProof,
+    ) -> Result<(), AuthorityRuntimeError> {
+        let terminal = terminated.terminal();
+        if !burned_proof_matches_context(terminal, context)
+            || terminal.cleanup_observed_at() < terminal.terminal_ready_at()
+            || terminal
+                .cleanup_receipt_digest()
+                .iter()
+                .all(|byte| *byte == 0)
+            || context.armed_receipt().is_some()
+                && !terminated
+                    .admission()
+                    .is_some_and(|admission| native_admission_matches_context(admission, context))
+        {
+            return self.fail_ledger_integrity();
+        }
+        let reason = runtime_terminal_reason(terminal.reason());
+        if self
+            .ledger
+            .burn(context.ticket(), context.run_binding_digest(), reason)
+            .is_err()
+        {
+            return self.fail_ledger_integrity();
+        }
+        self.active = None;
+        Ok(())
     }
 
     fn current_blockers(&mut self, run_self_test: bool) -> Vec<&'static str> {
@@ -1220,6 +2092,15 @@ impl RuntimeInner {
         if !proof.verifies_for(&identity.binding_digest()) {
             return Err(BLOCKER_RUNTIME_INTEGRITY);
         }
+        self.projection_producer
+            .verify_runtime_identity(&identity)
+            .map_err(|error| {
+                if error.code() == PROJECTION_NOT_CONNECTED_CODE {
+                    BLOCKER_PROJECTION_NOT_CONNECTED
+                } else {
+                    BLOCKER_RUNTIME_INTEGRITY
+                }
+            })?;
         Ok(proof)
     }
 
@@ -1260,6 +2141,41 @@ fn runtime_terminal_reason(reason: BurnReason) -> RuntimeTerminalKind {
     }
 }
 
+fn expected_ledger_identity_digest(
+    identity: &AuthorityRuntimeIdentity,
+) -> Result<[u8; 32], RuntimeDependencyError> {
+    LedgerIdentity::from_digests(
+        *identity.authority_generation_digest(),
+        *identity.signer_key_id(),
+    )
+    .map(|identity| identity.canonical_digest())
+    .map_err(|error| RuntimeDependencyError::new(error.code()))
+}
+
+#[cfg(windows)]
+fn native_admission_matches_context(
+    admission: &NativeAdmissionBinding,
+    context: &RuntimeRunContext,
+) -> bool {
+    let Some(armed) = context.armed_receipt() else {
+        return false;
+    };
+    let armed_digest: [u8; 32] = Sha256::digest(armed.encode()).into();
+    let policy_digest: [u8; 32] = Sha256::digest(context.canonical_policy_snapshot()).into();
+    let recovery_digest = compute_recovery_bundle_digest(
+        context.ticket().as_str(),
+        &hex_encode(context.run_binding_digest()),
+        &context.prepared_receipt().encode(),
+        context.canonical_policy_snapshot(),
+    )
+    .ok()
+    .and_then(|value| decode_digest(&value));
+    admission.prepared_receipt_digest() == &context.prepared_receipt().digest()
+        && admission.armed_receipt_digest() == &armed_digest
+        && admission.policy_snapshot_digest() == &policy_digest
+        && recovery_digest.as_ref() == Some(admission.recovery_bundle_digest())
+}
+
 fn ticket_ref_for_identity(
     identity: &AuthorityRuntimeIdentity,
     request_id: &str,
@@ -1294,6 +2210,19 @@ fn run_context(
     }
 }
 
+fn run_context_from_recovery(context: &RuntimeRecoveryContext) -> RuntimeRunContext {
+    RuntimeRunContext {
+        authority_identity_digest: context.authority_identity_digest,
+        ticket: context.ticket.clone(),
+        run_binding_digest: context.run_binding_digest,
+        service_instance_digest: *context.prepared_receipt.service_instance_digest(),
+        runner_policy_digest: *context.prepared_receipt.runner_policy_digest(),
+        prepared_receipt: context.prepared_receipt.clone(),
+        canonical_policy_snapshot: context.canonical_policy_snapshot.clone(),
+        armed_receipt: context.armed_receipt.clone(),
+    }
+}
+
 fn completed_proof_matches_context(proof: &CompletedRunProof, context: &RuntimeRunContext) -> bool {
     proof.authority_identity_digest() == context.authority_identity_digest()
         && proof.ticket_digest() == &context.ticket().digest()
@@ -1312,6 +2241,71 @@ fn burned_proof_matches_recovery(proof: &BurnedRunProof, context: &RuntimeRecove
         && proof.ticket_digest() == &context.ticket().digest()
         && proof.run_binding_digest() == context.run_binding_digest()
         && !proof.cleanup_receipt_digest().iter().all(|byte| *byte == 0)
+}
+
+#[cfg(windows)]
+fn recovered_normal_burn_proof(
+    proof: &NativeBurnedRunProof,
+    context: &RuntimeRecoveryContext,
+) -> Option<(RuntimeTerminalKind, RecoveredBurnProof)> {
+    let terminal = proof.terminal();
+    let (runtime_reason, ledger_reason) = match terminal.reason() {
+        BurnReason::Cancelled => (RuntimeTerminalKind::Cancelled, TicketBurnReason::Cancelled),
+        BurnReason::TimedOut => (RuntimeTerminalKind::TimedOut, TicketBurnReason::TimedOut),
+        BurnReason::Failed | BurnReason::RestartRecovery => return None,
+    };
+    let binding = proof.normal_termination_recovery()?;
+    if !burned_proof_matches_recovery(terminal, context)
+        || terminal.cleanup_observed_at() < terminal.terminal_ready_at()
+        || binding.cleanup_digest() != terminal.cleanup_receipt_digest()
+    {
+        return None;
+    }
+
+    let expected_armed_digest: Option<[u8; 32]> = context
+        .armed_receipt()
+        .map(|receipt| Sha256::digest(receipt.encode()).into());
+    if binding.armed_receipt_digest().copied() != expected_armed_digest {
+        return None;
+    }
+    match (context.armed_receipt(), proof.admission()) {
+        (None, None) => {}
+        (Some(_), Some(admission)) => {
+            let run_context = run_context_from_recovery(context);
+            if !native_admission_matches_context(admission, &run_context) {
+                return None;
+            }
+        }
+        _ => return None,
+    }
+
+    let prepared_receipt_digest = context.prepared_receipt().digest();
+    let recovery_proof_digest = RecoveredBurnProof::canonical_digest(
+        context.ticket().digest(),
+        *context.run_binding_digest(),
+        prepared_receipt_digest,
+        expected_armed_digest,
+        *binding.stage_journal_head_digest(),
+        *binding.termination_intent_digest(),
+        *binding.terminal_digest(),
+        *binding.cleanup_digest(),
+        ledger_reason,
+    )
+    .ok()?;
+    let recovered = RecoveredBurnProof::from_verified_digest(
+        recovery_proof_digest,
+        context.ticket().digest(),
+        *context.run_binding_digest(),
+        prepared_receipt_digest,
+        expected_armed_digest,
+        *binding.stage_journal_head_digest(),
+        *binding.termination_intent_digest(),
+        *binding.terminal_digest(),
+        *binding.cleanup_digest(),
+        ledger_reason,
+    )
+    .ok()?;
+    Some((runtime_reason, recovered))
 }
 
 fn decode_digest(value: &str) -> Option<[u8; 32]> {

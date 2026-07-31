@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum CanonicalUnsignedManifestPayload {
+pub(crate) enum CanonicalUnsignedManifestPayload {
     Trust {
         generation: [u8; 32],
         signer_key_id: [u8; 32],
@@ -31,6 +31,542 @@ pub(super) enum CanonicalUnsignedManifestPayload {
         valid: bool,
         revoked: bool,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum ProtectedUnsignedManifestPayload {
+    Trust {
+        schema: String,
+        generation: String,
+        signer_key_id: String,
+        signer_public_key_sec1: String,
+        ledger_identity: String,
+        created_epoch: u64,
+        valid: bool,
+        revoked: bool,
+    },
+    Activation {
+        schema: String,
+        generation: String,
+        trust_manifest_sha256: String,
+        signer_key_id: String,
+        activated_epoch: u64,
+        previous_generation: Option<String>,
+        previous_activation_sha256: Option<String>,
+        previous_activation_epoch: Option<u64>,
+        valid: bool,
+        revoked: bool,
+    },
+    Retirement {
+        schema: String,
+        generation: String,
+        prior_activation_sha256: String,
+        retired_epoch: u64,
+        successor_generation: Option<String>,
+        successor_activation_sha256: Option<String>,
+        valid: bool,
+        revoked: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ProtectedManifestKind {
+    Trust,
+    Activation,
+    Retirement,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProtectedDetachedManifestFile {
+    schema: String,
+    manifest_kind: ProtectedManifestKind,
+    unsigned_payload: ProtectedUnsignedManifestPayload,
+    unsigned_payload_sha256: String,
+    signer_key_id: String,
+    signature_p1363: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProtectedManifestSignatureInput {
+    pub(crate) digest: [u8; 32],
+    pub(crate) signer_key_id: [u8; 32],
+    pub(crate) signature_p1363: [u8; 64],
+}
+
+impl ProtectedDetachedManifestFile {
+    pub(crate) fn new(
+        unsigned_payload: CanonicalUnsignedManifestPayload,
+        signer_key_id: [u8; 32],
+        signature_p1363: [u8; 64],
+    ) -> Result<Self, AuthorityMaintenanceError> {
+        let manifest_kind = ProtectedManifestKind::from_payload(&unsigned_payload);
+        let digest = canonical_unsigned_manifest_digest(&unsigned_payload);
+        let value = Self {
+            schema: PROTECTED_DETACHED_MANIFEST_FILE_SCHEMA.to_string(),
+            manifest_kind,
+            unsigned_payload: ProtectedUnsignedManifestPayload::from_canonical(unsigned_payload),
+            unsigned_payload_sha256: hex_lower(&digest),
+            signer_key_id: hex_lower(&signer_key_id),
+            signature_p1363: hex_lower(&signature_p1363),
+        };
+        value.signature_input()?;
+        Ok(value)
+    }
+
+    pub(crate) fn parse_canonical(bytes: &[u8]) -> Result<Self, AuthorityMaintenanceError> {
+        if bytes.is_empty() || bytes.len() > 64 * 1024 {
+            return Err(AuthorityMaintenanceError(
+                "authority_protected_manifest_size_invalid",
+            ));
+        }
+        let value: Self = serde_json::from_slice(bytes).map_err(|_| {
+            AuthorityMaintenanceError("authority_protected_manifest_serialization_invalid")
+        })?;
+        let canonical = value.canonical_bytes()?;
+        if canonical != bytes {
+            return Err(AuthorityMaintenanceError(
+                "authority_protected_manifest_not_canonical",
+            ));
+        }
+        value.signature_input()?;
+        Ok(value)
+    }
+
+    pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, AuthorityMaintenanceError> {
+        serde_json::to_vec(self).map_err(|_| {
+            AuthorityMaintenanceError("authority_protected_manifest_serialization_failed")
+        })
+    }
+
+    pub(crate) fn unsigned_payload(
+        &self,
+    ) -> Result<CanonicalUnsignedManifestPayload, AuthorityMaintenanceError> {
+        self.unsigned_payload.to_canonical()
+    }
+
+    pub(crate) fn signature_input(
+        &self,
+    ) -> Result<ProtectedManifestSignatureInput, AuthorityMaintenanceError> {
+        let unsigned_payload = self.unsigned_payload.to_canonical()?;
+        if self.schema != PROTECTED_DETACHED_MANIFEST_FILE_SCHEMA
+            || self.manifest_kind != ProtectedManifestKind::from_payload(&unsigned_payload)
+        {
+            return Err(AuthorityMaintenanceError(
+                "authority_protected_manifest_shape_invalid",
+            ));
+        }
+        let digest = canonical_unsigned_manifest_digest(&unsigned_payload);
+        let encoded_digest = decode_hex_exact::<32>(
+            &self.unsigned_payload_sha256,
+            "authority_protected_manifest_digest_invalid",
+        )?;
+        let signer_key_id = decode_hex_exact::<32>(
+            &self.signer_key_id,
+            "authority_protected_manifest_signer_invalid",
+        )?;
+        let signature_p1363 = decode_hex_exact::<64>(
+            &self.signature_p1363,
+            "authority_protected_manifest_signature_invalid",
+        )?;
+        if encoded_digest != digest
+            || digest.iter().all(|value| *value == 0)
+            || signer_key_id.iter().all(|value| *value == 0)
+            || signature_p1363.iter().all(|value| *value == 0)
+        {
+            return Err(AuthorityMaintenanceError(
+                "authority_protected_manifest_binding_invalid",
+            ));
+        }
+        Ok(ProtectedManifestSignatureInput {
+            digest,
+            signer_key_id,
+            signature_p1363,
+        })
+    }
+}
+
+impl ProtectedManifestKind {
+    fn from_payload(value: &CanonicalUnsignedManifestPayload) -> Self {
+        match value {
+            CanonicalUnsignedManifestPayload::Trust { .. } => Self::Trust,
+            CanonicalUnsignedManifestPayload::Activation { .. } => Self::Activation,
+            CanonicalUnsignedManifestPayload::Retirement { .. } => Self::Retirement,
+        }
+    }
+}
+
+impl ProtectedUnsignedManifestPayload {
+    fn from_canonical(value: CanonicalUnsignedManifestPayload) -> Self {
+        match value {
+            CanonicalUnsignedManifestPayload::Trust {
+                generation,
+                signer_key_id,
+                signer_public_key_sec1,
+                ledger_identity,
+                created_epoch,
+                valid,
+                revoked,
+            } => Self::Trust {
+                schema: TRUST_MANIFEST_SCHEMA.to_string(),
+                generation: hex_lower(&generation),
+                signer_key_id: hex_lower(&signer_key_id),
+                signer_public_key_sec1: hex_lower(&signer_public_key_sec1),
+                ledger_identity: hex_lower(&ledger_identity),
+                created_epoch,
+                valid,
+                revoked,
+            },
+            CanonicalUnsignedManifestPayload::Activation {
+                generation,
+                trust_manifest_sha256,
+                signer_key_id,
+                activated_epoch,
+                previous_generation,
+                previous_activation_sha256,
+                previous_activation_epoch,
+                valid,
+                revoked,
+            } => Self::Activation {
+                schema: ACTIVE_GENERATION_SCHEMA.to_string(),
+                generation: hex_lower(&generation),
+                trust_manifest_sha256: hex_lower(&trust_manifest_sha256),
+                signer_key_id: hex_lower(&signer_key_id),
+                activated_epoch,
+                previous_generation: previous_generation.map(|value| hex_lower(&value)),
+                previous_activation_sha256: previous_activation_sha256
+                    .map(|value| hex_lower(&value)),
+                previous_activation_epoch,
+                valid,
+                revoked,
+            },
+            CanonicalUnsignedManifestPayload::Retirement {
+                generation,
+                prior_activation_sha256,
+                retired_epoch,
+                successor_generation,
+                successor_activation_sha256,
+                valid,
+                revoked,
+            } => Self::Retirement {
+                schema: RETIREMENT_MANIFEST_SCHEMA.to_string(),
+                generation: hex_lower(&generation),
+                prior_activation_sha256: hex_lower(&prior_activation_sha256),
+                retired_epoch,
+                successor_generation: successor_generation.map(|value| hex_lower(&value)),
+                successor_activation_sha256: successor_activation_sha256
+                    .map(|value| hex_lower(&value)),
+                valid,
+                revoked,
+            },
+        }
+    }
+
+    fn to_canonical(&self) -> Result<CanonicalUnsignedManifestPayload, AuthorityMaintenanceError> {
+        match self {
+            Self::Trust {
+                schema,
+                generation,
+                signer_key_id,
+                signer_public_key_sec1,
+                ledger_identity,
+                created_epoch,
+                valid,
+                revoked,
+            } => {
+                if schema != TRUST_MANIFEST_SCHEMA || *created_epoch == 0 {
+                    return Err(AuthorityMaintenanceError(
+                        "authority_trust_manifest_shape_invalid",
+                    ));
+                }
+                Ok(CanonicalUnsignedManifestPayload::Trust {
+                    generation: decode_hex_exact::<32>(
+                        generation,
+                        "authority_trust_manifest_generation_invalid",
+                    )?,
+                    signer_key_id: decode_hex_exact::<32>(
+                        signer_key_id,
+                        "authority_trust_manifest_signer_invalid",
+                    )?,
+                    signer_public_key_sec1: decode_hex_exact::<65>(
+                        signer_public_key_sec1,
+                        "authority_trust_manifest_public_key_invalid",
+                    )?,
+                    ledger_identity: decode_hex_exact::<32>(
+                        ledger_identity,
+                        "authority_trust_manifest_ledger_invalid",
+                    )?,
+                    created_epoch: *created_epoch,
+                    valid: *valid,
+                    revoked: *revoked,
+                })
+            }
+            Self::Activation {
+                schema,
+                generation,
+                trust_manifest_sha256,
+                signer_key_id,
+                activated_epoch,
+                previous_generation,
+                previous_activation_sha256,
+                previous_activation_epoch,
+                valid,
+                revoked,
+            } => {
+                if schema != ACTIVE_GENERATION_SCHEMA || *activated_epoch == 0 {
+                    return Err(AuthorityMaintenanceError(
+                        "authority_activation_manifest_shape_invalid",
+                    ));
+                }
+                Ok(CanonicalUnsignedManifestPayload::Activation {
+                    generation: decode_hex_exact::<32>(
+                        generation,
+                        "authority_activation_manifest_generation_invalid",
+                    )?,
+                    trust_manifest_sha256: decode_hex_exact::<32>(
+                        trust_manifest_sha256,
+                        "authority_activation_manifest_trust_invalid",
+                    )?,
+                    signer_key_id: decode_hex_exact::<32>(
+                        signer_key_id,
+                        "authority_activation_manifest_signer_invalid",
+                    )?,
+                    activated_epoch: *activated_epoch,
+                    previous_generation: previous_generation
+                        .as_deref()
+                        .map(|value| {
+                            decode_hex_exact::<32>(
+                                value,
+                                "authority_activation_manifest_previous_invalid",
+                            )
+                        })
+                        .transpose()?,
+                    previous_activation_sha256: previous_activation_sha256
+                        .as_deref()
+                        .map(|value| {
+                            decode_hex_exact::<32>(
+                                value,
+                                "authority_activation_manifest_previous_invalid",
+                            )
+                        })
+                        .transpose()?,
+                    previous_activation_epoch: *previous_activation_epoch,
+                    valid: *valid,
+                    revoked: *revoked,
+                })
+            }
+            Self::Retirement {
+                schema,
+                generation,
+                prior_activation_sha256,
+                retired_epoch,
+                successor_generation,
+                successor_activation_sha256,
+                valid,
+                revoked,
+            } => {
+                if schema != RETIREMENT_MANIFEST_SCHEMA || *retired_epoch == 0 {
+                    return Err(AuthorityMaintenanceError(
+                        "authority_retirement_manifest_shape_invalid",
+                    ));
+                }
+                Ok(CanonicalUnsignedManifestPayload::Retirement {
+                    generation: decode_hex_exact::<32>(
+                        generation,
+                        "authority_retirement_manifest_generation_invalid",
+                    )?,
+                    prior_activation_sha256: decode_hex_exact::<32>(
+                        prior_activation_sha256,
+                        "authority_retirement_manifest_prior_invalid",
+                    )?,
+                    retired_epoch: *retired_epoch,
+                    successor_generation: successor_generation
+                        .as_deref()
+                        .map(|value| {
+                            decode_hex_exact::<32>(
+                                value,
+                                "authority_retirement_manifest_successor_invalid",
+                            )
+                        })
+                        .transpose()?,
+                    successor_activation_sha256: successor_activation_sha256
+                        .as_deref()
+                        .map(|value| {
+                            decode_hex_exact::<32>(
+                                value,
+                                "authority_retirement_manifest_successor_invalid",
+                            )
+                        })
+                        .transpose()?,
+                    valid: *valid,
+                    revoked: *revoked,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProtectedActiveHead {
+    schema: String,
+    generation: String,
+    activation_manifest_sha256: String,
+    activation_epoch: u64,
+    transaction_sha256: String,
+    plan_sha256: String,
+    previous_head_sha256: Option<String>,
+}
+
+impl ProtectedActiveHead {
+    pub(crate) fn new(
+        generation: [u8; 32],
+        activation_manifest_sha256: [u8; 32],
+        activation_epoch: u64,
+        transaction_sha256: [u8; 32],
+        plan_sha256: [u8; 32],
+        previous_head_sha256: Option<[u8; 32]>,
+    ) -> Result<Self, AuthorityMaintenanceError> {
+        let value = Self {
+            schema: PROTECTED_ACTIVE_HEAD_SCHEMA.to_string(),
+            generation: hex_lower(&generation),
+            activation_manifest_sha256: hex_lower(&activation_manifest_sha256),
+            activation_epoch,
+            transaction_sha256: hex_lower(&transaction_sha256),
+            plan_sha256: hex_lower(&plan_sha256),
+            previous_head_sha256: previous_head_sha256.map(|value| hex_lower(&value)),
+        };
+        value.validated()?;
+        Ok(value)
+    }
+
+    pub(crate) fn parse_canonical(bytes: &[u8]) -> Result<Self, AuthorityMaintenanceError> {
+        if bytes.is_empty() || bytes.len() > 16 * 1024 {
+            return Err(AuthorityMaintenanceError(
+                "authority_active_head_size_invalid",
+            ));
+        }
+        let value: Self = serde_json::from_slice(bytes)
+            .map_err(|_| AuthorityMaintenanceError("authority_active_head_invalid"))?;
+        let canonical = value.canonical_bytes()?;
+        if canonical != bytes {
+            return Err(AuthorityMaintenanceError(
+                "authority_active_head_not_canonical",
+            ));
+        }
+        value.validated()?;
+        Ok(value)
+    }
+
+    pub(crate) fn canonical_bytes(&self) -> Result<Vec<u8>, AuthorityMaintenanceError> {
+        serde_json::to_vec(self)
+            .map_err(|_| AuthorityMaintenanceError("authority_active_head_serialization_failed"))
+    }
+
+    pub(crate) fn digest(&self) -> Result<[u8; 32], AuthorityMaintenanceError> {
+        let mut digest = Sha256::new();
+        digest.update(b"vrcforge-authority-active-head-v1\0");
+        digest.update(self.canonical_bytes()?);
+        Ok(digest.finalize().into())
+    }
+
+    pub(crate) fn generation(&self) -> Result<[u8; 32], AuthorityMaintenanceError> {
+        decode_hex_exact::<32>(&self.generation, "authority_active_head_generation_invalid")
+    }
+
+    pub(crate) fn activation_manifest_sha256(&self) -> Result<[u8; 32], AuthorityMaintenanceError> {
+        decode_hex_exact::<32>(
+            &self.activation_manifest_sha256,
+            "authority_active_head_activation_invalid",
+        )
+    }
+
+    pub(crate) fn activation_epoch(&self) -> u64 {
+        self.activation_epoch
+    }
+
+    pub(crate) fn plan_sha256(&self) -> Result<[u8; 32], AuthorityMaintenanceError> {
+        decode_hex_exact::<32>(&self.plan_sha256, "authority_active_head_plan_invalid")
+    }
+
+    pub(crate) fn transaction_sha256(&self) -> Result<[u8; 32], AuthorityMaintenanceError> {
+        decode_hex_exact::<32>(
+            &self.transaction_sha256,
+            "authority_active_head_transaction_invalid",
+        )
+    }
+
+    pub(crate) fn previous_head_sha256(
+        &self,
+    ) -> Result<Option<[u8; 32]>, AuthorityMaintenanceError> {
+        self.previous_head_sha256
+            .as_deref()
+            .map(|value| decode_hex_exact::<32>(value, "authority_active_head_previous_invalid"))
+            .transpose()
+    }
+
+    fn validated(&self) -> Result<(), AuthorityMaintenanceError> {
+        if self.schema != PROTECTED_ACTIVE_HEAD_SCHEMA || self.activation_epoch == 0 {
+            return Err(AuthorityMaintenanceError(
+                "authority_active_head_shape_invalid",
+            ));
+        }
+        for digest in [
+            self.generation()?,
+            self.activation_manifest_sha256()?,
+            self.transaction_sha256()?,
+            self.plan_sha256()?,
+        ] {
+            if digest.iter().all(|value| *value == 0) {
+                return Err(AuthorityMaintenanceError(
+                    "authority_active_head_digest_zero",
+                ));
+            }
+        }
+        if self
+            .previous_head_sha256()?
+            .is_some_and(|value| value.iter().all(|byte| *byte == 0))
+        {
+            return Err(AuthorityMaintenanceError(
+                "authority_active_head_digest_zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn decode_hex_exact<const N: usize>(
+    value: &str,
+    code: &'static str,
+) -> Result<[u8; N], AuthorityMaintenanceError> {
+    if value.len() != N * 2
+        || !value
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err(AuthorityMaintenanceError(code));
+    }
+    let mut output = [0u8; N];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        output[index] = (manifest_hex_nibble(pair[0]) << 4) | manifest_hex_nibble(pair[1]);
+    }
+    Ok(output)
+}
+
+fn manifest_hex_nibble(value: u8) -> u8 {
+    match value {
+        b'0'..=b'9' => value - b'0',
+        b'a'..=b'f' => value - b'a' + 10,
+        _ => unreachable!("validated lowercase hexadecimal input"),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

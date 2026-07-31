@@ -1,0 +1,36 @@
+{
+  "schema": "vrcforge.primitive_basis_baseline.v1",
+  "scenarioId": "cross_avatar_accessory_copy",
+  "files": [
+    {
+      "path": "Editor.meta",
+      "size": 170,
+      "sha256": "3e42460e925fdaefc2e4ea7511c8995069e9a15672064efb9167726ba502a422"
+    },
+    {
+      "path": "Editor/CrossAvatarAccessoryCopyFixtureBootstrap.cs",
+      "size": 10187,
+      "sha256": "3d4dc996a775d66290e77b5facc06c2280612e8f5d5d77a703de9981493451a6"
+    },
+    {
+      "path": "Editor/CrossAvatarAccessoryCopyFixtureBootstrap.cs.meta",
+      "size": 241,
+      "sha256": "1e10868f91a9fa513338dfd4aff18cc8222be4b5a2067cab8210ad8f033f6362"
+    },
+    {
+      "path": "baseline.json.meta",
+      "size": 156,
+      "sha256": "a69fdf97e54f19dc7b5591d7ed3df9b6943f194d6f9076990c76436f085d4586"
+    },
+    {
+      "path": "fixture-contract.json",
+      "size": 1877,
+      "sha256": "9d27683af01279c68777e3f755efe11733e9063b607c271d2576a9ddc74ed809"
+    },
+    {
+      "path": "fixture-contract.json.meta",
+      "size": 156,
+      "sha256": "ce1ac0043732e2889d40b0e8cc5c803781a9a3f82251a585ac12b3b30c8f553a"
+    }
+  ]
+}

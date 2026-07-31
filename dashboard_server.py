@@ -75,6 +75,11 @@ from component_feature_write import (
     build_wrapper_arguments as build_component_feature_wrapper_arguments,
 )
 from backend_owner_lease import BackendOwnerLease
+from backend_listener_adoption import (
+    BackendListenerAdoptionError,
+    backend_listener_adoption_requested,
+    load_backend_listener_adoption,
+)
 from background_goal_delivery import BackgroundGoalDeliveryCoordinator, BackgroundGoalDeliveryError
 from background_goal_runtime import (
     PHASE_TIMEOUT_SECONDS,
@@ -162,6 +167,7 @@ from memory_review_host import (
 )
 from memory_review_provider import invoke_memory_review_provider
 from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
+from know_yourself_skill import build_know_yourself_report
 from optimization_service import (
     OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL,
     OPTIMIZATION_APPLY_REQUEST_BY_GATEWAY,
@@ -181,7 +187,10 @@ from outfit_import_planner import (
 )
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
 from path_to_skill import DEFAULT_MIN_VRCFORGE_VERSION, PathToSkillError, build_path_to_skill_source
-from primitive_basis_live_attestation import load_packaged_live_session_from_stdin
+from primitive_basis_live_attestation import (
+    PrimitiveBasisLiveSession,
+    load_packaged_live_session_from_stdin,
+)
 from primitive_basis_live_runtime import (
     LiveRuntimeCallbacks,
     ModelPartCompositionLiveRuntime,
@@ -366,7 +375,11 @@ APP_SESSION_TOKEN = resolve_app_session_token()
 APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN) and not app_auth_disabled_for_test_process()
 APP_DASHBOARD_SESSION_COOKIE = "vrcforge_dashboard_session"
 APP_INTERNAL_SHUTDOWN_PATH = "/api/app/runtime/shutdown"
-PRIMITIVE_BASIS_LIVE_SESSION = load_packaged_live_session_from_stdin()
+PRIMITIVE_BASIS_LIVE_SESSION = (
+    None
+    if backend_listener_adoption_requested()
+    else load_packaged_live_session_from_stdin()
+)
 PRIMITIVE_BASIS_LIVE_RUNTIME: ModelPartCompositionLiveRuntime | None = None
 APP_ALLOWED_ORIGINS = {
     "tauri://localhost",
@@ -1966,6 +1979,13 @@ async def on_shutdown() -> None:
     global AGENT_MCP_CONTEXT
 
     await emit_safety_posture_snapshot("normal_shutdown")
+
+    live_session = PRIMITIVE_BASIS_LIVE_SESSION
+    if live_session is not None:
+        try:
+            live_session.close()
+        finally:
+            install_primitive_basis_live_runtime(None)
 
     try:
         await asyncio.to_thread(DESKTOP_EXECUTOR.stop)
@@ -7010,12 +7030,20 @@ def signal_owned_uvicorn_server_exit(server: uvicorn.Server) -> bool:
         return True
 
 
-def run_owned_uvicorn_server(host: str, port: int) -> None:
+def run_owned_uvicorn_server(
+    host: str,
+    port: int,
+    *,
+    sockets: list[socket.socket] | None = None,
+) -> None:
     config = uvicorn.Config(app=app, host=host, port=port, log_level="info", access_log=False)
     server = uvicorn.Server(config)
     register_owned_uvicorn_server(server)
     try:
-        server.run()
+        if sockets is None:
+            server.run()
+        else:
+            server.run(sockets=sockets)
     finally:
         clear_owned_uvicorn_server(server)
 
@@ -8650,6 +8678,97 @@ def build_app_doctor_report() -> dict[str, Any]:
         },
         "checks": checks,
     }
+
+
+def know_yourself_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    params = ensure_dict(params or {})
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    unity_status = build_unity_status_snapshot(settings)
+    doctor_report = build_app_doctor_report()
+    selected_project = str(DASHBOARD_STATE.selected_project_path or "").strip()
+    editor_path = str(DASHBOARD_STATE.unity_editor_path or "").strip()
+    editor_version = (
+        parse_editor_version(Path(selected_project) / "ProjectSettings" / "ProjectVersion.txt")
+        if selected_project
+        else ""
+    )
+    selected_project_running: bool | None = None
+    matching_process_ids: list[int] = []
+    if selected_project:
+        try:
+            for process in list_running_unity_processes(require_discovery_evidence=True):
+                if not unity_process_exactly_matches_project(process, Path(selected_project)):
+                    continue
+                selected_project_running = True
+                try:
+                    matching_process_ids.append(
+                        int(process.get("processId") or process.get("pid") or 0)
+                    )
+                except (TypeError, ValueError):
+                    continue
+            if selected_project_running is None:
+                selected_project_running = False
+        except Exception:  # noqa: BLE001 - readiness remains useful when process discovery is unavailable.
+            selected_project_running = None
+    compile_diagnostics: dict[str, Any] = {}
+    if (
+        unity_status.get("connected") is True
+        and unity_status.get("unityInstanceRegistered") is True
+        and unity_status.get("selectedInstanceMatched") is True
+    ):
+        try:
+            compile_diagnostics = read_agent_compile_errors(
+                {**params, "maxErrors": 20, "includeConsoleFallback": True}
+            )
+        except Exception:  # noqa: BLE001 - a missing diagnostic tool is itself a bounded unavailable result.
+            compile_diagnostics = {"ok": False}
+
+    focus_scope = ""
+    if selected_project:
+        doctor_checks = doctor_report.get("checks")
+        if not isinstance(doctor_checks, list):
+            doctor_checks = []
+        dependency_checks = [
+            item
+            for item in doctor_checks
+            if str(ensure_dict(item).get("id") or "")
+            in {"unity.plugin", "package.vrchat_sdk", "unity.mcp.package"}
+        ]
+        focus_scope_material = json.dumps(
+            {
+                "selectedProject": normalize_path_string(selected_project).casefold(),
+                "editorVersion": editor_version,
+                "matchingProcessIds": sorted(pid for pid in matching_process_ids if pid > 0),
+                "selectedInstance": str(unity_status.get("instance") or ""),
+                "dependencyChecks": dependency_checks,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        focus_scope = f"focus-{hashlib.sha256(focus_scope_material).hexdigest()[:16]}"
+    return build_know_yourself_report(
+        doctor_report=doctor_report,
+        unity_status=unity_status,
+        tool_registry=AGENT_GATEWAY.build_tool_registry(),
+        skill_registry=AGENT_GATEWAY.build_skill_registry(),
+        permission_state=AGENT_GATEWAY.permission_state(),
+        compile_diagnostics=compile_diagnostics,
+        project_context={
+            "projectSelected": bool(selected_project),
+            "editorVersion": editor_version,
+            "editorLaunchConfigured": bool(editor_path and Path(editor_path).is_file()),
+            "selectedProjectRunning": selected_project_running,
+            "editorFocusScope": focus_scope,
+        },
+        editor_focus_confirmed=normalize_bool(
+            params.get("editorFocusConfirmed") or params.get("editor_focus_confirmed"),
+            False,
+        ),
+        editor_focus_scope=str(
+            params.get("editorFocusScope") or params.get("editor_focus_scope") or ""
+        ),
+    )
 
 
 @app.get("/api/app/doctor")
@@ -14479,6 +14598,15 @@ def post_unity_http_json(settings: Settings, path: str, payload: dict[str, Any])
         return False, None, str(exc), None
 
 
+def stable_unity_cli_selector(instance: dict[str, Any]) -> str:
+    instance_hash = str(instance.get("hash") or "").strip()
+    if instance_hash:
+        return instance_hash
+    if instance.get("cliSelectorStable") is True:
+        return str(instance.get("cliInstanceId") or "").strip()
+    return ""
+
+
 def normalize_unity_instance(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
@@ -14489,10 +14617,11 @@ def normalize_unity_instance(raw: Any) -> dict[str, Any]:
     if project_path in {".", "./"}:
         project_path = ""
     instance_hash = str(raw.get("hash") or raw.get("project_id") or raw.get("projectId") or "").strip()
-    cli_instance_id = instance_hash or project or session_id
+    cli_instance_id = instance_hash
     return {
         "sessionId": session_id,
         "cliInstanceId": cli_instance_id,
+        "cliSelectorStable": bool(instance_hash),
         "project": project,
         "projectName": project,
         "projectPath": project_path,
@@ -14543,25 +14672,31 @@ def choose_active_unity_instance(instances: list[dict[str, Any]], settings: Sett
     return None, False
 
 
-def resolve_unity_cli_instance_selector(settings: Settings) -> None:
-    """Map CoplayDev session ids from /api/instances to CLI-safe project ids."""
+def resolve_unity_cli_instance_selector(
+    settings: Settings,
+    project_root: Path | None = None,
+) -> None:
+    """Map live session ids to stable CLI selectors without name fallback."""
     selector = (settings.unity_mcp_instance or DASHBOARD_STATE.unity_instance or "").strip()
     ok, payload, _error, _status_code = fetch_unity_http_json(settings, "/api/instances")
     if not ok:
         return
 
     instances = normalize_unity_instances_payload(payload)
-    active_instance, _selected_match = choose_active_unity_instance(instances, settings)
-    if not active_instance:
+    active_instance, selector_matched = choose_active_unity_instance(instances, settings)
+    if (
+        not active_instance
+        or not selector_matched
+        or active_instance.get("cliSelectorStable") is not True
+    ):
+        return
+    if project_root is None:
+        selected_project = normalize_path_string(DASHBOARD_STATE.selected_project_path)
+        project_root = Path(selected_project) if selected_project else None
+    if project_root is not None and not unity_instance_matches_project(active_instance, project_root):
         return
 
-    cli_selector = str(
-        active_instance.get("cliInstanceId")
-        or active_instance.get("hash")
-        or active_instance.get("project")
-        or active_instance.get("sessionId")
-        or ""
-    ).strip()
+    cli_selector = stable_unity_cli_selector(active_instance)
     if not cli_selector:
         return
 
@@ -14576,12 +14711,27 @@ def resolve_unity_cli_instance_selector(settings: Settings) -> None:
     DASHBOARD_STATE.unity_instance = cli_selector
 
 
-def build_unity_instances_diagnostics(settings: Settings) -> dict[str, Any]:
+def build_unity_instances_diagnostics(
+    settings: Settings,
+    project_root: Path | None = None,
+) -> dict[str, Any]:
     ok, payload, error, status_code = fetch_unity_http_json(settings, "/api/instances")
     instances = normalize_unity_instances_payload(payload) if ok else []
-    active_instance, selected_match = choose_active_unity_instance(instances, settings)
-    if active_instance:
-        cli_selector = active_instance.get("cliInstanceId") or active_instance.get("hash") or active_instance.get("project") or active_instance.get("sessionId") or ""
+    active_instance, selector_matched = choose_active_unity_instance(instances, settings)
+    if project_root is None:
+        selected_project = normalize_path_string(DASHBOARD_STATE.selected_project_path)
+        project_root = Path(selected_project) if selected_project else None
+    project_matched = bool(
+        active_instance
+        and (
+            project_root is None
+            or unity_instance_matches_project(active_instance, project_root)
+        )
+    )
+    cli_selector = stable_unity_cli_selector(active_instance or {})
+    cli_selector_stable = bool(cli_selector)
+    selected_match = selector_matched and project_matched and cli_selector_stable
+    if active_instance and selected_match:
         if cli_selector:
             DASHBOARD_STATE.unity_instance = cli_selector
             settings.unity_mcp_instance = cli_selector
@@ -14595,6 +14745,9 @@ def build_unity_instances_diagnostics(settings: Settings) -> dict[str, Any]:
         "instances": instances,
         "activeCount": len(instances),
         "activeInstance": active_instance,
+        "selectorMatched": selector_matched,
+        "selectedProjectMatched": project_matched,
+        "selectedCliSelectorStable": cli_selector_stable,
         "selectedInstanceMatched": selected_match,
         "raw": payload,
         "error": error,
@@ -14641,8 +14794,11 @@ def collect_tool_names_from_payload(payload: Any) -> list[str]:
     return sorted(unique)
 
 
-def build_unity_tools_diagnostics(settings: Settings) -> dict[str, Any]:
-    resolve_unity_cli_instance_selector(settings)
+def build_unity_tools_diagnostics(
+    settings: Settings,
+    project_root: Path | None = None,
+) -> dict[str, Any]:
+    resolve_unity_cli_instance_selector(settings, project_root)
     output = ""
     parsed: Any = None
     error = ""
@@ -14686,32 +14842,64 @@ def build_unity_tools_diagnostics(settings: Settings) -> dict[str, Any]:
     }
 
 
-def build_unity_status_snapshot(settings: Settings | None = None) -> dict[str, Any]:
+def build_unity_status_snapshot(
+    settings: Settings | None = None,
+    project_root: Path | None = None,
+) -> dict[str, Any]:
     settings = settings or load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
     settings.unity_mcp_timeout_seconds = min(settings.unity_mcp_timeout_seconds, 10)
-    instances = build_unity_instances_diagnostics(settings)
-    tools = build_unity_tools_diagnostics(settings)
+    selected_project = normalize_path_string(
+        str(project_root) if project_root is not None else DASHBOARD_STATE.selected_project_path
+    )
+    selected_project_path = Path(selected_project) if selected_project else None
+    instances = build_unity_instances_diagnostics(settings, selected_project_path)
+    instance_matches_selected_project = instances.get("selectedInstanceMatched") is True
+    if selected_project_path is not None and not instance_matches_selected_project:
+        tools = {
+            "ok": False,
+            "reachable": False,
+            "connected": False,
+            "host": settings.unity_mcp_host,
+            "port": settings.unity_mcp_port,
+            "instance": settings.unity_mcp_instance,
+            "totalTools": 0,
+            "defaultToolsCount": 0,
+            "vrcForgeToolsCount": 0,
+            "toolNames": [],
+            "vrcForgeToolNames": [],
+            "missingRequiredVrcForgeTools": list(REQUIRED_VRCFORGE_UNITY_TOOLS),
+            "onlyDefaultTools": False,
+            "output": "",
+            "parsed": None,
+            "error": "The active Unity instance is not bound to the selected project.",
+        }
+    else:
+        tools = build_unity_tools_diagnostics(settings, selected_project_path)
     mcp_health = fetch_mcp_server_health(settings)
     unity_mcp_package_version = ""
-    selected_project = normalize_path_string(DASHBOARD_STATE.selected_project_path)
     if selected_project:
         try:
-            selected_project_path = Path(selected_project)
-            if is_unity_project_path(selected_project_path):
+            if selected_project_path is not None and is_unity_project_path(selected_project_path):
                 unity_mcp_package_version = read_unity_mcp_package_version(selected_project_path)
         except Exception:  # noqa: BLE001 - status diagnostics should stay best effort.
             unity_mcp_package_version = ""
 
-    try:
-        output = run_unity_mcp_passthrough(settings, ["-f", "json", "status"])
-        parsed = try_parse_json(output)
-        status_error = ""
-        status_reachable = True
-    except Exception as exc:  # noqa: BLE001
+    if selected_project_path is not None and not instance_matches_selected_project:
         output = ""
         parsed = None
-        status_error = str(exc)
+        status_error = "The active Unity instance is not bound to the selected project."
         status_reachable = False
+    else:
+        try:
+            output = run_unity_mcp_passthrough(settings, ["-f", "json", "status"])
+            parsed = try_parse_json(output)
+            status_error = ""
+            status_reachable = True
+        except Exception as exc:  # noqa: BLE001
+            output = ""
+            parsed = None
+            status_error = str(exc)
+            status_reachable = False
 
     connected = bool(
         instances.get("reachable")
@@ -14728,7 +14916,7 @@ def build_unity_status_snapshot(settings: Settings | None = None) -> dict[str, A
         "host": settings.unity_mcp_host,
         "port": settings.unity_mcp_port,
         "instance": settings.unity_mcp_instance,
-        "projectPath": DASHBOARD_STATE.selected_project_path,
+        "projectPath": selected_project,
         "activeInstance": active_instance,
         "instances": instances.get("instances") or [],
         "activeInstanceCount": instances.get("activeCount") or 0,
@@ -14754,16 +14942,26 @@ def _repair_phase(phase_id: str, status: str, message: str, detail: Any = None) 
     }
 
 
-def _unity_repair_status_summary(status: dict[str, Any]) -> dict[str, Any]:
+def _unity_repair_status_summary(
+    status: dict[str, Any],
+    project_root: Path | None = None,
+) -> dict[str, Any]:
     tools = status.get("tools") if isinstance(status.get("tools"), dict) else {}
     mcp_health = status.get("mcpHealth") if isinstance(status.get("mcpHealth"), dict) else {}
+    selected_instance_matched = bool(status.get("selectedInstanceMatched"))
+    if project_root is not None:
+        active_instance = status.get("activeInstance") if isinstance(status.get("activeInstance"), dict) else {}
+        selected_instance_matched = bool(
+            stable_unity_cli_selector(active_instance)
+            and unity_instance_matches_project(active_instance, project_root)
+        )
     return {
         "connected": bool(status.get("connected")),
         "mcpServerReachable": bool(status.get("mcpServerReachable")),
         "mcpServerVersion": str(mcp_health.get("version") or mcp_health.get("serverVersion") or ""),
         "unityMcpPackageVersion": str(status.get("unityMcpPackageVersion") or ""),
         "unityInstanceRegistered": bool(status.get("unityInstanceRegistered")),
-        "selectedInstanceMatched": bool(status.get("selectedInstanceMatched")),
+        "selectedInstanceMatched": selected_instance_matched,
         "activeInstanceCount": int(status.get("activeInstanceCount") or 0),
         "vrcForgeToolsRegistered": bool(status.get("vrcForgeToolsRegistered")),
         "totalTools": int(tools.get("totalTools") or 0),
@@ -14861,13 +15059,18 @@ def discover_vrcforge_unity_tool_definitions(project_root: Path) -> list[dict[st
 
 
 def unity_repair_active_instance_for_registration(settings: Settings, project_root: Path) -> dict[str, Any]:
-    status = build_unity_status_snapshot(settings)
+    status = build_unity_status_snapshot(settings, project_root)
     active = status.get("activeInstance") if isinstance(status.get("activeInstance"), dict) else {}
-    if active and unity_instance_matches_project(active, project_root):
+    active_selector = stable_unity_cli_selector(active)
+    if active_selector and unity_instance_matches_project(active, project_root):
         return active
     instances = status.get("instances") if isinstance(status.get("instances"), list) else []
     for instance in instances:
-        if isinstance(instance, dict) and unity_instance_matches_project(instance, project_root):
+        if (
+            isinstance(instance, dict)
+            and stable_unity_cli_selector(instance)
+            and unity_instance_matches_project(instance, project_root)
+        ):
             return instance
     return {}
 
@@ -14891,13 +15094,7 @@ def register_vrcforge_unity_tools_from_project(
         return False, detail
 
     active_instance = unity_repair_active_instance_for_registration(settings, project_root)
-    project_id = str(
-        active_instance.get("cliInstanceId")
-        or active_instance.get("hash")
-        or settings.unity_mcp_instance
-        or active_instance.get("project")
-        or project_root.name
-    ).strip()
+    project_id = stable_unity_cli_selector(active_instance)
     if not project_id:
         detail = {"toolCount": len(tool_definitions)}
         phases.append(
@@ -14912,7 +15109,7 @@ def register_vrcforge_unity_tools_from_project(
 
     payload = {
         "project_id": project_id,
-        "project_hash": str(active_instance.get("hash") or project_id),
+        "project_hash": project_id,
         "tools": [
             {key: value for key, value in definition.items() if key != "source"}
             for definition in tool_definitions
@@ -14946,14 +15143,28 @@ def _repair_process_kwargs() -> dict[str, Any]:
     return {}
 
 
-def _process_cmdline_text(process: Any) -> str:
+def _process_cmdline_text(
+    process: Any,
+    *,
+    require_discovery_evidence: bool = False,
+) -> str:
     try:
         cmdline = process.info.get("cmdline") if hasattr(process, "info") else process.cmdline()
-    except Exception:  # noqa: BLE001 - process metadata can disappear while enumerating.
+    except Exception as exc:  # noqa: BLE001 - process metadata can disappear while enumerating.
+        if require_discovery_evidence:
+            raise UnityProcessDiscoveryUnavailable(
+                "A process command line could not be read."
+            ) from exc
         return ""
     if isinstance(cmdline, (list, tuple)):
-        return " ".join(str(part) for part in cmdline if part is not None)
-    return str(cmdline or "")
+        value = " ".join(str(part) for part in cmdline if part is not None)
+    else:
+        value = str(cmdline or "")
+    if require_discovery_evidence and not value.strip():
+        raise UnityProcessDiscoveryUnavailable(
+            "A running Unity process has no readable command line."
+        )
+    return value
 
 
 def _process_exe_text(process: Any) -> str:
@@ -14964,39 +15175,82 @@ def _process_exe_text(process: Any) -> str:
     return normalize_path_string(str(value or ""))
 
 
-def _process_name_text(process: Any) -> str:
+def _process_name_text(
+    process: Any,
+    *,
+    require_discovery_evidence: bool = False,
+) -> str:
     try:
         value = process.info.get("name") if hasattr(process, "info") else process.name()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if require_discovery_evidence:
+            raise UnityProcessDiscoveryUnavailable(
+                "A process name could not be read."
+            ) from exc
         return ""
-    return str(value or "")
+    name = str(value or "")
+    if require_discovery_evidence and not name.strip():
+        raise UnityProcessDiscoveryUnavailable(
+            "Process discovery returned an unreadable process name."
+        )
+    return name
 
 
-def _iter_processes() -> list[Any]:
+class UnityProcessDiscoveryUnavailable(RuntimeError):
+    """Raised when running-process evidence cannot be collected reliably."""
+
+
+def _iter_processes(*, require_discovery_evidence: bool = False) -> list[Any]:
     if psutil is None:
+        if require_discovery_evidence:
+            raise UnityProcessDiscoveryUnavailable("Process discovery is unavailable.")
         return []
     try:
         return list(psutil.process_iter(["pid", "name", "exe", "cmdline"]))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if require_discovery_evidence:
+            raise UnityProcessDiscoveryUnavailable(
+                "Process discovery did not produce usable evidence."
+            ) from exc
         return []
 
 
-def list_running_unity_processes() -> list[dict[str, Any]]:
+def list_running_unity_processes(
+    *,
+    require_discovery_evidence: bool = False,
+) -> list[dict[str, Any]]:
     if os.name != "nt":
+        if require_discovery_evidence:
+            raise UnityProcessDiscoveryUnavailable(
+                "Unity process discovery is unavailable on this platform."
+            )
         return []
     processes: list[dict[str, Any]] = []
-    for process in _iter_processes():
-        if _process_name_text(process).casefold() != "unity.exe":
+    for process in _iter_processes(
+        require_discovery_evidence=require_discovery_evidence
+    ):
+        if _process_name_text(
+            process,
+            require_discovery_evidence=require_discovery_evidence,
+        ).casefold() != "unity.exe":
             continue
         try:
             process_id = int(process.info.get("pid") if hasattr(process, "info") else process.pid)
-        except (TypeError, ValueError):
+        except Exception as exc:  # noqa: BLE001
+            if require_discovery_evidence:
+                raise UnityProcessDiscoveryUnavailable(
+                    "A running Unity process has no readable process id."
+                ) from exc
             continue
+        command_line = _process_cmdline_text(
+            process,
+            require_discovery_evidence=require_discovery_evidence,
+        )
         processes.append(
             {
                 "processId": process_id,
                 "executablePath": _process_exe_text(process),
-                "commandLine": _process_cmdline_text(process),
+                "commandLine": command_line,
             }
         )
     return processes
@@ -15041,27 +15295,23 @@ def _project_path_token(path: Path) -> str:
 
 
 def unity_process_matches_project(process: dict[str, Any], project_root: Path) -> bool:
-    command_line = str(process.get("commandLine") or "").replace("\\", "/").casefold()
-    project_token = _project_path_token(project_root)
-    if project_token and project_token in command_line:
-        return True
-    project_name = project_root.name.casefold()
-    return bool(project_name and "-projectpath" in command_line and project_name in command_line)
+    return unity_process_exactly_matches_project(process, project_root)
+
+
+def unity_process_exactly_matches_project(process: dict[str, Any], project_root: Path) -> bool:
+    observed_path = extract_unity_project_path_from_command_line(
+        str(process.get("commandLine") or "")
+    )
+    return bool(
+        observed_path
+        and _project_path_token(Path(observed_path)) == _project_path_token(project_root)
+    )
 
 
 def unity_instance_matches_project(instance: dict[str, Any], project_root: Path) -> bool:
     instance_path = normalize_path_string(str(instance.get("projectPath") or "")).casefold()
     project_path = normalize_path_string(str(project_root)).casefold()
-    if instance_path and instance_path == project_path:
-        return True
-    project_name = project_root.name.casefold()
-    candidates = [
-        instance.get("project"),
-        instance.get("projectName"),
-        instance.get("cliInstanceId"),
-        Path(str(instance.get("projectPath") or "")).name if instance.get("projectPath") else "",
-    ]
-    return any(str(candidate or "").strip().casefold() == project_name for candidate in candidates)
+    return bool(instance_path and instance_path == project_path)
 
 
 def _existing_command_path_candidates(command_names: tuple[str, ...], extra_candidates: list[Path] | None = None) -> Path | None:
@@ -15426,11 +15676,19 @@ def wait_for_unity_project_registration(settings: Settings, project_root: Path, 
     deadline = time.monotonic() + max(1, wait_seconds)
     latest: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        latest = build_unity_instances_diagnostics(settings)
+        latest = build_unity_instances_diagnostics(settings, project_root)
         instances = latest.get("instances") if isinstance(latest.get("instances"), list) else []
-        matched = next((instance for instance in instances if unity_instance_matches_project(instance, project_root)), None)
+        matched = next(
+            (
+                instance
+                for instance in instances
+                if unity_instance_matches_project(instance, project_root)
+                and stable_unity_cli_selector(instance)
+            ),
+            None,
+        )
         if matched:
-            cli_selector = str(matched.get("cliInstanceId") or matched.get("hash") or matched.get("project") or "").strip()
+            cli_selector = stable_unity_cli_selector(matched)
             if cli_selector:
                 DASHBOARD_STATE.unity_instance = cli_selector
                 settings.unity_mcp_instance = cli_selector
@@ -15442,6 +15700,7 @@ def wait_for_unity_project_registration(settings: Settings, project_root: Path, 
 def unity_repair_tools_ready(summary: dict[str, Any]) -> bool:
     return bool(
         summary.get("unityInstanceRegistered")
+        and summary.get("selectedInstanceMatched")
         and summary.get("vrcForgeToolsRegistered")
         and int(summary.get("totalTools") or 0) > 0
         and not summary.get("missingRequiredVrcForgeTools")
@@ -15454,6 +15713,8 @@ def unity_repair_tools_message(summary: dict[str, Any]) -> str:
         return "MCP server is reachable, but Unity's execution connection is not active."
     if not summary.get("unityInstanceRegistered"):
         return "Unity has not registered with the MCP server yet."
+    if not summary.get("selectedInstanceMatched"):
+        return "Unity registered, but its active instance is not bound to the selected project."
     if int(summary.get("totalTools") or 0) <= 0:
         return "Unity registered, but the MCP tool list is still empty."
     if not summary.get("vrcForgeToolsRegistered"):
@@ -15494,9 +15755,13 @@ def recent_unity_mcp_execution_error(window_seconds: int = 300) -> dict[str, Any
 
 def build_unity_repair_quick_summary(settings: Settings, project_root: Path) -> dict[str, Any]:
     health = fetch_mcp_server_health(settings)
-    instances = build_unity_instances_diagnostics(settings)
+    instances = build_unity_instances_diagnostics(settings, project_root)
     active_instance = instances.get("activeInstance") if isinstance(instances.get("activeInstance"), dict) else {}
-    matched = bool(active_instance and unity_instance_matches_project(active_instance, project_root))
+    matched = bool(
+        active_instance
+        and stable_unity_cli_selector(active_instance)
+        and unity_instance_matches_project(active_instance, project_root)
+    )
     active_count = int(instances.get("activeCount") or 0)
     recent_error = recent_unity_mcp_execution_error()
     return {
@@ -15571,17 +15836,17 @@ def wait_for_unity_tools_ready(
     deadline = time.monotonic() + max(1, wait_seconds)
     latest: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        status = build_unity_status_snapshot(settings)
-        latest = _unity_repair_status_summary(status)
-        active = status.get("activeInstance") if isinstance(status.get("activeInstance"), dict) else {}
-        if active and not unity_instance_matches_project(active, project_root):
-            latest["selectedInstanceMatched"] = False
+        status = build_unity_status_snapshot(settings, project_root)
+        latest = _unity_repair_status_summary(status, project_root)
         if unity_repair_tools_ready(latest):
             return True, latest
         if poll_interval_seconds > 0:
             time.sleep(min(poll_interval_seconds, max(0.0, deadline - time.monotonic())))
     if not latest:
-        latest = _unity_repair_status_summary(build_unity_status_snapshot(settings))
+        latest = _unity_repair_status_summary(
+            build_unity_status_snapshot(settings, project_root),
+            project_root,
+        )
     return False, latest
 
 
@@ -15595,12 +15860,8 @@ def resolve_unity_editor_path_for_repair(project_root: Path, requested_path: str
     running_processes = list_running_unity_processes()
     for process in running_processes:
         executable = str(process.get("executablePath") or "").strip()
-        if executable and unity_process_matches_project(process, project_root):
+        if executable and unity_process_exactly_matches_project(process, project_root):
             candidates.append(("running-unity-project", Path(executable)))
-    if len(running_processes) == 1:
-        executable = str(running_processes[0].get("executablePath") or "").strip()
-        if executable:
-            candidates.append(("single-running-unity", Path(executable)))
 
     editor_version = parse_editor_version(project_root / "ProjectSettings" / "ProjectVersion.txt")
     if editor_version and editor_version != "Unknown":
@@ -15635,8 +15896,14 @@ def resolve_unity_editor_path_for_repair(project_root: Path, requested_path: str
 
 
 def close_unity_project_gracefully(project_root: Path, timeout_seconds: int) -> tuple[bool, str, dict[str, Any]]:
-    processes = list_running_unity_processes()
-    matching = [process for process in processes if unity_process_matches_project(process, project_root)]
+    try:
+        processes = list_running_unity_processes(require_discovery_evidence=True)
+    except UnityProcessDiscoveryUnavailable:
+        return False, "Unity process evidence is unavailable, so VRCForge did not close any editor.", {
+            "processCount": 0,
+            "evidenceAvailable": False,
+        }
+    matching = [process for process in processes if unity_process_exactly_matches_project(process, project_root)]
     if not processes:
         return True, "Unity is not currently running; launch can proceed.", {"processCount": 0}
     if not matching:
@@ -15818,8 +16085,8 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                 "before": before,
                 "after": before,
             }
-        before_status = build_unity_status_snapshot(settings)
-        before = _unity_repair_status_summary(before_status)
+        before_status = build_unity_status_snapshot(settings, project_root)
+        before = _unity_repair_status_summary(before_status, project_root)
 
         if unity_repair_tools_ready(before) and unity_repair_execution_ready(settings, before, phases, "unity_execution_probe_initial"):
             phases.append(_repair_phase("already_healthy", "ok", "Unity bridge is already registered and VRCForge tools are available."))
@@ -15835,7 +16102,7 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
             }
 
         if not ensure_unity_mcp_server_running(settings, phases, request.wait_seconds):
-            after_status = build_unity_status_snapshot(settings)
+            after_status = build_unity_status_snapshot(settings, project_root)
             return {
                 "ok": False,
                 "schema": "vrcforge.unity_mcp_repair.v1",
@@ -15844,7 +16111,7 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                 "projectPath": str(project_root),
                 "phases": phases,
                 "before": before,
-                "after": _unity_repair_status_summary(after_status),
+                "after": _unity_repair_status_summary(after_status, project_root),
             }
 
         registered, instance_payload = wait_for_unity_project_registration(settings, project_root, registration_wait)
@@ -15985,8 +16252,8 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                     {"unityEditorPathResolved": bool(editor_path), "source": editor_source},
                 )
             )
-            after_status = build_unity_status_snapshot(settings)
-            after = _unity_repair_status_summary(after_status)
+            after_status = build_unity_status_snapshot(settings, project_root)
+            after = _unity_repair_status_summary(after_status, project_root)
             return {
                 "ok": False,
                 "schema": "vrcforge.unity_mcp_repair.v1",
@@ -16007,7 +16274,7 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                     {"source": editor_source},
                 )
             )
-            after_status = build_unity_status_snapshot(settings)
+            after_status = build_unity_status_snapshot(settings, project_root)
             return {
                 "ok": False,
                 "schema": "vrcforge.unity_mcp_repair.v1",
@@ -16016,13 +16283,13 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                 "projectPath": str(project_root),
                 "phases": phases,
                 "before": before,
-                "after": _unity_repair_status_summary(after_status),
+                "after": _unity_repair_status_summary(after_status, project_root),
             }
 
         closed, close_message, close_detail = close_unity_project_gracefully(project_root, request.close_timeout_seconds)
         phases.append(_repair_phase("unity_close", "ok" if closed else "warning", close_message, close_detail))
         if not closed:
-            after_status = build_unity_status_snapshot(settings)
+            after_status = build_unity_status_snapshot(settings, project_root)
             return {
                 "ok": False,
                 "schema": "vrcforge.unity_mcp_repair.v1",
@@ -16031,13 +16298,13 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                 "projectPath": str(project_root),
                 "phases": phases,
                 "before": before,
-                "after": _unity_repair_status_summary(after_status),
+                "after": _unity_repair_status_summary(after_status, project_root),
             }
 
         launched, launch_error = launch_unity_project(editor_path, project_root)
         if not launched:
             phases.append(_repair_phase("unity_launch", "error", f"Unity launch failed: {launch_error}", {"unityEditorPath": str(editor_path)}))
-            after_status = build_unity_status_snapshot(settings)
+            after_status = build_unity_status_snapshot(settings, project_root)
             return {
                 "ok": False,
                 "schema": "vrcforge.unity_mcp_repair.v1",
@@ -16046,7 +16313,7 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                 "projectPath": str(project_root),
                 "phases": phases,
                 "before": before,
-                "after": _unity_repair_status_summary(after_status),
+                "after": _unity_repair_status_summary(after_status, project_root),
             }
 
         phases.append(_repair_phase("unity_launch", "ok", "Unity launch requested for the selected project.", {"unityEditorPath": str(editor_path), "source": editor_source}))
@@ -16092,7 +16359,10 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                     )
                     tools_ready_after_launch = tools_ready_after_launch_registration
         else:
-            after = _unity_repair_status_summary(build_unity_status_snapshot(settings))
+            after = _unity_repair_status_summary(
+                build_unity_status_snapshot(settings, project_root),
+                project_root,
+            )
         recovered = unity_repair_execution_ready(settings, after, phases, "unity_execution_probe_after_launch") if unity_repair_tools_ready(after) else False
         return {
             "ok": bool(recovered),
@@ -16638,7 +16908,7 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         if active_instance:
             project["activeMcp"] = True
             project["sessionId"] = active_instance.get("sessionId") or ""
-            project["cliInstanceId"] = active_instance.get("cliInstanceId") or active_instance.get("hash") or active_instance.get("project") or ""
+            project["cliInstanceId"] = stable_unity_cli_selector(active_instance)
             project["unityVersion"] = active_instance.get("unityVersion") or project.get("editorVersion") or ""
             project["editorVersion"] = project["unityVersion"] or project["editorVersion"]
 
@@ -23280,6 +23550,12 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "Build a supervised import plan for a UnityPackage, Booth folder, or loose prefab/texture folder without writing Unity project files.", "plan/preview", plan_outfit_import_sync)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: build_full_health_payload())
     AGENT_GATEWAY.register_tool(
+        "vrcforge_know_yourself",
+        "Read the current work-start preparation, Unity/MCP readiness, capability map, gaps, and safe operating boundaries without changing the Unity project.",
+        "read/debug",
+        know_yourself_sync,
+    )
+    AGENT_GATEWAY.register_tool(
         "vrcforge_unity_status",
         "Read Unity MCP bridge status.",
         "read/debug",
@@ -23797,25 +24073,24 @@ AGENT_GATEWAY.checkpoint_restore_handler = reload_unity_checkpoint_sync
 register_agent_gateway_tools()
 
 
-def create_primitive_basis_live_runtime() -> ModelPartCompositionLiveRuntime | None:
-    if PRIMITIVE_BASIS_LIVE_SESSION is None:
-        return None
-    global PRIMITIVE_BASIS_LIVE_CONNECTION
-    PRIMITIVE_BASIS_LIVE_CONNECTION = PrimitiveBasisLiveUnityConnection()
+def create_primitive_basis_live_runtime(
+    session: PrimitiveBasisLiveSession,
+    connection: PrimitiveBasisLiveUnityConnection,
+) -> ModelPartCompositionLiveRuntime:
     return ModelPartCompositionLiveRuntime(
-        PRIMITIVE_BASIS_LIVE_SESSION,
+        session,
         LiveRuntimeCallbacks(
-            bind_connection=PRIMITIVE_BASIS_LIVE_CONNECTION.bind,
-            validate_connection=PRIMITIVE_BASIS_LIVE_CONNECTION.validate,
-            inspect_fixture=PRIMITIVE_BASIS_LIVE_CONNECTION.inspect_fixture,
-            reload_fixture=PRIMITIVE_BASIS_LIVE_CONNECTION.reload_fixture,
-            inspect_component=PRIMITIVE_BASIS_LIVE_CONNECTION.inspect_component,
-            preview_component=PRIMITIVE_BASIS_LIVE_CONNECTION.preview_component,
+            bind_connection=connection.bind,
+            validate_connection=connection.validate,
+            inspect_fixture=connection.inspect_fixture,
+            reload_fixture=connection.reload_fixture,
+            inspect_component=connection.inspect_component,
+            preview_component=connection.preview_component,
             create_apply_request=lambda params: AGENT_GATEWAY.create_apply_request(
                 params,
                 include_arguments_digest=True,
             ),
-            read_compile_status=PRIMITIVE_BASIS_LIVE_CONNECTION.read_compile_status,
+            read_compile_status=connection.read_compile_status,
             create_restore_request=create_primitive_basis_restore_request_sync,
             preview_checkpoint=lambda checkpoint_id: AGENT_GATEWAY.preview_restore_checkpoint(
                 {"checkpointId": checkpoint_id}
@@ -24068,11 +24343,32 @@ def _primitive_live_guard_fields(params: dict[str, Any]) -> dict[str, Any]:
 
 
 PRIMITIVE_BASIS_LIVE_CONNECTION: PrimitiveBasisLiveUnityConnection | None = None
-PRIMITIVE_BASIS_LIVE_RUNTIME = create_primitive_basis_live_runtime()
-if PRIMITIVE_BASIS_LIVE_RUNTIME is not None:
-    AGENT_GATEWAY.apply_lifecycle_observer_fn = (
-        PRIMITIVE_BASIS_LIVE_RUNTIME.observe_apply_lifecycle
-    )
+
+
+def install_primitive_basis_live_runtime(
+    session: PrimitiveBasisLiveSession | None,
+) -> ModelPartCompositionLiveRuntime | None:
+    global PRIMITIVE_BASIS_LIVE_CONNECTION
+    global PRIMITIVE_BASIS_LIVE_RUNTIME
+    global PRIMITIVE_BASIS_LIVE_SESSION
+
+    if session is None:
+        PRIMITIVE_BASIS_LIVE_SESSION = None
+        PRIMITIVE_BASIS_LIVE_CONNECTION = None
+        PRIMITIVE_BASIS_LIVE_RUNTIME = None
+        AGENT_GATEWAY.apply_lifecycle_observer_fn = None
+        return None
+
+    connection = PrimitiveBasisLiveUnityConnection()
+    runtime = create_primitive_basis_live_runtime(session, connection)
+    PRIMITIVE_BASIS_LIVE_SESSION = session
+    PRIMITIVE_BASIS_LIVE_CONNECTION = connection
+    PRIMITIVE_BASIS_LIVE_RUNTIME = runtime
+    AGENT_GATEWAY.apply_lifecycle_observer_fn = runtime.observe_apply_lifecycle
+    return runtime
+
+
+install_primitive_basis_live_runtime(PRIMITIVE_BASIS_LIVE_SESSION)
 app.mount("/", AGENT_MCP_MOUNT, name="agent_mcp")
 
 
@@ -24243,7 +24539,8 @@ def main() -> int:
             return 0
         run_stdio_server(bridge)
         return 0
-    if backend_bind_target_occupied(args.host, args.port):
+    adoption_requested = backend_listener_adoption_requested()
+    if not adoption_requested and backend_bind_target_occupied(args.host, args.port):
         print(
             f"VRCForge backend refused to start because {args.host}:{args.port} is already occupied.",
             file=sys.stderr,
@@ -24255,9 +24552,41 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    adopted = None
+    if adoption_requested:
+        try:
+            adopted = load_backend_listener_adoption()
+            if adopted is None:
+                raise BackendListenerAdoptionError("backend_adoption_missing")
+            install_primitive_basis_live_runtime(adopted.live_session)
+            adopted.acknowledge()
+        except Exception:
+            install_primitive_basis_live_runtime(None)
+            if adopted is not None:
+                adopted.close()
+            BACKEND_OWNER_LEASE.release()
+            print(
+                "VRCForge backend refused the protected listener adoption.",
+                file=sys.stderr,
+            )
+            return 1
     if getattr(sys, "frozen", False):
         install_standard_stream_capture(DIAGNOSTIC_LOGGER)
-    run_owned_uvicorn_server(args.host, args.port)
+    try:
+        if adopted is None:
+            run_owned_uvicorn_server(args.host, args.port)
+        else:
+            run_owned_uvicorn_server(
+                args.host,
+                args.port,
+                sockets=[adopted.listener_socket],
+            )
+    finally:
+        if adopted is not None:
+            try:
+                adopted.close()
+            finally:
+                install_primitive_basis_live_runtime(None)
     return 0
 
 

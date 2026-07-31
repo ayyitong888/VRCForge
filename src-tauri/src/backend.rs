@@ -1094,28 +1094,6 @@ pub(crate) fn clear_backend_session_verify_cache() {
     }
 }
 
-/// Inverse of `percent_encode_query_component` for metadata smuggled through
-/// ASCII-only invoke headers (chat attachment uploads). Returns `None` when the
-/// escape sequences are malformed or the decoded bytes are not valid UTF-8.
-pub(crate) fn percent_decode_utf8(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'%' {
-            let hex = bytes.get(index + 1..index + 3)?;
-            let text = std::str::from_utf8(hex).ok()?;
-            decoded.push(u8::from_str_radix(text, 16).ok()?);
-            index += 3;
-        } else {
-            decoded.push(byte);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
 pub(crate) fn percent_encode_query_component(value: &str) -> String {
     let mut encoded = String::new();
     for byte in value.as_bytes() {

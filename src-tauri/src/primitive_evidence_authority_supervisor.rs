@@ -1,3 +1,8 @@
+use crate::primitive_basis_protected_evidence_bundle::PreparedProtectedEvidenceSource;
+use crate::primitive_evidence_child_protocol::{
+    ChildBootstrapRole, RoleRawHandleListDigest, CHILD_STANDARD_HANDLE_SLOT_COUNT,
+    GLOBAL_CAPABILITY_SOURCE_COUNT,
+};
 use sha2::{Digest as Sha2Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -9,16 +14,17 @@ pub const BRIDGE_LOOPBACK_PORT: u16 = 8080;
 const MAX_CANONICAL_RESULT_BYTES: usize = 64 * 1024;
 const CLEANUP_RECEIPT_DOMAIN: &[u8] = b"vrcforge-authority-cleanup-receipt-v1\0";
 const READINESS_PROOF_DOMAIN: &[u8] = b"vrcforge-authority-readiness-proof-v2\0";
-const SUPERVISOR_POLICY_DOMAIN: &[u8] = b"vrcforge-authority-supervisor-policy-v2\0";
+const SUPERVISOR_POLICY_DOMAIN: &[u8] = b"vrcforge-authority-supervisor-policy-v6\0";
 const RUNTIME_RUN_BINDING_DOMAIN: &[u8] = b"vrcforge-authority-runtime-run-binding-v2\0";
-const PREPARED_RECEIPT_DOMAIN: &[u8] = b"vrcforge-authority-prepared-receipt-v1\0";
-const ARMED_RECEIPT_DOMAIN: &[u8] = b"vrcforge-authority-armed-receipt-v1\0";
+const PREPARED_RECEIPT_DOMAIN: &[u8] = b"vrcforge-authority-prepared-receipt-v3\0";
+const ARMED_RECEIPT_DOMAIN: &[u8] = b"vrcforge-authority-armed-receipt-v4\0";
 const ARTIFACT_POLICY_DOMAIN: &[u8] = b"vrcforge-authority-artifact-policy-v1\0";
 const ENDPOINT_POLICY_DOMAIN: &[u8] = b"vrcforge-authority-endpoint-policy-v1\0";
 const HELPER_POLICY_DOMAIN: &[u8] = b"vrcforge-authority-helper-policy-v1\0";
-const PREPARED_RECEIPT_MAGIC: &[u8; 8] = b"VRCPRP01";
-const ARMED_RECEIPT_MAGIC: &[u8; 8] = b"VRCARM01";
-const POLICY_SNAPSHOT_MAGIC: &[u8; 8] = b"VRCPOL01";
+const PREPARED_RECEIPT_MAGIC: &[u8; 8] = b"VRCPRP04";
+const ARMED_RECEIPT_MAGIC: &[u8; 8] = b"VRCARM04";
+const POLICY_SNAPSHOT_MAGIC: &[u8; 8] = b"VRCPOL06";
+const MAX_PROTECTED_EVIDENCE_SOURCE_BYTES: usize = 2 * 1024;
 const MAX_POLICY_ARTIFACTS: usize = 64;
 const MAX_POLICY_ENDPOINTS: usize = 8;
 const MAX_POLICY_HELPERS: usize = 64;
@@ -26,12 +32,18 @@ const MAX_HELPER_PARENT_DIGESTS: usize = 32;
 const MAX_HELPER_EXIT_CODES: usize = 32;
 const TEST_CLEANUP_RECEIPT_DOMAIN: &[u8] = b"vrcforge-authority-test-cleanup-receipt-v1\0";
 
-const PRODUCTION_BLOCKERS: [&str; 6] = [
+const PRODUCTION_BLOCKERS: [&str; 12] = [
+    "authority_generation_attestation_not_connected",
     "isolated_runner_identity_not_provisioned",
     "protected_process_launch_not_implemented",
     "service_owned_job_supervision_not_implemented",
-    "observed_endpoint_supervision_not_implemented",
-    "private_finalization_not_implemented",
+    "authority_backend_listener_adoption_not_supported",
+    "authority_bridge_target_listener_adoption_not_supported",
+    "authority_bridge_target_in_memory_startup_not_connected",
+    "authority_bridge_target_request_auth_not_connected",
+    "private_backend_pipe_not_implemented",
+    "service_direct_http_lifecycle_not_implemented",
+    "post_cleanup_origin_seal_not_implemented",
     "supervised_cleanup_not_implemented",
 ];
 
@@ -54,7 +66,7 @@ const CANDIDATE_ROLES: [ProcessRole; 6] = [
     ProcessRole::BridgeListener,
 ];
 
-const ROOT_ROLES: [ProcessRole; 1] = [ProcessRole::Driver];
+const ROOT_ROLES: [ProcessRole; 2] = [ProcessRole::BridgeLauncher, ProcessRole::Driver];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupervisorReadiness {
@@ -89,8 +101,7 @@ pub(crate) struct VerifiedReadinessProof {
 }
 
 impl VerifiedReadinessProof {
-    #[cfg(test)]
-    pub(crate) fn for_runtime_test(
+    fn from_authenticated_readback(
         authority_identity_digest: Digest,
         service_instance_digest: Digest,
     ) -> Self {
@@ -100,6 +111,14 @@ impl VerifiedReadinessProof {
             service_instance_digest,
             seal_digest,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_runtime_test(
+        authority_identity_digest: Digest,
+        service_instance_digest: Digest,
+    ) -> Self {
+        Self::from_authenticated_readback(authority_identity_digest, service_instance_digest)
     }
 
     pub(crate) fn verifies_for(&self, authority_identity_digest: &Digest) -> bool {
@@ -147,7 +166,7 @@ impl fmt::Display for SupervisorError {
 impl std::error::Error for SupervisorError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum ProcessRole {
+pub(crate) enum ProcessRole {
     AuthorityService,
     Driver,
     Desktop,
@@ -161,10 +180,9 @@ impl ProcessRole {
     fn expected_parent(self) -> Option<Self> {
         match self {
             Self::AuthorityService => None,
-            Self::Driver => Some(Self::AuthorityService),
+            Self::Driver | Self::BridgeLauncher => Some(Self::AuthorityService),
             Self::Desktop | Self::Unity => Some(Self::Driver),
             Self::Backend => Some(Self::Desktop),
-            Self::BridgeLauncher => Some(Self::Unity),
             Self::BridgeListener => Some(Self::BridgeLauncher),
         }
     }
@@ -175,6 +193,14 @@ impl ProcessRole {
 
     fn is_candidate(self) -> bool {
         self != Self::AuthorityService
+    }
+
+    fn child_bootstrap_role(self) -> Option<ChildBootstrapRole> {
+        match self {
+            Self::Driver => Some(ChildBootstrapRole::LifecycleDriver),
+            Self::BridgeLauncher => Some(ChildBootstrapRole::BridgeLauncher),
+            _ => None,
+        }
     }
 }
 
@@ -208,7 +234,7 @@ struct ProcessKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     volume_serial: u64,
     file_id: [u8; 16],
 }
@@ -216,15 +242,18 @@ struct FileIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedRecoveryReceipt {
     authority_identity_digest: Digest,
+    authority_generation_digest: Digest,
     ticket_digest: Digest,
     service_instance_digest: Digest,
     runner_policy_digest: Digest,
     deterministic_job_name_digest: Digest,
+    job_security_binding_digest: Digest,
     private_root_binding_digest: Digest,
     artifact_policy_digest: Digest,
     endpoint_policy_digest: Digest,
     helper_policy_digest: Digest,
-    inherited_handle_allowlist_digest: Digest,
+    child_transport_contract_digest: Digest,
+    protected_evidence_source_digest: Digest,
     issued_at: u64,
     deadline: u64,
     job_object_id: u64,
@@ -235,15 +264,18 @@ impl PreparedRecoveryReceipt {
     fn from_policy(policy: &SupervisorPolicy) -> Self {
         let mut receipt = Self {
             authority_identity_digest: policy.authority_identity_digest,
+            authority_generation_digest: policy.authority_generation_digest,
             ticket_digest: policy.ticket_digest,
             service_instance_digest: policy.service_instance_digest,
             runner_policy_digest: policy.runner_policy_digest,
             deterministic_job_name_digest: policy.deterministic_job_name_digest,
+            job_security_binding_digest: policy.job_security_binding_digest,
             private_root_binding_digest: policy.private_root_binding_digest,
             artifact_policy_digest: artifact_policy_digest(&policy.artifacts),
             endpoint_policy_digest: endpoint_policy_digest(&policy.socket_policies),
             helper_policy_digest: helper_policy_digest(&policy.helper_policies),
-            inherited_handle_allowlist_digest: policy.inherited_handle_allowlist_digest,
+            child_transport_contract_digest: policy.child_transport_contract_digest,
+            protected_evidence_source_digest: policy.protected_evidence_source.digest(),
             issued_at: policy.issued_at,
             deadline: policy.deadline,
             job_object_id: policy.job_object_id,
@@ -254,37 +286,43 @@ impl PreparedRecoveryReceipt {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, SupervisorError> {
-        const DIGEST_COUNT: usize = 11;
+        const DIGEST_COUNT: usize = 14;
         const ENCODED_LEN: usize = 8 + DIGEST_COUNT * 32 + 3 * 8;
         if bytes.len() != ENCODED_LEN || &bytes[..8] != PREPARED_RECEIPT_MAGIC {
             return Err(SupervisorError::new("authority_prepared_receipt_invalid"));
         }
         let mut offset = 8usize;
         let authority_identity_digest = take_digest(bytes, &mut offset)?;
+        let authority_generation_digest = take_digest(bytes, &mut offset)?;
         let ticket_digest = take_digest(bytes, &mut offset)?;
         let service_instance_digest = take_digest(bytes, &mut offset)?;
         let runner_policy_digest = take_digest(bytes, &mut offset)?;
         let deterministic_job_name_digest = take_digest(bytes, &mut offset)?;
+        let job_security_binding_digest = take_digest(bytes, &mut offset)?;
         let private_root_binding_digest = take_digest(bytes, &mut offset)?;
         let artifact_policy_digest = take_digest(bytes, &mut offset)?;
         let endpoint_policy_digest = take_digest(bytes, &mut offset)?;
         let helper_policy_digest = take_digest(bytes, &mut offset)?;
-        let inherited_handle_allowlist_digest = take_digest(bytes, &mut offset)?;
+        let child_transport_contract_digest = take_digest(bytes, &mut offset)?;
+        let protected_evidence_source_digest = take_digest(bytes, &mut offset)?;
         let issued_at = take_u64(bytes, &mut offset)?;
         let deadline = take_u64(bytes, &mut offset)?;
         let job_object_id = take_u64(bytes, &mut offset)?;
         let seal_digest = take_digest(bytes, &mut offset)?;
         let receipt = Self {
             authority_identity_digest,
+            authority_generation_digest,
             ticket_digest,
             service_instance_digest,
             runner_policy_digest,
             deterministic_job_name_digest,
+            job_security_binding_digest,
             private_root_binding_digest,
             artifact_policy_digest,
             endpoint_policy_digest,
             helper_policy_digest,
-            inherited_handle_allowlist_digest,
+            child_transport_contract_digest,
+            protected_evidence_source_digest,
             issued_at,
             deadline,
             job_object_id,
@@ -297,19 +335,22 @@ impl PreparedRecoveryReceipt {
     }
 
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(384);
+        let mut bytes = Vec::with_capacity(480);
         bytes.extend_from_slice(PREPARED_RECEIPT_MAGIC);
         for value in [
             self.authority_identity_digest,
+            self.authority_generation_digest,
             self.ticket_digest,
             self.service_instance_digest,
             self.runner_policy_digest,
             self.deterministic_job_name_digest,
+            self.job_security_binding_digest,
             self.private_root_binding_digest,
             self.artifact_policy_digest,
             self.endpoint_policy_digest,
             self.helper_policy_digest,
-            self.inherited_handle_allowlist_digest,
+            self.child_transport_contract_digest,
+            self.protected_evidence_source_digest,
         ] {
             bytes.extend_from_slice(&value);
         }
@@ -338,12 +379,15 @@ impl PreparedRecoveryReceipt {
             &policy.ticket_digest,
             &policy.service_instance_digest,
         ) && self.runner_policy_digest == policy.runner_policy_digest
+            && self.authority_generation_digest == policy.authority_generation_digest
             && self.deterministic_job_name_digest == policy.deterministic_job_name_digest
+            && self.job_security_binding_digest == policy.job_security_binding_digest
             && self.private_root_binding_digest == policy.private_root_binding_digest
             && self.artifact_policy_digest == artifact_policy_digest(&policy.artifacts)
             && self.endpoint_policy_digest == endpoint_policy_digest(&policy.socket_policies)
             && self.helper_policy_digest == helper_policy_digest(&policy.helper_policies)
-            && self.inherited_handle_allowlist_digest == policy.inherited_handle_allowlist_digest
+            && self.child_transport_contract_digest == policy.child_transport_contract_digest
+            && self.protected_evidence_source_digest == policy.protected_evidence_source.digest()
             && self.issued_at == policy.issued_at
             && self.deadline == policy.deadline
             && self.job_object_id == policy.job_object_id
@@ -356,15 +400,18 @@ impl PreparedRecoveryReceipt {
     fn is_self_consistent(&self) -> bool {
         ![
             self.authority_identity_digest,
+            self.authority_generation_digest,
             self.ticket_digest,
             self.service_instance_digest,
             self.runner_policy_digest,
             self.deterministic_job_name_digest,
+            self.job_security_binding_digest,
             self.private_root_binding_digest,
             self.artifact_policy_digest,
             self.endpoint_policy_digest,
             self.helper_policy_digest,
-            self.inherited_handle_allowlist_digest,
+            self.child_transport_contract_digest,
+            self.protected_evidence_source_digest,
         ]
         .iter()
         .any(is_zero_digest)
@@ -376,6 +423,10 @@ impl PreparedRecoveryReceipt {
 
     pub(crate) fn runner_policy_digest(&self) -> &Digest {
         &self.runner_policy_digest
+    }
+
+    pub(crate) fn authority_generation_digest(&self) -> &Digest {
+        &self.authority_generation_digest
     }
 
     pub(crate) fn service_instance_digest(&self) -> &Digest {
@@ -396,7 +447,7 @@ pub(crate) struct PreparedRun {
 }
 
 impl PreparedRun {
-    fn from_policy(policy: &SupervisorPolicy) -> Self {
+    pub(super) fn from_policy(policy: &SupervisorPolicy) -> Self {
         Self {
             receipt: PreparedRecoveryReceipt::from_policy(policy),
             policy_snapshot: canonical_supervisor_policy_snapshot(policy),
@@ -415,6 +466,35 @@ impl PreparedRun {
             ticket_digest,
             service_instance_digest,
             runner_policy_digest,
+        );
+        Self::from_policy(&policy)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn for_runtime_identity_test(
+        authority_identity_digest: Digest,
+        authority_generation_digest: Digest,
+        protected_manifest_digest: Digest,
+        installed_layout_digest: Digest,
+        service_executable_digest: Digest,
+        ledger_identity_digest: Digest,
+        ticket_digest: Digest,
+        service_instance_digest: Digest,
+        runner_policy_digest: Digest,
+    ) -> Self {
+        let policy = runtime_test_policy_with_identity_and_ledger(
+            authority_identity_digest,
+            ticket_digest,
+            service_instance_digest,
+            runner_policy_digest,
+            Some((
+                authority_generation_digest,
+                protected_manifest_digest,
+                installed_layout_digest,
+                service_executable_digest,
+            )),
+            Some(ledger_identity_digest),
         );
         Self::from_policy(&policy)
     }
@@ -449,16 +529,20 @@ pub(crate) struct ArmedRecoveryReceipt {
     run_binding_digest: Digest,
     runner_policy_digest: Digest,
     deterministic_job_name_digest: Digest,
+    job_security_binding_digest: Digest,
     private_root_binding_digest: Digest,
     artifact_policy_digest: Digest,
     endpoint_policy_digest: Digest,
     helper_policy_digest: Digest,
+    child_transport_contract_digest: Digest,
+    raw_handle_role: ChildBootstrapRole,
+    raw_handle_list_digest: Digest,
     root_process: ProcessKey,
     root_executable_digest: Digest,
     root_image_identity: FileIdentity,
     job_object_id: u64,
     created_suspended_at: u64,
-    assigned_to_job_at: u64,
+    job_membership_verified_at: u64,
     resumed_at: u64,
     seal_digest: Digest,
 }
@@ -477,16 +561,20 @@ impl ArmedRecoveryReceipt {
             run_binding_digest: policy.run_binding_digest,
             runner_policy_digest: policy.runner_policy_digest,
             deterministic_job_name_digest: policy.deterministic_job_name_digest,
+            job_security_binding_digest: policy.job_security_binding_digest,
             private_root_binding_digest: policy.private_root_binding_digest,
             artifact_policy_digest: artifact_policy_digest(&policy.artifacts),
             endpoint_policy_digest: endpoint_policy_digest(&policy.socket_policies),
             helper_policy_digest: helper_policy_digest(&policy.helper_policies),
+            child_transport_contract_digest: policy.child_transport_contract_digest,
+            raw_handle_role: launch.raw_handle_list.role(),
+            raw_handle_list_digest: *launch.raw_handle_list.as_bytes(),
             root_process: root_process.key,
             root_executable_digest: root_process.executable_digest,
             root_image_identity: root_process.image_handle_identity,
             job_object_id: policy.job_object_id,
             created_suspended_at: launch.created_suspended_at,
-            assigned_to_job_at: launch.assigned_to_job_at,
+            job_membership_verified_at: launch.job_membership_verified_at,
             resumed_at: launch.resumed_at,
             seal_digest: [0; 32],
         };
@@ -499,6 +587,11 @@ impl ArmedRecoveryReceipt {
         prepared: &PreparedRecoveryReceipt,
         run_binding_digest: Digest,
     ) -> Self {
+        let raw_handle_list = RoleRawHandleListDigest::derive(
+            ChildBootstrapRole::LifecycleDriver,
+            &[0x101usize, 0x202usize, 0x303usize],
+        )
+        .expect("fixed runtime-test raw handle list");
         let mut receipt = Self {
             prepared_receipt_digest: prepared.digest(),
             authority_identity_digest: prepared.authority_identity_digest,
@@ -506,10 +599,14 @@ impl ArmedRecoveryReceipt {
             run_binding_digest,
             runner_policy_digest: prepared.runner_policy_digest,
             deterministic_job_name_digest: prepared.deterministic_job_name_digest,
+            job_security_binding_digest: prepared.job_security_binding_digest,
             private_root_binding_digest: prepared.private_root_binding_digest,
             artifact_policy_digest: prepared.artifact_policy_digest,
             endpoint_policy_digest: prepared.endpoint_policy_digest,
             helper_policy_digest: prepared.helper_policy_digest,
+            child_transport_contract_digest: prepared.child_transport_contract_digest,
+            raw_handle_role: raw_handle_list.role(),
+            raw_handle_list_digest: *raw_handle_list.as_bytes(),
             root_process: ProcessKey {
                 pid: 101,
                 creation_time: 1_001,
@@ -521,7 +618,7 @@ impl ArmedRecoveryReceipt {
             },
             job_object_id: prepared.job_object_id,
             created_suspended_at: 30,
-            assigned_to_job_at: 31,
+            job_membership_verified_at: 31,
             resumed_at: 32,
             seal_digest: [0; 32],
         };
@@ -530,8 +627,8 @@ impl ArmedRecoveryReceipt {
     }
 
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self, SupervisorError> {
-        const DIGEST_COUNT: usize = 12;
-        const ENCODED_LEN: usize = 8 + DIGEST_COUNT * 32 + 4 + 8 + 8 + 16 + 4 * 8;
+        const DIGEST_COUNT: usize = 15;
+        const ENCODED_LEN: usize = 8 + DIGEST_COUNT * 32 + 1 + 4 + 8 + 8 + 16 + 4 * 8;
         if bytes.len() != ENCODED_LEN || &bytes[..8] != ARMED_RECEIPT_MAGIC {
             return Err(SupervisorError::new("authority_armed_receipt_invalid"));
         }
@@ -542,10 +639,19 @@ impl ArmedRecoveryReceipt {
         let run_binding_digest = take_digest(bytes, &mut offset)?;
         let runner_policy_digest = take_digest(bytes, &mut offset)?;
         let deterministic_job_name_digest = take_digest(bytes, &mut offset)?;
+        let job_security_binding_digest = take_digest(bytes, &mut offset)?;
         let private_root_binding_digest = take_digest(bytes, &mut offset)?;
         let artifact_policy_digest = take_digest(bytes, &mut offset)?;
         let endpoint_policy_digest = take_digest(bytes, &mut offset)?;
         let helper_policy_digest = take_digest(bytes, &mut offset)?;
+        let child_transport_contract_digest = take_digest(bytes, &mut offset)?;
+        let raw_handle_list_digest = take_digest(bytes, &mut offset)?;
+        let raw_handle_role = match take_u8(bytes, &mut offset)? {
+            value if value == ChildBootstrapRole::LifecycleDriver.wire_value() => {
+                ChildBootstrapRole::LifecycleDriver
+            }
+            _ => return Err(SupervisorError::new("authority_armed_receipt_invalid")),
+        };
         let root_executable_digest = take_digest(bytes, &mut offset)?;
         let pid = take_u32(bytes, &mut offset)?;
         let creation_time = take_u64(bytes, &mut offset)?;
@@ -553,7 +659,7 @@ impl ArmedRecoveryReceipt {
         let file_id = take_array_16(bytes, &mut offset)?;
         let job_object_id = take_u64(bytes, &mut offset)?;
         let created_suspended_at = take_u64(bytes, &mut offset)?;
-        let assigned_to_job_at = take_u64(bytes, &mut offset)?;
+        let job_membership_verified_at = take_u64(bytes, &mut offset)?;
         let resumed_at = take_u64(bytes, &mut offset)?;
         let seal_digest = take_digest(bytes, &mut offset)?;
         let receipt = Self {
@@ -563,10 +669,14 @@ impl ArmedRecoveryReceipt {
             run_binding_digest,
             runner_policy_digest,
             deterministic_job_name_digest,
+            job_security_binding_digest,
             private_root_binding_digest,
             artifact_policy_digest,
             endpoint_policy_digest,
             helper_policy_digest,
+            child_transport_contract_digest,
+            raw_handle_role,
+            raw_handle_list_digest,
             root_process: ProcessKey { pid, creation_time },
             root_executable_digest,
             root_image_identity: FileIdentity {
@@ -575,7 +685,7 @@ impl ArmedRecoveryReceipt {
             },
             job_object_id,
             created_suspended_at,
-            assigned_to_job_at,
+            job_membership_verified_at,
             resumed_at,
             seal_digest,
         };
@@ -595,21 +705,25 @@ impl ArmedRecoveryReceipt {
             self.run_binding_digest,
             self.runner_policy_digest,
             self.deterministic_job_name_digest,
+            self.job_security_binding_digest,
             self.private_root_binding_digest,
             self.artifact_policy_digest,
             self.endpoint_policy_digest,
             self.helper_policy_digest,
-            self.root_executable_digest,
+            self.child_transport_contract_digest,
+            self.raw_handle_list_digest,
         ] {
             bytes.extend_from_slice(&value);
         }
+        bytes.push(self.raw_handle_role.wire_value());
+        bytes.extend_from_slice(&self.root_executable_digest);
         bytes.extend_from_slice(&self.root_process.pid.to_be_bytes());
         bytes.extend_from_slice(&self.root_process.creation_time.to_be_bytes());
         bytes.extend_from_slice(&self.root_image_identity.volume_serial.to_be_bytes());
         bytes.extend_from_slice(&self.root_image_identity.file_id);
         bytes.extend_from_slice(&self.job_object_id.to_be_bytes());
         bytes.extend_from_slice(&self.created_suspended_at.to_be_bytes());
-        bytes.extend_from_slice(&self.assigned_to_job_at.to_be_bytes());
+        bytes.extend_from_slice(&self.job_membership_verified_at.to_be_bytes());
         bytes.extend_from_slice(&self.resumed_at.to_be_bytes());
         bytes.extend_from_slice(&self.seal_digest);
         bytes
@@ -625,10 +739,14 @@ impl ArmedRecoveryReceipt {
             && self.ticket_digest == prepared.ticket_digest
             && self.runner_policy_digest == prepared.runner_policy_digest
             && self.deterministic_job_name_digest == prepared.deterministic_job_name_digest
+            && self.job_security_binding_digest == prepared.job_security_binding_digest
             && self.private_root_binding_digest == prepared.private_root_binding_digest
             && self.artifact_policy_digest == prepared.artifact_policy_digest
             && self.endpoint_policy_digest == prepared.endpoint_policy_digest
             && self.helper_policy_digest == prepared.helper_policy_digest
+            && self.child_transport_contract_digest == prepared.child_transport_contract_digest
+            && self.raw_handle_role == ChildBootstrapRole::LifecycleDriver
+            && self.raw_handle_list_digest != self.child_transport_contract_digest
             && self.job_object_id == prepared.job_object_id
             && self.run_binding_digest == *run_binding_digest
             && self.is_self_consistent()
@@ -642,10 +760,13 @@ impl ArmedRecoveryReceipt {
             self.run_binding_digest,
             self.runner_policy_digest,
             self.deterministic_job_name_digest,
+            self.job_security_binding_digest,
             self.private_root_binding_digest,
             self.artifact_policy_digest,
             self.endpoint_policy_digest,
             self.helper_policy_digest,
+            self.child_transport_contract_digest,
+            self.raw_handle_list_digest,
             self.root_executable_digest,
         ]
         .iter()
@@ -659,8 +780,10 @@ impl ArmedRecoveryReceipt {
                 .iter()
                 .any(|byte| *byte != 0)
             && self.job_object_id != 0
-            && self.created_suspended_at < self.assigned_to_job_at
-            && self.assigned_to_job_at < self.resumed_at
+            && self.raw_handle_role == ChildBootstrapRole::LifecycleDriver
+            && self.raw_handle_list_digest != self.child_transport_contract_digest
+            && self.created_suspended_at < self.job_membership_verified_at
+            && self.job_membership_verified_at < self.resumed_at
             && self.seal_digest == armed_receipt_seal(self)
     }
 }
@@ -699,6 +822,7 @@ struct HelperProcessPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SupervisorPolicy {
     authority_identity_digest: Digest,
+    authority_generation_digest: Digest,
     ticket_digest: Digest,
     run_binding_digest: Digest,
     service_instance_digest: Digest,
@@ -708,16 +832,86 @@ pub(crate) struct SupervisorPolicy {
     authority_process: ProcessKey,
     authority_parent_process: ProcessKey,
     process_executable_digests: [Digest; PROCESS_ROLES.len()],
+    bridge_target_manifest_digest: Digest,
+    bridge_target_tree_digest: Digest,
     runner_identity_digest: Digest,
     runner_account_digest: Digest,
     runner_profile_digest: Digest,
-    inherited_handle_allowlist_digest: Digest,
+    child_transport_projection: policy_source::ChildTransportContractProjection,
+    child_transport_contract_digest: Digest,
     deterministic_job_name_digest: Digest,
+    job_security_binding_digest: Digest,
     private_root_binding_digest: Digest,
     job_object_id: u64,
+    protected_evidence_source: PreparedProtectedEvidenceSource,
     artifacts: Vec<ArtifactExpectation>,
     socket_policies: Vec<SocketPolicy>,
     helper_policies: Vec<HelperProcessPolicy>,
+}
+
+impl SupervisorPolicy {
+    pub(crate) fn child_transport_projection(
+        &self,
+    ) -> &policy_source::ChildTransportContractProjection {
+        &self.child_transport_projection
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreparedProtectedEvidencePolicyReadback {
+    source: PreparedProtectedEvidenceSource,
+    authority_identity_digest: Digest,
+    authority_generation_digest: Digest,
+    ticket_digest: Digest,
+    run_binding_digest: Digest,
+    prepared_receipt_digest: Digest,
+    policy_snapshot_digest: Digest,
+}
+
+impl PreparedProtectedEvidencePolicyReadback {
+    pub(crate) fn source(&self) -> &PreparedProtectedEvidenceSource {
+        &self.source
+    }
+
+    pub(crate) fn authority_identity_digest(&self) -> &Digest {
+        &self.authority_identity_digest
+    }
+
+    pub(crate) fn authority_generation_digest(&self) -> &Digest {
+        &self.authority_generation_digest
+    }
+
+    pub(crate) fn ticket_digest(&self) -> &Digest {
+        &self.ticket_digest
+    }
+
+    pub(crate) fn run_binding_digest(&self) -> &Digest {
+        &self.run_binding_digest
+    }
+
+    pub(crate) fn prepared_receipt_digest(&self) -> &Digest {
+        &self.prepared_receipt_digest
+    }
+
+    pub(crate) fn policy_snapshot_digest(&self) -> &Digest {
+        &self.policy_snapshot_digest
+    }
+}
+
+pub(crate) fn prepared_protected_evidence_policy_readback(
+    bytes: &[u8],
+) -> Result<PreparedProtectedEvidencePolicyReadback, SupervisorError> {
+    let policy = decode_supervisor_policy_snapshot(bytes)?;
+    let prepared_receipt_digest = PreparedRecoveryReceipt::from_policy(&policy).digest();
+    Ok(PreparedProtectedEvidencePolicyReadback {
+        source: policy.protected_evidence_source,
+        authority_identity_digest: policy.authority_identity_digest,
+        authority_generation_digest: policy.authority_generation_digest,
+        ticket_digest: policy.ticket_digest,
+        run_binding_digest: policy.run_binding_digest,
+        prepared_receipt_digest,
+        policy_snapshot_digest: Sha256::digest(bytes).into(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -763,11 +957,12 @@ struct StableArtifactObservation {
 struct RootLaunchObservation {
     role: ProcessRole,
     created_suspended_at: u64,
-    assigned_to_job_at: u64,
+    job_membership_verified_at: u64,
     resumed_at: u64,
     job_object_id: u64,
     runner_identity_digest: Digest,
-    inherited_handle_allowlist_digest: Digest,
+    child_transport_contract_digest: Digest,
+    raw_handle_list: RoleRawHandleListDigest,
     all_other_handles_non_inheritable: bool,
     breakaway_requested: bool,
 }
@@ -1166,11 +1361,98 @@ fn canonical_supervisor_policy_digest(policy: &SupervisorPolicy) -> Digest {
     digest.finalize().into()
 }
 
+fn encode_child_transport_projection(
+    bytes: &mut Vec<u8>,
+    projection: &policy_source::ChildTransportContractProjection,
+) {
+    bytes.extend_from_slice(&projection.manifest_identity_digest);
+    for identity in projection.global_source_identities {
+        bytes.extend_from_slice(&identity);
+    }
+    for role in &projection.roles {
+        bytes.push(role.role.wire_value());
+        bytes.extend_from_slice(&role.executable_identity_digest);
+        bytes.extend_from_slice(&role.executable_content_digest);
+        bytes.extend_from_slice(&role.executable_byte_length.to_be_bytes());
+        for slot in role.slots {
+            bytes.extend_from_slice(&slot.ordinal.to_be_bytes());
+            bytes.extend_from_slice(&slot.semantic.to_be_bytes());
+            bytes.push(slot.purpose);
+            bytes.push(u8::from(slot.readable));
+            bytes.push(u8::from(slot.writable));
+        }
+    }
+}
+
+fn decode_child_transport_projection(
+    bytes: &[u8],
+    offset: &mut usize,
+) -> Result<policy_source::ChildTransportContractProjection, SupervisorError> {
+    let manifest_identity_digest = take_digest(bytes, offset)?;
+    let mut global_source_identities = [[0u8; 32]; GLOBAL_CAPABILITY_SOURCE_COUNT];
+    for identity in &mut global_source_identities {
+        *identity = take_digest(bytes, offset)?;
+    }
+    let mut decode_role = || {
+        let role = match take_u8(bytes, offset)? {
+            value if value == ChildBootstrapRole::LifecycleDriver.wire_value() => {
+                ChildBootstrapRole::LifecycleDriver
+            }
+            value if value == ChildBootstrapRole::BridgeLauncher.wire_value() => {
+                ChildBootstrapRole::BridgeLauncher
+            }
+            _ => return Err(SupervisorError::new("authority_policy_snapshot_invalid")),
+        };
+        let executable_identity_digest = take_digest(bytes, offset)?;
+        let executable_content_digest = take_digest(bytes, offset)?;
+        let executable_byte_length = take_u64(bytes, offset)?;
+        let mut slots = [policy_source::ChildTransportSlotContractProjection {
+            ordinal: 0,
+            semantic: 0,
+            purpose: 0,
+            readable: false,
+            writable: false,
+        }; CHILD_STANDARD_HANDLE_SLOT_COUNT];
+        for slot in &mut slots {
+            slot.ordinal = take_u16(bytes, offset)?;
+            slot.semantic = take_u16(bytes, offset)?;
+            slot.purpose = take_u8(bytes, offset)?;
+            slot.readable = take_snapshot_bool(bytes, offset)?;
+            slot.writable = take_snapshot_bool(bytes, offset)?;
+        }
+        Ok(policy_source::ChildTransportRoleContractProjection {
+            role,
+            executable_identity_digest,
+            executable_content_digest,
+            executable_byte_length,
+            slots,
+        })
+    };
+    let projection = policy_source::ChildTransportContractProjection {
+        manifest_identity_digest,
+        global_source_identities,
+        roles: [decode_role()?, decode_role()?],
+    };
+    if !projection.validates_fixed_contract() {
+        return Err(SupervisorError::new("authority_policy_snapshot_invalid"));
+    }
+    Ok(projection)
+}
+
+fn take_snapshot_bool(bytes: &[u8], offset: &mut usize) -> Result<bool, SupervisorError> {
+    match take_u8(bytes, offset)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(SupervisorError::new("authority_policy_snapshot_invalid")),
+    }
+}
+
 fn canonical_supervisor_policy_snapshot(policy: &SupervisorPolicy) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(POLICY_SNAPSHOT_MAGIC);
     for value in [
         policy.authority_identity_digest,
+        policy.authority_generation_digest,
         policy.ticket_digest,
         policy.service_instance_digest,
     ] {
@@ -1185,17 +1467,28 @@ fn canonical_supervisor_policy_snapshot(policy: &SupervisorPolicy) -> Vec<u8> {
     for executable in policy.process_executable_digests {
         bytes.extend_from_slice(&executable);
     }
+    bytes.extend_from_slice(&policy.bridge_target_manifest_digest);
+    bytes.extend_from_slice(&policy.bridge_target_tree_digest);
     for value in [
         policy.runner_identity_digest,
         policy.runner_account_digest,
         policy.runner_profile_digest,
-        policy.inherited_handle_allowlist_digest,
+    ] {
+        bytes.extend_from_slice(&value);
+    }
+    encode_child_transport_projection(&mut bytes, &policy.child_transport_projection);
+    for value in [
+        policy.child_transport_contract_digest,
         policy.deterministic_job_name_digest,
+        policy.job_security_binding_digest,
         policy.private_root_binding_digest,
     ] {
         bytes.extend_from_slice(&value);
     }
     bytes.extend_from_slice(&policy.job_object_id.to_be_bytes());
+    let protected_evidence_source = policy.protected_evidence_source.canonical_bytes();
+    bytes.extend_from_slice(&(protected_evidence_source.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&protected_evidence_source);
     bytes.extend_from_slice(&(policy.artifacts.len() as u32).to_be_bytes());
     for artifact in &policy.artifacts {
         bytes.extend_from_slice(&artifact.binding_digest);
@@ -1242,6 +1535,7 @@ fn decode_supervisor_policy_snapshot(bytes: &[u8]) -> Result<SupervisorPolicy, S
     }
     let mut offset = 8usize;
     let authority_identity_digest = take_digest(bytes, &mut offset)?;
+    let authority_generation_digest = take_digest(bytes, &mut offset)?;
     let ticket_digest = take_digest(bytes, &mut offset)?;
     let service_instance_digest = take_digest(bytes, &mut offset)?;
     let issued_at = take_u64(bytes, &mut offset)?;
@@ -1258,13 +1552,32 @@ fn decode_supervisor_policy_snapshot(bytes: &[u8]) -> Result<SupervisorPolicy, S
     for digest in &mut process_executable_digests {
         *digest = take_digest(bytes, &mut offset)?;
     }
+    let bridge_target_manifest_digest = take_digest(bytes, &mut offset)?;
+    let bridge_target_tree_digest = take_digest(bytes, &mut offset)?;
     let runner_identity_digest = take_digest(bytes, &mut offset)?;
     let runner_account_digest = take_digest(bytes, &mut offset)?;
     let runner_profile_digest = take_digest(bytes, &mut offset)?;
-    let inherited_handle_allowlist_digest = take_digest(bytes, &mut offset)?;
+    let child_transport_projection = decode_child_transport_projection(bytes, &mut offset)?;
+    let child_transport_contract_digest = take_digest(bytes, &mut offset)?;
     let deterministic_job_name_digest = take_digest(bytes, &mut offset)?;
+    let job_security_binding_digest = take_digest(bytes, &mut offset)?;
     let private_root_binding_digest = take_digest(bytes, &mut offset)?;
     let job_object_id = take_u64(bytes, &mut offset)?;
+    let protected_evidence_source_length =
+        take_count(bytes, &mut offset, MAX_PROTECTED_EVIDENCE_SOURCE_BYTES)?;
+    if protected_evidence_source_length == 0 {
+        return Err(SupervisorError::new("authority_policy_snapshot_invalid"));
+    }
+    let protected_evidence_source_end = offset
+        .checked_add(protected_evidence_source_length)
+        .ok_or_else(|| SupervisorError::new("authority_policy_snapshot_invalid"))?;
+    let protected_evidence_source = PreparedProtectedEvidenceSource::decode(
+        bytes
+            .get(offset..protected_evidence_source_end)
+            .ok_or_else(|| SupervisorError::new("authority_policy_snapshot_invalid"))?,
+    )
+    .map_err(|_| SupervisorError::new("authority_policy_snapshot_invalid"))?;
+    offset = protected_evidence_source_end;
     let artifact_count = take_count(bytes, &mut offset, MAX_POLICY_ARTIFACTS)?;
     let mut artifacts = Vec::with_capacity(artifact_count);
     for _ in 0..artifact_count {
@@ -1336,6 +1649,7 @@ fn decode_supervisor_policy_snapshot(bytes: &[u8]) -> Result<SupervisorPolicy, S
     }
     let mut policy = SupervisorPolicy {
         authority_identity_digest,
+        authority_generation_digest,
         ticket_digest,
         run_binding_digest: [0; 32],
         service_instance_digest,
@@ -1345,13 +1659,18 @@ fn decode_supervisor_policy_snapshot(bytes: &[u8]) -> Result<SupervisorPolicy, S
         authority_process,
         authority_parent_process,
         process_executable_digests,
+        bridge_target_manifest_digest,
+        bridge_target_tree_digest,
         runner_identity_digest,
         runner_account_digest,
         runner_profile_digest,
-        inherited_handle_allowlist_digest,
+        child_transport_projection,
+        child_transport_contract_digest,
         deterministic_job_name_digest,
+        job_security_binding_digest,
         private_root_binding_digest,
         job_object_id,
+        protected_evidence_source,
         artifacts,
         socket_policies,
         helper_policies,
@@ -1374,6 +1693,42 @@ fn runtime_test_policy(
     service_instance_digest: Digest,
     policy_seed: Digest,
 ) -> SupervisorPolicy {
+    runtime_test_policy_with_identity(
+        authority_identity_digest,
+        ticket_digest,
+        service_instance_digest,
+        policy_seed,
+        None,
+    )
+}
+
+#[cfg(test)]
+fn runtime_test_policy_with_identity(
+    authority_identity_digest: Digest,
+    ticket_digest: Digest,
+    service_instance_digest: Digest,
+    policy_seed: Digest,
+    runtime_identity: Option<(Digest, Digest, Digest, Digest)>,
+) -> SupervisorPolicy {
+    runtime_test_policy_with_identity_and_ledger(
+        authority_identity_digest,
+        ticket_digest,
+        service_instance_digest,
+        policy_seed,
+        runtime_identity,
+        None,
+    )
+}
+
+#[cfg(test)]
+fn runtime_test_policy_with_identity_and_ledger(
+    authority_identity_digest: Digest,
+    ticket_digest: Digest,
+    service_instance_digest: Digest,
+    policy_seed: Digest,
+    runtime_identity: Option<(Digest, Digest, Digest, Digest)>,
+    ledger_identity: Option<Digest>,
+) -> SupervisorPolicy {
     let derive = |tag: u8| {
         let mut digest = Sha256::new();
         digest.update(b"vrcforge-authority-runtime-test-policy-v1\0");
@@ -1381,8 +1736,46 @@ fn runtime_test_policy(
         digest.update([tag]);
         <[u8; 32]>::from(digest.finalize())
     };
+    let child_transport_projection =
+        policy_source::child_transport_contract_projection_for_test(policy_seed);
+    let child_transport_contract_digest =
+        policy_source::child_transport_contract_digest_from_projection(&child_transport_projection);
+    let mut process_executable_digests = [
+        derive(1),
+        derive(2),
+        derive(3),
+        derive(4),
+        derive(5),
+        derive(6),
+        derive(7),
+    ];
+    let authority_generation_digest = runtime_identity.map_or_else(|| derive(0), |value| value.0);
+    let protected_evidence_source = match runtime_identity {
+        Some((
+            _,
+            protected_manifest_digest,
+            installed_layout_digest,
+            service_executable_digest,
+        )) => {
+            process_executable_digests[0] = service_executable_digest;
+            PreparedProtectedEvidenceSource::for_runtime_identity_test(
+                authority_generation_digest,
+                protected_manifest_digest,
+                installed_layout_digest,
+                ledger_identity.unwrap_or_else(|| derive(5)),
+                process_executable_digests,
+                policy_seed,
+            )
+        }
+        None => PreparedProtectedEvidenceSource::for_policy_test(
+            authority_generation_digest,
+            process_executable_digests,
+            policy_seed,
+        ),
+    };
     let mut policy = SupervisorPolicy {
         authority_identity_digest,
+        authority_generation_digest,
         ticket_digest,
         run_binding_digest: [0; 32],
         service_instance_digest,
@@ -1397,22 +1790,19 @@ fn runtime_test_policy(
             pid: 90,
             creation_time: 900,
         },
-        process_executable_digests: [
-            derive(1),
-            derive(2),
-            derive(3),
-            derive(4),
-            derive(5),
-            derive(6),
-            derive(7),
-        ],
+        process_executable_digests,
+        bridge_target_manifest_digest: derive(19),
+        bridge_target_tree_digest: derive(20),
         runner_identity_digest: derive(8),
         runner_account_digest: derive(9),
         runner_profile_digest: derive(10),
-        inherited_handle_allowlist_digest: derive(11),
+        child_transport_projection,
+        child_transport_contract_digest,
         deterministic_job_name_digest: derive(12),
-        private_root_binding_digest: derive(13),
+        job_security_binding_digest: derive(13),
+        private_root_binding_digest: derive(14),
         job_object_id: 500,
+        protected_evidence_source,
         artifacts: vec![
             ArtifactExpectation {
                 binding_digest: derive(14),
@@ -1510,15 +1900,18 @@ fn prepared_receipt_seal(receipt: &PreparedRecoveryReceipt) -> Digest {
     digest.update(PREPARED_RECEIPT_DOMAIN);
     for value in [
         receipt.authority_identity_digest,
+        receipt.authority_generation_digest,
         receipt.ticket_digest,
         receipt.service_instance_digest,
         receipt.runner_policy_digest,
         receipt.deterministic_job_name_digest,
+        receipt.job_security_binding_digest,
         receipt.private_root_binding_digest,
         receipt.artifact_policy_digest,
         receipt.endpoint_policy_digest,
         receipt.helper_policy_digest,
-        receipt.inherited_handle_allowlist_digest,
+        receipt.child_transport_contract_digest,
+        receipt.protected_evidence_source_digest,
     ] {
         digest.update(value);
     }
@@ -1538,21 +1931,25 @@ fn armed_receipt_seal(receipt: &ArmedRecoveryReceipt) -> Digest {
         receipt.run_binding_digest,
         receipt.runner_policy_digest,
         receipt.deterministic_job_name_digest,
+        receipt.job_security_binding_digest,
         receipt.private_root_binding_digest,
         receipt.artifact_policy_digest,
         receipt.endpoint_policy_digest,
         receipt.helper_policy_digest,
+        receipt.child_transport_contract_digest,
+        receipt.raw_handle_list_digest,
         receipt.root_executable_digest,
     ] {
         digest.update(value);
     }
+    digest.update([receipt.raw_handle_role.wire_value()]);
     digest.update(receipt.root_process.pid.to_be_bytes());
     digest.update(receipt.root_process.creation_time.to_be_bytes());
     digest.update(receipt.root_image_identity.volume_serial.to_be_bytes());
     digest.update(receipt.root_image_identity.file_id);
     digest.update(receipt.job_object_id.to_be_bytes());
     digest.update(receipt.created_suspended_at.to_be_bytes());
-    digest.update(receipt.assigned_to_job_at.to_be_bytes());
+    digest.update(receipt.job_membership_verified_at.to_be_bytes());
     digest.update(receipt.resumed_at.to_be_bytes());
     digest.finalize().into()
 }
@@ -1627,6 +2024,31 @@ pub(crate) fn validate_authority_owned_abort(
     if !matches!(reason, BurnReason::Failed | BurnReason::RestartRecovery) {
         return Err(SupervisorError::new("authority_abort_reason_invalid"));
     }
+    validate_authority_owned_partial_terminal(policy, prepared, armed, observation, reason)
+}
+
+pub(crate) fn validate_authority_owned_staged_termination(
+    policy: &SupervisorPolicy,
+    prepared: &PreparedRecoveryReceipt,
+    armed: Option<&ArmedRecoveryReceipt>,
+    observation: &AuthorityOwnedAbortObservation,
+    reason: BurnReason,
+) -> Result<BurnedRunProof, SupervisorError> {
+    if !matches!(reason, BurnReason::Cancelled | BurnReason::TimedOut) {
+        return Err(SupervisorError::new(
+            "authority_staged_termination_reason_invalid",
+        ));
+    }
+    validate_authority_owned_partial_terminal(policy, prepared, armed, observation, reason)
+}
+
+fn validate_authority_owned_partial_terminal(
+    policy: &SupervisorPolicy,
+    prepared: &PreparedRecoveryReceipt,
+    armed: Option<&ArmedRecoveryReceipt>,
+    observation: &AuthorityOwnedAbortObservation,
+    reason: BurnReason,
+) -> Result<BurnedRunProof, SupervisorError> {
     validate_policy(policy)?;
     if !prepared.verifies_policy(policy) {
         return Err(SupervisorError::new("authority_prepared_receipt_mismatch"));
@@ -1636,9 +2058,14 @@ pub(crate) fn validate_authority_owned_abort(
             return Err(SupervisorError::new("authority_armed_receipt_mismatch"));
         }
     }
+    let expected_terminal = match reason {
+        BurnReason::Cancelled => TerminalKind::Cancelled,
+        BurnReason::TimedOut => TerminalKind::TimedOut,
+        BurnReason::Failed | BurnReason::RestartRecovery => TerminalKind::Failed,
+    };
     if observation.ticket_consumed_at < policy.issued_at
         || observation.ticket_consumed_at >= policy.deadline
-        || observation.terminal.kind != TerminalKind::Failed
+        || observation.terminal.kind != expected_terminal
         || observation.terminal.intent != TerminalIntent::Burn
         || observation.terminal.observed_at < observation.ticket_consumed_at
         || observation.terminal.intent_recorded_at < observation.terminal.observed_at
@@ -1885,52 +2312,82 @@ fn validate_abort_launch(
     observation: &AuthorityOwnedAbortObservation,
     graph: &AbortProcessGraph,
 ) -> Result<(), SupervisorError> {
-    let driver = graph.core[role_index(ProcessRole::Driver)];
-    match (driver, observation.launches.as_slice()) {
-        (None, []) => {
-            if armed.is_some() {
-                return Err(SupervisorError::new("authority_armed_without_root"));
-            }
+    if observation.launches.len() > ROOT_ROLES.len() {
+        return Err(SupervisorError::new("authority_abort_root_set_invalid"));
+    }
+    let runner_validated_at = observation
+        .runner
+        .as_ref()
+        .map(|runner| runner.validated_at);
+    let mut prior_root_index = None;
+    let mut raw_handle_lists = BTreeSet::new();
+    for launch in &observation.launches {
+        let expected_child_role = launch
+            .role
+            .child_bootstrap_role()
+            .ok_or_else(|| SupervisorError::new("authority_abort_root_set_invalid"))?;
+        let root_index = ROOT_ROLES
+            .iter()
+            .position(|role| *role == launch.role)
+            .ok_or_else(|| SupervisorError::new("authority_abort_root_set_invalid"))?;
+        if prior_root_index.is_some_and(|prior| root_index <= prior)
+            || graph.core[role_index(launch.role)].is_none()
+            || launch.created_suspended_at
+                < runner_validated_at
+                    .ok_or_else(|| SupervisorError::new("authority_abort_runner_missing"))?
+            || launch.created_suspended_at >= launch.job_membership_verified_at
+            || launch.job_membership_verified_at >= launch.resumed_at
+            || launch.resumed_at >= policy.deadline
+            || launch.job_object_id != policy.job_object_id
+            || launch.runner_identity_digest != policy.runner_identity_digest
+            || launch.child_transport_contract_digest != policy.child_transport_contract_digest
+            || launch.raw_handle_list.role() != expected_child_role
+            || launch.raw_handle_list.as_bytes() == &policy.child_transport_contract_digest
+            || !raw_handle_lists.insert(*launch.raw_handle_list.as_bytes())
+            || !launch.all_other_handles_non_inheritable
+            || launch.breakaway_requested
+        {
+            return Err(SupervisorError::new("authority_abort_launch_invalid"));
         }
-        (Some(driver_key), [launch]) => {
-            if launch.role != ProcessRole::Driver
-                || launch.created_suspended_at
-                    < observation
-                        .runner
-                        .as_ref()
-                        .ok_or_else(|| SupervisorError::new("authority_abort_runner_missing"))?
-                        .validated_at
-                || launch.created_suspended_at >= launch.assigned_to_job_at
-                || launch.assigned_to_job_at >= launch.resumed_at
-                || launch.resumed_at >= policy.deadline
-                || launch.job_object_id != policy.job_object_id
-                || launch.runner_identity_digest != policy.runner_identity_digest
-                || launch.inherited_handle_allowlist_digest
-                    != policy.inherited_handle_allowlist_digest
-                || !launch.all_other_handles_non_inheritable
-                || launch.breakaway_requested
-            {
-                return Err(SupervisorError::new("authority_abort_launch_invalid"));
-            }
-            if let Some(armed) = armed {
-                let driver_process = observation
-                    .processes
-                    .iter()
-                    .find(|process| process.role == ProcessRole::Driver)
-                    .ok_or_else(|| SupervisorError::new("authority_abort_driver_missing"))?;
-                if armed.root_process != driver_key
-                    || armed.root_executable_digest != driver_process.executable_digest
-                    || armed.root_image_identity != driver_process.image_handle_identity
-                    || armed.created_suspended_at != launch.created_suspended_at
-                    || armed.assigned_to_job_at != launch.assigned_to_job_at
-                    || armed.resumed_at != launch.resumed_at
-                    || !armed.verifies_for(prepared, &policy.run_binding_digest)
-                {
-                    return Err(SupervisorError::new("authority_armed_root_mismatch"));
-                }
-            }
+        prior_root_index = Some(root_index);
+    }
+    for role in ROOT_ROLES {
+        let process_exists = graph.core[role_index(role)].is_some();
+        let launch_exists = observation
+            .launches
+            .iter()
+            .any(|launch| launch.role == role);
+        if process_exists != launch_exists {
+            return Err(SupervisorError::new("authority_abort_root_set_invalid"));
         }
-        _ => return Err(SupervisorError::new("authority_abort_root_set_invalid")),
+    }
+    if let Some(armed) = armed {
+        let driver_key = graph.core[role_index(ProcessRole::Driver)]
+            .ok_or_else(|| SupervisorError::new("authority_armed_without_root"))?;
+        let driver_launch = observation
+            .launches
+            .iter()
+            .find(|launch| launch.role == ProcessRole::Driver)
+            .ok_or_else(|| SupervisorError::new("authority_armed_without_root"))?;
+        let driver_process = observation
+            .processes
+            .iter()
+            .find(|process| process.role == ProcessRole::Driver)
+            .ok_or_else(|| SupervisorError::new("authority_abort_driver_missing"))?;
+        if armed.root_process != driver_key
+            || armed.root_executable_digest != driver_process.executable_digest
+            || armed.root_image_identity != driver_process.image_handle_identity
+            || armed.created_suspended_at != driver_launch.created_suspended_at
+            || armed.job_membership_verified_at != driver_launch.job_membership_verified_at
+            || armed.resumed_at != driver_launch.resumed_at
+            || armed.child_transport_contract_digest
+                != driver_launch.child_transport_contract_digest
+            || armed.raw_handle_role != driver_launch.raw_handle_list.role()
+            || armed.raw_handle_list_digest != *driver_launch.raw_handle_list.as_bytes()
+            || !armed.verifies_for(prepared, &policy.run_binding_digest)
+        {
+            return Err(SupervisorError::new("authority_armed_root_mismatch"));
+        }
     }
     Ok(())
 }
@@ -2156,15 +2613,19 @@ fn derive_abort_cleanup_receipt(
 
 fn validate_policy(policy: &SupervisorPolicy) -> Result<(), SupervisorError> {
     if is_zero_digest(&policy.authority_identity_digest)
+        || is_zero_digest(&policy.authority_generation_digest)
         || is_zero_digest(&policy.ticket_digest)
         || is_zero_digest(&policy.run_binding_digest)
         || is_zero_digest(&policy.service_instance_digest)
         || is_zero_digest(&policy.runner_policy_digest)
+        || is_zero_digest(&policy.bridge_target_manifest_digest)
+        || is_zero_digest(&policy.bridge_target_tree_digest)
         || is_zero_digest(&policy.runner_identity_digest)
         || is_zero_digest(&policy.runner_account_digest)
         || is_zero_digest(&policy.runner_profile_digest)
-        || is_zero_digest(&policy.inherited_handle_allowlist_digest)
+        || is_zero_digest(&policy.child_transport_contract_digest)
         || is_zero_digest(&policy.deterministic_job_name_digest)
+        || is_zero_digest(&policy.job_security_binding_digest)
         || is_zero_digest(&policy.private_root_binding_digest)
         || policy.issued_at == 0
         || policy.deadline <= policy.issued_at
@@ -2178,6 +2639,24 @@ fn validate_policy(policy: &SupervisorPolicy) -> Result<(), SupervisorError> {
         || policy.process_executable_digests.iter().any(is_zero_digest)
     {
         return Err(SupervisorError::new("authority_supervisor_policy_invalid"));
+    }
+    if !policy.child_transport_projection.validates_fixed_contract()
+        || policy.child_transport_contract_digest
+            != policy_source::child_transport_contract_digest_from_projection(
+                &policy.child_transport_projection,
+            )
+    {
+        return Err(SupervisorError::new(
+            "authority_child_transport_policy_invalid",
+        ));
+    }
+    if !policy.protected_evidence_source.matches_policy_processes(
+        &policy.authority_generation_digest,
+        &policy.process_executable_digests,
+    ) {
+        return Err(SupervisorError::new(
+            "authority_protected_evidence_source_mismatch",
+        ));
     }
     if policy.artifacts.is_empty() {
         return Err(SupervisorError::new("authority_artifact_policy_empty"));
@@ -2604,20 +3083,27 @@ fn validate_launches(
     if observation.launches.len() != ROOT_ROLES.len() {
         return Err(SupervisorError::new("authority_root_launch_set_invalid"));
     }
+    let mut raw_handle_lists = BTreeSet::new();
     for (expected_role, launch) in ROOT_ROLES.iter().zip(&observation.launches) {
         if launch.role != *expected_role {
             return Err(SupervisorError::new("authority_root_launch_order_invalid"));
         }
         if launch.created_suspended_at < observation.runner.validated_at
-            || launch.created_suspended_at >= launch.assigned_to_job_at
-            || launch.assigned_to_job_at >= launch.resumed_at
+            || launch.created_suspended_at >= launch.job_membership_verified_at
+            || launch.job_membership_verified_at >= launch.resumed_at
             || launch.resumed_at >= policy.deadline
         {
             return Err(SupervisorError::new("authority_launch_sequence_invalid"));
         }
         if launch.job_object_id != policy.job_object_id
             || launch.runner_identity_digest != policy.runner_identity_digest
-            || launch.inherited_handle_allowlist_digest != policy.inherited_handle_allowlist_digest
+            || launch.child_transport_contract_digest != policy.child_transport_contract_digest
+            || launch.raw_handle_list.role()
+                != expected_role
+                    .child_bootstrap_role()
+                    .ok_or_else(|| SupervisorError::new("authority_root_launch_order_invalid"))?
+            || launch.raw_handle_list.as_bytes() == &policy.child_transport_contract_digest
+            || !raw_handle_lists.insert(*launch.raw_handle_list.as_bytes())
             || !launch.all_other_handles_non_inheritable
             || launch.breakaway_requested
         {
@@ -3151,6 +3637,14 @@ fn role_index(role: ProcessRole) -> usize {
 fn is_zero_digest(value: &Digest) -> bool {
     value.iter().all(|byte| *byte == 0)
 }
+
+#[cfg(windows)]
+#[path = "primitive_evidence_authority_supervisor/policy_source.rs"]
+pub(crate) mod policy_source;
+
+#[cfg(windows)]
+#[path = "primitive_evidence_authority_supervisor_windows.rs"]
+pub(crate) mod native_windows;
 
 #[cfg(test)]
 #[path = "primitive_evidence_authority_supervisor/tests.rs"]

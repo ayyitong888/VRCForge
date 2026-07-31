@@ -1,0 +1,36 @@
+{
+  "schema": "vrcforge.primitive_basis_baseline.v1",
+  "scenarioId": "component_feature_application",
+  "files": [
+    {
+      "path": "Editor.meta",
+      "size": 170,
+      "sha256": "b68c788ae8e17d57ec2aca835e972806588a7a6656c3d95a0ad8d2f6b9c2e2c2"
+    },
+    {
+      "path": "Editor/ComponentFeatureApplicationFixtureBootstrap.cs",
+      "size": 8174,
+      "sha256": "7da2aa52a697ac754f413f50cd158521099f1e60c2348da7460a509317d2efc7"
+    },
+    {
+      "path": "Editor/ComponentFeatureApplicationFixtureBootstrap.cs.meta",
+      "size": 241,
+      "sha256": "a62c76633d8b680867d2ffe69a0524339ac8ac439df45920262f77acea99c3ed"
+    },
+    {
+      "path": "baseline.json.meta",
+      "size": 156,
+      "sha256": "d80d4ed12a2cd45545b6a04b58b1fc5c0346b46a0196a74305b13943a464ba16"
+    },
+    {
+      "path": "fixture-contract.json",
+      "size": 1627,
+      "sha256": "34168e9c5fae8af83af0ae292d8e618ac980397c4a4dd09d9f04c5c104c430b0"
+    },
+    {
+      "path": "fixture-contract.json.meta",
+      "size": 156,
+      "sha256": "599faa8381ac457866cf594e866e3c9b5adb80e68aa364903dfaf04191a1d4a2"
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "schema": "vrcforge.primitive_basis_baseline.v1",
+  "scenarioId": "parameter_optimization",
+  "files": [
+    {
+      "path": "Editor.meta",
+      "size": 170,
+      "sha256": "8f065a5546dba6bfb2f63176518e6ba1cea49bcf16a9114b2345b1541b68f6a2"
+    },
+    {
+      "path": "Editor/ParameterOptimizationFixtureBootstrap.cs",
+      "size": 19218,
+      "sha256": "9f4a5dcdbd060e0605fcfe790d2e278385eee1b8ed418a26681d13320340cb77"
+    },
+    {
+      "path": "Editor/ParameterOptimizationFixtureBootstrap.cs.meta",
+      "size": 241,
+      "sha256": "79c3dc3c1fcbdb2b8ceb279942072aa60dada366e5a9ecb5aeb474731e6b6acd"
+    },
+    {
+      "path": "baseline.json.meta",
+      "size": 156,
+      "sha256": "d6b9f735c2145fbdbba7991465b7e6b1df3c8085521c976bd8c477c2751b7200"
+    },
+    {
+      "path": "fixture-contract.json",
+      "size": 2158,
+      "sha256": "0312070c79e4626bb4a6cf68a95ed7d73bed94f159c72f20822d1020512fa7f4"
+    },
+    {
+      "path": "fixture-contract.json.meta",
+      "size": 156,
+      "sha256": "a74547a0788d0eab7fa96e9752833cec0e0f4b67684ad55ca0a6eb1a6973ce1d"
+    }
+  ]
+}

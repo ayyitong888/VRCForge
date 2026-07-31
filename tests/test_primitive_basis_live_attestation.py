@@ -197,6 +197,23 @@ def test_v3_finalization_is_one_shot_and_verifies_transaction_chain() -> None:
     assert proof.challenge.hex() not in serialized
 
 
+def test_abandoned_session_retains_only_public_binding_and_erases_proof_key() -> None:
+    proof = bootstrap()
+    session = live.PrimitiveBasisLiveSession(proof)
+
+    assert not hasattr(session, "_bootstrap")
+    assert session.backend_executable_digest == proof.backend_executable_digest
+    assert any(session._key)
+
+    session.close()
+    session.close()
+
+    assert session.state == "closed"
+    assert not any(session._key)
+    with pytest.raises(live.LiveAttestationError, match="started twice"):
+        session.begin(fixture_digest=DIGEST, project_binding_digest=PROJECT_DIGEST)
+
+
 def test_self_mac_finalization_expires_after_freshness_window() -> None:
     proof, payload, verified_at = finalization()
 
@@ -410,6 +427,32 @@ def test_packaged_bootstrap_requires_frozen_exact_backend_bytes(tmp_path: Path) 
             executable_path=backend,
             frozen=True,
         )
+
+
+def test_trusted_bootstrap_has_explicit_exact_bytes_and_session_entrypoints(
+    tmp_path: Path,
+) -> None:
+    backend = tmp_path / "vrcforge_backend.exe"
+    backend.write_bytes(b"packaged backend")
+    proof = replace(
+        bootstrap(),
+        backend_executable_digest=hashlib.sha256(backend.read_bytes()).hexdigest(),
+        origin_ticket_digest=hashlib.sha256(b"origin-ticket").hexdigest(),
+    )
+    encoded = live.encode_bootstrap_frame(proof)
+
+    assert len(encoded) == 400
+    assert live.parse_bootstrap_bytes(encoded) == proof
+    session = live.create_packaged_live_session_from_bytes(
+        encoded,
+        executable_path=backend,
+        frozen=True,
+        now=TickClock(),
+    )
+    assert session.state == "issued"
+
+    with pytest.raises(live.LiveAttestationError, match="frame is invalid"):
+        live.parse_bootstrap_bytes(encoded + b"x")
 
 
 def test_finalization_rejects_private_authoritative_event() -> None:

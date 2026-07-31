@@ -1,0 +1,50 @@
+{
+  "schema": "vrcforge.primitive_basis_cross_avatar_copy_fixture.v1",
+  "scenarioId": "cross_avatar_accessory_copy",
+  "unity": {
+    "version": "2022.3.22f1",
+    "revision": "887be4894c44"
+  },
+  "sourceMode": "isolated_runtime_generation",
+  "scene": {
+    "assetPath": "Assets/VRCForge/PrimitiveBasis/RuntimeCrossAvatarAccessoryCopy/CrossAvatarAccessoryCopy.unity",
+    "sourceAvatarPath": "AvatarA",
+    "sourceObjectPath": "AvatarA/Accessory",
+    "constraintSourcePath": "AvatarA/AccessoryAnchor",
+    "targetAvatarPath": "AvatarB",
+    "targetParentPath": "AvatarB",
+    "animationPath": "Assets/VRCForge/PrimitiveBasis/RuntimeCrossAvatarAccessoryCopy/AccessoryMotion.anim",
+    "controllerPath": "Assets/VRCForge/PrimitiveBasis/RuntimeCrossAvatarAccessoryCopy/Accessory.controller",
+    "prefabPath": "Assets/VRCForge/PrimitiveBasis/RuntimeCrossAvatarAccessoryCopy/AccessoryCopy.prefab",
+    "rendererCount": 1,
+    "constraintSourceCount": 1,
+    "baselineTargetCopyCount": 0,
+    "baselinePrefabCount": 0
+  },
+  "requiredPackages": [
+    {
+      "id": "com.coplaydev.unity-mcp",
+      "version": "9.6.9-beta.7",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrchat.avatars",
+      "version": "3.10.3",
+      "provisioning": "exact_artifact"
+    },
+    {
+      "id": "com.vrchat.base",
+      "version": "3.10.3",
+      "provisioning": "exact_artifact"
+    }
+  ],
+  "runtime": {
+    "bootstrapType": "VRCForge.PrimitiveBasisFixtures.CrossAvatarAccessoryCopyFixtureBootstrap",
+    "runIdEnvironment": "VRCFORGE_PRIMITIVE_CROSS_AVATAR_ACCESSORY_COPY_RUN_ID",
+    "generatedRoot": "Assets/VRCForge/PrimitiveBasis/RuntimeCrossAvatarAccessoryCopy",
+    "generatedRootPrecondition": "absent",
+    "readyMarker": "Library/VRCForge/primitive-basis-cross-avatar-accessory-copy-ready.json",
+    "cleanup": "remove_generated_root_and_ready_marker"
+  }
+}
+

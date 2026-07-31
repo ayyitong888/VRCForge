@@ -30,8 +30,12 @@ namespace VRCForge.Editor
     public static class ParameterBitPackingTool
     {
         private const string ResultSchema = "vrcforge.parameter_bit_packing.v2";
+        private const string CapabilitySchema = "vrcforge.parameter_capability.v2";
+        private const string CallbackAssemblySetSchema = "vrcforge.avatar_callback_assembly_set.v1";
         private const string PackageTreeSchema = "vrcforge.package_tree.v1";
         private const string GeneratedTreeSchema = "vrcforge.generated_tree.v1";
+        private const string AuxiliaryGeneratedTreeSchema = "vrcforge.parameter_auxiliary_tree.v1";
+        private const string AuxiliarySnapshotSchema = "vrcforge.parameter_auxiliary_snapshot.v1";
         private const string OutputTreeSchema = "vrcforge.parameter_output_tree.v1";
         private const string ProtectedTreeSchema = "vrcforge.protected_project_tree.v1";
         private const string RootIdentitySchema = "vrcforge.parameter_project_roots.v1";
@@ -40,6 +44,7 @@ namespace VRCForge.Editor
         private const string CompressedNamesSchema = "vrcforge.compressed_parameter_names.v1";
         private const string ExcludedSchema = "vrcforge.excluded_parameters.v1";
         private const string CacheJournalSchema = "vrcforge.parameter_cache_journal.v1";
+        private const string AuxiliaryJournalSchema = "vrcforge.parameter_auxiliary_journal.v1";
         private const string CacheContentSchema = "vrcforge.parameter_cache_content.v1";
         private const string OutputManifestSchema = "vrcforge.parameter_output_manifest.v1";
         private const string PreferenceSchema = "vrcforge.parameter_preferences.v1";
@@ -52,7 +57,6 @@ namespace VRCForge.Editor
         private const string CallbackAssemblyName = "VRCFury-Editor-Avatars";
         private const string CallbackAssemblyVersion = "0.0.0.0";
         private const string CallbackAssemblyPublicKeyToken = "";
-        private const string CallbackAssemblySha256 = "e568293abe29428b7fb35d805cb3053cc8437621a19ae714d5fc76931d9fe10f";
         private const string SdkCallbackAssemblyName = "VRCSDKBase-Editor";
         private const string SdkCallbackAssemblyVersion = "1.0.0.0";
         private const string SdkCallbackAssemblyPublicKeyToken = "";
@@ -60,11 +64,37 @@ namespace VRCForge.Editor
         private const string CallbackTypeName = "VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks";
         private const string CallbackSignature = "public static System.Boolean OnPreprocessAvatar(UnityEngine.GameObject)";
         private const string RegisteredHookType = "VF.Hooks.ParameterCompressorHook";
-        private const int CallbackRosterCount = 16;
-        private const string CallbackRosterDigest = "305bc43e713cc76fe13f16d99e6e1d7137d87c066d6a46a6917196b909de10ba";
+        private const string PackageRuntimeAssemblyName = "VRCFury";
+        private const string PackageComponentTypeName = "VF.Model.VRCFury";
+        private const string NonInteractiveFeatureTypeName = "VF.Model.Feature.FixWriteDefaults";
+        private const string NonInteractiveFeatureModeName = "Disabled";
+        private static readonly CapabilityProfile[] CapabilityProfiles =
+        {
+            new CapabilityProfile
+            {
+                Id = "embedded-minimal-v1",
+                CallbackAssemblySha256 = "e568293abe29428b7fb35d805cb3053cc8437621a19ae714d5fc76931d9fe10f",
+                CallbackRosterCount = 16,
+                CallbackRosterDigest = "305bc43e713cc76fe13f16d99e6e1d7137d87c066d6a46a6917196b909de10ba",
+                CallbackAssemblySetCount = 3,
+                CallbackAssemblySetDigest = "1884970046bc7b2f7194cef03c3c085dffb02df8cc6eddc9173e90fd231794d1"
+            },
+            new CapabilityProfile
+            {
+                Id = "embedded-extended-v1",
+                CallbackAssemblySha256 = "c220c73e91f69aa88425c8cd81cf271a6b484eb5b34cca15a33f6edcde89c8f4",
+                CallbackRosterCount = 23,
+                CallbackRosterDigest = "a345576b0aad61991a4518413a5685d3b9df85e9ad33af50ff6b04a71d0f920e",
+                CallbackAssemblySetCount = 7,
+                CallbackAssemblySetDigest = "2eebf5d668c881ac7b208191e488c6a69c896549473fb44281d12c07404dc221"
+            }
+        };
         private const string GeneratedRoot = "Packages/com.vrcfury.temp/Builds";
         private const string StagingFolderName = "VRCForge Input";
         private const string StagingRoot = GeneratedRoot + "/" + StagingFolderName;
+        private const string AuxiliaryPackageRoot = "Packages/nadena.dev.ndmf";
+        private const string AuxiliaryPackageManifest = AuxiliaryPackageRoot + "/package.json";
+        private const string AuxiliaryGeneratedRoot = AuxiliaryPackageRoot + "/__Generated";
         private const string OutputRoot = "Assets/VRCForge/Generated";
         private const string OutputKindRoot = OutputRoot + "/ParameterBitPacking";
         private const string TempPackageManifest = "Packages/com.vrcfury.temp/package.json";
@@ -76,6 +106,8 @@ namespace VRCForge.Editor
         private const int RegisteredAssetPathScanLimit = 100000;
         private const int RegisteredAssetObjectScanLimit = 500000;
         private const int OpenProjectSceneScanLimit = 128;
+        private const int TransactionIoRetryAttempts = 8;
+        private const int TransactionIoRetryBaseDelayMilliseconds = 25;
         private const uint NativeOpenExisting = 3;
         private const uint NativeFileShareRead = 0x00000001;
         private const uint NativeFileShareWrite = 0x00000002;
@@ -136,6 +168,14 @@ namespace VRCForge.Editor
             "expectedGeneratedEntryCountBefore",
             "expectedGeneratedContentDigestBefore",
             "expectedGeneratedByteCountBefore",
+            "expectedAuxiliaryPackageRootIdentityDigest",
+            "expectedAuxiliaryPackageManifestDigest",
+            "expectedAuxiliaryPackageManifestIdentityDigest",
+            "expectedAuxiliaryRootExistsBefore",
+            "expectedAuxiliaryTreeDigestBefore",
+            "expectedAuxiliaryContentDigestBefore",
+            "expectedAuxiliaryEntryCountBefore",
+            "expectedAuxiliaryByteCountBefore",
             "expectedPreferenceDigest",
             "expectedProtectedTreeDigestBefore",
             "expectedProtectedEntryCountBefore",
@@ -154,13 +194,17 @@ namespace VRCForge.Editor
             Scene outputScene = default;
             SourceSnapshot beforeSource = null;
             TreeSnapshot beforeGenerated = null;
+            AuxiliaryGeneratedSnapshot beforeAuxiliary = null;
             TreeSnapshot beforeOutput = null;
             TreeSnapshot beforeProtected = null;
             RootIdentitySnapshot beforeRoots = null;
             StableInputLeases stableInputLeases = null;
             StableInputLeases stableOutputLeases = null;
             CacheTransaction cacheTransaction = null;
+            AuxiliaryGeneratedTransaction auxiliaryTransaction = null;
+            AssetTreeManifest stagedOutputManifest = null;
             AssetTreeManifest outputManifest = null;
+            var createdOutputFolders = new List<CreatedAssetFolder>();
             string outputCloneName = null;
             try
             {
@@ -190,6 +234,8 @@ namespace VRCForge.Editor
                 var capability = CaptureCapability();
                 operationStage = "generated_tree_capture";
                 beforeGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
+                operationStage = "auxiliary_generated_capture";
+                beforeAuxiliary = CaptureAuxiliaryGenerated();
                 operationStage = "output_tree_capture";
                 beforeOutput = CaptureManagedTree(OutputRoot, OutputTreeSchema);
                 operationStage = "root_identity_capture";
@@ -205,6 +251,7 @@ namespace VRCForge.Editor
                     beforeSource,
                     capability,
                     beforeGenerated,
+                    beforeAuxiliary,
                     beforeOutput,
                     beforeProtected,
                     beforeRoots,
@@ -221,6 +268,7 @@ namespace VRCForge.Editor
                             beforeSource,
                             capability,
                             beforeGenerated,
+                            beforeAuxiliary,
                             beforeOutput,
                             beforeProtected,
                             beforeRoots,
@@ -236,6 +284,7 @@ namespace VRCForge.Editor
                     beforeSource,
                     capability,
                     beforeGenerated,
+                    beforeAuxiliary,
                     beforeOutput,
                     beforeProtected,
                     beforeRoots,
@@ -244,17 +293,20 @@ namespace VRCForge.Editor
                     previewDigest
                 );
 
-                stableInputLeases = HoldStableInputs(beforeSource, capability, beforeOutput, beforeProtected, beforeRoots);
+                stableInputLeases = HoldStableInputs(beforeSource, capability, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots);
                 {
                     var leases = stableInputLeases;
                     operationStage = "stable_input_verification";
-                    VerifyStableInputs(beforeSource, capability, beforeOutput, beforeProtected, beforeRoots, leases);
+                    VerifyStableInputs(beforeSource, capability, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots, leases);
                     Require(CapturePreferences().ReceiptDigest == preferences.ReceiptDigest, "A parameter build preference changed after preview.");
                     operationStage = "project_cleanliness_recheck";
                     RequireNoDirtyProjectAssets();
                     operationStage = "cache_transaction_prepare";
-                    cacheTransaction = CacheTransaction.Create(beforeGenerated);
+                    cacheTransaction = CacheTransaction.Plan(beforeGenerated);
+                    auxiliaryTransaction = AuxiliaryGeneratedTransaction.Plan(beforeAuxiliary);
                     mutationStarted = true;
+                    cacheTransaction.Prepare();
+                    auxiliaryTransaction.Prepare();
                     operationStage = "temporary_scene_creation";
                     outputScene = UnityEditor.SceneManagement.EditorSceneManager.NewScene(
                         UnityEditor.SceneManagement.NewSceneSetup.EmptyScene,
@@ -266,15 +318,25 @@ namespace VRCForge.Editor
                     SceneManager.MoveGameObjectToScene(clone, outputScene);
                     clone.SetActive(true);
                     operationStage = "clone_asset_staging";
-                    PrepareCloneAssets(clone);
-                    VerifyStableInputs(beforeSource, capability, beforeOutput, beforeProtected, beforeRoots, leases);
+                    PrepareCloneAssets(clone, outputScene);
+                    EnsureNonInteractiveBuildPolicy(clone);
+                    VerifyStableInputs(beforeSource, capability, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots, leases);
 
                     operationStage = "public_preprocess";
-                    var callbacksOk = VRCBuildPipelineCallbacks.OnPreprocessAvatar(clone);
+                    bool callbacksOk;
+                    try
+                    {
+                        callbacksOk = VRCBuildPipelineCallbacks.OnPreprocessAvatar(clone);
+                    }
+                    finally
+                    {
+                        auxiliaryTransaction.ObserveMutation();
+                    }
                     Require(callbacksOk, "The public avatar preprocess pipeline rejected the clone.");
-                    RequireNoDirtyProjectAssets(GeneratedRoot);
+                    RequireNoDirtyProjectAssets(outputScene, GeneratedRoot, AuxiliaryGeneratedRoot);
                     AssetDatabase.SaveAssets();
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                    auxiliaryTransaction.ObserveMutation();
 
                     operationStage = "source_verification";
                     var afterSource = CaptureSource(sourceScenePath, sourceAvatarPath);
@@ -296,34 +358,99 @@ namespace VRCForge.Editor
                     Require(callbackDelta.Added.Count > 0, "The public preprocess pipeline produced no generated assets.");
                     RequireGeneratedSubtree(callbackDelta.Added, outputCloneName);
 
-                    operationStage = "output_verification";
+                    operationStage = "output_descriptor_verification";
                     var cloneDescriptor = clone.GetComponent<VRCAvatarDescriptor>();
                     Require(cloneDescriptor != null, "The output clone has no avatar descriptor.");
+                    operationStage = "output_null_layer_mask_restore";
+                    var restoredNullLayerMasks = RestoreSourceNullLayerMasks(
+                        cloneDescriptor,
+                        beforeSource.BehaviorEvidence,
+                        stage => operationStage = "output_null_layer_mask_restore_" + stage);
+                    if (restoredNullLayerMasks > 0)
+                    {
+                        operationStage = "output_null_layer_mask_restore_dirty_scope";
+                        RequireNoDirtyProjectAssets(outputScene, GeneratedRoot, AuxiliaryGeneratedRoot);
+                        AssetDatabase.SaveAssets();
+                        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                        auxiliaryTransaction.ObserveMutation();
+                        operationStage = "output_null_layer_mask_restore_source_readback";
+                        var normalizedSource = CaptureSource(sourceScenePath, sourceAvatarPath);
+                        Require(
+                            normalizedSource.SourceStateDigest == beforeSource.SourceStateDigest
+                                && normalizedSource.SourceAssetSetDigest == beforeSource.SourceAssetSetDigest
+                                && !normalizedSource.SourceDirty
+                                && !normalizedSource.ReferencedAssetsDirty,
+                            "The source avatar changed during output layer-mask restoration.");
+                        operationStage = "output_null_layer_mask_restore_stable_input";
+                        VerifyStableInputs(
+                            beforeSource,
+                            capability,
+                            beforeAuxiliary,
+                            beforeOutput,
+                            beforeProtected,
+                            beforeRoots,
+                            leases,
+                            verifyAuxiliaryTree: false);
+                    }
+                    operationStage = "output_parameter_capture";
                     var outputParameters = RequireOutputParameters(cloneDescriptor);
                     var outputState = CaptureParameterState(outputParameters, beforeSource.MenuUsage);
+                    operationStage = "output_parameter_verification";
                     var compressedNames = VerifyOutputParameters(beforeSource.ParameterState, outputState);
+                    operationStage = "output_budget_verification";
                     Require(outputState.CostBits <= 256, "The output clone remains above the synchronized parameter budget.");
                     Require(outputState.CostBits < beforeSource.ParameterState.CostBits, "The output clone did not reduce synchronized parameter cost.");
                     Require(compressedNames.Count > 0, "The output clone did not compress an approved parameter.");
-                    var cloneEvidence = ParameterBitPackingEvidence.Capture(clone);
+                    operationStage = "output_behavior_capture";
+                    var cloneEvidence = ParameterBitPackingEvidence.Capture(
+                        clone,
+                        stage => operationStage = "output_behavior_capture_" + stage);
+                    operationStage = "output_behavior_verification";
                     var behaviorProof = ParameterBitPackingEvidence.VerifyBehavior(
                         beforeSource.BehaviorEvidence,
                         cloneEvidence,
                         compressedNames,
-                        beforeSource.ParameterState.Excluded.Select(item => item.Name).ToArray());
+                        beforeSource.ParameterState.Excluded.Select(item => item.Name).ToArray(),
+                        stage => operationStage = "output_behavior_verification_" + stage);
                     Require(behaviorProof.PlatformScope == "current-target-only", "The behavior proof claimed unsupported cross-platform equivalence.");
                     var cloneParameterStateDigest = outputState.StateDigest;
                     var temporaryOutputRoot = GeneratedRoot + "/" + outputCloneName;
                     var durableOutputRoot = OutputKindRoot + "/" + outputCloneName;
                     var temporaryPrefabPath = temporaryOutputRoot + "/" + outputCloneName + ".prefab";
                     Require(AssetDatabase.IsValidFolder(temporaryOutputRoot), "The processed temporary output subtree is missing.");
-                    operationStage = "temporary_output_prefab_save";
+                    operationStage = "temporary_output_prefab_save_call";
                     Require(AssetDatabase.LoadAssetAtPath<GameObject>(temporaryPrefabPath) == null, "The temporary output prefab already exists.");
-                    var stagedPrefab = PrefabUtility.SaveAsPrefabAsset(clone, temporaryPrefabPath, out var stagedPrefabSaved);
-                    Require(stagedPrefabSaved && stagedPrefab != null, "The processed clone could not be saved inside its temporary output subtree.");
-                    RequireNoDirtyProjectAssets(GeneratedRoot);
+                    var immediatePrefab = PrefabUtility.SaveAsPrefabAsset(clone, temporaryPrefabPath, out var stagedPrefabSaved);
+                    operationStage = "temporary_output_prefab_save_flag";
+                    Require(stagedPrefabSaved, "The processed clone prefab save did not report success.");
+                    auxiliaryTransaction.ObserveMutation();
+                    RequireNoDirtyProjectAssets(outputScene, GeneratedRoot, AuxiliaryGeneratedRoot);
                     AssetDatabase.SaveAssets();
+                    AssetDatabase.ImportAsset(
+                        temporaryPrefabPath,
+                        ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                    auxiliaryTransaction.ObserveMutation();
+                    operationStage = "temporary_output_prefab_import_readback";
+                    var importedMainType = AssetDatabase.GetMainAssetTypeAtPath(temporaryPrefabPath);
+                    operationStage = importedMainType == null
+                        ? "temporary_output_prefab_import_main_type_null"
+                        : importedMainType == typeof(GameObject)
+                            ? "temporary_output_prefab_import_main_type_game_object"
+                            : "temporary_output_prefab_import_main_type_unexpected";
+                    var importedMainAsset = AssetDatabase.LoadMainAssetAtPath(temporaryPrefabPath);
+                    operationStage = importedMainAsset == null
+                        ? "temporary_output_prefab_import_main_asset_null"
+                        : importedMainAsset is GameObject
+                            ? "temporary_output_prefab_import_main_asset_game_object"
+                            : "temporary_output_prefab_import_main_asset_unexpected";
+                    var importedPrefab = importedMainAsset as GameObject;
+                    Require(importedPrefab != null, "The successfully saved clone prefab was unavailable after synchronous import.");
+                    operationStage = "temporary_output_prefab_identity_reconciliation";
+                    Require(immediatePrefab == null
+                            || AssetDatabase.GetAssetPath(immediatePrefab) == temporaryPrefabPath,
+                        "The immediate clone prefab resolved to another asset path after import.");
+                    operationStage = "temporary_output_prefab_receipt_capture";
                     var stagedReceipt = CaptureOutputPrefab(
                         temporaryPrefabPath,
                         outputCloneName,
@@ -332,21 +459,24 @@ namespace VRCForge.Editor
                         behaviorProof,
                         beforeSource.BehaviorEvidence,
                         compressedNames,
-                        beforeSource.ParameterState.Excluded.Select(item => item.Name).ToArray());
-                    var stagedManifest = CaptureAssetTreeManifest(temporaryOutputRoot, temporaryPrefabPath, requireNoTemporaryReferences: false);
+                        beforeSource.ParameterState.Excluded.Select(item => item.Name).ToArray(),
+                        stage => operationStage = "temporary_output_prefab_receipt_" + stage);
+                    stagedOutputManifest = CaptureAssetTreeManifest(temporaryOutputRoot, temporaryPrefabPath, requireNoTemporaryReferences: false);
 
                     operationStage = "persistent_output_move";
-                    EnsureAssetFolder(OutputKindRoot);
+                    EnsureAssetFolder(OutputKindRoot, createdOutputFolders);
                     Require(!AssetDatabase.IsValidFolder(durableOutputRoot), "The approved durable output subtree already exists.");
                     var moveError = AssetDatabase.MoveAsset(temporaryOutputRoot, durableOutputRoot);
                     Require(string.IsNullOrWhiteSpace(moveError), "The processed output subtree could not be moved into managed project assets.");
-                    RequireNoDirtyProjectAssets(GeneratedRoot, durableOutputRoot);
+                    auxiliaryTransaction.ObserveMutation();
+                    RequireNoDirtyProjectAssets(outputScene, GeneratedRoot, AuxiliaryGeneratedRoot, durableOutputRoot);
                     AssetDatabase.SaveAssets();
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                    auxiliaryTransaction.ObserveMutation();
                     Require(!AssetDatabase.IsValidFolder(temporaryOutputRoot), "The temporary processed output subtree remained after migration.");
                     Require(AssetDatabase.IsValidFolder(durableOutputRoot), "The durable processed output subtree is missing after migration.");
                     var movedManifest = CaptureAssetTreeManifest(durableOutputRoot, outputPreview.PrefabPath, requireNoTemporaryReferences: true);
-                    VerifyGuidPreservingMove(stagedManifest, movedManifest);
+                    VerifyGuidPreservingMove(stagedOutputManifest, movedManifest);
                     outputManifest = movedManifest;
                     operationStage = "persistent_output_scope_verification";
                     var afterGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
@@ -405,8 +535,15 @@ namespace VRCForge.Editor
                     var finalManifest = CaptureAssetTreeManifest(durableOutputRoot, outputPreview.PrefabPath, requireNoTemporaryReferences: true);
                     Require(finalManifest.ReceiptDigest == movedManifest.ReceiptDigest, "The durable output manifest changed before receipt construction.");
 
+                    operationStage = "auxiliary_generated_restore";
+                    Require(auxiliaryTransaction.Restore(allowGeneratedRootDirty: true), "The auxiliary generated root could not be restored exactly.");
+                    var afterAuxiliary = CaptureAuxiliaryGenerated();
+                    Require(AuxiliaryContentEquals(beforeAuxiliary, afterAuxiliary),
+                        "The auxiliary generated root differs from its approved baseline.");
+
                     operationStage = "cache_restore";
-                    Require(cacheTransaction.Restore(), "The dependency cache could not be restored exactly.");
+                    Require(cacheTransaction.Restore(allowAuxiliaryRootDirty: true), "The dependency cache could not be restored exactly.");
+                    RequireNoDirtyProjectAssets();
                     var restoredGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
                     Require(restoredGenerated.ContentDigest == beforeGenerated.ContentDigest
                         && restoredGenerated.EntryCount == beforeGenerated.EntryCount
@@ -417,7 +554,16 @@ namespace VRCForge.Editor
                     temporaryDeltaDigest = ComputeTreeDeltaDigest(generatedDelta, "vrcforge.parameter_temporary_delta.v1");
 
                     operationStage = "final_input_verification";
-                    VerifyStableInputs(beforeSource, capability, beforeOutput, beforeProtected, beforeRoots, leases, verifyOutputTree: false);
+                    VerifyStableInputs(
+                        beforeSource,
+                        capability,
+                        beforeAuxiliary,
+                        beforeOutput,
+                        beforeProtected,
+                        beforeRoots,
+                        leases,
+                        verifyOutputTree: false,
+                        verifyAuxiliaryIdentity: false);
                     afterSource = CaptureSource(sourceScenePath, sourceAvatarPath);
                     Require(afterSource.SourceStateDigest == beforeSource.SourceStateDigest, "The source avatar changed before final readback.");
                     var afterCapability = CaptureCapability();
@@ -429,6 +575,11 @@ namespace VRCForge.Editor
                     var afterRoots = CaptureRootIdentities();
                     Require(afterRoots.Digest == beforeRoots.Digest && afterRoots.EntryCount == beforeRoots.EntryCount, "A project root identity changed before final readback.");
 
+                    auxiliaryTransaction.Complete();
+                    cacheTransaction.Complete();
+                    Require(auxiliaryTransaction.VerifyClosedTerminal()
+                            && cacheTransaction.VerifyClosedTerminal(),
+                        "A parameter transaction did not reach its verified closed state.");
                     var applyReceiptDigest = ComputeApplyReceiptDigest(
                         CurrentProjectPath(),
                         previewDigest,
@@ -447,16 +598,19 @@ namespace VRCForge.Editor
                         cloneParameterStateDigest,
                         outputReadback,
                         behaviorProof,
-                        stagedManifest,
+                        stagedOutputManifest,
                         finalManifest,
                         preferences,
                         cacheTransaction,
+                        auxiliaryTransaction,
                         sceneLoadedAfter,
                         temporaryObjectResidue,
                         beforeGenerated,
                         afterGenerated,
                         generatedDelta,
                         temporaryDeltaDigest,
+                        beforeAuxiliary,
+                        afterAuxiliary,
                         beforeOutput,
                         afterOutput,
                         outputDelta,
@@ -471,7 +625,6 @@ namespace VRCForge.Editor
                         false,
                         "verified"
                     );
-                    cacheTransaction.Complete();
                     return new SuccessResponse(
                         "Parameter bit-packing clone verified.",
                         new
@@ -586,6 +739,11 @@ namespace VRCForge.Editor
                                 journalId = cacheTransaction.JournalId,
                                 journalClosed = cacheTransaction.Completed
                             },
+                            auxiliaryGenerated = BuildAuxiliaryApplyPayload(
+                                beforeAuxiliary,
+                                afterAuxiliary,
+                                auxiliaryTransaction
+                            ),
                             managedOutput = new
                             {
                                 root = OutputRoot,
@@ -607,7 +765,7 @@ namespace VRCForge.Editor
                                 guidPreservingWholeTreeMove = true,
                                 temporaryTreeRemoved = true,
                                 prefabGuidPreserved = true,
-                                stagedManifest = stagedManifest.ToPayload(),
+                                stagedManifest = stagedOutputManifest.ToPayload(),
                                 finalManifest = finalManifest.ToPayload(),
                                 manifestSchema = OutputManifestSchema,
                                 manifestDigest = finalManifest.ReceiptDigest,
@@ -644,7 +802,20 @@ namespace VRCForge.Editor
             {
                 stableOutputLeases?.Dispose();
                 stableOutputLeases = null;
-                var restored = TryCleanupFailure(outputScene, beforeGenerated, beforeOutput, beforeProtected, beforeRoots, beforeSource, outputCloneName, cacheTransaction, outputManifest);
+                var restored = TryCleanupFailure(
+                    outputScene,
+                    beforeGenerated,
+                    beforeAuxiliary,
+                    beforeOutput,
+                    beforeProtected,
+                    beforeRoots,
+                    beforeSource,
+                    outputCloneName,
+                    cacheTransaction,
+                    auxiliaryTransaction,
+                    stagedOutputManifest,
+                    outputManifest,
+                    createdOutputFolders);
                 var reason = exception is ParameterBitPackingException
                     ? " " + exception.Message
                     : string.Empty;
@@ -690,6 +861,7 @@ namespace VRCForge.Editor
             SourceSnapshot source,
             CapabilitySnapshot capability,
             TreeSnapshot generated,
+            AuxiliaryGeneratedSnapshot auxiliary,
             TreeSnapshot outputTree,
             TreeSnapshot protectedTree,
             RootIdentitySnapshot roots,
@@ -728,6 +900,23 @@ namespace VRCForge.Editor
                     exists = true,
                     reparseFree = true
                 },
+                auxiliaryGenerated = new
+                {
+                    root = AuxiliaryGeneratedRoot,
+                    packageRoot = AuxiliaryPackageRoot,
+                    packageRootIdentityDigestBefore = auxiliary.PackageRootIdentityDigest,
+                    packageManifestDigestBefore = auxiliary.PackageManifestDigest,
+                    packageManifestIdentityDigestBefore = auxiliary.PackageManifestIdentityDigest,
+                    rootExistsBefore = auxiliary.Tree.Exists,
+                    treeDigestBefore = auxiliary.Tree.Digest,
+                    contentDigestBefore = auxiliary.Tree.ContentDigest,
+                    entryCountBefore = auxiliary.Tree.EntryCount,
+                    byteCountBefore = auxiliary.Tree.TotalBytes,
+                    backupMaxEntries = CacheBackupMaxEntries,
+                    backupMaxBytes = CacheBackupMaxBytes,
+                    journalSchema = AuxiliaryJournalSchema,
+                    reparseFree = true
+                },
                 preferences = preferences.ToPayload(),
                 platformProof = new
                 {
@@ -741,11 +930,57 @@ namespace VRCForge.Editor
             };
         }
 
+        private static object BuildAuxiliaryApplyPayload(
+            AuxiliaryGeneratedSnapshot before,
+            AuxiliaryGeneratedSnapshot after,
+            AuxiliaryGeneratedTransaction transaction)
+        {
+            Require(before != null && after != null && transaction != null && transaction.Observed != null,
+                "The auxiliary generated receipt is incomplete.");
+            return new
+            {
+                root = AuxiliaryGeneratedRoot,
+                packageRoot = AuxiliaryPackageRoot,
+                packageRootIdentityDigestBefore = before.PackageRootIdentityDigest,
+                packageRootIdentityDigestAfter = after.PackageRootIdentityDigest,
+                packageManifestDigestBefore = before.PackageManifestDigest,
+                packageManifestDigestAfter = after.PackageManifestDigest,
+                packageManifestIdentityDigestBefore = before.PackageManifestIdentityDigest,
+                packageManifestIdentityDigestAfter = after.PackageManifestIdentityDigest,
+                rootExistsBefore = before.Tree.Exists,
+                rootExistsAfter = after.Tree.Exists,
+                treeDigestBefore = before.Tree.Digest,
+                treeDigestAfter = after.Tree.Digest,
+                contentDigestBefore = before.Tree.ContentDigest,
+                contentDigestAfter = after.Tree.ContentDigest,
+                entryCountBefore = before.Tree.EntryCount,
+                entryCountAfter = after.Tree.EntryCount,
+                byteCountBefore = before.Tree.TotalBytes,
+                byteCountAfter = after.Tree.TotalBytes,
+                observedRootExists = transaction.Observed.Tree.Exists,
+                observedTreeDigest = transaction.Observed.Tree.Digest,
+                observedContentDigest = transaction.Observed.Tree.ContentDigest,
+                observedEntryCount = transaction.Observed.Tree.EntryCount,
+                observedByteCount = transaction.Observed.Tree.TotalBytes,
+                ownedRootIdentityDigest = transaction.OwnedRootIdentityDigest,
+                createdByOperation = transaction.CreatedByOperation,
+                restorationMode = transaction.RestorationMode,
+                restoreVerified = true,
+                backupBounded = true,
+                backupMaxEntries = CacheBackupMaxEntries,
+                backupMaxBytes = CacheBackupMaxBytes,
+                journalSchema = AuxiliaryJournalSchema,
+                journalId = transaction.JournalId,
+                journalClosed = transaction.Completed
+            };
+        }
+
         private static void ValidateApplyPreconditions(
             JObject request,
             SourceSnapshot source,
             CapabilitySnapshot capability,
             TreeSnapshot generated,
+            AuxiliaryGeneratedSnapshot auxiliary,
             TreeSnapshot outputTree,
             TreeSnapshot protectedTree,
             RootIdentitySnapshot roots,
@@ -780,6 +1015,14 @@ namespace VRCForge.Editor
             Require(ReadExpectedInt(request, "expectedGeneratedEntryCountBefore") == generated.EntryCount, "The generated build root count changed after preview.");
             Require(ReadExpectedString(request, "expectedGeneratedContentDigestBefore") == generated.ContentDigest, "The generated build root content changed after preview.");
             Require(ReadExpectedLong(request, "expectedGeneratedByteCountBefore") == generated.TotalBytes, "The generated build root byte count changed after preview.");
+            Require(ReadExpectedString(request, "expectedAuxiliaryPackageRootIdentityDigest") == auxiliary.PackageRootIdentityDigest, "The auxiliary package root identity changed after preview.");
+            Require(ReadExpectedString(request, "expectedAuxiliaryPackageManifestDigest") == auxiliary.PackageManifestDigest, "The auxiliary package manifest changed after preview.");
+            Require(ReadExpectedString(request, "expectedAuxiliaryPackageManifestIdentityDigest") == auxiliary.PackageManifestIdentityDigest, "The auxiliary package manifest identity changed after preview.");
+            Require(ReadExpectedBool(request, "expectedAuxiliaryRootExistsBefore") == auxiliary.Tree.Exists, "The auxiliary generated root state changed after preview.");
+            Require(ReadExpectedString(request, "expectedAuxiliaryTreeDigestBefore") == auxiliary.Tree.Digest, "The auxiliary generated tree changed after preview.");
+            Require(ReadExpectedString(request, "expectedAuxiliaryContentDigestBefore") == auxiliary.Tree.ContentDigest, "The auxiliary generated content changed after preview.");
+            Require(ReadExpectedInt(request, "expectedAuxiliaryEntryCountBefore") == auxiliary.Tree.EntryCount, "The auxiliary generated entry count changed after preview.");
+            Require(ReadExpectedLong(request, "expectedAuxiliaryByteCountBefore") == auxiliary.Tree.TotalBytes, "The auxiliary generated byte count changed after preview.");
             Require(ReadExpectedString(request, "expectedPreferenceDigest") == preferences.ReceiptDigest, "A parameter build preference changed after preview.");
             Require(ReadExpectedString(request, "expectedProtectedTreeDigestBefore") == protectedTree.Digest, "The protected project tree changed after preview.");
             Require(ReadExpectedInt(request, "expectedProtectedEntryCountBefore") == protectedTree.EntryCount, "The protected project tree count changed after preview.");
@@ -889,13 +1132,13 @@ namespace VRCForge.Editor
             var callbackHash = Sha256File(callbackAssembly.Location);
             Require(callbackName.Version.ToString() == CallbackAssemblyVersion, "The package callback assembly version is not allowlisted.");
             Require(PublicKeyToken(callbackName) == CallbackAssemblyPublicKeyToken, "The package callback assembly signature state is not allowlisted.");
-            Require(callbackHash == CallbackAssemblySha256, "The package callback assembly bytes are not allowlisted.");
 
             var sdkAssembly = typeof(VRCBuildPipelineCallbacks).Assembly;
             var sdkName = sdkAssembly.GetName();
             Require(sdkName.Name == SdkCallbackAssemblyName && sdkName.Version.ToString() == SdkCallbackAssemblyVersion, "The public callback assembly identity is not allowlisted.");
             Require(PublicKeyToken(sdkName) == SdkCallbackAssemblyPublicKeyToken, "The public callback assembly signature state is not allowlisted.");
-            Require(Sha256File(sdkAssembly.Location) == SdkCallbackAssemblySha256, "The public callback assembly bytes are not allowlisted.");
+            var sdkHash = Sha256File(sdkAssembly.Location);
+            Require(sdkHash == SdkCallbackAssemblySha256, "The public callback assembly bytes are not allowlisted.");
             var callbackMethod = typeof(VRCBuildPipelineCallbacks).GetMethod(
                 "OnPreprocessAvatar",
                 BindingFlags.Public | BindingFlags.Static,
@@ -904,34 +1147,93 @@ namespace VRCForge.Editor
                 null
             );
             Require(callbackMethod != null && callbackMethod.ReturnType == typeof(bool), "The public avatar callback signature is unavailable.");
-            var registered = TypeCache.GetTypesDerivedFrom<IVRCSDKPreprocessAvatarCallback>()
+            var callbackTypes = TypeCache.GetTypesDerivedFrom<IVRCSDKPreprocessAvatarCallback>()
+                .Where(type => !type.IsAbstract)
+                .ToArray();
+            var registered = callbackTypes
                 .Where(type => type.FullName == RegisteredHookType && type.Assembly.GetName().Name == CallbackAssemblyName)
                 .ToArray();
-            Require(registered.Length == 1 && !registered[0].IsAbstract, "The package compressor hook registration is not allowlisted.");
-            var callbackRoster = TypeCache.GetTypesDerivedFrom<IVRCSDKPreprocessAvatarCallback>()
-                .Where(type => !type.IsAbstract)
+            Require(registered.Length == 1, "The package compressor hook registration is not allowlisted.");
+            var callbackRoster = callbackTypes
                 .Select(type => type.Assembly.GetName().Name + ":" + type.FullName)
                 .OrderBy(value => value, StringComparer.Ordinal)
                 .ToArray();
+            Require(
+                callbackRoster.Distinct(StringComparer.Ordinal).Count() == callbackRoster.Length,
+                "The avatar preprocess callback roster contains duplicate identities."
+            );
             var callbackRosterDigest = Sha256Framed(
                 "vrcforge.avatar_callback_roster.v1",
                 callbackRoster.Cast<object>().ToArray()
             );
+
+            var runtimeAssembly = AppDomain.CurrentDomain.GetAssemblies()
+                .SingleOrDefault(assembly => assembly.GetName().Name == PackageRuntimeAssemblyName);
+            Require(runtimeAssembly != null && !string.IsNullOrWhiteSpace(runtimeAssembly.Location), "The package runtime assembly is unavailable.");
+            var callbackAssemblyPaths = new List<string>();
+            var callbackAssemblySetRows = new List<string>();
+            foreach (var group in callbackTypes
+                .Select(type => type.Assembly)
+                .Concat(new[] { runtimeAssembly })
+                .GroupBy(assembly => assembly.GetName().Name, StringComparer.Ordinal)
+                .OrderBy(value => value.Key, StringComparer.Ordinal))
+            {
+                Require(!string.IsNullOrWhiteSpace(group.Key), "A callback assembly has no stable name.");
+                var assemblies = group
+                    .Where(assembly => assembly != null && !string.IsNullOrWhiteSpace(assembly.Location))
+                    .GroupBy(assembly => Path.GetFullPath(assembly.Location), StringComparer.OrdinalIgnoreCase)
+                    .Select(value => value.First())
+                    .ToArray();
+                Require(assemblies.Length == 1, "A callback assembly name resolves to multiple loaded binaries.");
+                var assembly = assemblies[0];
+                var name = assembly.GetName();
+                Require(name.Name == group.Key && name.Version != null, "A callback assembly identity is incomplete.");
+                var path = Path.GetFullPath(assembly.Location);
+                var hash = Sha256File(path);
+                callbackAssemblyPaths.Add(path);
+                callbackAssemblySetRows.Add(
+                    name.Name + "|" + name.Version + "|" + PublicKeyToken(name) + "|" + hash
+                );
+            }
             Require(
-                callbackRoster.Length == CallbackRosterCount && callbackRosterDigest == CallbackRosterDigest,
-                "The avatar preprocess callback roster is not allowlisted."
+                callbackAssemblyPaths.Distinct(StringComparer.OrdinalIgnoreCase).Count() == callbackAssemblyPaths.Count,
+                "The callback assembly path set contains aliases."
+            );
+            var callbackAssemblySetDigest = Sha256Framed(
+                CallbackAssemblySetSchema,
+                callbackAssemblySetRows.Cast<object>().ToArray()
+            );
+            var profile = CapabilityProfiles.SingleOrDefault(value =>
+                value.CallbackAssemblySha256 == callbackHash
+                    && value.CallbackRosterCount == callbackRoster.Length
+                    && value.CallbackRosterDigest == callbackRosterDigest
+                    && value.CallbackAssemblySetCount == callbackAssemblySetRows.Count
+                    && value.CallbackAssemblySetDigest == callbackAssemblySetDigest);
+            Require(
+                profile != null,
+                "The complete avatar preprocess capability profile is not allowlisted."
+            );
+            Require(
+                callbackAssemblyPaths.Any(path => ProjectPathsEqual(path, callbackAssembly.Location))
+                    && callbackAssemblyPaths.Any(path => ProjectPathsEqual(path, sdkAssembly.Location)),
+                "The callback assembly set is incomplete."
             );
 
             var snapshot = new CapabilitySnapshot
             {
                 PackageRootPath = packageRoot,
                 PackageRootIdentityDigest = rootIdentity.Digest,
-                CallbackAssemblyPath = callbackAssembly.Location,
+                ProfileId = profile.Id,
                 CallbackAssemblySha256 = callbackHash,
-                SdkCallbackAssemblyPath = sdkAssembly.Location
+                SdkCallbackAssemblySha256 = sdkHash,
+                CallbackRosterCount = callbackRoster.Length,
+                CallbackRosterDigest = callbackRosterDigest,
+                CallbackAssemblySetCount = callbackAssemblySetRows.Count,
+                CallbackAssemblySetDigest = callbackAssemblySetDigest,
+                CallbackAssemblyPaths = callbackAssemblyPaths
             };
             snapshot.CapabilityDigest = Sha256Framed(
-                "vrcforge.parameter_capability.v1",
+                CapabilitySchema,
                 PackageId,
                 PackageVersion,
                 PackageAuthor,
@@ -939,20 +1241,23 @@ namespace VRCForge.Editor
                 PackageTreeSha256,
                 PackageFileCount,
                 snapshot.PackageRootIdentityDigest,
+                snapshot.ProfileId,
                 CallbackAssemblyName,
                 CallbackAssemblyVersion,
                 CallbackAssemblyPublicKeyToken,
-                CallbackAssemblySha256,
+                snapshot.CallbackAssemblySha256,
                 SdkCallbackAssemblyName,
                 SdkCallbackAssemblyVersion,
                 SdkCallbackAssemblyPublicKeyToken,
-                SdkCallbackAssemblySha256,
+                snapshot.SdkCallbackAssemblySha256,
                 CallbackTypeName,
                 CallbackSignature,
                 RegisteredHookType,
                 1,
-                CallbackRosterCount,
-                CallbackRosterDigest
+                snapshot.CallbackRosterCount,
+                snapshot.CallbackRosterDigest,
+                snapshot.CallbackAssemblySetCount,
+                snapshot.CallbackAssemblySetDigest
             );
             return snapshot;
         }
@@ -973,7 +1278,7 @@ namespace VRCForge.Editor
             };
         }
 
-        private static void PrepareCloneAssets(GameObject clone)
+        private static void PrepareCloneAssets(GameObject clone, Scene outputScene)
         {
             var descriptor = clone.GetComponent<VRCAvatarDescriptor>();
             Require(descriptor != null, "The output clone has no avatar descriptor.");
@@ -1007,15 +1312,75 @@ namespace VRCForge.Editor
             }
             EnsureStagingAnchor(descriptor);
             EditorUtility.SetDirty(descriptor);
-            RequireNoDirtyProjectAssets(StagingRoot);
+            RequireNoDirtyProjectAssets(outputScene, StagingRoot);
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
             Require(IsStagedAsset(descriptor.expressionParameters), "The clone expression parameters escaped the generated input staging root.");
             Require(IsStagedAsset(descriptor.expressionsMenu), "The clone expression menu escaped the generated input staging root.");
         }
 
-        private static void EnsureAssetFolder(string assetPath)
+        private static void EnsureNonInteractiveBuildPolicy(GameObject clone)
         {
+            var runtimeAssembly = AppDomain.CurrentDomain.GetAssemblies()
+                .SingleOrDefault(assembly => assembly.GetName().Name == PackageRuntimeAssemblyName);
+            Require(runtimeAssembly != null, "The package runtime assembly is unavailable for non-interactive policy.");
+            var componentType = runtimeAssembly.GetType(PackageComponentTypeName, false);
+            var featureType = runtimeAssembly.GetType(NonInteractiveFeatureTypeName, false);
+            Require(
+                componentType != null
+                    && typeof(Component).IsAssignableFrom(componentType)
+                    && !componentType.IsAbstract
+                    && featureType != null
+                    && !featureType.IsAbstract,
+                "The package non-interactive policy types are unavailable."
+            );
+            var contentField = componentType.GetField("content", BindingFlags.Public | BindingFlags.Instance);
+            var modeField = featureType.GetField("mode", BindingFlags.Public | BindingFlags.Instance);
+            Require(
+                contentField != null
+                    && contentField.FieldType.IsAssignableFrom(featureType)
+                    && modeField != null
+                    && modeField.FieldType.IsEnum,
+                "The package non-interactive policy contract changed."
+            );
+            var modeNames = Enum.GetNames(modeField.FieldType).OrderBy(value => value, StringComparer.Ordinal).ToArray();
+            Require(
+                modeNames.SequenceEqual(
+                    new[] { "Auto", "Disabled", "ForceOff", "ForceOn" },
+                    StringComparer.Ordinal
+                ),
+                "The package non-interactive policy modes changed."
+            );
+
+            var existingPolicies = clone.GetComponentsInChildren<Component>(true)
+                .Where(component => component != null && componentType.IsInstanceOfType(component))
+                .Where(component =>
+                {
+                    var content = contentField.GetValue(component);
+                    return content != null && featureType.IsInstanceOfType(content);
+                })
+                .ToArray();
+            Require(existingPolicies.Length <= 1, "The clone has duplicate non-interactive policy features.");
+            if (existingPolicies.Length == 1) return;
+
+            var policyComponent = clone.AddComponent(componentType);
+            var policyFeature = Activator.CreateInstance(featureType);
+            Require(policyComponent != null && policyFeature != null, "The clone non-interactive policy could not be created.");
+            modeField.SetValue(policyFeature, Enum.Parse(modeField.FieldType, NonInteractiveFeatureModeName, false));
+            contentField.SetValue(policyComponent, policyFeature);
+            Require(
+                featureType.IsInstanceOfType(contentField.GetValue(policyComponent))
+                    && modeField.GetValue(policyFeature).ToString() == NonInteractiveFeatureModeName,
+                "The clone non-interactive policy readback failed."
+            );
+            EditorUtility.SetDirty(policyComponent);
+        }
+
+        private static void EnsureAssetFolder(
+            string assetPath,
+            ICollection<CreatedAssetFolder> createdFolders)
+        {
+            Require(createdFolders != null, "The managed output folder ownership ledger is unavailable.");
             var normalized = assetPath.Replace('\\', '/').TrimEnd('/');
             Require(normalized.StartsWith("Assets/", StringComparison.Ordinal), "The managed output folder is outside project assets.");
             var parts = normalized.Split('/');
@@ -1026,12 +1391,54 @@ namespace VRCForge.Editor
                 if (!AssetDatabase.IsValidFolder(next))
                 {
                     Require(AssetDatabase.LoadMainAssetAtPath(next) == null, "A managed output folder path is occupied by an asset.");
-                    Require(!string.IsNullOrWhiteSpace(AssetDatabase.CreateFolder(current, parts[index])), "A managed output folder could not be created.");
+                    var createdGuid = AssetDatabase.CreateFolder(current, parts[index]);
+                    Require(IsGuid(createdGuid), "A managed output folder could not be created.");
+                    createdFolders.Add(CaptureCreatedAssetFolder(next, createdGuid.ToLowerInvariant()));
                 }
                 var identity = CaptureIdentity(AbsoluteProjectPath(next), true);
                 Require(!identity.IsReparsePoint && identity.NumberOfLinks == 1, "A managed output folder is linked or reparsed.");
                 current = next;
             }
+        }
+
+        private static CreatedAssetFolder CaptureCreatedAssetFolder(string assetPath, string expectedGuid)
+        {
+            Require(assetPath == OutputRoot || assetPath == OutputKindRoot,
+                "The managed output folder ownership path is invalid.");
+            var absolute = AbsoluteProjectPath(assetPath);
+            Require(Directory.Exists(absolute), "An operation-created managed output folder is missing.");
+            var directoryIdentity = CaptureIdentity(absolute, true);
+            Require(!directoryIdentity.IsReparsePoint && directoryIdentity.NumberOfLinks == 1,
+                "An operation-created managed output folder is linked or reparsed.");
+            var metaPath = absolute + ".meta";
+            RequireStableRegularFile(metaPath);
+            var metaIdentity = CaptureIdentity(metaPath, false);
+            var databaseGuid = AssetDatabase.AssetPathToGUID(assetPath).ToLowerInvariant();
+            var metaGuid = ParseMetaGuid(ReadStableFileBytes(metaPath));
+            Require(IsGuid(expectedGuid)
+                    && databaseGuid == expectedGuid
+                    && metaGuid == expectedGuid,
+                "An operation-created managed output folder GUID is inconsistent.");
+            return new CreatedAssetFolder
+            {
+                AssetPath = assetPath,
+                Guid = expectedGuid,
+                DirectoryIdentityDigest = directoryIdentity.Digest,
+                MetaIdentityDigest = metaIdentity.Digest,
+                MetaDigest = Sha256File(metaPath)
+            };
+        }
+
+        private static void VerifyCreatedAssetFolder(CreatedAssetFolder expected)
+        {
+            Require(expected != null
+                    && (expected.AssetPath == OutputRoot || expected.AssetPath == OutputKindRoot),
+                "The managed output folder ownership receipt is invalid.");
+            var actual = CaptureCreatedAssetFolder(expected.AssetPath, expected.Guid);
+            Require(actual.DirectoryIdentityDigest == expected.DirectoryIdentityDigest
+                    && actual.MetaIdentityDigest == expected.MetaIdentityDigest
+                    && actual.MetaDigest == expected.MetaDigest,
+                "An operation-created managed output folder changed before cleanup.");
         }
 
         private static VRCExpressionsMenu CloneMenuGraph(
@@ -1122,6 +1529,108 @@ namespace VRCForge.Editor
                 layers[index] = layer;
             }
             descriptor.baseAnimationLayers = layers.ToArray();
+        }
+
+        private static int RestoreSourceNullLayerMasks(
+            VRCAvatarDescriptor descriptor,
+            ParameterBehaviorEvidence sourceEvidence,
+            Action<string> setStage)
+        {
+            setStage?.Invoke("evidence");
+            Require(descriptor != null && sourceEvidence != null, "Layer-mask restoration evidence is unavailable.");
+            var expectedNullMasks = new HashSet<string>(
+                sourceEvidence.AnimatorRows
+                    .Where(row => row.Kind == "layer"
+                        && row.SemanticFields.Length > 2
+                        && row.SemanticFields[2] == "null")
+                    .Select(row => Frame(row.Scope) + Frame(row.SemanticName)),
+                StringComparer.Ordinal);
+            var observed = new HashSet<string>(StringComparer.Ordinal);
+            var restored = 0;
+            setStage?.Invoke("base");
+            restored += RestoreSourceNullLayerMasks(
+                descriptor.baseAnimationLayers,
+                "base",
+                expectedNullMasks,
+                observed,
+                setStage);
+            setStage?.Invoke("special");
+            restored += RestoreSourceNullLayerMasks(
+                descriptor.specialAnimationLayers,
+                "special",
+                expectedNullMasks,
+                observed,
+                setStage);
+            setStage?.Invoke("complete");
+            Require(observed.SetEquals(expectedNullMasks), "An existing null layer mask could not be matched after preprocessing.");
+            return restored;
+        }
+
+        private static int RestoreSourceNullLayerMasks(
+            VRCAvatarDescriptor.CustomAnimLayer[] descriptorLayers,
+            string group,
+            ISet<string> expectedNullMasks,
+            ISet<string> observed,
+            Action<string> setStage)
+        {
+            var restored = 0;
+            foreach (var descriptorLayer in descriptorLayers ?? Array.Empty<VRCAvatarDescriptor.CustomAnimLayer>())
+            {
+                if (descriptorLayer.animatorController == null) continue;
+                setStage?.Invoke(group + "_controller_type");
+                AnimatorController controller;
+                if (descriptorLayer.animatorController is AnimatorController directController)
+                {
+                    controller = directController;
+                }
+                else if (descriptorLayer.animatorController is AnimatorOverrideController overrideController)
+                {
+                    controller = overrideController.runtimeAnimatorController as AnimatorController;
+                    Require(controller != null, "An output animator override controller has no direct base controller.");
+                }
+                else
+                {
+                    throw new InvalidOperationException("The output animator controller type is unsupported for layer-mask restoration.");
+                }
+
+                var role = group + ":" + descriptorLayer.type;
+                var layers = controller.layers ?? Array.Empty<AnimatorControllerLayer>();
+                var changed = false;
+                for (var index = 0; index < layers.Length; index++)
+                {
+                    var layer = layers[index];
+                    var identity = Frame(role) + Frame(layer.name ?? string.Empty);
+                    if (!expectedNullMasks.Contains(identity)) continue;
+                    setStage?.Invoke(group + "_layer_unique");
+                    Require(observed.Add(identity), "An existing null layer mask matched more than one output layer.");
+                    if (layer.avatarMask == null) continue;
+                    var controllerPath = AssetDatabase.GetAssetPath(controller);
+                    var ownershipCategory = !EditorUtility.IsPersistent(controller)
+                        ? "transient"
+                        : IsGeneratedMutationPath(controllerPath) ? "generated" : "persistent_other";
+                    setStage?.Invoke(group + "_ownership_" + ownershipCategory);
+                    Require(
+                        !EditorUtility.IsPersistent(controller)
+                            || IsGeneratedMutationPath(controllerPath),
+                        "A source animator controller cannot be mutated during layer-mask restoration.");
+                    setStage?.Invoke(group + "_write");
+                    layer.avatarMask = null;
+                    layers[index] = layer;
+                    changed = true;
+                    restored++;
+                }
+                if (!changed) continue;
+                controller.layers = layers;
+                EditorUtility.SetDirty(controller);
+            }
+            return restored;
+        }
+
+        private static bool IsGeneratedMutationPath(string assetPath)
+        {
+            return !string.IsNullOrWhiteSpace(assetPath)
+                && (assetPath.StartsWith(GeneratedRoot + "/", StringComparison.Ordinal)
+                    || assetPath.StartsWith(AuxiliaryGeneratedRoot + "/", StringComparison.Ordinal));
         }
 
         private static bool IsStagedAsset(Object asset)
@@ -1458,6 +1967,60 @@ namespace VRCForge.Editor
             return TreeSnapshot.FromEntries(ProtectedTreeSchema, entries);
         }
 
+        private static AuxiliaryGeneratedSnapshot CaptureAuxiliaryGenerated()
+        {
+            var packageRoot = AbsoluteProjectPath(AuxiliaryPackageRoot);
+            Require(Directory.Exists(packageRoot), "The auxiliary package root is missing.");
+            var packageIdentity = CaptureIdentity(packageRoot, true);
+            Require(!packageIdentity.IsReparsePoint && packageIdentity.NumberOfLinks == 1,
+                "The auxiliary package root is linked or reparsed.");
+            var packageManifest = AbsoluteProjectPath(AuxiliaryPackageManifest);
+            RequireStableRegularFile(packageManifest);
+            var manifestIdentity = CaptureIdentity(packageManifest, false);
+            var tree = CaptureManagedTree(AuxiliaryGeneratedRoot, AuxiliaryGeneratedTreeSchema);
+            Require(tree.EntryCount <= CacheBackupMaxEntries,
+                "The auxiliary generated root exceeds the backup entry limit.");
+            Require(tree.TotalBytes <= CacheBackupMaxBytes,
+                "The auxiliary generated root exceeds the backup byte limit.");
+            var snapshot = new AuxiliaryGeneratedSnapshot
+            {
+                Tree = tree,
+                PackageRootIdentityDigest = packageIdentity.Digest,
+                PackageManifestDigest = Sha256File(packageManifest),
+                PackageManifestIdentityDigest = manifestIdentity.Digest
+            };
+            snapshot.ReceiptDigest = Sha256Framed(
+                AuxiliarySnapshotSchema,
+                AuxiliaryPackageRoot,
+                snapshot.PackageRootIdentityDigest,
+                AuxiliaryPackageManifest,
+                snapshot.PackageManifestDigest,
+                snapshot.PackageManifestIdentityDigest,
+                AuxiliaryGeneratedRoot,
+                tree.Exists,
+                tree.Digest,
+                tree.ContentDigest,
+                tree.EntryCount,
+                tree.TotalBytes
+            );
+            return snapshot;
+        }
+
+        private static bool AuxiliaryContentEquals(
+            AuxiliaryGeneratedSnapshot expected,
+            AuxiliaryGeneratedSnapshot actual)
+        {
+            if (expected == null || actual == null) return false;
+            return actual.PackageRootIdentityDigest == expected.PackageRootIdentityDigest
+                && actual.PackageManifestDigest == expected.PackageManifestDigest
+                && actual.PackageManifestIdentityDigest == expected.PackageManifestIdentityDigest
+                && actual.Tree.Exists == expected.Tree.Exists
+                && actual.Tree.ContentDigest == expected.Tree.ContentDigest
+                && actual.Tree.EntryCount == expected.Tree.EntryCount
+                && actual.Tree.TotalBytes == expected.Tree.TotalBytes
+                && (expected.Tree.Exists || actual.Tree.Digest == expected.Tree.Digest);
+        }
+
         private static RootIdentitySnapshot CaptureRootIdentities()
         {
             var entries = new SortedDictionary<string, FileIdentity>(StringComparer.Ordinal);
@@ -1481,7 +2044,8 @@ namespace VRCForge.Editor
                 new KeyValuePair<string, string>("Packages", Path.Combine(project, "Packages")),
                 new KeyValuePair<string, string>("ProjectSettings", Path.Combine(project, "ProjectSettings")),
                 new KeyValuePair<string, string>("Packages/com.vrcfury.temp", Path.Combine(project, "Packages", "com.vrcfury.temp")),
-                new KeyValuePair<string, string>(GeneratedRoot, AbsoluteProjectPath(GeneratedRoot))
+                new KeyValuePair<string, string>(GeneratedRoot, AbsoluteProjectPath(GeneratedRoot)),
+                new KeyValuePair<string, string>(AuxiliaryPackageRoot, AbsoluteProjectPath(AuxiliaryPackageRoot))
             };
         }
 
@@ -1503,6 +2067,9 @@ namespace VRCForge.Editor
             {
                 var relative = relativeRoot + "/" + RelativePath(root, path);
                 if (relative.Equals(GeneratedRoot, StringComparison.OrdinalIgnoreCase) || relative.StartsWith(GeneratedRoot + "/", StringComparison.OrdinalIgnoreCase)) continue;
+                if (relative.Equals(AuxiliaryGeneratedRoot, StringComparison.OrdinalIgnoreCase)
+                    || relative.Equals(AuxiliaryGeneratedRoot + ".meta", StringComparison.OrdinalIgnoreCase)
+                    || relative.StartsWith(AuxiliaryGeneratedRoot + "/", StringComparison.OrdinalIgnoreCase)) continue;
                 if (relative.Equals(OutputRoot, StringComparison.OrdinalIgnoreCase)
                     || relative.Equals(OutputRoot + ".meta", StringComparison.OrdinalIgnoreCase)
                     || relative.StartsWith(OutputRoot + "/", StringComparison.OrdinalIgnoreCase)) continue;
@@ -1535,9 +2102,14 @@ namespace VRCForge.Editor
         private static TreeSnapshot CaptureManagedTree(string assetPath, string schema)
         {
             var absolute = AbsoluteProjectPath(assetPath);
-            var meta = absolute + ".meta";
+            return CaptureManagedTreeAbsolute(absolute, absolute + ".meta", schema);
+        }
+
+        private static TreeSnapshot CaptureManagedTreeAbsolute(string absolute, string meta, string schema)
+        {
             if (!Directory.Exists(absolute))
             {
+                Require(!File.Exists(absolute), "A managed tree root collides with a file.");
                 Require(!File.Exists(meta), "A managed output root metadata file exists without its directory.");
                 return new TreeSnapshot
                 {
@@ -1713,39 +2285,83 @@ namespace VRCForge.Editor
             ParameterBehaviorProof expectedBehaviorProof,
             ParameterBehaviorEvidence sourceEvidence,
             IReadOnlyCollection<string> compressedNames,
-            IReadOnlyCollection<string> excludedNames)
+            IReadOnlyCollection<string> excludedNames,
+            Action<string> setStage = null)
         {
+            setStage?.Invoke("path");
             var temporaryPath = GeneratedRoot + "/" + expectedName + "/" + expectedName + ".prefab";
             var durablePath = OutputKindRoot + "/" + expectedName + "/" + expectedName + ".prefab";
             Require(prefabPath == temporaryPath || prefabPath == durablePath, "The persisted output prefab path is invalid.");
             var absolute = AbsoluteProjectPath(prefabPath);
             var meta = absolute + ".meta";
+            setStage?.Invoke("files");
             RequireStableRegularFile(absolute);
             RequireStableRegularFile(meta);
+            setStage?.Invoke("main_asset");
             var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
             Require(prefab != null && EditorUtility.IsPersistent(prefab), "The persisted output prefab is unavailable.");
+            setStage?.Invoke("identity");
             Require(AssetDatabase.GetAssetPath(prefab) == prefabPath, "The persisted output prefab resolved to another path.");
             Require(prefab.name == expectedName, "The persisted output prefab root changed name.");
             Require(PrefabUtility.GetPrefabAssetType(prefab) != PrefabAssetType.NotAPrefab, "The persisted output asset is not a prefab.");
+            setStage?.Invoke("descriptor");
             var descriptor = prefab.GetComponent<VRCAvatarDescriptor>();
             Require(descriptor != null, "The persisted output prefab has no avatar descriptor.");
+            setStage?.Invoke("parameter_state");
             var parameterState = CaptureParameterState(RequireOutputParameters(descriptor), menuUsage);
+            setStage?.Invoke("behavior_evidence");
             var evidence = ParameterBitPackingEvidence.Capture(prefab);
+            setStage?.Invoke("portable_avatar");
+            if (evidence.PortableAvatarDigest != expectedOutputEvidence.PortableAvatarDigest)
+            {
+                setStage?.Invoke(evidence.PortableObjectDigest != expectedOutputEvidence.PortableObjectDigest
+                    ? "portable_avatar_objects"
+                    : evidence.PortableComponentDigest != expectedOutputEvidence.PortableComponentDigest
+                        ? "portable_avatar_components"
+                        : evidence.PortablePropertyDigest != expectedOutputEvidence.PortablePropertyDigest
+                            ? evidence.PortableTransformEditorPropertyDigest != expectedOutputEvidence.PortableTransformEditorPropertyDigest
+                                ? "portable_avatar_properties_transform_editor"
+                                : evidence.PortableTransformRuntimePropertyDigest != expectedOutputEvidence.PortableTransformRuntimePropertyDigest
+                                    ? evidence.PortableTransformSpatialPropertyDigest != expectedOutputEvidence.PortableTransformSpatialPropertyDigest
+                                        ? "portable_avatar_properties_transform_spatial"
+                                        : evidence.PortableTransformHierarchyPropertyDigest != expectedOutputEvidence.PortableTransformHierarchyPropertyDigest
+                                            ? "portable_avatar_properties_transform_hierarchy"
+                                            : evidence.PortableTransformOtherPropertyDigest != expectedOutputEvidence.PortableTransformOtherPropertyDigest
+                                                ? "portable_avatar_properties_transform_other"
+                                                : "portable_avatar_properties_transform_unclassified"
+                                    : evidence.PortableDescriptorPropertyDigest != expectedOutputEvidence.PortableDescriptorPropertyDigest
+                                        ? "portable_avatar_properties_descriptor_"
+                                            + FirstMismatchedDescriptorPropertyGroup(
+                                                expectedOutputEvidence.PortableDescriptorPropertyGroupDigests,
+                                                evidence.PortableDescriptorPropertyGroupDigests)
+                                        : evidence.PortableOtherPropertyDigest != expectedOutputEvidence.PortableOtherPropertyDigest
+                                            ? "portable_avatar_properties_other"
+                                            : "portable_avatar_properties_unclassified"
+                            : "portable_avatar_unclassified");
+            }
             Require(evidence.PortableAvatarDigest == expectedOutputEvidence.PortableAvatarDigest, "The persisted output portable avatar projection changed.");
+            setStage?.Invoke("ordered_parameters");
             Require(evidence.OrderedParameterDigest == expectedOutputEvidence.OrderedParameterDigest, "The persisted output parameter order changed.");
+            setStage?.Invoke("menu_graph");
             Require(evidence.MenuGraphDigest == expectedOutputEvidence.MenuGraphDigest, "The persisted output menu graph changed.");
+            setStage?.Invoke("animator_behavior");
             Require(evidence.AnimatorBehaviorDigest == expectedOutputEvidence.AnimatorBehaviorDigest, "The persisted output animator behavior changed.");
+            setStage?.Invoke("evidence_receipt");
             Require(evidence.ReceiptDigest == expectedOutputEvidence.ReceiptDigest, "The persisted output semantic evidence changed.");
+            setStage?.Invoke("behavior_proof");
             var readbackProof = ParameterBitPackingEvidence.VerifyBehavior(
                 sourceEvidence,
                 evidence,
                 compressedNames,
                 excludedNames);
             Require(readbackProof.ReceiptDigest == expectedBehaviorProof.ReceiptDigest, "The persisted output behavior proof changed.");
+            setStage?.Invoke("guid");
             var guid = AssetDatabase.AssetPathToGUID(prefabPath).ToLowerInvariant();
             Require(IsGuid(guid), "The persisted output prefab GUID is invalid.");
+            setStage?.Invoke("global_object_id");
             var globalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(prefab).ToString();
             Require(!string.IsNullOrWhiteSpace(globalObjectId), "The persisted output prefab identity is unavailable.");
+            setStage?.Invoke("complete");
             return new OutputArtifactReceipt
             {
                 PrefabPath = prefabPath,
@@ -1761,6 +2377,24 @@ namespace VRCForge.Editor
                 BehaviorProofDigest = readbackProof.ReceiptDigest,
                 ParameterStateDigest = parameterState.StateDigest
             };
+        }
+
+        private static string FirstMismatchedDescriptorPropertyGroup(
+            IReadOnlyDictionary<string, string> expected,
+            IReadOnlyDictionary<string, string> actual)
+        {
+            foreach (var group in expected.Keys
+                         .Union(actual.Keys, StringComparer.Ordinal)
+                         .OrderBy(value => value, StringComparer.Ordinal))
+            {
+                if (!expected.TryGetValue(group, out var expectedDigest)
+                    || !actual.TryGetValue(group, out var actualDigest)
+                    || expectedDigest != actualDigest)
+                {
+                    return group;
+                }
+            }
+            return "unclassified";
         }
 
         private static AssetTreeManifest CaptureAssetTreeManifest(
@@ -1883,7 +2517,10 @@ namespace VRCForge.Editor
             };
         }
 
-        private static void VerifyGuidPreservingMove(AssetTreeManifest staged, AssetTreeManifest final)
+        private static void VerifyGuidPreservingMove(
+            AssetTreeManifest staged,
+            AssetTreeManifest final,
+            bool requireNoTemporaryReferences = true)
         {
             Require(staged != null && final != null, "The output migration manifest is incomplete.");
             Require(staged.EntryCount == final.EntryCount, "The output migration changed the asset tree count.");
@@ -1892,7 +2529,8 @@ namespace VRCForge.Editor
             Require(staged.HandleEvidenceDigest == final.HandleEvidenceDigest, "The output migration changed file identities.");
             Require(staged.GuidMapDigest == final.GuidMapDigest, "The output migration changed asset GUIDs or local identifiers.");
             Require(staged.DependencyGuidDigest == final.DependencyGuidDigest, "The output migration changed the dependency GUID closure.");
-            Require(final.NoTemporaryReferences && final.ReparseFree && final.SingleLink
+            Require((!requireNoTemporaryReferences || final.NoTemporaryReferences)
+                    && final.ReparseFree && final.SingleLink
                 && final.HandleHashed && final.FinalEnumerationVerified,
                 "The durable output migration evidence is incomplete.");
         }
@@ -2049,10 +2687,13 @@ namespace VRCForge.Editor
         private static StableInputLeases HoldStableInputs(
             SourceSnapshot source,
             CapabilitySnapshot capability,
+            AuxiliaryGeneratedSnapshot auxiliary,
             TreeSnapshot outputTree,
             TreeSnapshot protectedTree,
             RootIdentitySnapshot roots)
         {
+            Require(auxiliary != null && auxiliary.Tree != null,
+                "The auxiliary generated baseline is unavailable.");
             var pathKinds = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
             void Add(string path, bool isDirectory)
             {
@@ -2078,13 +2719,14 @@ namespace VRCForge.Editor
                     Add(AbsoluteProjectPath(OutputRoot + "/" + entry.RelativePath), entry.Kind == "D");
                 }
             }
-            foreach (var path in source.SourceAssetFilePaths.Concat(new[]
-            {
-                source.SceneFilePath,
-                source.SceneMetaPath,
-                capability.CallbackAssemblyPath,
-                capability.SdkCallbackAssemblyPath
-            })) Add(path, false);
+            Require(
+                capability.CallbackAssemblyPaths != null
+                    && capability.CallbackAssemblyPaths.Count == capability.CallbackAssemblySetCount,
+                "The callback assembly lease set is incomplete."
+            );
+            foreach (var path in source.SourceAssetFilePaths
+                .Concat(new[] { source.SceneFilePath, source.SceneMetaPath })
+                .Concat(capability.CallbackAssemblyPaths)) Add(path, false);
             var paths = pathKinds.OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase).ToArray();
             var leases = new List<IDisposable>();
             try
@@ -2115,11 +2757,14 @@ namespace VRCForge.Editor
         private static void VerifyStableInputs(
             SourceSnapshot source,
             CapabilitySnapshot capability,
+            AuxiliaryGeneratedSnapshot auxiliary,
             TreeSnapshot outputTree,
             TreeSnapshot protectedTree,
             RootIdentitySnapshot roots,
             StableInputLeases leases,
-            bool verifyOutputTree = true)
+            bool verifyOutputTree = true,
+            bool verifyAuxiliaryIdentity = true,
+            bool verifyAuxiliaryTree = true)
         {
             Require(leases.Paths.Count > PackageFileCount, "The stable input lease set is incomplete.");
             Require(Sha256File(source.SceneFilePath) == source.SceneFileDigest && Sha256File(source.SceneMetaPath) == source.SceneMetaDigest, "The source scene changed while leases were acquired.");
@@ -2127,6 +2772,15 @@ namespace VRCForge.Editor
             Require(refreshedCapability.CapabilityDigest == capability.CapabilityDigest, "The package capability changed while leases were acquired.");
             var refreshedRoots = CaptureRootIdentities();
             Require(refreshedRoots.Digest == roots.Digest && refreshedRoots.EntryCount == roots.EntryCount, "A project root identity changed while leases were acquired.");
+            if (verifyAuxiliaryTree)
+            {
+                var refreshedAuxiliary = CaptureAuxiliaryGenerated();
+                Require(
+                    verifyAuxiliaryIdentity
+                        ? refreshedAuxiliary.ReceiptDigest == auxiliary.ReceiptDigest
+                        : AuxiliaryContentEquals(auxiliary, refreshedAuxiliary),
+                    "The auxiliary generated baseline changed while leases were acquired.");
+            }
             if (verifyOutputTree)
             {
                 var refreshedOutput = CaptureManagedTree(OutputRoot, OutputTreeSchema);
@@ -2157,119 +2811,280 @@ namespace VRCForge.Editor
         private static bool TryCleanupFailure(
             Scene outputScene,
             TreeSnapshot beforeGenerated,
+            AuxiliaryGeneratedSnapshot beforeAuxiliary,
             TreeSnapshot beforeOutput,
             TreeSnapshot beforeProtected,
             RootIdentitySnapshot beforeRoots,
             SourceSnapshot beforeSource,
             string cloneName,
             CacheTransaction cacheTransaction,
-            AssetTreeManifest outputManifest)
+            AuxiliaryGeneratedTransaction auxiliaryTransaction,
+            AssetTreeManifest stagedOutputManifest,
+            AssetTreeManifest outputManifest,
+            IReadOnlyCollection<CreatedAssetFolder> createdOutputFolders)
         {
-            try
+            var restored = true;
+            void RunCleanupStep(Action action)
             {
-                var restored = true;
+                try { action(); }
+                catch { restored = false; }
+            }
+
+            RunCleanupStep(() =>
+            {
                 if (outputScene.IsValid() && outputScene.isLoaded)
                 {
                     foreach (var root in outputScene.GetRootGameObjects()) Object.DestroyImmediate(root);
                     Require(EditorSceneManagerClose(outputScene), "Failed to close the temporary output scene.");
                 }
-                if (beforeGenerated != null && cacheTransaction != null)
+            });
+
+            RunCleanupStep(() =>
+            {
+                RestoreManagedOutputAfterFailure(
+                    beforeOutput,
+                    cloneName,
+                    stagedOutputManifest,
+                    outputManifest,
+                    createdOutputFolders,
+                    cacheTransaction != null && cacheTransaction.Prepared
+                        && !cacheTransaction.Restored && !cacheTransaction.Completed,
+                    auxiliaryTransaction != null && auxiliaryTransaction.Prepared
+                        && !auxiliaryTransaction.Restored && !auxiliaryTransaction.Completed);
+            });
+
+            RunCleanupStep(() =>
+            {
+                if (auxiliaryTransaction != null && auxiliaryTransaction.Completed)
                 {
-                    if (!cacheTransaction.Restore()) restored = false;
+                    Require(auxiliaryTransaction.VerifyClosedTerminal(),
+                        "The completed auxiliary transaction has an invalid terminal state.");
+                }
+                else if (auxiliaryTransaction != null && !auxiliaryTransaction.Prepared)
+                {
+                    Require(auxiliaryTransaction.Completed || auxiliaryTransaction.AbortPreparation(),
+                        "The incomplete auxiliary transaction could not be removed.");
+                }
+                else if (beforeAuxiliary != null && auxiliaryTransaction != null
+                    && auxiliaryTransaction.Restored)
+                {
+                    Require(auxiliaryTransaction.VerifyRestoredBaseline(),
+                        "The restored auxiliary transaction differs from its baseline.");
+                }
+                else if (beforeAuxiliary != null && auxiliaryTransaction != null)
+                {
+                    Require(auxiliaryTransaction.Restore(
+                            allowGeneratedRootDirty: cacheTransaction != null
+                                && cacheTransaction.Prepared && !cacheTransaction.Restored
+                                && !cacheTransaction.Completed),
+                        "The auxiliary generated root could not be restored.");
+                }
+                else if (beforeAuxiliary != null)
+                {
+                    Require(AuxiliaryContentEquals(beforeAuxiliary, CaptureAuxiliaryGenerated()),
+                        "The auxiliary generated root changed without an owning transaction.");
+                }
+            });
+
+            RunCleanupStep(() =>
+            {
+                if (cacheTransaction != null && cacheTransaction.Completed)
+                {
+                    Require(cacheTransaction.VerifyClosedTerminal(),
+                        "The completed cache transaction has an invalid terminal state.");
+                }
+                else if (cacheTransaction != null && !cacheTransaction.Prepared)
+                {
+                    Require(cacheTransaction.Completed || cacheTransaction.AbortPreparation(),
+                        "The incomplete cache transaction could not be removed.");
+                }
+                else if (beforeGenerated != null && cacheTransaction != null
+                    && cacheTransaction.Restored)
+                {
+                    Require(cacheTransaction.VerifyRestoredBaseline(),
+                        "The restored generated cache differs from its baseline.");
+                }
+                else if (beforeGenerated != null && cacheTransaction != null)
+                {
+                    Require(cacheTransaction.Restore(
+                            allowAuxiliaryRootDirty: auxiliaryTransaction != null
+                                && auxiliaryTransaction.Prepared && !auxiliaryTransaction.Restored
+                                && !auxiliaryTransaction.Completed),
+                        "The generated cache could not be restored.");
                 }
                 else if (beforeGenerated != null)
                 {
                     var current = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
                     var delta = CompareGeneratedTrees(beforeGenerated, current);
-                    if (delta.Modified.Count > 0 || delta.Removed.Count > 0)
+                    Require(delta.Modified.Count == 0 && delta.Removed.Count == 0,
+                        "The generated cache changed without an owning transaction.");
+                    foreach (var first in delta.Added.Select(entry => entry.RelativePath.Split('/')[0].Replace(".meta", string.Empty)).Distinct(StringComparer.Ordinal))
                     {
-                        restored = false;
-                    }
-                    else foreach (var first in delta.Added.Select(entry => entry.RelativePath.Split('/')[0].Replace(".meta", string.Empty)).Distinct(StringComparer.Ordinal))
-                    {
-                        if (string.IsNullOrWhiteSpace(first))
-                        {
-                            restored = false;
-                            continue;
-                        }
+                        Require(!string.IsNullOrWhiteSpace(first),
+                            "The generated cache delta is not safely removable.");
                         AssetDatabase.DeleteAsset(GeneratedRoot + "/" + first);
                     }
                     RequireNoDirtyProjectAssets(GeneratedRoot);
                     AssetDatabase.SaveAssets();
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
                     var restoredGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
-                    if (restoredGenerated.Digest != beforeGenerated.Digest || restoredGenerated.EntryCount != beforeGenerated.EntryCount) restored = false;
+                    Require(restoredGenerated.Digest == beforeGenerated.Digest
+                            && restoredGenerated.EntryCount == beforeGenerated.EntryCount,
+                        "The generated cache did not return to its baseline.");
                 }
-                if (beforeOutput != null && !string.IsNullOrWhiteSpace(cloneName))
+            });
+
+            RunCleanupStep(() =>
+            {
+                RequireNoDirtyProjectAssets();
+                if (beforeAuxiliary != null)
                 {
-                    var durableTarget = OutputKindRoot + "/" + cloneName;
-                    var ownedTargetRemoved = true;
-                    if (AssetDatabase.IsValidFolder(durableTarget))
-                    {
-                        if (outputManifest == null)
-                        {
-                            restored = false;
-                            ownedTargetRemoved = false;
-                        }
-                        else
-                        {
-                            var currentManifest = CaptureAssetTreeManifest(
-                                durableTarget,
-                                durableTarget + "/" + cloneName + ".prefab",
-                                requireNoTemporaryReferences: true);
-                            if (currentManifest.ReceiptDigest != outputManifest.ReceiptDigest)
-                            {
-                                restored = false;
-                                ownedTargetRemoved = false;
-                            }
-                            else AssetDatabase.DeleteAsset(durableTarget);
-                        }
-                    }
-                    if (ownedTargetRemoved && beforeOutput.Exists)
-                    {
-                        if (!beforeOutput.Entries.ContainsKey("ParameterBitPacking") && AssetDatabase.IsValidFolder(OutputKindRoot))
-                        {
-                            AssetDatabase.DeleteAsset(OutputKindRoot);
-                        }
-                    }
-                    else if (ownedTargetRemoved && !beforeOutput.Exists && AssetDatabase.IsValidFolder(OutputRoot))
-                    {
-                        AssetDatabase.DeleteAsset(OutputRoot);
-                    }
-                    RequireNoDirtyProjectAssets(OutputRoot);
-                    AssetDatabase.SaveAssets();
-                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                    var restoredOutput = CaptureManagedTree(OutputRoot, OutputTreeSchema);
-                    if (restoredOutput.Exists != beforeOutput.Exists
-                        || restoredOutput.Digest != beforeOutput.Digest
-                        || restoredOutput.EntryCount != beforeOutput.EntryCount) restored = false;
+                    Require(AuxiliaryContentEquals(beforeAuxiliary, CaptureAuxiliaryGenerated()),
+                        "The auxiliary generated root differs after cleanup.");
                 }
                 if (beforeProtected != null)
                 {
                     var protectedAfter = CaptureProtectedTree();
-                    if (protectedAfter.Digest != beforeProtected.Digest || protectedAfter.EntryCount != beforeProtected.EntryCount) restored = false;
+                    Require(protectedAfter.Digest == beforeProtected.Digest
+                            && protectedAfter.EntryCount == beforeProtected.EntryCount,
+                        "The protected project tree differs after cleanup.");
                 }
                 if (beforeRoots != null)
                 {
                     var rootsAfter = CaptureRootIdentities();
-                    if (rootsAfter.Digest != beforeRoots.Digest || rootsAfter.EntryCount != beforeRoots.EntryCount) restored = false;
+                    Require(rootsAfter.Digest == beforeRoots.Digest
+                            && rootsAfter.EntryCount == beforeRoots.EntryCount,
+                        "A project root identity differs after cleanup.");
                 }
                 if (beforeSource != null)
                 {
                     var sourceAfter = CaptureSource(beforeSource.ScenePath, beforeSource.ObjectPath);
-                    if (sourceAfter.SourceStateDigest != beforeSource.SourceStateDigest
-                        || sourceAfter.SourceAssetSetDigest != beforeSource.SourceAssetSetDigest) restored = false;
+                    Require(sourceAfter.SourceStateDigest == beforeSource.SourceStateDigest
+                            && sourceAfter.SourceAssetSetDigest == beforeSource.SourceAssetSetDigest,
+                        "The source avatar differs after cleanup.");
                 }
-                if (restored && cacheTransaction != null && !cacheTransaction.Completed)
-                {
-                    cacheTransaction.Complete();
-                }
-                return restored;
-            }
-            catch
+            });
+
+            if (restored)
             {
-                return false;
+                RunCleanupStep(() =>
+                {
+                    if (auxiliaryTransaction != null && !auxiliaryTransaction.Completed)
+                    {
+                        auxiliaryTransaction.Complete();
+                    }
+                    if (auxiliaryTransaction != null)
+                    {
+                        Require(auxiliaryTransaction.VerifyClosedTerminal(),
+                            "The auxiliary transaction did not close cleanly.");
+                    }
+                });
+                RunCleanupStep(() =>
+                {
+                    if (cacheTransaction != null && !cacheTransaction.Completed)
+                    {
+                        cacheTransaction.Complete();
+                    }
+                    if (cacheTransaction != null)
+                    {
+                        Require(cacheTransaction.VerifyClosedTerminal(),
+                            "The cache transaction did not close cleanly.");
+                    }
+                });
             }
+            return restored;
+        }
+
+        private static void RestoreManagedOutputAfterFailure(
+            TreeSnapshot beforeOutput,
+            string cloneName,
+            AssetTreeManifest stagedOutputManifest,
+            AssetTreeManifest outputManifest,
+            IReadOnlyCollection<CreatedAssetFolder> createdOutputFolders,
+            bool allowGeneratedRootDirty,
+            bool allowAuxiliaryRootDirty)
+        {
+            Require(beforeOutput != null && !string.IsNullOrWhiteSpace(cloneName),
+                "The managed output cleanup baseline is unavailable.");
+            Require(createdOutputFolders != null
+                    && createdOutputFolders.All(folder => folder != null)
+                    && createdOutputFolders.Select(folder => folder.AssetPath)
+                        .Distinct(StringComparer.Ordinal).Count() == createdOutputFolders.Count,
+                "The managed output folder ownership ledger is invalid.");
+            var durableTarget = OutputKindRoot + "/" + cloneName;
+            var outputMutated = false;
+            if (AssetDatabase.IsValidFolder(durableTarget))
+            {
+                if (outputManifest != null)
+                {
+                    var currentManifest = CaptureAssetTreeManifest(
+                        durableTarget,
+                        durableTarget + "/" + cloneName + ".prefab",
+                        requireNoTemporaryReferences: true);
+                    Require(currentManifest.ReceiptDigest == outputManifest.ReceiptDigest,
+                        "The owned durable output changed before failure cleanup.");
+                }
+                else
+                {
+                    Require(stagedOutputManifest != null,
+                        "An unverified durable output target requires checkpoint restore.");
+                    var movedFailureManifest = CaptureAssetTreeManifest(
+                        durableTarget,
+                        durableTarget + "/" + cloneName + ".prefab",
+                        requireNoTemporaryReferences: false);
+                    VerifyGuidPreservingMove(
+                        stagedOutputManifest,
+                        movedFailureManifest,
+                        requireNoTemporaryReferences: false);
+                }
+                Require(AssetDatabase.DeleteAsset(durableTarget),
+                    "The verified durable output target could not be removed.");
+                outputMutated = true;
+            }
+            else
+            {
+                Require(outputManifest == null,
+                    "The verified durable output target disappeared before failure cleanup.");
+            }
+
+            foreach (var folder in createdOutputFolders.Reverse())
+            {
+                Require(folder.AssetPath == OutputKindRoot || folder.AssetPath == OutputRoot,
+                    "The managed output folder ownership path is invalid.");
+                Require(AssetDatabase.IsValidFolder(folder.AssetPath),
+                    "An operation-created managed output folder disappeared before cleanup.");
+                VerifyCreatedAssetFolder(folder);
+                var absolute = AbsoluteProjectPath(folder.AssetPath);
+                Require(!Directory.EnumerateFileSystemEntries(
+                        absolute,
+                        "*",
+                        SearchOption.TopDirectoryOnly).Any(),
+                    "An operation-created managed output folder is not empty.");
+                Require(AssetDatabase.DeleteAsset(folder.AssetPath),
+                    "An operation-created managed output folder could not be removed.");
+                Require(!Directory.Exists(absolute)
+                        && !File.Exists(absolute)
+                        && !File.Exists(absolute + ".meta"),
+                    "An operation-created managed output folder remains after cleanup.");
+                outputMutated = true;
+            }
+
+            if (outputMutated)
+            {
+                var allowedDirtyRoots = new List<string>();
+                if (allowGeneratedRootDirty) allowedDirtyRoots.Add(GeneratedRoot);
+                if (allowAuxiliaryRootDirty) allowedDirtyRoots.Add(AuxiliaryGeneratedRoot);
+                RequireNoDirtyProjectAssets(allowedDirtyRoots.ToArray());
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+            }
+            var restoredOutput = CaptureManagedTree(OutputRoot, OutputTreeSchema);
+            Require(restoredOutput.Exists == beforeOutput.Exists
+                    && restoredOutput.Digest == beforeOutput.Digest
+                    && restoredOutput.ContentDigest == beforeOutput.ContentDigest
+                    && restoredOutput.EntryCount == beforeOutput.EntryCount
+                    && restoredOutput.TotalBytes == beforeOutput.TotalBytes,
+                "The managed output root did not return to its baseline.");
         }
 
         private static bool EditorSceneManagerClose(Scene scene)
@@ -2278,6 +3093,11 @@ namespace VRCForge.Editor
         }
 
         private static void RequireNoDirtyProjectAssets(params string[] allowedDirtyRoots)
+        {
+            RequireNoDirtyProjectAssets(default(Scene), allowedDirtyRoots);
+        }
+
+        private static void RequireNoDirtyProjectAssets(Scene allowedTransientScene, params string[] allowedDirtyRoots)
         {
             var allowedRoots = (allowedDirtyRoots ?? Array.Empty<string>())
                 .Select(root => (root ?? string.Empty).Replace('\\', '/').TrimEnd('/'))
@@ -2288,24 +3108,42 @@ namespace VRCForge.Editor
                         root == GeneratedRoot
                         || root.StartsWith(GeneratedRoot + "/", StringComparison.Ordinal)
                         || root == OutputRoot
-                        || root.StartsWith(OutputRoot + "/", StringComparison.Ordinal)),
+                        || root.StartsWith(OutputRoot + "/", StringComparison.Ordinal)
+                        || root == AuxiliaryGeneratedRoot),
                 "The dirty-asset save scope is invalid."
             );
             Require(
                 SceneManager.sceneCount <= OpenProjectSceneScanLimit,
                 "The open project scene set exceeds the bounded cleanliness scan."
             );
+            var hasAllowedTransientScene = allowedTransientScene.IsValid();
+            var allowedTransientSceneMatches = 0;
             for (var index = 0; index < SceneManager.sceneCount; index++)
             {
                 var scene = SceneManager.GetSceneAt(index);
                 Require(scene.IsValid() && scene.isLoaded, "An open project scene is incomplete.");
+                if (hasAllowedTransientScene && scene.handle == allowedTransientScene.handle)
+                {
+                    Require(
+                        string.IsNullOrWhiteSpace(scene.path) && !scene.isSubScene,
+                        "The allowed transient scene acquired persistent or subscene state."
+                    );
+                    allowedTransientSceneMatches++;
+                    continue;
+                }
                 Require(!string.IsNullOrWhiteSpace(scene.path), "An open project scene has no persistent project asset.");
                 var scenePath = scene.path.Replace('\\', '/');
+                var pathPartsAreCanonical = !scenePath.Split('/')
+                    .Any(part => string.IsNullOrWhiteSpace(part) || part == "." || part == "..");
+                var isProjectScene = !scene.isSubScene
+                    && scenePath.StartsWith("Assets/", StringComparison.Ordinal);
+                var isReadOnlyPackageSubScene = scene.isSubScene
+                    && scenePath.StartsWith("Packages/", StringComparison.Ordinal);
                 Require(
                     scenePath == scene.path
-                        && scenePath.StartsWith("Assets/", StringComparison.Ordinal)
                         && scenePath.EndsWith(".unity", StringComparison.Ordinal)
-                        && !scenePath.Split('/').Any(part => string.IsNullOrWhiteSpace(part) || part == "." || part == ".."),
+                        && pathPartsAreCanonical
+                        && (isProjectScene || isReadOnlyPackageSubScene),
                     "An open project scene has an invalid persistent path."
                 );
                 var sceneAsset = AssetDatabase.LoadAssetAtPath<SceneAsset>(scenePath);
@@ -2317,6 +3155,10 @@ namespace VRCForge.Editor
                 );
                 Require(!scene.isDirty, "All open project scenes must be saved before parameter bit-packing.");
             }
+            Require(
+                !hasAllowedTransientScene || allowedTransientSceneMatches == 1,
+                "The allowed transient scene is not uniquely loaded."
+            );
 
             var registeredPaths = AssetDatabase.GetAllAssetPaths();
             Require(
@@ -2332,6 +3174,7 @@ namespace VRCForge.Editor
                     && projectPaths.Distinct(StringComparer.Ordinal).Count() == projectPaths.Length,
                 "The registered project asset set is incomplete."
             );
+            var projectPathSet = new HashSet<string>(projectPaths, StringComparer.Ordinal);
 
             var objectCount = 0;
             foreach (var path in projectPaths)
@@ -2356,30 +3199,33 @@ namespace VRCForge.Editor
                 Require(objectCount <= RegisteredAssetObjectScanLimit, "The registered asset object set exceeds the bounded cleanliness scan.");
                 Require(
                     !EditorUtility.IsDirty(importer) || IsAllowedDirtyAssetPath(path, allowedRoots),
-                    "An unrelated project asset importer is dirty."
+                    "An unrelated project asset importer is dirty: " + path
                 );
-                if (isDirectory) continue;
+            }
 
-                var assets = AssetDatabase.LoadAllAssetsAtPath(path);
-                Require(assets != null && assets.Length > 0, "A registered project asset has no persistent object.");
+            var loadedObjects = Resources.FindObjectsOfTypeAll<Object>();
+            Require(
+                loadedObjects != null && loadedObjects.Length <= RegisteredAssetObjectScanLimit,
+                "The loaded asset object set exceeds the bounded cleanliness scan."
+            );
+            foreach (var asset in loadedObjects)
+            {
+                if (asset == null) continue;
+                var path = AssetDatabase.GetAssetPath(asset);
+                if (string.IsNullOrWhiteSpace(path)) continue;
+                path = path.Replace('\\', '/');
+                if (!IsProjectOwnedAssetPath(path)) continue;
                 Require(
-                    objectCount <= RegisteredAssetObjectScanLimit - assets.Length,
-                    "The registered asset object set exceeds the bounded cleanliness scan."
+                    projectPathSet.Contains(path)
+                        && AssetDatabase.Contains(asset)
+                        && EditorUtility.IsPersistent(asset),
+                    "A loaded project asset has incomplete persistent registration."
                 );
-                objectCount += assets.Length;
-                foreach (var asset in assets)
-                {
-                    Require(
-                        asset != null
-                            && EditorUtility.IsPersistent(asset)
-                            && AssetDatabase.GetAssetPath(asset) == path,
-                        "A registered project asset contains an incomplete persistent object."
-                    );
-                    Require(
-                        !EditorUtility.IsDirty(asset) || IsAllowedDirtyAssetPath(path, allowedRoots),
-                        "An unrelated project asset is dirty."
-                    );
-                }
+                if (!AssetDatabase.IsNativeAsset(asset)) continue;
+                Require(
+                    !EditorUtility.IsDirty(asset) || IsAllowedDirtyAssetPath(path, allowedRoots),
+                    "An unrelated project asset is dirty: " + path
+                );
             }
         }
 
@@ -2412,6 +3258,7 @@ namespace VRCForge.Editor
             SourceSnapshot source,
             CapabilitySnapshot capability,
             TreeSnapshot generated,
+            AuxiliaryGeneratedSnapshot auxiliary,
             TreeSnapshot outputTree,
             TreeSnapshot protectedTree,
             RootIdentitySnapshot roots,
@@ -2461,6 +3308,20 @@ namespace VRCForge.Editor
                     Frame(protectedTree.EntryCount),
                     Frame(roots.Digest),
                     Frame(roots.EntryCount),
+                    Frame(AuxiliaryGeneratedRoot),
+                    Frame(AuxiliaryPackageRoot),
+                    Frame(auxiliary.PackageRootIdentityDigest),
+                    Frame(auxiliary.PackageManifestDigest),
+                    Frame(auxiliary.PackageManifestIdentityDigest),
+                    Frame(auxiliary.Tree.Exists),
+                    Frame(auxiliary.Tree.Digest),
+                    Frame(auxiliary.Tree.ContentDigest),
+                    Frame(auxiliary.Tree.EntryCount),
+                    Frame(auxiliary.Tree.TotalBytes),
+                    Frame(CacheBackupMaxEntries),
+                    Frame(CacheBackupMaxBytes),
+                    Frame(AuxiliaryJournalSchema),
+                    Frame(true),
                     Frame(preferences.ReceiptDigest),
                     Frame(EditorUserBuildSettings.activeBuildTarget.ToString()),
                     Frame("current-target-only"),
@@ -2505,12 +3366,15 @@ namespace VRCForge.Editor
             AssetTreeManifest manifest,
             PreferenceSnapshot preferences,
             CacheTransaction cacheTransaction,
+            AuxiliaryGeneratedTransaction auxiliaryTransaction,
             bool sceneLoadedAfter,
             bool temporaryObjectResidue,
             TreeSnapshot generatedBefore,
             TreeSnapshot generatedAfter,
             GeneratedDelta generatedDelta,
             string temporaryDeltaDigest,
+            AuxiliaryGeneratedSnapshot auxiliaryBefore,
+            AuxiliaryGeneratedSnapshot auxiliaryAfter,
             TreeSnapshot outputBefore,
             TreeSnapshot outputAfter,
             GeneratedDelta outputDelta,
@@ -2611,6 +3475,39 @@ namespace VRCForge.Editor
                 CacheBackupMaxBytes,
                 CacheJournalSchema,
                 cacheTransaction.JournalId,
+                true,
+                AuxiliaryGeneratedRoot,
+                AuxiliaryPackageRoot,
+                auxiliaryBefore.PackageRootIdentityDigest,
+                auxiliaryAfter.PackageRootIdentityDigest,
+                auxiliaryBefore.PackageManifestDigest,
+                auxiliaryAfter.PackageManifestDigest,
+                auxiliaryBefore.PackageManifestIdentityDigest,
+                auxiliaryAfter.PackageManifestIdentityDigest,
+                auxiliaryBefore.Tree.Exists,
+                auxiliaryAfter.Tree.Exists,
+                auxiliaryBefore.Tree.Digest,
+                auxiliaryAfter.Tree.Digest,
+                auxiliaryBefore.Tree.ContentDigest,
+                auxiliaryAfter.Tree.ContentDigest,
+                auxiliaryBefore.Tree.EntryCount,
+                auxiliaryAfter.Tree.EntryCount,
+                auxiliaryBefore.Tree.TotalBytes,
+                auxiliaryAfter.Tree.TotalBytes,
+                auxiliaryTransaction.Observed.Tree.Exists,
+                auxiliaryTransaction.Observed.Tree.Digest,
+                auxiliaryTransaction.Observed.Tree.ContentDigest,
+                auxiliaryTransaction.Observed.Tree.EntryCount,
+                auxiliaryTransaction.Observed.Tree.TotalBytes,
+                auxiliaryTransaction.OwnedRootIdentityDigest,
+                auxiliaryTransaction.CreatedByOperation,
+                auxiliaryTransaction.RestorationMode,
+                true,
+                true,
+                CacheBackupMaxEntries,
+                CacheBackupMaxBytes,
+                AuxiliaryJournalSchema,
+                auxiliaryTransaction.JournalId,
                 true,
                 OutputRoot,
                 OutputKindRoot,
@@ -2767,6 +3664,120 @@ namespace VRCForge.Editor
             Require(File.Exists(path), "A required file is missing.");
             var identity = CaptureIdentity(path, false);
             Require(!identity.IsReparsePoint && identity.NumberOfLinks == 1, "A required file is linked or reparsed.");
+        }
+
+        private static void PublishTransactionJournal(string journalPath, byte[] bytes)
+        {
+            Require(!string.IsNullOrWhiteSpace(journalPath)
+                    && bytes != null && bytes.Length > 0,
+                "The transaction journal publication is invalid.");
+            var nextPath = journalPath + ".next";
+            for (var attempt = 0; attempt < TransactionIoRetryAttempts; attempt++)
+            {
+                try
+                {
+                    if (File.Exists(nextPath))
+                    {
+                        RequireStableRegularFile(nextPath);
+                        File.Delete(nextPath);
+                    }
+                    if (!File.Exists(nextPath)) break;
+                }
+                catch (Exception exception) when (
+                    (exception is IOException || exception is UnauthorizedAccessException)
+                    && attempt + 1 < TransactionIoRetryAttempts)
+                {
+                    System.Threading.Thread.Sleep(
+                        TransactionIoRetryBaseDelayMilliseconds * (attempt + 1));
+                    continue;
+                }
+                if (attempt + 1 < TransactionIoRetryAttempts)
+                {
+                    System.Threading.Thread.Sleep(
+                        TransactionIoRetryBaseDelayMilliseconds * (attempt + 1));
+                }
+            }
+            Require(!File.Exists(nextPath),
+                "The prior transaction journal staging file could not be removed.");
+            using (var stream = new FileStream(
+                nextPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.Read))
+            {
+                stream.Write(bytes, 0, bytes.Length);
+                stream.Flush(true);
+            }
+            RequireStableRegularFile(nextPath);
+
+            for (var attempt = 0; attempt < TransactionIoRetryAttempts; attempt++)
+            {
+                try
+                {
+                    if (File.Exists(nextPath))
+                    {
+                        RequireStableRegularFile(nextPath);
+                        if (File.Exists(journalPath))
+                        {
+                            RequireStableRegularFile(journalPath);
+                            File.Replace(nextPath, journalPath, null, true);
+                        }
+                        else File.Move(nextPath, journalPath);
+                    }
+                    Require(!File.Exists(nextPath),
+                        "The transaction journal staging file remained after publication.");
+                    RequireStableRegularFile(journalPath);
+                    Require(File.ReadAllBytes(journalPath).SequenceEqual(bytes),
+                        "The published transaction journal differs from its durable payload.");
+                    return;
+                }
+                catch (Exception exception) when (
+                    (exception is IOException || exception is UnauthorizedAccessException)
+                    && attempt + 1 < TransactionIoRetryAttempts)
+                {
+                    System.Threading.Thread.Sleep(
+                        TransactionIoRetryBaseDelayMilliseconds * (attempt + 1));
+                }
+            }
+            throw new ParameterBitPackingException(
+                "The transaction journal could not be published.");
+        }
+
+        private static void DeleteOwnedTransactionTreeWithRetry(string transactionRoot)
+        {
+            Require(!string.IsNullOrWhiteSpace(transactionRoot),
+                "The transaction cleanup root is invalid.");
+            for (var attempt = 0; attempt < TransactionIoRetryAttempts; attempt++)
+            {
+                try
+                {
+                    if (!Directory.Exists(transactionRoot))
+                    {
+                        Require(!File.Exists(transactionRoot),
+                            "The transaction cleanup root changed type.");
+                        return;
+                    }
+                    CacheTransaction.RequireSafeOwnedTreeForDeletion(transactionRoot);
+                    Directory.Delete(transactionRoot, true);
+                    if (!Directory.Exists(transactionRoot)
+                        && !File.Exists(transactionRoot)) return;
+                }
+                catch (Exception exception) when (
+                    (exception is IOException || exception is UnauthorizedAccessException)
+                    && attempt + 1 < TransactionIoRetryAttempts)
+                {
+                    System.Threading.Thread.Sleep(
+                        TransactionIoRetryBaseDelayMilliseconds * (attempt + 1));
+                    continue;
+                }
+                if (attempt + 1 < TransactionIoRetryAttempts)
+                {
+                    System.Threading.Thread.Sleep(
+                        TransactionIoRetryBaseDelayMilliseconds * (attempt + 1));
+                }
+            }
+            Require(!Directory.Exists(transactionRoot) && !File.Exists(transactionRoot),
+                "The transaction journal tree could not be removed.");
         }
 
         private static FileIdentity CaptureIdentity(string path, bool isDirectory)
@@ -3058,13 +4069,28 @@ namespace VRCForge.Editor
             internal List<string> AbsoluteFilePaths;
         }
 
+        private sealed class CapabilityProfile
+        {
+            internal string Id;
+            internal string CallbackAssemblySha256;
+            internal int CallbackRosterCount;
+            internal string CallbackRosterDigest;
+            internal int CallbackAssemblySetCount;
+            internal string CallbackAssemblySetDigest;
+        }
+
         private sealed class CapabilitySnapshot
         {
             internal string PackageRootPath;
             internal string PackageRootIdentityDigest;
-            internal string CallbackAssemblyPath;
+            internal string ProfileId;
             internal string CallbackAssemblySha256;
-            internal string SdkCallbackAssemblyPath;
+            internal string SdkCallbackAssemblySha256;
+            internal int CallbackRosterCount;
+            internal string CallbackRosterDigest;
+            internal int CallbackAssemblySetCount;
+            internal string CallbackAssemblySetDigest;
+            internal List<string> CallbackAssemblyPaths;
             internal string CapabilityDigest;
 
             internal object ToPayload()
@@ -3078,6 +4104,7 @@ namespace VRCForge.Editor
                     packageTreeSha256 = PackageTreeSha256,
                     packageFileCount = PackageFileCount,
                     packageRootIdentityDigest = PackageRootIdentityDigest,
+                    profileId = ProfileId,
                     callbackAssemblyName = CallbackAssemblyName,
                     callbackAssemblyVersion = CallbackAssemblyVersion,
                     callbackAssemblyPublicKeyToken = CallbackAssemblyPublicKeyToken,
@@ -3092,6 +4119,8 @@ namespace VRCForge.Editor
                     registeredHookCount = 1,
                     callbackRosterCount = CallbackRosterCount,
                     callbackRosterDigest = CallbackRosterDigest,
+                    callbackAssemblySetCount = CallbackAssemblySetCount,
+                    callbackAssemblySetDigest = CallbackAssemblySetDigest,
                     capabilityDigest = CapabilityDigest
                 };
             }
@@ -3254,6 +4283,15 @@ namespace VRCForge.Editor
             };
         }
 
+        private sealed class CreatedAssetFolder
+        {
+            internal string AssetPath;
+            internal string Guid;
+            internal string DirectoryIdentityDigest;
+            internal string MetaIdentityDigest;
+            internal string MetaDigest;
+        }
+
         private sealed class TreeSnapshot
         {
             internal string Digest;
@@ -3279,6 +4317,15 @@ namespace VRCForge.Editor
                     Exists = true
                 };
             }
+        }
+
+        private sealed class AuxiliaryGeneratedSnapshot
+        {
+            internal TreeSnapshot Tree;
+            internal string PackageRootIdentityDigest;
+            internal string PackageManifestDigest;
+            internal string PackageManifestIdentityDigest;
+            internal string ReceiptDigest;
         }
 
         private sealed class TreeEntry
@@ -3330,25 +4377,566 @@ namespace VRCForge.Editor
             internal string Digest;
         }
 
+        private sealed class AuxiliaryGeneratedTransaction
+        {
+            private readonly string privateRoot;
+            private readonly string transactionsRoot;
+            private readonly string transactionRoot;
+            private readonly string backupRoot;
+            private readonly string backupMetaPath;
+            private readonly string journalPath;
+            private readonly string lockPath;
+            private readonly AuxiliaryGeneratedSnapshot baseline;
+            private FileStream transactionLock;
+            private bool prepared;
+            private bool restored;
+            private bool closingStarted;
+            private bool completed;
+            private AuxiliaryGeneratedSnapshot observed;
+            private string ownedRootIdentityDigest = string.Empty;
+            private bool createdByOperation;
+            private string restorationMode = string.Empty;
+
+            private AuxiliaryGeneratedTransaction(
+                string privateRoot,
+                string transactionsRoot,
+                string transactionRoot,
+                string backupRoot,
+                string backupMetaPath,
+                string journalPath,
+                AuxiliaryGeneratedSnapshot baseline)
+            {
+                this.privateRoot = privateRoot;
+                this.transactionsRoot = transactionsRoot;
+                this.transactionRoot = transactionRoot;
+                this.backupRoot = backupRoot;
+                this.backupMetaPath = backupMetaPath;
+                this.journalPath = journalPath;
+                lockPath = Path.Combine(transactionsRoot, "parameter-auxiliary-generated.lock");
+                this.baseline = baseline;
+            }
+
+            internal string JournalId => Path.GetFileName(transactionRoot);
+            internal bool Prepared => prepared;
+            internal bool Restored => restored;
+            internal bool Completed => completed;
+            internal AuxiliaryGeneratedSnapshot Observed => observed;
+            internal string OwnedRootIdentityDigest => ownedRootIdentityDigest;
+            internal bool CreatedByOperation => createdByOperation;
+            internal string RestorationMode => restorationMode;
+
+            internal static AuxiliaryGeneratedTransaction Plan(AuxiliaryGeneratedSnapshot baseline)
+            {
+                Require(baseline != null && baseline.Tree != null,
+                    "The auxiliary generated baseline is unavailable.");
+                Require(baseline.Tree.EntryCount <= CacheBackupMaxEntries,
+                    "The auxiliary generated baseline exceeds the backup entry limit.");
+                Require(baseline.Tree.TotalBytes <= CacheBackupMaxBytes,
+                    "The auxiliary generated baseline exceeds the backup byte limit.");
+                var project = CurrentProjectPath();
+                var library = Path.Combine(project, "Library");
+                Require(Directory.Exists(library), "The project Library root is unavailable.");
+                CacheTransaction.RequireSafeDirectory(library,
+                    "The project Library root is linked or reparsed.");
+                var privateRoot = Path.Combine(library, "VRCForge");
+                Require(!File.Exists(privateRoot), "The private transaction root collides with a file.");
+                if (Directory.Exists(privateRoot))
+                {
+                    CacheTransaction.RequireSafeDirectory(privateRoot,
+                        "The private transaction root is linked or reparsed.");
+                }
+                var transactions = Path.Combine(privateRoot, "transactions");
+                Require(!File.Exists(transactions), "The transaction journal root collides with a file.");
+                if (Directory.Exists(transactions))
+                {
+                    CacheTransaction.RequireSafeDirectory(transactions,
+                        "The transaction journal root is linked or reparsed.");
+                    Require(!File.Exists(Path.Combine(transactions, "parameter-auxiliary-generated.lock")),
+                        "Another auxiliary generated transaction is active.");
+                    var unfinished = Directory.EnumerateFileSystemEntries(
+                            transactions,
+                            "parameter-auxiliary-generated-*",
+                            SearchOption.TopDirectoryOnly)
+                        .Take(2)
+                        .ToArray();
+                    Require(unfinished.Length == 0,
+                        "An unfinished auxiliary generated transaction requires checkpoint restore.");
+                }
+                var transactionRoot = Path.Combine(
+                    transactions,
+                    "parameter-auxiliary-generated-" + Guid.NewGuid().ToString("N"));
+                Require(!Directory.Exists(transactionRoot) && !File.Exists(transactionRoot),
+                    "The planned auxiliary transaction path already exists.");
+                return new AuxiliaryGeneratedTransaction(
+                    privateRoot,
+                    transactions,
+                    transactionRoot,
+                    Path.Combine(transactionRoot, "tree"),
+                    Path.Combine(transactionRoot, "root.meta"),
+                    Path.Combine(transactionRoot, "journal.json"),
+                    baseline);
+            }
+
+            internal void Prepare()
+            {
+                Require(!prepared && !restored && !completed,
+                    "The auxiliary transaction cannot be prepared in its current state.");
+                Directory.CreateDirectory(privateRoot);
+                CacheTransaction.RequireSafeDirectory(privateRoot,
+                    "The private transaction root is linked or reparsed.");
+                Directory.CreateDirectory(transactionsRoot);
+                CacheTransaction.RequireSafeDirectory(transactionsRoot,
+                    "The transaction journal root is linked or reparsed.");
+                try
+                {
+                    transactionLock = new FileStream(
+                        lockPath,
+                        FileMode.CreateNew,
+                        FileAccess.ReadWrite,
+                        FileShare.Read,
+                        4096,
+                        FileOptions.DeleteOnClose | FileOptions.WriteThrough);
+                    var lockBytes = Encoding.UTF8.GetBytes(JournalId);
+                    transactionLock.Write(lockBytes, 0, lockBytes.Length);
+                    transactionLock.Flush(true);
+                }
+                catch (IOException)
+                {
+                    throw new ParameterBitPackingException(
+                        "Another auxiliary generated transaction is active.");
+                }
+                Require(
+                    !Directory.EnumerateFileSystemEntries(
+                        transactionsRoot,
+                        "parameter-auxiliary-generated-*",
+                        SearchOption.TopDirectoryOnly).Any(),
+                    "An unfinished auxiliary generated transaction requires checkpoint restore.");
+                Directory.CreateDirectory(transactionRoot);
+                CacheTransaction.RequireSafeDirectory(transactionRoot,
+                    "The auxiliary transaction root is linked or reparsed.");
+                WriteJournal("preparing", false);
+                if (baseline.Tree.Exists)
+                {
+                    Directory.CreateDirectory(backupRoot);
+                    CacheTransaction.RequireSafeDirectory(backupRoot,
+                        "The auxiliary backup root is linked or reparsed.");
+                    CacheTransaction.CopyTree(AbsoluteProjectPath(AuxiliaryGeneratedRoot), backupRoot);
+                    var auxiliaryMeta = AbsoluteProjectPath(AuxiliaryGeneratedRoot) + ".meta";
+                    RequireStableRegularFile(auxiliaryMeta);
+                    File.Copy(auxiliaryMeta, backupMetaPath, false);
+                    RequireStableRegularFile(backupMetaPath);
+                    var backup = CaptureManagedTreeAbsolute(
+                        backupRoot,
+                        backupMetaPath,
+                        AuxiliaryGeneratedTreeSchema + ".backup");
+                    Require(ContentEquivalent(baseline.Tree, backup)
+                            && backup.EntryCount == baseline.Tree.EntryCount
+                            && backup.TotalBytes == baseline.Tree.TotalBytes,
+                        "The auxiliary generated backup does not match its baseline.");
+                }
+                var stableBaseline = CaptureAuxiliaryGenerated();
+                Require(stableBaseline.ReceiptDigest == baseline.ReceiptDigest,
+                    "The auxiliary generated baseline changed during backup.");
+                WriteJournal("prepared", false);
+                prepared = true;
+            }
+
+            internal void ObserveMutation()
+            {
+                Require(prepared && !restored && !completed,
+                    "The auxiliary transaction cannot observe in its current state.");
+                var current = CaptureAuxiliaryGenerated();
+                RequirePackageIdentity(current);
+                if (baseline.Tree.Exists)
+                {
+                    Require(current.Tree.Exists,
+                        "The pre-existing auxiliary generated root disappeared during apply.");
+                    var baselineRootIdentity = RootIdentityDigest(baseline.Tree);
+                    Require(RootIdentityDigest(current.Tree) == baselineRootIdentity,
+                        "The pre-existing auxiliary generated root identity changed during apply.");
+                    ownedRootIdentityDigest = baselineRootIdentity;
+                }
+                else if (current.Tree.Exists)
+                {
+                    var currentRootIdentity = RootIdentityDigest(current.Tree);
+                    if (string.IsNullOrEmpty(ownedRootIdentityDigest))
+                    {
+                        ownedRootIdentityDigest = currentRootIdentity;
+                        createdByOperation = true;
+                    }
+                    else
+                    {
+                        Require(currentRootIdentity == ownedRootIdentityDigest,
+                            "The operation-created auxiliary generated root identity changed.");
+                    }
+                }
+                else
+                {
+                    Require(!createdByOperation,
+                        "The operation-created auxiliary generated root disappeared before restore.");
+                    ownedRootIdentityDigest = string.Empty;
+                }
+                observed = current;
+                WriteJournal("observed", false);
+            }
+
+            internal bool Restore(bool allowGeneratedRootDirty)
+            {
+                if (!prepared || completed) return false;
+                if (restored)
+                {
+                    try
+                    {
+                        return AuxiliaryContentEquals(baseline, CaptureAuxiliaryGenerated());
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                }
+                try
+                {
+                    if (allowGeneratedRootDirty)
+                    {
+                        RequireNoDirtyProjectAssets(AuxiliaryGeneratedRoot, GeneratedRoot);
+                    }
+                    else RequireNoDirtyProjectAssets(AuxiliaryGeneratedRoot);
+                    if (observed == null) ObserveMutation();
+                    WriteJournal("restoring", false);
+                    var current = CaptureAuxiliaryGenerated();
+                    RequirePackageIdentity(current);
+                    Require(current.Tree.Digest == observed.Tree.Digest
+                            && current.Tree.ContentDigest == observed.Tree.ContentDigest
+                            && current.Tree.EntryCount == observed.Tree.EntryCount
+                            && current.Tree.TotalBytes == observed.Tree.TotalBytes
+                            && current.Tree.Exists == observed.Tree.Exists,
+                        "The auxiliary generated root changed after its owned observation.");
+                    if (baseline.Tree.Exists)
+                    {
+                        RestorePresentBaseline(current.Tree);
+                        restorationMode = "restored_baseline";
+                    }
+                    else if (current.Tree.Exists)
+                    {
+                        DeleteCreatedRoot(current.Tree);
+                        restorationMode = "removed_created_root";
+                    }
+                    else
+                    {
+                        Require(!createdByOperation && string.IsNullOrEmpty(ownedRootIdentityDigest),
+                            "The absent auxiliary baseline has inconsistent ownership evidence.");
+                        restorationMode = "no_auxiliary_root";
+                    }
+                    if (allowGeneratedRootDirty)
+                    {
+                        RequireNoDirtyProjectAssets(AuxiliaryGeneratedRoot, GeneratedRoot);
+                    }
+                    else RequireNoDirtyProjectAssets(AuxiliaryGeneratedRoot);
+                    AssetDatabase.SaveAssets();
+                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                    var final = CaptureAuxiliaryGenerated();
+                    Require(AuxiliaryContentEquals(baseline, final)
+                            && final.Tree.ContentDigest == baseline.Tree.ContentDigest
+                            && final.Tree.EntryCount == baseline.Tree.EntryCount
+                            && final.Tree.TotalBytes == baseline.Tree.TotalBytes,
+                        "The auxiliary generated root was not restored exactly.");
+                    WriteJournal("restored", true);
+                    restored = true;
+                    return true;
+                }
+                catch
+                {
+                    try { WriteJournal("restore_failed", false); } catch { }
+                    return false;
+                }
+            }
+
+            internal bool AbortPreparation()
+            {
+                if (prepared) return false;
+                if (completed) return true;
+                try
+                {
+                    if (Directory.Exists(transactionRoot))
+                    {
+                        CacheTransaction.RequireSafeOwnedTreeForDeletion(transactionRoot);
+                        DeleteOwnedTransactionTreeWithRetry(transactionRoot);
+                    }
+                    Require(!Directory.Exists(transactionRoot) && !File.Exists(transactionRoot),
+                        "The incomplete auxiliary transaction could not be removed.");
+                    if (transactionLock != null) ReleaseLock();
+                    completed = true;
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            internal void Complete()
+            {
+                if (completed)
+                {
+                    Require(VerifyClosedTerminal(),
+                        "The auxiliary transaction closed state is inconsistent.");
+                    return;
+                }
+                Require(prepared && restored,
+                    "The auxiliary transaction cannot be closed in its current state.");
+                if (!closingStarted)
+                {
+                    Require(Directory.Exists(transactionRoot)
+                            && transactionLock != null
+                            && File.Exists(lockPath),
+                        "The auxiliary transaction cannot begin closing from an incomplete state.");
+                    CacheTransaction.RequireSafeOwnedTreeForDeletion(transactionRoot);
+                    RequireStableRegularFile(journalPath);
+                    WriteJournal("closing", true);
+                    closingStarted = true;
+                }
+                else if (Directory.Exists(transactionRoot))
+                {
+                    CacheTransaction.RequireSafeOwnedTreeForDeletion(transactionRoot);
+                    RequireStableRegularFile(journalPath);
+                    WriteJournal("closing", true);
+                }
+                if (transactionLock != null) ReleaseLock();
+                else Require(!File.Exists(lockPath),
+                    "The auxiliary transaction lock state is inconsistent.");
+                if (Directory.Exists(transactionRoot))
+                {
+                    CacheTransaction.RequireSafeOwnedTreeForDeletion(transactionRoot);
+                    DeleteOwnedTransactionTreeWithRetry(transactionRoot);
+                }
+                Require(!Directory.Exists(transactionRoot)
+                        && !File.Exists(transactionRoot)
+                        && !File.Exists(lockPath),
+                    "The auxiliary transaction journal could not be closed.");
+                completed = true;
+            }
+
+            internal bool VerifyRestoredBaseline()
+            {
+                try
+                {
+                    return AuxiliaryContentEquals(baseline, CaptureAuxiliaryGenerated());
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            internal bool VerifyClosedTerminal()
+            {
+                return completed
+                    && (!prepared || closingStarted)
+                    && transactionLock == null
+                    && !Directory.Exists(transactionRoot)
+                    && !File.Exists(transactionRoot)
+                    && !File.Exists(lockPath)
+                    && VerifyRestoredBaseline();
+            }
+
+            private void DeleteCreatedRoot(TreeSnapshot current)
+            {
+                Require(createdByOperation && current.Exists && observed != null,
+                    "The auxiliary generated root is not owned by this operation.");
+                Require(current.Digest == observed.Tree.Digest
+                        && current.ContentDigest == observed.Tree.ContentDigest
+                        && current.EntryCount == observed.Tree.EntryCount
+                        && current.TotalBytes == observed.Tree.TotalBytes,
+                    "The operation-created auxiliary generated root changed before cleanup.");
+                Require(RootIdentityDigest(current) == ownedRootIdentityDigest,
+                    "The operation-created auxiliary generated root identity changed before cleanup.");
+                var auxiliaryRoot = AbsoluteProjectPath(AuxiliaryGeneratedRoot);
+                var auxiliaryMeta = auxiliaryRoot + ".meta";
+                var expectedMeta = current.Entries["$root.meta"];
+                AssetDatabase.DeleteAsset(AuxiliaryGeneratedRoot);
+                if (Directory.Exists(auxiliaryRoot))
+                {
+                    Require(RootIdentityDigest(CaptureManagedTree(
+                            AuxiliaryGeneratedRoot,
+                            AuxiliaryGeneratedTreeSchema + ".delete_check")) == ownedRootIdentityDigest,
+                        "The operation-created auxiliary root identity changed during cleanup.");
+                    CacheTransaction.RequireSafeOwnedTreeForDeletion(auxiliaryRoot);
+                    Directory.Delete(auxiliaryRoot, true);
+                }
+                if (File.Exists(auxiliaryMeta))
+                {
+                    RequireStableRegularFile(auxiliaryMeta);
+                    var metaIdentity = CaptureIdentity(auxiliaryMeta, false);
+                    Require(metaIdentity.Digest == expectedMeta.IdentityDigest
+                            && Sha256File(auxiliaryMeta) == expectedMeta.Digest,
+                        "The operation-created auxiliary metadata changed during cleanup.");
+                    File.Delete(auxiliaryMeta);
+                }
+                Require(!Directory.Exists(auxiliaryRoot)
+                        && !File.Exists(auxiliaryRoot)
+                        && !File.Exists(auxiliaryMeta),
+                    "The operation-created auxiliary generated root remains after cleanup.");
+            }
+
+            private void RestorePresentBaseline(TreeSnapshot current)
+            {
+                Require(current.Exists && observed != null,
+                    "The pre-existing auxiliary generated root is unavailable for restore.");
+                Require(current.Digest == observed.Tree.Digest
+                        && current.ContentDigest == observed.Tree.ContentDigest
+                        && current.EntryCount == observed.Tree.EntryCount
+                        && current.TotalBytes == observed.Tree.TotalBytes,
+                    "The pre-existing auxiliary generated root changed before restore.");
+                Require(RootIdentityDigest(current) == RootIdentityDigest(baseline.Tree),
+                    "The pre-existing auxiliary generated root identity changed before restore.");
+                var backup = CaptureManagedTreeAbsolute(
+                    backupRoot,
+                    backupMetaPath,
+                    AuxiliaryGeneratedTreeSchema + ".backup_readback");
+                Require(ContentEquivalent(baseline.Tree, backup)
+                        && backup.EntryCount == baseline.Tree.EntryCount
+                        && backup.TotalBytes == baseline.Tree.TotalBytes,
+                    "The auxiliary generated backup changed before restore.");
+                var auxiliaryRoot = AbsoluteProjectPath(AuxiliaryGeneratedRoot);
+                var auxiliaryMeta = auxiliaryRoot + ".meta";
+                var assetNames = Directory.EnumerateFileSystemEntries(
+                        auxiliaryRoot,
+                        "*",
+                        SearchOption.TopDirectoryOnly)
+                    .Select(Path.GetFileName)
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Select(name => name.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)
+                        ? name.Substring(0, name.Length - 5)
+                        : name)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                foreach (var name in assetNames)
+                {
+                    AssetDatabase.DeleteAsset(AuxiliaryGeneratedRoot + "/" + name);
+                }
+                foreach (var residue in Directory.EnumerateFileSystemEntries(
+                    auxiliaryRoot,
+                    "*",
+                    SearchOption.TopDirectoryOnly).ToArray())
+                {
+                    var attributes = File.GetAttributes(residue);
+                    var isDirectory = (attributes & FileAttributes.Directory) != 0;
+                    var identity = CaptureIdentity(residue, isDirectory);
+                    Require(!identity.IsReparsePoint && identity.NumberOfLinks == 1,
+                        "The auxiliary restore target contains linked or reparsed residue.");
+                    if (isDirectory)
+                    {
+                        CacheTransaction.RequireSafeOwnedTreeForDeletion(residue);
+                        Directory.Delete(residue, true);
+                    }
+                    else File.Delete(residue);
+                }
+                Require(!Directory.EnumerateFileSystemEntries(
+                        auxiliaryRoot,
+                        "*",
+                        SearchOption.TopDirectoryOnly).Any(),
+                    "The auxiliary restore target could not be emptied.");
+                CacheTransaction.CopyTree(backupRoot, auxiliaryRoot);
+                RequireStableRegularFile(auxiliaryMeta);
+                File.Copy(backupMetaPath, auxiliaryMeta, true);
+                RequireStableRegularFile(auxiliaryMeta);
+            }
+
+            private void RequirePackageIdentity(AuxiliaryGeneratedSnapshot current)
+            {
+                Require(current.PackageRootIdentityDigest == baseline.PackageRootIdentityDigest,
+                    "The auxiliary package root identity changed during apply.");
+                Require(current.PackageManifestIdentityDigest == baseline.PackageManifestIdentityDigest,
+                    "The auxiliary package manifest identity changed during apply.");
+                Require(current.PackageManifestDigest == baseline.PackageManifestDigest,
+                    "The auxiliary package manifest changed during apply.");
+            }
+
+            private void ReleaseLock()
+            {
+                Require(transactionLock != null, "The auxiliary transaction lock is unavailable.");
+                transactionLock.Dispose();
+                transactionLock = null;
+                Require(!File.Exists(lockPath), "The auxiliary transaction lock was not released.");
+            }
+
+            private void WriteJournal(string state, bool restoreVerified)
+            {
+                var payload = new JObject
+                {
+                    ["schema"] = AuxiliaryJournalSchema,
+                    ["journalId"] = JournalId,
+                    ["state"] = state,
+                    ["packageRoot"] = AuxiliaryPackageRoot,
+                    ["packageRootIdentityDigest"] = baseline.PackageRootIdentityDigest,
+                    ["packageManifest"] = AuxiliaryPackageManifest,
+                    ["packageManifestDigest"] = baseline.PackageManifestDigest,
+                    ["packageManifestIdentityDigest"] = baseline.PackageManifestIdentityDigest,
+                    ["auxiliaryRoot"] = AuxiliaryGeneratedRoot,
+                    ["baselineExists"] = baseline.Tree.Exists,
+                    ["baselineTreeDigest"] = baseline.Tree.Digest,
+                    ["baselineContentDigest"] = baseline.Tree.ContentDigest,
+                    ["baselineEntryCount"] = baseline.Tree.EntryCount,
+                    ["baselineByteCount"] = baseline.Tree.TotalBytes,
+                    ["observedTreeDigest"] = observed == null ? string.Empty : observed.Tree.Digest,
+                    ["ownedRootIdentityDigest"] = ownedRootIdentityDigest,
+                    ["createdByOperation"] = createdByOperation,
+                    ["restorationMode"] = restorationMode,
+                    ["restoreVerified"] = restoreVerified
+                };
+                var bytes = Encoding.UTF8.GetBytes(payload.ToString(Newtonsoft.Json.Formatting.None));
+                PublishTransactionJournal(journalPath, bytes);
+            }
+
+            private static string RootIdentityDigest(TreeSnapshot tree)
+            {
+                Require(tree != null && tree.Exists && tree.Entries.ContainsKey("$root"),
+                    "The auxiliary generated root identity is unavailable.");
+                return tree.Entries["$root"].IdentityDigest;
+            }
+
+            private static bool ContentEquivalent(TreeSnapshot left, TreeSnapshot right)
+            {
+                if (left == null || right == null || left.Exists != right.Exists) return false;
+                const string schema = "vrcforge.parameter_auxiliary_backup_compare.v1";
+                return CacheTransaction.ReframeContentDigest(left, schema)
+                    == CacheTransaction.ReframeContentDigest(right, schema);
+            }
+        }
+
         private sealed class CacheTransaction
         {
+            private readonly string privateRoot;
+            private readonly string transactionsRoot;
             private readonly string transactionRoot;
             private readonly string backupRoot;
             private readonly string journalPath;
+            private readonly string lockPath;
+            private readonly TreeSnapshot baseline;
             private readonly string baselineContentDigest;
             private readonly int baselineEntryCount;
             private readonly long baselineByteCount;
+            private bool prepared;
+            private bool restored;
+            private bool closingStarted;
             private bool completed;
+            private FileStream transactionLock;
 
             private CacheTransaction(
+                string privateRoot,
+                string transactionsRoot,
                 string transactionRoot,
                 string backupRoot,
                 string journalPath,
                 TreeSnapshot baseline)
             {
+                this.privateRoot = privateRoot;
+                this.transactionsRoot = transactionsRoot;
                 this.transactionRoot = transactionRoot;
                 this.backupRoot = backupRoot;
                 this.journalPath = journalPath;
+                lockPath = Path.Combine(transactionsRoot, "parameter-bit-packing.lock");
+                this.baseline = baseline;
                 baselineContentDigest = baseline.ContentDigest;
                 baselineEntryCount = baseline.EntryCount;
                 baselineByteCount = baseline.TotalBytes;
@@ -3358,9 +4946,11 @@ namespace VRCForge.Editor
             internal string BaselineContentDigest => baselineContentDigest;
             internal int BaselineEntryCount => baselineEntryCount;
             internal long BaselineByteCount => baselineByteCount;
+            internal bool Prepared => prepared;
+            internal bool Restored => restored;
             internal bool Completed => completed;
 
-            internal static CacheTransaction Create(TreeSnapshot baseline)
+            internal static CacheTransaction Plan(TreeSnapshot baseline)
             {
                 Require(baseline != null, "The generated cache baseline is unavailable.");
                 Require(baseline.EntryCount <= CacheBackupMaxEntries, "The generated cache exceeds the backup entry limit.");
@@ -3370,22 +4960,94 @@ namespace VRCForge.Editor
                 Require(Directory.Exists(library), "The project Library root is unavailable.");
                 RequireSafeDirectory(library, "The project Library root is linked or reparsed.");
                 var privateRoot = Path.Combine(library, "VRCForge");
-                Directory.CreateDirectory(privateRoot);
-                RequireSafeDirectory(privateRoot, "The private transaction root is linked or reparsed.");
+                Require(!File.Exists(privateRoot), "The private transaction root collides with a file.");
+                if (Directory.Exists(privateRoot))
+                {
+                    RequireSafeDirectory(privateRoot, "The private transaction root is linked or reparsed.");
+                }
                 var transactions = Path.Combine(privateRoot, "transactions");
-                Directory.CreateDirectory(transactions);
-                RequireSafeDirectory(transactions, "The transaction journal root is linked or reparsed.");
+                Require(!File.Exists(transactions), "The transaction journal root collides with a file.");
+                if (Directory.Exists(transactions))
+                {
+                    RequireSafeDirectory(transactions, "The transaction journal root is linked or reparsed.");
+                    Require(!File.Exists(Path.Combine(transactions, "parameter-bit-packing.lock")),
+                        "Another parameter cache transaction is active.");
+                    Require(!File.Exists(Path.Combine(transactions, "parameter-auxiliary-generated.lock")),
+                        "Another auxiliary generated transaction is active.");
+                    var unfinished = Directory.EnumerateFileSystemEntries(
+                            transactions,
+                            "parameter-bit-packing-*",
+                            SearchOption.TopDirectoryOnly
+                        )
+                        .Take(2)
+                        .ToArray();
+                    Require(unfinished.Length == 0, "An unfinished parameter cache transaction requires checkpoint restore.");
+                    var unfinishedAuxiliary = Directory.EnumerateFileSystemEntries(
+                            transactions,
+                            "parameter-auxiliary-generated-*",
+                            SearchOption.TopDirectoryOnly)
+                        .Take(2)
+                        .ToArray();
+                    Require(unfinishedAuxiliary.Length == 0,
+                        "An unfinished auxiliary generated transaction requires checkpoint restore.");
+                }
                 var transactionRoot = Path.Combine(
                     transactions,
                     "parameter-bit-packing-" + Guid.NewGuid().ToString("N"));
+                var backupRoot = Path.Combine(transactionRoot, "cache");
+                var journalPath = Path.Combine(transactionRoot, "journal.json");
+                Require(!Directory.Exists(transactionRoot) && !File.Exists(transactionRoot),
+                    "The planned cache transaction path already exists.");
+                return new CacheTransaction(
+                    privateRoot,
+                    transactions,
+                    transactionRoot,
+                    backupRoot,
+                    journalPath,
+                    baseline
+                );
+            }
+
+            internal void Prepare()
+            {
+                Require(!prepared && !completed, "The cache transaction cannot be prepared in its current state.");
+                Directory.CreateDirectory(privateRoot);
+                RequireSafeDirectory(privateRoot, "The private transaction root is linked or reparsed.");
+                Directory.CreateDirectory(transactionsRoot);
+                RequireSafeDirectory(transactionsRoot, "The transaction journal root is linked or reparsed.");
+                try
+                {
+                    transactionLock = new FileStream(
+                        lockPath,
+                        FileMode.CreateNew,
+                        FileAccess.ReadWrite,
+                        FileShare.Read,
+                        4096,
+                        FileOptions.DeleteOnClose | FileOptions.WriteThrough
+                    );
+                    var lockBytes = Encoding.UTF8.GetBytes(JournalId);
+                    transactionLock.Write(lockBytes, 0, lockBytes.Length);
+                    transactionLock.Flush(true);
+                }
+                catch (IOException)
+                {
+                    throw new ParameterBitPackingException("Another parameter cache transaction is active.");
+                }
+                Require(
+                    !Directory.EnumerateFileSystemEntries(
+                        transactionsRoot,
+                        "parameter-bit-packing-*",
+                        SearchOption.TopDirectoryOnly
+                    ).Any(),
+                    "An unfinished parameter cache transaction requires checkpoint restore."
+                );
+                Require(!Directory.Exists(transactionRoot) && !File.Exists(transactionRoot),
+                    "The planned cache transaction path already exists.");
                 Directory.CreateDirectory(transactionRoot);
                 RequireSafeDirectory(transactionRoot, "The cache transaction root is linked or reparsed.");
-                var backupRoot = Path.Combine(transactionRoot, "cache");
                 Directory.CreateDirectory(backupRoot);
                 RequireSafeDirectory(backupRoot, "The cache backup root is linked or reparsed.");
-                var journalPath = Path.Combine(transactionRoot, "journal.json");
-                var transaction = new CacheTransaction(transactionRoot, backupRoot, journalPath, baseline);
-                transaction.WriteJournal("preparing", false);
+                WriteJournal("preparing", false);
                 CopyTree(AbsoluteProjectPath(GeneratedRoot), backupRoot);
                 var backup = CaptureTreeAbsolute(backupRoot, CacheContentSchema + ".backup");
                 Require(
@@ -3393,14 +5055,21 @@ namespace VRCForge.Editor
                         && backup.EntryCount == baseline.EntryCount
                         && backup.TotalBytes == baseline.TotalBytes,
                     "The generated cache backup does not match its baseline.");
-                transaction.WriteJournal("prepared", false);
-                return transaction;
+                WriteJournal("prepared", false);
+                prepared = true;
             }
 
-            internal bool Restore()
+            internal bool Restore(bool allowAuxiliaryRootDirty)
             {
+                if (!prepared || completed) return false;
+                if (restored) return VerifyRestoredBaseline();
                 try
                 {
+                    if (allowAuxiliaryRootDirty)
+                    {
+                        RequireNoDirtyProjectAssets(GeneratedRoot, AuxiliaryGeneratedRoot);
+                    }
+                    else RequireNoDirtyProjectAssets(GeneratedRoot);
                     WriteJournal("restoring", false);
                     var cacheRoot = AbsoluteProjectPath(GeneratedRoot);
                     Require(Directory.Exists(cacheRoot), "The generated cache root is missing during restore.");
@@ -3436,18 +5105,23 @@ namespace VRCForge.Editor
                     Require(!Directory.EnumerateFileSystemEntries(cacheRoot, "*", SearchOption.TopDirectoryOnly).Any(),
                         "The generated cache could not be emptied for exact restore.");
                     CopyTree(backupRoot, cacheRoot);
-                    RequireNoDirtyProjectAssets(GeneratedRoot);
+                    if (allowAuxiliaryRootDirty)
+                    {
+                        RequireNoDirtyProjectAssets(GeneratedRoot, AuxiliaryGeneratedRoot);
+                    }
+                    else RequireNoDirtyProjectAssets(GeneratedRoot);
                     AssetDatabase.SaveAssets();
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                    var restored = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
-                    if (restored.ContentDigest != baselineContentDigest
-                        || restored.EntryCount != baselineEntryCount
-                        || restored.TotalBytes != baselineByteCount)
+                    var finalSnapshot = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
+                    if (finalSnapshot.ContentDigest != baselineContentDigest
+                        || finalSnapshot.EntryCount != baselineEntryCount
+                        || finalSnapshot.TotalBytes != baselineByteCount)
                     {
                         WriteJournal("restore_mismatch", false);
                         return false;
                     }
                     WriteJournal("restored", true);
+                    restored = true;
                     return true;
                 }
                 catch
@@ -3457,12 +5131,136 @@ namespace VRCForge.Editor
                 }
             }
 
+            internal bool AbortPreparation()
+            {
+                if (prepared) return false;
+                if (completed) return true;
+                try
+                {
+                    if (Directory.Exists(transactionRoot))
+                    {
+                        RequireSafeDirectory(transactionRoot, "The incomplete cache transaction root is linked or reparsed.");
+                        RequireSafeOwnedTreeForDeletion(transactionRoot);
+                        DeleteOwnedTransactionTreeWithRetry(transactionRoot);
+                    }
+                    Require(!Directory.Exists(transactionRoot) && !File.Exists(transactionRoot),
+                        "The incomplete cache transaction could not be removed.");
+                    if (transactionLock != null) ReleaseLock();
+                    completed = true;
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
             internal void Complete()
             {
-                WriteJournal("closing", true);
-                Directory.Delete(transactionRoot, true);
-                Require(!Directory.Exists(transactionRoot), "The cache transaction journal could not be closed.");
+                if (completed)
+                {
+                    Require(VerifyClosedTerminal(),
+                        "The cache transaction closed state is inconsistent.");
+                    return;
+                }
+                Require(prepared && restored, "The cache transaction cannot be closed in its current state.");
+                if (!closingStarted)
+                {
+                    Require(Directory.Exists(transactionRoot)
+                            && transactionLock != null
+                            && File.Exists(lockPath),
+                        "The cache transaction cannot begin closing from an incomplete state.");
+                    RequireSafeOwnedTreeForDeletion(transactionRoot);
+                    RequireStableRegularFile(journalPath);
+                    WriteJournal("closing", true);
+                    closingStarted = true;
+                }
+                else if (Directory.Exists(transactionRoot))
+                {
+                    RequireSafeOwnedTreeForDeletion(transactionRoot);
+                    RequireStableRegularFile(journalPath);
+                    WriteJournal("closing", true);
+                }
+                if (transactionLock != null) ReleaseLock();
+                else Require(!File.Exists(lockPath),
+                    "The cache transaction lock state is inconsistent.");
+                if (Directory.Exists(transactionRoot))
+                {
+                    RequireSafeOwnedTreeForDeletion(transactionRoot);
+                    DeleteOwnedTransactionTreeWithRetry(transactionRoot);
+                }
+                Require(!Directory.Exists(transactionRoot)
+                        && !File.Exists(transactionRoot)
+                        && !File.Exists(lockPath),
+                    "The cache transaction journal could not be closed.");
                 completed = true;
+            }
+
+            internal bool VerifyRestoredBaseline()
+            {
+                try
+                {
+                    var current = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
+                    return current.ContentDigest == baselineContentDigest
+                        && current.EntryCount == baselineEntryCount
+                        && current.TotalBytes == baselineByteCount;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+
+            internal bool VerifyClosedTerminal()
+            {
+                return completed
+                    && (!prepared || closingStarted)
+                    && transactionLock == null
+                    && !Directory.Exists(transactionRoot)
+                    && !File.Exists(transactionRoot)
+                    && !File.Exists(lockPath)
+                    && VerifyRestoredBaseline();
+            }
+
+            private void ReleaseLock()
+            {
+                Require(transactionLock != null, "The cache transaction lock is unavailable.");
+                transactionLock.Dispose();
+                transactionLock = null;
+                Require(!File.Exists(lockPath), "The cache transaction lock was not released.");
+            }
+
+            internal static void RequireSafeOwnedTreeForDeletion(string root)
+            {
+                var rootIdentity = CaptureIdentity(root, true);
+                Require(!rootIdentity.IsReparsePoint && rootIdentity.NumberOfLinks == 1,
+                    "The incomplete cache transaction root is linked or reparsed.");
+                var entryCount = 0;
+                var pending = new Stack<string>();
+                pending.Push(root);
+                while (pending.Count > 0)
+                {
+                    var current = pending.Pop();
+                    foreach (var entry in Directory.EnumerateFileSystemEntries(current, "*", SearchOption.TopDirectoryOnly))
+                    {
+                        entryCount++;
+                        Require(entryCount <= CacheBackupMaxEntries + 16,
+                            "The incomplete cache transaction exceeds the bounded cleanup limit.");
+                        var attributes = File.GetAttributes(entry);
+                        var isDirectory = (attributes & FileAttributes.Directory) != 0;
+                        var identity = CaptureIdentity(entry, isDirectory);
+                        Require(!identity.IsReparsePoint && identity.NumberOfLinks == 1,
+                            "The incomplete cache transaction contains a linked or reparsed path.");
+                        if (isDirectory) pending.Push(entry);
+                    }
+                }
+                var finalRootIdentity = CaptureIdentity(root, true);
+                Require(
+                    finalRootIdentity.VolumeSerial == rootIdentity.VolumeSerial
+                        && finalRootIdentity.FileIndexHigh == rootIdentity.FileIndexHigh
+                        && finalRootIdentity.FileIndexLow == rootIdentity.FileIndexLow,
+                    "The incomplete cache transaction root identity changed before cleanup."
+                );
             }
 
             private void WriteJournal(string state, bool cacheRestored)
@@ -3479,31 +5277,10 @@ namespace VRCForge.Editor
                     ["cacheRestored"] = cacheRestored
                 };
                 var bytes = Encoding.UTF8.GetBytes(payload.ToString(Newtonsoft.Json.Formatting.None));
-                var nextPath = journalPath + ".next";
-                if (File.Exists(nextPath))
-                {
-                    RequireStableRegularFile(nextPath);
-                    File.Delete(nextPath);
-                }
-                using (var stream = new FileStream(nextPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
-                {
-                    stream.Write(bytes, 0, bytes.Length);
-                    stream.Flush(true);
-                }
-                RequireStableRegularFile(nextPath);
-                if (File.Exists(journalPath))
-                {
-                    RequireStableRegularFile(journalPath);
-                    File.Replace(nextPath, journalPath, null, true);
-                }
-                else
-                {
-                    File.Move(nextPath, journalPath);
-                }
-                RequireStableRegularFile(journalPath);
+                PublishTransactionJournal(journalPath, bytes);
             }
 
-            private static void CopyTree(string sourceRoot, string destinationRoot)
+            internal static void CopyTree(string sourceRoot, string destinationRoot)
             {
                 Require(Directory.Exists(sourceRoot), "A cache copy source is missing.");
                 Directory.CreateDirectory(destinationRoot);
@@ -3554,14 +5331,14 @@ namespace VRCForge.Editor
                 }
             }
 
-            private static void RequireSafeDirectory(string path, string message)
+            internal static void RequireSafeDirectory(string path, string message)
             {
                 Require(Directory.Exists(path), message);
                 var identity = CaptureIdentity(path, true);
                 Require(!identity.IsReparsePoint && identity.NumberOfLinks == 1, message);
             }
 
-            private static string ReframeContentDigest(TreeSnapshot snapshot, string schema)
+            internal static string ReframeContentDigest(TreeSnapshot snapshot, string schema)
             {
                 return Sha256Utf8(
                     schema + ".content\n"

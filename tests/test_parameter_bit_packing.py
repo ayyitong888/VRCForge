@@ -29,6 +29,23 @@ from parameter_bit_packing import (
 
 PROJECT_PATH = str(Path("D:/DisposableParameterProject").resolve())
 
+CAPABILITY_PROFILE_FIXTURES = {
+    "embedded-minimal-v1": {
+        "callbackAssemblySha256": "e568293abe29428b7fb35d805cb3053cc8437621a19ae714d5fc76931d9fe10f",
+        "callbackRosterCount": 16,
+        "callbackRosterDigest": "305bc43e713cc76fe13f16d99e6e1d7137d87c066d6a46a6917196b909de10ba",
+        "callbackAssemblySetCount": 3,
+        "callbackAssemblySetDigest": "1884970046bc7b2f7194cef03c3c085dffb02df8cc6eddc9173e90fd231794d1",
+    },
+    "embedded-extended-v1": {
+        "callbackAssemblySha256": "c220c73e91f69aa88425c8cd81cf271a6b484eb5b34cca15a33f6edcde89c8f4",
+        "callbackRosterCount": 23,
+        "callbackRosterDigest": "a345576b0aad61991a4518413a5685d3b9df85e9ad33af50ff6b04a71d0f920e",
+        "callbackAssemblySetCount": 7,
+        "callbackAssemblySetDigest": "2eebf5d668c881ac7b208191e488c6a69c896549473fb44281d12c07404dc221",
+    },
+}
+
 
 def request_arguments() -> dict:
     return {
@@ -75,7 +92,8 @@ def exclusions() -> list[dict]:
     return sorted(rows, key=lambda row: row["name"])
 
 
-def capability() -> dict:
+def capability(profile_id: str = "embedded-minimal-v1") -> dict:
+    profile = CAPABILITY_PROFILE_FIXTURES[profile_id]
     value = {
         "packageId": bitpack.PACKAGE_ID,
         "packageVersion": bitpack.PACKAGE_VERSION,
@@ -84,10 +102,11 @@ def capability() -> dict:
         "packageTreeSha256": bitpack.PACKAGE_TREE_SHA256,
         "packageFileCount": bitpack.PACKAGE_FILE_COUNT,
         "packageRootIdentityDigest": "7" * 64,
+        "profileId": profile_id,
         "callbackAssemblyName": bitpack.CALLBACK_ASSEMBLY_NAME,
         "callbackAssemblyVersion": bitpack.CALLBACK_ASSEMBLY_VERSION,
         "callbackAssemblyPublicKeyToken": bitpack.CALLBACK_ASSEMBLY_PUBLIC_KEY_TOKEN,
-        "callbackAssemblySha256": bitpack.CALLBACK_ASSEMBLY_SHA256,
+        "callbackAssemblySha256": profile["callbackAssemblySha256"],
         "sdkCallbackAssemblyName": bitpack.SDK_CALLBACK_ASSEMBLY_NAME,
         "sdkCallbackAssemblyVersion": bitpack.SDK_CALLBACK_ASSEMBLY_VERSION,
         "sdkCallbackAssemblyPublicKeyToken": bitpack.SDK_CALLBACK_ASSEMBLY_PUBLIC_KEY_TOKEN,
@@ -96,8 +115,10 @@ def capability() -> dict:
         "callbackSignature": bitpack.CALLBACK_SIGNATURE,
         "registeredHookType": bitpack.REGISTERED_HOOK_TYPE,
         "registeredHookCount": 1,
-        "callbackRosterCount": bitpack.CALLBACK_ROSTER_COUNT,
-        "callbackRosterDigest": bitpack.CALLBACK_ROSTER_DIGEST,
+        "callbackRosterCount": profile["callbackRosterCount"],
+        "callbackRosterDigest": profile["callbackRosterDigest"],
+        "callbackAssemblySetCount": profile["callbackAssemblySetCount"],
+        "callbackAssemblySetDigest": profile["callbackAssemblySetDigest"],
     }
     value["capabilityDigest"] = compute_capability_digest(value)
     return value
@@ -335,7 +356,11 @@ def refresh_manifest_receipt(value: dict) -> None:
     )
 
 
-def preview_payload(project_path: str = PROJECT_PATH) -> dict:
+def preview_payload(
+    project_path: str = PROJECT_PATH,
+    *,
+    profile_id: str = "embedded-minimal-v1",
+) -> dict:
     safe = [f"SafeToggle{i:03d}" for i in range(20)]
     excluded = exclusions()
     source = {
@@ -374,7 +399,7 @@ def preview_payload(project_path: str = PROJECT_PATH) -> dict:
         "mutationCount": 0,
         "projectPath": project_path,
         "source": source,
-        "capability": capability(),
+        "capability": capability(profile_id),
         "generated": {
             "root": bitpack.GENERATED_ROOT,
             "treeDigestBefore": "0" * 64,
@@ -387,8 +412,24 @@ def preview_payload(project_path: str = PROJECT_PATH) -> dict:
             "protectedTreeDigestBefore": "b" * 64,
             "protectedEntryCountBefore": 1400,
             "rootIdentityDigestBefore": "c" * 64,
-            "rootIdentityCountBefore": 6,
+            "rootIdentityCountBefore": 7,
             "exists": True,
+            "reparseFree": True,
+        },
+        "auxiliaryGenerated": {
+            "root": bitpack.AUXILIARY_GENERATED_ROOT,
+            "packageRoot": bitpack.AUXILIARY_PACKAGE_ROOT,
+            "packageRootIdentityDigestBefore": "e" * 64,
+            "packageManifestDigestBefore": "f" * 64,
+            "packageManifestIdentityDigestBefore": "1" * 64,
+            "rootExistsBefore": False,
+            "treeDigestBefore": "2" * 64,
+            "contentDigestBefore": "3" * 64,
+            "entryCountBefore": 0,
+            "byteCountBefore": 0,
+            "backupMaxEntries": bitpack.CACHE_BACKUP_MAX_ENTRIES,
+            "backupMaxBytes": bitpack.CACHE_BACKUP_MAX_BYTES,
+            "journalSchema": bitpack.AUXILIARY_JOURNAL_SCHEMA,
             "reparseFree": True,
         },
         "preferences": preferences(),
@@ -413,16 +454,28 @@ def preview_payload(project_path: str = PROJECT_PATH) -> dict:
     return result
 
 
-def approved(project_path: str = PROJECT_PATH) -> tuple[dict, dict]:
+def approved(
+    project_path: str = PROJECT_PATH,
+    *,
+    profile_id: str = "embedded-minimal-v1",
+) -> tuple[dict, dict]:
     canonical, approval = bind_authoritative_preview(
         wrapper(project_path),
-        preview_payload(project_path),
+        preview_payload(project_path, profile_id=profile_id),
     )
     return canonical["arguments"], approval
 
 
-def apply_payload(approved_arguments: dict | None = None) -> dict:
-    args = deepcopy(approved_arguments) if approved_arguments is not None else approved()[0]
+def apply_payload(
+    approved_arguments: dict | None = None,
+    *,
+    profile_id: str = "embedded-minimal-v1",
+) -> dict:
+    args = (
+        deepcopy(approved_arguments)
+        if approved_arguments is not None
+        else approved(profile_id=profile_id)[0]
+    )
     safe = [f"SafeToggle{i:03d}" for i in range(20)]
     proof = behavior_proof()
     output_evidence = behavior_evidence(output=True)
@@ -446,7 +499,7 @@ def apply_payload(approved_arguments: dict | None = None) -> dict:
         "temporaryObjectResidue": False,
         "projectPath": args["expectedProjectPath"],
         "previewDigest": args["expectedPreviewDigest"],
-        "capability": capability(),
+        "capability": capability(profile_id),
         "preferences": preferences(),
         "platformProof": platform_proof(),
         "behaviorProof": proof,
@@ -528,6 +581,53 @@ def apply_payload(approved_arguments: dict | None = None) -> dict:
             "backupMaxBytes": bitpack.CACHE_BACKUP_MAX_BYTES,
             "journalSchema": bitpack.CACHE_JOURNAL_SCHEMA,
             "journalId": "parameter-bit-packing-" + "a" * 32,
+            "journalClosed": True,
+        },
+        "auxiliaryGenerated": {
+            "root": bitpack.AUXILIARY_GENERATED_ROOT,
+            "packageRoot": bitpack.AUXILIARY_PACKAGE_ROOT,
+            "packageRootIdentityDigestBefore": args[
+                "expectedAuxiliaryPackageRootIdentityDigest"
+            ],
+            "packageRootIdentityDigestAfter": args[
+                "expectedAuxiliaryPackageRootIdentityDigest"
+            ],
+            "packageManifestDigestBefore": args[
+                "expectedAuxiliaryPackageManifestDigest"
+            ],
+            "packageManifestDigestAfter": args[
+                "expectedAuxiliaryPackageManifestDigest"
+            ],
+            "packageManifestIdentityDigestBefore": args[
+                "expectedAuxiliaryPackageManifestIdentityDigest"
+            ],
+            "packageManifestIdentityDigestAfter": args[
+                "expectedAuxiliaryPackageManifestIdentityDigest"
+            ],
+            "rootExistsBefore": args["expectedAuxiliaryRootExistsBefore"],
+            "rootExistsAfter": args["expectedAuxiliaryRootExistsBefore"],
+            "treeDigestBefore": args["expectedAuxiliaryTreeDigestBefore"],
+            "treeDigestAfter": args["expectedAuxiliaryTreeDigestBefore"],
+            "contentDigestBefore": args["expectedAuxiliaryContentDigestBefore"],
+            "contentDigestAfter": args["expectedAuxiliaryContentDigestBefore"],
+            "entryCountBefore": args["expectedAuxiliaryEntryCountBefore"],
+            "entryCountAfter": args["expectedAuxiliaryEntryCountBefore"],
+            "byteCountBefore": args["expectedAuxiliaryByteCountBefore"],
+            "byteCountAfter": args["expectedAuxiliaryByteCountBefore"],
+            "observedRootExists": True,
+            "observedTreeDigest": "4" * 64,
+            "observedContentDigest": "5" * 64,
+            "observedEntryCount": 8,
+            "observedByteCount": 2048,
+            "ownedRootIdentityDigest": "6" * 64,
+            "createdByOperation": True,
+            "restorationMode": "removed_created_root",
+            "restoreVerified": True,
+            "backupBounded": True,
+            "backupMaxEntries": bitpack.CACHE_BACKUP_MAX_ENTRIES,
+            "backupMaxBytes": bitpack.CACHE_BACKUP_MAX_BYTES,
+            "journalSchema": bitpack.AUXILIARY_JOURNAL_SCHEMA,
+            "journalId": "parameter-auxiliary-generated-" + "b" * 32,
             "journalClosed": True,
         },
         "managedOutput": {
@@ -667,11 +767,19 @@ def test_authoritative_preview_binds_source_capability_cache_preferences_and_emp
     assert args["expectedGeneratedContentDigestBefore"] == "9" * 64
     assert args["expectedGeneratedEntryCountBefore"] == 4
     assert args["expectedGeneratedByteCountBefore"] == 1234
+    assert args["expectedAuxiliaryPackageRootIdentityDigest"] == "e" * 64
+    assert args["expectedAuxiliaryPackageManifestDigest"] == "f" * 64
+    assert args["expectedAuxiliaryPackageManifestIdentityDigest"] == "1" * 64
+    assert args["expectedAuxiliaryRootExistsBefore"] is False
+    assert args["expectedAuxiliaryTreeDigestBefore"] == "2" * 64
+    assert args["expectedAuxiliaryContentDigestBefore"] == "3" * 64
+    assert args["expectedAuxiliaryEntryCountBefore"] == 0
+    assert args["expectedAuxiliaryByteCountBefore"] == 0
     assert args["expectedPreferenceDigest"] == preview_payload()["preferences"]["receiptDigest"]
     assert args["expectedProtectedTreeDigestBefore"] == "b" * 64
     assert args["expectedProtectedEntryCountBefore"] == 1400
     assert args["expectedRootIdentityDigest"] == "c" * 64
-    assert args["expectedRootIdentityCount"] == 6
+    assert args["expectedRootIdentityCount"] == 7
     assert args["expectedExcludedDigest"] == preview_payload()["source"]["excludedDigest"]
     assert set(args) == {
         *request_arguments().keys(),
@@ -705,6 +813,14 @@ def test_authoritative_preview_binds_source_capability_cache_preferences_and_emp
         "expectedGeneratedEntryCountBefore",
         "expectedGeneratedContentDigestBefore",
         "expectedGeneratedByteCountBefore",
+        "expectedAuxiliaryPackageRootIdentityDigest",
+        "expectedAuxiliaryPackageManifestDigest",
+        "expectedAuxiliaryPackageManifestIdentityDigest",
+        "expectedAuxiliaryRootExistsBefore",
+        "expectedAuxiliaryTreeDigestBefore",
+        "expectedAuxiliaryContentDigestBefore",
+        "expectedAuxiliaryEntryCountBefore",
+        "expectedAuxiliaryByteCountBefore",
         "expectedPreferenceDigest",
         "expectedProtectedTreeDigestBefore",
         "expectedProtectedEntryCountBefore",
@@ -715,6 +831,71 @@ def test_authoritative_preview_binds_source_capability_cache_preferences_and_emp
         "expectedOutputRootExistsBefore",
         "expectedPreviewDigest",
     }
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "expected_digest"),
+    [
+        ("embedded-minimal-v1", "9f42739a6b8d94158c50525e474ade1d294788fbb29dc5733deacdbba7c55c8e"),
+        ("embedded-extended-v1", "f6c6bd34af4fca5c3ce734feabcaf227a1f6a9d287e6c3d8f04f933e8390414f"),
+    ],
+)
+def test_preview_and_apply_accept_each_exact_capability_profile(
+    profile_id: str,
+    expected_digest: str,
+) -> None:
+    payload = preview_payload(profile_id=profile_id)
+
+    canonical, approval = bind_authoritative_preview(wrapper(), payload)
+    applied = validate_apply_result(
+        canonical["arguments"],
+        apply_payload(canonical["arguments"], profile_id=profile_id),
+    )
+
+    assert payload["capability"]["capabilityDigest"] == expected_digest
+    assert approval["capability"] == payload["capability"]
+    assert applied["capability"] == payload["capability"]
+
+
+def test_compatibility_capability_constants_alias_minimal_profile() -> None:
+    minimal = CAPABILITY_PROFILE_FIXTURES["embedded-minimal-v1"]
+
+    assert bitpack.CAPABILITY_PROFILE_ID == "embedded-minimal-v1"
+    assert bitpack.CALLBACK_ASSEMBLY_SHA256 == minimal["callbackAssemblySha256"]
+    assert bitpack.CALLBACK_ROSTER_COUNT == minimal["callbackRosterCount"]
+    assert bitpack.CALLBACK_ROSTER_DIGEST == minimal["callbackRosterDigest"]
+    assert bitpack.CALLBACK_ASSEMBLY_SET_COUNT == minimal["callbackAssemblySetCount"]
+    assert bitpack.CALLBACK_ASSEMBLY_SET_DIGEST == minimal["callbackAssemblySetDigest"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("profileId", "unknown-profile-v1"),
+        (
+            "callbackAssemblySha256",
+            CAPABILITY_PROFILE_FIXTURES["embedded-extended-v1"]["callbackAssemblySha256"],
+        ),
+        ("callbackRosterCount", CAPABILITY_PROFILE_FIXTURES["embedded-extended-v1"]["callbackRosterCount"]),
+        ("callbackRosterDigest", CAPABILITY_PROFILE_FIXTURES["embedded-extended-v1"]["callbackRosterDigest"]),
+        (
+            "callbackAssemblySetCount",
+            CAPABILITY_PROFILE_FIXTURES["embedded-extended-v1"]["callbackAssemblySetCount"],
+        ),
+        (
+            "callbackAssemblySetDigest",
+            CAPABILITY_PROFILE_FIXTURES["embedded-extended-v1"]["callbackAssemblySetDigest"],
+        ),
+    ],
+)
+def test_preview_rejects_unknown_or_mixed_capability_profile(field: str, value: object) -> None:
+    payload = preview_payload()
+    payload["capability"][field] = value
+    payload["capability"]["capabilityDigest"] = compute_capability_digest(payload["capability"])
+    payload["previewDigest"] = compute_preview_digest(payload)
+
+    with pytest.raises(ParameterBitPackingError, match="capability"):
+        bind_authoritative_preview(wrapper(), payload)
 
 
 @pytest.mark.parametrize(
@@ -746,6 +927,11 @@ def test_authoritative_preview_binds_source_capability_cache_preferences_and_emp
         lambda p: p["generated"].update({"entryCountBefore": 1}),
         lambda p: p["generated"].update({"treeDigestBefore": "f" * 64}),
         lambda p: p["generated"].update({"reparseFree": False}),
+        lambda p: p["auxiliaryGenerated"].update({"root": "Packages/other/__Generated"}),
+        lambda p: p["auxiliaryGenerated"].update({"packageRootIdentityDigestBefore": "0" * 64}),
+        lambda p: p["auxiliaryGenerated"].update({"rootExistsBefore": True}),
+        lambda p: p["auxiliaryGenerated"].update({"entryCountBefore": 1}),
+        lambda p: p["auxiliaryGenerated"].update({"reparseFree": False}),
         lambda p: p["output"].update({"cloneExists": True}),
         lambda p: p.update({"previewDigest": "0" * 64}),
     ],
@@ -766,6 +952,7 @@ def test_preview_fails_closed_on_forged_or_unknown_state(mutator) -> None:
         "source",
         "source_evidence",
         "generated",
+        "auxiliary",
         "preferences",
         "platform",
         "output",
@@ -780,6 +967,7 @@ def test_preview_rejects_unvalidated_field_injection(case: str, reframe: bool) -
         "source": payload["source"],
         "source_evidence": payload["source"]["behaviorEvidence"],
         "generated": payload["generated"],
+        "auxiliary": payload["auxiliaryGenerated"],
         "preferences": payload["preferences"],
         "platform": payload["platformProof"],
         "output": payload["output"],
@@ -847,12 +1035,59 @@ def test_apply_accepts_only_verified_reduction_with_durable_managed_output() -> 
     assert result["generated"]["contentDigestAfter"] == result["generated"]["contentDigestBefore"]
     assert result["generated"]["cacheRestored"] is True
     assert result["generated"]["journalClosed"] is True
+    assert result["auxiliaryGenerated"]["rootExistsAfter"] is False
+    assert result["auxiliaryGenerated"]["createdByOperation"] is True
+    assert result["auxiliaryGenerated"]["restorationMode"] == "removed_created_root"
+    assert result["auxiliaryGenerated"]["restoreVerified"] is True
+    assert result["auxiliaryGenerated"]["journalClosed"] is True
     assert result["managedOutput"]["addedEntryCount"] == 7
     assert result["managedOutput"]["leaseBound"] is True
     assert result["managedOutput"]["guidPreservingWholeTreeMove"] is True
     assert result["managedOutput"]["finalManifest"]["noTemporaryReferences"] is True
     assert result["behaviorProof"]["platformScope"] == bitpack.PLATFORM_SCOPE
     assert result["platformProof"]["crossPlatformEquivalent"] is False
+
+
+def test_apply_accepts_exact_byte_restore_for_a_present_auxiliary_baseline() -> None:
+    preview = preview_payload()
+    preview["auxiliaryGenerated"].update(
+        {
+            "rootExistsBefore": True,
+            "treeDigestBefore": "7" * 64,
+            "contentDigestBefore": "8" * 64,
+            "entryCountBefore": 9,
+            "byteCountBefore": 4096,
+        }
+    )
+    preview["previewDigest"] = compute_preview_digest(preview)
+    canonical, _approval = bind_authoritative_preview(wrapper(), preview)
+    result = apply_payload(canonical["arguments"])
+    result["auxiliaryGenerated"].update(
+        {
+            "rootExistsBefore": True,
+            "rootExistsAfter": True,
+            "treeDigestBefore": "7" * 64,
+            "treeDigestAfter": "9" * 64,
+            "contentDigestBefore": "8" * 64,
+            "contentDigestAfter": "8" * 64,
+            "entryCountBefore": 9,
+            "entryCountAfter": 9,
+            "byteCountBefore": 4096,
+            "byteCountAfter": 4096,
+            "createdByOperation": False,
+            "restorationMode": "restored_baseline",
+        }
+    )
+    result["applyReceiptDigest"] = compute_apply_receipt_digest(result)
+
+    validated = validate_apply_result(canonical["arguments"], result)
+
+    assert validated["auxiliaryGenerated"]["treeDigestAfter"] != validated[
+        "auxiliaryGenerated"
+    ]["treeDigestBefore"]
+    assert validated["auxiliaryGenerated"]["contentDigestAfter"] == validated[
+        "auxiliaryGenerated"
+    ]["contentDigestBefore"]
 
 
 @pytest.mark.parametrize(
@@ -863,6 +1098,7 @@ def test_apply_accepts_only_verified_reduction_with_durable_managed_output() -> 
         "source_evidence",
         "output",
         "generated",
+        "auxiliary",
         "managed",
         "staged_manifest",
         "final_manifest",
@@ -883,6 +1119,7 @@ def test_apply_rejects_unvalidated_field_injection_even_with_reframed_receipt(ca
         "source_evidence": payload["source"]["behaviorEvidence"],
         "output": payload["output"],
         "generated": payload["generated"],
+        "auxiliary": payload["auxiliaryGenerated"],
         "managed": payload["managedOutput"],
         "staged_manifest": payload["managedOutput"]["stagedManifest"],
         "final_manifest": payload["managedOutput"]["finalManifest"],
@@ -900,12 +1137,14 @@ def test_apply_rejects_unvalidated_field_injection_even_with_reframed_receipt(ca
         validate_apply_result(args, payload)
 
 
-@pytest.mark.parametrize("case", ["cache", "manifest", "codec", "preference", "platform", "journal", "closure", "source"])
+@pytest.mark.parametrize("case", ["cache", "auxiliary", "manifest", "codec", "preference", "platform", "journal", "closure", "source"])
 def test_apply_rejects_reframed_nested_proof_drift(case: str) -> None:
     args, _ = approved()
     payload = apply_payload(args)
     if case == "cache":
         payload["generated"]["contentDigestAfter"] = "f" * 64
+    elif case == "auxiliary":
+        payload["auxiliaryGenerated"]["contentDigestAfter"] = "f" * 64
     elif case == "manifest":
         final = payload["managedOutput"]["finalManifest"]
         final["contentDigest"] = "f" * 64
@@ -985,6 +1224,15 @@ def test_apply_rejects_noncanonical_lists_even_with_recomputed_receipt(mutator) 
         lambda p: p["generated"].update({"targetResidue": True}),
         lambda p: p["generated"].update({"stagingRoot": bitpack.GENERATED_ROOT + "/Other"}),
         lambda p: p["generated"].update({"stagingRemoved": False}),
+        lambda p: p["auxiliaryGenerated"].update({"root": "Packages/other/__Generated"}),
+        lambda p: p["auxiliaryGenerated"].update({"packageRootIdentityDigestAfter": "0" * 64}),
+        lambda p: p["auxiliaryGenerated"].update({"packageManifestDigestAfter": "0" * 64}),
+        lambda p: p["auxiliaryGenerated"].update({"rootExistsAfter": True}),
+        lambda p: p["auxiliaryGenerated"].update({"contentDigestAfter": "0" * 64}),
+        lambda p: p["auxiliaryGenerated"].update({"createdByOperation": False}),
+        lambda p: p["auxiliaryGenerated"].update({"restorationMode": "restored_baseline"}),
+        lambda p: p["auxiliaryGenerated"].update({"restoreVerified": False}),
+        lambda p: p["auxiliaryGenerated"].update({"journalClosed": False}),
         lambda p: p["managedOutput"].update({"root": "Assets/Other"}),
         lambda p: p["managedOutput"].update({"targetRoot": bitpack.OUTPUT_KIND_ROOT + "/Other"}),
         lambda p: p["managedOutput"].update({"rootExistsBefore": False}),
@@ -1195,12 +1443,39 @@ def test_public_csharp_tool_uses_only_public_build_dispatch_and_rejects_deprecat
 
     assert "VRCBuildPipelineCallbacks.OnPreprocessAvatar" in source
     assert "PrefabUtility.SaveAsPrefabAsset" in source
+    assert "immediatePrefab == importedPrefab" not in source
+    assert "AssetDatabase.GetAssetPath(immediatePrefab) == temporaryPrefabPath" in source
     assert source.index("PrefabUtility.SaveAsPrefabAsset") < source.index("AssetDatabase.MoveAsset")
-    assert "CacheTransaction.Create" in source
-    assert "cacheTransaction.Restore()" in source
+    assert "CacheTransaction.Plan" in source
+    assert "cacheTransaction.Prepare();" in source
+    assert "cacheTransaction.AbortPreparation()" in source
+    assert "RequireSafeOwnedTreeForDeletion(transactionRoot);" in source
+    assert "unfinished.Length == 0" in source
+    assert '"parameter-bit-packing.lock"' in source
+    assert "FileMode.CreateNew" in source
+    assert "FileOptions.DeleteOnClose | FileOptions.WriteThrough" in source
+    cache_transaction = source.index("private sealed class CacheTransaction")
+    prepare_body = source[
+        source.index("internal void Prepare()", cache_transaction) : source.index(
+            "internal bool Restore(", cache_transaction
+        )
+    ]
+    assert prepare_body.index("transactionLock = new FileStream") < prepare_body.index(
+        "Directory.EnumerateFileSystemEntries"
+    )
+    assert "transactionLock.Flush(true);" in prepare_body
+    assert "ReleaseLock();" in source
+    assert "cacheTransaction.Restore(\n                            allowAuxiliaryRootDirty:" in source
     assert "File.Replace(nextPath, journalPath" in source
-    assert source.index('WriteJournal("closing", true)') < source.index("completed = true")
-    assert source.index("Directory.Delete(transactionRoot, true)") < source.index("completed = true")
+    complete = source[
+        source.index("internal void Complete()", cache_transaction) : source.index(
+            "internal static void RequireSafeOwnedTreeForDeletion", cache_transaction
+        )
+    ]
+    assert complete.index('WriteJournal("closing", true)') < complete.index("completed = true")
+    assert complete.index("DeleteOwnedTransactionTreeWithRetry(transactionRoot)") < complete.index(
+        "completed = true"
+    )
     assert "A cache copy exceeds the bounded entry limit." in source
     assert "A cache copy exceeds the bounded byte limit." in source
     assert "CaptureTreeAbsolute(cacheRoot, CacheContentSchema + \".restore_target\")" in source
@@ -1209,6 +1484,19 @@ def test_public_csharp_tool_uses_only_public_build_dispatch_and_rejects_deprecat
     assert '"current-target-only"' in source
     assert "BuildTarget.StandaloneWindows64" in source
     assert "CaptureOutputPrefab" in source
+    assert 'CapabilitySchema = "vrcforge.parameter_capability.v2"' in source
+    assert 'Id = "embedded-minimal-v1"' in source
+    assert 'Id = "embedded-extended-v1"' in source
+    assert "CallbackAssemblySetSchema" in source
+    assert ".Concat(new[] { runtimeAssembly })" in source
+    assert "capability.CallbackAssemblyPaths.Count == capability.CallbackAssemblySetCount" in source
+    assert "EnsureNonInteractiveBuildPolicy(clone);" in source
+    assert 'NonInteractiveFeatureModeName = "Disabled"' in source
+    assert source.index("EnsureNonInteractiveBuildPolicy(clone);") < source.index(
+        "VRCBuildPipelineCallbacks.OnPreprocessAvatar"
+    )
+    assert "existingPolicies.Length <= 1" in source
+    assert "contentField.SetValue(policyComponent, policyFeature)" in source
     assert "ParameterCompressorService" not in source
     assert "VRCFuryInjectorBuilder" not in source
     assert "UnlimitedParameters" not in source
@@ -1223,6 +1511,110 @@ def test_public_csharp_tool_uses_only_public_build_dispatch_and_rejects_deprecat
     assert "animator_behavior" in evidence
     assert "parameter_codec_mapping" in evidence
     assert "EditorJsonUtility.ToJson" not in evidence
+    assert "Animator state names must be unique within a state machine." not in evidence
+    assert "Animator child state-machine names must be unique." not in evidence
+    assert '"/state:" + stateIndex.ToString(CultureInfo.InvariantCulture)' in evidence
+    assert '"/machine:" + machineIndex.ToString(CultureInfo.InvariantCulture)' in evidence
+    assert "var defaultStateToken = StateWithinMachineToken(machine.defaultState, states);" in evidence
+    assert "ControllerObjectToken(machine.defaultState, controller)" not in evidence
+    assert 'return "state:" + index.ToString(CultureInfo.InvariantCulture)' in evidence
+    assert "var animatorPathIndex = BuildAnimatorPathIndex(layer.stateMachine, layerPath);" in evidence
+    assert "AnimatorStatePathToken(transition.destinationState, animatorPathIndex)" in evidence
+    assert "AnimatorStateMachinePathToken(transition.destinationStateMachine, animatorPathIndex)" in evidence
+    assert "ControllerObjectToken(transition.destinationState, controller)" not in evidence
+    assert "ControllerObjectToken(transition.destinationStateMachine, controller)" not in evidence
+    assert "An animator state has more than one structural path." in evidence
+    assert 'setStage?.Invoke("animator_subset_transition_identity");' in evidence
+    assert '"destination", "exit", "mute", "solo", "conditions", "duration", "exit_time"' in evidence
+    assert "transition.name" not in evidence
+    assert "Scope = path" in evidence
+    assert "SemanticName = index.ToString(CultureInfo.InvariantCulture)" in evidence
+    assert "Body = Frame(path) + Frame(index) + string.Concat(semanticFields.Select(Frame))" in evidence
+    excluded_start = evidence.index("var excludedBefore = source.Parameters")
+    excluded_end = evidence.index('setStage?.Invoke("codec_graph")', excluded_start)
+    excluded_block = evidence[excluded_start:excluded_end]
+    assert ".Select(row => row.Canonical)" not in excluded_block
+    assert "Frame(row.Name) + Frame(row.Type) + Frame(row.DefaultValue)" in excluded_block
+    assert "+ Frame(row.Saved) + Frame(row.NetworkSynced)" in excluded_block
+    assert 'operationStage = "temporary_output_prefab_save_flag";' in source
+    assert 'operationStage = "temporary_output_prefab_import_readback";' in source
+    assert 'operationStage = "temporary_output_prefab_identity_reconciliation";' in source
+    assert 'operationStage = "temporary_output_prefab_receipt_capture";' in source
+    assert 'stage => operationStage = "temporary_output_prefab_receipt_" + stage' in source
+    assert 'setStage?.Invoke("animator_behavior");' in source
+    assert "PortableObjectDigest" in evidence
+    assert "PortableComponentDigest" in evidence
+    assert "PortablePropertyDigest" in evidence
+    assert "PortableTransformEditorPropertyDigest" in evidence
+    assert "PortableTransformRuntimePropertyDigest" in evidence
+    assert "PortableTransformSpatialPropertyDigest" in evidence
+    assert "PortableTransformHierarchyPropertyDigest" in evidence
+    assert "PortableTransformOtherPropertyDigest" in evidence
+    assert "PortableDescriptorPropertyDigest" in evidence
+    assert "PortableDescriptorPropertyGroupDigests" in evidence
+    assert "DescriptorPropertyGroup(iterator.propertyPath)" in evidence
+    assert "FirstMismatchedDescriptorPropertyGroup(" in source
+    assert '"portable_avatar_properties_descriptor_"' in source
+    assert "PortableOtherPropertyDigest" in evidence
+    assert "if (component is Transform) continue;" in evidence
+    assert '|| iterator.propertyPath == "serializedVersion")' in evidence
+    assert '|| iterator.propertyPath == "m_GameObject"' in evidence
+    assert 'iterator.propertyPath.StartsWith("m_GameObject.", StringComparison.Ordinal)' in evidence
+    assert 'iterator.propertyPath.StartsWith("m_GameObject[", StringComparison.Ordinal)' in evidence
+    assert 'iterator.propertyPath.StartsWith("m_CorrespondingSourceObject.", StringComparison.Ordinal)' in evidence
+    assert 'iterator.propertyPath.StartsWith("m_PrefabInstance.", StringComparison.Ordinal)' in evidence
+    assert 'iterator.propertyPath.StartsWith("m_PrefabAsset.", StringComparison.Ordinal)' in evidence
+    assert "Frame(VectorText(transform.localPosition))" in evidence
+    assert "Frame(QuaternionText(transform.localRotation))" in evidence
+    assert "Frame(VectorText(transform.localScale))" in evidence
+    assert 'propertyPath.StartsWith("m_LocalEulerAnglesHint.", StringComparison.Ordinal)' in evidence
+    assert 'propertyPath == "serializedVersion"' in evidence
+    assert '"portable_avatar_properties_transform_editor"' in source
+    assert '"portable_avatar_properties_transform_hierarchy"' in source
+    assert "ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate" in source
+    controller_parameter_start = evidence.index(
+        "var semanticDefault = ControllerParameterDefault(parameter);"
+    )
+    controller_parameters = evidence[
+        controller_parameter_start : evidence.index(
+            "var controllerLayers", controller_parameter_start
+        )
+    ]
+    assert "Frame(parameterIndex)" not in controller_parameters
+    assert "Frame(role) + Frame(parameter.name) + Frame(parameter.type)" in controller_parameters
+    assert "Frame(semanticDefault)" in controller_parameters
+    assert "Frame(FloatText(parameter.defaultFloat)) + Frame(parameter.defaultInt)" not in controller_parameters
+    assert 'var role = group + ":" + value.type;' in evidence
+    assert 'value.type + ":" + layerSlot.ToString' not in evidence
+    assert 'var layerPath = role + "/layer:" + layer.name;' in evidence
+    assert '"/layer:" + index.ToString(CultureInfo.InvariantCulture)' not in evidence
+    assert "synchronizedLayer = controllerLayers[layer.syncedLayerIndex].name" in evidence
+    assert "+ Frame(layer.iKPass) + Frame(layer.syncedLayerIndex)" not in evidence
+    assert "var avatarMaskToken = AvatarMaskToken(layer.avatarMask, out var avatarMaskSummary);" in evidence
+    assert "ObjectToken(layer.avatarMask, null)" not in evidence
+    assert "FirstLayerMaskMismatchCategory(sourceLayers, outputLayers)" in evidence
+    assert 'return "null";' in evidence
+    assert 'StartsWith("mask:", StringComparison.Ordinal)' in evidence
+    assert "Frame(row.Scope) + Frame(row.SemanticName)" in evidence
+    assert 'summary = "mask_body_" + activeBodyPartCount.ToString' in evidence
+    assert '"_transform_" + activeTransformCount.ToString' in evidence
+    assert "SemanticMaskSummary = avatarMaskSummary" in evidence
+    assert 'operationStage = "output_null_layer_mask_restore";' in source
+    assert "RestoreSourceNullLayerMasks(" in source
+    assert 'stage => operationStage = "output_null_layer_mask_restore_" + stage' in source
+    assert '"persistent_other"' in source
+    assert 'operationStage = "output_null_layer_mask_restore_dirty_scope";' in source
+    assert 'operationStage = "output_null_layer_mask_restore_source_readback";' in source
+    assert "normalizedSource.SourceStateDigest == beforeSource.SourceStateDigest" in source
+    assert "verifyAuxiliaryTree: false" in source
+    assert "if (verifyAuxiliaryTree)" in source
+    assert 'row.SemanticFields[2] == "null"' in source
+    assert "if (!expectedNullMasks.Contains(identity)) continue;" in source
+    assert "layer.avatarMask = null;" in source
+    assert "!EditorUtility.IsPersistent(controller)" in source
+    assert "IsGeneratedMutationPath(controllerPath)" in source
+    assert 'assetPath.StartsWith(GeneratedRoot + "/", StringComparison.Ordinal)' in source
+    assert 'assetPath.StartsWith(AuxiliaryGeneratedRoot + "/", StringComparison.Ordinal)' in source
 
 
 def test_protected_tree_uses_only_fixed_persistent_project_roots() -> None:
@@ -1242,6 +1634,206 @@ def test_protected_tree_uses_only_fixed_persistent_project_roots() -> None:
     assert "Path.Combine(project, relativeRoot)" in capture_block
 
 
+def test_csharp_tool_owns_only_the_fixed_auxiliary_generated_root_transactionally() -> None:
+    source = Path("Assets/VRCForge/Editor/ParameterBitPackingTool.cs").read_text(encoding="utf-8")
+    fixture = Path(
+        "tests/fixtures/primitive_basis/parameter_bit_packing/ParameterBitPackingFixtureProbe.cs"
+    ).read_text(encoding="utf-8")
+
+    assert 'AuxiliaryPackageRoot = "Packages/nadena.dev.ndmf"' in source
+    assert 'AuxiliaryGeneratedRoot = AuxiliaryPackageRoot + "/__Generated"' in source
+    assert 'AuxiliaryPackageManifest = AuxiliaryPackageRoot + "/package.json"' in source
+    assert 'AuxiliaryJournalSchema = "vrcforge.parameter_auxiliary_journal.v1"' in source
+    assert "CaptureAuxiliaryGenerated()" in source
+    assert "CaptureManagedTree(AuxiliaryGeneratedRoot" in source
+    assert "packageManifestIdentityDigest" in source
+    assert 'relative.Equals(AuxiliaryGeneratedRoot + ".meta"' in source
+    assert 'relative.Equals(AuxiliaryGeneratedRoot,' in source
+
+    guard_start = source.index(
+        "private static void RequireNoDirtyProjectAssets(params string[] allowedDirtyRoots)"
+    )
+    guard_end = source.index("private static bool IsProjectOwnedAssetPath", guard_start)
+    guard = source[guard_start:guard_end]
+    assert "root == AuxiliaryGeneratedRoot" in guard
+    assert "root.StartsWith(AuxiliaryGeneratedRoot" not in guard
+
+    transaction_start = source.index("private sealed class AuxiliaryGeneratedTransaction")
+    transaction = source[transaction_start:]
+    assert '"parameter-auxiliary-generated-" + Guid.NewGuid().ToString("N")' in transaction
+    assert '"parameter-auxiliary-generated.lock"' in transaction
+    assert 'WriteJournal("prepared"' in transaction
+    assert "CopyTree(AbsoluteProjectPath(AuxiliaryGeneratedRoot), backupRoot)" in transaction
+    assert "File.Copy(auxiliaryMeta, backupMetaPath" in transaction
+    assert "ObserveMutation()" in transaction
+    assert "current.Tree.Digest == observed.Tree.Digest" in transaction
+    assert "current.Tree.ContentDigest == observed.Tree.ContentDigest" in transaction
+    assert "DeleteCreatedRoot" in transaction
+    assert "RestorePresentBaseline" in transaction
+    assert "final.Tree.ContentDigest == baseline.Tree.ContentDigest" in transaction
+    assert "final.Tree.EntryCount == baseline.Tree.EntryCount" in transaction
+    assert "final.Tree.TotalBytes == baseline.Tree.TotalBytes" in transaction
+    assert "PackageRootIdentityDigest == baseline.PackageRootIdentityDigest" in transaction
+    assert "PackageManifestIdentityDigest == baseline.PackageManifestIdentityDigest" in transaction
+    assert "PackageManifestDigest == baseline.PackageManifestDigest" in transaction
+
+    callback = source.index("VRCBuildPipelineCallbacks.OnPreprocessAvatar(clone)")
+    observed = source.index("auxiliaryTransaction.ObserveMutation();", callback)
+    allowed = source.index(
+        "RequireNoDirtyProjectAssets(outputScene, GeneratedRoot, AuxiliaryGeneratedRoot)",
+        callback,
+    )
+    assert callback < observed < allowed
+    assert "auxiliaryTransaction.Restore(\n                            allowGeneratedRootDirty:" in source
+    assert "auxiliaryTransaction.AbortPreparation()" in source
+    assert "checkpoint_restore_required" in source
+
+    assert 'AuxiliaryGeneratedRoot = "Packages/nadena.dev.ndmf/__Generated"' in fixture
+    assert "auxiliaryBaseline" in fixture
+    assert "CaptureAuxiliaryReceipt()" in fixture
+    assert "fixture final auxiliary tree readback" in fixture
+
+
+def test_failure_cleanup_breaks_owned_dirty_scope_cycles_and_fails_closed_on_unknown_output() -> None:
+    source = Path("Assets/VRCForge/Editor/ParameterBitPackingTool.cs").read_text(encoding="utf-8")
+    fixture = Path(
+        "tests/fixtures/primitive_basis/parameter_bit_packing/ParameterBitPackingFixtureProbe.cs"
+    ).read_text(encoding="utf-8")
+
+    cleanup_start = source.index("private static bool TryCleanupFailure(")
+    cleanup_end = source.index("private static bool EditorSceneManagerClose", cleanup_start)
+    cleanup = source[cleanup_start:cleanup_end]
+    output_cleanup = cleanup.index("RestoreManagedOutputAfterFailure(")
+    auxiliary_restore = cleanup.index("auxiliaryTransaction.Restore(")
+    cache_restore = cleanup.index("cacheTransaction.Restore(")
+    global_clean = cleanup.index("RequireNoDirtyProjectAssets();", cache_restore)
+    assert output_cleanup < auxiliary_restore < cache_restore < global_clean
+    assert "allowGeneratedRootDirty: cacheTransaction != null" in cleanup
+    assert "&& cacheTransaction.Prepared && !cacheTransaction.Restored" in cleanup
+    assert "allowAuxiliaryRootDirty: auxiliaryTransaction != null" in cleanup
+    assert "&& auxiliaryTransaction.Prepared && !auxiliaryTransaction.Restored" in cleanup
+
+    helper_start = source.index("private static void RestoreManagedOutputAfterFailure(")
+    helper = source[helper_start:cleanup_end]
+    assert "stagedOutputManifest" in helper
+    assert "outputManifest" in helper
+    assert '"An unverified durable output target requires checkpoint restore."' in helper
+    assert "CaptureAssetTreeManifest(" in helper
+    assert "requireNoTemporaryReferences: false" in helper
+    assert "VerifyGuidPreservingMove(" in helper
+    assert "VerifyCreatedAssetFolder(folder);" in helper
+    assert "SearchOption.TopDirectoryOnly).Any()" in helper
+    assert "RequireNoDirtyProjectAssets(OutputRoot)" not in helper
+    assert "allowedDirtyRoots.Add(GeneratedRoot)" in helper
+    assert "allowedDirtyRoots.Add(AuxiliaryGeneratedRoot)" in helper
+    assert 'allowedDirtyRoots.Add("Packages' not in helper
+
+    auxiliary_start = source.index("private sealed class AuxiliaryGeneratedTransaction")
+    cache_start = source.index("private sealed class CacheTransaction", auxiliary_start)
+    auxiliary = source[auxiliary_start:cache_start]
+    cache = source[cache_start:]
+    assert "internal bool Restore(bool allowGeneratedRootDirty)" in auxiliary
+    assert "RequireNoDirtyProjectAssets(AuxiliaryGeneratedRoot, GeneratedRoot)" in auxiliary
+    assert "internal bool Restore(bool allowAuxiliaryRootDirty)" in cache
+    assert "RequireNoDirtyProjectAssets(GeneratedRoot, AuxiliaryGeneratedRoot)" in cache
+    assert "RequireNoDirtyProjectAssets(Packages" not in auxiliary
+    assert "RequireNoDirtyProjectAssets(Packages" not in cache
+
+    assert '"unsupported asset staging failure stage"' in fixture
+    assert '"failure cache restore"' in fixture
+    assert '"failure auxiliary tree restore"' in fixture
+
+
+def test_transaction_close_is_idempotent_and_receipts_follow_verified_terminal_state() -> None:
+    source = Path("Assets/VRCForge/Editor/ParameterBitPackingTool.cs").read_text(encoding="utf-8")
+
+    success_start = source.index("var afterRoots = CaptureRootIdentities();")
+    success_end = source.index("return new SuccessResponse(", success_start)
+    success = source[success_start:success_end]
+    auxiliary_complete = success.index("auxiliaryTransaction.Complete();")
+    cache_complete = success.index("cacheTransaction.Complete();")
+    terminal_verification = success.index("auxiliaryTransaction.VerifyClosedTerminal()")
+    digest = success.index("var applyReceiptDigest = ComputeApplyReceiptDigest(")
+    assert auxiliary_complete < cache_complete < terminal_verification < digest
+
+    cleanup_start = source.index("private static bool TryCleanupFailure(")
+    cleanup_end = source.index("private static void RestoreManagedOutputAfterFailure(", cleanup_start)
+    cleanup = source[cleanup_start:cleanup_end]
+    auxiliary_completed = cleanup.index("auxiliaryTransaction.Completed")
+    auxiliary_restore = cleanup.index("auxiliaryTransaction.Restore(")
+    cache_completed = cleanup.index("cacheTransaction.Completed", auxiliary_restore)
+    cache_restore = cleanup.index("cacheTransaction.Restore(", cache_completed)
+    assert auxiliary_completed < auxiliary_restore
+    assert cache_completed < cache_restore
+    assert "auxiliaryTransaction.VerifyClosedTerminal()" in cleanup
+    assert "cacheTransaction.VerifyClosedTerminal()" in cleanup
+    assert "auxiliaryTransaction.Restored" in cleanup
+    assert "cacheTransaction.Restored" in cleanup
+
+    auxiliary_start = source.index("private sealed class AuxiliaryGeneratedTransaction")
+    cache_start = source.index("private sealed class CacheTransaction", auxiliary_start)
+    auxiliary = source[auxiliary_start:cache_start]
+    cache = source[cache_start:]
+    for transaction in (auxiliary, cache):
+        complete_start = transaction.index("internal void Complete()")
+        verify_start = transaction.index("internal bool VerifyRestoredBaseline()", complete_start)
+        complete = transaction[complete_start:verify_start]
+        assert "if (completed)" in complete
+        assert "if (!closingStarted)" in complete
+        assert "&& transactionLock != null" in complete
+        assert "&& File.Exists(lockPath)" in complete
+        assert "cannot begin closing from an incomplete state" in complete
+        assert "if (Directory.Exists(transactionRoot))" in complete
+        assert "RequireStableRegularFile(journalPath);" in complete
+        assert complete.index("RequireStableRegularFile(journalPath);") < complete.index(
+            'WriteJournal("closing", true);'
+        )
+        assert 'if (File.Exists(journalPath)) WriteJournal("closing", true);' not in complete
+        assert complete.index('WriteJournal("closing", true);') < complete.index(
+            "closingStarted = true;"
+        )
+        assert "if (transactionLock != null) ReleaseLock();" in complete
+        assert "else Require(!File.Exists(lockPath)" in complete
+        assert complete.index("DeleteOwnedTransactionTreeWithRetry(transactionRoot);") < complete.index(
+            "completed = true;"
+        )
+        assert "VerifyClosedTerminal()" in transaction
+        terminal = transaction[transaction.index("internal bool VerifyClosedTerminal()") :]
+        assert "transactionLock == null" in terminal
+        assert "(!prepared || closingStarted)" in terminal
+        assert "!Directory.Exists(transactionRoot)" in terminal
+        assert "!File.Exists(lockPath)" in terminal
+        assert "VerifyRestoredBaseline()" in terminal
+
+    stable_file_start = source.index("private static void RequireStableRegularFile(string path)")
+    stable_file_end = source.index("private static FileIdentity CaptureIdentity", stable_file_start)
+    stable_file = source[stable_file_start:stable_file_end]
+    assert "Require(File.Exists(path)" in stable_file
+    assert "!identity.IsReparsePoint && identity.NumberOfLinks == 1" in stable_file
+
+    publish_start = source.index("private static void PublishTransactionJournal(")
+    delete_start = source.index("private static void DeleteOwnedTransactionTreeWithRetry(")
+    publish = source[publish_start:delete_start]
+    delete_end = source.index("private static FileIdentity CaptureIdentity", delete_start)
+    delete_tree = source[delete_start:delete_end]
+    assert "attempt < TransactionIoRetryAttempts" in publish
+    assert "File.Replace(nextPath, journalPath, null, true);" in publish
+    assert "File.Move(nextPath, journalPath);" in publish
+    assert "File.ReadAllBytes(journalPath).SequenceEqual(bytes)" in publish
+    assert "exception is IOException || exception is UnauthorizedAccessException" in publish
+    assert "The prior transaction journal staging file could not be removed." in publish
+    assert source.count("PublishTransactionJournal(journalPath, bytes);") == 2
+    assert "attempt < TransactionIoRetryAttempts" in delete_tree
+    assert delete_tree.index("RequireSafeOwnedTreeForDeletion(transactionRoot);") < delete_tree.index(
+        "Directory.Delete(transactionRoot, true);"
+    )
+    assert "exception is IOException || exception is UnauthorizedAccessException" in delete_tree
+    assert source.count("DeleteOwnedTransactionTreeWithRetry(transactionRoot);") == 4
+
+    assert 'journalClosed = cacheTransaction.Completed' in source
+    assert 'journalClosed = transaction.Completed' in source
+
+
 def test_csharp_tool_rejects_dirty_registered_assets_and_open_project_scenes_before_mutation() -> None:
     source = Path("Assets/VRCForge/Editor/ParameterBitPackingTool.cs").read_text(encoding="utf-8")
     fixture = Path(
@@ -1257,20 +1849,39 @@ def test_csharp_tool_rejects_dirty_registered_assets_and_open_project_scenes_bef
     assert "RegisteredAssetObjectScanLimit" in guard
     assert "OpenProjectSceneScanLimit" in guard
     assert "AssetDatabase.GetAllAssetPaths()" in guard
-    assert "AssetDatabase.LoadAllAssetsAtPath(path)" in guard
+    assert "Resources.FindObjectsOfTypeAll<Object>()" in guard
+    assert "AssetDatabase.LoadAllAssetsAtPath(path)" not in guard
     assert "AssetImporter.GetAtPath(path)" in guard
+    assert "AssetDatabase.Contains(asset)" in guard
+    assert "AssetDatabase.IsNativeAsset(asset)" in guard
     assert "EditorUtility.IsPersistent" in guard
     assert "EditorUtility.IsDirty" in guard
+    assert '"An unrelated project asset importer is dirty: " + path' in guard
+    assert '"An unrelated project asset is dirty: " + path' in guard
+    assert guard.index("AssetDatabase.IsNativeAsset(asset)") < guard.index(
+        '"An unrelated project asset is dirty: " + path'
+    )
     assert "SceneManager.sceneCount" in guard
     assert "scene.isDirty" in guard
+    assert "scene.handle == allowedTransientScene.handle" in guard
+    assert "allowedTransientSceneMatches == 1" in guard
+    assert 'string.IsNullOrWhiteSpace(scene.path) && !scene.isSubScene' in guard
+    assert "!scene.isSubScene" in guard
+    assert "scene.isSubScene" in guard
+    assert 'scenePath.StartsWith("Assets/", StringComparison.Ordinal)' in guard
+    assert 'scenePath.StartsWith("Packages/", StringComparison.Ordinal)' in guard
+    assert "isProjectScene || isReadOnlyPackageSubScene" in guard
     assert "LoadAssetAtPath<SceneAsset>" in guard
     assert "AssetDatabase.SaveAssets" not in guard
 
     calls = [match.start() for match in re.finditer(r"RequireNoDirtyProjectAssets\(\);", source)]
-    assert len(calls) == 2
+    assert len(calls) >= 4
     assert calls[0] < source.index("if (preview)")
     assert source.index("ValidateApplyPreconditions") < calls[1]
-    assert calls[1] < source.index("cacheTransaction = CacheTransaction.Create")
+    planned = source.index("cacheTransaction = CacheTransaction.Plan")
+    mutation_started = source.index("mutationStarted = true;", planned)
+    prepared = source.index("cacheTransaction.Prepare();", mutation_started)
+    assert calls[1] < planned < mutation_started < prepared
     assert calls[1] < source.index("EditorSceneManager.NewScene")
     assert calls[1] < source.index("AssetDatabase.SaveAssets")
     for save in re.finditer(r"AssetDatabase\.SaveAssets\(\);", source):
@@ -1293,9 +1904,12 @@ def test_disposable_fixture_keeps_dangerous_parameters_unsynced_and_checks_clean
     assert "networkSynced: false" in source
     assert "VerifySourceUnchanged" in source
     assert "VerifyNoResidueAfterFailure" in source
+    assert 'details["failureStage"] == "clone_asset_staging"' in source
     assert "SeedGeneratedCache" in source
     assert "CaptureCacheReceipt" in source
     assert "RequireNoActiveCacheTransaction" in source
+    assert '"parameter-bit-packing.lock"' in source
+    assert '"parameter-auxiliary-generated.lock"' in source
     assert "VerifyDurableOutputAfterApprovedApply" in source
     assert "guidPreservingWholeTreeMove" in source
     assert "VRCAvatarParameterDriver" in source
