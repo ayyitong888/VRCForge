@@ -8,8 +8,6 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
@@ -20,10 +18,11 @@ using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 using VRC.SDKBase.Editor.BuildPipeline;
 using Object = UnityEngine.Object;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_build_parameter_bit_packed_clone",
         Description = "Preview or build one verified parameter-packed avatar clone through the public avatar preprocess pipeline."
     )]

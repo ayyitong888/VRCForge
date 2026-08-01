@@ -5,11 +5,10 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -18,7 +17,7 @@ namespace VRCForge.Editor
     /// The optional dependency is resolved by its pinned public type contract so
     /// projects without UniVRM continue to compile and never receive a fake file.
     /// </summary>
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_export_vrm",
         Description = "Export one loaded humanoid avatar as a validated VRM 1.0 file through an installed compatible UniVRM package."
     )]
@@ -36,28 +35,28 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [ToolParameter("Exact avatar hierarchy path, or an avatar root name when it is unique. Leave empty only when exactly one VRChat avatar or valid Humanoid model is loaded.", Required = false)]
+            [VRCForgeParameter("Exact avatar hierarchy path, or an avatar root name when it is unique. Leave empty only when exactly one VRChat avatar or valid Humanoid model is loaded.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Required VRM author/creator name written into the exported metadata.", Required = true)]
+            [VRCForgeParameter("Required VRM author/creator name written into the exported metadata.", Required = true)]
             public string author { get; set; } = "";
 
-            [ToolParameter("VRM title. Defaults to the selected avatar root name.", Required = false)]
+            [VRCForgeParameter("VRM title. Defaults to the selected avatar root name.", Required = false)]
             public string title { get; set; } = "";
 
-            [ToolParameter("Avatar content version written into VRM metadata. Defaults to 1.0.", Required = false)]
+            [VRCForgeParameter("Avatar content version written into VRM metadata. Defaults to 1.0.", Required = false)]
             public string version { get; set; } = "1.0";
 
-            [ToolParameter("Must be true to confirm that the user has the rights needed to export and distribute this avatar content.", Required = true)]
+            [VRCForgeParameter("Must be true to confirm that the user has the rights needed to export and distribute this avatar content.", Required = true)]
             public bool? confirmRights { get; set; } = false;
 
-            [ToolParameter("Output path under Assets/VRCForge/Exports. Must use the .vrm extension.", Required = false)]
+            [VRCForgeParameter("Output path under Assets/VRCForge/Exports. Must use the .vrm extension.", Required = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [ToolParameter("Replace an existing managed .vrm output. Defaults to false.", Required = false)]
+            [VRCForgeParameter("Replace an existing managed .vrm output. Defaults to false.", Required = false)]
             public bool? overwrite { get; set; } = false;
 
-            [ToolParameter("Refresh Unity's AssetDatabase after a validated export.", Required = false)]
+            [VRCForgeParameter("Refresh Unity's AssetDatabase after a validated export.", Required = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 

@@ -1,12 +1,12 @@
 using System;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_save_scene_object_as_prefab",
         Description = "Preview or CreateNew-save one exact saved-scene hierarchy as a generated prefab asset."
     )]

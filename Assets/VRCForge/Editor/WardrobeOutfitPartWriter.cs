@@ -2,14 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -26,7 +25,7 @@ namespace VRCForge.Editor
     // when outfit N is not worn the toggle is inert (the int!=N transition forces
     // the part back off). Add-only: never rewrites the wardrobe's own states/clips.
     // Supports preview.
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_add_outfit_part",
         Description = "Add an int-gated part toggle (e.g. a hat) to one outfit value of an existing int-exclusive wardrobe. Creates a Bool parameter, a dedicated FX layer (Off default; Off->On = int Equals N AND bool true; On->Off = bool false OR int != N), authors on/off clips, sets the part scene-default off, and adds a menu toggle. Add-only. Supports preview."
     )]

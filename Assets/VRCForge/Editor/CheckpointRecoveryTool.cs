@@ -2,8 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -12,7 +11,7 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_prepare_checkpoint",
         Description = "Save open project scenes and dirty assets immediately before VRCForge creates a rollback checkpoint. Internal safety tool."
     )]
@@ -95,7 +94,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_reload_after_checkpoint_restore",
         Description = "Reload restored project scenes and refresh assets after VRCForge rollback. Internal safety tool."
     )]

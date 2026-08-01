@@ -2,11 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -23,7 +22,7 @@ namespace VRCForge.Editor
     // name is also accepted. Add-only by default (won't duplicate an existing MA
     // component of the same type unless allowDuplicate=true). Undo-registered.
     // Supports preview.
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_add_modular_avatar_component",
         Description = "Add a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters, or a fully-qualified nadena.dev type) to a scene object. Resolves AvatarObjectReference fields from object paths, loads asset/scene object references by member type, and sets scalar/enum fields. Add-only by default, Undo-registered. Supports preview."
     )]
@@ -744,9 +743,10 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_inspect_modular_avatar_component",
-        Description = "Read whether a specific Modular Avatar component is present on a scene object, its exact count/type, scene dirty state, and AvatarObjectReference stored/resolved paths without writing."
+        Description = "Read whether a specific Modular Avatar component is present on a scene object, its exact count/type, scene dirty state, and AvatarObjectReference stored/resolved paths without writing.",
+        Permission = VRCForgeToolPermission.ReadOnly
     )]
     public static class MAComponentInspector
     {

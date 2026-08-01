@@ -1,15 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_apply_material_tuning",
         Description = "Apply validated semantic material parameter changes through shader adapters."
     )]

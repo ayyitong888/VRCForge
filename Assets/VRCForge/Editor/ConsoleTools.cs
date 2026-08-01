@@ -4,8 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -14,7 +13,7 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_create_safe_backup",
         Description = "Create a local VRCForge backup snapshot for selected Unity assets before asset-writing actions."
     )]
@@ -25,19 +24,19 @@ namespace VRCForge.Editor
 
         public class CreateSafeBackupParameters
         {
-            [ToolParameter("Optional avatar root hierarchy path used to include the avatar prefab source when available.", Required = false)]
+            [VRCForgeParameter("Optional avatar root hierarchy path used to include the avatar prefab source when available.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Asset paths to include. If empty, selected project assets plus open scenes are used.", Required = false)]
+            [VRCForgeParameter("Asset paths to include. If empty, selected project assets plus open scenes are used.", Required = false)]
             public List<string> assetPaths { get; set; } = new List<string>();
 
-            [ToolParameter("Include loaded scene asset files in the snapshot.", Required = false)]
+            [VRCForgeParameter("Include loaded scene asset files in the snapshot.", Required = false)]
             public bool? includeOpenScenes { get; set; } = true;
 
-            [ToolParameter("Project-relative or absolute folder for backup snapshots.", Required = false)]
+            [VRCForgeParameter("Project-relative or absolute folder for backup snapshots.", Required = false)]
             public string backupRoot { get; set; } = DefaultBackupRoot;
 
-            [ToolParameter("Refresh the Unity AssetDatabase if the backup root is inside Assets.", Required = false)]
+            [VRCForgeParameter("Refresh the Unity AssetDatabase if the backup root is inside Assets.", Required = false)]
             public bool? refreshAssets { get; set; } = false;
         }
 

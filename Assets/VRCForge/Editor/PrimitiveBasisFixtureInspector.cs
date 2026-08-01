@@ -4,19 +4,19 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_inspect_primitive_basis_fixture",
-        Description = "Read the fixed primitive-basis fixture identity, active scene, ready marker, and project binding without writing."
+        Description = "Read the fixed primitive-basis fixture identity, active scene, ready marker, and project binding without writing.",
+        Permission = VRCForgeToolPermission.ReadOnly
     )]
     public static class PrimitiveBasisFixtureInspector
     {
@@ -258,7 +258,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_reload_primitive_basis_fixture",
         Description = "Reload the fixed live primitive-basis scene from its saved bytes after validating the one-shot process binding."
     )]

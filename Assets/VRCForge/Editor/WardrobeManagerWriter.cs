@@ -2,14 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -24,7 +23,7 @@ namespace VRCForge.Editor
     //   - delete_wardrobe: remove the expression parameter, menu toggles, and FX
     //     wardrobe bindings/layers; scene objects are preserved unless requested.
     // All writes support preview and Undo. Asset deletion is opt-in.
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_manage_wardrobe",
         Description = "Manage an existing int-exclusive wardrobe: remove/rename/reorder outfits, set the default int value, or delete wardrobe bindings. Supports preview; destructive object/asset deletion is opt-in."
     )]

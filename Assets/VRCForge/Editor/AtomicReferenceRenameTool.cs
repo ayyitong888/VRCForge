@@ -5,8 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -18,7 +17,7 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_atomic_reference_rename",
         Description = "Preview or atomically migrate one fixed-schema avatar object or parameter reference set."
     )]

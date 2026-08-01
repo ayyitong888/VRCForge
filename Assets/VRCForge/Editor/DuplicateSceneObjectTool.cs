@@ -1,6 +1,6 @@
 using System;
 using System.Linq;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -9,7 +9,7 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_duplicate_scene_object",
         Description = "Preview or CreateNew-duplicate one saved scene hierarchy beneath an exact saved-scene parent."
     )]

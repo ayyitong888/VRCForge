@@ -132,6 +132,10 @@ export type AgentManifest = {
   roslynRiskAcknowledged: boolean;
 };
 
+export type ProviderApiType = "auto" | "chat_completions" | "responses" | "generate_content" | "messages";
+
+export type ProviderCapabilityKey = "text" | "structured_json" | "vision" | "reasoning" | "tools";
+
 export type ApiConfig = {
   provider: string;
   providerLabel?: string;
@@ -139,6 +143,15 @@ export type ApiConfig = {
   apiKeyPresent: boolean;
   base_url?: string;
   model?: string;
+  /** Requested provider transport; absent is a legacy configuration. */
+  api_type?: ProviderApiType;
+  /** Camel-case alias returned by provider descriptors. */
+  apiType?: ProviderApiType;
+  resolvedApiType?: Exclude<ProviderApiType, "auto">;
+  supportedApiTypes?: ProviderApiType[];
+  capabilities?: ProviderCapabilityKey[];
+  capabilitySource?: string;
+  modelRegistrySchema?: string;
   /** Model-aware reasoning variant; empty means provider default (no override). */
   thinking_level?: string;
   usesBaseUrl?: boolean;
@@ -166,6 +179,14 @@ export type ProviderModelInfo = {
   maxInputTokens?: number;
   outputTokenLimit?: number;
   maxOutputTokens?: number;
+  provider?: string;
+  api_type?: ProviderApiType;
+  apiType?: ProviderApiType;
+  resolvedApiType?: Exclude<ProviderApiType, "auto">;
+  supportedApiTypes?: ProviderApiType[];
+  capabilities?: ProviderCapabilityKey[];
+  capabilitySource?: string;
+  modelRegistrySchema?: string;
 };
 
 export type DiagnosticLogLevel = "error" | "warn" | "info" | "debug" | "trace";

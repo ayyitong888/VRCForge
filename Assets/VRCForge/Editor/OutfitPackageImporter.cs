@@ -1,14 +1,13 @@
 using System;
 using System.IO;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.PackageManager;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_import_unitypackage",
         Description = "Import a local .unitypackage through Unity AssetDatabase. Intended for VRCForge supervised outfit imports."
     )]
@@ -16,13 +15,13 @@ namespace VRCForge.Editor
     {
         public class ImportUnityPackageParameters
         {
-            [ToolParameter("Absolute path to the .unitypackage file.", Required = true)]
+            [VRCForgeParameter("Absolute path to the .unitypackage file.", Required = true)]
             public string unityPackagePath { get; set; } = "";
 
-            [ToolParameter("Expected active Unity project root.", Required = false)]
+            [VRCForgeParameter("Expected active Unity project root.", Required = false)]
             public string projectPath { get; set; } = "";
 
-            [ToolParameter("When true, Unity may show the package import UI. VRCForge uses false.", Required = false)]
+            [VRCForgeParameter("When true, Unity may show the package import UI. VRCForge uses false.", Required = false)]
             public bool? interactive { get; set; } = false;
         }
 
@@ -65,7 +64,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_refresh_asset_database",
         Description = "Refresh Unity AssetDatabase after VRCForge copied supervised outfit assets."
     )]

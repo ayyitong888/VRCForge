@@ -43,6 +43,8 @@ pub(crate) struct DesktopProviderConfigRequest {
     #[serde(default, alias = "baseUrl")]
     base_url: Option<String>,
     model: Option<String>,
+    #[serde(default, alias = "apiType")]
+    api_type: Option<String>,
     #[serde(default, alias = "thinkingLevel")]
     thinking_level: Option<String>,
     #[serde(default, alias = "timeoutMs")]
@@ -70,6 +72,8 @@ pub(crate) struct DesktopProviderTestRequest {
     #[serde(default, alias = "baseUrl")]
     base_url: Option<String>,
     model: Option<String>,
+    #[serde(default, alias = "apiType")]
+    api_type: Option<String>,
     #[serde(default, alias = "thinkingLevel")]
     thinking_level: Option<String>,
     capability: String,
@@ -81,6 +85,8 @@ pub(crate) struct DesktopProviderTestRequest {
 pub(crate) struct DesktopReasoningVariantsRequest {
     provider: String,
     model: String,
+    #[serde(default, alias = "apiType")]
+    api_type: Option<String>,
     #[serde(default, alias = "timeoutMs")]
     timeout_ms: Option<u64>,
 }
@@ -474,6 +480,7 @@ pub fn update_api_config(
         request.api_key,
         request.base_url,
         request.model,
+        request.api_type,
     );
     if let serde_json::Value::Object(object) = &mut body {
         if let Some(thinking_level) = request.thinking_level {
@@ -504,6 +511,7 @@ pub fn update_vision_config(
         request.api_key,
         request.base_url,
         request.model,
+        None,
     );
     if let serde_json::Value::Object(object) = &mut body {
         object.insert(
@@ -536,6 +544,7 @@ pub fn fetch_provider_models(
                 request.api_key,
                 request.base_url,
                 request.model,
+                request.api_type,
             )),
             request.timeout_ms,
         ),
@@ -553,6 +562,7 @@ pub fn test_provider_capability(
         request.api_key,
         request.base_url,
         request.model,
+        request.api_type,
     );
     if let serde_json::Value::Object(object) = &mut body {
         object.insert(
@@ -586,6 +596,7 @@ pub async fn fetch_reasoning_variants(
             Some(serde_json::json!({
             "provider": request.provider,
             "model": request.model,
+            "api_type": request.api_type,
             })),
             request.timeout_ms,
         )

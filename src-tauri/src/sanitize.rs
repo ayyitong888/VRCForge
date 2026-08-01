@@ -297,6 +297,7 @@ pub(crate) fn provider_config_body(
     api_key: Option<String>,
     base_url: Option<String>,
     model: Option<String>,
+    api_type: Option<String>,
 ) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     body.insert("provider".to_string(), serde_json::Value::String(provider));
@@ -311,6 +312,9 @@ pub(crate) fn provider_config_body(
         "model".to_string(),
         model.map_or(serde_json::Value::Null, serde_json::Value::String),
     );
+    if let Some(api_type) = api_type {
+        body.insert("api_type".to_string(), serde_json::Value::String(api_type));
+    }
     serde_json::Value::Object(body)
 }
 

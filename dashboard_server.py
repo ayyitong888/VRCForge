@@ -143,6 +143,14 @@ from doctor_service import (
     sanitize_doctor_text,
     sanitize_doctor_value,
 )
+from model_provider_adapters import (
+    ProviderApiTypeError,
+    ProviderCredentialError,
+    normalize_provider_api_type,
+    provider_model_descriptor,
+    validate_provider_api_key,
+)
+from provider_runtime_adapters import DeepSeekResponsesAdapter, ProviderRuntimeRequest
 from desktop_worker import EmbeddedDesktopWorker, desktop_executor_enabled
 from external_agent_connector_installer import (
     ConnectorInstallError,
@@ -268,6 +276,7 @@ from vrchat_blendshape_agent import (
     validate_plan,
     resolve_avatar_selection,
 )
+from unity_mcp_core_client import UnityMcpCoreClient, UnityMcpCoreError
 
 
 def resolve_runtime_path(env_name: str, default: Path) -> Path:
@@ -571,6 +580,9 @@ class DashboardRequest(BaseModel):
     unity_host: str | None = None
     unity_port: int | None = None
     unity_instance: str | None = None
+    project_path: str | None = Field(default=None, alias="projectPath")
+
+    model_config = {"populate_by_name": True}
 
 
 class ConnectionRequest(BaseModel):
@@ -578,6 +590,9 @@ class ConnectionRequest(BaseModel):
     unity_host: str | None = None
     unity_port: int | None = None
     unity_instance: str | None = None
+    project_path: str | None = Field(default=None, alias="projectPath")
+
+    model_config = {"populate_by_name": True}
 
 
 class DashboardStateRequest(BaseModel):
@@ -625,6 +640,9 @@ class ApiConfigRequest(BaseModel):
     api_key: str = ""
     base_url: str | None = None
     model: str | None = None
+    # ``None`` means an on-disk/request legacy configuration: preserve its
+    # provider's historical transport instead of treating it as new ``auto``.
+    api_type: str | None = None
     # Model-aware reasoning variant; empty means provider default/no override.
     thinking_level: str = ""
 
@@ -636,6 +654,8 @@ class ApiModelListRequest(ApiConfigRequest):
 class ReasoningVariantsRequest(BaseModel):
     provider: str = DEFAULT_LLM_PROVIDER
     model: str = ""
+    # Omitted remains a legacy request, preserving the historical transport.
+    api_type: str | None = None
 
 
 class VisionConfigRequest(BaseModel):
@@ -1544,6 +1564,10 @@ class DashboardApiConfig:
     api_key: str
     base_url: str
     model: str
+    # Requested API transport. ``None`` retains the provider's historical
+    # transport for internal/legacy constructors; normalized requests persist
+    # an explicit value.
+    api_type: str | None = None
     # Normalized model-aware reasoning variant. The vision lane constructs
     # configs without it on purpose, so vision requests never inherit it.
     thinking_level: str = ""
@@ -6726,7 +6750,7 @@ def build_bootstrap_app_health(*, refresh_projects: bool = False) -> dict[str, A
             {"path": DASHBOARD_STATE.selected_project_path},
         ),
         "unityPluginInstalled": health_component("unknown", "Unity plugin status is refreshing.", ""),
-        "mcpPackageConfigured": health_component("unknown", "Unity MCP package status is refreshing.", ""),
+        "mcpPackageConfigured": health_component("unknown", "VRCForge MCP Core status is refreshing.", ""),
         "providerConfigPresent": health_component(
             "ok" if not api_config.get("apiKeyRequired") or bool(api_config.get("apiKeyPresent")) else "warning",
             "Provider configuration is present." if not api_config.get("apiKeyRequired") or bool(api_config.get("apiKeyPresent")) else f"{api_config.get('providerLabel') or api_config.get('provider') or 'Provider'} API key is not configured.",
@@ -7246,7 +7270,7 @@ def _doctor_fix_command_for_id(check_id: str) -> str:
     commands = {
         "unity.project_root": "Open Project Picker and select the Unity project root used by the bridge.",
         "unity.plugin": "Run Unity plugin install/repair for the selected project.",
-        "unity.mcp.package": "Repair VRCForge Unity plugin install, or add the Unity MCP package through VCC/vrc-get/ALCOM.",
+        "unity.mcp.package": "Repair the VRCForge Unity plugin; MCP Core is bundled and needs no separate package.",
         "unity.mcp.bridge": "Use Repair bridge to start the local MCP server and reconnect Unity, then Retry.",
         "unity.mcp.instance": "Use Repair bridge to wait for or relaunch the selected Unity project, then Retry.",
         "unity.tools": "Wait for Unity compile, then repair/reinstall the VRCForge plugin if tools remain missing.",
@@ -8098,6 +8122,18 @@ def repair_project_chat_store_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _repair_unity_bridge_doctor(context: dict[str, Any], mode: str, phases: PhaseLog) -> dict[str, Any]:
+    project_path = str(context.get("selected_project_path") or "").strip()
+    if project_path and vrcforge_mcp_core_installed(Path(project_path)):
+        status = build_unity_status_snapshot(project_root=Path(project_path))
+        if status.get("connected"):
+            phases.add("core_ready", "ok", "The project-scoped VRCForge MCP Core is reachable.")
+            return {"status": "healthy", "changed": False}
+        phases.add(
+            "open_unity",
+            "warning",
+            "Open the selected Unity project and wait for VRCForge MCP Core Ready, then retry.",
+        )
+        return {"status": "needs_user_action", "changed": False}
     request = UnityMcpRepairRequest(
         projectPath=str(context.get("selected_project_path") or ""),
         allowUnityRelaunch=mode == "force",
@@ -8111,67 +8147,6 @@ def _repair_unity_bridge_doctor(context: dict[str, Any], mode: str, phases: Phas
     if result.get("ok"):
         return {"status": "repaired" if result.get("status") != "healthy" else "healthy", "changed": result.get("status") != "healthy"}
     return {"status": "needs_user_action" if result.get("status") == "needs_user_action" else "failed", "changed": False}
-
-
-def _is_matching_doctor_package_approval(approval: dict[str, Any], project_key: str) -> bool:
-    arguments = ensure_dict(approval.get("arguments"))
-    return bool(
-        project_key
-        and approval.get("status") == "pending"
-        and approval.get("targetTool") == "vrcforge_install_vpm_package"
-        and str(approval.get("agentName") or "").strip().casefold() == "doctor"
-        and approval.get("requiresExplicitApproval") is True
-        and approval.get("autoApprovalBlocked") is True
-        and str(arguments.get("packageId") or "").strip().casefold() == "com.coplaydev.unity-mcp"
-        and normalize_chat_project_key(str(arguments.get("projectPath") or "")) == project_key
-        and not str(arguments.get("repository") or "").strip()
-        and not str(arguments.get("preferredManager") or "").strip()
-        and arguments.get("includePrerelease") is False
-    )
-
-
-def _repair_unity_package_doctor(context: dict[str, Any], _mode: str, phases: PhaseLog) -> dict[str, Any]:
-    project_path = str(context.get("selected_project_path") or "").strip()
-    if not project_path:
-        phases.add("project_required", "warning", "Select a Unity project before requesting package repair.")
-        return {"status": "needs_user_action", "changed": False}
-    project_key = normalize_chat_project_key(project_path)
-    if not project_key:
-        phases.add("project_unavailable", "warning", "The selected Unity project path is unavailable or unsafe.")
-        return {"status": "needs_user_action", "changed": False}
-    pending = next(
-        (
-            approval
-            for approval in AGENT_GATEWAY.list_approvals(include_expired=False)
-            if _is_matching_doctor_package_approval(approval, project_key)
-        ),
-        None,
-    )
-    result = (
-        {"ok": True, "status": "pending", "approval": pending}
-        if pending is not None
-        else request_package_install_sync(
-            {
-                "projectPath": project_path,
-                "packageId": "com.coplaydev.unity-mcp",
-                "requiresExplicitApproval": True,
-                "neverAutoApprove": True,
-            },
-            agent_name="doctor",
-        )
-    )
-    status = str(result.get("status") or "")
-    queued = bool(result.get("ok")) and status == "pending"
-    executed = bool(result.get("ok")) and status == "executed"
-    phases.add(
-        "request_supervised_install",
-        "ok" if queued or executed else "warning",
-        "Unity MCP package repair was routed through the supervised package request lane.",
-        {"queued": queued, "executed": executed},
-    )
-    if executed:
-        return {"status": "repaired", "changed": True}
-    return {"status": "queued_for_approval" if queued else "needs_user_action", "changed": False}
 
 
 def _detect_runtime_settings_doctor(_context: dict[str, Any]) -> dict[str, Any]:
@@ -8318,7 +8293,7 @@ def app_doctor_service() -> DoctorService:
         service.register_rule(DoctorRule("checkpoint.backend", "Rollback", "Checkpoint backend", _detect_checkpoint_doctor, _repair_checkpoint_doctor))
         service.register_rule(DoctorRule("skills.registry", "Skills", "Skill registry", _detect_skills_doctor, _repair_skills_doctor))
         service.register_rule(DoctorRule("session.storage", "Session storage", "Session store integrity", _detect_session_storage_doctor, _repair_session_storage_doctor))
-        service.register_rule(DoctorRule("unity.mcp.package", "Unity environment", "Unity MCP package", _doctor_component_detect("mcpPackageConfigured"), _repair_unity_package_doctor))
+        service.register_rule(DoctorRule("unity.mcp.package", "Unity environment", "VRCForge MCP Core", _doctor_component_detect("mcpPackageConfigured")))
         service.register_rule(DoctorRule("unity.mcp.bridge", "Unity environment", "Unity MCP bridge", _doctor_component_detect("unityMcpBridgeReachable"), _repair_unity_bridge_doctor))
         service.register_rule(DoctorRule("unity.mcp.instance", "Unity environment", "Unity instance registration", _doctor_component_detect("unityMcpInstance"), _repair_unity_bridge_doctor))
         service.register_rule(DoctorRule("security.developer_options", "Security", "Developer Options posture", _detect_security_developer_options))
@@ -8336,7 +8311,7 @@ DOCTOR_RULE_COPY: dict[str, tuple[str, str]] = {
     "checkpoint.backend": ("Every write depends on readable checkpoint evidence for rollback.", "Run Safe fix to recreate missing storage and quarantine malformed JSONL rows."),
     "skills.registry": ("Only eligible Skills should be exposed to the runtime and external agents.", "Run Safe fix to quarantine broken user manifests and disable signature failures without deleting evidence."),
     "session.storage": ("Chat, goal, run, and sub-agent continuity depends on durable stores that do not silently lose corrupt records.", "Run Safe fix for app-owned data; Unity-project data remains approval-gated."),
-    "unity.mcp.package": ("The Unity MCP package is required for the supervised editor bridge.", "Run Safe fix to create a package-install approval request."),
+    "unity.mcp.package": ("The project-scoped MCP Core is bundled with the VRCForge Unity plugin.", "Repair the VRCForge plugin install; no separate MCP package is required."),
 }
 
 
@@ -8419,10 +8394,10 @@ def build_app_doctor_report() -> dict[str, Any]:
         ),
         _doctor_check_from_component(
             "unity.mcp.package",
-            "Unity MCP package",
+            "VRCForge MCP Core",
             components.get("mcpPackageConfigured"),
-            "VRCForge reaches Unity through the MCP bridge, so the project manifest must include the Unity MCP package.",
-            "Repair the plugin install or add the Unity MCP package through VCC/vrc-get/ALCOM.",
+            "VRCForge reaches Unity through its project-scoped MCP Core bundled with the editor plugin.",
+            "Repair the VRCForge plugin install; no separate MCP package is required.",
         ),
         _doctor_check_from_component(
             "unity.mcp.bridge",
@@ -9182,8 +9157,13 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
                 api_key=saved.api_key,
                 base_url=config.base_url,
                 model=config.model,
+                api_type=config.api_type,
                 thinking_level=config.thinking_level,
             )
+    try:
+        validate_provider_api_key(config.api_key)
+    except ProviderCredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     DASHBOARD_API_CONFIG = config
     save_dashboard_api_config(DASHBOARD_API_CONFIG)
     payload = {
@@ -9208,7 +9188,10 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
 
 @app.post("/api/config/vision")
 async def update_vision_config(request: VisionConfigRequest) -> dict[str, Any]:
-    config = normalize_vision_config_request(request)
+    try:
+        config = normalize_vision_config_request(request)
+    except ProviderCredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if config.provider and not config.api_key.strip():
         # 与 /api/config 相同的"留空即沿用已存密钥"约定。
         saved = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
@@ -9220,6 +9203,10 @@ async def update_vision_config(request: VisionConfigRequest) -> dict[str, Any]:
                 model=config.model,
                 enabled=config.enabled,
             )
+    try:
+        validate_provider_api_key(config.api_key)
+    except ProviderCredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     save_dashboard_vision_config(config)
     payload = {
         "configPath": str(CONFIG_PATH),
@@ -9243,7 +9230,10 @@ async def update_vision_config(request: VisionConfigRequest) -> dict[str, Any]:
 
 @app.post("/api/models")
 async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
-    config = normalize_api_config_request(request)
+    try:
+        config = normalize_api_config_request(request)
+    except (ProviderCredentialError, ProviderApiTypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not config.api_key.strip():
         saved = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
         if saved and saved.provider == config.provider and saved.api_key.strip():
@@ -9252,7 +9242,13 @@ async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
                 api_key=saved.api_key,
                 base_url=config.base_url,
                 model=config.model,
+                api_type=config.api_type,
+                thinking_level=config.thinking_level,
             )
+    try:
+        validate_provider_api_key(config.api_key)
+    except ProviderCredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     provider_label = provider_display_name(config.provider)
 
     try:
@@ -9274,9 +9270,10 @@ async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
         "provider": config.provider,
         "providerLabel": provider_label,
         "baseUrl": config.base_url,
-        "models": models,
+        "models": [enrich_provider_model_item(config, item) for item in models],
         "modelCount": len(models),
         "selectedModel": config.model,
+        **provider_config_descriptor(config),
     }
     await emit_log_async(
         "success",
@@ -9297,6 +9294,7 @@ async def test_api_provider(request: ProviderTestRequest) -> dict[str, Any]:
                 api_key=saved.api_key,
                 base_url=request.base_url,
                 model=request.model,
+                api_type=request.api_type,
                 thinking_level=request.thinking_level,
                 capability=request.capability,
             )
@@ -9307,7 +9305,7 @@ async def test_api_provider(request: ProviderTestRequest) -> dict[str, Any]:
 def read_reasoning_variants(request: ReasoningVariantsRequest) -> dict[str, Any]:
     """Return the backend-owned provider/model reasoning capability descriptor."""
 
-    return reasoning_variants_descriptor(request.provider, request.model)
+    return reasoning_variants_descriptor(request.provider, request.model, request.api_type)
 
 
 def _resolve_install_source_assets() -> Path:
@@ -9319,17 +9317,6 @@ def _resolve_install_source_assets() -> Path:
         if candidate.is_dir():
             return candidate.resolve()
     raise RuntimeError("Source Assets/VRCForge folder was not found in the source tree or packaged payload.")
-
-
-def _resolve_install_source_mcp_package() -> Path | None:
-    candidates = [
-        ROOT_DIR / "third_party" / "com.coplaydev.unity-mcp",
-        ROOT_DIR / "unity_plugin" / "Packages" / "com.coplaydev.unity-mcp",
-    ]
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate.resolve()
-    return None
 
 
 def _new_install_backup_path(backup_root: Path, prefix: str) -> Path:
@@ -9393,11 +9380,7 @@ def install_vrcforge_into_unity_project(project_root: Path) -> dict[str, Any]:
     legacy_target = target_assets_root / "VRCAutoRig"
     state_root = resolved_project / ".vrcforge"
     backup_root = state_root / "backups"
-    mcp_package_name = "com.coplaydev.unity-mcp"
-    mcp_package_value = "file:Packages/com.coplaydev.unity-mcp"
-    target_mcp_package = target_packages_root / mcp_package_name
     source_assets = _resolve_install_source_assets()
-    source_mcp_package = _resolve_install_source_mcp_package()
 
     for required, label in (
         (target_assets_root, "Assets"),
@@ -9407,13 +9390,17 @@ def install_vrcforge_into_unity_project(project_root: Path) -> dict[str, Any]:
         if not required.exists():
             raise RuntimeError(f"Target Unity project is missing {label}: {required}")
 
+    try:
+        manifest = json.loads(target_manifest.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Target Packages/manifest.json is invalid: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise RuntimeError("manifest root is not an object")
+
     backups: dict[str, str] = {}
     installed_vrcforge = False
-    installed_mcp = False
-    should_configure_mcp = source_mcp_package is not None or target_mcp_package.exists()
     legacy_backup: Path | None = None
     vrcforge_backup: Path | None = None
-    mcp_backup: Path | None = None
     try:
         backup_root.mkdir(parents=True, exist_ok=True)
         if legacy_target.exists():
@@ -9433,38 +9420,6 @@ def install_vrcforge_into_unity_project(project_root: Path) -> dict[str, Any]:
             _restore_install_backup(vrcforge_backup, target_vrcforge)
             raise
 
-        if source_mcp_package is not None:
-            if target_mcp_package.exists():
-                mcp_backup = _new_install_backup_path(backup_root, mcp_package_name)
-                _move_path_with_meta(target_mcp_package, mcp_backup)
-                backups["mcp"] = str(mcp_backup)
-            try:
-                _copy_tree_clean_with_meta(source_mcp_package, target_mcp_package)
-                installed_mcp = True
-                should_configure_mcp = True
-            except Exception:
-                _restore_install_backup(mcp_backup, target_mcp_package)
-                raise
-
-        manifest_backup = _new_install_backup_path(backup_root, "manifest").with_suffix(".json")
-        shutil.copy2(target_manifest, manifest_backup)
-        backups["manifest"] = str(manifest_backup)
-        if should_configure_mcp:
-            try:
-                manifest = json.loads(target_manifest.read_text(encoding="utf-8-sig"))
-                if not isinstance(manifest, dict):
-                    raise RuntimeError("manifest root is not an object")
-                dependencies = manifest.setdefault("dependencies", {})
-                if not isinstance(dependencies, dict):
-                    dependencies = {}
-                    manifest["dependencies"] = dependencies
-                if dependencies.get(mcp_package_name) != mcp_package_value:
-                    dependencies[mcp_package_name] = mcp_package_value
-                    target_manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                    json.loads(target_manifest.read_text(encoding="utf-8-sig"))
-            except Exception as exc:
-                shutil.copy2(manifest_backup, target_manifest)
-                raise RuntimeError(f"Failed to update Packages/manifest.json. Restored backup from {manifest_backup}. Error: {exc}") from exc
     except Exception:
         if legacy_backup is not None:
             _restore_install_backup(legacy_backup, legacy_target)
@@ -9472,29 +9427,23 @@ def install_vrcforge_into_unity_project(project_root: Path) -> dict[str, Any]:
             _restore_install_backup(vrcforge_backup, target_vrcforge)
         elif installed_vrcforge:
             _remove_path_with_meta(target_vrcforge)
-        if mcp_backup is not None:
-            _restore_install_backup(mcp_backup, target_mcp_package)
-        elif installed_mcp:
-            _remove_path_with_meta(target_mcp_package)
         raise
 
     summary_parts = [
         f"Installed Assets/VRCForge into: {resolved_project}",
         f"Project backups are under: {backup_root}",
+        "VRCForge MCP Core is bundled; no separate Unity MCP package is required.",
     ]
-    if should_configure_mcp:
-        summary_parts.append(f"Unity MCP package dependency uses: {mcp_package_value}")
-    if source_mcp_package:
-        summary_parts.append(f"Copied Unity MCP package into: {target_mcp_package}")
     return {
         "summary": "\n".join(summary_parts),
         "projectPath": str(resolved_project),
         "sourceAssets": str(source_assets),
-        "sourceMcpPackage": str(source_mcp_package) if source_mcp_package else "",
+        "sourceMcpPackage": "",
         "backupRoot": str(backup_root),
         "backups": backups,
-        "installedMcp": installed_mcp,
-        "configuredMcp": should_configure_mcp,
+        "installedMcp": False,
+        "configuredMcp": True,
+        "mcpCoreBundled": True,
     }
 
 
@@ -12866,6 +12815,13 @@ def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Se
     elif DASHBOARD_STATE.unity_instance:
         settings.unity_mcp_instance = DASHBOARD_STATE.unity_instance
 
+    settings.unity_project_path = str(
+        getattr(request, "project_path", None)
+        or DASHBOARD_STATE.selected_project_path
+        or settings.unity_project_path
+        or ""
+    ).strip()
+
     resolve_unity_cli_instance_selector(settings)
     return settings
 
@@ -14852,6 +14808,8 @@ def build_unity_status_snapshot(
         str(project_root) if project_root is not None else DASHBOARD_STATE.selected_project_path
     )
     selected_project_path = Path(selected_project) if selected_project else None
+    if selected_project_path is not None and (selected_project_path / "Library" / "VRCForge" / "mcp-core.json").is_file():
+        return build_vrcforge_mcp_core_status(selected_project_path, settings)
     instances = build_unity_instances_diagnostics(settings, selected_project_path)
     instance_matches_selected_project = instances.get("selectedInstanceMatched") is True
     if selected_project_path is not None and not instance_matches_selected_project:
@@ -14931,6 +14889,94 @@ def build_unity_status_snapshot(
     }
 
 
+def build_vrcforge_mcp_core_status(project_root: Path, settings: Settings) -> dict[str, Any]:
+    try:
+        tool_items = UnityMcpCoreClient(
+            project_root,
+            timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 10), 30)),
+        ).list_tools()
+        names = sorted(
+            str(item.get("name") or "")
+            for item in tool_items
+            if isinstance(item, dict) and str(item.get("name") or "")
+        )
+        missing = [name for name in REQUIRED_VRCFORGE_UNITY_TOOLS if name not in set(names)]
+        tools = {
+            "ok": True,
+            "reachable": True,
+            "connected": True,
+            "host": "127.0.0.1",
+            "port": 0,
+            "instance": "project-scoped",
+            "totalTools": len(names),
+            "defaultToolsCount": 0,
+            "vrcForgeToolsCount": len(names),
+            "toolNames": names,
+            "vrcForgeToolNames": names,
+            "missingRequiredVrcForgeTools": missing,
+            "onlyDefaultTools": False,
+            "output": "",
+            "parsed": None,
+            "error": "",
+        }
+        active_instance = {
+            "projectPath": str(project_root.resolve()),
+            "transport": "vrcforge-mcp-core",
+            "cliSelectorStable": True,
+            "cliInstanceId": "project-scoped",
+        }
+        return {
+            "connected": True,
+            "mcpServerReachable": True,
+            "unityInstanceRegistered": True,
+            "selectedInstanceMatched": True,
+            "host": "127.0.0.1",
+            "port": 0,
+            "instance": "project-scoped",
+            "projectPath": normalize_path_string(str(project_root)),
+            "activeInstance": active_instance,
+            "instances": [active_instance],
+            "activeInstanceCount": 1,
+            "tools": tools,
+            "mcpHealth": {"ok": True, "protocolVersion": "2025-11-25", "transport": "vrcforge-mcp-core"},
+            "unityMcpPackageVersion": "core-1",
+            "vrcForgeToolsRegistered": bool(names),
+            "missingRequiredVrcForgeTools": missing,
+            "output": "",
+            "parsed": None,
+            "error": "",
+        }
+    except UnityMcpCoreError as exc:
+        return {
+            "connected": False,
+            "mcpServerReachable": False,
+            "unityInstanceRegistered": False,
+            "selectedInstanceMatched": False,
+            "host": "127.0.0.1",
+            "port": 0,
+            "instance": "project-scoped",
+            "projectPath": normalize_path_string(str(project_root)),
+            "activeInstance": None,
+            "instances": [],
+            "activeInstanceCount": 0,
+            "tools": {
+                "ok": False,
+                "reachable": False,
+                "totalTools": 0,
+                "vrcForgeToolsCount": 0,
+                "missingRequiredVrcForgeTools": list(REQUIRED_VRCFORGE_UNITY_TOOLS),
+                "error": str(exc),
+            },
+            "mcpHealth": {"ok": False, "transport": "vrcforge-mcp-core"},
+            "unityMcpPackageVersion": "core-1",
+            "vrcForgeToolsRegistered": False,
+            "missingRequiredVrcForgeTools": list(REQUIRED_VRCFORGE_UNITY_TOOLS),
+            "output": "",
+            "parsed": None,
+            "error": str(exc),
+        }
+
+
 def _repair_phase(phase_id: str, status: str, message: str, detail: Any = None) -> dict[str, Any]:
     if status not in {"ok", "warning", "error", "skipped"}:
         status = "warning"
@@ -14973,6 +15019,8 @@ def _unity_repair_status_summary(
 
 
 def read_unity_mcp_package_version(project_root: Path) -> str:
+    if vrcforge_mcp_core_installed(project_root):
+        return "core-1"
     candidates = [
         project_root / "Packages" / "com.coplaydev.unity-mcp" / "package.json",
         project_root / "Packages" / "com.gamelovers.mcp-unity" / "package.json",
@@ -16463,7 +16511,7 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
     if selected_project is None:
         components["selectedUnityProject"] = health_component("warning", "No Unity project selected.", "")
         components["unityPluginInstalled"] = health_component("unknown", "Unity plugin status is unknown until a project is selected.", "")
-        components["mcpPackageConfigured"] = health_component("unknown", "Unity MCP package status is unknown until a project is selected.", "")
+        components["mcpPackageConfigured"] = health_component("unknown", "VRCForge MCP Core status is unknown until a project is selected.", "")
     else:
         required_paths = {
             "Assets": selected_project / "Assets",
@@ -16484,11 +16532,13 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
             str(plugin_path),
         )
 
-        mcp_value = dependencies.get("com.coplaydev.unity-mcp")
+        mcp_core_installed = vrcforge_mcp_core_installed(selected_project)
         components["mcpPackageConfigured"] = health_component(
-            "ok" if mcp_value else "error",
-            "Unity MCP package dependency is configured." if mcp_value else "Unity MCP package dependency is missing.",
-            {"manifestPath": str(manifest_path), "dependency": mcp_value or ""},
+            "ok" if mcp_core_installed else "error",
+            "VRCForge MCP Core is bundled with the plugin."
+            if mcp_core_installed
+            else "VRCForge MCP Core is missing from the plugin install.",
+            {"corePath": str(selected_project / "Assets" / "VRCForge" / "Core" / "MCP")},
         )
 
     unity_status = CURRENT_UNITY_STATUS or build_unity_status_snapshot(settings)
@@ -17151,6 +17201,8 @@ def parse_editor_version(version_file: Path) -> str:
 
 
 def has_unity_mcp_dependency(manifest_path: Path) -> bool:
+    if vrcforge_mcp_core_installed(manifest_path.parent.parent):
+        return True
     if not manifest_path.exists():
         return False
 
@@ -17161,6 +17213,14 @@ def has_unity_mcp_dependency(manifest_path: Path) -> bool:
 
     dependencies = manifest.get("dependencies") or {}
     return "com.coplaydev.unity-mcp" in dependencies
+
+
+def vrcforge_mcp_core_installed(project_root: Path) -> bool:
+    core_root = project_root / "Assets" / "VRCForge" / "Core" / "MCP"
+    return all(
+        (core_root / name).is_file()
+        for name in ("VRCForgeToolAttribute.cs", "VRCForgeToolRegistry.cs", "VRCForgeResponse.cs")
+    ) and (project_root / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").is_file()
 
 
 def resolve_target_project(project_path: str | None) -> str:
@@ -17209,6 +17269,7 @@ def load_initial_dashboard_api_config() -> DashboardApiConfig:
             api_key=api_key,
             base_url=base_url,
             model=model,
+            api_type=normalize_provider_api_type(provider, model, section.get("api_type"))[0],
             thinking_level=normalize_reasoning_effort(raw_thinking_level),
         )
 
@@ -17259,7 +17320,7 @@ def normalize_vision_config_request(request: VisionConfigRequest) -> DashboardVi
     defaults = get_provider_defaults(provider)
     return DashboardVisionConfig(
         provider=provider,
-        api_key=request.api_key.strip(),
+        api_key=validate_provider_api_key(request.api_key),
         base_url=normalize_base_url(request.base_url, provider, defaults["base_url"]),
         model=str(request.model or "").strip(),
         enabled=bool(request.enabled),
@@ -17282,11 +17343,12 @@ def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfi
     defaults = get_provider_defaults(provider)
     model = str(request.model or defaults["model"]).strip() or defaults["model"]
     base_url = normalize_base_url(request.base_url, provider, defaults["base_url"])
+    requested_api_type, _resolved_api_type = normalize_provider_api_type(provider, model, request.api_type)
 
     thinking_level = normalize_reasoning_effort(request.thinking_level)
     raw_thinking_level = str(request.thinking_level or "").strip()
     if raw_thinking_level and raw_thinking_level.lower() not in {"off", "default"}:
-        supported = reasoning_effort_variants(provider, model)
+        supported = reasoning_effort_variants(provider, model, request.api_type)
         if not thinking_level or thinking_level not in supported:
             supported_text = ", ".join(supported) if supported else "provider default only"
             raise ValueError(
@@ -17296,14 +17358,39 @@ def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfi
 
     return DashboardApiConfig(
         provider=provider,
-        api_key=request.api_key.strip(),
+        api_key=validate_provider_api_key(request.api_key),
         base_url=base_url,
         model=model,
+        api_type=requested_api_type,
         thinking_level=thinking_level,
     )
 
 
+def provider_config_descriptor(config: DashboardApiConfig) -> dict[str, Any]:
+    """Expose a non-secret, model-aware provider transport descriptor."""
+
+    return provider_model_descriptor(config.provider, config.model, config.api_type)
+
+
+def enrich_provider_model_item(config: DashboardApiConfig, item: dict[str, Any]) -> dict[str, Any]:
+    """Keep provider list metadata while adding conservative registry fields."""
+
+    enriched = dict(item)
+    model_id = str(enriched.get("id") or "").strip()
+    descriptor = provider_model_descriptor(config.provider, model_id, config.api_type)
+    enriched.update(
+        provider=config.provider,
+        apiType=descriptor["apiType"],
+        resolvedApiType=descriptor["resolvedApiType"],
+        supportedApiTypes=descriptor["supportedApiTypes"],
+        capabilities=descriptor["capabilities"],
+        capabilitySource=descriptor["capabilitySource"],
+    )
+    return enriched
+
+
 def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
+    validate_provider_api_key(config.api_key)
     if provider_requires_api_key(config.provider) and not config.api_key.strip():
         raise RuntimeError(f"{provider_display_name(config.provider)} API key is empty. Enter an API key before loading models.")
 
@@ -17332,6 +17419,7 @@ def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
             "message": str(exc),
         }
     provider_label = provider_display_name(config.provider)
+    descriptor = provider_config_descriptor(config)
     if provider_requires_api_key(config.provider) and not config.api_key.strip():
         return {
             "ok": False,
@@ -17340,6 +17428,8 @@ def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
             "provider": config.provider,
             "providerLabel": provider_label,
             "model": config.model,
+            "apiType": descriptor["apiType"],
+            "resolvedApiType": descriptor["resolvedApiType"],
             "message": f"{provider_label} API key is empty.",
         }
     if capability == "vision":
@@ -17351,6 +17441,8 @@ def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
             "provider": config.provider,
             "providerLabel": provider_label,
             "model": config.model,
+            "apiType": descriptor["apiType"],
+            "resolvedApiType": descriptor["resolvedApiType"],
             "message": "Vision test requires an explicit user-selected image; no Unity screenshot or project asset was sent.",
         }
     prompt = (
@@ -17368,6 +17460,8 @@ def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
             "provider": config.provider,
             "providerLabel": provider_label,
             "model": config.model,
+            "apiType": descriptor["apiType"],
+            "resolvedApiType": descriptor["resolvedApiType"],
             "message": str(exc),
         }
     structured_ok = True
@@ -17384,12 +17478,32 @@ def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
         "provider": config.provider,
         "providerLabel": provider_label,
         "model": config.model,
+        "apiType": descriptor["apiType"],
+        "resolvedApiType": descriptor["resolvedApiType"],
         "message": "Provider test succeeded." if structured_ok else "Provider responded, but structured JSON did not validate.",
         "responsePreview": text[:240],
     }
 
 
 def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured: bool = False) -> str:
+    validate_provider_api_key(config.api_key)
+    _requested_api_type, resolved_api_type = normalize_provider_api_type(
+        config.provider, config.model, config.api_type
+    )
+    if resolved_api_type == "responses":
+        adapter = DeepSeekResponsesAdapter(api_key=config.api_key, base_url=config.base_url)
+        response = adapter.send_request(
+            ProviderRuntimeRequest(
+                model=config.model,
+                prompt=prompt,
+                instructions="You are a provider connectivity probe. Return only the requested result.",
+                reasoning_effort=config.thinking_level,
+                max_output_tokens=64,
+                mode="probe",
+                structured_output=structured,
+            )
+        )
+        return response.text
     if config.provider in {"gemini", "vertexai"}:
         try:
             from google import genai
@@ -17466,6 +17580,7 @@ def _provider_probe_settings(config: DashboardApiConfig) -> Settings:
         execute_tool_name="",
         export_path=Path("Assets/VRCForge/blendshapes_export.json"),
         min_confidence=0.0,
+        llm_api_type=config.api_type,
     )
 
 
@@ -17580,6 +17695,7 @@ def _run_provider_vision_analysis(
     Returns (analysis_text, usage). Usage belongs to the vision run step only
     and must never be merged into the chat context meter.
     """
+    validate_provider_api_key(config.api_key)
     decoded: list[tuple[str, str]] = []
     for item in images:
         mime, payload = split_image_data_url(str(item.get("dataUrl") or ""))
@@ -17688,6 +17804,7 @@ def _run_provider_vision_analysis(
 
 
 def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
+    validate_provider_api_key(config.api_key)
     if not config.base_url.strip():
         raise RuntimeError("Base URL is empty. Enter a provider API endpoint before loading models.")
 
@@ -17706,6 +17823,7 @@ def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str,
 
 
 def fetch_google_ai_studio_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
+    validate_provider_api_key(config.api_key)
     try:
         from google import genai
     except ImportError as exc:
@@ -17755,6 +17873,7 @@ def resolve_vertex_project_location(value: str) -> tuple[str, str]:
 
 
 def fetch_anthropic_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
+    validate_provider_api_key(config.api_key)
     try:
         import anthropic
     except ImportError as exc:
@@ -17876,12 +17995,14 @@ def save_dashboard_config_document() -> None:
     with CONFIG_DOCUMENT_LOCK:
         api = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
         vision = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
+        api_descriptor = provider_config_descriptor(api)
         payload: dict[str, Any] = {
             "api": {
                 "provider": api.provider,
                 "api_key": api.api_key,
                 "base_url": api.base_url,
                 "model": api.model,
+                "api_type": api_descriptor["api_type"],
                 "thinking_level": api.thinking_level,
             }
         }
@@ -17934,6 +18055,7 @@ def serialize_api_config(include_secret: bool) -> dict[str, Any]:
         "apiKeyPresent": bool(config.api_key),
         "base_url": config.base_url,
         "model": config.model,
+        **provider_config_descriptor(config),
         # Always present so build_llm_settings override handling sees the key.
         "thinking_level": config.thinking_level,
         "usesBaseUrl": config.provider not in {"anthropic", "gemini"},
@@ -17971,6 +18093,7 @@ def build_effective_model_summary() -> dict[str, Any]:
         "providerLabel": provider_display_name(config.provider),
         "model": config.model,
         "baseUrl": config.base_url,
+        **provider_config_descriptor(config),
         "authHeader": provider_auth_label(config.provider),
         "apiKeyRequired": provider_requires_api_key(config.provider),
     }
@@ -21112,7 +21235,7 @@ def _environment_validation(findings: list[dict[str, Any]], result: dict[str, An
     else:
         _validation_add_finding(findings, "VRCForge Unity plugin", "Error", "VRCForge Unity plugin unavailable", "VRCForge cannot rely on live Unity tools until the plugin is repaired.", "environment", plugin)
 
-    for key, title in (("mcpPackageConfigured", "Unity MCP package"), ("unityMcpBridgeReachable", "Unity MCP bridge"), ("unityMcpInstance", "Unity MCP instance"), ("vrcForgeUnityTools", "VRCForge Unity tools")):
+    for key, title in (("mcpPackageConfigured", "VRCForge MCP Core"), ("unityMcpBridgeReachable", "Unity MCP bridge"), ("unityMcpInstance", "Unity MCP instance"), ("vrcForgeUnityTools", "VRCForge Unity tools")):
         status, component = component_status(key)
         if status == "ok":
             _validation_add_finding(findings, "MCP bridge", "Info", f"{title} available", f"{title} is available for read-only scans and supervised requests.", "environment", component)

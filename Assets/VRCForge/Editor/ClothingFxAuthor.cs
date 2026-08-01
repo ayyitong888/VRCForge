@@ -2,8 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
@@ -13,7 +12,7 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_apply_clothing_fx",
         Description = "Author simple clothing toggle FX assets via a predefined VRCForge tool."
     )]

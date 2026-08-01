@@ -1,7 +1,7 @@
 import { Check, Eye, Loader2, MessageSquare, RefreshCw } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
 import i18n from "../../i18n";
-import type { ProviderModelInfo, ProviderReasoningVariants } from "../../lib/api";
+import type { ProviderApiType, ProviderModelInfo, ProviderReasoningVariants } from "../../lib/api";
 import { providerCapabilities, providerNeedsApiKey } from "../../lib/provider-ui";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -11,6 +11,9 @@ type ProviderSetupProps = {
   apiKey: string;
   baseUrl: string;
   model: string;
+  apiType: ProviderApiType;
+  modelCapabilities?: readonly string[];
+  capabilitySource?: string;
   /** Backend-resolved reasoning variant; `default` sends no override. */
   thinkingLevel: string;
   reasoningVariants: ProviderReasoningVariants | null;
@@ -28,6 +31,7 @@ type ProviderSetupProps = {
   onApiKeyChange: (value: string) => void;
   onBaseUrlChange: (value: string) => void;
   onModelChange: (value: string) => void;
+  onApiTypeChange: (value: ProviderApiType) => void;
   onThinkingLevelChange: (value: string) => void;
   onSubmit: (event?: FormEvent) => void;
 };
@@ -57,6 +61,9 @@ export function ProviderSetup({
   apiKey,
   baseUrl,
   model,
+  apiType,
+  modelCapabilities,
+  capabilitySource,
   thinkingLevel,
   reasoningVariants,
   saving,
@@ -73,6 +80,7 @@ export function ProviderSetup({
   onApiKeyChange,
   onBaseUrlChange,
   onModelChange,
+  onApiTypeChange,
   onThinkingLevelChange,
   onSubmit,
 }: ProviderSetupProps) {
@@ -82,7 +90,8 @@ export function ProviderSetup({
   const hasUnsupportedReasoningVariant =
     thinkingLevel !== "default" && !supportedReasoningVariants.some((variant) => variant.key === thinkingLevel);
   const hasModelList = models.length > 0;
-  const capabilities = providerCapabilities(provider);
+  const capabilities = providerCapabilities(modelCapabilities, capabilitySource);
+  const apiTypeOptions = supportedApiTypeOptions(provider, model);
 
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
@@ -181,6 +190,18 @@ export function ProviderSetup({
             <div className="mt-1.5 text-xs text-muted-foreground">{i18n.t("provider.fetchedModels", { count: models.length })}</div>
           ) : null}
         </SettingsFieldLabel>
+        <SettingsFieldLabel label={i18n.t("provider.apiType")}>
+          <select
+            value={apiTypeOptions.includes(apiType) ? apiType : "auto"}
+            onChange={(event) => onApiTypeChange(event.target.value as ProviderApiType)}
+            className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
+          >
+            {apiTypeOptions.map((option) => (
+              <option key={option} value={option}>{i18n.t(`provider.apiType_${option}`)}</option>
+            ))}
+          </select>
+          <div className="mt-1.5 text-xs text-muted-foreground">{i18n.t("provider.apiTypeHint")}</div>
+        </SettingsFieldLabel>
         {supportsReasoning || hasUnsupportedReasoningVariant ? (
           <SettingsFieldLabel label={i18n.t("provider.reasoningEffort")}>
             <select
@@ -228,6 +249,21 @@ export function ProviderSetup({
       </div>
     </form>
   );
+}
+
+function supportedApiTypeOptions(provider: string, model: string): ProviderApiType[] {
+  if (provider === "deepseek") {
+    return model.trim().toLowerCase() === "deepseek-v4-flash"
+      ? ["auto", "responses", "chat_completions"]
+      : ["auto", "chat_completions"];
+  }
+  if (provider === "gemini" || provider === "vertexai") {
+    return ["auto", "generate_content"];
+  }
+  if (provider === "anthropic") {
+    return ["auto", "messages"];
+  }
+  return ["auto", "chat_completions"];
 }
 
 export function VisionProfileSetup({

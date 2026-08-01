@@ -2,12 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
+using VRCForge.Core.MCP;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
@@ -222,7 +221,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_ensure_expression_parameter",
         Description = "Create or update an avatar VRCExpressionParameters entry (Bool/Int/Float), creating the parameters asset if missing. Supports preview."
     )]
@@ -311,7 +310,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_ensure_expression_menu_control",
         Description = "Create an avatar expression menu control under a menu path, creating root/submenus when needed. Supports Toggle/SubMenu and preview."
     )]
@@ -559,7 +558,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_ensure_animator_state",
         Description = "Ensure an FX animator parameter, layer, state, optional generated clip, and Any-State transition condition. Supports preview."
     )]

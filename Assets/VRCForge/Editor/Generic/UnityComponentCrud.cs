@@ -4,11 +4,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Reflection;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -515,9 +514,10 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_get_property",
-        Description = "Read a single serialized field/property value from a component on a scene GameObject (read-only)."
+        Description = "Read a single serialized field/property value from a component on a scene GameObject (read-only).",
+        Permission = VRCForgeToolPermission.ReadOnly
     )]
     public static class GetPropertyTool
     {
@@ -525,16 +525,16 @@ namespace VRCForge.Editor
 
         public class GetPropertyParameters
         {
-            [ToolParameter("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("Component type. Fully-qualified (e.g. 'UnityEngine.SkinnedMeshRenderer') or unique short name.", Required = true)]
+            [VRCForgeParameter("Component type. Fully-qualified (e.g. 'UnityEngine.SkinnedMeshRenderer') or unique short name.", Required = true)]
             public string componentType { get; set; } = "";
 
-            [ToolParameter("Field or property name to read (e.g. 'enabled', 'sharedMesh').", Required = true)]
+            [VRCForgeParameter("Field or property name to read (e.g. 'enabled', 'sharedMesh').", Required = true)]
             public string propertyPath { get; set; } = "";
 
-            [ToolParameter("Which component instance to read when several of the same type exist (default 0).", Required = false)]
+            [VRCForgeParameter("Which component instance to read when several of the same type exist (default 0).", Required = false)]
             public int? componentIndex { get; set; } = 0;
         }
 
@@ -570,7 +570,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_add_component",
         Description = "Add a component of a given type to a scene GameObject (Undo-registered). Supports preview mode."
     )]
@@ -580,13 +580,13 @@ namespace VRCForge.Editor
 
         public class AddComponentParameters
         {
-            [ToolParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("Component type to add. Fully-qualified or unique short name.", Required = true)]
+            [VRCForgeParameter("Component type to add. Fully-qualified or unique short name.", Required = true)]
             public string componentType { get; set; } = "";
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -641,7 +641,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_remove_component",
         Description = "Remove a component of a given type from a scene GameObject (Undo-registered). Supports preview mode."
     )]
@@ -651,16 +651,16 @@ namespace VRCForge.Editor
 
         public class RemoveComponentParameters
         {
-            [ToolParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("Component type to remove. Fully-qualified or unique short name.", Required = true)]
+            [VRCForgeParameter("Component type to remove. Fully-qualified or unique short name.", Required = true)]
             public string componentType { get; set; } = "";
 
-            [ToolParameter("Which component instance to remove when several of the same type exist (default 0).", Required = false)]
+            [VRCForgeParameter("Which component instance to remove when several of the same type exist (default 0).", Required = false)]
             public int? componentIndex { get; set; } = 0;
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -716,7 +716,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_set_property",
         Description = "Set a single field/property on a component of a scene GameObject (Undo-registered). Supports preview mode."
     )]
@@ -726,19 +726,19 @@ namespace VRCForge.Editor
 
         public class SetPropertyParameters
         {
-            [ToolParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("Component type. Fully-qualified or unique short name.", Required = true)]
+            [VRCForgeParameter("Component type. Fully-qualified or unique short name.", Required = true)]
             public string componentType { get; set; } = "";
 
-            [ToolParameter("Field or property name to set (e.g. 'enabled', 'm_Weight').", Required = true)]
+            [VRCForgeParameter("Field or property name to set (e.g. 'enabled', 'm_Weight').", Required = true)]
             public string propertyPath { get; set; } = "";
 
-            [ToolParameter("Which component instance to target when several of the same type exist (default 0).", Required = false)]
+            [VRCForgeParameter("Which component instance to target when several of the same type exist (default 0).", Required = false)]
             public int? componentIndex { get; set; } = 0;
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 

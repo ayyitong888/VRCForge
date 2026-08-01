@@ -1,11 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -27,9 +26,10 @@ namespace VRCForge.Editor
     // what *would* change without mutating, feeding the per-action approval card.
     // ------------------------------------------------------------------
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_get_gameobject",
-        Description = "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components (read-only)."
+        Description = "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components (read-only).",
+        Permission = VRCForgeToolPermission.ReadOnly
     )]
     public static class GetGameObjectTool
     {
@@ -37,7 +37,7 @@ namespace VRCForge.Editor
 
         public class GetGameObjectParameters
         {
-            [ToolParameter("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", Required = true)]
             public string gameObjectPath { get; set; } = "";
         }
 
@@ -96,7 +96,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_create_gameobject",
         Description = "Create a new empty GameObject, optionally parented under another scene object (Undo-registered). Supports preview mode."
     )]
@@ -106,13 +106,13 @@ namespace VRCForge.Editor
 
         public class CreateGameObjectParameters
         {
-            [ToolParameter("Name for the new GameObject (default 'GameObject').", Required = false)]
+            [VRCForgeParameter("Name for the new GameObject (default 'GameObject').", Required = false)]
             public string name { get; set; } = "";
 
-            [ToolParameter("Full hierarchy path or unique name of the parent GameObject. Empty creates at the active scene root.", Required = false)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the parent GameObject. Empty creates at the active scene root.", Required = false)]
             public string parentPath { get; set; } = "";
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -173,7 +173,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_rename_gameobject",
         Description = "Rename a scene GameObject (Undo-registered). Supports preview mode."
     )]
@@ -183,13 +183,13 @@ namespace VRCForge.Editor
 
         public class RenameGameObjectParameters
         {
-            [ToolParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("New name for the GameObject.", Required = true)]
+            [VRCForgeParameter("New name for the GameObject.", Required = true)]
             public string newName { get; set; } = "";
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -246,7 +246,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_reparent_gameobject",
         Description = "Move a scene GameObject under a new parent (or to the scene root) preserving world transform by default (Undo-registered). Supports preview mode."
     )]
@@ -256,16 +256,16 @@ namespace VRCForge.Editor
 
         public class ReparentGameObjectParameters
         {
-            [ToolParameter("Full hierarchy path or unique name of the GameObject to move.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the GameObject to move.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("Full hierarchy path or unique name of the new parent. Empty moves the object to the scene root.", Required = false)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the new parent. Empty moves the object to the scene root.", Required = false)]
             public string newParentPath { get; set; } = "";
 
-            [ToolParameter("Keep the object's world position/rotation/scale (default true).", Required = false)]
+            [VRCForgeParameter("Keep the object's world position/rotation/scale (default true).", Required = false)]
             public bool? worldPositionStays { get; set; } = true;
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -345,7 +345,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_delete_gameobject",
         Description = "Delete a scene GameObject and its children (Undo-registered). Supports preview mode."
     )]
@@ -355,10 +355,10 @@ namespace VRCForge.Editor
 
         public class DeleteGameObjectParameters
         {
-            [ToolParameter("Full hierarchy path or unique name of the GameObject to delete.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the GameObject to delete.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -406,7 +406,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_set_gameobject_active",
         Description = "Set a scene GameObject's active-self state (Undo-registered). Supports preview mode."
     )]
@@ -416,13 +416,13 @@ namespace VRCForge.Editor
 
         public class SetGameObjectActiveParameters
         {
-            [ToolParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("Desired active-self state (true/false).", Required = true)]
+            [VRCForgeParameter("Desired active-self state (true/false).", Required = true)]
             public bool? active { get; set; }
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 

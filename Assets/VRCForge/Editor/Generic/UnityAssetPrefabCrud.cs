@@ -2,11 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -72,9 +71,10 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_find_assets",
-        Description = "Search the project for assets by query/type/folder via AssetDatabase (read-only)."
+        Description = "Search the project for assets by query/type/folder via AssetDatabase (read-only).",
+        Permission = VRCForgeToolPermission.ReadOnly
     )]
     public static class FindAssetsTool
     {
@@ -82,16 +82,16 @@ namespace VRCForge.Editor
 
         public class FindAssetsParameters
         {
-            [ToolParameter("Unity search filter (e.g. 'outfit' or 'l:wardrobe'). Combined with 'typeName' when both are given.", Required = false)]
+            [VRCForgeParameter("Unity search filter (e.g. 'outfit' or 'l:wardrobe'). Combined with 'typeName' when both are given.", Required = false)]
             public string query { get; set; } = "";
 
-            [ToolParameter("Restrict to an asset type by name (e.g. 'Prefab', 'Material', 'AnimationClip'); applied as a 't:' filter.", Required = false)]
+            [VRCForgeParameter("Restrict to an asset type by name (e.g. 'Prefab', 'Material', 'AnimationClip'); applied as a 't:' filter.", Required = false)]
             public string typeName { get; set; } = "";
 
-            [ToolParameter("Limit the search to a project folder (e.g. 'Assets/Outfits'). Empty searches the whole project.", Required = false)]
+            [VRCForgeParameter("Limit the search to a project folder (e.g. 'Assets/Outfits'). Empty searches the whole project.", Required = false)]
             public string folder { get; set; } = "";
 
-            [ToolParameter("Maximum number of results to return (default 50).", Required = false)]
+            [VRCForgeParameter("Maximum number of results to return (default 50).", Required = false)]
             public int? limit { get; set; } = 50;
         }
 
@@ -173,9 +173,10 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_get_asset_info",
-        Description = "Describe a project asset: path, GUID, type, importer, and prefab details when applicable (read-only)."
+        Description = "Describe a project asset: path, GUID, type, importer, and prefab details when applicable (read-only).",
+        Permission = VRCForgeToolPermission.ReadOnly
     )]
     public static class GetAssetInfoTool
     {
@@ -183,10 +184,10 @@ namespace VRCForge.Editor
 
         public class GetAssetInfoParameters
         {
-            [ToolParameter("Project-relative asset path (e.g. 'Assets/Outfits/Dress.prefab').", Required = false)]
+            [VRCForgeParameter("Project-relative asset path (e.g. 'Assets/Outfits/Dress.prefab').", Required = false)]
             public string assetPath { get; set; } = "";
 
-            [ToolParameter("Asset GUID (used when assetPath is omitted).", Required = false)]
+            [VRCForgeParameter("Asset GUID (used when assetPath is omitted).", Required = false)]
             public string guid { get; set; } = "";
         }
 
@@ -243,7 +244,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_instantiate_prefab",
         Description = "Instantiate a prefab asset into the active scene, optionally under a parent, keeping the prefab link (Undo-registered). Supports preview mode."
     )]
@@ -253,22 +254,22 @@ namespace VRCForge.Editor
 
         public class InstantiatePrefabParameters
         {
-            [ToolParameter("Project-relative path to the prefab asset (e.g. 'Assets/Outfits/Dress.prefab').", Required = false)]
+            [VRCForgeParameter("Project-relative path to the prefab asset (e.g. 'Assets/Outfits/Dress.prefab').", Required = false)]
             public string assetPath { get; set; } = "";
 
-            [ToolParameter("Prefab asset GUID (used when assetPath is omitted).", Required = false)]
+            [VRCForgeParameter("Prefab asset GUID (used when assetPath is omitted).", Required = false)]
             public string guid { get; set; } = "";
 
-            [ToolParameter("Full hierarchy path or unique name of the parent GameObject. Empty instantiates at the active scene root.", Required = false)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the parent GameObject. Empty instantiates at the active scene root.", Required = false)]
             public string parentPath { get; set; } = "";
 
-            [ToolParameter("Optional name override for the new instance.", Required = false)]
+            [VRCForgeParameter("Optional name override for the new instance.", Required = false)]
             public string name { get; set; } = "";
 
-            [ToolParameter("Keep the instance's world position/rotation/scale when parenting (default true).", Required = false)]
+            [VRCForgeParameter("Keep the instance's world position/rotation/scale when parenting (default true).", Required = false)]
             public bool? worldPositionStays { get; set; } = true;
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -355,7 +356,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_unpack_prefab",
         Description = "Unpack a prefab instance in the scene so its contents become plain GameObjects (Undo-registered). Supports preview mode."
     )]
@@ -365,13 +366,13 @@ namespace VRCForge.Editor
 
         public class UnpackPrefabParameters
         {
-            [ToolParameter("Full hierarchy path or unique name of the prefab instance root to unpack.", Required = true)]
+            [VRCForgeParameter("Full hierarchy path or unique name of the prefab instance root to unpack.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [ToolParameter("Unpack mode: 'outermost' (default, only this prefab layer) or 'completely' (all nested prefabs).", Required = false)]
+            [VRCForgeParameter("Unpack mode: 'outermost' (default, only this prefab layer) or 'completely' (all nested prefabs).", Required = false)]
             public string mode { get; set; } = "outermost";
 
-            [ToolParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
 

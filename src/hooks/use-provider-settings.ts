@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   AppBootstrap,
   ProviderModelInfo,
+  ProviderApiType,
   ProviderReasoningVariants,
   fetchProviderModels,
   fetchReasoningVariants,
@@ -50,6 +51,7 @@ export function useProviderSettings({
   const [apiKey, setApiKey] = useState("");
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
+  const [apiType, setApiType] = useState<ProviderApiType>("auto");
   // Provider default (send nothing) is distinct from an explicit `none` variant.
   const [apiThinkingLevel, setApiThinkingLevel] = useState("default");
   const [reasoningVariants, setReasoningVariants] = useState<ProviderReasoningVariants | null>(null);
@@ -74,10 +76,11 @@ export function useProviderSettings({
     setApiProvider(apiConfig.provider || "gemini");
     setApiBaseUrl(apiConfig.base_url || "");
     setApiModel(apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"));
+    setApiType(apiConfig.api_type || apiConfig.apiType || "auto");
     setApiThinkingLevel(apiConfig.thinking_level || "default");
     setModelOptions([]);
     setModelOptionsScope(null);
-  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model, apiConfig?.thinking_level]);
+  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model, apiConfig?.api_type, apiConfig?.apiType, apiConfig?.thinking_level]);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,7 +90,7 @@ export function useProviderSettings({
         cancelled = true;
       };
     }
-    void fetchReasoningVariants(endpoint, { provider: apiProvider, model: apiModel.trim() })
+    void fetchReasoningVariants(endpoint, { provider: apiProvider, model: apiModel.trim(), api_type: apiType })
       .then((descriptor) => {
         if (cancelled) {
           return;
@@ -102,7 +105,7 @@ export function useProviderSettings({
     return () => {
       cancelled = true;
     };
-  }, [endpoint, runtimeConnected, apiProvider, apiModel]);
+  }, [endpoint, runtimeConnected, apiProvider, apiModel, apiType]);
 
   useEffect(() => {
     if (!visionConfig) {
@@ -125,6 +128,11 @@ export function useProviderSettings({
     providerLabel: savedProviderLabel,
     model: savedModel,
   };
+  const selectedModelInfo = modelOptions.find((item) => item.id === apiModel);
+  const selectedModelCapabilities = selectedModelInfo?.capabilities ??
+    (apiConfig?.provider === apiProvider && apiConfig?.model === apiModel ? apiConfig.capabilities : undefined);
+  const selectedModelCapabilitySource = selectedModelInfo?.capabilitySource ??
+    (apiConfig?.provider === apiProvider && apiConfig?.model === apiModel ? apiConfig.capabilitySource : undefined);
 
   async function ensureRuntime(): Promise<string | null> {
     if (runtimeConnected) {
@@ -150,6 +158,7 @@ export function useProviderSettings({
         api_key: apiKey.trim(),
         base_url: apiBaseUrl.trim(),
         model: apiModel.trim(),
+        api_type: apiType,
         thinking_level: apiThinkingLevel === "default" ? "" : apiThinkingLevel,
       });
       setApiKey("");
@@ -164,12 +173,20 @@ export function useProviderSettings({
   function handleProviderChange(provider: string) {
     setApiProvider(provider);
     setApiModel(defaultModelForProvider(provider));
+    setApiType("auto");
     setApiBaseUrl(defaultBaseUrlForProvider(provider));
     setApiThinkingLevel("default");
     setReasoningVariants(null);
     setModelOptions([]);
     setModelOptionsScope(null);
     setModelsError("");
+  }
+
+  function handleApiModelChange(model: string) {
+    setApiModel(model);
+    if (apiType === "responses" && !(apiProvider === "deepseek" && model.trim() === "deepseek-v4-flash")) {
+      setApiType("auto");
+    }
   }
 
   function handleVisionProviderChange(provider: string) {
@@ -245,6 +262,7 @@ export function useProviderSettings({
         api_key: apiKey.trim(),
         base_url: apiBaseUrl.trim(),
         model: apiModel.trim(),
+        api_type: apiType,
       });
       const models = payload.models || [];
       setModelOptions(models);
@@ -252,7 +270,7 @@ export function useProviderSettings({
       if (models.length === 0) {
         setModelsError(t("provider.noModelsReturned"));
       } else if (!models.some((item) => item.id === apiModel)) {
-        setApiModel(payload.selectedModel && models.some((item) => item.id === payload.selectedModel) ? payload.selectedModel : models[0].id);
+        handleApiModelChange(payload.selectedModel && models.some((item) => item.id === payload.selectedModel) ? payload.selectedModel : models[0].id);
       }
     } catch (cause) {
       setModelOptions([]);
@@ -281,6 +299,7 @@ export function useProviderSettings({
         api_key: apiKey.trim(),
         base_url: apiBaseUrl.trim(),
         model: apiModel.trim(),
+        api_type: apiType,
         thinking_level: apiThinkingLevel === "default" ? "" : apiThinkingLevel,
         capability,
       });
@@ -303,7 +322,11 @@ export function useProviderSettings({
     apiBaseUrl,
     setApiBaseUrl,
     apiModel,
-    setApiModel,
+    setApiModel: handleApiModelChange,
+    apiType,
+    setApiType,
+    selectedModelCapabilities,
+    selectedModelCapabilitySource,
     apiThinkingLevel,
     setApiThinkingLevel,
     reasoningVariants,

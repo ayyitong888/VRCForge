@@ -2,8 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -81,9 +80,10 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_get_compile_errors",
-        Description = "Read-only: report C# compile errors from the last compilation pass (CompilationPipeline capture with Unity Console fallback)."
+        Description = "Read-only: report C# compile errors from the last compilation pass (CompilationPipeline capture with Unity Console fallback).",
+        Permission = VRCForgeToolPermission.ReadOnly
     )]
     public static class CompileErrorReader
     {
@@ -93,10 +93,10 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [ToolParameter("Maximum number of errors to return. Clamped to 1-200.", Required = false)]
+            [VRCForgeParameter("Maximum number of errors to return. Clamped to 1-200.", Required = false)]
             public int? maxErrors { get; set; } = DefaultMaxErrors;
 
-            [ToolParameter("If true (default), fall back to scanning the Unity Console for 'error CS' entries when no pipeline capture exists.", Required = false)]
+            [VRCForgeParameter("If true (default), fall back to scanning the Unity Console for 'error CS' entries when no pipeline capture exists.", Required = false)]
             public bool? includeConsoleFallback { get; set; } = true;
         }
 

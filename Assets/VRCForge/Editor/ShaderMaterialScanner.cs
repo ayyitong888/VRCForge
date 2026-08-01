@@ -3,16 +3,15 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_scan_avatar_materials",
         Description = "Scan avatar renderers and shared materials into a read-only material inventory snapshot."
     )]
@@ -23,13 +22,13 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [ToolParameter("Optional avatar root hierarchy path. If empty, all scene avatar roots are scanned.", Required = false)]
+            [VRCForgeParameter("Optional avatar root hierarchy path. If empty, all scene avatar roots are scanned.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Asset-relative or absolute output path.", Required = false)]
+            [VRCForgeParameter("Asset-relative or absolute output path.", Required = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [ToolParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 

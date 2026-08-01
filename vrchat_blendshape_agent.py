@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field, ValidationError
+from model_provider_adapters import normalize_provider_api_type, validate_provider_api_key
+from provider_runtime_adapters import DeepSeekResponsesAdapter, ProviderRuntimeRequest
+from unity_mcp_core_client import UnityMcpCoreClient
 
 
 DEFAULT_SETTINGS_PATH = Path(".gemini/settings.json")
@@ -23,7 +26,7 @@ DEFAULT_MIN_CONFIDENCE = 0.65
 DEFAULT_MVP_EXPORT_PATH = Path("examples/mvp_blendshapes_export.json")
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-chat"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
 DEFAULT_OLLAMA_MODEL = "llama3.2"
@@ -115,6 +118,8 @@ class Settings:
     llm_system_instruction: str = ""
     llm_max_output_tokens: int | None = None
     llm_sdk_max_retries: int | None = None
+    llm_api_type: str | None = None
+    unity_project_path: str = ""
 
 
 @dataclass
@@ -331,6 +336,8 @@ def load_settings(
         execute_tool_name=mcp_settings.get("execute_tool_name", "vrc_apply_blendshapes"),
         export_path=export_path,
         min_confidence=float(planning_settings.get("min_confidence", DEFAULT_MIN_CONFIDENCE)),
+        llm_api_type=llm_settings.get("api_type"),
+        unity_project_path=str(mcp_settings.get("project_path", "")).strip(),
     )
 
 
@@ -378,6 +385,7 @@ def build_llm_settings(
         if "thinking_level" in override
         else llm_settings.get("thinking_level", legacy_gemini_settings.get("thinking_level", ""))
     )
+    api_type_value = override.get("api_type") if "api_type" in override else llm_settings.get("api_type")
 
     return {
         "provider": provider,
@@ -386,6 +394,7 @@ def build_llm_settings(
         "base_url": normalize_base_url(base_url_value, provider, defaults["base_url"]),
         "model": str(model_value).strip() or defaults["model"],
         "thinking_level": str(thinking_level_value or "").strip(),
+        "api_type": None if api_type_value is None else str(api_type_value).strip(),
     }
 
 
@@ -441,6 +450,22 @@ def provider_requires_api_key(provider: str) -> bool:
 
 
 def export_blendshapes(settings: Settings) -> dict[str, Any]:
+    core_project = str(settings.unity_project_path or "").strip()
+    core_descriptor = Path(core_project) / "Library" / "VRCForge" / "mcp-core.json" if core_project else None
+    if core_descriptor is not None and core_descriptor.is_file():
+        result = invoke_unity_mcp(
+            settings,
+            settings.export_tool_name,
+            {"outputPath": "", "refreshAssets": False, "returnPayloadOnly": True},
+        )
+        candidate: Any = result.payload
+        for key in ("structuredContent", "data"):
+            if isinstance(candidate, dict) and isinstance(candidate.get(key), dict):
+                candidate = candidate[key]
+        if isinstance(candidate, dict) and isinstance(candidate.get("avatars"), list):
+            return candidate
+        raise UnityMcpError("Unity MCP Core returned an invalid read-only blendshape inventory.")
+
     export_params = {"outputPath": settings.export_path.as_posix(), "refreshAssets": True}
     result = invoke_unity_mcp(settings, settings.export_tool_name, export_params)
 
@@ -1299,6 +1324,16 @@ def request_llm_plan_with_metadata(
 ) -> LlmPlanResponse:
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
+    _requested_api_type, resolved_api_type = normalize_provider_api_type(
+        provider, settings.llm_model, getattr(settings, "llm_api_type", None)
+    )
+    if resolved_api_type == "responses":
+        return request_deepseek_responses_plan_with_metadata(
+            settings,
+            prompt,
+            reference_image_paths=image_paths,
+            stream_callback=stream_callback,
+        )
     if provider == "gemini":
         return request_gemini_plan_with_metadata(settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback)
     if provider == "vertexai":
@@ -1312,6 +1347,48 @@ def request_llm_plan_with_metadata(
         reference_image_paths=image_paths,
         stream_callback=stream_callback,
     )
+
+
+def request_deepseek_responses_plan_with_metadata(
+    settings: Settings,
+    prompt: str,
+    reference_image_paths: Sequence[str | Path] | None = None,
+    stream_callback: Callable[[str], None] | None = None,
+    client_factory: Callable[..., Any] | None = None,
+) -> LlmPlanResponse:
+    """Use the stateless Responses transport without executing model tool calls."""
+
+    image_paths = normalize_reference_image_paths(reference_image_paths=reference_image_paths)
+    adapter = DeepSeekResponsesAdapter(
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
+        client_factory=client_factory,
+        **_llm_sdk_retry_kwargs(settings),
+    )
+    response = adapter.send_request(
+        ProviderRuntimeRequest(
+            model=settings.llm_model,
+            prompt=prompt,
+            instructions=llm_system_instruction(settings),
+            reasoning_effort=_deepseek_responses_reasoning_effort(settings),
+            max_output_tokens=llm_max_output_tokens(settings),
+            reference_image_paths=tuple(str(path) for path in image_paths),
+            stream_callback=stream_callback,
+        )
+    )
+    reasoning = extract_llm_reasoning_trace(
+        {"output": [{"type": "reasoning", "summary": summary} for summary in response.reasoning_summary]},
+        settings,
+        source="deepseek-responses",
+    )
+    usage = extract_llm_token_usage({"usage": response.usage}, settings, source="deepseek-responses")
+    return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
+
+
+def _deepseek_responses_reasoning_effort(settings: Settings) -> str:
+    level = normalize_reasoning_effort(settings.gemini_thinking_level)
+    supported = reasoning_effort_variants("deepseek", settings.llm_model, settings.llm_api_type)
+    return level if level in supported else ""
 
 
 def llm_system_instruction(settings: Settings) -> str:
@@ -1350,6 +1427,7 @@ def request_gemini_plan_with_metadata(
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
 ) -> LlmPlanResponse:
+    validate_provider_api_key(settings.llm_api_key)
     try:
         from google import genai
     except ImportError as exc:
@@ -1662,11 +1740,16 @@ def _openai_reasoning_variants(model_id: str) -> list[str]:
     return ["minimal", "low", "medium", "high"]
 
 
-def _deepseek_reasoning_variants(model_id: str) -> list[str]:
+def _deepseek_reasoning_variants(model_id: str, resolved_api_type: str = "chat_completions") -> list[str]:
     # DeepSeek exposes a native thinking on/off switch, not a graded effort
     # enum. `high` is VRCForge's semantic label for enabled thinking.
     if re.match(r"^deepseek-(?:chat|reasoner)(?:[-.]|$)", model_id):
         return ["none", "high"]
+    if model_id == "deepseek-v4-flash" and resolved_api_type == "responses":
+        return ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    # Chat Completion V4 models use the safe common semantic subset.
+    if model_id in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+        return ["none", "low", "high", "max"]
     return []
 
 
@@ -1711,20 +1794,25 @@ REASONING_PROVIDER_VARIANT_RESOLVERS: dict[str, Callable[[str], list[str]]] = {
 }
 
 
-def reasoning_effort_variants(provider: str, model: str) -> list[str]:
+def reasoning_effort_variants(provider: str, model: str, api_type: object = None) -> list[str]:
     """Return VRCForge's model-aware, weakest-to-strongest reasoning variants."""
 
     model_id = bare_provider_model_id(model)
     if not model_id:
         return []
-    resolver = REASONING_PROVIDER_VARIANT_RESOLVERS.get(normalize_provider_name(provider), _no_reasoning_variants)
+    provider_id = normalize_provider_name(provider)
+    if provider_id == "deepseek":
+        _requested, resolved = normalize_provider_api_type(provider_id, model, api_type)
+        return _deepseek_reasoning_variants(model_id, resolved)
+    resolver = REASONING_PROVIDER_VARIANT_RESOLVERS.get(provider_id, _no_reasoning_variants)
     return resolver(model_id)
 
 
-def reasoning_variants_descriptor(provider: str, model: str) -> dict[str, Any]:
-    levels = reasoning_effort_variants(provider, model)
+def reasoning_variants_descriptor(provider: str, model: str, api_type: object = None) -> dict[str, Any]:
+    levels = reasoning_effort_variants(provider, model, api_type)
     provider_id = normalize_provider_name(provider)
     model_id = bare_provider_model_id(model)
+    _requested_api_type, resolved_api_type = normalize_provider_api_type(provider_id, model, api_type)
     transport = {
         "openai": "openai_chat_completions",
         "deepseek": "deepseek_chat_completions",
@@ -1735,6 +1823,8 @@ def reasoning_variants_descriptor(provider: str, model: str) -> dict[str, Any]:
         "ollama": "ollama_chat_completions",
         "custom": "custom_chat_completions",
     }.get(provider_id, "unknown")
+    if provider_id == "deepseek" and resolved_api_type == "responses":
+        transport = "deepseek_responses"
     request_mode = {
         "openai": "reasoning_effort",
         "deepseek": "thinking_toggle",
@@ -1742,6 +1832,8 @@ def reasoning_variants_descriptor(provider: str, model: str) -> dict[str, Any]:
         "gemini": f"thinking_{gemini_model_thinking_mode(model_id)}",
         "vertexai": f"thinking_{gemini_model_thinking_mode(model_id)}",
     }.get(provider_id, "")
+    if provider_id == "deepseek" and resolved_api_type == "responses":
+        request_mode = "reasoning.effort"
     if provider_id == "anthropic":
         if anthropic_model_supports_adaptive_thinking(model_id):
             request_mode = "adaptive_thinking_effort"
@@ -1753,6 +1845,8 @@ def reasoning_variants_descriptor(provider: str, model: str) -> dict[str, Any]:
         "schema": "vrcforge.reasoning_variants.v1",
         "provider": provider_id,
         "model": str(model or "").strip(),
+        "apiType": _requested_api_type,
+        "resolvedApiType": resolved_api_type,
         "transport": transport,
         "defaultKey": "default",
         "variants": [
@@ -1834,6 +1928,8 @@ def build_openai_compatible_request_payload(settings: Settings, user_content: An
         payload["reasoning_effort"] = active_level
     elif active_level and provider == "deepseek":
         payload["extra_body"] = {"thinking": {"type": "disabled" if active_level == "none" else "enabled"}}
+        if bare_provider_model_id(settings.llm_model) in {"deepseek-v4-flash", "deepseek-v4-pro"} and active_level != "none":
+            payload["reasoning_effort"] = active_level
     elif active_level and provider == "openrouter":
         payload["extra_body"] = {"reasoning": {"effort": active_level}}
     return payload
@@ -1921,6 +2017,7 @@ def request_openai_compatible_plan_with_metadata(
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
 ) -> LlmPlanResponse:
+    validate_provider_api_key(settings.llm_api_key)
     if not settings.llm_base_url:
         provider_name = provider_display_name(settings.llm_provider)
         raise RuntimeError(f"{provider_name} requires a Base URL for OpenAI-compatible requests.")
@@ -2052,6 +2149,7 @@ def request_anthropic_plan_with_metadata(
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
 ) -> LlmPlanResponse:
+    validate_provider_api_key(settings.llm_api_key)
     try:
         import anthropic
     except ImportError as exc:
@@ -2795,9 +2893,34 @@ def mock_execute_payload(apply_payload: str, selected_avatar: SelectedAvatar, ex
 
 def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any]) -> McpResult:
     last_error: Exception | None = None
+    core_project = str(
+        params.get("projectPath")
+        or params.get("project_path")
+        or settings.unity_project_path
+        or ""
+    ).strip()
+    core_descriptor = Path(core_project) / "Library" / "VRCForge" / "mcp-core.json" if core_project else None
+    core_installed = bool(
+        core_project
+        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolAttribute.cs").is_file()
+        and (Path(core_project) / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").is_file()
+    )
 
     for attempt in range(1, settings.unity_mcp_retries + 1):
         try:
+            if core_descriptor is not None and core_descriptor.is_file():
+                core_result = UnityMcpCoreClient(
+                    core_project,
+                    timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
+                ).call_tool(tool_name, params)
+                serialized = json.dumps(core_result, ensure_ascii=False, separators=(",", ":"))
+                if core_result.get("isError") is True:
+                    raise UnityMcpError("Unity MCP Core rejected the tool execution.")
+                return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
+            if core_installed:
+                raise UnityMcpError(
+                    "VRCForge MCP Core is installed but not ready; legacy connector fallback is disabled for this project."
+                )
             completed = run_unity_mcp_process(
                 settings,
                 build_custom_tool_cli_args(settings, tool_name, params),

@@ -11,7 +11,7 @@ SOURCE = (ROOT / "Assets" / "VRCForge" / "Editor" / "VrmExporter.cs").read_text(
 
 
 def test_vrm_exporter_uses_the_current_vrm10_static_api_without_a_fake_fallback():
-    assert '[McpForUnityTool(' in SOURCE
+    assert '[VRCForgeTool(' in SOURCE
     assert 'name: "vrc_export_vrm"' in SOURCE
     assert '"UniVRM10.Vrm10Exporter"' in SOURCE
     assert '"UniGLTF.GltfExportSettings"' in SOURCE

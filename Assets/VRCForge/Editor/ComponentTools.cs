@@ -5,8 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -15,7 +14,7 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_scan_fx_animator",
         Description = "Scan a VRChat avatar FX AnimatorController into a read-only layer/state/transition inventory."
     )]
@@ -26,16 +25,16 @@ namespace VRCForge.Editor
 
         public class ScanFxAnimatorParameters
         {
-            [ToolParameter("Optional avatar root hierarchy path. If empty, the first scene avatar descriptor is used.", Required = false)]
+            [VRCForgeParameter("Optional avatar root hierarchy path. If empty, the first scene avatar descriptor is used.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Optional AnimatorController asset path. If set, this overrides avatar FX lookup.", Required = false)]
+            [VRCForgeParameter("Optional AnimatorController asset path. If set, this overrides avatar FX lookup.", Required = false)]
             public string controllerPath { get; set; } = "";
 
-            [ToolParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
+            [VRCForgeParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [ToolParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 

@@ -4,12 +4,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
+using VRCForge.Core.MCP;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
 
@@ -276,9 +275,10 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_read_avatar_descriptor",
-        Description = "Read VRCAvatarDescriptor core authoring fields: viewpoint, lip sync, visemes, expressions, playable layers, and eye-look summary."
+        Description = "Read VRCAvatarDescriptor core authoring fields: viewpoint, lip sync, visemes, expressions, playable layers, and eye-look summary.",
+        Permission = VRCForgeToolPermission.ReadOnly
     )]
     public static class ReadAvatarDescriptorTool
     {
@@ -363,7 +363,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_write_avatar_descriptor",
         Description = "Write selected VRCAvatarDescriptor fields: viewpoint, lip sync, viseme mesh/blendshapes, expression assets, playable-layer controllers, and eye-look enable flag. Supports preview."
     )]
@@ -563,7 +563,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_write_animation_curve",
         Description = "Create, replace, or delete a single AnimationClip editor curve binding. Supports preview."
     )]
@@ -693,7 +693,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_manage_expression_parameters",
         Description = "Manage existing VRCExpressionParameters entries: update, delete, rename, or reorder. Use vrc_ensure_expression_parameter for first-time create. Supports preview."
     )]
@@ -820,7 +820,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_manage_expression_menu",
         Description = "Manage VRCExpressionsMenu controls: create, update, delete, or reorder controls in a root menu or submenu. Supports preview."
     )]
@@ -1101,7 +1101,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_manage_fx_animator",
         Description = "Manage FX AnimatorController layers, states, Any-State transitions, conditions, motions, and deletion. Supports preview."
     )]

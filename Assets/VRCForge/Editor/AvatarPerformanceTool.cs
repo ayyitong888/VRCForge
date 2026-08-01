@@ -5,8 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -14,7 +13,7 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_scan_avatar_performance",
         Description = "Calculate VRChat SDK avatar performance statistics and ranking for a scene avatar (read-only)."
     )]
@@ -24,13 +23,13 @@ namespace VRCForge.Editor
 
         public class AvatarPerformanceParameters
         {
-            [ToolParameter("Avatar root hierarchy path or avatar name.", Required = false)]
+            [VRCForgeParameter("Avatar root hierarchy path or avatar name.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Calculate ratings against mobile (Quest/Android) limits instead of PC limits.", Required = false)]
+            [VRCForgeParameter("Calculate ratings against mobile (Quest/Android) limits instead of PC limits.", Required = false)]
             public bool? isMobile { get; set; } = false;
 
-            [ToolParameter("Optional JSON output path for the full report.", Required = false)]
+            [VRCForgeParameter("Optional JSON output path for the full report.", Required = false)]
             public string outputPath { get; set; } = "";
         }
 
@@ -310,7 +309,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_scan_thry_avatar_performance",
         Description = "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for a scene avatar."
     )]
@@ -320,10 +319,10 @@ namespace VRCForge.Editor
 
         public class ThryAvatarPerformanceParameters
         {
-            [ToolParameter("Avatar root hierarchy path or avatar name.", Required = false)]
+            [VRCForgeParameter("Avatar root hierarchy path or avatar name.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Optional JSON output path for the full report.", Required = false)]
+            [VRCForgeParameter("Optional JSON output path for the full report.", Required = false)]
             public string outputPath { get; set; } = "";
         }
 

@@ -2,17 +2,16 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_setup_outfit",
         Description = "Validate or run Modular Avatar Setup Outfit on an outfit object parented under a VRChat avatar."
     )]
@@ -43,19 +42,19 @@ namespace VRCForge.Editor
 
         public class SetupOutfitParameters
         {
-            [ToolParameter("Avatar root hierarchy path or avatar name.", Required = false)]
+            [VRCForgeParameter("Avatar root hierarchy path or avatar name.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Hierarchy path of the outfit object under the avatar root.", Required = true)]
+            [VRCForgeParameter("Hierarchy path of the outfit object under the avatar root.", Required = true)]
             public string outfitPath { get; set; } = "";
 
-            [ToolParameter("Must be true to actually run Setup Outfit. False returns a readiness preview.", Required = false)]
+            [VRCForgeParameter("Must be true to actually run Setup Outfit. False returns a readiness preview.", Required = false)]
             public bool? confirmSetup { get; set; } = false;
 
-            [ToolParameter("Save the target outfit scene after a confirmed setup.", Required = false)]
+            [VRCForgeParameter("Save the target outfit scene after a confirmed setup.", Required = false)]
             public bool? saveScene { get; set; } = true;
 
-            [ToolParameter("Existing Setup Outfit job id to poll.", Required = false)]
+            [VRCForgeParameter("Existing Setup Outfit job id to poll.", Required = false)]
             public string jobId { get; set; } = "";
         }
 

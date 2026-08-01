@@ -778,17 +778,28 @@ mod tests {
             None,
             Some("https://example.test".to_string()),
             Some("model-a".to_string()),
+            None,
         );
         assert!(without_key.get("api_key").is_none());
+        assert!(without_key.get("api_type").is_none());
 
         let with_blank_key =
-            provider_config_body("gemini".to_string(), Some(String::new()), None, None);
+            provider_config_body("gemini".to_string(), Some(String::new()), None, None, None);
         assert_eq!(
             with_blank_key
                 .get("api_key")
                 .and_then(|value| value.as_str()),
             Some("")
         );
+
+        let with_api_type = provider_config_body(
+            "deepseek".to_string(),
+            None,
+            None,
+            Some("deepseek-v4-flash".to_string()),
+            Some("responses".to_string()),
+        );
+        assert_eq!(with_api_type["api_type"], "responses");
     }
 
     #[test]

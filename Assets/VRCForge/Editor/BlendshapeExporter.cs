@@ -2,8 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -12,7 +11,7 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_export_blendshapes",
         Description = "Export all VRChat avatar blendshapes in the open scenes to JSON for LLM semantic matching."
     )]
@@ -23,11 +22,14 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [ToolParameter("Asset-relative or absolute export path.", Required = false)]
+            [VRCForgeParameter("Asset-relative or absolute export path.", Required = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [ToolParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
             public bool? refreshAssets { get; set; } = true;
+
+            [VRCForgeParameter("Return the inventory without writing a file. FastAPI read lane only.", Required = false)]
+            public bool? returnPayloadOnly { get; set; } = false;
         }
 
         [MenuItem("VRCForge/Export Blendshapes")]
@@ -43,6 +45,13 @@ namespace VRCForge.Editor
 
             try
             {
+                if (parameters.returnPayloadOnly == true)
+                {
+                    var payload = BuildPayload();
+                    return new SuccessResponse(
+                        $"Read {payload.summary.blendshapeCount} blendshapes from {payload.summary.rendererCount} renderers.",
+                        payload);
+                }
                 var exportResult = ExportToDisk(
                     string.IsNullOrWhiteSpace(parameters.outputPath) ? DefaultOutputPath : parameters.outputPath,
                     parameters.refreshAssets ?? true);

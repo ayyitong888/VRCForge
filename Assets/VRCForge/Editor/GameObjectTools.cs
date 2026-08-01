@@ -4,8 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -13,7 +12,7 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_scan_avatar_items",
         Description = "Scan avatar GameObjects and renderer-backed items into a read-only hierarchy inventory."
     )]
@@ -31,16 +30,16 @@ namespace VRCForge.Editor
 
         public class ScanAvatarItemsParameters
         {
-            [ToolParameter("Optional avatar root hierarchy path. If empty, all scene avatar roots are scanned.", Required = false)]
+            [VRCForgeParameter("Optional avatar root hierarchy path. If empty, all scene avatar roots are scanned.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
+            [VRCForgeParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [ToolParameter("Maximum number of hierarchy items to return.", Required = false)]
+            [VRCForgeParameter("Maximum number of hierarchy items to return.", Required = false)]
             public int? maxItems { get; set; } = 500;
 
-            [ToolParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 

@@ -74,7 +74,7 @@ direct write entrypoint; approval, checkpoint, and rollback remain mandatory.
 
 ## Unity Plugin / Unity 插件
 
-The desktop app auto-installs VRCForge Unity tools to `Assets/VRCForge/Editor` and the Unity MCP package to `Packages/com.coplaydev.unity-mcp`, with backups under `.vrcforge/backups/`. Install is idempotent and includes fallback to manual `VRCForge.unitypackage` import.
+The desktop app installs the VRCForge Unity tools and project-scoped MCP Core under `Assets/VRCForge`, with backups under `.vrcforge/backups/`. No separate Unity MCP package or manifest edit is required. Install is idempotent and includes fallback to manual `VRCForge.unitypackage` import.
 
 ## Privacy / 隐私
 

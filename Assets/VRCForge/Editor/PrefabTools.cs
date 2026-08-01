@@ -4,15 +4,14 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_restore_safe_backup",
         Description = "Preview or restore files from a VRCForge-created backup snapshot with project identity and overwrite checks."
     )]
@@ -23,28 +22,28 @@ namespace VRCForge.Editor
 
         public class RestoreSafeBackupParameters
         {
-            [ToolParameter("Absolute or project-relative path to a VRCForge backup folder.", Required = false)]
+            [VRCForgeParameter("Absolute or project-relative path to a VRCForge backup folder.", Required = false)]
             public string backupPath { get; set; } = "";
 
-            [ToolParameter("Backup id under backupRoot. Used when backupPath is empty.", Required = false)]
+            [VRCForgeParameter("Backup id under backupRoot. Used when backupPath is empty.", Required = false)]
             public string backupId { get; set; } = "";
 
-            [ToolParameter("Project-relative or absolute folder containing backup snapshots.", Required = false)]
+            [VRCForgeParameter("Project-relative or absolute folder containing backup snapshots.", Required = false)]
             public string backupRoot { get; set; } = DefaultBackupRoot;
 
-            [ToolParameter("Optional subset of asset paths to restore from the manifest.", Required = false)]
+            [VRCForgeParameter("Optional subset of asset paths to restore from the manifest.", Required = false)]
             public List<string> assetPaths { get; set; } = new List<string>();
 
-            [ToolParameter("Must be true to actually copy files. False returns a restore preview.", Required = false)]
+            [VRCForgeParameter("Must be true to actually copy files. False returns a restore preview.", Required = false)]
             public bool? confirmRestore { get; set; } = false;
 
-            [ToolParameter("Allow restore when the project identity does not match the backup manifest.", Required = false)]
+            [VRCForgeParameter("Allow restore when the project identity does not match the backup manifest.", Required = false)]
             public bool? allowProjectMismatch { get; set; } = false;
 
-            [ToolParameter("Allow overwriting files that changed since the backup was created.", Required = false)]
+            [VRCForgeParameter("Allow overwriting files that changed since the backup was created.", Required = false)]
             public bool? allowOverwriteChanged { get; set; } = false;
 
-            [ToolParameter("Refresh the Unity AssetDatabase after files are restored.", Required = false)]
+            [VRCForgeParameter("Refresh the Unity AssetDatabase after files are restored.", Required = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 

@@ -98,6 +98,11 @@ def test_reasoning_variants_are_provider_and_model_aware():
     assert reasoning_effort_variants("openai", "gpt-5.4-pro") == []
     assert reasoning_effort_variants("openai", "gpt-5.2-chat-latest") == []
     assert reasoning_effort_variants("deepseek", "deepseek-reasoner") == ["none", "high"]
+    assert reasoning_effort_variants("deepseek", "deepseek-v4-flash", "responses") == [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ]
+    assert reasoning_effort_variants("deepseek", "deepseek-v4-flash", "chat_completions") == ["none", "low", "high", "max"]
+    assert reasoning_effort_variants("deepseek", "deepseek-v4-pro", "chat_completions") == ["none", "low", "high", "max"]
     assert reasoning_effort_variants("deepseek", "unknown-model") == []
     assert reasoning_effort_variants("openrouter", "openai/o3") == [
         "none", "minimal", "low", "medium", "high", "xhigh"
@@ -119,6 +124,15 @@ def test_reasoning_descriptor_has_default_separate_from_explicit_none():
     assert [variant["key"] for variant in descriptor["variants"]] == ["none", "high"]
     assert {variant["requestMode"] for variant in descriptor["variants"]} == {"thinking_toggle"}
     assert "default" not in [variant["key"] for variant in descriptor["variants"]]
+
+
+def test_flash_responses_reasoning_descriptor_is_transport_specific():
+    descriptor = reasoning_variants_descriptor("deepseek", "deepseek-v4-flash", "responses")
+    assert descriptor["transport"] == "deepseek_responses"
+    assert descriptor["resolvedApiType"] == "responses"
+    assert [variant["key"] for variant in descriptor["variants"]] == [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ]
 
 
 # --- OpenAI-compatible lane --------------------------------------------------
@@ -373,6 +387,35 @@ def test_provider_connection_test_reuses_production_reasoning_resolver():
     assert result["ok"] is True
     config = probe.call_args.args[0]
     assert config.thinking_level == "high"
+
+
+@pytest.mark.parametrize(("capability", "expected_text", "structured"), [
+    ("text", "VRCForge provider test OK", False),
+    ("structured", '{"ok":true,"name":"vrcforge"}', True),
+])
+def test_provider_test_routes_flash_responses_probe_without_chat(capability, expected_text, structured):
+    requests = []
+
+    class FakeResponsesAdapter:
+        def __init__(self, **_kwargs):
+            pass
+
+        def send_request(self, request):
+            requests.append(request)
+            return SimpleNamespace(text=expected_text, usage={}, reasoning_summary=[])
+
+    with patch.object(dashboard_server, "DeepSeekResponsesAdapter", FakeResponsesAdapter):
+        response = TestClient(dashboard_server.app).post(
+            "/api/app/provider/test",
+            json={
+                "provider": "deepseek", "api_key": "safe-key", "base_url": "https://api.deepseek.example",
+                "model": "deepseek-v4-flash", "api_type": "responses", "capability": capability,
+            },
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True and payload["apiType"] == "responses" and payload["resolvedApiType"] == "responses"
+    assert len(requests) == 1 and requests[0].mode == "probe" and requests[0].structured_output is structured
 
 
 def test_provider_connection_test_reports_unsupported_variant_without_sending():

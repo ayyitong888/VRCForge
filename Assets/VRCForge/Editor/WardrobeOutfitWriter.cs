@@ -2,14 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -28,7 +27,7 @@ namespace VRCForge.Editor
     // It NEVER rewrites existing clips/states (per-clip author choices are
     // intentional). Exclusivity for previously-authored outfits is preserved by the
     // wardrobe's Write Defaults + scene-default-off convention. Supports preview.
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_add_wardrobe_outfit",
         Description = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, set new objects scene-default off, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (nested SubMenu overflow). Add-only, never rewrites existing clips. Supports preview."
     )]

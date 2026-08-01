@@ -5,8 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -15,7 +14,7 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_scan_animation_bindings",
         Description = "Scan AnimationClip bindings for object toggles, blendshapes, material properties, and unsupported asset-reference writes."
     )]
@@ -26,25 +25,25 @@ namespace VRCForge.Editor
 
         public class ScanAnimationBindingsParameters
         {
-            [ToolParameter("Optional avatar root hierarchy path used to discover FX clips.", Required = false)]
+            [VRCForgeParameter("Optional avatar root hierarchy path used to discover FX clips.", Required = false)]
             public string avatarPath { get; set; } = "";
 
-            [ToolParameter("Optional AnimatorController asset path used to discover clips.", Required = false)]
+            [VRCForgeParameter("Optional AnimatorController asset path used to discover clips.", Required = false)]
             public string controllerPath { get; set; } = "";
 
-            [ToolParameter("Optional explicit AnimationClip asset paths.", Required = false)]
+            [VRCForgeParameter("Optional explicit AnimationClip asset paths.", Required = false)]
             public List<string> clipPaths { get; set; } = new List<string>();
 
-            [ToolParameter("When true, scan all AnimationClip assets in the project.", Required = false)]
+            [VRCForgeParameter("When true, scan all AnimationClip assets in the project.", Required = false)]
             public bool? includeAllProjectClips { get; set; } = false;
 
-            [ToolParameter("Maximum number of clips to scan.", Required = false)]
+            [VRCForgeParameter("Maximum number of clips to scan.", Required = false)]
             public int? maxClips { get; set; } = 300;
 
-            [ToolParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
+            [VRCForgeParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [ToolParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 

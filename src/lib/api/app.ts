@@ -1,5 +1,5 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorFixMode, DoctorFixResult, DoctorReport, PermissionState, ProjectSnapshot, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
+import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorFixMode, DoctorFixResult, DoctorReport, PermissionState, ProjectSnapshot, ProviderApiType, ProviderCapabilityKey, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
 
 export async function fetchBootstrap(endpoint: string, options: { refreshProjects?: boolean } = {}): Promise<AppBootstrap> {
   if (hasTauriInternals()) {
@@ -255,7 +255,7 @@ export async function requestChatAttachmentImport(
 
 export async function updateApiConfig(
   endpoint: string,
-  config: { provider: string; api_key: string; base_url?: string; model?: string; thinking_level?: string },
+  config: { provider: string; api_key: string; base_url?: string; model?: string; api_type?: ProviderApiType; thinking_level?: string },
 ) {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<{ ok?: boolean; apiConfig: ApiConfig; visionConfig?: VisionConfig }>("update_api_config", {
@@ -292,6 +292,13 @@ export type ProviderModelList = {
   models: ProviderModelInfo[];
   modelCount: number;
   selectedModel?: string;
+  api_type?: ProviderApiType;
+  apiType?: ProviderApiType;
+  resolvedApiType?: Exclude<ProviderApiType, "auto">;
+  supportedApiTypes?: ProviderApiType[];
+  capabilities?: ProviderCapabilityKey[];
+  capabilitySource?: string;
+  modelRegistrySchema?: string;
 };
 
 export type ProviderTestResult = {
@@ -301,6 +308,8 @@ export type ProviderTestResult = {
   provider: string;
   providerLabel?: string;
   model?: string;
+  apiType?: ProviderApiType | string;
+  resolvedApiType?: ProviderApiType | string;
   message: string;
   responsePreview?: string;
   skipped?: boolean;
@@ -310,6 +319,8 @@ export type ProviderReasoningVariants = {
   schema: "vrcforge.reasoning_variants.v1" | string;
   provider: string;
   model: string;
+  apiType?: ProviderApiType | string;
+  resolvedApiType?: ProviderApiType | string;
   transport: string;
   defaultKey: "default" | string;
   variants: Array<{
@@ -322,7 +333,7 @@ export type ProviderReasoningVariants = {
 
 export async function fetchProviderModels(
   endpoint: string,
-  config: { provider: string; api_key?: string; base_url?: string; model?: string },
+  config: { provider: string; api_key?: string; base_url?: string; model?: string; api_type?: ProviderApiType },
 ): Promise<ProviderModelList> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<ProviderModelList>("fetch_provider_models", {
@@ -338,7 +349,7 @@ export async function fetchProviderModels(
 
 export async function fetchReasoningVariants(
   endpoint: string,
-  request: { provider: string; model: string },
+  request: { provider: string; model: string; api_type?: ProviderApiType },
 ): Promise<ProviderReasoningVariants> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<ProviderReasoningVariants>("fetch_reasoning_variants", {
@@ -355,7 +366,7 @@ export async function fetchReasoningVariants(
 
 export async function testProviderCapability(
   endpoint: string,
-  request: { provider: string; api_key?: string; base_url?: string; model?: string; thinking_level?: string; capability: "text" | "structured" | "vision" },
+  request: { provider: string; api_key?: string; base_url?: string; model?: string; api_type?: ProviderApiType; thinking_level?: string; capability: "text" | "structured" | "vision" },
 ): Promise<ProviderTestResult> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<ProviderTestResult>("test_provider_capability", {

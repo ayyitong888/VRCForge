@@ -4,8 +4,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -13,6 +11,7 @@ using UnityEditor.Animations;
 using UnityEngine;
 using VRC.SDK3.Avatars.Components;
 using VRC.SDK3.Avatars.ScriptableObjects;
+using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
@@ -24,7 +23,7 @@ namespace VRCForge.Editor
     // For every outfit it also reads the clip's m_IsActive curves (which objects it turns
     // on vs off) and the state's Write Defaults flag, because exclusivity in this style
     // relies on WD + scene-default-off alternates. This is read-only.
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_scan_wardrobe",
         Description = "Detect VRChat int-exclusive wardrobe(s): reconcile an expression Int parameter, menu toggle values (recursing SubMenus), FX layer Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults flags. Read-only."
     )]

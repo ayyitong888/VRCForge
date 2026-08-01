@@ -334,6 +334,10 @@ export default function App() {
     setApiBaseUrl,
     apiModel,
     setApiModel,
+    apiType,
+    setApiType,
+    selectedModelCapabilities,
+    selectedModelCapabilitySource,
     apiThinkingLevel,
     setApiThinkingLevel,
     reasoningVariants,
@@ -2963,6 +2967,9 @@ export default function App() {
               apiKey={apiKey}
               apiBaseUrl={apiBaseUrl}
               apiModel={apiModel}
+              apiType={apiType}
+              selectedModelCapabilities={selectedModelCapabilities}
+              selectedModelCapabilitySource={selectedModelCapabilitySource}
               apiThinkingLevel={apiThinkingLevel}
               reasoningVariants={reasoningVariants}
               apiKeySaved={apiKeySaved}
@@ -3017,6 +3024,7 @@ export default function App() {
               onApiKeyChange={setApiKey}
               onApiBaseUrlChange={setApiBaseUrl}
               onApiModelChange={setApiModel}
+              onApiTypeChange={setApiType}
               onApiThinkingLevelChange={setApiThinkingLevel}
               onSaveApiProvider={saveApiProvider}
               onVisionProviderChange={handleVisionProviderChange}

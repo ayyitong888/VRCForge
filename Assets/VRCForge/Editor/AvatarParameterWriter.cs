@@ -1,8 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -11,7 +10,7 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_apply_parameter_optimization",
         Description = "Apply selected VRCExpressionParameters type optimizations via a predefined VRCForge tool."
     )]
@@ -124,7 +123,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_rollback_avatar_parameters",
         Description = "Restore VRCExpressionParameters from a dashboard snapshot via a predefined VRCForge tool."
     )]

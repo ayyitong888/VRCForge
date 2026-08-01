@@ -11,6 +11,7 @@ import type {
   ExternalAgentConnectorStatus,
   PermissionState,
   ProviderModelInfo,
+  ProviderApiType,
   ProviderReasoningVariants,
   VisionConfig,
 } from "../../lib/api";
@@ -44,6 +45,9 @@ type SettingsWorkspaceProps = {
   apiKey: string;
   apiBaseUrl: string;
   apiModel: string;
+  apiType: ProviderApiType;
+  selectedModelCapabilities?: readonly string[];
+  selectedModelCapabilitySource?: string;
   apiThinkingLevel: string;
   reasoningVariants: ProviderReasoningVariants | null;
   apiKeySaved: boolean;
@@ -90,6 +94,7 @@ type SettingsWorkspaceProps = {
   onApiKeyChange: (value: string) => void;
   onApiBaseUrlChange: (value: string) => void;
   onApiModelChange: (value: string) => void;
+  onApiTypeChange: (value: ProviderApiType) => void;
   onApiThinkingLevelChange: (value: string) => void;
   onSaveApiProvider: (event?: FormEvent) => void;
   onVisionProviderChange: (value: string) => void;
@@ -133,6 +138,9 @@ export function SettingsWorkspace({
   apiKey,
   apiBaseUrl,
   apiModel,
+  apiType,
+  selectedModelCapabilities,
+  selectedModelCapabilitySource,
   apiThinkingLevel,
   reasoningVariants,
   apiKeySaved,
@@ -179,6 +187,7 @@ export function SettingsWorkspace({
   onApiKeyChange,
   onApiBaseUrlChange,
   onApiModelChange,
+  onApiTypeChange,
   onApiThinkingLevelChange,
   onSaveApiProvider,
   onVisionProviderChange,
@@ -346,6 +355,9 @@ export function SettingsWorkspace({
               apiKey={apiKey}
               baseUrl={apiBaseUrl}
               model={apiModel}
+              apiType={apiType}
+              modelCapabilities={selectedModelCapabilities}
+              capabilitySource={selectedModelCapabilitySource}
               thinkingLevel={apiThinkingLevel}
               reasoningVariants={reasoningVariants}
               saving={savingApiConfig}
@@ -362,6 +374,7 @@ export function SettingsWorkspace({
               onApiKeyChange={onApiKeyChange}
               onBaseUrlChange={onApiBaseUrlChange}
               onModelChange={onApiModelChange}
+              onApiTypeChange={onApiTypeChange}
               onThinkingLevelChange={onApiThinkingLevelChange}
               onSubmit={onSaveApiProvider}
             />

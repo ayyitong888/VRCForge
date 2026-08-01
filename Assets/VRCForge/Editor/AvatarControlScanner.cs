@@ -5,8 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
-using MCPForUnity.Editor.Helpers;
-using MCPForUnity.Editor.Tools;
+using VRCForge.Core.MCP;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -15,7 +14,7 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_scan_avatar_controls",
         Description = "Scan a VRChat avatar expression menu, expression parameters, and scene clothing-like objects via a predefined VRCForge tool."
     )]
@@ -469,7 +468,7 @@ namespace VRCForge.Editor
         }
     }
 
-    [McpForUnityTool(
+    [VRCForgeTool(
         name: "vrc_toggle_scene_object",
         Description = "Toggle a scene GameObject active state by transform path via a predefined VRCForge tool."
     )]
