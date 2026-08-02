@@ -17,10 +17,11 @@ This software is provided without warranty. Users should back up their Unity / V
 
 Bundled third-party component:
 
-* CoplayDev Unity MCP (`com.coplaydev.unity-mcp`)
-  * Upstream: https://github.com/CoplayDev/unity-mcp
-  * License: MIT License, copyright (c) 2025 CoplayDev
-  * The upstream MIT LICENSE is preserved in the vendored package and copied
-    into binary release payloads as `licenses/CoplayDev-Unity-MCP-LICENSE.txt`.
-  * VRCForge distribution notes are included as
-    `licenses/CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt`.
+* uv Windows runtime
+  * Upstream: https://github.com/astral-sh/uv
+  * License: MIT OR Apache-2.0
+  * The upstream license files and VRCForge distribution notes are preserved in
+    binary release payloads under `licenses/`.
+
+The Unity MCP Core and Unity tool registry shipped in `VRCForge.unitypackage`
+are VRCForge-owned first-party code. No third-party Unity MCP package is bundled.

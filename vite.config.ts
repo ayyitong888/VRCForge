@@ -8,5 +8,8 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 1420,
     strictPort: true,
+    watch: {
+      ignored: ["**/artifacts/**", "**/src-tauri/target/**"],
+    },
   },
 });

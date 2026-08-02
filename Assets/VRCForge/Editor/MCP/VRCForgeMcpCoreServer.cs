@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -16,30 +17,80 @@ using VRCForge.Core.MCP;
 namespace VRCForge.Editor
 {
     /// <summary>
-    /// Project-scoped, loopback-only MCP service. Explicitly read-only tools
-    /// may execute directly; every write-capable tool fails closed.
+    /// Project-scoped, loopback-only MCP service. Direct calls may execute only
+    /// explicitly read-only tools. Preview, checkpoint-control, and write calls
+    /// require the release-paired managed VRCForge App lane; writes additionally
+    /// require a one-use approval/checkpoint execution context.
     /// </summary>
     public static class VRCForgeMcpCoreServer
     {
-        private const string TransportSchema = "vrcforge.mcp.transport.v1";
-        private const string ProtocolVersion = "2025-11-25";
+        private const string TransportSchema = "vrcforge.mcp.transport.v2";
+        private const string ModernProtocolVersion = "2026-07-28";
+        private const string ApprovedExecutionMetaKey = "io.vrcforge/approvedExecution";
         private const int MaxFrameBytes = 1024 * 1024;
         private const int MaxClients = 4;
         private const int SocketTimeoutMilliseconds = 15000;
         private const int ThreadJoinMilliseconds = 2000;
         private const int InvocationQueueTimeoutMilliseconds = 120000;
+        private const int ApprovedExecutionMaxLifetimeMilliseconds = 120000;
+        private const int ApprovedExecutionClockSkewMilliseconds = 5000;
+        private const int MaxConsumedExecutionIds = 4096;
         private static readonly object LifecycleGate = new object();
         private static readonly object Gate = new object();
         private static readonly HashSet<TcpClient> ActiveClients = new HashSet<TcpClient>();
         private static readonly HashSet<Thread> ActiveWorkers = new HashSet<Thread>();
         private static readonly ConcurrentQueue<PendingInvocation> PendingInvocations = new ConcurrentQueue<PendingInvocation>();
+        private static readonly Dictionary<string, long> ConsumedExecutionExpirations =
+            new Dictionary<string, long>(StringComparer.Ordinal);
+        private static readonly Queue<KeyValuePair<string, long>> ConsumedExecutionOrder =
+            new Queue<KeyValuePair<string, long>>();
+        private static readonly HashSet<string> PreviewTools = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "vrc_set_material_shader",
+            "vrc_duplicate_scene_object",
+            "vrc_save_scene_object_as_prefab",
+            "vrc_set_texture_import_settings",
+            "vrc_set_constraint_sources",
+            "vrc_create_component_feature",
+            "vrc_build_parameter_bit_packed_clone",
+            "vrc_atomic_reference_rename",
+        };
+        private static readonly HashSet<string> SafetyControlTools = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "vrc_prepare_checkpoint",
+            "vrc_reload_after_checkpoint_restore",
+        };
+        // This must use Core tool names, never AgentGateway handler names. It
+        // is derived only from the startup-verified immutable 64-tool snapshot.
+        private static ISet<string> ApprovedAppCoreTools = new HashSet<string>(StringComparer.Ordinal);
+
+        private enum InvocationLane
+        {
+            DirectRead = 0,
+            AppPreview = 1,
+            AppSafetyControl = 2,
+            AppSetupOutfitPoll = 3,
+            ApprovedWrite = 4,
+        }
 
         private sealed class VRCForgeMcpProtocolException : Exception { }
+
+        private sealed class VRCForgeMcpMetadataError
+        {
+            internal int Code;
+            internal string Message;
+            internal JObject Data;
+        }
 
         private sealed class PendingInvocation
         {
             public string ToolName;
             public JObject Arguments;
+            public JObject ExecutionContext;
+            public InvocationLane Lane;
+            public TcpClient Client;
+            public VRCForgeMcpPeerProcessEvidence PeerEvidence;
+            public bool Modern;
             public readonly ManualResetEventSlim Completion = new ManualResetEventSlim(false);
             public JObject Response;
             public int State;
@@ -53,11 +104,33 @@ namespace VRCForge.Editor
         private static string descriptorInstanceId;
         private static VRCForgeToolDescriptor[] tools = new VRCForgeToolDescriptor[0];
 
+        [InitializeOnLoadMethod]
+        private static void RegisterEditorDomainInvocationPump()
+        {
+            // The main-thread pump belongs to the Unity editor domain, not to
+            // any listener instance. Register it before Bootstrap can start a
+            // listener from an update callback, so a successful Start never
+            // depends on mutating the update delegate during its dispatch.
+            EditorApplication.update -= DrainInvocations;
+            EditorApplication.update += DrainInvocations;
+        }
+
         public static void Start()
         {
             lock (LifecycleGate)
             {
                 StartExclusive();
+            }
+        }
+
+        public static bool IsReady
+        {
+            get
+            {
+                lock (Gate)
+                {
+                    return listener != null;
+                }
             }
         }
 
@@ -79,6 +152,7 @@ namespace VRCForge.Editor
                 try
                 {
                     tools = SnapshotTools();
+                    ApprovedAppCoreTools = SnapshotApprovedWriteTools(tools);
                     token = CreateToken();
                     descriptorPath = GetDescriptorPath();
                     descriptorInstanceId = Guid.NewGuid().ToString("N");
@@ -86,7 +160,6 @@ namespace VRCForge.Editor
                     listener.Start(MaxClients);
                     WriteDescriptor((IPEndPoint)listener.LocalEndpoint);
                     stopping = false;
-                    EditorApplication.update += DrainInvocations;
                     acceptThread = new Thread(AcceptLoop);
                     acceptThread.IsBackground = true;
                     acceptThread.Name = "VRCForgeMcpCoreAccept";
@@ -138,7 +211,6 @@ namespace VRCForge.Editor
             out string priorDescriptorInstanceId)
         {
             stopping = true;
-            EditorApplication.update -= DrainInvocations;
             if (listener != null)
             {
                 try { listener.Stop(); } catch (SocketException) { }
@@ -157,6 +229,9 @@ namespace VRCForge.Editor
             priorDescriptorInstanceId = descriptorInstanceId;
             acceptThread = null;
             tools = new VRCForgeToolDescriptor[0];
+            ApprovedAppCoreTools = new HashSet<string>(StringComparer.Ordinal);
+            ConsumedExecutionExpirations.Clear();
+            ConsumedExecutionOrder.Clear();
             ClearSecret(ref token);
             descriptorPath = null;
             descriptorInstanceId = null;
@@ -215,7 +290,45 @@ namespace VRCForge.Editor
 
         private static VRCForgeToolDescriptor[] SnapshotTools()
         {
-            return new List<VRCForgeToolDescriptor>(VRCForgeToolRegistry.DiscoverLoadedAssemblies().Tools).ToArray();
+            return VRCForgeMcpToolContract.SnapshotExact(
+                VRCForgeToolRegistry.DiscoverLoadedAssemblies().Tools);
+        }
+
+        private static ISet<string> SnapshotApprovedWriteTools(IEnumerable<VRCForgeToolDescriptor> snapshot)
+        {
+            var all = new HashSet<string>(StringComparer.Ordinal);
+            var readOnly = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var descriptor in snapshot ?? Enumerable.Empty<VRCForgeToolDescriptor>())
+            {
+                if (descriptor == null || !VRCForgeMcpToolContract.IsExpectedDescriptor(descriptor)
+                    || !all.Add(descriptor.Name))
+                {
+                    throw new InvalidOperationException("The packaged VRCForge MCP tool contract is invalid.");
+                }
+                if (descriptor.Permission == VRCForgeToolPermission.ReadOnly)
+                {
+                    readOnly.Add(descriptor.Name);
+                }
+            }
+            var preview = new HashSet<string>(PreviewTools, StringComparer.Ordinal);
+            var safety = new HashSet<string>(SafetyControlTools, StringComparer.Ordinal);
+            if (all.Count != VRCForgeMcpToolContract.ToolCount
+                || readOnly.Count != 8 || preview.Count != 8 || safety.Count != 2
+                || !all.SetEquals(VRCForgeMcpToolContract.ExpectedToolNames)
+                || !readOnly.SetEquals(VRCForgeMcpToolContract.ExpectedReadOnlyToolNames)
+                || !all.IsSupersetOf(preview) || !all.IsSupersetOf(safety)
+                || readOnly.Overlaps(preview) || readOnly.Overlaps(safety) || preview.Overlaps(safety))
+            {
+                throw new InvalidOperationException("The VRCForge MCP tool lanes do not match the packaged contract.");
+            }
+            var approved = new HashSet<string>(all, StringComparer.Ordinal);
+            approved.ExceptWith(readOnly);
+            approved.ExceptWith(safety);
+            if (approved.Count != 54 || !approved.IsSupersetOf(preview))
+            {
+                throw new InvalidOperationException("The VRCForge approved-write tool contract is invalid.");
+            }
+            return approved;
         }
 
         private static byte[] CreateToken()
@@ -322,24 +435,12 @@ namespace VRCForge.Editor
                 using (client)
                 using (var stream = client.GetStream())
                 {
-                    var authenticated = false;
-                    var initialized = false;
-                    var receivedInitializedNotification = false;
                     while (!stopping)
                     {
                         var envelope = ReadEnvelope(stream);
-                        if (!authenticated)
-                        {
-                            AuthenticateFirstEnvelope(envelope);
-                            authenticated = true;
-                        }
-                        else
-                        {
-                            ValidateSubsequentEnvelope(envelope);
-                        }
-
                         var message = envelope["message"] as JObject;
-                        var response = HandleMessage(message, ref initialized, ref receivedInitializedNotification);
+                        AuthenticateEnvelope(envelope, true);
+                        var response = HandleMessage(message, client);
                         if (response != null)
                         {
                             WriteEnvelope(stream, response);
@@ -364,14 +465,59 @@ namespace VRCForge.Editor
 
         private static JObject ReadEnvelope(NetworkStream stream)
         {
-            var lengthBytes = ReadExactly(stream, 4);
-            var length = (lengthBytes[0] << 24) | (lengthBytes[1] << 16) | (lengthBytes[2] << 8) | lengthBytes[3];
-            if (length <= 0 || length > MaxFrameBytes)
+            var first = stream.ReadByte();
+            if (first < 0)
+            {
+                throw new IOException();
+            }
+            if (first != (byte)'{')
             {
                 throw new VRCForgeMcpProtocolException();
             }
-            var payload = Encoding.UTF8.GetString(ReadExactly(stream, length));
-            var envelope = JObject.Parse(payload);
+            return ParseEnvelope(ReadNewlineFrame(stream, (byte)first));
+        }
+
+        private static byte[] ReadNewlineFrame(NetworkStream stream, byte? first)
+        {
+            using (var buffer = new MemoryStream())
+            {
+                if (first.HasValue)
+                {
+                    buffer.WriteByte(first.Value);
+                }
+                while (true)
+                {
+                    var value = stream.ReadByte();
+                    if (value < 0)
+                    {
+                        throw new IOException();
+                    }
+                    if (value == (byte)'\n')
+                    {
+                        break;
+                    }
+                    if (buffer.Length >= MaxFrameBytes)
+                    {
+                        throw new VRCForgeMcpProtocolException();
+                    }
+                    buffer.WriteByte((byte)value);
+                }
+                var payload = buffer.ToArray();
+                if (payload.Length > 0 && payload[payload.Length - 1] == (byte)'\r')
+                {
+                    Array.Resize(ref payload, payload.Length - 1);
+                }
+                if (payload.Length == 0)
+                {
+                    throw new VRCForgeMcpProtocolException();
+                }
+                return payload;
+            }
+        }
+
+        private static JObject ParseEnvelope(byte[] payload)
+        {
+            var envelope = JObject.Parse(new UTF8Encoding(false, true).GetString(payload));
             if (!string.Equals((string)envelope["schema"], TransportSchema, StringComparison.Ordinal)
                 || !(envelope["message"] is JObject))
             {
@@ -380,49 +526,25 @@ namespace VRCForge.Editor
             return envelope;
         }
 
-        private static byte[] ReadExactly(NetworkStream stream, int length)
-        {
-            var result = new byte[length];
-            var offset = 0;
-            while (offset < length)
-            {
-                var count = stream.Read(result, offset, length - offset);
-                if (count <= 0)
-                {
-                    throw new IOException();
-                }
-                offset += count;
-            }
-            return result;
-        }
-
-        private static void AuthenticateFirstEnvelope(JObject envelope)
+        private static void AuthenticateEnvelope(JObject envelope, bool required)
         {
             var authorizationToken = envelope["authorization"];
-            if (authorizationToken == null || authorizationToken.Type != JTokenType.String)
+            if (authorizationToken == null)
+            {
+                if (required)
+                {
+                    throw new VRCForgeMcpProtocolException();
+                }
+                return;
+            }
+            if (authorizationToken.Type != JTokenType.String)
             {
                 throw new VRCForgeMcpProtocolException();
             }
-            var authorization = (string)authorizationToken;
+            var supplied = (string)authorizationToken;
             const string prefix = "Bearer ";
-            if (string.IsNullOrEmpty(authorization) || !authorization.StartsWith(prefix, StringComparison.Ordinal)
-                || !ConstantTimeTokenEquals(authorization.Substring(prefix.Length), token))
-            {
-                throw new VRCForgeMcpProtocolException();
-            }
-        }
-
-        private static void ValidateSubsequentEnvelope(JObject envelope)
-        {
-            var authorization = envelope["authorization"];
-            if (authorization != null && authorization.Type != JTokenType.String)
-            {
-                throw new VRCForgeMcpProtocolException();
-            }
-            var supplied = authorization == null ? null : (string)authorization;
-            if (authorization != null && (string.IsNullOrEmpty(supplied)
-                || !supplied.StartsWith("Bearer ", StringComparison.Ordinal)
-                || !ConstantTimeTokenEquals(supplied.Substring("Bearer ".Length), token)))
+            if (string.IsNullOrEmpty(supplied) || !supplied.StartsWith(prefix, StringComparison.Ordinal)
+                || !ConstantTimeTokenEquals(supplied.Substring(prefix.Length), token))
             {
                 throw new VRCForgeMcpProtocolException();
             }
@@ -453,7 +575,7 @@ namespace VRCForge.Editor
             return difference == 0;
         }
 
-        private static JObject HandleMessage(JObject message, ref bool initialized, ref bool initializedNotification)
+        private static JObject HandleMessage(JObject message, TcpClient client)
         {
             if (!string.Equals((string)message["jsonrpc"], "2.0", StringComparison.Ordinal)
                 || message["method"] == null || message["method"].Type != JTokenType.String)
@@ -473,65 +595,95 @@ namespace VRCForge.Editor
                 throw new VRCForgeMcpProtocolException();
             }
             var parameters = message["params"] as JObject;
-
-            if (string.Equals(method, "ping", StringComparison.Ordinal))
+            var metadataError = ValidateModernMetadata(parameters);
+            if (metadataError != null)
             {
-                return hasId ? Result(id, new JObject()) : null;
+                return hasId ? Error(id, metadataError.Code, metadataError.Message, metadataError.Data) : null;
             }
-            if (!initialized)
+            if (string.Equals(method, "server/discover", StringComparison.Ordinal))
             {
-                if (!string.Equals(method, "initialize", StringComparison.Ordinal) || !hasId)
-                {
-                    return hasId ? Error(id, -32600, "Initialize first.") : null;
-                }
-                var clientInfo = parameters == null ? null : parameters["clientInfo"] as JObject;
-                if (parameters == null
-                    || !string.Equals((string)parameters["protocolVersion"], ProtocolVersion, StringComparison.Ordinal)
-                    || !(parameters["capabilities"] is JObject)
-                    || clientInfo == null
-                    || clientInfo["name"] == null || clientInfo["name"].Type != JTokenType.String
-                    || clientInfo["version"] == null || clientInfo["version"].Type != JTokenType.String)
-                {
-                    return Error(id, -32602, "Invalid initialize parameters.");
-                }
-                initialized = true;
-                return Result(id, InitializeResult());
-            }
-
-            if (string.Equals(method, "notifications/initialized", StringComparison.Ordinal))
-            {
-                if (hasId)
-                {
-                    return Error(id, -32600, "Invalid notification.");
-                }
-                initializedNotification = true;
-                return null;
-            }
-            if (!initializedNotification)
-            {
-                return hasId ? Error(id, -32600, "Initialized notification required.") : null;
+                return hasId ? Result(id, DiscoverResult(), true) : null;
             }
 
             if (string.Equals(method, "tools/list", StringComparison.Ordinal))
             {
-                return hasId ? Result(id, ToolsListResult()) : null;
+                return hasId ? Result(id, ToolsListResult(true), true) : null;
             }
             if (string.Equals(method, "tools/call", StringComparison.Ordinal))
             {
-                return hasId ? Result(id, InvokeTool(parameters)) : null;
+                return hasId ? Result(id, InvokeTool(parameters, client, true), true) : null;
             }
             if (string.Equals(method, "resources/list", StringComparison.Ordinal))
             {
-                return hasId ? Result(id, new JObject { ["resources"] = new JArray() }) : null;
+                var resources = new JObject { ["resources"] = new JArray() };
+                resources["ttlMs"] = 3000;
+                resources["cacheScope"] = "private";
+                return hasId ? Result(id, resources, true) : null;
             }
             if (string.Equals(method, "prompts/list", StringComparison.Ordinal))
             {
-                return hasId ? Result(id, new JObject { ["prompts"] = new JArray() }) : null;
+                var prompts = new JObject { ["prompts"] = new JArray() };
+                prompts["ttlMs"] = 3000;
+                prompts["cacheScope"] = "private";
+                return hasId ? Result(id, prompts, true) : null;
             }
             return hasId ? Error(id, -32601, "Method not found.") : null;
         }
 
-        private static JObject InvokeTool(JObject parameters)
+        private static VRCForgeMcpMetadataError ValidateModernMetadata(JObject parameters)
+        {
+            var metadata = parameters == null ? null : parameters["_meta"] as JObject;
+            if (metadata == null)
+            {
+                return new VRCForgeMcpMetadataError
+                {
+                    Code = -32021,
+                    Message = "Required client capabilities are missing.",
+                    Data = new JObject { ["requiredCapabilities"] = new JObject() },
+                };
+            }
+            var requestedVersion = metadata["io.modelcontextprotocol/protocolVersion"];
+            if (!string.Equals(
+                    requestedVersion != null && requestedVersion.Type == JTokenType.String
+                        ? (string)requestedVersion
+                        : null,
+                    ModernProtocolVersion,
+                    StringComparison.Ordinal))
+            {
+                return new VRCForgeMcpMetadataError
+                {
+                    Code = -32022,
+                    Message = "Unsupported protocol version.",
+                    Data = new JObject
+                    {
+                        ["supported"] = new JArray(ModernProtocolVersion),
+                        ["requested"] = requestedVersion != null && requestedVersion.Type == JTokenType.String
+                            ? (string)requestedVersion
+                            : string.Empty,
+                    },
+                };
+            }
+            if (!(metadata["io.modelcontextprotocol/clientCapabilities"] is JObject))
+            {
+                return new VRCForgeMcpMetadataError
+                {
+                    Code = -32021,
+                    Message = "Required client capabilities are missing.",
+                    Data = new JObject { ["requiredCapabilities"] = new JObject() },
+                };
+            }
+            var clientInfoToken = metadata["io.modelcontextprotocol/clientInfo"];
+            var clientInfo = clientInfoToken as JObject;
+            if (clientInfoToken != null && (clientInfo == null
+                || clientInfo["name"] == null || clientInfo["name"].Type != JTokenType.String
+                || clientInfo["version"] == null || clientInfo["version"].Type != JTokenType.String))
+            {
+                return new VRCForgeMcpMetadataError { Code = -32602, Message = "Client identity is invalid." };
+            }
+            return null;
+        }
+
+        private static JObject InvokeTool(JObject parameters, TcpClient client, bool modern)
         {
             if (parameters == null || parameters["name"] == null || parameters["name"].Type != JTokenType.String
                 || (parameters["arguments"] != null && !(parameters["arguments"] is JObject)))
@@ -547,23 +699,123 @@ namespace VRCForge.Editor
             }
             catch (KeyNotFoundException)
             {
-                return ToolError("Unknown VRCForge tool.");
-            }
-            if (descriptor.Permission != VRCForgeToolPermission.ReadOnly)
-            {
-                return ToolError("This tool requires the VRCForge FastAPI approval and checkpoint lane.");
+                return ToolError("Unknown VRCForge tool.", modern);
             }
 
-            return QueueInvocation(toolName, arguments);
+            if (descriptor.Permission == VRCForgeToolPermission.ReadOnly
+                || IsStrictBlendshapePayloadRead(toolName, arguments))
+            {
+                return QueueInvocation(toolName, arguments, null, InvocationLane.DirectRead, client, null, modern);
+            }
+
+            var metadata = parameters["_meta"] as JObject;
+            var executionContext = metadata == null ? null : metadata[ApprovedExecutionMetaKey] as JObject;
+            if (executionContext == null)
+            {
+                return ToolError("This tool requires the VRCForge App approval and checkpoint lane.", modern);
+            }
+            VRCForgeMcpPeerProcessEvidence peerEvidence;
+            if (!VRCForgeMcpPeerProcessVerifier.TryScreenManagedBackendPeer(client, out peerEvidence))
+            {
+                return ToolError("The VRCForge managed peer eligibility check failed.", modern);
+            }
+            int claimedProcessId;
+            try
+            {
+                claimedProcessId = executionContext["clientProcessId"] != null
+                    && executionContext["clientProcessId"].Type == JTokenType.Integer
+                    ? executionContext["clientProcessId"].Value<int>()
+                    : 0;
+            }
+            catch (Exception)
+            {
+                claimedProcessId = 0;
+            }
+            if (claimedProcessId != peerEvidence.ProcessId)
+            {
+                return ToolError("The VRCForge App process binding is invalid.", modern);
+            }
+
+            var laneName = (string)executionContext["lane"];
+            InvocationLane lane;
+            if (string.Equals(laneName, "app_preview", StringComparison.Ordinal))
+            {
+                lane = InvocationLane.AppPreview;
+                if (!PreviewTools.Contains(toolName) || !HasExplicitPreviewRequest(arguments))
+                {
+                    return ToolError("The App preview request is not allowed.", modern);
+                }
+            }
+            else if (string.Equals(laneName, "app_safety_control", StringComparison.Ordinal))
+            {
+                lane = InvocationLane.AppSafetyControl;
+                if (!SafetyControlTools.Contains(toolName))
+                {
+                    return ToolError("The App safety-control tool is not allowed.", modern);
+                }
+            }
+            else if (string.Equals(laneName, "app_setup_outfit_poll", StringComparison.Ordinal))
+            {
+                lane = InvocationLane.AppSetupOutfitPoll;
+                if (!IsStrictSetupOutfitJobPoll(toolName, arguments)
+                    || !ValidateManagedAppInstanceContext(executionContext))
+                {
+                    return ToolError("The App Setup Outfit job poll is not allowed.", modern);
+                }
+            }
+            else if (string.Equals(laneName, "approved_write", StringComparison.Ordinal))
+            {
+                lane = InvocationLane.ApprovedWrite;
+                if (!ValidateApprovedExecutionContext(executionContext, toolName, arguments))
+                {
+                    return ToolError("The approved execution context is invalid or expired.", modern);
+                }
+            }
+            else
+            {
+                return ToolError("The VRCForge App execution lane is invalid.", modern);
+            }
+
+            return QueueInvocation(toolName, arguments, executionContext, lane, client, peerEvidence, modern);
         }
 
-        private static JObject QueueInvocation(string toolName, JObject arguments)
+        private static bool IsStrictBlendshapePayloadRead(string toolName, JObject arguments)
+        {
+            if (!string.Equals(toolName, "vrc_export_blendshapes", StringComparison.Ordinal)
+                || arguments == null || arguments.Count != 3)
+            {
+                return false;
+            }
+            var outputPath = arguments["outputPath"];
+            var refreshAssets = arguments["refreshAssets"];
+            var returnPayloadOnly = arguments["returnPayloadOnly"];
+            return outputPath != null && outputPath.Type == JTokenType.String
+                && string.IsNullOrEmpty((string)outputPath)
+                && refreshAssets != null && refreshAssets.Type == JTokenType.Boolean
+                && !refreshAssets.Value<bool>()
+                && returnPayloadOnly != null && returnPayloadOnly.Type == JTokenType.Boolean
+                && returnPayloadOnly.Value<bool>();
+        }
+
+        private static JObject QueueInvocation(
+            string toolName,
+            JObject arguments,
+            JObject executionContext,
+            InvocationLane lane,
+            TcpClient client,
+            VRCForgeMcpPeerProcessEvidence peerEvidence,
+            bool modern)
         {
 
             var pending = new PendingInvocation
             {
                 ToolName = toolName,
                 Arguments = (JObject)arguments.DeepClone(),
+                ExecutionContext = executionContext == null ? null : (JObject)executionContext.DeepClone(),
+                Lane = lane,
+                Client = client,
+                PeerEvidence = peerEvidence,
+                Modern = modern,
             };
             PendingInvocations.Enqueue(pending);
             var deadline = DateTime.UtcNow.AddMilliseconds(InvocationQueueTimeoutMilliseconds);
@@ -582,6 +834,14 @@ namespace VRCForge.Editor
                 throw new VRCForgeMcpProtocolException();
             }
             return pending.Response;
+        }
+
+        private static bool HasExplicitPreviewRequest(JObject arguments)
+        {
+            return arguments != null
+                && arguments["preview"] != null
+                && arguments["preview"].Type == JTokenType.Boolean
+                && arguments["preview"].Value<bool>();
         }
 
         private static VRCForgeToolDescriptor FindTool(string name)
@@ -610,24 +870,278 @@ namespace VRCForge.Editor
             }
             try
             {
-                var registry = VRCForgeToolRegistry.DiscoverLoadedAssemblies();
-                var descriptor = registry.GetRequired(pending.ToolName);
-                if (descriptor.Permission != VRCForgeToolPermission.ReadOnly)
+                var descriptor = FindTool(pending.ToolName);
+                if (!VRCForgeMcpToolContract.IsExpectedDescriptor(descriptor)
+                    || !IsInvocationStillAuthorized(pending, descriptor))
                 {
                     throw new VRCForgeMcpProtocolException();
                 }
-                var result = registry.Invoke(pending.ToolName, pending.Arguments);
-                pending.Response = ToolResult(result);
+                var result = descriptor.Handler.Invoke(null, new object[] { pending.Arguments });
+                pending.Response = ToolResult(result, pending.Modern);
             }
             catch (Exception)
             {
-                pending.Response = ToolError("VRCForge tool execution failed.");
+                pending.Response = ToolError("VRCForge tool execution failed.", pending.Modern);
             }
             finally
             {
                 Volatile.Write(ref pending.State, 2);
                 pending.Completion.Set();
             }
+        }
+
+        private static bool IsInvocationStillAuthorized(
+            PendingInvocation pending,
+            VRCForgeToolDescriptor descriptor)
+        {
+            if (pending == null || descriptor == null)
+            {
+                return false;
+            }
+            if (pending.Lane == InvocationLane.DirectRead)
+            {
+                return descriptor.Permission == VRCForgeToolPermission.ReadOnly
+                    || IsStrictBlendshapePayloadRead(pending.ToolName, pending.Arguments);
+            }
+            if (descriptor.Permission == VRCForgeToolPermission.ReadOnly
+                || !ReverifyManagedPeer(pending))
+            {
+                return false;
+            }
+            if (pending.Lane == InvocationLane.AppPreview)
+            {
+                return PreviewTools.Contains(pending.ToolName);
+            }
+            if (pending.Lane == InvocationLane.AppSafetyControl)
+            {
+                return SafetyControlTools.Contains(pending.ToolName);
+            }
+            if (pending.Lane == InvocationLane.AppSetupOutfitPoll)
+            {
+                return IsStrictSetupOutfitJobPoll(pending.ToolName, pending.Arguments)
+                    && ValidateManagedAppInstanceContext(pending.ExecutionContext);
+            }
+            return pending.Lane == InvocationLane.ApprovedWrite
+                && ValidateApprovedExecutionContext(
+                    pending.ExecutionContext,
+                    pending.ToolName,
+                    pending.Arguments)
+                && ConsumeApprovedExecutionId(
+                    (string)pending.ExecutionContext["executionId"],
+                    pending.ExecutionContext["expiresAtUnixMs"].Value<long>());
+        }
+
+        private static bool IsStrictSetupOutfitJobPoll(string toolName, JObject arguments)
+        {
+            if (!string.Equals(toolName, "vrc_setup_outfit", StringComparison.Ordinal)
+                || arguments == null
+                || arguments.Properties().Count() != 1)
+            {
+                return false;
+            }
+            var jobId = arguments["jobId"];
+            Guid parsed;
+            return jobId != null
+                && jobId.Type == JTokenType.String
+                && Guid.TryParseExact((string)jobId, "N", out parsed);
+        }
+
+        private static bool ValidateManagedAppInstanceContext(JObject context)
+        {
+            if (context == null)
+            {
+                return false;
+            }
+            try
+            {
+                var projectHash = RequiredBoundedString(context, "projectHash", 64);
+                var instanceId = RequiredBoundedString(context, "instanceId", 128);
+                return IsLowerHex(projectHash, 64)
+                    && string.Equals(projectHash, ComputeProjectHash(GetProjectRoot()), StringComparison.Ordinal)
+                    && string.Equals(instanceId, descriptorInstanceId, StringComparison.Ordinal);
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static bool ReverifyManagedPeer(PendingInvocation pending)
+        {
+            VRCForgeMcpPeerProcessEvidence evidence;
+            if (pending == null || pending.ExecutionContext == null || pending.PeerEvidence == null
+                || !VRCForgeMcpPeerProcessVerifier.TryScreenManagedBackendPeer(pending.Client, out evidence)
+                || !pending.PeerEvidence.Matches(evidence))
+            {
+                return false;
+            }
+            try
+            {
+                return pending.ExecutionContext["clientProcessId"] != null
+                    && pending.ExecutionContext["clientProcessId"].Type == JTokenType.Integer
+                    && pending.ExecutionContext["clientProcessId"].Value<int>() == evidence.ProcessId;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static bool ValidateApprovedExecutionContext(
+            JObject context,
+            string toolName,
+            JObject arguments)
+        {
+            if (context == null || arguments == null)
+            {
+                return false;
+            }
+            try
+            {
+                var executionId = RequiredBoundedString(context, "executionId", 128);
+                var approvalId = RequiredBoundedString(context, "approvalId", 256);
+                var checkpointId = RequiredBoundedString(context, "checkpointId", 256);
+                var targetTool = RequiredBoundedString(context, "targetTool", 128);
+                var boundUnityTool = RequiredBoundedString(context, "unityToolName", 128);
+                var argumentsSha256 = RequiredBoundedString(context, "argumentsSha256", 64);
+                var projectHash = RequiredBoundedString(context, "projectHash", 64);
+                var instanceId = RequiredBoundedString(context, "instanceId", 128);
+                var issuedAt = context["issuedAtUnixMs"].Value<long>();
+                var expiresAt = context["expiresAtUnixMs"].Value<long>();
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                if (string.IsNullOrEmpty(executionId)
+                    || string.IsNullOrEmpty(approvalId)
+                    || string.IsNullOrEmpty(checkpointId)
+                    || !ApprovedAppCoreTools.Contains(targetTool)
+                    || !string.Equals(targetTool, toolName, StringComparison.Ordinal)
+                    || !string.Equals(boundUnityTool, toolName, StringComparison.Ordinal)
+                    || !IsLowerHex(argumentsSha256, 64)
+                    || !string.Equals(argumentsSha256, ComputeCanonicalJsonHash(arguments), StringComparison.Ordinal)
+                    || !string.Equals(projectHash, ComputeProjectHash(GetProjectRoot()), StringComparison.Ordinal)
+                    || !string.Equals(instanceId, descriptorInstanceId, StringComparison.Ordinal)
+                    || expiresAt <= issuedAt
+                    || expiresAt - issuedAt > ApprovedExecutionMaxLifetimeMilliseconds
+                    || now < issuedAt - ApprovedExecutionClockSkewMilliseconds
+                    || now >= expiresAt)
+                {
+                    return false;
+                }
+                lock (Gate)
+                {
+                    PurgeExpiredExecutionIds(now);
+                    return !ConsumedExecutionExpirations.ContainsKey(executionId);
+                }
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        private static string RequiredBoundedString(JObject value, string name, int maxLength)
+        {
+            var tokenValue = value[name];
+            if (tokenValue == null || tokenValue.Type != JTokenType.String)
+            {
+                return null;
+            }
+            var text = (string)tokenValue;
+            return string.IsNullOrWhiteSpace(text) || text.Length > maxLength ? null : text;
+        }
+
+        private static bool IsLowerHex(string value, int length)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length != length)
+            {
+                return false;
+            }
+            foreach (var character in value)
+            {
+                if (!((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool ConsumeApprovedExecutionId(string executionId, long expiresAtUnixMs)
+        {
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (string.IsNullOrEmpty(executionId) || expiresAtUnixMs <= now)
+            {
+                return false;
+            }
+            lock (Gate)
+            {
+                PurgeExpiredExecutionIds(now);
+                if (ConsumedExecutionExpirations.ContainsKey(executionId)
+                    || ConsumedExecutionExpirations.Count >= MaxConsumedExecutionIds)
+                {
+                    return false;
+                }
+                ConsumedExecutionExpirations.Add(executionId, expiresAtUnixMs);
+                ConsumedExecutionOrder.Enqueue(
+                    new KeyValuePair<string, long>(executionId, expiresAtUnixMs));
+                return true;
+            }
+        }
+
+        private static void PurgeExpiredExecutionIds(long nowUnixMs)
+        {
+            while (ConsumedExecutionOrder.Count > 0
+                && ConsumedExecutionOrder.Peek().Value <= nowUnixMs)
+            {
+                var expired = ConsumedExecutionOrder.Dequeue();
+                long recordedExpiry;
+                if (ConsumedExecutionExpirations.TryGetValue(expired.Key, out recordedExpiry)
+                    && recordedExpiry == expired.Value)
+                {
+                    ConsumedExecutionExpirations.Remove(expired.Key);
+                }
+            }
+        }
+
+        private static string ComputeCanonicalJsonHash(JToken value)
+        {
+            var canonical = CanonicalizeJson(value).ToString(Formatting.None);
+            using (var sha = SHA256.Create())
+            {
+                var digest = sha.ComputeHash(new UTF8Encoding(false, true).GetBytes(canonical));
+                var builder = new StringBuilder(digest.Length * 2);
+                foreach (var item in digest)
+                {
+                    builder.Append(item.ToString("x2"));
+                }
+                return builder.ToString();
+            }
+        }
+
+        private static JToken CanonicalizeJson(JToken value)
+        {
+            var objectValue = value as JObject;
+            if (objectValue != null)
+            {
+                var result = new JObject();
+                var properties = new List<JProperty>(objectValue.Properties());
+                properties.Sort((left, right) => string.CompareOrdinal(left.Name, right.Name));
+                foreach (var property in properties)
+                {
+                    result[property.Name] = CanonicalizeJson(property.Value);
+                }
+                return result;
+            }
+            var arrayValue = value as JArray;
+            if (arrayValue != null)
+            {
+                var result = new JArray();
+                foreach (var item in arrayValue)
+                {
+                    result.Add(CanonicalizeJson(item));
+                }
+                return result;
+            }
+            return value == null ? JValue.CreateNull() : value.DeepClone();
         }
 
         private static void CancelPendingInvocations()
@@ -640,12 +1154,12 @@ namespace VRCForge.Editor
             }
         }
 
-        private static JObject ToolResult(object value)
+        private static JObject ToolResult(object value, bool modern)
         {
             var tokenValue = value == null ? JValue.CreateNull() : JToken.FromObject(value);
             var isError = value is IMcpResponse response && !response.Success;
             var structured = tokenValue as JObject ?? new JObject { ["result"] = tokenValue.DeepClone() };
-            return new JObject
+            var result = new JObject
             {
                 ["content"] = new JArray
                 {
@@ -658,11 +1172,16 @@ namespace VRCForge.Editor
                 ["structuredContent"] = structured,
                 ["isError"] = isError,
             };
+            if (modern)
+            {
+                result["resultType"] = "complete";
+            }
+            return result;
         }
 
-        private static JObject ToolError(string message)
+        private static JObject ToolError(string message, bool modern)
         {
-            return new JObject
+            var result = new JObject
             {
                 ["content"] = new JArray
                 {
@@ -670,27 +1189,36 @@ namespace VRCForge.Editor
                 },
                 ["isError"] = true,
             };
+            if (modern)
+            {
+                result["resultType"] = "complete";
+            }
+            return result;
         }
 
-        private static JObject InitializeResult()
+        private static JObject DiscoverResult()
         {
             return new JObject
             {
-                ["protocolVersion"] = ProtocolVersion,
+                ["supportedVersions"] = new JArray(ModernProtocolVersion),
                 ["capabilities"] = new JObject
                 {
                     ["tools"] = new JObject { ["listChanged"] = false },
                     ["resources"] = new JObject { ["listChanged"] = false },
-                    ["prompts"] = new JObject { ["listChanged"] = false }
+                    ["prompts"] = new JObject { ["listChanged"] = false },
                 },
-                ["serverInfo"] = new JObject { ["name"] = "VRCForge MCP Core", ["version"] = "1" }
+                ["instructions"] = "Read tools are direct. Other tools require the release-paired managed VRCForge App lane.",
+                ["ttlMs"] = 3000,
+                ["cacheScope"] = "private",
             };
         }
 
-        private static JObject ToolsListResult()
+        private static JObject ToolsListResult(bool modern)
         {
             var result = new JArray();
-            foreach (var descriptor in tools)
+            var orderedTools = new List<VRCForgeToolDescriptor>(tools);
+            orderedTools.Sort((left, right) => string.CompareOrdinal(left.Name, right.Name));
+            foreach (var descriptor in orderedTools)
             {
                 var annotations = new JObject();
                 if (descriptor.Permission == VRCForgeToolPermission.ReadOnly)
@@ -718,21 +1246,50 @@ namespace VRCForge.Editor
                     ["_meta"] = metadata
                 });
             }
-            return new JObject { ["tools"] = result };
+            var response = new JObject { ["tools"] = result };
+            if (modern)
+            {
+                response["ttlMs"] = 3000;
+                response["cacheScope"] = "private";
+            }
+            return response;
         }
 
-        private static JObject Result(JToken id, JToken result)
+        private static JObject Result(JToken id, JToken result, bool modern)
         {
-            return new JObject { ["jsonrpc"] = "2.0", ["id"] = id.DeepClone(), ["result"] = result };
+            var responseResult = result == null ? new JObject() : result.DeepClone();
+            if (modern)
+            {
+                var responseObject = responseResult as JObject;
+                if (responseObject == null)
+                {
+                    responseObject = new JObject { ["value"] = responseResult };
+                    responseResult = responseObject;
+                }
+                responseObject["resultType"] = "complete";
+                var metadata = responseObject["_meta"] as JObject ?? new JObject();
+                metadata["io.modelcontextprotocol/serverInfo"] = new JObject
+                {
+                    ["name"] = "VRCForge MCP Core",
+                    ["version"] = "2",
+                };
+                responseObject["_meta"] = metadata;
+            }
+            return new JObject { ["jsonrpc"] = "2.0", ["id"] = id.DeepClone(), ["result"] = responseResult };
         }
 
-        private static JObject Error(JToken id, int code, string message)
+        private static JObject Error(JToken id, int code, string message, JToken data = null)
         {
+            var error = new JObject { ["code"] = code, ["message"] = message };
+            if (data != null)
+            {
+                error["data"] = data.DeepClone();
+            }
             return new JObject
             {
                 ["jsonrpc"] = "2.0",
                 ["id"] = id == null ? JValue.CreateNull() : id.DeepClone(),
-                ["error"] = new JObject { ["code"] = code, ["message"] = message }
+                ["error"] = error
             };
         }
 
@@ -747,13 +1304,8 @@ namespace VRCForge.Editor
             {
                 throw new VRCForgeMcpProtocolException();
             }
-            var header = new[]
-            {
-                (byte)(payload.Length >> 24), (byte)(payload.Length >> 16),
-                (byte)(payload.Length >> 8), (byte)payload.Length
-            };
-            stream.Write(header, 0, header.Length);
             stream.Write(payload, 0, payload.Length);
+            stream.WriteByte((byte)'\n');
             stream.Flush();
         }
 
@@ -773,11 +1325,12 @@ namespace VRCForge.Editor
             var document = new JObject
             {
                 ["schema"] = TransportSchema,
-                ["transport"] = "tcp-length-prefixed-jsonrpc",
-                ["protocolVersion"] = ProtocolVersion,
+                ["transport"] = "tcp-newline-jsonrpc",
+                ["protocolVersion"] = ModernProtocolVersion,
+                ["supportedProtocolVersions"] = new JArray(ModernProtocolVersion),
                 ["host"] = IPAddress.Loopback.ToString(),
                 ["port"] = endpoint.Port,
-                ["authMode"] = "bearer",
+                ["authMode"] = "bearer-per-request",
                 ["authToken"] = Convert.ToBase64String(token),
                 ["instanceId"] = descriptorInstanceId,
                 ["processId"] = System.Diagnostics.Process.GetCurrentProcess().Id,
@@ -786,7 +1339,7 @@ namespace VRCForge.Editor
                 ["startedAt"] = DateTime.UtcNow.ToString("o"),
                 ["toolCount"] = tools.Length,
                 ["lifecycle"] = "unity-editor-domain",
-                ["executionPolicy"] = "read-only-direct-writes-rejected"
+                ["executionPolicy"] = "read-direct-app-process-approved-writes"
             };
             WriteJsonAtomically(descriptorPath, document);
         }

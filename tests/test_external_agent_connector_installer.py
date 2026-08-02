@@ -381,7 +381,7 @@ def test_same_canonical_json_config_updates_are_serialized(
     assert servers == {f"server-{index}": {"command": f"command-{index}"} for index in range(12)}
 
 
-def test_stdio_mcp_handshake_runs_initialize_and_tools_list(tmp_path: Path) -> None:
+def test_stdio_mcp_handshake_runs_2026_discover_and_tools_list(tmp_path: Path) -> None:
     server = tmp_path / "mock_mcp.py"
     server.write_text(
         "\n".join(
@@ -389,11 +389,18 @@ def test_stdio_mcp_handshake_runs_initialize_and_tools_list(tmp_path: Path) -> N
                 "import json, sys",
                 "for line in sys.stdin:",
                 "    msg = json.loads(line)",
-                "    if msg.get('method') == 'initialize':",
-                "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':{'protocolVersion':'2025-06-18','capabilities':{},'serverInfo':{'name':'mock','version':'0'}}}), flush=True)",
+                "    meta = msg.get('params', {}).get('_meta', {})",
+                "    valid_meta = meta.get('io.modelcontextprotocol/protocolVersion') == '2026-07-28' and meta.get('io.modelcontextprotocol/clientCapabilities') == {}",
+                "    client_info = meta.get('io.modelcontextprotocol/clientInfo')",
+                "    valid_client_info = client_info is None or (isinstance(client_info, dict) and isinstance(client_info.get('name'), str) and isinstance(client_info.get('version'), str))",
+                "    common = {'resultType':'complete','_meta':{'io.modelcontextprotocol/serverInfo':{'name':'mock','version':'1'}}}",
+                "    if msg.get('method') == 'server/discover' and valid_meta and valid_client_info:",
+                "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':dict(common, supportedVersions=['2026-07-28'])}), flush=True)",
                 "    elif msg.get('method') == 'tools/list':",
                 "        tools = [{'name':'vrcforge_bridge_preflight'}, {'name':'vrcforge_request_apply'}]",
-                "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':{'tools':tools}}), flush=True)",
+                "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':dict(common, tools=tools) if valid_meta and valid_client_info else {'error':'bad metadata'}}), flush=True)",
+                "    else:",
+                "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'error':{'code':-32601,'message':'legacy lifecycle rejected'}}), flush=True)",
             ]
         ),
         encoding="utf-8",
@@ -406,6 +413,23 @@ def test_stdio_mcp_handshake_runs_initialize_and_tools_list(tmp_path: Path) -> N
     assert result["connected"] is True
     assert result["ready"] is True
     assert result["toolCount"] == 2
+
+
+def test_stdio_mcp_handshake_rejects_legacy_or_incomplete_result(tmp_path: Path) -> None:
+    server = tmp_path / "legacy_mcp.py"
+    server.write_text(
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    msg = json.loads(line)\n"
+        "    print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':{'supportedVersions':['2025-06-18']}}), flush=True)\n",
+        encoding="utf-8",
+    )
+    bridge = StdioBridgeSpec(command=sys.executable, args=[str(server)], cwd=str(tmp_path), packaged=False, source="test")
+
+    result = run_stdio_mcp_handshake(bridge, timeout_seconds=5)
+
+    assert result["ok"] is False
+    assert "complete 2026-07-28 result" in result["error"]
 
 
 def test_stdio_mcp_handshake_reports_missing_mcp_dependency(tmp_path: Path) -> None:

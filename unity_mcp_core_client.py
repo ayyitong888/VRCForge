@@ -1,19 +1,23 @@
-"""Narrow client for the project-scoped VRCForge Unity MCP Core transport."""
+"""Bounded client for the project-scoped VRCForge Unity MCP Core transport."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
+import os
 import socket
-import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES, READ_ONLY_TOOL_NAMES
 
-TRANSPORT_SCHEMA = "vrcforge.mcp.transport.v1"
-PROTOCOL_VERSION = "2025-11-25"
+
+TRANSPORT_SCHEMA = "vrcforge.mcp.transport.v2"
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+APP_SETUP_OUTFIT_POLL_LANE = "app_setup_outfit_poll"
+SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION,)
 MAX_FRAME_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
@@ -31,26 +35,27 @@ class UnityMcpCoreConnection:
     instance_id: str
     process_id: int
     project_hash: str
+    supported_protocol_versions: tuple[str, ...]
+    transport: str
 
 
-def load_unity_mcp_core_connection(
-    project_root: str | Path,
-) -> UnityMcpCoreConnection:
+def load_unity_mcp_core_connection(project_root: str | Path) -> UnityMcpCoreConnection:
     root = _resolve_project_root(project_root)
     descriptor = _read_json_object(root / "Library" / "VRCForge" / "mcp-core.json", "Core descriptor")
-    _require_string(descriptor, "schema", "Core descriptor")
-    if descriptor["schema"] != TRANSPORT_SCHEMA:
+    if _require_string(descriptor, "schema", "Core descriptor") != TRANSPORT_SCHEMA:
         raise UnityMcpCoreError("Unity MCP Core descriptor is not recognized.")
-    if _require_string(descriptor, "transport", "Core descriptor") != "tcp-length-prefixed-jsonrpc":
-        raise UnityMcpCoreError("Unity MCP Core transport is not supported.")
-    if _require_string(descriptor, "protocolVersion", "Core descriptor") != PROTOCOL_VERSION:
+    if _require_string(descriptor, "protocolVersion", "Core descriptor") != MODERN_PROTOCOL_VERSION:
         raise UnityMcpCoreError("Unity MCP Core protocol version is not supported.")
-    if _require_string(descriptor, "authMode", "Core descriptor") != "bearer":
+    if _require_string(descriptor, "authMode", "Core descriptor") != "bearer-per-request":
         raise UnityMcpCoreError("Unity MCP Core authentication mode is not supported.")
-    if _require_string(descriptor, "executionPolicy", "Core descriptor") != "read-only-direct-writes-rejected":
+    if _require_string(descriptor, "executionPolicy", "Core descriptor") != "read-direct-app-process-approved-writes":
         raise UnityMcpCoreError("Unity MCP Core execution policy is invalid.")
     if _require_string(descriptor, "host", "Core descriptor") != "127.0.0.1":
         raise UnityMcpCoreError("Unity MCP Core must use the loopback endpoint.")
+    supported_versions = _require_supported_versions(descriptor)
+    _require_string(descriptor, "transport", "Core descriptor")
+    if _require_positive_int(descriptor, "toolCount", "Core descriptor") != EXPECTED_TOOL_COUNT:
+        raise UnityMcpCoreError("Unity MCP Core tool contract is invalid.")
 
     raw_project_path = _require_string(descriptor, "projectPath", "Core descriptor")
     try:
@@ -59,109 +64,131 @@ def load_unity_mcp_core_connection(
         raise UnityMcpCoreError("Unity MCP Core project binding is invalid.") from None
     if descriptor_root != root:
         raise UnityMcpCoreError("Unity MCP Core belongs to a different project.")
-
     project_hash = _require_string(descriptor, "projectHash", "Core descriptor")
-    expected_hash = hashlib.sha256(raw_project_path.encode("utf-8")).hexdigest()
-    if project_hash != expected_hash:
+    if project_hash != hashlib.sha256(raw_project_path.encode("utf-8")).hexdigest():
         raise UnityMcpCoreError("Unity MCP Core project hash is invalid.")
-    port = _require_port(descriptor, "port", "Core descriptor")
-    discovery_token = _require_base64_token(descriptor, "authToken", "Core descriptor", 32)
-    instance_id = _require_string(descriptor, "instanceId", "Core descriptor")
-    process_id = _require_positive_int(descriptor, "processId", "Core descriptor")
 
     return UnityMcpCoreConnection(
         project_root=root,
         host="127.0.0.1",
-        port=port,
-        discovery_token=discovery_token,
-        instance_id=instance_id,
-        process_id=process_id,
+        port=_require_port(descriptor, "port", "Core descriptor"),
+        discovery_token=_require_base64_token(descriptor, "authToken", "Core descriptor", 32),
+        instance_id=_require_string(descriptor, "instanceId", "Core descriptor"),
+        process_id=_require_positive_int(descriptor, "processId", "Core descriptor"),
         project_hash=project_hash,
+        supported_protocol_versions=supported_versions,
+        transport=_require_string(descriptor, "transport", "Core descriptor"),
     )
 
 
 class UnityMcpCoreClient:
-    def __init__(
-        self,
-        project_root: str | Path,
-        *,
-        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-    ) -> None:
+    """Client for the sole VRCForge MCP 2026-07-28 Core contract."""
+
+    def __init__(self, project_root: str | Path, *, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> None:
         if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool) or not 0 < timeout_seconds <= 600:
             raise ValueError("timeout_seconds must be between 0 and 600 seconds.")
         self._connection = load_unity_mcp_core_connection(project_root)
+        if MODERN_PROTOCOL_VERSION not in self._connection.supported_protocol_versions:
+            raise UnityMcpCoreError("Unity MCP Core does not support the requested protocol version.")
+        if self._connection.transport != "tcp-newline-jsonrpc":
+            raise UnityMcpCoreError("Unity MCP Core transport is not supported.")
         self._timeout_seconds = float(timeout_seconds)
+
+    @property
+    def protocol_version(self) -> str:
+        return MODERN_PROTOCOL_VERSION
 
     def list_tools(self) -> list[dict[str, Any]]:
         result = self._request("tools/list", {})
         tools = result.get("tools") if isinstance(result, dict) else None
         if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
             raise UnityMcpCoreError("Unity MCP Core returned an invalid tools list.")
+        names = [tool.get("name") for tool in tools]
+        if len(tools) != EXPECTED_TOOL_COUNT or not all(isinstance(name, str) and name for name in names):
+            raise UnityMcpCoreError("Unity MCP Core returned an invalid tools list.")
+        if len(set(names)) != EXPECTED_TOOL_COUNT or set(names) != EXPECTED_TOOL_NAMES:
+            raise UnityMcpCoreError("Unity MCP Core tool contract does not match the packaged VRCForge tools.")
+        for tool in tools:
+            name = tool["name"]
+            input_schema = tool.get("inputSchema")
+            annotations = tool.get("annotations")
+            metadata = tool.get("_meta")
+            if not isinstance(input_schema, dict) or input_schema.get("type") != "object" \
+                    or not isinstance(annotations, dict) or not isinstance(metadata, dict):
+                raise UnityMcpCoreError("Unity MCP Core tool metadata is invalid.")
+            is_read_only = name in READ_ONLY_TOOL_NAMES
+            if annotations.get("readOnlyHint") is not (True if is_read_only else None) \
+                    or annotations.get("destructiveHint") is not (None if is_read_only else True) \
+                    or metadata.get("permission") != ("ReadOnly" if is_read_only else "RequiresApproval"):
+                raise UnityMcpCoreError("Unity MCP Core tool permissions do not match the packaged VRCForge tools.")
         return tools
 
-    def call_tool(
-        self,
-        name: str,
-        arguments: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    def call_tool(self, name: str, arguments: dict[str, Any] | None = None,
+                  *, execution_context: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(name, str) or not name:
             raise ValueError("tool name is required.")
         if arguments is not None and not isinstance(arguments, dict):
             raise ValueError("tool arguments must be an object.")
-        result = self._request("tools/call", {"name": name, "arguments": arguments or {}})
+        if execution_context is not None and not isinstance(execution_context, dict):
+            raise ValueError("execution_context must be an object.")
+        if isinstance(execution_context, dict) and execution_context.get("lane") == APP_SETUP_OUTFIT_POLL_LANE:
+            if name != "vrc_setup_outfit" or not _is_strict_setup_outfit_job_poll(arguments):
+                raise ValueError("Setup Outfit job polling requires exact jobId arguments.")
+        result = self._request("tools/call", {"name": name, "arguments": arguments or {}}, execution_context=execution_context)
         if not isinstance(result, dict):
             raise UnityMcpCoreError("Unity MCP Core returned an invalid tool result.")
         return result
 
-    def _request(self, method: str, params: dict[str, Any]) -> Any:
+    def _request(self, method: str, params: dict[str, Any], *, execution_context: dict[str, Any] | None = None) -> Any:
+        return self._modern_request(method, params, execution_context=execution_context)
+
+    def _modern_request(self, method: str, params: dict[str, Any], *, execution_context: dict[str, Any] | None) -> Any:
         try:
-            with socket.create_connection((self._connection.host, self._connection.port), self._timeout_seconds) as connection:
-                connection.settimeout(self._timeout_seconds)
-                self._send_envelope(connection, 1, "initialize", {
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "VRCForge FastAPI", "version": "1"},
-                }, authorization="Bearer " + self._connection.discovery_token)
-                initialize = self._receive_response(connection, 1)
-                if not isinstance(initialize, dict) or initialize.get("protocolVersion") != PROTOCOL_VERSION:
-                    raise UnityMcpCoreError("Unity MCP Core initialization failed.")
-                self._send_notification(connection, "notifications/initialized", {})
-                self._send_envelope(
-                    connection,
-                    2,
-                    method,
-                    params,
-                )
-                return self._receive_response(connection, 2)
+            with self._open_connection() as connection:
+                self._send_modern(connection, 1, "server/discover", {})
+                discovery = self._receive_modern_response(connection, 1)
+                supported = discovery.get("supportedVersions") if isinstance(discovery, dict) else None
+                if not isinstance(supported, list) or not all(isinstance(version, str) for version in supported) \
+                        or MODERN_PROTOCOL_VERSION not in supported:
+                    raise UnityMcpCoreError("Unity MCP Core modern discovery failed.")
+                self._send_modern(connection, 2, method, params, execution_context=execution_context)
+                return self._receive_modern_response(connection, 2)
         except UnityMcpCoreError:
             raise
-        except (OSError, UnicodeError, json.JSONDecodeError, struct.error):
+        except (OSError, UnicodeError, json.JSONDecodeError):
             raise UnityMcpCoreError("Unity MCP Core connection failed.") from None
 
-    def _send_notification(self, connection: socket.socket, method: str, params: dict[str, Any]) -> None:
-        self._write_frame(connection, {"schema": TRANSPORT_SCHEMA, "message": {
-            "jsonrpc": "2.0", "method": method, "params": params,
-        }})
+    def _open_connection(self) -> socket.socket:
+        connection = socket.create_connection((self._connection.host, self._connection.port), self._timeout_seconds)
+        connection.settimeout(self._timeout_seconds)
+        return connection
 
-    def _send_envelope(
-        self,
-        connection: socket.socket,
-        request_id: int,
-        method: str,
-        params: dict[str, Any],
-        *,
-        authorization: str | None = None,
-    ) -> None:
-        envelope: dict[str, Any] = {
-            "schema": TRANSPORT_SCHEMA,
-            "message": {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+    def _send_modern(self, connection: socket.socket, request_id: int, method: str, params: dict[str, Any],
+                     *, execution_context: dict[str, Any] | None = None) -> None:
+        request_params = dict(params)
+        metadata: dict[str, Any] = {
+            "io.modelcontextprotocol/protocolVersion": MODERN_PROTOCOL_VERSION,
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "VRCForge FastAPI", "version": "1"},
         }
-        if authorization is not None:
-            envelope["authorization"] = authorization
-        self._write_frame(connection, envelope)
+        if execution_context is not None:
+            approved_execution = _json_object_copy(execution_context)
+            approved_execution["clientProcessId"] = os.getpid()
+            approved_execution["projectHash"] = self._connection.project_hash
+            approved_execution["instanceId"] = self._connection.instance_id
+            metadata["io.vrcforge/approvedExecution"] = approved_execution
+        request_params["_meta"] = metadata
+        self._write_line(connection, {
+            "schema": TRANSPORT_SCHEMA,
+            "authorization": "Bearer " + self._connection.discovery_token,
+            "message": {"jsonrpc": "2.0", "id": request_id, "method": method, "params": request_params},
+        })
 
-    def _receive_response(self, connection: socket.socket, expected_id: int) -> Any:
-        envelope = self._read_frame(connection)
+    def _receive_modern_response(self, connection: socket.socket, expected_id: int) -> Any:
+        return self._validate_response(self._read_line(connection), expected_id, require_complete=True)
+
+    @staticmethod
+    def _validate_response(envelope: Any, expected_id: int, *, require_complete: bool) -> Any:
         if not isinstance(envelope, dict) or envelope.get("schema") != TRANSPORT_SCHEMA:
             raise UnityMcpCoreError("Unity MCP Core returned an invalid transport response.")
         message = envelope.get("message")
@@ -171,42 +198,89 @@ class UnityMcpCoreClient:
             raise UnityMcpCoreError("Unity MCP Core rejected the request.")
         if "result" not in message:
             raise UnityMcpCoreError("Unity MCP Core returned an invalid JSON-RPC response.")
-        return message["result"]
+        result = message["result"]
+        if require_complete and (not isinstance(result, dict) or result.get("resultType") != "complete"):
+            raise UnityMcpCoreError("Unity MCP Core returned an incomplete modern result.")
+        return result
 
     @staticmethod
-    def _write_frame(connection: socket.socket, payload: dict[str, Any]) -> None:
-        try:
-            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        except (TypeError, ValueError, UnicodeError):
-            raise UnityMcpCoreError("Unity MCP Core request is invalid.") from None
-        if not 0 < len(encoded) <= MAX_FRAME_BYTES:
+    def _write_line(connection: socket.socket, payload: dict[str, Any]) -> None:
+        encoded = _encode_payload(payload, "request")
+        if b"\n" in encoded or len(encoded) + 1 > MAX_FRAME_BYTES:
             raise UnityMcpCoreError("Unity MCP Core request is too large.")
-        connection.sendall(struct.pack(">I", len(encoded)) + encoded)
+        connection.sendall(encoded + b"\n")
 
     @staticmethod
-    def _read_frame(connection: socket.socket) -> dict[str, Any]:
-        size = struct.unpack(">I", _read_exactly(connection, 4))[0]
-        if not 0 < size <= MAX_FRAME_BYTES:
-            raise UnityMcpCoreError("Unity MCP Core response is invalid.")
-        try:
-            value = json.loads(_read_exactly(connection, size).decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError):
-            raise UnityMcpCoreError("Unity MCP Core response is invalid.") from None
-        if not isinstance(value, dict):
-            raise UnityMcpCoreError("Unity MCP Core response is invalid.")
-        return value
+    def _read_line(connection: socket.socket) -> dict[str, Any]:
+        data = bytearray()
+        while len(data) <= MAX_FRAME_BYTES:
+            byte = connection.recv(1)
+            if not byte:
+                raise UnityMcpCoreError("Unity MCP Core connection closed unexpectedly.")
+            if byte == b"\n":
+                if not data:
+                    raise UnityMcpCoreError("Unity MCP Core response is invalid.")
+                return _decode_payload(bytes(data), "response")
+            data.extend(byte)
+        raise UnityMcpCoreError("Unity MCP Core response is invalid.")
 
 
-def _read_exactly(connection: socket.socket, size: int) -> bytes:
-    chunks: list[bytes] = []
-    remaining = size
-    while remaining:
-        chunk = connection.recv(remaining)
-        if not chunk:
-            raise UnityMcpCoreError("Unity MCP Core connection closed unexpectedly.")
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    return b"".join(chunks)
+
+
+def _is_strict_setup_outfit_job_poll(arguments: Any) -> bool:
+    if not isinstance(arguments, dict) or set(arguments) != {"jobId"}:
+        return False
+    job_id = arguments.get("jobId")
+    if not isinstance(job_id, str) or len(job_id) != 32:
+        return False
+    return all(character in "0123456789abcdefABCDEF" for character in job_id)
+
+
+def _encode_payload(payload: dict[str, Any], direction: str) -> bytes:
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        raise UnityMcpCoreError("Unity MCP Core " + direction + " is invalid.") from None
+    if not 0 < len(encoded) <= MAX_FRAME_BYTES:
+        raise UnityMcpCoreError("Unity MCP Core " + direction + " is too large.")
+    return encoded
+
+
+def canonical_arguments_sha256(arguments: dict[str, Any]) -> str:
+    """Bind an approved Core execution to the exact JSON tool arguments."""
+    if not isinstance(arguments, dict):
+        raise ValueError("arguments must be an object.")
+    try:
+        encoded = json.dumps(
+            arguments,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError):
+        raise ValueError("arguments must be JSON-compatible.") from None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _decode_payload(data: bytes, direction: str) -> dict[str, Any]:
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise UnityMcpCoreError("Unity MCP Core " + direction + " is invalid.") from None
+    if not isinstance(value, dict):
+        raise UnityMcpCoreError("Unity MCP Core " + direction + " is invalid.")
+    return value
+
+
+def _json_object_copy(value: dict[str, Any]) -> dict[str, Any]:
+    try:
+        copied = json.loads(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError, UnicodeError):
+        raise ValueError("execution_context must be JSON-compatible.") from None
+    if not isinstance(copied, dict):
+        raise ValueError("execution_context must be an object.")
+    return copied
 
 
 def _resolve_project_root(project_root: str | Path) -> Path:
@@ -227,6 +301,17 @@ def _read_json_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise UnityMcpCoreError(label + " is invalid.")
     return value
+
+
+def _require_supported_versions(document: dict[str, Any]) -> tuple[str, ...]:
+    value = document.get("supportedProtocolVersions")
+    if not isinstance(value, list) or not value or not all(isinstance(version, str) for version in value):
+        raise UnityMcpCoreError("Core descriptor is invalid.")
+    if len(value) != len(set(value)):
+        raise UnityMcpCoreError("Core descriptor is invalid.")
+    if any(version not in SUPPORTED_PROTOCOL_VERSIONS for version in value):
+        raise UnityMcpCoreError("Core descriptor is invalid.")
+    return tuple(value)
 
 
 def _require_string(document: dict[str, Any], key: str, label: str) -> str:

@@ -210,14 +210,8 @@ def _portable_archive_entries(
     entries.extend(_tree_archive_entries(package_trees["backend"], "backend"))
     entries.extend(
         _tree_archive_entries(
-            package_trees["packaged-tool"],
-            "unity_plugin/Assets/VRCForge/Editor",
-        )
-    )
-    entries.extend(
-        _tree_archive_entries(
-            package_trees["connector"],
-            "unity_plugin/Packages/com.coplaydev.unity-mcp",
+            package_trees["vrcforge-core"],
+            "unity_plugin/Assets/VRCForge",
         )
     )
     entries.extend(_tree_archive_entries(bridge_tree, "bridge_target"))
@@ -407,7 +401,7 @@ def _fixture(tmp_path: Path) -> SimpleNamespace:
     fixture_baseline = fixture_baselines["model_part_composition"]
 
     package_trees: dict[str, Path] = {}
-    for name in ("backend", "packaged-tool", "connector", "server"):
+    for name in ("backend", "vrcforge-core", "server"):
         root = tmp_path / "package-trees" / name
         _write_bytes(root / "payload" / f"{name}.bin", f"tree:{name}".encode("ascii"))
         package_trees[name] = root
@@ -472,8 +466,7 @@ def _fixture(tmp_path: Path) -> SimpleNamespace:
         portable_archive=portable_archive,
         unity_package=unity_package,
         backend_tree=package_trees["backend"],
-        packaged_tool_tree=package_trees["packaged-tool"],
-        connector_tree=package_trees["connector"],
+        vrcforge_core_tree=package_trees["vrcforge-core"],
         server_tree=package_trees["server"],
         dependency_set_descriptor=dependency_set_descriptor,
         component_feature_application_descriptor=(
@@ -597,10 +590,8 @@ def _cli_arguments(fixture: SimpleNamespace, mode: str) -> list[str]:
         str(fixture.paths.unity_package),
         "--backend-tree",
         str(fixture.paths.backend_tree),
-        "--packaged-tool-tree",
-        str(fixture.paths.packaged_tool_tree),
-        "--connector-tree",
-        str(fixture.paths.connector_tree),
+        "--vrcforge-core-tree",
+        str(fixture.paths.vrcforge_core_tree),
         "--server-tree",
         str(fixture.paths.server_tree),
         "--dependency-set-descriptor",
@@ -688,8 +679,7 @@ def test_cli_create_and_verify_exact_canonical_contract(
     }
     assert set(document["packageTrees"]) == {
         "backend",
-        "packagedTool",
-        "connector",
+        "vrcforgeCore",
         "server",
     }
     dependency_document = json.loads(
@@ -932,7 +922,7 @@ def test_create_accepts_exact_portable_archive_bindings(tmp_path: Path) -> None:
     receipt = _create(fixture)
 
     assert receipt["ok"] is True
-    assert receipt["packageTreeCount"] == 4
+    assert receipt["packageTreeCount"] == 3
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows sharing contract")
@@ -1043,17 +1033,8 @@ def test_create_rejects_link_like_or_unsupported_archive_entries(
         (
             set(),
             {
-                "unity_plugin/Assets/VRCForge/Editor/payload/packaged-tool.bin": (
-                    b"changed-tool"
-                )
-            },
-            [],
-        ),
-        (
-            set(),
-            {
-                "unity_plugin/Packages/com.coplaydev.unity-mcp/payload/connector.bin": (
-                    b"changed-connector"
+                "unity_plugin/Assets/VRCForge/payload/vrcforge-core.bin": (
+                    b"changed-vrcforge-core"
                 )
             },
             [],
@@ -1149,7 +1130,7 @@ def test_create_rejects_duplicate_tree_identity(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     fixture.paths = dataclasses.replace(
         fixture.paths,
-        server_tree=fixture.paths.connector_tree,
+        server_tree=fixture.paths.vrcforge_core_tree,
     )
 
     _expect_code(

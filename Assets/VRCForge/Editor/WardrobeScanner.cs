@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Security.Cryptography;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
@@ -51,6 +52,15 @@ namespace VRCForge.Editor
                 var wardrobeCandidates = new List<object>();
                 var looseControls = new List<object>();
                 var wardrobes = BuildWardrobes(intParameters, menuToggles, fxLayers, wardrobeCandidates, looseControls);
+                var fingerprint = ComputeStableFingerprint(new
+                {
+                    schema = "vrcforge.wardrobe-fingerprint.v1",
+                    avatarPath = avatarRootPath,
+                    fxControllerPath,
+                    wardrobes,
+                    wardrobeCandidates,
+                    looseControls
+                });
 
                 var payload = new
                 {
@@ -66,7 +76,8 @@ namespace VRCForge.Editor
                     wardrobeCandidates,
                     looseControlCount = looseControls.Count,
                     looseControls,
-                    wardrobes
+                    wardrobes,
+                    fingerprint
                 };
 
                 var jsonPath = WriteJsonIfRequested(outputPath, payload);
@@ -85,12 +96,64 @@ namespace VRCForge.Editor
                         wardrobeCandidates,
                         looseControlCount = looseControls.Count,
                         looseControls,
-                        wardrobes
+                        wardrobes,
+                        fingerprint
                     });
             }
             catch (Exception ex)
             {
                 return new ErrorResponse($"Wardrobe scan failed: {ex.Message}\n{ex.StackTrace}");
+            }
+        }
+
+        internal static string ComputeStableFingerprintForAvatar(string avatarPath)
+        {
+            var descriptor = ResolveAvatarDescriptor(avatarPath);
+            var avatarRootPath = GetTransformPath(descriptor.transform);
+            var intParameters = ReadIntParameters(descriptor);
+            var menuToggles = new List<MenuToggle>();
+            ReadMenuToggles(descriptor.expressionsMenu, "", menuToggles, new HashSet<int>(), 0);
+            var fxController = GetFxController(descriptor);
+            var fxControllerPath = fxController != null ? AssetDatabase.GetAssetPath(fxController) : "";
+            var fxLayers = fxController != null ? ReadFxLayers(fxController) : new List<FxLayerInfo>();
+            var wardrobeCandidates = new List<object>();
+            var looseControls = new List<object>();
+            var wardrobes = BuildWardrobes(intParameters, menuToggles, fxLayers, wardrobeCandidates, looseControls);
+            return ComputeStableFingerprint(new
+            {
+                schema = "vrcforge.wardrobe-fingerprint.v1",
+                avatarPath = avatarRootPath,
+                fxControllerPath,
+                wardrobes,
+                wardrobeCandidates,
+                looseControls
+            });
+        }
+
+        private static JToken CanonicalizeToken(JToken token)
+        {
+            if (token is JObject valueObject)
+            {
+                var result = new JObject();
+                foreach (var property in valueObject.Properties().OrderBy(item => item.Name, StringComparer.Ordinal))
+                {
+                    result.Add(property.Name, CanonicalizeToken(property.Value));
+                }
+                return result;
+            }
+            if (token is JArray valueArray)
+            {
+                return new JArray(valueArray.Select(CanonicalizeToken));
+            }
+            return token.DeepClone();
+        }
+
+        private static string ComputeStableFingerprint(object value)
+        {
+            var json = CanonicalizeToken(JToken.FromObject(value)).ToString(Formatting.None);
+            using (var sha = SHA256.Create())
+            {
+                return BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(json))).Replace("-", "").ToLowerInvariant();
             }
         }
 

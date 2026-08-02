@@ -23,6 +23,10 @@ from external_agent_connector_installer import StdioBridgeSpec, run_stdio_mcp_ha
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8757"
 HIDDEN_EXTERNAL_TOOLS = {"vrcforge_apply_approved", "vrcforge_execute_approved_shell"}
+MCP_PROTOCOL_VERSION = "2026-07-28"
+MCP_PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
+MCP_CLIENT_CAPABILITIES_META_KEY = "io.modelcontextprotocol/clientCapabilities"
+MCP_CLIENT_INFO_META_KEY = "io.modelcontextprotocol/clientInfo"
 
 
 def main() -> int:
@@ -98,7 +102,6 @@ class ExternalAgentBridgeSmoke:
             self.step("stdio.bridge_preflight", self.check_stdio_bridge_preflight())
             self.step("stdio.mcp_tools_list", self.check_stdio_mcp_tools())
             self.step("gateway.manifest", self.check_manifest())
-            self.step("mcp.tools_list", self.check_mcp_tools())
             if self.args.optimizer_write_request:
                 self.step("permission.set_for_optimizer_request", self.set_execution_mode(self.args.execution_mode))
                 self.optimizer_write_request()
@@ -302,33 +305,6 @@ class ExternalAgentBridgeSmoke:
             "requestApplyAdvertised": "vrcforge_request_apply" in tool_names,
             "directApplyAdvertised": sorted(HIDDEN_EXTERNAL_TOOLS & tool_names),
             "createGameObjectTarget": "vrcforge_create_gameobject" in write_targets,
-        }
-
-    def check_mcp_tools(self) -> dict[str, Any]:
-        try:
-            initialize = self.mcp_rpc("initialize", {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": self.args.agent_name, "version": "0"},
-            })
-            listed = self.mcp_rpc("tools/list", {})
-        except Exception as exc:  # noqa: BLE001 - smoke evidence should keep moving after disabled gateway/protocol failures.
-            return {
-                "ok": False,
-                "initialized": False,
-                "toolCount": 0,
-                "requestApplyListed": False,
-                "directApplyListed": [],
-                "error": str(exc),
-            }
-        tools = ensure_list(ensure_dict(listed.get("result")).get("tools"))
-        tool_names = {str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)}
-        return {
-            "ok": "vrcforge_request_apply" in tool_names and not bool(HIDDEN_EXTERNAL_TOOLS & tool_names),
-            "initialized": "result" in initialize,
-            "toolCount": len(tool_names),
-            "requestApplyListed": "vrcforge_request_apply" in tool_names,
-            "directApplyListed": sorted(HIDDEN_EXTERNAL_TOOLS & tool_names),
         }
 
     def live_write_rollback(self) -> None:
@@ -574,7 +550,7 @@ class ExternalAgentBridgeSmoke:
     def mcp_call_tool(self, name: str, params: dict[str, Any]) -> dict[str, Any]:
         payload = self.mcp_rpc(
             "tools/call",
-            {"name": name, "arguments": {"params": params, "agent_name": self.args.agent_name}},
+            {"name": name, "arguments": params},
         )
         if "error" in payload:
             return {"ok": False, "error": payload["error"]}
@@ -590,21 +566,35 @@ class ExternalAgentBridgeSmoke:
         return result
 
     def mcp_rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        request_params = {
+            "_meta": {
+                MCP_PROTOCOL_VERSION_META_KEY: MCP_PROTOCOL_VERSION,
+                MCP_CLIENT_CAPABILITIES_META_KEY: {},
+                MCP_CLIENT_INFO_META_KEY: {"name": self.args.agent_name, "version": "1.4.0-smoke"},
+            },
+            **params,
+        }
         payload = {
             "jsonrpc": "2.0",
             "id": int(time.time() * 1000) % 100000000,
             "method": method,
-            "params": params,
+            "params": request_params,
         }
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.gateway_token}",
+            "Origin": self.base_url,
+            "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+            "Mcp-Method": method,
+        }
+        if method == "tools/call":
+            headers["Mcp-Name"] = str(request_params.get("name") or "")
         request = urllib.request.Request(
             f"{self.base_url}/mcp",
             data=json.dumps(payload).encode("utf-8"),
             method="POST",
-            headers={
-                "Accept": "application/json, text/event-stream",
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.gateway_token}",
-            },
+            headers=headers,
         )
         with urllib.request.urlopen(request, timeout=self.args.timeout) as response:  # noqa: S310 - loopback-only smoke.
             return json.loads(response.read().decode("utf-8", errors="replace") or "{}")

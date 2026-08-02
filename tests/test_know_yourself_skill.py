@@ -728,178 +728,24 @@ def test_self_knowledge_projects_effective_guarded_write_permission() -> None:
     }
 
 
-def test_instance_diagnostics_bind_the_selector_to_the_selected_project(
+def test_unity_status_requires_the_selected_project_core_contract(
     monkeypatch: Any,
     tmp_path: Any,
 ) -> None:
     import dashboard_server
 
     project_a = tmp_path / "workspace-a" / "SharedProject"
-    project_b = tmp_path / "workspace-b" / "SharedProject"
     project_a.mkdir(parents=True)
-    project_b.mkdir(parents=True)
     settings = SimpleNamespace(
-        unity_mcp_host="127.0.0.1",
-        unity_mcp_port=8080,
-        unity_mcp_instance="",
         unity_mcp_timeout_seconds=5,
     )
-    previous_selected = dashboard_server.DASHBOARD_STATE.selected_project_path
-    previous_instance = dashboard_server.DASHBOARD_STATE.unity_instance
-    dashboard_server.DASHBOARD_STATE.selected_project_path = str(project_a)
-    dashboard_server.DASHBOARD_STATE.unity_instance = ""
-    try:
-        monkeypatch.setattr(
-            dashboard_server,
-            "fetch_unity_http_json",
-            lambda *_args: (
-                True,
-                {
-                    "instances": [
-                        {
-                            "session_id": "session-b",
-                            "project": project_b.name,
-                            "project_path": str(project_b),
-                            "hash": "project-b-selector",
-                        }
-                    ]
-                },
-                "",
-                200,
-            ),
-        )
-        wrong = dashboard_server.build_unity_instances_diagnostics(settings, project_a)
+    status = dashboard_server.build_unity_status_snapshot(settings, project_a)
 
-        assert wrong["selectorMatched"] is True
-        assert wrong["selectedProjectMatched"] is False
-        assert wrong["selectedInstanceMatched"] is False
-        assert settings.unity_mcp_instance == ""
-        assert dashboard_server.DASHBOARD_STATE.unity_instance == ""
-
-        for instance_hash in ("project-b-selector", ""):
-            monkeypatch.setattr(
-                dashboard_server,
-                "fetch_unity_http_json",
-                lambda *_args, instance_hash=instance_hash: (
-                    True,
-                    {
-                        "instances": [
-                            {
-                                "session_id": "session-b",
-                                "project": project_b.name,
-                                "hash": instance_hash,
-                            }
-                        ]
-                    },
-                    "",
-                    200,
-                ),
-            )
-            missing_path = dashboard_server.build_unity_instances_diagnostics(
-                settings,
-                project_a,
-            )
-
-            assert missing_path["selectorMatched"] is True
-            assert missing_path["selectedProjectMatched"] is False
-            assert missing_path["selectedInstanceMatched"] is False
-            assert settings.unity_mcp_instance == ""
-            assert dashboard_server.DASHBOARD_STATE.unity_instance == ""
-
-        monkeypatch.setattr(
-            dashboard_server,
-            "build_unity_tools_diagnostics",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("cross-project tools must not be queried")
-            ),
-        )
-        monkeypatch.setattr(
-            dashboard_server,
-            "run_unity_mcp_passthrough",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("cross-project status must not be queried")
-            ),
-        )
-        monkeypatch.setattr(
-            dashboard_server,
-            "fetch_mcp_server_health",
-            lambda *_args, **_kwargs: {},
-        )
-        missing_path_status = dashboard_server.build_unity_status_snapshot(settings)
-
-        assert missing_path_status["selectedInstanceMatched"] is False
-        assert missing_path_status["tools"]["toolNames"] == []
-        assert missing_path_status["unityInstanceRegistered"] is True
-        assert "not bound to the selected project" in missing_path_status["error"]
-
-        settings.unity_mcp_instance = "session-a"
-        dashboard_server.DASHBOARD_STATE.unity_instance = "session-a"
-        monkeypatch.setattr(
-            dashboard_server,
-            "fetch_unity_http_json",
-            lambda *_args: (
-                True,
-                {
-                    "instances": [
-                        {
-                            "session_id": "session-a",
-                            "project": project_a.name,
-                            "project_path": str(project_a),
-                        }
-                    ]
-                },
-                "",
-                200,
-            ),
-        )
-        exact_path_without_hash = dashboard_server.build_unity_instances_diagnostics(
-            settings,
-            project_a,
-        )
-
-        assert exact_path_without_hash["selectorMatched"] is True
-        assert exact_path_without_hash["selectedProjectMatched"] is True
-        assert exact_path_without_hash["selectedCliSelectorStable"] is False
-        assert exact_path_without_hash["selectedInstanceMatched"] is False
-        assert exact_path_without_hash["activeInstance"]["cliInstanceId"] == ""
-        assert settings.unity_mcp_instance == "session-a"
-        assert dashboard_server.DASHBOARD_STATE.unity_instance == "session-a"
-
-        exact_path_status = dashboard_server.build_unity_status_snapshot(settings)
-        assert exact_path_status["selectedInstanceMatched"] is False
-        assert exact_path_status["tools"]["toolNames"] == []
-        assert "not bound to the selected project" in exact_path_status["error"]
-
-        monkeypatch.setattr(
-            dashboard_server,
-            "fetch_unity_http_json",
-            lambda *_args: (
-                True,
-                {
-                    "instances": [
-                        {
-                            "session_id": "session-a",
-                            "project": project_a.name,
-                            "project_path": str(project_a),
-                            "hash": "project-a-selector",
-                        }
-                    ]
-                },
-                "",
-                200,
-            ),
-        )
-        correct = dashboard_server.build_unity_instances_diagnostics(settings, project_a)
-
-        assert correct["selectorMatched"] is True
-        assert correct["selectedProjectMatched"] is True
-        assert correct["selectedCliSelectorStable"] is True
-        assert correct["selectedInstanceMatched"] is True
-        assert settings.unity_mcp_instance == "project-a-selector"
-        assert dashboard_server.DASHBOARD_STATE.unity_instance == "project-a-selector"
-    finally:
-        dashboard_server.DASHBOARD_STATE.selected_project_path = previous_selected
-        dashboard_server.DASHBOARD_STATE.unity_instance = previous_instance
+    assert status["selectedInstanceMatched"] is False
+    assert status["unityInstanceRegistered"] is False
+    assert status["instances"] == []
+    assert status["tools"]["toolNames"] == []
+    assert "does not contain the VRCForge MCP2 unitypackage" in status["error"]
 
 
 def test_unity_process_proof_requires_the_exact_selected_project_path(tmp_path: Any) -> None:
@@ -922,63 +768,16 @@ def test_unity_process_proof_requires_the_exact_selected_project_path(tmp_path: 
     )
 
 
-def test_tool_reregistration_requires_a_stable_cli_selector(
+def test_core_transport_has_no_runtime_tool_reregistration_seam(
     monkeypatch: Any,
     tmp_path: Any,
 ) -> None:
     import dashboard_server
 
-    project = tmp_path / "SharedProject"
-    editor = project / "Assets" / "VRCForge" / "Editor"
-    editor.mkdir(parents=True)
-    (editor / "FixtureTool.cs").write_text(
-        """
-using MCPForUnity.Editor.Tools;
-[McpForUnityTool(name: "vrc_fixture_read", Description = "Read fixture state.")]
-public static class FixtureTool {}
-""",
-        encoding="utf-8",
-    )
-    active_instance = {
-        "sessionId": "session-a",
-        "cliInstanceId": "",
-        "cliSelectorStable": False,
-        "project": project.name,
-        "projectPath": str(project),
-        "hash": "",
-    }
-    monkeypatch.setattr(
-        dashboard_server,
-        "build_unity_status_snapshot",
-        lambda _settings, selected_project=None: (
-            {
-                "selectedInstanceMatched": False,
-                "activeInstance": active_instance,
-                "instances": [active_instance],
-            }
-            if selected_project == project
-            else (_ for _ in ()).throw(AssertionError("registration status must use the requested project"))
-        ),
-    )
-    monkeypatch.setattr(
-        dashboard_server,
-        "post_unity_http_json",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("tool registration must not use a project-name fallback")
-        ),
-    )
-
-    phases: list[dict[str, Any]] = []
-    ok, detail = dashboard_server.register_vrcforge_unity_tools_from_project(
-        project,
-        SimpleNamespace(unity_mcp_instance="session-a"),
-        phases,
-    )
-
-    assert ok is False
-    assert detail == {"toolCount": 1}
-    assert phases[-1]["id"] == "unity_tool_registration"
-    assert phases[-1]["status"] == "warning"
+    _ = monkeypatch, tmp_path
+    assert not hasattr(dashboard_server, "register_vrcforge_unity_tools_from_project")
+    assert not hasattr(dashboard_server, "post_unity_http_json")
+    assert dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
 
 
 def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(

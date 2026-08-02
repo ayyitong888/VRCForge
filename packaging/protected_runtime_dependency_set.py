@@ -75,7 +75,6 @@ SCENARIO_DEFINITIONS: dict[str, tuple[str, ...]] = {
 SCENARIO_ORDER = tuple(SCENARIO_DEFINITIONS)
 
 DIRECT_PACKAGE_VERSIONS: dict[str, str] = {
-    "com.coplaydev.unity-mcp": "9.6.9-beta.7",
     "com.vrchat.avatars": "3.10.3",
     "com.vrchat.base": "3.10.3",
     "com.vrcfury.vrcfury": "1.1334.0",
@@ -83,7 +82,6 @@ DIRECT_PACKAGE_VERSIONS: dict[str, str] = {
     "nadena.dev.ndmf": "1.13.1",
 }
 _SHARED_DIRECT_PACKAGES = (
-    "com.coplaydev.unity-mcp",
     "com.vrchat.avatars",
     "com.vrchat.base",
 )
@@ -113,7 +111,7 @@ _BASE_MANIFEST_SEMANTIC_DIGEST = (
     "efae25b9d4cdab91119b8677747fe71f5d8e77f0aa1da72aca280602fd86f709"
 )
 _BASE_LOCK_SEMANTIC_DIGEST = (
-    "a1a750dfb9738e478ac82f3bcccb23bd1fa3be49a03b5f5885c7a9f228b67fc5"
+    "b4ab746524de7503159583c1726804c9e4cf8b16278f2509668e6a24066d66c4"
 )
 _FEATURE_PACKAGE_ID = "com.vrcfury.vrcfury"
 _FEATURE_LOCK_ROW = {
@@ -124,15 +122,12 @@ _FEATURE_LOCK_ROW = {
 }
 _BASE_PACKAGE_IDS = frozenset(
     {
-        "com.coplaydev.unity-mcp",
         "com.unity.burst",
         "com.unity.collections",
-        "com.unity.ext.nunit",
         "com.unity.mathematics",
         "com.unity.nuget.mono-cecil",
         "com.unity.nuget.newtonsoft-json",
         "com.unity.postprocessing",
-        "com.unity.test-framework",
         "com.unity.timeline",
         "com.unity.ugui",
         "com.unity.xr.legacyinputhelpers",
@@ -178,7 +173,7 @@ _BASE_PACKAGE_IDS = frozenset(
 )
 EXPECTED_PACKAGE_IDS = _BASE_PACKAGE_IDS | {_FEATURE_PACKAGE_ID}
 _EXPECTED_CLOSURE_SEMANTIC_DIGEST = (
-    "92f88ec550256e3608796b9f3eb223f1fa05e56bf7e423ecce1b32c0c0d9ff28"
+    "82edb338d73efd50b00d48f9639cd3fb5e15a556d731ce89f291a918f44f4d08"
 )
 
 _ROOT_KEYS = {

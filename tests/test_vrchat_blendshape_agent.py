@@ -12,30 +12,24 @@ from vrchat_blendshape_agent import (
     BlendshapePlan,
     McpResult,
     Settings,
-    build_custom_tool_cli_args,
-    build_unity_mcp_command,
     create_blendshape_plan,
-    extract_unity_mcp_stdout_error,
     filter_plan_by_instruction_relevance,
     filter_planning_payload_to_face_blendshapes,
     build_planning_payload,
     extract_llm_reasoning_trace,
     extract_llm_token_usage,
-    humanize_unity_mcp_error,
     load_settings,
     load_export_payload,
     mock_execute_payload,
     read_plan_json,
     read_export_json,
     resolve_export_result_path,
-    resolve_unity_mcp_wrapper_command,
     resolve_avatar_selection,
     render_preview,
     request_anthropic_plan_with_metadata,
     request_gemini_plan_with_metadata,
     request_openai_compatible_plan_with_metadata,
     request_vertex_ai_plan_with_metadata,
-    run_unity_mcp_process,
     validate_plan,
 )
 
@@ -856,109 +850,6 @@ class PlanningValidationTests(unittest.TestCase):
 
 
 class MvpFlowTests(unittest.TestCase):
-    def test_humanize_unity_mcp_error_adds_startup_hint(self) -> None:
-        detail = "Cannot connect to Unity MCP server at 127.0.0.1:8080"
-        message = humanize_unity_mcp_error(detail)
-        self.assertIn("Unity MCP server is not ready yet.", message)
-        self.assertIn(detail, message)
-
-    def test_build_unity_mcp_command_includes_host_port_and_instance(self) -> None:
-        settings = Settings(
-            llm_provider="gemini",
-            llm_api_key="",
-            llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-            llm_model="gemini-2.5-flash",
-            llm_api_key_env="GEMINI_API_KEY",
-            gemini_thinking_level="",
-            unity_mcp_command=["powershell", "-File", "tools/unity-mcp-cli.ps1"],
-            unity_mcp_host="127.0.0.1",
-            unity_mcp_port=8080,
-            unity_mcp_instance="Karin FT Rework@abc123",
-            unity_mcp_retries=3,
-            unity_mcp_retry_backoff_seconds=2.0,
-            unity_mcp_timeout_seconds=30,
-            export_tool_name="vrc_export_blendshapes",
-            execute_tool_name="vrc_apply_blendshapes",
-            export_path=Path("Assets/VRCForge/blendshapes_export.json"),
-            min_confidence=0.65,
-        )
-
-        command = build_unity_mcp_command(settings, ["status"])
-        self.assertEqual(
-            command,
-            [
-                "powershell",
-                "-File",
-                "tools/unity-mcp-cli.ps1",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                "8080",
-                "--instance",
-                "Karin FT Rework@abc123",
-                "status",
-            ],
-        )
-
-    def test_build_custom_tool_cli_args_uses_base64_for_powershell_wrapper(self) -> None:
-        settings = Settings(
-            llm_provider="gemini",
-            llm_api_key="",
-            llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-            llm_model="gemini-2.5-flash",
-            llm_api_key_env="GEMINI_API_KEY",
-            gemini_thinking_level="",
-            unity_mcp_command=["powershell", "-File", "tools/unity-mcp-cli.ps1"],
-            unity_mcp_host="127.0.0.1",
-            unity_mcp_port=8080,
-            unity_mcp_instance="Karin FT Rework@abc123",
-            unity_mcp_retries=3,
-            unity_mcp_retry_backoff_seconds=2.0,
-            unity_mcp_timeout_seconds=30,
-            export_tool_name="vrc_export_blendshapes",
-            execute_tool_name="vrc_apply_blendshapes",
-            export_path=Path("Assets/VRCForge/blendshapes_export.json"),
-            min_confidence=0.65,
-        )
-
-        args = build_custom_tool_cli_args(settings, "vrc_apply_blendshapes", {"avatarPath": "Avatar", "adjustments": []})
-
-        self.assertEqual(args[:3], ["editor", "custom-tool", "vrc_apply_blendshapes"])
-        self.assertEqual(args[3], "--params-b64")
-        self.assertNotIn("--params", args)
-
-    def test_resolve_unity_mcp_wrapper_command_decodes_base64_params_for_direct_cli(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            fake_cli = Path(temp_dir) / "unity-mcp.exe"
-            fake_cli.write_text("", encoding="utf-8")
-            command = [
-                "powershell",
-                "-File",
-                "tools/unity-mcp-cli.ps1",
-                "--host",
-                "127.0.0.1",
-                "editor",
-                "custom-tool",
-                "vrc_export_blendshapes",
-                "--params-b64",
-                "eyJvdXRwdXRQYXRoIjogIkFzc2V0cy9leHBvcnQuanNvbiJ9",
-            ]
-
-            with patch("vrchat_blendshape_agent.find_unity_mcp_executable_prefix", return_value=[str(fake_cli)]):
-                resolved = resolve_unity_mcp_wrapper_command(command)
-
-        self.assertEqual(resolved[0], str(fake_cli))
-        self.assertIn("--params", resolved)
-        self.assertIn('{"outputPath": "Assets/export.json"}', resolved)
-        self.assertNotIn("--params-b64", resolved)
-
-    def test_extract_unity_mcp_stdout_error_reads_cli_error_prefix(self) -> None:
-        message = extract_unity_mcp_stdout_error(
-            "❌ Error: Unity MCP server is not ready yet.\n"
-        )
-
-        self.assertEqual(message, "Unity MCP server is not ready yet.")
-
     def test_resolve_export_result_path_uses_absolute_stdout_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             export_path = Path(temp_dir) / "unity-export.json"
@@ -991,34 +882,7 @@ class MvpFlowTests(unittest.TestCase):
 
             self.assertEqual(resolve_export_result_path(settings, result), export_path)
 
-    def test_run_unity_mcp_process_forces_utf8_environment(self) -> None:
-        settings = Settings(
-            llm_provider="gemini",
-            llm_api_key="",
-            llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-            llm_model="gemini-2.5-flash",
-            llm_api_key_env="GEMINI_API_KEY",
-            gemini_thinking_level="",
-            unity_mcp_command=["unity-mcp"],
-            unity_mcp_host="127.0.0.1",
-            unity_mcp_port=8080,
-            unity_mcp_instance="",
-            unity_mcp_retries=3,
-            unity_mcp_retry_backoff_seconds=2.0,
-            unity_mcp_timeout_seconds=30,
-            export_tool_name="vrc_export_blendshapes",
-            execute_tool_name="vrc_apply_blendshapes",
-            export_path=Path("Assets/VRCForge/blendshapes_export.json"),
-            min_confidence=0.65,
-        )
-
-        with patch("vrchat_blendshape_agent.subprocess.run") as run_mock:
-            run_unity_mcp_process(settings, ["status"])
-
-        self.assertEqual(run_mock.call_args.kwargs["env"]["PYTHONIOENCODING"], "utf-8")
-        self.assertEqual(run_mock.call_args.kwargs["env"]["PYTHONUTF8"], "1")
-
-    def test_load_settings_allows_model_override(self) -> None:
+    def test_load_settings_ignores_legacy_mcp_endpoint_when_overriding_model(self) -> None:
         settings_payload = {
             "gemini": {
                 "api_key_env": "TEST_GEMINI_API_KEY",
@@ -1042,8 +906,8 @@ class MvpFlowTests(unittest.TestCase):
             self.assertEqual(settings.llm_base_url, "")
             self.assertEqual(settings.llm_api_key_env, "TEST_GEMINI_API_KEY")
             self.assertEqual(settings.unity_mcp_host, "127.0.0.1")
-            self.assertEqual(settings.unity_mcp_port, 8080)
-            self.assertEqual(settings.unity_mcp_instance, "Karin FT Rework@abc123")
+            self.assertEqual(settings.unity_mcp_port, 0)
+            self.assertEqual(settings.unity_mcp_instance, "project-scoped")
 
     def test_load_settings_accepts_utf8_bom(self) -> None:
         settings_payload = {

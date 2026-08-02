@@ -43,16 +43,7 @@ function Ensure-DefaultSettings {
     "thinking_level": ""
   },
   "unity_mcp": {
-    "command": [
-      "powershell",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      "tools/unity-mcp-cli.ps1"
-    ],
-    "host": "127.0.0.1",
-    "port": 8080,
-    "instance": "",
+    "project_path": "",
     "retries": 3,
     "retry_backoff_seconds": 2.0,
     "timeout_seconds": 30,

@@ -38,6 +38,11 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var mutationStarted = false;
+            var continuationConsumed = false;
+            var recoveryAvatarPath = "";
+            var recoveryParameterName = "";
+            var recoveryClipPath = "";
             try
             {
                 @params = @params ?? new JObject();
@@ -50,6 +55,8 @@ namespace VRCForge.Editor
                 var subMenuOverflow = @params["subMenuOverflow"] == null || @params["subMenuOverflow"].ToObject<bool>();
                 var subMenuName = (@params["subMenuName"]?.ToString() ?? "Wardrobe").Trim();
                 var clipDir = NormalizeAssetDir((@params["clipOutputDir"]?.ToString() ?? DefaultClipDir).Trim());
+                var expectedWardrobeFingerprint = (@params["expectedWardrobeFingerprint"]?.ToString() ?? string.Empty).Trim();
+                var approvedObjectReceiptNonce = (@params["approvedObjectReceiptNonce"]?.ToString() ?? string.Empty).Trim();
 
                 if (string.IsNullOrWhiteSpace(parameterName))
                 {
@@ -70,6 +77,16 @@ namespace VRCForge.Editor
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
                 var avatarRoot = descriptor.transform;
                 var avatarRootPath = GetTransformPath(avatarRoot);
+                recoveryAvatarPath = avatarRootPath;
+                recoveryParameterName = parameterName;
+                if (!string.IsNullOrEmpty(expectedWardrobeFingerprint))
+                {
+                    var liveFingerprint = WardrobeScanner.ComputeStableFingerprintForAvatar(avatarRootPath);
+                    if (!string.Equals(liveFingerprint, expectedWardrobeFingerprint, StringComparison.Ordinal))
+                    {
+                        return new ErrorResponse("Wardrobe state drifted from the approved fingerprint.");
+                    }
+                }
 
                 // 1. Validate the parameter is an existing Int expression parameter.
                 var parametersAsset = descriptor.expressionParameters;
@@ -153,10 +170,16 @@ namespace VRCForge.Editor
                 {
                     newValue = (existingValues.Count > 0 ? existingValues.Max() : 0) + 1;
                 }
+                if (@params["expectedAssignedValue"] != null
+                    && newValue != @params["expectedAssignedValue"].ToObject<int>())
+                {
+                    return new ErrorResponse("Wardrobe assigned value drifted from the approved expectation.");
+                }
 
                 // 5. Resolve the new outfit objects to avatar-root-relative binding paths.
                 var onObjects = new List<string>();
                 var resolvedTargets = new List<Transform>();
+                var objectGlobalObjectIds = new List<string>();
                 var unresolved = new List<string>();
                 foreach (var input in objectInputs)
                 {
@@ -171,6 +194,7 @@ namespace VRCForge.Editor
                     {
                         onObjects.Add(rel);
                         resolvedTargets.Add(t);
+                        objectGlobalObjectIds.Add(GlobalObjectId.GetGlobalObjectIdSlow(t.gameObject).ToString());
                     }
                 }
                 if (unresolved.Count > 0)
@@ -208,6 +232,7 @@ namespace VRCForge.Editor
                 var stateName = MakeUniqueStateName(stateByName, Sanitize(outfitName, "Outfit"));
                 var clipFileName = $"{Sanitize(descriptor.name, "Avatar")}_{Sanitize(parameterName, "Wardrobe")}_{stateName}.anim";
                 var clipPath = $"{clipDir}/{clipFileName}";
+                recoveryClipPath = clipPath;
 
                 // Plan menu placement (read-only resolution).
                 var menuPlan = PlanMenuPlacement(descriptor.expressionsMenu, parameterName, menuToggles, subMenuOverflow, subMenuName);
@@ -242,6 +267,7 @@ namespace VRCForge.Editor
                     wardrobeWriteDefaults,
                     writeDefaultsConsistent,
                     onObjects,
+                    objectGlobalObjectIds,
                     offObjects,
                     setObjectsDefaultOff,
                     addMenuToggle = addMenuToggle && menuPlan.menu != null,
@@ -264,6 +290,19 @@ namespace VRCForge.Editor
                 }
 
                 // ---- APPLY -------------------------------------------------------
+                if (!string.IsNullOrWhiteSpace(approvedObjectReceiptNonce))
+                {
+                    if (resolvedTargets.Count != 1)
+                    {
+                        return new ErrorResponse("Approval-bound outfit continuation requires exactly one new outfit object.");
+                    }
+                    VRCForgeApprovedObjectReceipt.Consume(
+                        approvedObjectReceiptNonce,
+                        ToolName,
+                        resolvedTargets[0].gameObject);
+                    continuationConsumed = true;
+                }
+                mutationStarted = true;
                 Directory.CreateDirectory(clipDir);
                 var undoGroup = Undo.GetCurrentGroup();
                 Undo.SetCurrentGroupName($"Add wardrobe outfit '{outfitName}'");
@@ -347,6 +386,12 @@ namespace VRCForge.Editor
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
+                var postWardrobeFingerprint = WardrobeScanner.ComputeStableFingerprintForAvatar(avatarRootPath);
+                if (string.IsNullOrWhiteSpace(postWardrobeFingerprint)
+                    || string.Equals(postWardrobeFingerprint, expectedWardrobeFingerprint, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Wardrobe write readback fingerprint did not advance.");
+                }
 
                 return new SuccessResponse(
                     $"Added outfit '{outfitName}' as value {newValue} to wardrobe '{parameterName}' on '{descriptor.name}'.",
@@ -360,21 +405,39 @@ namespace VRCForge.Editor
                         parameterName,
                         outfitName,
                         assignedValue = newValue,
+                        previousWardrobeFingerprint = expectedWardrobeFingerprint,
+                        wardrobeFingerprint = postWardrobeFingerprint,
                         fxControllerPath,
                         fxLayerName = wardrobeLayer.name,
                         fxStateName = stateName,
                         clipPath = createdClipPath,
                         writeDefaults = newWriteDefaults,
                         onObjects,
+                        objectGlobalObjectIds,
                         offObjects,
                         setObjectsDefaultOff,
                         menuToggleAdded,
                         menuPath = appliedMenuPath,
+                        continuationConsumed,
                         warnings
                     });
             }
             catch (Exception ex)
             {
+                if (mutationStarted)
+                {
+                    return new ErrorResponse($"Add wardrobe outfit failed after mutation: {ex.Message}", new
+                    {
+                        ok = false,
+                        committed = true,
+                        commitState = "unknown",
+                        checkpointRecoveryRequired = true,
+                        avatarPath = recoveryAvatarPath,
+                        parameterName = recoveryParameterName,
+                        clipPath = recoveryClipPath,
+                        continuationConsumed,
+                    });
+                }
                 return new ErrorResponse($"Add wardrobe outfit failed: {ex.Message}\n{ex.StackTrace}");
             }
         }

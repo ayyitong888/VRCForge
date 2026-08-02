@@ -145,7 +145,7 @@ internal sealed class MainForm : Form
     {
         FlowLayoutPanel panel = Page("Install");
         panel.Controls.Add(Header("安装 Unity 插件"));
-        panel.Controls.Add(TextBlock("安装会备份 Assets/VRCForge、Packages/manifest.json，并复制本地 CoplayDev Unity MCP package。manifest 写入失败会恢复备份并停止。"));
+        panel.Controls.Add(TextBlock("安装会备份并复制完整的 Assets/VRCForge；其中已包含 VRCForge 自有 MCP2 Core 和全部 Unity 工具。"));
         panel.Controls.Add(Button("开始安装 Unity 插件", () =>
         {
             InstallResult result = installer.InstallOrUpdate(selectedProjectPath);
@@ -188,11 +188,11 @@ internal sealed class MainForm : Form
         {
             RuntimeDependencyResult runtimeResult = new(
                 false,
-                "Unity MCP runtime check was not completed.",
+                "VRCForge MCP2 Core bundle check was not completed.",
                 $"Runtime logs: {paths.RuntimeDependencyLogPath.FullName}");
             try
             {
-                statusBox.Text = "正在检查 Unity MCP 运行时依赖...";
+                statusBox.Text = "正在检查 VRCForge MCP2 Core 内置组件...";
                 try
                 {
                     runtimeResult = await runtimeDependencies.EnsureUnityMcpRuntimeAsync(
@@ -203,7 +203,7 @@ internal sealed class MainForm : Form
                 {
                     runtimeResult = new RuntimeDependencyResult(
                         false,
-                        "Unity MCP 运行时准备失败，Dashboard 仍会继续启动。",
+                        "VRCForge MCP2 Core 内置组件检查失败，Dashboard 仍会继续启动。",
                         $"{runtimeEx.Message}\r\nRuntime logs: {paths.RuntimeDependencyLogPath.FullName}");
                 }
                 statusBox.Text = $"{runtimeResult.Message}\r\n{runtimeResult.Detail}\r\n\r\n正在启动 VRCForge backend...";
@@ -271,7 +271,7 @@ internal sealed class MainForm : Form
     {
         FlowLayoutPanel panel = Page("Health");
         panel.Controls.Add(Header("状态诊断"));
-        panel.Controls.Add(TextBlock("这里显示诊断信息。Dashboard 启动不再因为 Unity MCP、Provider 或工程诊断 warning/error 被阻塞。"));
+        panel.Controls.Add(TextBlock("这里显示诊断信息。Dashboard 启动不再因为 VRCForge MCP2 Core、Provider 或工程诊断 warning/error 被阻塞。"));
         panel.Controls.Add(Button("复制诊断信息", () => Clipboard.SetText(latestDiagnostics)));
         panel.Controls.Add(Button("打开日志目录", () => OpenFolder(paths.LogsDir.FullName)));
         panel.Controls.Add(Button("打开外部 Agent 接入页", () => wizard.SelectedIndex = 7));
@@ -806,9 +806,6 @@ internal sealed class MainForm : Form
             .AppendLine(inspection.Message)
             .AppendLine($"旧 Assets/VRCAutoRig: {(inspection.HasLegacyFolder ? "检测到，需要迁移" : "未检测到")}")
             .AppendLine($"Assets/VRCForge/Editor: {(inspection.HasVrcForgePlugin ? "已存在" : "未安装")}")
-            .AppendLine($"Packages/com.coplaydev.unity-mcp: {(inspection.HasMcpPackageFolder ? "已存在" : "未安装")}")
-            .AppendLine($"manifest dependency: {(inspection.HasMcpManifestDependency ? "已配置" : "未配置")}")
-            .AppendLine($"manifest writable: {(inspection.ManifestWritable ? "可写" : "不可写")}")
             .ToString();
     }
 

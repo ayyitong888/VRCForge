@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/source-v1.3.6-blue)](https://github.com/ayyitong888/VRCForge)
+[![Version](https://img.shields.io/badge/source-v1.4.0-blue)](https://github.com/ayyitong888/VRCForge)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -12,7 +12,7 @@ VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接 Tauri 
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source / target release: `1.3.6`. Latest published stable release:
+Current source / target release: `1.4.0`. Latest published stable release:
 `1.3.6` (`v1.3.6`).
 
 ## Install / 安装
@@ -74,7 +74,14 @@ direct write entrypoint; approval, checkpoint, and rollback remain mandatory.
 
 ## Unity Plugin / Unity 插件
 
-The desktop app installs the VRCForge Unity tools and project-scoped MCP Core under `Assets/VRCForge`, with backups under `.vrcforge/backups/`. No separate Unity MCP package or manifest edit is required. Install is idempotent and includes fallback to manual `VRCForge.unitypackage` import.
+`VRCForge.unitypackage` contains the complete VRCForge Unity integration: the
+project-scoped MCP Core, lifecycle bootstrap, and all 64 product tools under
+`Assets/VRCForge`. After import, the App discovers and connects the selected
+project directly. No separate MCP server/package, manifest edit, command, or
+token copy is required. The integration supports only protocol `2026-07-28`;
+reads are project-bound and writes still require App approval, checkpoint,
+readback, and restore. Install is idempotent and the App can perform the same
+package import as the manual fallback.
 
 ## Privacy / 隐私
 
@@ -100,6 +107,9 @@ This path is for development only. Normal users should use the installer.
 
 ## License / 许可
 
-GPL-3.0. Binary releases bundle CoplayDev Unity MCP (MIT) and may bundle the uv runtime (MIT OR Apache-2.0). See [LICENSE](LICENSE).
+GPL-3.0. The Unity MCP Core and tool package are VRCForge-owned code. Binary
+releases may bundle the uv runtime (MIT OR Apache-2.0). See [LICENSE](LICENSE)
+and [NOTICE](NOTICE).
 
-VRCForge 使用 GPL-3.0 发布。二进制 Release 包含 CoplayDev Unity MCP (MIT) 和 uv 运行时 (MIT OR Apache-2.0)。
+VRCForge 使用 GPL-3.0 发布。Unity MCP Core 与工具包是 VRCForge 自有代码；
+二进制包可能同时包含采用 MIT OR Apache-2.0 许可的 uv 运行时。

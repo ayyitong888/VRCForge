@@ -6,9 +6,6 @@ import json
 import mimetypes
 import os
 import re
-import shutil
-import subprocess
-import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -18,7 +15,13 @@ from typing import Any, Callable
 from pydantic import BaseModel, Field, ValidationError
 from model_provider_adapters import normalize_provider_api_type, validate_provider_api_key
 from provider_runtime_adapters import DeepSeekResponsesAdapter, ProviderRuntimeRequest
+from approved_unity_execution import (
+    ApprovedUnityExecutionError,
+    ApprovedUnityExecutionPlan,
+    current_approved_unity_execution,
+)
 from unity_mcp_core_client import UnityMcpCoreClient
+from unity_mcp_tool_contract import READ_ONLY_TOOL_NAMES
 
 
 DEFAULT_SETTINGS_PATH = Path(".gemini/settings.json")
@@ -235,11 +238,11 @@ def main() -> int:
     try:
         settings = load_settings(args.settings, gemini_model_override=args.model)
         if args.unity_status:
-            print(run_unity_mcp_passthrough(settings, ["status"]))
+            print(json.dumps(read_unity_mcp_core_status(settings), ensure_ascii=False, indent=2))
             return 0
 
         if args.list_unity_instances:
-            print(run_unity_mcp_passthrough(settings, ["instances"]))
+            print(json.dumps(read_unity_mcp_core_status(settings)["instances"], ensure_ascii=False, indent=2))
             return 0
 
         export_payload, export_source, using_mock_execute = load_export_payload(
@@ -311,9 +314,6 @@ def load_settings(
     mcp_settings = raw_settings.get("unity_mcp", {})
     path_settings = raw_settings.get("paths", {})
     planning_settings = raw_settings.get("planning", {})
-    command = mcp_settings.get("command", ["unity-mcp"])
-    if isinstance(command, str):
-        command = [command]
 
     export_path = Path(path_settings.get("blendshape_export", "Assets/VRCForge/blendshapes_export.json"))
     llm_settings = build_llm_settings(raw_settings, gemini_model_override, llm_override)
@@ -325,10 +325,10 @@ def load_settings(
         llm_model=llm_settings["model"],
         llm_api_key_env=llm_settings["api_key_env"],
         gemini_thinking_level=llm_settings["thinking_level"],
-        unity_mcp_command=command,
-        unity_mcp_host=str(mcp_settings.get("host", "127.0.0.1")).strip() or "127.0.0.1",
-        unity_mcp_port=int(mcp_settings.get("port", 8080)),
-        unity_mcp_instance=str(mcp_settings.get("instance", "")).strip(),
+        unity_mcp_command=[],
+        unity_mcp_host="127.0.0.1",
+        unity_mcp_port=0,
+        unity_mcp_instance="project-scoped",
         unity_mcp_retries=int(mcp_settings.get("retries", 3)),
         unity_mcp_retry_backoff_seconds=float(mcp_settings.get("retry_backoff_seconds", 2.0)),
         unity_mcp_timeout_seconds=int(mcp_settings.get("timeout_seconds", 30)),
@@ -2891,8 +2891,20 @@ def mock_execute_payload(apply_payload: str, selected_avatar: SelectedAvatar, ex
     )
 
 
-def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any]) -> McpResult:
-    last_error: Exception | None = None
+def invoke_unity_mcp(
+    settings: Settings,
+    tool_name: str,
+    params: dict[str, Any],
+    *,
+    execution_context: dict[str, Any] | None = None,
+    preserve_tool_error: bool = False,
+) -> McpResult:
+    if isinstance(execution_context, dict) and execution_context.get("lane") == "approved_write":
+        raise UnityMcpError(
+            "Approved Unity writes require the gateway-bound execution capability; explicit contexts are rejected."
+        )
+    active_plan = current_approved_unity_execution()
+    transport_context = execution_context
     core_project = str(
         params.get("projectPath")
         or params.get("project_path")
@@ -2906,40 +2918,82 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
         and (Path(core_project) / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").is_file()
     )
 
+    if (
+        isinstance(active_plan, ApprovedUnityExecutionPlan)
+        and execution_context is None
+        and tool_name not in READ_ONLY_TOOL_NAMES
+    ):
+        try:
+            if core_descriptor is None or not core_descriptor.is_file():
+                if core_installed:
+                    raise UnityMcpError("VRCForge MCP Core is installed but not ready for this project.")
+                raise UnityMcpError(
+                    "This Unity project does not have the VRCForge MCP2 unitypackage installed and ready."
+                )
+            claim = active_plan.claim(tool_name, params, core_project)
+        except ApprovedUnityExecutionError as exc:
+            raise UnityMcpError(str(exc)) from exc
+
+        try:
+            core_client = UnityMcpCoreClient(
+                core_project,
+                timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
+            )
+            core_result = core_client.call_tool(
+                tool_name,
+                params,
+                execution_context=dict(claim.execution_context),
+            )
+            # A response, including a rejected tool result, makes the one-use
+            # identifier terminal.  Only an exception leaves transport outcome
+            # uncertain and closes the remaining plan.
+            claim.complete()
+        except Exception as exc:  # noqa: BLE001 - unknown transport outcome fails closed.
+            claim.uncertain()
+            raise UnityMcpError(
+                f"Approved Unity write '{tool_name}' failed after its single transport attempt."
+            ) from exc
+        serialized = json.dumps(core_result, ensure_ascii=False, separators=(",", ":"))
+        if core_result.get("isError") is True:
+            raise UnityMcpError("Unity MCP Core rejected the approved tool execution.")
+        return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
+
+    last_error: Exception | None = None
+
     for attempt in range(1, settings.unity_mcp_retries + 1):
         try:
             if core_descriptor is not None and core_descriptor.is_file():
-                core_result = UnityMcpCoreClient(
+                core_client = UnityMcpCoreClient(
                     core_project,
                     timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
-                ).call_tool(tool_name, params)
+                )
+                core_result = (
+                    core_client.call_tool(tool_name, params)
+                    if transport_context is None
+                    else core_client.call_tool(
+                        tool_name,
+                        params,
+                        execution_context=transport_context,
+                    )
+                )
                 serialized = json.dumps(core_result, ensure_ascii=False, separators=(",", ":"))
                 if core_result.get("isError") is True:
+                    if preserve_tool_error:
+                        return McpResult(
+                            exit_code=1,
+                            stdout=serialized,
+                            stderr="",
+                            payload=core_result,
+                        )
                     raise UnityMcpError("Unity MCP Core rejected the tool execution.")
                 return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
             if core_installed:
                 raise UnityMcpError(
-                    "VRCForge MCP Core is installed but not ready; legacy connector fallback is disabled for this project."
+                    "VRCForge MCP Core is installed but not ready for this project."
                 )
-            completed = run_unity_mcp_process(
-                settings,
-                build_custom_tool_cli_args(settings, tool_name, params),
+            raise UnityMcpError(
+                "This Unity project does not have the VRCForge MCP2 unitypackage installed and ready."
             )
-            payload = try_parse_json(completed.stdout)
-            result = McpResult(
-                exit_code=completed.returncode,
-                stdout=completed.stdout.strip(),
-                stderr=completed.stderr.strip(),
-                payload=payload,
-            )
-
-            payload_error = extract_mcp_error(result.payload)
-            stdout_error = extract_unity_mcp_stdout_error(result.stdout)
-            if completed.returncode == 0 and not payload_error and not stdout_error:
-                return result
-
-            error_text = payload_error or stdout_error or result.stderr or result.stdout or f"unity-mcp exited with code {completed.returncode}"
-            raise UnityMcpError(humanize_unity_mcp_error(error_text))
         except Exception as exc:  # noqa: BLE001 - We want to retry any transport/runtime failure here.
             last_error = exc
             if attempt >= settings.unity_mcp_retries:
@@ -2950,182 +3004,30 @@ def invoke_unity_mcp(settings: Settings, tool_name: str, params: dict[str, Any])
     raise UnityMcpError(f"Failed to call unity-mcp tool '{tool_name}' after retries{detail}") from last_error
 
 
-def build_custom_tool_cli_args(settings: Settings, tool_name: str, params: dict[str, Any]) -> list[str]:
-    params_json = json.dumps(params, ensure_ascii=False)
-    if uses_unity_mcp_legacy_wrapper(settings.unity_mcp_command):
-        params_b64 = base64.b64encode(params_json.encode("utf-8")).decode("ascii")
-        return ["editor", "custom-tool", tool_name, "--params-b64", params_b64]
-
-    return ["editor", "custom-tool", tool_name, "--params", params_json]
-
-
-def uses_unity_mcp_legacy_wrapper(command: list[str]) -> bool:
-    legacy_name = "unity-mcp-cli" + "." + "ps1"
-    return any(str(part).lower().endswith(legacy_name) for part in command)
-
-
-def extract_unity_mcp_stdout_error(stdout: str) -> str | None:
-    stripped = stdout.strip()
-    if not stripped:
-        return None
-
-    for line in stripped.splitlines():
-        clean_line = line.strip()
-        if clean_line.startswith("❌ Error:"):
-            return clean_line.replace("❌ Error:", "", 1).strip() or clean_line
-
-    return None
-
-
-def run_unity_mcp_passthrough(settings: Settings, cli_args: list[str]) -> str:
-    completed = run_unity_mcp_process(settings, cli_args)
-    if completed.returncode != 0:
-        stderr = completed.stderr.strip()
-        stdout = completed.stdout.strip()
-        detail = stderr or stdout or f"unity-mcp exited with code {completed.returncode}"
-        raise UnityMcpError(humanize_unity_mcp_error(detail))
-
-    return completed.stdout.strip() or completed.stderr.strip() or "unity-mcp returned no output."
-
-
-def run_unity_mcp_process(settings: Settings, cli_args: list[str]) -> subprocess.CompletedProcess[str]:
-    command = build_unity_mcp_command(settings, cli_args)
-    command = resolve_unity_mcp_wrapper_command(command)
-    env = os.environ.copy()
-    env["PYTHONIOENCODING"] = "utf-8"
-    env["PYTHONUTF8"] = "1"
+def read_unity_mcp_core_status(settings: Settings) -> dict[str, Any]:
+    """Read the selected project's VRCForge Core descriptor only."""
+    project_value = str(settings.unity_project_path or "").strip()
+    if not project_value:
+        raise UnityMcpError("No Unity project is configured for VRCForge MCP Core.")
+    project_root = Path(project_value)
     try:
-        return subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            env=env,
-            timeout=settings.unity_mcp_timeout_seconds,
-        )
-    except FileNotFoundError as exc:
-        joined_command = " ".join(command)
+        tools = UnityMcpCoreClient(
+            project_root,
+            timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
+        ).list_tools()
+    except Exception as exc:  # noqa: BLE001 - present one actionable readiness message.
         raise UnityMcpError(
-            "Could not find the unity-mcp CLI command.\n"
-            f"Tried command: {joined_command}\n"
-            "Install mcpforunityserver, or install uv so VRCForge can run uvx --from mcpforunityserver unity-mcp."
+            "VRCForge MCP Core is not ready for the configured Unity project. "
+            "Import the VRCForge unitypackage and open that project in Unity."
         ) from exc
-
-
-def build_unity_mcp_command(settings: Settings, cli_args: list[str]) -> list[str]:
-    command = list(settings.unity_mcp_command)
-    command.extend(["--host", settings.unity_mcp_host, "--port", str(settings.unity_mcp_port)])
-    if settings.unity_mcp_instance:
-        command.extend(["--instance", settings.unity_mcp_instance])
-    command.extend(cli_args)
-    return command
-
-
-def resolve_unity_mcp_wrapper_command(command: list[str]) -> list[str]:
-    wrapper_index = next(
-        (index for index, part in enumerate(command) if str(part).lower().endswith("unity-mcp-cli" + "." + "ps1")),
-        None,
-    )
-    if wrapper_index is None:
-        return command
-
-    resolved_prefix = find_unity_mcp_executable_prefix()
-    if not resolved_prefix:
-        raise UnityMcpError(
-            "Legacy unity-mcp wrapper settings are no longer executed. "
-            "Install mcpforunityserver or uv, then update the Unity MCP command to unity-mcp or uvx."
-        )
-
-    cli_args = decode_params_base64_args(command[wrapper_index + 1:])
-    return resolved_prefix + cli_args
-
-
-def find_unity_mcp_executable_prefix() -> list[str] | None:
-    unity_mcp_path = shutil.which("unity-mcp.exe") or shutil.which("unity-mcp")
-    if unity_mcp_path:
-        return [unity_mcp_path]
-
-    candidates: list[Path] = []
-    virtual_env = os.environ.get("VIRTUAL_ENV")
-    if virtual_env:
-        candidates.append(Path(virtual_env) / "Scripts" / "unity-mcp.exe")
-    candidates.append(Path(sys.executable).parent / "Scripts" / "unity-mcp.exe")
-
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        candidates.extend(
-            [
-                Path(appdata) / "Python" / "Python314" / "Scripts" / "unity-mcp.exe",
-                Path(appdata) / "Python" / "Scripts" / "unity-mcp.exe",
-            ]
-        )
-
-    localappdata = os.environ.get("LOCALAPPDATA")
-    if localappdata:
-        candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / "unity-mcp.exe")
-
-    for candidate in candidates:
-        if candidate.exists():
-            return [str(candidate)]
-
-    uvx_path = shutil.which("uvx.exe") or shutil.which("uvx")
-    uvx_candidates: list[Path] = []
-    if virtual_env:
-        uvx_candidates.append(Path(virtual_env) / "Scripts" / "uvx.exe")
-    uvx_candidates.append(Path(sys.executable).parent / "Scripts" / "uvx.exe")
-    if appdata:
-        uvx_candidates.extend(
-            [
-                Path(appdata) / "Python" / "Python314" / "Scripts" / "uvx.exe",
-                Path(appdata) / "Python" / "Scripts" / "uvx.exe",
-            ]
-        )
-    if localappdata:
-        uvx_candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / "uvx.exe")
-
-    for candidate in uvx_candidates:
-        if candidate.exists():
-            uvx_path = str(candidate)
-            break
-
-    if uvx_path:
-        return [uvx_path, "--from", "mcpforunityserver", "unity-mcp"]
-
-    return None
-
-
-def decode_params_base64_args(args: list[str]) -> list[str]:
-    converted: list[str] = []
-    index = 0
-    while index < len(args):
-        argument = args[index]
-        if argument not in ("--params-b64", "--params-base64"):
-            converted.append(argument)
-            index += 1
-            continue
-
-        if index + 1 >= len(args):
-            raise UnityMcpError(f"Missing value after {argument}.")
-        decoded = base64.b64decode(args[index + 1]).decode("utf-8")
-        converted.extend(["--params", decoded])
-        index += 2
-
-    return converted
-
-
-def humanize_unity_mcp_error(detail: str) -> str:
-    normalized = detail.strip()
-    lowered = normalized.lower()
-
-    if "http error from server: 503" in lowered or "cannot connect to unity mcp server" in lowered:
-        return (
-            f"{normalized}\n"
-            "Unity MCP server is not ready yet. Open the target Unity project, wait for package import, "
-            "then start MCP for Unity inside the editor before retrying."
-        )
-
-    return normalized
+    return {
+        "protocolVersion": "2026-07-28",
+        "transport": "vrcforge-mcp-core",
+        "projectPath": str(project_root),
+        "connected": True,
+        "tools": tools,
+        "instances": [{"projectPath": str(project_root), "instance": "project-scoped"}],
+    }
 
 
 def extract_mcp_error(payload: Any | None) -> str | None:

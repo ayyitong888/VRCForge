@@ -73,27 +73,6 @@ internal sealed class LauncherPaths
         EnsureAgentGatewayConfig();
     }
 
-    public void SetUnityMcpCommand(params string[] command)
-    {
-        ConfigDir.Create();
-        if (!SettingsPath.Exists)
-        {
-            File.WriteAllText(SettingsPath.FullName, DefaultSettingsJson);
-        }
-
-        JsonObject root = JsonNode.Parse(File.ReadAllText(SettingsPath.FullName))?.AsObject() ?? new JsonObject();
-        JsonObject unityMcp = root["unity_mcp"] as JsonObject ?? new JsonObject();
-        JsonArray commandArray = new();
-        foreach (string part in command.Where(item => !string.IsNullOrWhiteSpace(item)))
-        {
-            commandArray.Add(part);
-        }
-
-        unityMcp["command"] = commandArray;
-        root["unity_mcp"] = unityMcp;
-        File.WriteAllText(SettingsPath.FullName, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-    }
-
     public JsonObject EnsureAgentGatewayConfig()
     {
         JsonObject config = AgentGatewayConfigPath.Exists
@@ -221,12 +200,7 @@ internal sealed class LauncherPaths
     "model": "gemini-2.5-flash"
   },
   "unity_mcp": {
-    "command": [
-      "unity-mcp"
-    ],
-    "host": "127.0.0.1",
-    "port": 8080,
-    "instance": "",
+    "project_path": "",
     "retries": 3,
     "retry_backoff_seconds": 2.0,
     "timeout_seconds": 30,

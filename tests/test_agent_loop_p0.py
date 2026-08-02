@@ -21,6 +21,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
+from agent_gateway import detect_avatar_write_intent
+from approved_unity_execution import current_approved_unity_execution
 
 
 class AgentLoopP0Tests(unittest.TestCase):
@@ -30,6 +32,9 @@ class AgentLoopP0Tests(unittest.TestCase):
         root = Path(self.temp_dir.name)
         self.original_paths = (self.gateway.config_path, self.gateway.audit_dir)
         self.original_prepare = self.gateway.checkpoint_prepare_handler
+        self.original_create_checkpoint_prepare = self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].checkpoint_prepare_handler
         self.gateway.configure_paths(root / "agent_gateway.json", root / "agent_gateway")
         config = self.gateway.ensure_config()
         config.enabled = True
@@ -37,11 +42,17 @@ class AgentLoopP0Tests(unittest.TestCase):
         config.execution_mode = "approval"
         self.gateway.save_config(config)
         self.gateway.checkpoint_prepare_handler = lambda _root: {"ok": True}
+        self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].checkpoint_prepare_handler = lambda _root, _arguments: {"ok": True}
         self.original_planner_label = self.gateway.llm_planner_label
 
     def tearDown(self) -> None:
         self.gateway.llm_planner_label = self.original_planner_label
         self.gateway.checkpoint_prepare_handler = self.original_prepare
+        self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].checkpoint_prepare_handler = self.original_create_checkpoint_prepare
         self.gateway.configure_paths(*self.original_paths)
         self.temp_dir.cleanup()
 
@@ -105,14 +116,23 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertTrue(payload["plan"].get("multiStep"))
         self.assertEqual(payload["plan"].get("stepCount"), 2)
 
+        applied_result = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "gameObjectPath": "Milltina/GameObject"}},
+        )
+
+        def invoke_with_bound_execution(_settings, tool_name, arguments, **_kwargs):
+            plan = current_approved_unity_execution()
+            self.assertIsNotNone(plan)
+            claim = plan.claim(tool_name, arguments, project)
+            claim.complete()
+            return applied_result
+
         with patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()), patch(
             "dashboard_server.invoke_unity_mcp",
-            return_value=dashboard_server.McpResult(
-                exit_code=0,
-                stdout="ok",
-                stderr="",
-                payload={"data": {"ok": True, "gameObjectPath": "Milltina/GameObject"}},
-            ),
+            side_effect=invoke_with_bound_execution,
         ) as mock_invoke:
             gateway.approve(approval_id)
             applied = gateway.apply_approved({"approval_id": approval_id})
@@ -124,6 +144,93 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(arguments["name"], "GameObject")
         self.assertEqual(arguments["parentPath"], "Milltina")
         self.assertFalse(arguments["preview"])
+
+    def test_explicit_scene_root_create_bypasses_avatar_scan_and_uses_supervised_write(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+
+        with patch.object(
+            gateway,
+            "_execute_runtime_skill",
+            side_effect=AssertionError("an explicit scene-root target must not scan avatars"),
+        ):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "create an object named VRCForgeMCP2AppAcceptance at the scene root",
+                        "projectPath": str(project),
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        steps = payload.get("steps") or []
+        self.assertEqual(len(steps), 1)
+        self.assertEqual(steps[0]["kind"], "write")
+        self.assertEqual(steps[0]["tool"], "vrcforge_create_gameobject")
+        self.assertEqual(payload["plan"].get("resolvedTarget"), "scene_root")
+
+        approval_id = payload["approval_id"]
+        approval = gateway._approvals[approval_id]
+        self.assertEqual(approval["targetTool"], "vrcforge_create_gameobject")
+        self.assertEqual(approval["arguments"]["name"], "VRCForgeMCP2AppAcceptance")
+        self.assertEqual(approval["arguments"]["parentPath"], "")
+        self.assertEqual(approval["arguments"]["projectPath"], str(project))
+
+        applied_result = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "gameObjectPath": "VRCForgeMCP2AppAcceptance"}},
+        )
+
+        def invoke_with_bound_execution(_settings, tool_name, arguments, **_kwargs):
+            plan = current_approved_unity_execution()
+            self.assertIsNotNone(plan)
+            claim = plan.claim(tool_name, arguments, project)
+            claim.complete()
+            return applied_result
+
+        with patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()), patch(
+            "dashboard_server.invoke_unity_mcp",
+            side_effect=invoke_with_bound_execution,
+        ) as mock_invoke:
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+        self.assertTrue(applied["ok"])
+        self.assertEqual(applied["status"], "applied")
+        _settings, tool_name, arguments = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_create_gameobject")
+        self.assertEqual(arguments["name"], "VRCForgeMCP2AppAcceptance")
+        self.assertEqual(arguments["parentPath"], "")
+        self.assertFalse(arguments["preview"])
+
+    def test_scene_root_write_intent_requires_an_unambiguous_scene_root_phrase(self) -> None:
+        english = detect_avatar_write_intent("create an object named RootProbe at the scene root")
+        chinese = detect_avatar_write_intent("在活动场景根节点创建一个名为根节点探针的对象")
+        project_root = detect_avatar_write_intent("create an object in the project root")
+
+        self.assertEqual(english["targetMode"], "scene_root")
+        self.assertEqual(chinese["targetMode"], "scene_root")
+        self.assertEqual(project_root["targetMode"], "")
+        self.assertIsNone(detect_avatar_write_intent("inspect the scene root"))
+
+    def test_scene_root_and_avatar_target_conflict_fails_closed(self) -> None:
+        plan = self.gateway._plan_write_intent(
+            "create an object at the scene root",
+            {"avatarPath": "AvatarRoot"},
+            [],
+            False,
+        )
+
+        self.assertIsNotNone(plan)
+        self.assertTrue(plan["deterministicTerminal"])
+        self.assertEqual(plan["nextStep"], "done")
+        self.assertFalse(plan["writeNeeded"])
+        self.assertFalse(plan["skillNeeded"])
 
     def test_multiple_models_asks_user_to_choose_without_writing(self) -> None:
         gateway = self.gateway

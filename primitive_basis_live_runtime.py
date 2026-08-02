@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import socket
 import stat
 import threading
 import time
@@ -32,8 +31,8 @@ FIXTURE_READY_MARKER = Path("Library/VRCForge/primitive-basis-model-part-ready.j
 EXPECTED_UNITY_VERSION = "2022.3.22f1"
 EXPECTED_SCENE_GUID = "285dbe12f5ede174cbcd075983e1410f"
 EXPECTED_SCENE_DIGEST = "59de4a023cd1912acbbe9215c722886cc700879f43d8d4d477145f24b58aa97f"
-EXPECTED_CONTRACT_DIGEST = "68a466d27cdb6718586fa74661d7337404c684c6a1c5a21e0af618c7b790e74d"
-EXPECTED_BASELINE_FILE_DIGEST = "68160ac3203b41c5ccf2a5e882f4436b7a46fffc3c5e6eb8a89dea9d97c25f33"
+EXPECTED_CONTRACT_DIGEST = "03d1b74f0c0ddab4c7cf26b21890679cb9f65a5ecab022d2bbd7fb19cbce6097"
+EXPECTED_BASELINE_FILE_DIGEST = "b1288cf980ea597acfff107c3b83f4bcd153ee061bdc6a95ee47b6e08b92e0b7"
 EXPECTED_COMPONENT_HOST = "FixtureAvatar/Part/Armature"
 EXPECTED_AVATAR_ROOT = "FixtureAvatar"
 EXPECTED_MERGE_TARGET = "FixtureAvatar/Armature"
@@ -57,12 +56,10 @@ EXPECTED_RENDERER_BONE = "FixtureAvatar/Part/Armature/Hips"
 FIXTURE_INSPECT_TOOL = "vrc_inspect_primitive_basis_fixture"
 FIXTURE_RELOAD_TOOL = "vrc_reload_primitive_basis_fixture"
 COMPONENT_INSPECT_TOOL = "vrc_inspect_modular_avatar_component"
-DEFAULT_BRIDGE_PORT = 8080
 _INVENTORY_ROOTS = ("Assets", "Packages", "ProjectSettings", "VRCForgeFixture")
 _MAX_INVENTORY_FILES = 50_000
 _MAX_INVENTORY_BYTES = 4 * 1024 * 1024 * 1024
 _REQUIRED_PACKAGE_VERSIONS = {
-    "com.coplaydev.unity-mcp": "9.6.9-beta.7",
     "com.vrchat.avatars": "3.10.3",
     "com.vrchat.base": "3.10.3",
     "nadena.dev.modular-avatar": "1.17.1",
@@ -100,12 +97,9 @@ class ModelPartCompositionLiveRuntime:
         self,
         session: PrimitiveBasisLiveSession,
         callbacks: LiveRuntimeCallbacks,
-        *,
-        bridge_port: int = DEFAULT_BRIDGE_PORT,
     ) -> None:
         self._session = session
         self._callbacks = callbacks
-        self._bridge_port = int(bridge_port)
         self._lock = threading.Lock()
         self._project_root: Path | None = None
         self._fixtures: FixtureSet | None = None
@@ -731,7 +725,7 @@ class ModelPartCompositionLiveRuntime:
                 "count": 0,
                 "projectRemoved": True,
                 "unityProcessExited": True,
-                "bridgePortReleased": True,
+                "projectMcpCoreRemoved": True,
             }
             self._cleanup_facts = (baseline_facts, residue_facts)
             return {
@@ -753,7 +747,6 @@ class ModelPartCompositionLiveRuntime:
             if project_root.exists():
                 raise PrimitiveBasisLiveRuntimeError("Disposable fixture project still exists.")
             _require_process_exited(self._unity_process_id)
-            _require_tcp_port_released(self._bridge_port)
             baseline_facts, residue_facts = self._cleanup_facts
             self._session.record(
                 "baseline_comparison",
@@ -770,7 +763,7 @@ class ModelPartCompositionLiveRuntime:
                     "source": "post_cleanup_probe",
                     "projectRemoved": True,
                     "unityProcessExited": True,
-                    "bridgePortReleased": True,
+                    "projectMcpCoreRemoved": True,
                 },
             )
             return self._session.finalize()
@@ -1784,25 +1777,6 @@ def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
 
 def _mapping_or_empty(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
-
-
-def _require_tcp_port_released(port: int) -> None:
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        if os.name == "nt":
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        probe.bind(("127.0.0.1", int(port)))
-    except OSError as exc:
-        code = int(getattr(exc, "winerror", 0) or getattr(exc, "errno", 0) or 0)
-        if code in {48, 98, 10048}:
-            raise PrimitiveBasisLiveRuntimeError(
-                "The fixed fixture bridge port is still in use."
-            ) from exc
-        raise PrimitiveBasisLiveRuntimeError(
-            "The fixed fixture bridge port release could not be verified."
-        ) from exc
-    finally:
-        probe.close()
 
 
 def _require_process_exited(process_id: int) -> None:

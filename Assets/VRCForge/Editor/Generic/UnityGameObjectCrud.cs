@@ -69,6 +69,7 @@ namespace VRCForge.Editor
                 var payload = new
                 {
                     gameObjectPath = ComponentCrudCore.GetHierarchyPath(t),
+                    globalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString(),
                     name = go.name,
                     activeSelf = go.activeSelf,
                     activeInHierarchy = go.activeInHierarchy,
@@ -77,6 +78,10 @@ namespace VRCForge.Editor
                     layerName = LayerMask.LayerToName(go.layer),
                     isStatic = go.isStatic,
                     sceneName = go.scene.IsValid() ? go.scene.name : null,
+                    scenePath = go.scene.IsValid() ? go.scene.path : null,
+                    hierarchyPathCount = go.scene.IsValid()
+                        ? AssetPrefabCore.CountHierarchyPath(ComponentCrudCore.GetHierarchyPath(t), go.scene.handle)
+                        : 0,
                     parentPath = t.parent != null ? ComponentCrudCore.GetHierarchyPath(t.parent) : null,
                     siblingIndex = t.GetSiblingIndex(),
                     childCount = t.childCount,

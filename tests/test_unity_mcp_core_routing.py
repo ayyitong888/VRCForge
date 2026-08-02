@@ -15,7 +15,7 @@ def _settings(project: Path) -> agent.Settings:
         llm_model="test",
         llm_api_key_env="",
         gemini_thinking_level="",
-        unity_mcp_command=["legacy-unity-mcp"],
+        unity_mcp_command=["unused-external-mcp"],
         unity_mcp_host="127.0.0.1",
         unity_mcp_port=8080,
         unity_mcp_instance="",
@@ -47,7 +47,6 @@ def test_invoke_routes_to_project_bound_core_when_descriptor_exists(tmp_path: Pa
             return {"content": [{"type": "text", "text": "ok"}], "isError": False}
 
     monkeypatch.setattr(agent, "UnityMcpCoreClient", FakeCoreClient)
-    monkeypatch.setattr(agent, "run_unity_mcp_process", lambda *_args, **_kwargs: pytest.fail("legacy transport used"))
 
     result = agent.invoke_unity_mcp(_settings(tmp_path), "vrc_read", {"projectPath": str(tmp_path), "value": "汉字"})
 
@@ -74,7 +73,6 @@ def test_core_tool_error_never_falls_back_to_legacy_transport(tmp_path: Path, mo
             return {"content": [{"type": "text", "text": "rejected"}], "isError": True}
 
     monkeypatch.setattr(agent, "UnityMcpCoreClient", FakeCoreClient)
-    monkeypatch.setattr(agent, "run_unity_mcp_process", lambda *_args, **_kwargs: pytest.fail("legacy transport used"))
 
     with pytest.raises(agent.UnityMcpError, match="Failed to call unity-mcp"):
         agent.invoke_unity_mcp(_settings(tmp_path), "vrc_write", {"projectPath": str(tmp_path)})
@@ -90,13 +88,8 @@ def test_core_installed_without_descriptor_never_falls_back_to_legacy_write(
     server_marker.parent.mkdir(parents=True)
     core_marker.write_text("// marker", encoding="utf-8")
     server_marker.write_text("// marker", encoding="utf-8")
-    monkeypatch.setattr(
-        agent,
-        "run_unity_mcp_process",
-        lambda *_args, **_kwargs: pytest.fail("legacy transport used"),
-    )
 
-    with pytest.raises(agent.UnityMcpError, match="legacy connector fallback is disabled"):
+    with pytest.raises(agent.UnityMcpError, match="installed but not ready"):
         agent.invoke_unity_mcp(
             _settings(tmp_path),
             "vrc_write",
@@ -104,7 +97,38 @@ def test_core_installed_without_descriptor_never_falls_back_to_legacy_write(
         )
 
 
-def test_core_calls_never_receive_an_out_of_band_execution_context(
+def test_cli_status_reads_only_the_project_scoped_core_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeCoreClient:
+        def __init__(self, project_root: Path, *, timeout_seconds: int) -> None:
+            observed["projectRoot"] = project_root
+            observed["timeout"] = timeout_seconds
+
+        def list_tools(self) -> list[dict[str, str]]:
+            return [{"name": "vrc_read"}]
+
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", FakeCoreClient)
+    status = agent.read_unity_mcp_core_status(_settings(tmp_path))
+
+    assert status["protocolVersion"] == "2026-07-28"
+    assert status["transport"] == "vrcforge-mcp-core"
+    assert status["tools"] == [{"name": "vrc_read"}]
+    assert observed == {"projectRoot": tmp_path, "timeout": 45}
+
+
+def test_cli_status_without_project_fails_closed() -> None:
+    settings = _settings(Path("."))
+    settings.unity_project_path = ""
+
+    with pytest.raises(agent.UnityMcpError, match="No Unity project"):
+        agent.read_unity_mcp_core_status(settings)
+
+
+def test_core_rejects_explicit_approved_write_contexts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -117,16 +141,19 @@ def test_core_calls_never_receive_an_out_of_band_execution_context(
         def __init__(self, _project_root: str, *, timeout_seconds: int) -> None:
             assert timeout_seconds == 45
 
-        def call_tool(self, name: str, arguments: dict) -> dict:
-            observed.append((name, arguments))
+        def call_tool(self, name: str, arguments: dict, *, execution_context=None) -> dict:
+            observed.append((name, arguments, execution_context))
             return {"content": [{"type": "text", "text": "ok"}], "isError": False}
 
     monkeypatch.setattr(agent, "UnityMcpCoreClient", FakeCoreClient)
     settings = _settings(tmp_path)
     agent.invoke_unity_mcp(settings, "vrc_scan_avatar_items", {"outputPath": ""})
-    agent.invoke_unity_mcp(settings, "vrc_write", {"value": 1})
 
-    assert observed == [
-        ("vrc_scan_avatar_items", {"outputPath": ""}),
-        ("vrc_write", {"value": 1}),
-    ]
+    assert observed[0] == ("vrc_scan_avatar_items", {"outputPath": ""}, None)
+    with pytest.raises(agent.UnityMcpError, match="explicit contexts"):
+        agent.invoke_unity_mcp(
+            settings,
+            "vrc_write",
+            {"value": 1},
+            execution_context={"lane": "approved_write"},
+        )

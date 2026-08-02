@@ -1,5 +1,5 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
-import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorFixMode, DoctorFixResult, DoctorReport, PermissionState, ProjectSnapshot, ProviderApiType, ProviderCapabilityKey, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
+import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorFixMode, DoctorFixResult, DoctorReport, PermissionState, ProjectSelectionState, ProjectSnapshot, ProviderApiType, ProviderCapabilityKey, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
 
 export async function fetchBootstrap(endpoint: string, options: { refreshProjects?: boolean } = {}): Promise<AppBootstrap> {
   if (hasTauriInternals()) {
@@ -30,6 +30,19 @@ export async function refreshProjects(endpoint: string): Promise<ProjectSnapshot
     });
   }
   return requestJson<ProjectSnapshot>(`${endpoint}/api/projects/refresh`, { method: "POST", timeoutMs: 30000 });
+}
+
+export async function selectUnityProject(endpoint: string, projectPath: string): Promise<ProjectSelectionState> {
+  const request = { projectPath, timeoutMs: 20000 };
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort<ProjectSelectionState>("select_unity_project", { request });
+  }
+  return requestJson<ProjectSelectionState>(`${endpoint}/api/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectPath }),
+    timeoutMs: 20000,
+  });
 }
 
 export async function refreshUnityReadiness(endpoint: string): Promise<UnityReadinessRefresh> {

@@ -27,11 +27,6 @@
   },
   "requiredPackages": [
     {
-      "id": "com.coplaydev.unity-mcp",
-      "version": "9.6.9-beta.7",
-      "provisioning": "exact_artifact"
-    },
-    {
       "id": "com.vrchat.avatars",
       "version": "3.10.3",
       "provisioning": "exact_artifact"

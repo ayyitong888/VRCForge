@@ -34,10 +34,12 @@ Before publishing a release package:
       bundled component fails its license gate.
 * [ ] Add every bundled third-party component to
       `packaging/THIRD_PARTY_LICENSES.json` before publishing it.
-* [ ] For bundled CoplayDev Unity MCP, include the upstream MIT LICENSE in both
-      the package root and release `licenses/` folder.
-* [ ] For bundled CoplayDev Unity MCP, include VRCForge distribution notes that
-      state the upstream project, pinned commit, license, and local changes.
+* [ ] Confirm `VRCForge.unitypackage` contains only VRCForge-owned MCP Core and
+      tool sources under `Assets/VRCForge`, with no external Unity MCP package.
+* [ ] Confirm the package exposes exactly 64 tools and only protocol
+      `2026-07-28`; old protocol/transport/fallback strings must be absent.
+* [ ] Confirm the package-generated trusted desktop/backend SHA-256 values
+      match the exact binaries in the paired Windows payload.
 * [ ] Add a warning that users should back up Unity / VRChat avatar projects before writing assets.
 * [ ] Add changelog notes for major behavior changes.
 * [ ] Confirm the public compatibility matrix covers Unity, VRChat SDK,

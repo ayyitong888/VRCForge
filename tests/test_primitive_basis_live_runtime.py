@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-import socket
 from pathlib import Path
 
 import pytest
@@ -345,15 +344,9 @@ def make_runtime(tmp_path: Path) -> tuple[Path, live.LiveBootstrap, FakeRuntime,
         encoding="utf-8",
     )
     fake = FakeRuntime(project_root, bootstrap)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as port_probe:
-        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-            port_probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        port_probe.bind(("127.0.0.1", 0))
-        bridge_port = int(port_probe.getsockname()[1])
     coordinator = runtime.ModelPartCompositionLiveRuntime(
         live.PrimitiveBasisLiveSession(bootstrap),
         fake.callbacks(),
-        bridge_port=bridge_port,
     )
     return project_root, bootstrap, fake, coordinator
 
@@ -529,7 +522,6 @@ def test_real_gateway_apply_and_restore_satisfy_live_lifecycle_contract(
     coordinator = runtime.ModelPartCompositionLiveRuntime(
         live.PrimitiveBasisLiveSession(bootstrap),
         callbacks,
-        bridge_port=65_534,
     )
     def reload_restored_fixture(path: Path) -> dict[str, object]:
         assert path.resolve() == project_root.resolve()
@@ -648,7 +640,6 @@ def test_start_rejects_dirty_scene_identity(tmp_path: Path) -> None:
         runtime.LiveRuntimeCallbacks(
             **{**fake.callbacks().__dict__, "inspect_fixture": dirty_fixture}
         ),
-        bridge_port=65_534,
     )
     with pytest.raises(runtime.PrimitiveBasisLiveRuntimeError, match="identity"):
         coordinator.start(str(project_root))
@@ -671,7 +662,6 @@ def test_connection_switch_is_rejected_before_component_read(tmp_path: Path) -> 
         runtime.LiveRuntimeCallbacks(
             **{**fake.callbacks().__dict__, "validate_connection": changed_connection}
         ),
-        bridge_port=65_534,
     )
     with pytest.raises(runtime.PrimitiveBasisLiveRuntimeError, match="connection changed"):
         coordinator.start(str(project_root))
@@ -690,7 +680,6 @@ def test_compile_status_rejects_replacement_unity_process(tmp_path: Path) -> Non
         runtime.LiveRuntimeCallbacks(
             **{**fake.callbacks().__dict__, "read_compile_status": replaced_process}
         ),
-        bridge_port=65_534,
     )
     coordinator.start(str(project_root))
     observe_apply_lifecycle(fake, coordinator)
@@ -806,7 +795,6 @@ def test_apply_argument_rebinding_is_rejected(tmp_path: Path) -> None:
         runtime.LiveRuntimeCallbacks(
             **{**fake.callbacks().__dict__, "create_apply_request": changed_request}
         ),
-        bridge_port=65_534,
     )
     with pytest.raises(runtime.PrimitiveBasisLiveRuntimeError, match="arguments changed"):
         coordinator.start(str(project_root))
@@ -823,7 +811,7 @@ def test_unrelated_approval_is_not_counted(tmp_path: Path) -> None:
         coordinator.readback_and_request_restore()
 
 
-def test_finalization_requires_project_process_and_port_cleanup(tmp_path: Path) -> None:
+def test_finalization_requires_project_and_process_cleanup(tmp_path: Path) -> None:
     project_root, _bootstrap, fake, coordinator = make_runtime(tmp_path)
     coordinator.start(str(project_root))
     observe_apply_lifecycle(fake, coordinator)

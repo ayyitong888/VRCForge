@@ -20,7 +20,6 @@ python -m pip install -r requirements.txt
 | `openai` | OpenAI-compatible providers, including OpenAI, DeepSeek, OpenRouter, Ollama-compatible HTTP endpoints | OpenAI-compatible 接口，包括 OpenAI、DeepSeek、OpenRouter、Ollama 兼容 HTTP 接口 |
 | `google-genai` | Google AI Studio and Google Vertex AI Gemini calls | Google AI Studio 与 Google Vertex AI Gemini 调用 |
 | `anthropic` | Anthropic Claude calls | Anthropic Claude 调用 |
-| `mcpforunityserver` | Python side of the Unity MCP connection | Unity MCP 连接的 Python 侧组件 |
 | `cryptography` | `.vsk` skill package signing and Ed25519 signature verification | Skill 包签名与验签 |
 | `httpx` | FastAPI test client support | FastAPI 测试客户端支持 |
 | `pytest` | Local test runner | 本地测试运行器 |
@@ -35,43 +34,31 @@ Git is optional at runtime. Git worktrees use git-backed checkpoints; non-git pr
 
 ## Unity / Unity 侧
 
-VRCForge does not require one single `.unitypackage` file. Use a normal VRChat Avatar project and add the packages below.
-VRCForge 当前不依赖一个单独的 `.unitypackage` 文件。请使用普通 VRChat Avatar 工程，并加入下面的包。
+Import the single release artifact `VRCForge.unitypackage` into a normal VRChat
+Avatar project. It installs the VRCForge-owned project-scoped MCP Core,
+lifecycle bootstrap, and all 64 Unity tools under `Assets/VRCForge`. No separate
+MCP server/package, Unity manifest edit, Python command, `uvx` command, or token
+copy is required. The App and package support only protocol `2026-07-28`.
+
+将发布文件 `VRCForge.unitypackage` 导入普通 VRChat Avatar 工程即可。它会把
+VRCForge 自有的项目级 MCP Core、生命周期引导程序和全部 64 个 Unity 工具安装到
+`Assets/VRCForge`。不需要额外 MCP 服务或包、Unity manifest 修改、Python/`uvx`
+命令或手工复制 token。App 与该包只支持协议 `2026-07-28`。
 
 | Package | How to install | Required | 用途 |
 | --- | --- | --- | --- |
 | VRChat SDK - Avatars | Install through VRChat Creator Companion | Yes | Provides Avatar Descriptor, Expression Parameters, Expression Menu, and VRChat avatar APIs |
-| MCP for Unity (`com.coplaydev.unity-mcp`) | Add through Unity Package Manager, or let VRCForge / `tools/install-unity-project.ps1` add it to `Packages/manifest.json` | Yes | Lets the local runtime call Unity Editor tools |
 | Unity Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) | Usually pulled in by SDK/packages; add from Unity Package Manager if Unity reports missing `Newtonsoft.Json` | Yes if missing | JSON parsing inside Unity editor tools |
-
-MCP for Unity package URL used by the install script:
-安装脚本使用的 MCP for Unity 包地址：
-
-```json
-"com.coplaydev.unity-mcp": "file:Packages/com.coplaydev.unity-mcp"
-```
-
-Windows x64 installer builds bundle a pinned copy of CoplayDev MCP under
-`third_party/com.coplaydev.unity-mcp` after the license gate passes, then copy it
-into the release payload at `unity_plugin/Packages/com.coplaydev.unity-mcp`.
-
-The bundled CoplayDev Unity MCP package is MIT licensed. VRCForge must preserve
-the upstream `LICENSE` file in the package and copy it into the release payload
-as `licenses/CoplayDev-Unity-MCP-LICENSE.txt`. The build gate checks for the
-expected CoplayDev MIT copyright and permission notice text before packaging.
-Because VRCForge vendors a modified package copy, it also ships
-`VRCFORGE_DISTRIBUTION_NOTES.txt` in the package root and copies it into release
-payloads as `licenses/CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt`.
 
 Before every release build, all bundled third-party components must pass
 `packaging/check_third_party_licenses.ps1`. Any new bundled dependency must be
 listed in `packaging/THIRD_PARTY_LICENSES.json` before it can be shipped.
 
-Windows x64 release payloads may also bundle the official uv runtime so the
-desktop app/backend can bootstrap `uvx --from mcpforunityserver unity-mcp` on
-machines that do not have Python or uv installed. uv is licensed `MIT OR Apache-2.0`; release
-builds copy `LICENSE-MIT`, `LICENSE-APACHE`, and VRCForge distribution notes
-into the payload `licenses/` folder.
+Windows x64 release payloads may also bundle the official uv runtime for
+backend-managed support tooling. It is not used to start or install the Unity
+MCP Core. uv is licensed `MIT OR Apache-2.0`; release builds copy `LICENSE-MIT`,
+`LICENSE-APACHE`, and VRCForge distribution notes into the payload `licenses/`
+folder.
 
 ## VRCForge Unity Files / VRCForge Unity 文件
 
@@ -82,8 +69,8 @@ Copy or install this repository folder into the Unity project:
 Assets/VRCForge/
 ```
 
-The helper script can copy it and add MCP for Unity:
-辅助脚本可以复制该目录并添加 MCP for Unity：
+The source/debug helper script installs the same self-contained VRCForge tree:
+源码/调试辅助脚本会安装相同的自包含 VRCForge 文件树：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/install-unity-project.ps1 -ProjectPath "PATH_TO_UNITY_PROJECT"
@@ -91,9 +78,14 @@ powershell -ExecutionPolicy Bypass -File tools/install-unity-project.ps1 -Projec
 
 ## External Agent Gateway / 外部 Agent Gateway
 
-The backend includes a local MCP + REST Agent Gateway for external MCP-capable agent clients. It uses the official Python MCP SDK through `mcp[cli]` and is disabled by default until enabled in desktop settings.
+The backend includes a local MCP + REST Agent Gateway for external MCP-capable
+agent clients. It is served by the VRCForge-owned protocol `2026-07-28` router
+and is disabled by default until enabled in desktop settings.
 
-外部 Agent Gateway 使用官方 Python MCP SDK（`mcp[cli]`），默认关闭。启用后，外部 agent 只能通过 VRCForge 的受监督工具层读取、预览、请求写入和等待用户 approval，不能直接绕过 VRCForge 调 Unity MCP。approval token 由 VRCForge 内部保存，不包含在复制给外部 agent 的 MCP 配置中。
+外部 Agent Gateway 由 VRCForge 自有的 `2026-07-28` 协议路由提供，默认关闭。启用后，
+外部 agent 只能通过 VRCForge 的受监督工具层读取、预览、请求写入和等待用户 approval，
+不能绕过 VRCForge 直接调用 Unity MCP。approval token 由 VRCForge 内部保存，不包含在
+复制给外部 agent 的 MCP 配置中。
 
 ## Execution Model / 执行模型
 

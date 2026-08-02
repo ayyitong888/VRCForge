@@ -30,8 +30,15 @@ if (-not $tar) {
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcforge-unitypackage-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tempRoot | Out-Null
 
-function New-UnityGuid {
-    return [guid]::NewGuid().ToString("N")
+function New-StableUnityGuid([string]$PathName) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes("vrcforge.unitypackage.v1/$PathName")
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash($bytes)
+    } finally {
+        $sha.Dispose()
+    }
+    return ([System.BitConverter]::ToString($hash).Replace("-", "").Substring(0, 32)).ToLowerInvariant()
 }
 
 function Write-Utf8NoBom([string]$Path, [string]$Value) {
@@ -46,14 +53,14 @@ function Write-UnityPackageEntry {
         [bool]$IsDirectory
     )
 
-    $entryDir = Join-Path $EntryRoot (New-UnityGuid)
+    $entryDir = Join-Path $EntryRoot (New-StableUnityGuid "entry/$PathName")
     New-Item -ItemType Directory -Force -Path $entryDir | Out-Null
     Write-Utf8NoBom (Join-Path $entryDir "pathname") $PathName
 
     if ($IsDirectory) {
         $meta = @"
 fileFormatVersion: 2
-guid: $(New-UnityGuid)
+guid: $(New-StableUnityGuid $PathName)
 folderAsset: yes
 DefaultImporter:
   externalObjects: {}
@@ -65,7 +72,7 @@ DefaultImporter:
         Copy-Item -LiteralPath $SourcePath -Destination (Join-Path $entryDir "asset") -Force
         $meta = @"
 fileFormatVersion: 2
-guid: $(New-UnityGuid)
+guid: $(New-StableUnityGuid $PathName)
 MonoImporter:
   externalObjects: {}
   serializedVersion: 2
@@ -77,8 +84,15 @@ MonoImporter:
   assetBundleVariant:
 "@
     }
-
-    Write-Utf8NoBom (Join-Path $entryDir "asset.meta") $meta
+    $sourceMetaPath = "$SourcePath.meta"
+    if (Test-Path -LiteralPath $sourceMetaPath -PathType Leaf) {
+        Copy-Item -LiteralPath $sourceMetaPath -Destination (Join-Path $entryDir "asset.meta") -Force
+    } else {
+        # Unity's YAML reader rejects a final empty scalar when the generated
+        # .meta ends immediately after the colon. Keep the required terminal
+        # LF even though pathnames intentionally stay byte-exact without one.
+        Write-Utf8NoBom (Join-Path $entryDir "asset.meta") ($meta + "`n")
+    }
 }
 
 function Get-RelativePackagePath([string]$RootPath, [string]$ItemPath) {
@@ -94,17 +108,62 @@ function Get-RelativePackagePath([string]$RootPath, [string]$ItemPath) {
 
 try {
     $sourceRoot = Resolve-Path -LiteralPath $resolvedSource
-    $repoRootResolved = Resolve-Path -LiteralPath $repoRoot
     $items = @($sourceRoot.Path) + @(
         Get-ChildItem -LiteralPath $sourceRoot.Path -Recurse -Force |
+            Where-Object { $_.Extension -ne ".meta" } |
             Sort-Object FullName |
             ForEach-Object { $_.FullName }
     )
 
     foreach ($item in $items) {
-        $relative = (Get-RelativePackagePath $repoRootResolved.Path $item).Replace("\", "/")
+        # The source may be a release-staging directory outside this checkout.
+        # Unity package pathnames are an artifact contract, not a reflection of
+        # the builder's physical input path.
+        if ([string]::Equals($item, $sourceRoot.Path, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $relative = "Assets/VRCForge"
+        } else {
+            $sourceRelative = (Get-RelativePackagePath $sourceRoot.Path $item).Replace("\", "/")
+            if ([string]::IsNullOrWhiteSpace($sourceRelative) -or $sourceRelative.StartsWith("../", [System.StringComparison]::Ordinal)) {
+                throw "Unity package source item escaped its VRCForge Assets root: $item"
+            }
+            $relative = "Assets/VRCForge/$sourceRelative"
+        }
         $isDirectory = (Get-Item -LiteralPath $item).PSIsContainer
         Write-UnityPackageEntry -EntryRoot $tempRoot -PathName $relative -SourcePath $item -IsDirectory:$isDirectory
+    }
+
+    $packagePathNames = @(
+        Get-ChildItem -LiteralPath $tempRoot -Directory | ForEach-Object {
+            Get-Content -LiteralPath (Join-Path $_.FullName "pathname") -Raw
+        }
+    )
+    if ($packagePathNames | Where-Object { $_.Trim().EndsWith(".meta", [System.StringComparison]::OrdinalIgnoreCase) }) {
+        throw "Unity package content assertion failed: .meta files must be entry metadata, not standalone assets."
+    }
+    if ($packagePathNames | Where-Object { $_.Trim() -match "(^|/)Packages/(com\\.(coplaydev|gamelovers)\\.unity-mcp)(/|$)" }) {
+        throw "Unity package content assertion failed: third-party MCP package content is forbidden."
+    }
+    $firstPartyCoreMarker = Join-Path $sourceRoot.Path "Core\MCP\VRCForgeToolAttribute.cs"
+    if (Test-Path -LiteralPath $firstPartyCoreMarker -PathType Leaf) {
+        $requiredFirstPartyPaths = @(
+            "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+            "Assets/VRCForge/Core/MCP/VRCForgeParameterAttribute.cs",
+            "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
+            "Assets/VRCForge/Core/MCP/VRCForgeApprovedObjectReceipt.cs",
+            "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
+            "Assets/VRCForge/Editor/MCP/VRCForgeMcpToolContract.cs",
+            "Assets/VRCForge/Editor/McpBridgeBootstrap.cs"
+        )
+        foreach ($requiredPath in $requiredFirstPartyPaths) {
+            if ($packagePathNames -notcontains $requiredPath) {
+                throw "Unity package content assertion failed: missing first-party MCP Core path $requiredPath"
+            }
+        }
+        $forbiddenAnnotation = Get-ChildItem -LiteralPath $sourceRoot.Path -Recurse -File -Filter "*.cs" |
+            Select-String -Pattern "McpForUnityTool(Attribute)?|McpForUnityParameter(Attribute)?|MCPForUnity" -CaseSensitive
+        if ($forbiddenAnnotation) {
+            throw "Unity package content assertion failed: legacy external MCP annotation remains in first-party source."
+        }
     }
 
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $resolvedOutput) | Out-Null

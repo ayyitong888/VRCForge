@@ -33,7 +33,6 @@ RUNTIME_GENERATED_FIXTURES = {
             "primitive-basis-component-feature-application-ready.json"
         ),
         "packages": {
-            "com.coplaydev.unity-mcp": "9.6.9-beta.7",
             "com.vrchat.avatars": "3.10.3",
             "com.vrchat.base": "3.10.3",
             "com.vrcfury.vrcfury": "1.1334.0",
@@ -61,7 +60,6 @@ RUNTIME_GENERATED_FIXTURES = {
             "Library/VRCForge/primitive-basis-parameter-optimization-ready.json"
         ),
         "packages": {
-            "com.coplaydev.unity-mcp": "9.6.9-beta.7",
             "com.vrchat.avatars": "3.10.3",
             "com.vrchat.base": "3.10.3",
             "com.vrcfury.vrcfury": "1.1334.0",
@@ -93,7 +91,6 @@ RUNTIME_GENERATED_FIXTURES = {
             "Library/VRCForge/primitive-basis-cross-avatar-accessory-copy-ready.json"
         ),
         "packages": {
-            "com.coplaydev.unity-mcp": "9.6.9-beta.7",
             "com.vrchat.avatars": "3.10.3",
             "com.vrchat.base": "3.10.3",
         },
@@ -148,10 +145,10 @@ def test_all_four_fixed_fixture_roots_materialize_from_pinned_sources() -> None:
     )
 
     assert fixtures.descriptor_digest == (
-        "e1e1422cdc40af2a3a0a7aef7d43ddac21e0961c8edaad31bae38ed792f28ea6"
+        "224bece5f977b9e82dfdb255ced6a90abd92ed821d2f3fe6e69195994276ac7a"
     )
     assert fixtures.digest == (
-        "8c6a3cd60ed64b819f0f4fbe33a7e81772d14ba4394866e277b3329c31f60471"
+        "a634ab6ed15afc66c2b9e808f42e30189b7e9c19f04af4f4bff2d0d51accc5fa"
     )
     assert [fixture.scenario_id for fixture in fixtures.fixtures] == list(
         matrix.SCENARIO_ORDER

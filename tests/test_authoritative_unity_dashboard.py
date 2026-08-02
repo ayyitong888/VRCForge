@@ -534,6 +534,12 @@ def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
         write_handler.checkpoint_prepare_handler
         is dashboard_server.prepare_authoritative_unity_checkpoint_sync
     )
+    for target_name in dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS:
+        target = dashboard_server.AGENT_GATEWAY._write_handlers[target_name]
+        assert (
+            target.checkpoint_prepare_handler
+            is dashboard_server.prepare_authoritative_unity_checkpoint_sync
+        )
     for nested_tool in (PARAMETER_BIT_PACKING_TOOL_NAME, ATOMIC_REFERENCE_RENAME_TOOL_NAME):
         assert write_handler.manual_approval_resolver({"toolName": nested_tool}, {})
     assert write_handler.manual_approval_resolver({"toolName": DUPLICATE_TOOL_NAME}, {}) == ""
@@ -562,6 +568,7 @@ def test_strict_apply_exposes_only_the_canonical_validated_receipt() -> None:
                 "projectPath": "D:/Project",
                 "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
                 "arguments": {},
+                "_vrcforge_approved_execution": {"lane": "approved_write"},
             }
         )
 
@@ -595,6 +602,7 @@ def test_strict_apply_transport_failure_does_not_expose_raw_output() -> None:
                 "projectPath": "D:/Project",
                 "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
                 "arguments": {},
+                "_vrcforge_approved_execution": {"lane": "approved_write"},
             }
         )
 

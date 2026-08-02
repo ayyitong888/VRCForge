@@ -693,29 +693,32 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools() -> None:
         "Authorization": f"Bearer {config.token}",
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
+        "MCP-Protocol-Version": "2026-07-28",
+    }
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "avatar-encryption-test", "version": "1"},
     }
 
     with TestClient(dashboard_server.app) as client:
-        initialize = client.post(
+        discovered = client.post(
             "/mcp",
-            headers=headers,
+            headers={**headers, "Mcp-Method": "server/discover"},
             json={
                 "jsonrpc": "2.0",
                 "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "avatar-encryption-test", "version": "0"},
-                },
+                "method": "server/discover",
+                "params": {"_meta": meta},
             },
         )
-        assert initialize.status_code == 200
+        assert discovered.status_code == 200
+        assert discovered.json()["result"]["supportedVersions"] == ["2026-07-28"]
 
         listed = client.post(
             "/mcp",
-            headers=headers,
-            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+            headers={**headers, "Mcp-Method": "tools/list"},
+            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": meta}},
         )
         assert listed.status_code == 200
         tool_names = {tool["name"] for tool in listed.json()["result"]["tools"]}
@@ -734,7 +737,11 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools() -> None:
 
         scan = client.post(
             "/mcp",
-            headers=headers,
+            headers={
+                **headers,
+                "Mcp-Method": "tools/call",
+                "Mcp-Name": "vrcforge_avatar_encryption_scan",
+            },
             json={
                 "jsonrpc": "2.0",
                 "id": 3,
@@ -747,16 +754,22 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools() -> None:
                             "inventory": make_encryption_inventory(),
                         }
                     },
+                    "_meta": meta,
                 },
             },
         )
         assert scan.status_code == 200
         scan_payload = json.loads(scan.json()["result"]["content"][0]["text"])
-        assert scan_payload["result"]["summary"]["candidateCount"] == 2
+        assert scan.json()["result"]["isError"] is True
+        assert "MCP2 unitypackage installed and ready" in scan_payload["error"]
 
         apply_request = client.post(
             "/mcp",
-            headers=headers,
+            headers={
+                **headers,
+                "Mcp-Method": "tools/call",
+                "Mcp-Name": "vrcforge_avatar_encryption_liltoon_apply_request",
+            },
             json={
                 "jsonrpc": "2.0",
                 "id": 4,
@@ -771,10 +784,11 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools() -> None:
                             "confirmCreatorOwnedAssets": True,
                         }
                     },
+                    "_meta": meta,
                 },
             },
         )
         assert apply_request.status_code == 200
         request_payload = json.loads(apply_request.json()["result"]["content"][0]["text"])
-        assert request_payload["result"]["status"] == "blocked"
-        assert "addon.private_module_not_configured" in request_payload["result"]["error"]
+        assert apply_request.json()["result"]["isError"] is True
+        assert "MCP2 unitypackage installed and ready" in request_payload["error"]

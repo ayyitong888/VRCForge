@@ -140,7 +140,7 @@ def test_internal_legacy_config_uses_provider_transport_instead_of_chat_default(
 @pytest.mark.parametrize(
     ("provider", "model", "api_type", "expected"),
     [
-        ("deepseek", "deepseek-v4-flash", None, ("chat_completions", "chat_completions")),
+        ("deepseek", "deepseek-v4-flash", None, ("auto", "responses")),
         ("deepseek", "deepseek-v4-flash", "auto", ("auto", "responses")),
         ("deepseek", "deepseek-v4-pro", "auto", ("auto", "chat_completions")),
         ("deepseek", "DeepSeek-V4-Flash", "auto", ("auto", "chat_completions")),

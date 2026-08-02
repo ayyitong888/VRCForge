@@ -3,8 +3,8 @@
   "scenarioId": "cross_avatar_accessory_copy",
   "fixtureRoot": "Assets/VRCForge/PrimitiveBasis/cross_avatar_accessory_copy",
   "baselineManifest": "baseline.json",
-  "expectedBaselineDigest": "4044f14283cb3e9b1f0c57bc395f1c2152127cc0b4a43ff0eeaf2a77d57ce9d3",
-  "expectedTreeDigest": "dcdf81db743bad162157078859679dd26c7b37ac32a40045bf65fcfcbc1a2156",
+  "expectedBaselineDigest": "50559bc898a657d291e19bd86f6acc0795eafedf951405e00e317af7cdea9606",
+  "expectedTreeDigest": "89019d20d2894c247fe4fd5218dd3feb6edfb34cca1d2b26caaa57fde5306cd8",
   "requiredPrimitives": [
     "duplicate_scene_object",
     "save_scene_object_as_prefab"

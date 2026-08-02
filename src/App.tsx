@@ -92,6 +92,7 @@ import {
   type ThemeMode,
 } from "./lib/app-preferences";
 import { FALLBACK_ENDPOINT, isAbsoluteLocalPath, isRuntimeSessionVerificationError, isTauriRuntime } from "./lib/app-runtime";
+import { useDashboardProjectSelection } from "./hooks/use-dashboard-project-selection";
 import type { AgentRuntimeDeltaEvent } from "./lib/chat-streaming";
 import {
   buildChatHistory,
@@ -326,6 +327,13 @@ export default function App() {
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
   const healthWarnings = Object.values(healthComponents).filter((item) => item.status === "warning").length;
   const runtimeConnected = Boolean(bootstrap?.ok);
+  useDashboardProjectSelection({
+    endpoint,
+    runtimeConnected,
+    projectPath: activeProjectPath,
+    setBootstrap,
+    setError,
+  });
   const {
     apiProvider,
     apiKey,
@@ -561,6 +569,11 @@ export default function App() {
     return list;
   }, [computerUseEnabled, developerOptionsEnabled, skills, t]);
   const projects = bootstrap?.health.projects?.projects ?? [];
+  const authoritativeSelectedProjectPath = (
+    bootstrap?.health.state?.selectedProjectPath
+    || bootstrap?.health.projects?.selectedProjectPath
+    || ""
+  ).trim();
   const externalAgentConnected = Boolean(connectorStatus?.gateway?.enabled);
   const chatAvailable = providerConfigured || externalAgentConnected;
   const chatDisabledReason = !runtimeConnected
@@ -1327,13 +1340,23 @@ export default function App() {
   }, [conversation.length]);
 
   useEffect(() => {
-    if (!projectInitRef.current && projectItems.length > 0) {
-      projectInitRef.current = true;
-      if (!activeProjectPath) {
-        setActiveProjectPath(projectKey(projectItems[0]));
-      }
+    if (activeProjectPath || !authoritativeSelectedProjectPath) {
+      return;
     }
-  }, [projectItems]);
+    projectInitRef.current = true;
+    setActiveProjectPath(authoritativeSelectedProjectPath);
+  }, [activeProjectPath, authoritativeSelectedProjectPath]);
+
+  useEffect(() => {
+    if (projectInitRef.current || activeProjectPath) {
+      return;
+    }
+    const activeMcpProjects = projectItems.filter((project) => Boolean(project.activeMcp && projectKey(project)));
+    if (activeMcpProjects.length === 1) {
+      projectInitRef.current = true;
+      setActiveProjectPath(projectKey(activeMcpProjects[0]));
+    }
+  }, [activeProjectPath, projectItems]);
 
   useEffect(() => {
     const intervalMs = isTauriRuntime() ? 30000 : 5000;

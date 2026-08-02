@@ -31,10 +31,7 @@ if (!fs.existsSync(settingsPath)) {
           thinking_level: "",
         },
         unity_mcp: {
-          command: ["uvx", "--from", "mcpforunityserver", "unity-mcp"],
-          host: "127.0.0.1",
-          port: 8080,
-          instance: "",
+          project_path: "",
           retries: 1,
           retry_backoff_seconds: 0.1,
           timeout_seconds: 2,

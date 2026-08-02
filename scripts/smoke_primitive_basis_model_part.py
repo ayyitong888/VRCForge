@@ -39,7 +39,6 @@ from primitive_basis_live_runtime import compute_fixed_project_input_digest  # n
 APP_ORIGIN = "http://127.0.0.1:8757"
 APP_REQUEST_ORIGIN = "tauri://localhost"
 APP_PORT = 8757
-BRIDGE_PORT = 8080
 FIXTURE_TEMPLATE = (
     REPOSITORY_ROOT
     / "tests"
@@ -55,8 +54,6 @@ REQUIRED_EXTERNAL_PACKAGES = {
     "nadena.dev.ndmf": "1.13.1",
     "nadena.dev.modular-avatar": "1.17.1",
 }
-PACKAGED_CONNECTOR_ID = "com.coplaydev.unity-mcp"
-PACKAGED_CONNECTOR_VERSION = "9.6.9-beta.7"
 MAX_ARCHIVE_ENTRIES = 50_000
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_TREE_FILES = 100_000
@@ -81,7 +78,6 @@ class PreparedRun:
     run_root: Path
     package_root: Path
     project_root: Path
-    server_root: Path
     desktop_executable: Path
     backend_executable: Path
     unity_package: Path
@@ -96,8 +92,6 @@ class PreparedRun:
     runtime_unity_tool_tree_digest: str
     runner_digest: str
     unity_editor_digest: str
-    connector_digest: str
-    server_digest: str
     dependencies: tuple[PackageArtifact, ...]
     fixtures: Any
     fixture_digest: str
@@ -123,7 +117,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=[],
         help="Exact external Unity package root; repeat once for every required package.",
     )
-    parser.add_argument("--mcp-server-root", required=True)
     parser.add_argument(
         "--artifact-root",
         default="artifacts/primitive-basis-model-part-live",
@@ -173,7 +166,7 @@ class PackagedModelPartSmoke:
         self.project_deleted = False
         self.desktop_clean = False
         self.app_port_released = False
-        self.bridge_port_released = False
+        self.project_mcp_core_removed = False
         self.secrets_removed = False
         self.transcript_verified = False
         self.failure = ""
@@ -283,7 +276,7 @@ class PackagedModelPartSmoke:
             and self.project_deleted
             and self.desktop_clean
             and self.app_port_released
-            and self.bridge_port_released
+            and self.project_mcp_core_removed
             and self.secrets_removed
             and not self.failure
         )
@@ -307,9 +300,9 @@ class PackagedModelPartSmoke:
             "cleanup": {
                 "restoreVerified": self.restore_verified,
                 "projectRemoved": self.project_deleted,
+                "projectMcpCoreRemoved": self.project_mcp_core_removed,
                 "desktopAndBackendStopped": self.desktop_clean,
                 "appPortReleased": self.app_port_released,
-                "bridgePortReleased": self.bridge_port_released,
                 "isolatedSecretsRemoved": self.secrets_removed,
             },
             "matrix": matrix_report or {},
@@ -324,7 +317,6 @@ class PackagedModelPartSmoke:
         if os.name != "nt":
             raise PackagedModelPartSmokeError("The packaged live runner requires Windows.")
         _require_port_released(APP_PORT, "app")
-        _require_port_released(BRIDGE_PORT, "fixture bridge")
         if self.run_root.exists():
             raise PackagedModelPartSmokeError("The isolated run directory already exists.")
         self.private_root.mkdir(parents=True)
@@ -425,22 +417,6 @@ class PackagedModelPartSmoke:
         runtime_unity_tool_root = project_root / "Assets" / "VRCForge" / "Editor"
         _materialize_deterministic_unity_metas(runtime_unity_tool_root)
         runtime_unity_tool_tree_digest = _tree_digest(runtime_unity_tool_root)
-        connector_source = (
-            package_root
-            / "unity_plugin"
-            / "Packages"
-            / PACKAGED_CONNECTOR_ID
-        )
-        connector = _verify_package_root(
-            connector_source,
-            expected_id=PACKAGED_CONNECTOR_ID,
-            expected_version=PACKAGED_CONNECTOR_VERSION,
-        )
-        connector_target = project_root / "Packages" / PACKAGED_CONNECTOR_ID
-        shutil.copytree(connector_source, connector_target)
-        if _tree_digest(connector_target) != connector.tree_digest:
-            raise PackagedModelPartSmokeError("The packaged connector copy changed.")
-
         dependencies = _resolve_external_packages(self.args.package_root)
         for dependency in dependencies:
             target = project_root / "Packages" / dependency.package_id
@@ -449,14 +425,6 @@ class PackagedModelPartSmoke:
                 raise PackagedModelPartSmokeError("An external package copy changed.")
 
         fixture_project_input_digest = compute_fixed_project_input_digest(project_root)
-
-        server_source = Path(self.args.mcp_server_root).expanduser().resolve(strict=True)
-        _verify_server_root(server_source)
-        server_digest = _tree_digest(server_source)
-        server_root = self.private_root / "mcp-server"
-        shutil.copytree(server_source, server_root)
-        if _tree_digest(server_root) != server_digest:
-            raise PackagedModelPartSmokeError("The fixed bridge server copy changed.")
 
         fixtures = load_fixture_set(
             project_root / "VRCForgeFixture" / "descriptors",
@@ -480,8 +448,6 @@ class PackagedModelPartSmoke:
                 "runtimeUnityToolTreeDigest": runtime_unity_tool_tree_digest,
                 "runnerDigest": runner_digest,
                 "unityEditorDigest": unity_editor_digest,
-                "connectorDigest": connector.tree_digest,
-                "serverDigest": server_digest,
                 "dependencyDigests": {
                     item.package_id: item.tree_digest for item in dependencies
                 },
@@ -508,7 +474,6 @@ class PackagedModelPartSmoke:
             run_root=self.run_root,
             package_root=package_root,
             project_root=project_root,
-            server_root=server_root,
             desktop_executable=desktop,
             backend_executable=backend,
             unity_package=unity_package_path,
@@ -523,8 +488,6 @@ class PackagedModelPartSmoke:
             runtime_unity_tool_tree_digest=runtime_unity_tool_tree_digest,
             runner_digest=runner_digest,
             unity_editor_digest=unity_editor_digest,
-            connector_digest=connector.tree_digest,
-            server_digest=server_digest,
             dependencies=dependencies,
             fixtures=fixtures,
             fixture_digest=fixture.digest,
@@ -589,20 +552,11 @@ class PackagedModelPartSmoke:
 
     def _launch_unity(self) -> None:
         prepared = self._required_prepared()
-        uv_directory = prepared.package_root / "tools" / "uv"
-        if not (uv_directory / "uv.exe").is_file() or not (uv_directory / "uvx.exe").is_file():
-            raise PackagedModelPartSmokeError("The packaged uv runtime is incomplete.")
         environment = dict(os.environ)
         environment.pop("VRCFORGE_PRIMITIVE_LIVE_STDIN", None)
         environment.update(
             {
                 "VRCFORGE_PRIMITIVE_BASIS_RUN_ID": prepared.challenge_text,
-                "VRCFORGE_PRIMITIVE_MCP_SERVER_ROOT": str(prepared.server_root),
-                "UNITY_MCP_DISABLE_TELEMETRY": "1",
-                "DISABLE_TELEMETRY": "1",
-                "UV_OFFLINE": "1",
-                "UV_FROZEN": "1",
-                "PATH": str(uv_directory) + os.pathsep + environment.get("PATH", ""),
             }
         )
         unity_log = self.private_root / "unity.log"
@@ -632,7 +586,8 @@ class PackagedModelPartSmoke:
         deadline = time.monotonic() + max(30.0, float(self.args.timeout))
         while time.monotonic() < deadline:
             self._require_children_alive()
-            if marker.is_file() and _port_open(BRIDGE_PORT):
+            core_port = _core_port(prepared.project_root)
+            if marker.is_file() and core_port is not None:
                 try:
                     payload = _json_object(_stable_read(marker, 32 * 1024), "fixture marker")
                 except PackagedModelPartSmokeError:
@@ -663,7 +618,6 @@ class PackagedModelPartSmoke:
             {
                 "projectPath": str(prepared.project_root),
                 "unityHost": "127.0.0.1",
-                "unityPort": BRIDGE_PORT,
             },
         )
         if str(state.get("selected_project_path") or state.get("selectedProjectPath") or "") not in {
@@ -713,8 +667,6 @@ class PackagedModelPartSmoke:
         except subprocess.TimeoutExpired as exc:
             raise PackagedModelPartSmokeError("The fixture Unity process did not close normally.") from exc
         self.unity_process = None
-        _wait_for_port_released(BRIDGE_PORT, "fixture bridge", timeout=30)
-        self.bridge_port_released = True
 
     def _delete_disposable_project(self) -> None:
         prepared = self._required_prepared()
@@ -726,6 +678,13 @@ class PackagedModelPartSmoke:
         self.project_deleted = not project.exists()
         if not self.project_deleted:
             raise PackagedModelPartSmokeError("The disposable project was not removed.")
+        self.project_mcp_core_removed = not (
+            project / "Library" / "VRCForge" / "mcp-core.json"
+        ).exists()
+        if not self.project_mcp_core_removed:
+            raise PackagedModelPartSmokeError(
+                "The project-scoped Core descriptor remained reachable after cleanup."
+            )
 
     def _attempt_emergency_restore(self) -> None:
         if not self.app_token or self.restore_verified:
@@ -792,7 +751,6 @@ class PackagedModelPartSmoke:
 
         for port, label, attribute in (
             (APP_PORT, "app", "app_port_released"),
-            (BRIDGE_PORT, "fixture bridge", "bridge_port_released"),
         ):
             try:
                 _wait_for_port_released(port, label, timeout=20)
@@ -910,8 +868,6 @@ class PackagedModelPartSmoke:
         if prepared is None:
             return {}
         return {
-            "connectorDigest": prepared.connector_digest,
-            "serverDigest": prepared.server_digest,
             "packages": {
                 item.package_id: {
                     "version": item.version,
@@ -961,24 +917,12 @@ def _verify_package_root(
     package_id = str(payload.get("name") or "")
     version = str(payload.get("version") or "")
     if expected_id and package_id != expected_id:
-        raise PackagedModelPartSmokeError("The packaged connector id is invalid.")
+        raise PackagedModelPartSmokeError("The package id is invalid.")
     if expected_version and version != expected_version:
-        raise PackagedModelPartSmokeError("The packaged connector version is invalid.")
-    if package_id not in REQUIRED_EXTERNAL_PACKAGES and package_id != PACKAGED_CONNECTOR_ID:
+        raise PackagedModelPartSmokeError("The package version is invalid.")
+    if package_id not in REQUIRED_EXTERNAL_PACKAGES:
         raise PackagedModelPartSmokeError("An unexpected package root was supplied.")
     return PackageArtifact(package_id, version, root, _tree_digest(root))
-
-
-def _verify_server_root(root: Path) -> None:
-    if not root.is_dir() or _is_reparse_point(root):
-        raise PackagedModelPartSmokeError("The fixed bridge server root is invalid.")
-    for relative in ("pyproject.toml", "uv.lock"):
-        if not (root / relative).is_file() or _is_reparse_point(root / relative):
-            raise PackagedModelPartSmokeError("The fixed bridge server is incomplete.")
-    windows_python = root / ".venv" / "Scripts" / "python.exe"
-    unix_python = root / ".venv" / "bin" / "python"
-    if not windows_python.is_file() and not unix_python.is_file():
-        raise PackagedModelPartSmokeError("The fixed bridge server environment is absent.")
 
 
 def _accepted_evidence_build_policy(value: Mapping[str, Any]) -> bool:
@@ -1353,6 +1297,20 @@ def _port_open(port: int) -> bool:
             return True
     except OSError:
         return False
+
+
+def _core_port(project_root: Path) -> int | None:
+    descriptor = project_root / "Library" / "VRCForge" / "mcp-core.json"
+    try:
+        payload = _json_object(_stable_read(descriptor, 32 * 1024), "Core descriptor")
+        port = payload.get("port")
+        if type(port) is not int or not 1 <= port <= 65535:
+            return None
+        if payload.get("protocolVersion") != "2026-07-28":
+            return None
+        return port
+    except PackagedModelPartSmokeError:
+        return None
 
 
 def _port_released(port: int, label: str) -> bool:

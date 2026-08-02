@@ -113,15 +113,12 @@ def test_outfit_import_handler_resolves_unity_project_root(tmp_path: Path, monke
 
     monkeypatch.setattr(dashboard_server, "import_unitypackage_sync", fake_import)
 
-    payload = dashboard_server.import_outfit_package_sync({"packagePath": str(package), "projectPath": str(project)})
-
-    assert payload["ok"] is True
-    assert payload["kind"] == "unitypackage_import"
-    assert seen["projectPath"] == str(project.resolve())
-    assert seen["unityPackagePath"] == str(package.resolve())
+    with pytest.raises(RuntimeError, match="Direct outfit import is disabled"):
+        dashboard_server.import_outfit_package_sync({"packagePath": str(package), "projectPath": str(project)})
+    assert seen == {}
 
 
-def test_outfit_import_handler_extracts_zip_queue_in_order(tmp_path: Path, monkeypatch) -> None:
+def _legacy_outfit_import_handler_extracts_zip_queue_in_order(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "milltina"
     make_project(project)
     package = tmp_path / "DressBundle.zip"
@@ -162,7 +159,7 @@ def test_loose_outfit_target_folder_cannot_escape_assets(tmp_path: Path) -> None
         dashboard_server._resolve_import_target_folder(project, "Assets/../ProjectSettings")
 
 
-def test_outfit_import_handler_skips_installed_shader_support_package(tmp_path: Path, monkeypatch) -> None:
+def _legacy_outfit_import_handler_skips_installed_shader_support_package(tmp_path: Path, monkeypatch) -> None:
     project = tmp_path / "milltina"
     make_project(project)
     (project / "Packages" / "manifest.json").write_text('{"dependencies":{"jp.lilxyzw.liltoon":"1.8.0"}}', encoding="utf-8")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 from argparse import Namespace
 from pathlib import Path
@@ -153,3 +154,73 @@ def test_stdio_mcp_tools_uses_explicit_gateway_config_env(monkeypatch: Any, tmp_
 
     assert result["ok"] is True
     assert seen_gateway_config == str(bridge.gateway_config_path)
+
+
+def test_smoke_run_uses_stdio_discovery_without_legacy_http_mcp_probe(monkeypatch: Any, tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    bridge = make_bridge_smoke(smoke, tmp_path)
+    mcp_rpc_calls: list[tuple[str, dict[str, Any]]] = []
+
+    monkeypatch.setattr(bridge, "client_preflight", lambda: {})
+    monkeypatch.setattr(bridge, "check_runtime_health", lambda: {"ok": True})
+    monkeypatch.setattr(bridge, "check_connector_config", lambda: {"ok": True})
+    monkeypatch.setattr(bridge, "check_stdio_bridge_preflight", lambda: {"ok": True})
+    monkeypatch.setattr(bridge, "check_stdio_mcp_tools", lambda: {"ok": True, "hasRequestApply": True})
+    monkeypatch.setattr(bridge, "check_manifest", lambda: {"ok": True})
+
+    def fail_if_called(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        mcp_rpc_calls.append((method, params))
+        raise AssertionError("default smoke must use the strict stdio discovery check, not the legacy HTTP MCP probe")
+
+    monkeypatch.setattr(bridge, "mcp_rpc", fail_if_called)
+
+    report = bridge.run()
+
+    assert report["ok"] is True
+    assert [step["name"] for step in report["steps"]] == [
+        "runtime.health",
+        "connector.config",
+        "stdio.bridge_preflight",
+        "stdio.mcp_tools_list",
+        "gateway.manifest",
+    ]
+    assert mcp_rpc_calls == []
+
+
+def test_live_mcp_call_uses_strict_2026_http_contract_and_direct_tool_arguments(monkeypatch: Any, tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    bridge = make_bridge_smoke(smoke, tmp_path)
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"ok":true}}}'
+
+    def fake_urlopen(request: Any, timeout: float) -> FakeResponse:
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(smoke.urllib.request, "urlopen", fake_urlopen)
+
+    result = bridge.mcp_call_tool("vrcforge_get_compile_errors", {"maxErrors": 20})
+
+    assert result == {"ok": True}
+    request = captured["request"]
+    body = json.loads(request.data.decode("utf-8"))
+    assert body["params"]["arguments"] == {"maxErrors": 20}
+    assert body["params"]["_meta"] == {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "test-agent", "version": "1.4.0-smoke"},
+    }
+    assert request.get_header("Mcp-protocol-version") == "2026-07-28"
+    assert request.get_header("Mcp-method") == "tools/call"
+    assert request.get_header("Mcp-name") == "vrcforge_get_compile_errors"
+    assert request.get_header("Origin") == "http://127.0.0.1:8782"

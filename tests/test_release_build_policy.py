@@ -6,11 +6,60 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_tauri_manifest_selects_the_desktop_app_as_default_binary() -> None:
+    manifest = tomllib.loads(
+        (REPO_ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
+    )
+
+    assert manifest["package"]["default-run"] == "vrcforge-agentic-app"
+
+
+def test_vite_dev_watcher_excludes_generated_and_evidence_trees() -> None:
+    config = (REPO_ROOT / "vite.config.ts").read_text(encoding="utf-8")
+
+    assert '"**/artifacts/**"' in config
+    assert '"**/src-tauri/target/**"' in config
+
+
+def test_desktop_project_selection_is_confirmed_before_unity_readiness() -> None:
+    commands = (REPO_ROOT / "src-tauri" / "src" / "commands.rs").read_text(
+        encoding="utf-8"
+    )
+    api = (REPO_ROOT / "src" / "lib" / "api" / "app.ts").read_text(
+        encoding="utf-8"
+    )
+    hook = (
+        REPO_ROOT / "src" / "hooks" / "use-dashboard-project-selection.ts"
+    ).read_text(encoding="utf-8")
+
+    assert '"/api/state".to_string()' in commands
+    assert 'serde_json::json!({"projectPath": request.project_path})' in commands
+    assert '"select_unity_project"' in api
+    assert hook.index("await selectUnityProject(endpoint, projectPath)") < hook.index(
+        "await refreshUnityReadiness(endpoint)"
+    )
+    assert "state.selectedProjectPath" in hook
+    assert "!projectPath.trim()" in hook
+
+
+def test_desktop_restores_authoritative_project_without_guessing_first_item() -> None:
+    app = (REPO_ROOT / "src" / "App.tsx").read_text(encoding="utf-8")
+    types = (REPO_ROOT / "src" / "lib" / "api" / "types.ts").read_text(encoding="utf-8")
+
+    restored = app.index("bootstrap?.health.state?.selectedProjectPath")
+    applied = app.index("setActiveProjectPath(authoritativeSelectedProjectPath)")
+    unique_active = app.index("activeMcpProjects.length === 1")
+    assert restored < applied < unique_active
+    assert "setActiveProjectPath(projectKey(projectItems[0]))" not in app
+    assert "state?: ProjectSelectionState" in types
 
 
 def _build_script() -> str:
@@ -90,6 +139,26 @@ def test_strict_evidence_attestor_stays_outside_candidate_payload() -> None:
     assert 'Join-Path $payloadRoot "tools\\vrcforge_primitive_attestor.exe"' not in source
 
 
+def test_release_pairs_unity_core_with_exact_desktop_and_backend_payloads() -> None:
+    source = _build_script()
+
+    desktop_hash = source.index("$trustedDesktopSha256 =")
+    backend_hash = source.index("$trustedBackendSha256 =")
+    generated_core = source.index("$trustedReleaseSourcePath =")
+    package_build = source.index(
+        "-SourceAssetsPath $vrcforgeCorePayloadRoot -OutputPath $UnityPackagePath"
+    )
+    manifest = source.index('$payloadIntegrityManifest = [ordered]@{')
+
+    assert desktop_hash < generated_core < package_build < manifest
+    assert backend_hash < generated_core
+    assert 'internal const string DesktopSha256 = "$trustedDesktopSha256";' in source
+    assert 'internal const string BackendSha256 = "$trustedBackendSha256";' in source
+    assert "sha256 = $trustedDesktopSha256" in source
+    assert "sha256 = $trustedBackendSha256" in source
+    assert '-SourceAssetsPath "Assets\\VRCForge"' not in source
+
+
 def test_strict_evidence_outputs_reject_reparse_and_overwrite_paths() -> None:
     source = _build_script()
 
@@ -157,9 +226,10 @@ def test_private_authority_finalization_occurs_after_public_manifest_seal() -> N
     tool = _authority_bundle_tool()
 
     manifest_write = source.index("$releaseManifestJson = $manifest | ConvertTo-Json -Depth 7")
-    archive_readback = source.index("$bridgeArchiveVerifier =")
     private_finalize = source.index("$authorityBundleTool =")
-    assert manifest_write < archive_readback < private_finalize
+    assert manifest_write < private_finalize
+    assert "$bridgeArchiveVerifier" not in source
+    assert '"bridgeTargetRuntime"' not in source
     assert "$manifest.evidenceAuthority" not in source
     assert '"--strict-release-manifest", $releaseManifestPath' in source
     assert (

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,6 +14,30 @@ import primitive_basis_live_runtime as live_runtime
 
 
 def configure_state(monkeypatch, project: Path, settings_path: Path) -> None:
+    raw_project_path = str(project.resolve())
+    descriptor_path = project / "Library" / "VRCForge" / "mcp-core.json"
+    descriptor_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor_path.write_text(
+        json.dumps(
+            {
+                "schema": "vrcforge.mcp.transport.v2",
+                "transport": "tcp-newline-jsonrpc",
+                "protocolVersion": "2026-07-28",
+                "supportedProtocolVersions": ["2026-07-28"],
+                "authMode": "bearer-per-request",
+                "executionPolicy": "read-direct-app-process-approved-writes",
+                "host": "127.0.0.1",
+                "port": 23456,
+                "authToken": base64.b64encode(b"t" * 32).decode("ascii"),
+                "instanceId": "core-instance-1",
+                "processId": 12345,
+                "projectPath": raw_project_path,
+                "projectHash": hashlib.sha256(raw_project_path.encode("utf-8")).hexdigest(),
+                "toolCount": 64,
+            }
+        ),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
         dashboard_server.DASHBOARD_STATE,
         "selected_project_path",
@@ -18,7 +45,7 @@ def configure_state(monkeypatch, project: Path, settings_path: Path) -> None:
     )
     monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "settings_path", settings_path)
     monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "unity_host", "127.0.0.1")
-    monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "unity_port", 8080)
+    monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "unity_port", 0)
     monkeypatch.setattr(
         dashboard_server.DASHBOARD_STATE,
         "unity_instance",
@@ -29,10 +56,10 @@ def configure_state(monkeypatch, project: Path, settings_path: Path) -> None:
 def fixed_settings(project: Path) -> SimpleNamespace:
     return SimpleNamespace(
         unity_mcp_host="127.0.0.1",
-        unity_mcp_port=8080,
-        unity_mcp_instance=project.name,
+        unity_mcp_port=0,
+        unity_mcp_instance="",
         unity_mcp_timeout_seconds=30,
-        unity_mcp_command=["fixed", "bridge"],
+        unity_mcp_command=[],
     )
 
 
@@ -45,7 +72,7 @@ def test_connection_freezes_project_transport_and_settings(monkeypatch, tmp_path
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: settings)
     calls: list[tuple[object, str, dict[str, object]]] = []
 
-    def invoke(call_settings, tool_name: str, arguments: dict[str, object]):
+    def invoke(call_settings, tool_name: str, arguments: dict[str, object], **_kwargs):
         calls.append((call_settings, tool_name, arguments))
         return dashboard_server.McpResult(
             exit_code=0,
@@ -68,7 +95,10 @@ def test_connection_freezes_project_transport_and_settings(monkeypatch, tmp_path
     connection._invoke_result("vrc_test_read", {})
     assert calls == [(settings, "vrc_test_read", {})]
 
-    dashboard_server.DASHBOARD_STATE.unity_instance = "OtherProject"
+    descriptor_path = project / "Library" / "VRCForge" / "mcp-core.json"
+    descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+    descriptor["instanceId"] = "core-instance-2"
+    descriptor_path.write_text(json.dumps(descriptor), encoding="utf-8")
     with pytest.raises(live_runtime.PrimitiveBasisLiveRuntimeError, match="connection changed"):
         connection._invoke_result("vrc_test_read", {})
 
@@ -85,7 +115,7 @@ def test_compile_status_returns_unwrapped_authoritative_payload(monkeypatch, tmp
     )
     calls: list[tuple[str, dict[str, object]]] = []
 
-    def invoke(_settings, tool: str, arguments: dict[str, object]):
+    def invoke(_settings, tool: str, arguments: dict[str, object], **_kwargs):
         calls.append((tool, dict(arguments)))
         return dashboard_server.McpResult(
             exit_code=0,
@@ -163,13 +193,18 @@ def test_checkpoint_callbacks_preserve_guarded_unity_identity(
     }
     calls: list[tuple[str, dict[str, object]]] = []
 
-    def invoke(_settings, tool: str, arguments: dict[str, object]):
+    def invoke(_settings, tool: str, arguments: dict[str, object], **_kwargs):
         calls.append((tool, dict(arguments)))
         return dashboard_server.McpResult(
             exit_code=0,
             stdout="",
             stderr="",
-            payload={"data": {"ok": True, **identity}},
+            payload={
+                "structuredContent": {
+                    "success": True,
+                    "data": {"ok": True, **identity},
+                }
+            },
         )
 
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)

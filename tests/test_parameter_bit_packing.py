@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 import authoritative_unity_writes as authoritative_writes
 import dashboard_server
 import parameter_bit_packing as bitpack
+from approved_unity_execution import current_approved_unity_execution
 from agent_gateway import AgentGateway
 from parameter_bit_packing import (
     APPROVAL_SCHEMA,
@@ -1376,11 +1377,19 @@ def test_fastapi_preview_request_and_approved_execution_chain(
         payload={"data": apply_payload(canonical_arguments)},
     )
 
+    def invoke_with_bound_execution(_settings, tool_name, arguments, **_kwargs):
+        plan = current_approved_unity_execution()
+        if plan is None:
+            return preview_result
+        claim = plan.claim(tool_name, arguments, project_path)
+        claim.complete()
+        return apply_result
+
     with (
         patch("dashboard_server.load_dashboard_settings"),
-            patch(
-                "dashboard_server.invoke_unity_mcp",
-                side_effect=[preview_result, preview_result, preview_result, apply_result],
+        patch(
+            "dashboard_server.invoke_unity_mcp",
+            side_effect=invoke_with_bound_execution,
         ) as invoke,
     ):
         client = TestClient(dashboard_server.app)

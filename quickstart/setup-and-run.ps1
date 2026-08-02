@@ -67,16 +67,7 @@ function Ensure-DefaultSettings {
     "thinking_level": ""
   },
   "unity_mcp": {
-    "command": [
-      "powershell",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      "tools/unity-mcp-cli.ps1"
-    ],
-    "host": "127.0.0.1",
-    "port": 8080,
-    "instance": "",
+    "project_path": "",
     "retries": 3,
     "retry_backoff_seconds": 2.0,
     "timeout_seconds": 30,
@@ -283,10 +274,6 @@ function Ensure-UnityInstall {
     )
 
     $args = @("-ExecutionPolicy", "Bypass", "-File", $installUnityScript, "-ProjectPath", $ResolvedProjectPath)
-    $sourceMcpPackage = Join-Path $repoRoot "third_party\com.coplaydev.unity-mcp"
-    if (Test-Path -LiteralPath $sourceMcpPackage) {
-        $args += @("-SourceMcpPackagePath", $sourceMcpPackage)
-    }
     if ($Launch) {
         if ([string]::IsNullOrWhiteSpace($EditorPath)) {
             throw "LaunchUnity was requested but UnityEditorPath is empty."
@@ -303,15 +290,6 @@ function Ensure-UnityInstall {
     $targetVrcForge = Join-Path $ResolvedProjectPath "Assets\VRCForge"
     if (-not (Test-Path -LiteralPath $targetVrcForge)) {
         throw "Unity-side install did not create Assets/VRCForge."
-    }
-
-    $manifest = Read-JsonFile -Path (Join-Path $ResolvedProjectPath "Packages\manifest.json")
-    $mcpDependency = $manifest.dependencies.PSObject.Properties["com.coplaydev.unity-mcp"]
-    if ($null -eq $mcpDependency) {
-        Write-Warn "MCP for Unity dependency was not configured because no local CoplayDev package was bundled. Use the Windows installer release for the no-Git/no-manual-import path."
-    }
-    else {
-        Write-Ok "MCP for Unity dependency: $($mcpDependency.Value)"
     }
 
     Write-Ok "Unity-side VRCForge tools installed."
@@ -408,8 +386,7 @@ else {
 Write-Host ""
 Write-Host "Unity next steps:"
 Write-Host "1. Open the Unity Avatar project and wait for package resolution / C# compile."
-Write-Host "2. Start the MCP bridge from Unity: VRCForge / MCP / Start Bridge Now."
-Write-Host "3. Dashboard should connect to the MCP bridge at http://127.0.0.1:8080."
+Write-Host "2. Select the project in Dashboard; its VRCForge MCP Core is discovered automatically."
 
 if ($CheckOnly) {
     Write-Host ""

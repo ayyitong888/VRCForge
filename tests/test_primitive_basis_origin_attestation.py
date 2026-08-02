@@ -261,7 +261,7 @@ def _facts(phase: str) -> dict[str, object]:
             "count": 0,
             "projectRemoved": True,
             "unityProcessExited": True,
-            "bridgePortReleased": True,
+            "projectMcpCoreRemoved": True,
         },
     }[phase]
 
@@ -452,8 +452,8 @@ def _make_signed_sample() -> SignedSample:
         "bridgeLauncherExited": True,
         "bridgeListenerExited": True,
         "appPortReleased": True,
-        "bridgePortReleased": True,
         "projectRemoved": True,
+        "projectMcpCoreRemoved": True,
         "observedAt": _timestamp(BASE_TIME + timedelta(seconds=20)),
     }
     envelope: dict[str, object] = {
@@ -853,6 +853,19 @@ def test_cleanup_tampering_is_rejected(sample: SignedSample) -> None:
     _refresh_cleanup_and_sign(envelope, sample.private_key)
 
     with pytest.raises(live.LiveAttestationError, match="cleanup is incomplete"):
+        _verify(sample, envelope=envelope)
+
+
+def test_cleanup_rejects_legacy_bridge_port_instead_of_project_core_removal(
+    sample: SignedSample,
+) -> None:
+    envelope = copy.deepcopy(sample.envelope)
+    cleanup = envelope["cleanup"]
+    cleanup.pop("projectMcpCoreRemoved")
+    cleanup["bridgePortReleased"] = True
+    _refresh_cleanup_and_sign(envelope, sample.private_key)
+
+    with pytest.raises(live.LiveAttestationError, match="origin cleanup fields mismatch"):
         _verify(sample, envelope=envelope)
 
 

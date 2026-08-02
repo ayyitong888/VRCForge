@@ -3,7 +3,6 @@ param(
     [string]$ProjectPath,
     [string]$UnityEditorPath,
     [string]$SourceAssetsPath,
-    [string]$SourceMcpPackagePath,
     [switch]$LaunchUnity
 )
 
@@ -92,18 +91,6 @@ $targetVrcForge = Join-Path $targetAssetsRoot "VRCForge"
 $legacyTargetToolFolder = Join-Path $targetAssetsRoot ("VRC" + "AutoRig")
 $projectStateRoot = Join-Path $resolvedProjectPath ".vrcforge"
 $backupRoot = Join-Path $projectStateRoot "backups"
-$mcpPackageName = "com.coplaydev.unity-mcp"
-$mcpPackageValue = "file:Packages/com.coplaydev.unity-mcp"
-$targetMcpPackagePath = Join-Path $targetPackagesRoot $mcpPackageName
-$sourceMcpPackage = $null
-if (-not [string]::IsNullOrWhiteSpace($SourceMcpPackagePath)) {
-    $sourceMcpPackage = Resolve-ExistingPath $SourceMcpPackagePath "Source CoplayDev Unity MCP package"
-} else {
-    $defaultSourceMcpPackage = Join-Path $repoRoot "third_party\com.coplaydev.unity-mcp"
-    if (Test-Path -LiteralPath $defaultSourceMcpPackage) {
-        $sourceMcpPackage = (Resolve-Path -LiteralPath $defaultSourceMcpPackage).Path
-    }
-}
 
 if (-not (Test-Path -LiteralPath $targetAssetsRoot)) {
     throw "Target Unity project is missing Assets/: $targetAssetsRoot"
@@ -119,11 +106,7 @@ if (-not (Test-Path -LiteralPath $targetProjectSettings)) {
 
 $legacyBackupPath = $null
 $vrcForgeBackupPath = $null
-$mcpBackupPath = $null
-$manifestBackupPath = $null
 $installedVrcForge = $false
-$installedMcp = $false
-$shouldConfigureMcp = $false
 
 try {
     New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
@@ -155,89 +138,21 @@ try {
         throw
     }
 
-    if ($sourceMcpPackage) {
-        if (Test-Path -LiteralPath $targetMcpPackagePath) {
-            $mcpBackupPath = New-BackupPath $backupRoot "com.coplaydev.unity-mcp"
-            Move-DirectoryWithMeta $targetMcpPackagePath $mcpBackupPath
-            Write-Host "Backed up existing Unity MCP package to: $mcpBackupPath"
-        }
-        try {
-            Copy-DirectoryClean $sourceMcpPackage $targetMcpPackagePath
-            $installedMcp = $true
-        } catch {
-            Restore-DirectoryBackup $mcpBackupPath $targetMcpPackagePath
-            throw
-        }
-        $shouldConfigureMcp = $true
-    } elseif (Test-Path -LiteralPath $targetMcpPackagePath) {
-        $shouldConfigureMcp = $true
-        Write-Warning "No local CoplayDev Unity MCP source package was supplied. Keeping existing project package folder and configuring manifest."
-    } else {
-        Write-Warning "No local CoplayDev Unity MCP package was supplied. Skipping manifest MCP dependency update to avoid a broken file: package reference."
-    }
-
-    $manifestBackupPath = New-BackupPath $backupRoot "manifest"
-    $manifestBackupPath = "$manifestBackupPath.json"
-    Copy-Item -LiteralPath $targetPackageManifest -Destination $manifestBackupPath -Force
-
-    try {
-        $manifest = Get-Content -LiteralPath $targetPackageManifest -Raw | ConvertFrom-Json
-        if (-not $manifest.PSObject.Properties["dependencies"]) {
-            $manifest | Add-Member -NotePropertyName "dependencies" -NotePropertyValue ([pscustomobject]@{})
-        }
-
-        $dependencies = $manifest.dependencies
-        if ($null -eq $dependencies) {
-            $dependencies = [pscustomobject]@{}
-            $manifest.dependencies = $dependencies
-        }
-
-        if ($shouldConfigureMcp) {
-            $manifestChanged = $false
-            $existingDependency = $dependencies.PSObject.Properties[$mcpPackageName]
-            if ($null -eq $existingDependency) {
-                $dependencies | Add-Member -NotePropertyName $mcpPackageName -NotePropertyValue $mcpPackageValue
-                $manifestChanged = $true
-            } elseif ($existingDependency.Value -ne $mcpPackageValue) {
-                $existingDependency.Value = $mcpPackageValue
-                $manifestChanged = $true
-            }
-
-            if ($manifestChanged) {
-                $manifestJson = $manifest | ConvertTo-Json -Depth 20
-                [System.IO.File]::WriteAllText($targetPackageManifest, $manifestJson, [System.Text.UTF8Encoding]::new($false))
-                Get-Content -LiteralPath $targetPackageManifest -Raw | ConvertFrom-Json | Out-Null
-            }
-        }
-    } catch {
-        Copy-Item -LiteralPath $manifestBackupPath -Destination $targetPackageManifest -Force
-        throw "Failed to update Packages/manifest.json. Restored backup from $manifestBackupPath. Error: $($_.Exception.Message)"
-    }
 } catch {
     if (-not $installedVrcForge) {
         Restore-DirectoryBackup $vrcForgeBackupPath $targetVrcForge
-    }
-    if (-not $installedMcp) {
-        Restore-DirectoryBackup $mcpBackupPath $targetMcpPackagePath
     }
     throw
 }
 
 Write-Host "Installed Assets/VRCForge into: $resolvedProjectPath"
 Write-Host "Project backups are under: $backupRoot"
-if ($shouldConfigureMcp) {
-    Write-Host "Unity MCP package dependency uses: $mcpPackageValue"
-}
-if ($sourceMcpPackage) {
-    Write-Host "Copied Unity MCP package into: $targetMcpPackagePath"
-}
 Write-Host ""
 Write-Host "Next steps inside Unity:"
-Write-Host "1. Open the project and wait for package resolution."
-Write-Host "2. Confirm MCP for Unity finished importing."
-Write-Host "3. Optional: use the VRCForge app Doctor if Unity tools do not appear."
-Write-Host "4. Start the Unity MCP server."
-Write-Host "5. Re-run python vrchat_blendshape_agent.py --unity-status"
+Write-Host "1. Open the project and wait for VRCForge scripts to compile."
+Write-Host "2. Confirm the Console has no compiler errors and VRCForge MCP Core reports Ready."
+Write-Host "3. Open VRCForge App and select this project; the packaged Core connects automatically."
+Write-Host "4. Optional: use the VRCForge App Doctor if the 64 Unity tools do not appear."
 
 if ($LaunchUnity) {
     if ([string]::IsNullOrWhiteSpace($UnityEditorPath)) {

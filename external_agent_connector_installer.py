@@ -390,23 +390,32 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
             {
                 "jsonrpc": "2.0",
                 "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": {},
-                    "clientInfo": {"name": "vrcforge-connector-self-test", "version": "0"},
-                },
+                "method": "server/discover",
+                "params": _modern_stdio_request_metadata(),
             },
         )
-        initialize = _read_json_rpc_response(process, stdout_queue, stderr_queue, 1, timeout_seconds, transcript, stderr_lines)
-        _send_json_rpc(process, {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
-        _send_json_rpc(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        discovered = _read_json_rpc_response(process, stdout_queue, stderr_queue, 1, timeout_seconds, transcript, stderr_lines)
+        _validate_modern_stdio_result(discovered, "server/discover")
+        discover_result = discovered["result"]
+        supported_versions = discover_result.get("supportedVersions")
+        if not isinstance(supported_versions, list) or supported_versions != ["2026-07-28"]:
+            raise RuntimeError("MCP server/discover did not advertise only protocol version 2026-07-28.")
+        _send_json_rpc(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": _modern_stdio_request_metadata(),
+            },
+        )
         listed = _read_json_rpc_response(process, stdout_queue, stderr_queue, 2, timeout_seconds, transcript, stderr_lines)
+        _validate_modern_stdio_result(listed, "tools/list")
         tools = listed.get("result", {}).get("tools", []) if isinstance(listed.get("result"), dict) else []
         tool_names = [str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)]
         connected = "vrcforge_bridge_preflight" in tool_names
         ready = "vrcforge_request_apply" in tool_names
-        ok = bool(initialize.get("result")) and connected
+        ok = connected
         return {
             "ok": ok,
             "connected": connected,
@@ -441,6 +450,28 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
         }
     finally:
         _terminate_process(process)
+
+
+def _modern_stdio_request_metadata() -> dict[str, Any]:
+    """Return the only protocol metadata accepted by the bundled MCP2 bridge."""
+    return {
+        "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "VRCForge connector self-test", "version": "1"},
+        }
+    }
+
+
+def _validate_modern_stdio_result(response: dict[str, Any], method: str) -> None:
+    result = response.get("result")
+    if not isinstance(result, dict) or result.get("resultType") != "complete":
+        raise RuntimeError(f"MCP {method} did not return a complete 2026-07-28 result.")
+    metadata = result.get("_meta")
+    server_info = metadata.get("io.modelcontextprotocol/serverInfo") if isinstance(metadata, dict) else None
+    if not isinstance(server_info, dict) or not isinstance(server_info.get("name"), str) or not server_info["name"].strip() \
+            or not isinstance(server_info.get("version"), str) or not server_info["version"].strip():
+        raise RuntimeError(f"MCP {method} did not return valid io.modelcontextprotocol/serverInfo metadata.")
 
 
 def _read_stream_lines(stream: Any, output: queue.Queue[str]) -> None:

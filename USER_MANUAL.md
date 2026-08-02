@@ -292,7 +292,7 @@ alias key and identity map stay local and are never bundled.
 - VRChat SDK3 Avatar project
 - Windows x64 installer users do not need Python, Git, uv, or manual `pip install`
 - Source/debug users need Python, Node.js, Rust/Tauri tooling, and the package dependencies
-- MCP for Unity, installed automatically into the selected Unity project by VRCForge
+- `VRCForge.unitypackage`, containing the complete VRCForge-owned MCP Core and 64 Unity tools
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -301,7 +301,7 @@ alias key and identity map stay local and are never bundled.
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- MCP for Unity，由 VRCForge 自动安装到选中的 Unity 工程
+- `VRCForge.unitypackage`，包含完整的 VRCForge 自有 MCP Core 和 64 个 Unity 工具
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -438,7 +438,7 @@ npm run smoke:agentic
 
 | Problem | Check | 问题 | 检查 |
 | --- | --- | --- | --- |
-| Unity is not connected | Unity is open, compiled, and MCP for Unity is running | Unity 未连接 | Unity 是否打开、编译完成、MCP for Unity 是否运行 |
+| Unity is not connected | The selected project is open, compiled without errors, and VRCForge MCP Core reports Ready | Unity 未连接 | 选中的工程是否已打开、无错误编译，且 VRCForge MCP Core 是否显示 Ready |
 | Avatar list is empty | The scene contains a VRChat Avatar descriptor | Avatar 列表为空 | 场景中是否存在 VRChat Avatar descriptor |
 | Blendshapes do not load | The selected Avatar has SkinnedMeshRenderer Blendshapes | Blendshape 加载失败 | 选中的 Avatar 是否包含 Blendshape |
 | AI planning fails | Provider, model, and credentials are valid | AI 规划失败 | Provider、模型和凭据是否有效 |

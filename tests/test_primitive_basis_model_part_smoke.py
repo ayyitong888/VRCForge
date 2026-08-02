@@ -327,26 +327,17 @@ def test_isolated_secret_cleanup_is_verified(tmp_path: Path) -> None:
 
 def test_runner_uses_private_start_switch_and_actual_token_directory() -> None:
     source = Path(smoke.__file__).read_text(encoding="utf-8")
-    server_source = (
-        Path(smoke.__file__).parents[1]
-        / "third_party"
-        / "com.coplaydev.unity-mcp"
-        / "Editor"
-        / "Services"
-        / "ServerManagementService.cs"
-    ).read_text(encoding="utf-8")
 
     assert '[str(prepared.desktop_executable), "--primitive-live-stdin"]' in source
     assert 'user_data_root / "config" / "app-session-token"' in source
     assert 'config_root / "app-session-token"' not in source
+    assert '"projectMcpCoreRemoved": self.project_mcp_core_removed' in source
+    assert "bridgePortReleased" not in source
     assert '"vrc_reload_primitive_basis_fixture"' in source
     assert '"packagedUnityToolTreeDigest": packaged_unity_tool_tree_digest' in source
     assert '"runtimeUnityToolTreeDigest": runtime_unity_tool_tree_digest' in source
     assert '_tree_digest(project_root / "Assets" / "VRCForge" / "Editor")' in source
     assert "ignore_errors=True" not in source
-    assert "_primitiveBasisServerProcess = System.Diagnostics.Process.Start(startInfo)" in server_source
-    assert "StopPrimitiveBasisServerProcess()" in server_source
-    assert "ProcessWindowStyle.Hidden" in server_source
 
 
 def test_cleanup_continues_after_one_owned_process_wait_fails(monkeypatch) -> None:
@@ -407,7 +398,7 @@ def test_cleanup_continues_after_one_owned_process_wait_fails(monkeypatch) -> No
     runner.desktop_process = NormalProcess()
     runner.desktop_log_handle = LogHandle()
     runner.app_port_released = False
-    runner.bridge_port_released = False
+    runner.project_mcp_core_removed = False
     runner.desktop_clean = False
 
     monkeypatch.setattr(
@@ -428,12 +419,11 @@ def test_cleanup_continues_after_one_owned_process_wait_fails(monkeypatch) -> No
     assert "desktop-wait-20" in events
     assert "log-close" in events
     assert f"port-{smoke.APP_PORT}-app-20" in events
-    assert f"port-{smoke.BRIDGE_PORT}-fixture bridge-20" in events
     assert runner.unity_process is None
     assert runner.desktop_process is None
     assert runner.desktop_log_handle is None
     assert runner.app_port_released is True
-    assert runner.bridge_port_released is True
+    assert runner.project_mcp_core_removed is False
     assert runner.desktop_clean is False
 
 

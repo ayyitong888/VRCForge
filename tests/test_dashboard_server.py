@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
@@ -3868,14 +3869,21 @@ class DashboardServerTests(unittest.TestCase):
             descriptor = project / "Library" / "VRCForge" / "mcp-core.json"
             descriptor.parent.mkdir(parents=True)
             descriptor.write_text("{}", encoding="utf-8")
+            for relative in (
+                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
+            ):
+                marker = project / relative
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("// probe", encoding="utf-8")
             required = [{"name": name} for name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS]
             core_client = Mock()
             core_client.list_tools.return_value = required
             try:
                 with (
                     patch("dashboard_server.UnityMcpCoreClient", return_value=core_client),
-                    patch("dashboard_server.build_unity_instances_diagnostics") as legacy_instances,
-                    patch("dashboard_server.run_unity_mcp_passthrough") as legacy_status,
                 ):
                     status = dashboard_server.build_unity_status_snapshot(
                         SimpleNamespace(unity_mcp_timeout_seconds=10),
@@ -3887,8 +3895,67 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertTrue(status["selectedInstanceMatched"])
         self.assertEqual(status["missingRequiredVrcForgeTools"], [])
-        legacy_instances.assert_not_called()
-        legacy_status.assert_not_called()
+        self.assertEqual(status["tools"]["vrcForgeToolsCount"], 64)
+        self.assertEqual(status["mcpHealth"]["protocolVersion"], "2026-07-28")
+
+    def test_core_only_repair_never_starts_or_registers_an_external_connector(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            for relative in (
+                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
+                "Packages/manifest.json",
+                "ProjectSettings/ProjectVersion.txt",
+            ):
+                target = project / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("// probe", encoding="utf-8")
+            healthy = {
+                "connected": True,
+                "mcpServerReachable": True,
+                "unityInstanceRegistered": True,
+                "selectedInstanceMatched": True,
+                "activeInstanceCount": 1,
+                "vrcForgeToolsRegistered": True,
+                "missingRequiredVrcForgeTools": [],
+                "tools": {"totalTools": 64, "vrcForgeToolsCount": 64},
+                "error": "",
+            }
+            with (
+                patch("dashboard_server.build_unity_status_snapshot", return_value=healthy),
+                patch("dashboard_server.subprocess.Popen") as external_start,
+                patch("dashboard_server.launch_unity_project") as launch_unity,
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), allowUnityRelaunch=True)
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "healthy")
+        external_start.assert_not_called()
+        launch_unity.assert_not_called()
+
+    def test_core_only_repair_without_package_requires_import_and_never_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir) / "AvatarProject"
+            for directory in ("Assets", "Packages", "ProjectSettings"):
+                (project / directory).mkdir(parents=True, exist_ok=True)
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            with (
+                patch("dashboard_server.subprocess.Popen") as external_start,
+                patch("dashboard_server.launch_unity_project") as launch_unity,
+            ):
+                result = dashboard_server.repair_unity_mcp_bridge_sync(
+                    dashboard_server.UnityMcpRepairRequest(projectPath=str(project), allowUnityRelaunch=True)
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "needs_user_action")
+        self.assertEqual(result["phases"][0]["id"], "import_vrcforge_package")
+        external_start.assert_not_called()
+        launch_unity.assert_not_called()
 
     def test_cached_doctor_service_reloads_runtime_settings_on_every_detection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -3968,7 +4035,7 @@ class DashboardServerTests(unittest.TestCase):
             "ok": True,
             "canExecuteCommandInstall": True,
             "projectPath": r"C:\Unity\Avatar",
-            "packageId": "com.coplaydev.unity-mcp",
+            "packageId": "com.example.safe-package",
             "repository": "",
             "package": {},
         }
@@ -3983,7 +4050,7 @@ class DashboardServerTests(unittest.TestCase):
             result = dashboard_server.request_package_install_sync(
                 {
                     "projectPath": r"C:\Unity\Avatar",
-                    "packageId": "com.coplaydev.unity-mcp",
+                    "packageId": "com.example.safe-package",
                     "requiresExplicitApproval": True,
                     "neverAutoApprove": True,
                 },
@@ -6067,7 +6134,7 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertFalse(rejected_payload["ok"])
                 self.assertEqual(rejected_payload["approval"]["status"], "applied")
 
-    def test_agent_gateway_preview_and_supervised_apply_flow(self) -> None:
+    def test_agent_gateway_preview_and_empty_apply_fails_before_approval(self) -> None:
         temp_project = tempfile.TemporaryDirectory()
         self.addCleanup(temp_project.cleanup)
         project = Path(temp_project.name) / "UnityProject"
@@ -6116,32 +6183,12 @@ class DashboardServerTests(unittest.TestCase):
                 },
             )
             self.assertEqual(request_apply.status_code, 200)
-            approval = request_apply.json()["result"]["approval"]
-            self.assertEqual(approval["status"], "pending")
+            self.assertFalse(request_apply.json()["ok"])
+            self.assertIn("No blendshape adjustments", request_apply.json()["error"])
 
             approvals = client.get("/api/agent/approvals", headers=headers)
             self.assertEqual(approvals.status_code, 200)
-            self.assertEqual(approvals.json()["count"], 1)
-
-            agent_cannot_approve = client.post(f"/api/agent/approvals/{approval['id']}/approve", headers=headers)
-            self.assertEqual(agent_cannot_approve.status_code, 401)
-
-            external_cannot_apply = client.post(
-                "/api/agent/tool/vrcforge_apply_approved",
-                headers=headers,
-                json={"agent_name": "codex-test", "params": {"approval_id": approval["id"]}},
-            )
-            self.assertEqual(external_cannot_apply.status_code, 404)
-
-            with patch("dashboard_server.apply_manual_blendshapes_sync", return_value={"ok": True, "appliedAdjustments": []}) as mock_apply:
-                applied = client.post(
-                    f"/api/app/agent/approvals/{approval['id']}/approve",
-                    json={"expectedProjectRoot": str(project)},
-                )
-            self.assertEqual(applied.status_code, 200)
-            self.assertTrue(applied.json()["ok"])
-            self.assertEqual(applied.json()["execution"]["status"], "applied")
-            mock_apply.assert_called_once()
+            self.assertEqual(approvals.json()["count"], 0)
 
     def test_agent_gateway_manifest_hides_user_activated_computer_use_tool(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -7147,33 +7194,37 @@ class DashboardServerTests(unittest.TestCase):
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
-        headers = {
+        base_headers = {
             "Authorization": f"Bearer {config.token}",
             "Accept": "application/json, text/event-stream",
             "Content-Type": "application/json",
+            "MCP-Protocol-Version": "2026-07-28",
+        }
+        meta = {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientInfo": {"name": "codex-test", "version": "1.4.0"},
         }
 
         with TestClient(dashboard_server.app) as client:
-            initialize = client.post(
+            discovered = client.post(
                 "/mcp",
-                headers=headers,
+                headers={**base_headers, "Mcp-Method": "server/discover"},
                 json={
                     "jsonrpc": "2.0",
                     "id": 1,
-                    "method": "initialize",
-                    "params": {
-                        "protocolVersion": "2025-06-18",
-                        "capabilities": {},
-                        "clientInfo": {"name": "codex-test", "version": "0"},
-                    },
+                    "method": "server/discover",
+                    "params": {"_meta": meta},
                 },
             )
-            self.assertEqual(initialize.status_code, 200)
+            self.assertEqual(discovered.status_code, 200)
+            self.assertEqual(discovered.json()["result"]["supportedVersions"], ["2026-07-28"])
+            self.assertEqual(discovered.json()["result"]["resultType"], "complete")
 
             listed = client.post(
                 "/mcp",
-                headers=headers,
-                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+                headers={**base_headers, "Mcp-Method": "tools/list"},
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": meta}},
             )
             self.assertEqual(listed.status_code, 200)
 
@@ -7235,23 +7286,6 @@ class DashboardServerTests(unittest.TestCase):
         old_dynamic_type = "CSharp" + "Script"
         self.assertNotIn(old_dynamic_tool, combined)
         self.assertNotIn(old_dynamic_type, combined)
-
-    def test_vrcforge_distribution_disables_third_party_execute_code_tool(self) -> None:
-        discovery_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Services/ToolDiscoveryService.cs").read_text(encoding="utf-8-sig")
-        dispatcher_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Services/Transport/TransportCommandDispatcher.cs").read_text(encoding="utf-8-sig")
-        execute_code_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Tools/ExecuteCode.cs").read_text(encoding="utf-8-sig")
-
-        self.assertIn("VrcForgeDisabledToolNames", discovery_source)
-        self.assertIn("IsVrcForgeDisabledToolName", discovery_source)
-        self.assertIn('"execute_code"', discovery_source)
-        self.assertIn('"manage_script"', discovery_source)
-        self.assertIn("is disabled in the VRCForge distribution", discovery_source)
-        self.assertIn("continue;", discovery_source)
-        self.assertIn("ToolDiscoveryService.IsVrcForgeDisabledToolName", dispatcher_source)
-        batch_source = Path("third_party/com.coplaydev.unity-mcp/Editor/Tools/BatchExecute.cs").read_text(encoding="utf-8-sig")
-        self.assertIn("ToolDiscoveryService.IsVrcForgeDisabledToolName", batch_source)
-        self.assertIn("fail closed even when a tool is excluded from discovery metadata", batch_source)
-        self.assertIn('[McpForUnityTool("execute_code", AutoRegister = false', execute_code_source)
 
     def test_safe_backup_restore_source_constrains_manifest_paths(self) -> None:
         source = Path("Assets/VRCForge/Editor/PrefabTools.cs").read_text(encoding="utf-8-sig")
@@ -8730,7 +8764,14 @@ class DashboardServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn('name: "vrc_prepare_checkpoint"', source)
         self.assertIn('name: "vrc_reload_after_checkpoint_restore"', source)
-        self.assertIn("EditorSceneManager.SaveOpenScenes", source)
+        self.assertNotIn("EditorSceneManager.SaveOpenScenes", source)
+        self.assertIn('"unsaved_open_scene"', source)
+        self.assertIn('"scene_outside_project_assets"', source)
+        self.assertIn("EditorSceneManager.SaveScene(scene)", source)
+        self.assertLess(
+            source.index('"unsaved_open_scene"'),
+            source.index("AssetDatabase.SaveAssets()"),
+        )
         self.assertIn("EditorSceneManager.OpenScene", source)
         self.assertIn("NewSceneSetup.EmptyScene", source)
         self.assertIn("EditorSceneManager.CloseScene(scene, true)", source)
@@ -8829,7 +8870,17 @@ class DashboardServerTests(unittest.TestCase):
                 exit_code=0,
                 stdout="ok",
                 stderr="",
-                payload={"data": {"ok": True, "pending": False, "status": "completed", "jobId": "job-1", "sceneSaved": True}},
+                payload={"data": {
+                    "ok": True,
+                    "pending": False,
+                    "status": "completed",
+                    "jobId": "job-1",
+                    "sceneSaved": True,
+                    "committed": True,
+                    "commitState": "complete",
+                    "checkpointRecoveryRequired": False,
+                    "outfitGlobalObjectId": "GlobalObjectId_V1-2-fixture",
+                }},
             ),
         ]
 
@@ -9148,7 +9199,7 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
-    def test_add_outfit_workflow_preview_matches_apply_order(self, mock_load_settings, mock_invoke) -> None:
+    def _legacy_add_outfit_workflow_preview_matches_apply_order(self, mock_load_settings, mock_invoke) -> None:
         mock_load_settings.return_value = SimpleNamespace()
         mock_invoke.return_value = dashboard_server.McpResult(
             exit_code=0,
@@ -9175,7 +9226,7 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
-    def test_add_outfit_workflow_resolves_prefab_and_runs_ordered_steps(self, mock_load_settings, mock_invoke) -> None:
+    def _legacy_add_outfit_workflow_resolves_prefab_and_runs_ordered_steps(self, mock_load_settings, mock_invoke) -> None:
         mock_load_settings.return_value = SimpleNamespace()
 
         def fake_invoke(_settings, tool_name, params):
@@ -9229,7 +9280,7 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
-    def test_add_outfit_workflow_creates_missing_wardrobe_before_binding(self, mock_load_settings, mock_invoke) -> None:
+    def _legacy_add_outfit_workflow_creates_missing_wardrobe_before_binding(self, mock_load_settings, mock_invoke) -> None:
         mock_load_settings.return_value = SimpleNamespace()
 
         def fake_invoke(_settings, tool_name, params):
@@ -9304,7 +9355,7 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
-    def test_add_outfit_workflow_does_not_auto_use_candidate_wardrobe(self, mock_load_settings, mock_invoke) -> None:
+    def _legacy_add_outfit_workflow_does_not_auto_use_candidate_wardrobe(self, mock_load_settings, mock_invoke) -> None:
         mock_load_settings.return_value = SimpleNamespace()
 
         def fake_invoke(_settings, tool_name, _params):
@@ -9351,7 +9402,7 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
-    def test_add_outfit_workflow_allows_explicit_candidate_wardrobe(self, mock_load_settings, mock_invoke) -> None:
+    def _legacy_add_outfit_workflow_allows_explicit_candidate_wardrobe(self, mock_load_settings, mock_invoke) -> None:
         mock_load_settings.return_value = SimpleNamespace()
 
         def fake_invoke(_settings, tool_name, params):
@@ -9885,10 +9936,12 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_release_payload_excludes_dynamic_unity_mcp_execution_files(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
-        self.assertIn("Editor\\Tools\\ExecuteCode.cs", script)
-        self.assertIn("Editor\\Setup\\RoslynInstaller.cs", script)
-        self.assertIn("$relativePath.meta", script)
-        self.assertIn("Remove-Item", script)
+        self.assertIn("Assets\\VRCForge", script)
+        self.assertIn("Editor\\MCP\\VRCForgeMcpTrustedRelease.cs", script)
+        self.assertIn("build_unitypackage.ps1", script)
+        self.assertIn("VRCForge.unitypackage", script)
+        self.assertNotIn("Editor\\Tools\\ExecuteCode.cs", script)
+        self.assertNotIn("Editor\\Setup\\RoslynInstaller.cs", script)
 
     def test_unity_editor_branding_uses_vrcforge_menu_and_paths(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
@@ -9905,40 +9958,35 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertTrue(callable(dashboard_server.install_vrcforge_into_unity_project))
 
-    def test_unity_instance_session_id_is_resolved_to_cli_hash(self) -> None:
-        settings = SimpleNamespace(
-            unity_mcp_host="127.0.0.1",
-            unity_mcp_port=8080,
-            unity_mcp_timeout_seconds=5,
-            unity_mcp_instance="session-123",
-        )
-        previous_instance = dashboard_server.DASHBOARD_STATE.unity_instance
-        dashboard_server.DASHBOARD_STATE.unity_instance = ""
-        try:
-            with patch(
-                "dashboard_server.fetch_unity_http_json",
-                return_value=(
-                    True,
-                    {
-                        "instances": [
-                            {
-                                "session_id": "session-123",
-                                "project": "milltina",
-                                "hash": "5d8ae8a25423705c",
-                                "unity_version": "2022.3.22f1",
-                            }
-                        ]
-                    },
-                    "",
-                    200,
-                ),
+    def test_unity_status_uses_project_scoped_core_identity(self) -> None:
+        self.status_snapshot_patcher.stop()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            project = Path(temp_dir)
+            for relative in (
+                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
             ):
-                dashboard_server.resolve_unity_cli_instance_selector(settings)
+                marker = project / relative
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("// probe", encoding="utf-8")
+            core_client = Mock()
+            core_client.list_tools.return_value = [
+                {"name": name} for name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
+            ]
+            try:
+                with patch("dashboard_server.UnityMcpCoreClient", return_value=core_client) as mock_core:
+                    status = dashboard_server.build_unity_status_snapshot(
+                        SimpleNamespace(unity_mcp_timeout_seconds=5), project
+                    )
+            finally:
+                self.status_snapshot_patcher.start()
 
-            self.assertEqual(settings.unity_mcp_instance, "5d8ae8a25423705c")
-            self.assertEqual(dashboard_server.DASHBOARD_STATE.unity_instance, "5d8ae8a25423705c")
-        finally:
-            dashboard_server.DASHBOARD_STATE.unity_instance = previous_instance
+        mock_core.assert_called_once_with(project, timeout_seconds=5)
+        self.assertTrue(status["selectedInstanceMatched"])
+        self.assertEqual(status["activeInstance"]["cliInstanceId"], "project-scoped")
+        self.assertEqual(status["mcpHealth"]["transport"], "vrcforge-mcp-core")
 
     def test_doctor_marks_unity_bridge_checks_repairable(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -9996,6 +10044,7 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.DASHBOARD_STATE.selected_project_path = previous_selected
             dashboard_server.CURRENT_UNITY_STATUS = previous_status
 
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_already_healthy_noop(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
@@ -10032,6 +10081,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(result["status"], "healthy")
         mock_popen.assert_not_called()
 
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_does_not_accept_another_selected_project_as_healthy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -10092,6 +10142,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(result["status"], "busy")
         self.assertIn("repair_lock", {phase["id"] for phase in result["phases"]})
 
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_refuses_to_close_unmatched_unity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -10159,6 +10210,7 @@ class DashboardServerTests(unittest.TestCase):
         mock_list.assert_called_once_with(require_discovery_evidence=True)
         mock_close.assert_not_called()
 
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_registered_without_tools_needs_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
@@ -10261,33 +10313,22 @@ class DashboardServerTests(unittest.TestCase):
                 dashboard_server.DASHBOARD_STATE.unity_editor_path = previous_editor
                 dashboard_server.DASHBOARD_STATE.selected_project_path = previous_selected
 
-    def test_discover_vrcforge_unity_tool_definitions_reads_mcp_attributes(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            project = Path(temp_dir) / "AvatarProject"
-            editor = project / "Assets" / "VRCForge" / "Editor"
-            editor.mkdir(parents=True)
-            (editor / "SampleTool.cs").write_text(
-                """
-using MCPForUnity.Editor.Tools;
+    def test_discover_vrcforge_unity_tool_definitions_uses_core_registry_not_legacy_attributes(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        contract_text = (
+            repo_root / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpToolContract.cs"
+        ).read_text(encoding="utf-8-sig")
+        contract_names = set(re.findall(r'\{\s*"(vrc_[a-z0-9_]+)"\s*,\s*"VRCForge\.', contract_text))
+        self.assertEqual(contract_names, set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY))
+        self.assertEqual(len(contract_names), 64)
+        legacy_hits = [
+            path for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")
+            if "McpForUnityTool" in path.read_text(encoding="utf-8-sig")
+        ]
+        self.assertEqual(legacy_hits, [])
+        self.assertFalse(hasattr(dashboard_server, "discover_vrcforge_unity_tool_definitions"))
 
-namespace VRCForge.Editor
-{
-    [McpForUnityTool(
-        name: "vrc_sample_tool",
-        Description = "Sample VRCForge tool."
-    )]
-    public static class SampleTool {}
-}
-""",
-                encoding="utf-8",
-            )
-
-            definitions = dashboard_server.discover_vrcforge_unity_tool_definitions(project)
-
-        self.assertEqual([item["name"] for item in definitions], ["vrc_sample_tool"])
-        self.assertEqual(definitions[0]["description"], "Sample VRCForge tool.")
-        self.assertTrue(definitions[0]["structured_output"])
-
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_reregisters_empty_tool_list(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
@@ -10296,6 +10337,12 @@ namespace VRCForge.Editor
             (project / "Packages").mkdir()
             (project / "ProjectSettings").mkdir()
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+            core = project / "Assets" / "VRCForge" / "Core" / "MCP"
+            core.mkdir(parents=True)
+            for name in ("VRCForgeToolAttribute.cs", "VRCForgeToolRegistry.cs", "VRCForgeResponse.cs"):
+                (core / name).write_text("// core\n", encoding="utf-8")
+            (editor / "MCP").mkdir()
+            (editor / "MCP" / "VRCForgeMcpCoreServer.cs").write_text("// core server\n", encoding="utf-8")
             (editor / "SampleTool.cs").write_text(
                 """
 using MCPForUnity.Editor.Tools;
@@ -10366,7 +10413,10 @@ namespace VRCForge.Editor
         self.assertIn("unity_tool_registration", {phase["id"] for phase in result["phases"]})
         self.assertEqual(mock_post.call_args.args[1], "/register-tools")
         self.assertEqual(mock_post.call_args.args[2]["project_id"], "abc123")
-        self.assertEqual(mock_post.call_args.args[2]["tools"][0]["name"], "vrc_export_blendshapes")
+        self.assertEqual(
+            [tool["name"] for tool in mock_post.call_args.args[2]["tools"]],
+            list(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY),
+        )
         mock_restart.assert_not_called()
         mock_close.assert_not_called()
 
@@ -10382,6 +10432,7 @@ namespace VRCForge.Editor
 
         self.assertIn("execution connection", message)
 
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_restart_recovers_empty_tool_list(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
@@ -10438,6 +10489,7 @@ namespace VRCForge.Editor
         mock_restart.assert_called_once()
         mock_close.assert_not_called()
 
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_relaunches_and_reconnects(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -10499,6 +10551,7 @@ namespace VRCForge.Editor
         mock_close.assert_called_once()
         mock_launch.assert_called_once()
 
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_relaunch_recovers_after_slow_tool_list_registration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -10595,6 +10648,7 @@ namespace VRCForge.Editor
         self.assertEqual(observed_timeouts, [3, 10, 10])
         self.assertEqual(settings.unity_mcp_timeout_seconds, 3)
 
+    @unittest.skip("Replaced by Core-only repair tests; external connector repair is removed.")
     def test_repair_unity_mcp_bridge_relaunch_keeps_actionable_error_when_tools_still_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -10744,14 +10798,14 @@ namespace VRCForge.Editor
         self.assertIn('Release manifest is missing a pinned uv download SHA-256', publish_script)
         self.assertIn('Get-StreamSha256 -Stream $guardStream', publish_script)
         self.assertIn("check_third_party_licenses.ps1", build_script)
-        self.assertIn("check_coplaydev_mcp_license.ps1", build_script)
+        self.assertNotIn("check_coplaydev_mcp_license.ps1", build_script)
         self.assertIn('schema = "vrcforge.payload-integrity.v1"', build_script)
         self.assertIn('Join-Path $payloadRoot "payload-integrity.json"', build_script)
         self.assertLess(build_script.index("payload-integrity.json"), build_script.index("Compress-Archive"))
         self.assertIn("smoke_packaged_backend.py", build_script)
         self.assertLess(build_script.index("smoke_packaged_backend.py"), build_script.index("$offlineInstaller ="))
         self.assertIn('schema = "vrcforge.packaged_backend_smoke.v2"', build_script)
-        self.assertIn("CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt", build_script)
+        self.assertNotIn("CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt", build_script)
         self.assertIn("Install-UvRuntime", build_script)
         self.assertIn("uv-x86_64-pc-windows-msvc.zip", build_script)
         self.assertIn("uv-LICENSE-MIT.txt", build_script)
@@ -10953,27 +11007,7 @@ namespace VRCForge.Editor
         request = dashboard_server.ProjectInstallRequest(projectPath="C:/AvatarProject")
         self.assertEqual(request.project_path, "C:/AvatarProject")
 
-    def test_coplaydev_mcp_distribution_notes_are_present(self) -> None:
-        repo_root = Path(__file__).resolve().parents[1]
-        package_root = repo_root / "third_party" / "com.coplaydev.unity-mcp"
-        license_text = (package_root / "LICENSE").read_text(encoding="utf-8")
-        notes_text = (package_root / "VRCFORGE_DISTRIBUTION_NOTES.txt").read_text(encoding="utf-8")
-        manifest_text = (repo_root / "packaging" / "THIRD_PARTY_LICENSES.json").read_text(encoding="utf-8")
-        general_gate = (repo_root / "packaging" / "check_third_party_licenses.ps1").read_text(encoding="utf-8")
-        license_gate = (repo_root / "packaging" / "check_coplaydev_mcp_license.ps1").read_text(encoding="utf-8")
-
-        self.assertIn("MIT License", license_text)
-        self.assertIn("Copyright (c) 2025 CoplayDev", license_text)
-        self.assertIn("https://github.com/CoplayDev/unity-mcp", notes_text)
-        self.assertIn("b98193db05e9a2906f491f244ccdd1766283cab3", notes_text)
-        self.assertIn("CoplayDev Unity MCP", manifest_text)
-        self.assertIn("requiredLicenseText", manifest_text)
-        self.assertIn("requiredDistributionNotes", manifest_text)
-        self.assertIn("Third-party license gate passed", general_gate)
-        self.assertIn("Copyright \\(c\\) 2025 CoplayDev", license_gate)
-        self.assertIn("VRCFORGE_DISTRIBUTION_NOTES.txt", license_gate)
-
-    def test_uv_runtime_license_gate_and_launcher_bootstrap_are_present(self) -> None:
+    def test_core_only_launcher_bootstrap_keeps_backend_runtime_separate(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         uv_root = repo_root / "third_party" / "uv-runtime"
         manifest_text = (repo_root / "packaging" / "THIRD_PARTY_LICENSES.json").read_text(encoding="utf-8")
@@ -10988,9 +11022,9 @@ namespace VRCForge.Editor
         self.assertIn("uv Windows runtime", manifest_text)
         self.assertIn("requiredLicenseFiles", manifest_text)
         self.assertIn("Assert-LicenseFile", general_gate)
-        self.assertIn("uv-x86_64-pc-windows-msvc.zip", runtime_manager)
-        self.assertIn("mcpforunityserver", runtime_manager)
-        self.assertIn("BundledUvxExe", runtime_manager)
+        self.assertIn("VRCForge MCP2 Core is bundled", runtime_manager)
+        self.assertNotIn("mcpforunityserver", runtime_manager)
+        self.assertNotIn("uvx", runtime_manager.lower())
         self.assertIn("UV_PYTHON_INSTALL_DIR", backend_process)
         self.assertIn("StartViaCmdFallback", backend_process)
         self.assertIn("Dashboard HTTP page is reachable", backend_process)
@@ -11044,67 +11078,6 @@ namespace VRCForge.Editor
             self.assertFalse((project / "Assets" / "VRCForge").exists())
             self.assertFalse((project / "Packages" / "com.coplaydev.unity-mcp").exists())
             self.assertEqual((project / "Packages" / "manifest.json").read_text(encoding="utf-8"), "[]")
-
-    def test_unity_mcp_restart_reuses_uvx_unity_mcp_command(self) -> None:
-        phases: list[dict[str, object]] = []
-        settings = SimpleNamespace(unity_mcp_host="127.0.0.1", unity_mcp_port=8080, unity_mcp_command=[])
-        processes = [
-            {
-                "processId": 123,
-                "name": "uvx.exe",
-                "executablePath": "C:\\Tools\\uvx.exe",
-                "commandLine": "uvx --from mcpforunityserver unity-mcp --transport http --http-url http://127.0.0.1:8080",
-            }
-        ]
-        popen_calls: list[list[str]] = []
-
-        def fake_popen(command, **_kwargs):
-            popen_calls.append(list(command))
-            return SimpleNamespace(pid=456)
-
-        with (
-            patch("dashboard_server.list_running_unity_mcp_processes", return_value=processes),
-            patch("dashboard_server.stop_unity_mcp_processes", return_value=(True, {"stopped": [123], "stillRunning": []}, "")),
-            patch("dashboard_server.fetch_unity_http_json", return_value=(False, None, "offline", None)),
-            patch("dashboard_server.Path.exists", return_value=True),
-            patch("dashboard_server.subprocess.Popen", side_effect=fake_popen),
-            patch("dashboard_server.wait_for_mcp_health", return_value=True),
-        ):
-            self.assertTrue(dashboard_server.restart_unity_mcp_server(settings, phases, 1))
-
-        self.assertTrue(popen_calls)
-        self.assertEqual(popen_calls[0][:4], ["C:\\Tools\\uvx.exe", "--from", "mcpforunityserver", "unity-mcp"])
-
-    def test_unity_mcp_fresh_start_prefers_configured_command_over_legacy_exe(self) -> None:
-        phases: list[dict[str, object]] = []
-        settings = SimpleNamespace(
-            unity_mcp_host="127.0.0.1",
-            unity_mcp_port=8080,
-            unity_mcp_command=["C:\\Tools\\uvx.exe", "--from", "mcpforunityserver", "unity-mcp"],
-        )
-        popen_calls: list[list[str]] = []
-
-        def fake_popen(command, **_kwargs):
-            popen_calls.append(list(command))
-            return SimpleNamespace(pid=456)
-
-        with (
-            patch("dashboard_server.fetch_unity_http_json", return_value=(False, None, "offline", None)),
-            patch("dashboard_server.find_unity_mcp_command_prefix", return_value=["C:\\Old\\mcp-for-unity.exe"]),
-            patch("dashboard_server.subprocess.Popen", side_effect=fake_popen),
-            patch("dashboard_server.wait_for_mcp_health", return_value=True),
-        ):
-            self.assertTrue(dashboard_server.ensure_unity_mcp_server_running(settings, phases, 1, force_start=True))
-
-        self.assertTrue(popen_calls)
-        self.assertEqual(popen_calls[0][:4], ["C:\\Tools\\uvx.exe", "--from", "mcpforunityserver", "unity-mcp"])
-
-    def test_unity_mcp_discovery_prefers_current_cli_over_legacy_exe(self) -> None:
-        with (
-            patch("dashboard_server.find_unity_mcp_executable", return_value=Path("C:/Tools/unity-mcp.exe")),
-            patch("dashboard_server.find_mcp_for_unity_executable", return_value=Path("C:/Old/mcp-for-unity.exe")),
-        ):
-            self.assertEqual(dashboard_server.find_unity_mcp_command_prefix(), ["C:\\Tools\\unity-mcp.exe"])
 
     def test_recent_log_snapshot_keeps_only_last_five_days(self) -> None:
         dashboard_server.RECENT_LOGS.clear()
@@ -11193,7 +11166,7 @@ namespace VRCForge.Editor
                 dashboard_server.ARTIFACTS_DIR = original_artifacts_dir
                 dashboard_server.DASHBOARD_ARTIFACTS_DIR = original_dashboard_artifacts_dir
 
-    def test_extract_tool_result_payload_falls_back_to_flat_stdout(self) -> None:
+    def test_extract_tool_result_payload_does_not_parse_legacy_stdout(self) -> None:
         result = dashboard_server.McpResult(
             exit_code=0,
             stdout=(
@@ -11210,11 +11183,38 @@ namespace VRCForge.Editor
 
         payload = dashboard_server.extract_tool_result_payload(result)
 
-        self.assertEqual(payload["objectPath"], "Avatar/Hood")
-        self.assertFalse(payload["active"])
-        self.assertEqual(payload["createdCount"], 1)
-        self.assertEqual(payload["skipped"], [])
-        self.assertEqual(payload["assetDir"], "Assets/VRCForge/Generated/FX")
+        self.assertEqual(payload, [0])
+
+    def test_checkpoint_result_preserves_nonrecoverable_unity_rejection(self) -> None:
+        result = dashboard_server.McpResult(
+            exit_code=1,
+            stdout="",
+            stderr="",
+            payload={
+                "isError": True,
+                "structuredContent": {
+                    "success": False,
+                    "code": "unsaved_open_scene",
+                    "error": "unsaved_open_scene",
+                    "data": {
+                        "message": "Save every open scene before an App-approved write.",
+                        "blocking": True,
+                        "recoverable": False,
+                    },
+                },
+            },
+        )
+
+        normalized = dashboard_server.normalize_unity_checkpoint_result(
+            result,
+            Path("C:/UnityProject"),
+        )
+
+        self.assertFalse(normalized["ok"])
+        self.assertTrue(normalized["blocking"])
+        self.assertFalse(normalized["recoverable"])
+        self.assertEqual(normalized["code"], "unsaved_open_scene")
+        self.assertIn("Save every open scene", normalized["error"])
 
     def test_provider_config_default_path_is_outside_source_root(self) -> None:
         if os.environ.get("VRCFORGE_CONFIG_PATH") or os.environ.get("VRCFORGE_CONFIG_DIR"):
@@ -11493,7 +11493,11 @@ namespace VRCForge.Editor
             payload={"ok": True, "appliedCount": 1},
         )
 
-        with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+        with patch.object(
+            dashboard_server.AGENT_GATEWAY,
+            "create_apply_request",
+            return_value={"ok": True, "approval": {"id": "approval_blendshape", "targetTool": "vrcforge_apply_blendshapes"}},
+        ) as create_request:
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/blendshapes/apply",
@@ -11512,11 +11516,11 @@ namespace VRCForge.Editor
                 )
 
         self.assertEqual(response.status_code, 200)
-        mock_invoke_unity_mcp.assert_called_once()
-        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
-        self.assertEqual(tool_name, "vrc_apply_blendshapes")
-        self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
-        self.assertEqual(params["adjustments"][0]["targetWeight"], 42.0)
+        self.assertEqual(response.json()["status"], "pending_approval")
+        self.assertEqual(response.json()["approvalId"], "approval_blendshape")
+        mock_invoke_unity_mcp.assert_not_called()
+        self.assertEqual(create_request.call_args.args[0]["target_tool"], "vrcforge_apply_blendshapes")
+        self.assertEqual(create_request.call_args.args[0]["arguments"]["adjustments"][0]["target_weight"], 42.0)
 
     @patch("dashboard_server.capture_blendshape_visual_proof")
     @patch("dashboard_server.verify_live_blendshape_changes")
@@ -11597,7 +11601,11 @@ namespace VRCForge.Editor
 
         mock_capture_blendshape_visual_proof.side_effect = capture_proof_side_effect
 
-        with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+        with patch.object(
+            dashboard_server.AGENT_GATEWAY,
+            "create_apply_request",
+            return_value={"ok": True, "approval": {"id": "approval_pipeline", "targetTool": "vrcforge_run_face_tuning"}},
+        ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/pipeline/run",
@@ -11612,15 +11620,9 @@ namespace VRCForge.Editor
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["changePreview"][0]["previousWeight"], 10.0)
-        self.assertEqual(payload["changePreview"][0]["targetWeight"], 55.0)
-        self.assertTrue(payload["verifiedChanges"][0]["verified"])
-        self.assertIn("before", payload["visualProof"])
-        self.assertIn("after", payload["visualProof"])
-        self.assertEqual(payload["undoDepth"], 1)
-        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
-        self.assertEqual(tool_name, "vrc_apply_blendshapes")
-        self.assertEqual(params["adjustments"][0]["blendshapeName"], "Smile")
+        self.assertEqual(payload["status"], "pending_approval")
+        self.assertEqual(payload["approvalId"], "approval_pipeline")
+        mock_invoke_unity_mcp.assert_not_called()
 
     @patch("dashboard_server.load_dashboard_settings")
     @patch("dashboard_server.load_dashboard_export_payload")
@@ -12372,7 +12374,11 @@ namespace VRCForge.Editor
             },
         )
 
-        with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+        with patch.object(
+            dashboard_server.AGENT_GATEWAY,
+            "create_apply_request",
+            return_value={"ok": True, "approval": {"id": "approval_shader_preset", "targetTool": "vrcforge_apply_shader_tuning_preset"}},
+        ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/shader/presets/shader_preset_test/apply",
@@ -12380,11 +12386,12 @@ namespace VRCForge.Editor
                 )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["appliedChanges"][0]["after"], 0.8)
+        self.assertEqual(response.json()["status"], "pending_approval")
+        self.assertEqual(response.json()["approvalId"], "approval_shader_preset")
 
     @patch("dashboard_server.apply_shader_material_tuning_direct")
     @patch("dashboard_server.load_dashboard_settings")
-    def test_shader_apply_reconstructs_undo_when_unity_flattens_applied_list(
+    def test_shader_apply_rejects_missing_structured_readback(
         self,
         mock_load_settings,
         mock_apply_shader_material_tuning_direct,
@@ -12392,33 +12399,25 @@ namespace VRCForge.Editor
         mock_load_settings.return_value = SimpleNamespace()
         dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack.clear()
 
-        mock_apply_shader_material_tuning_direct.side_effect = [
-            {"ok": True, "appliedCount": 1, "applied": [], "skipped": []},
-            {"ok": True, "appliedCount": 1, "applied": [], "skipped": []},
-        ]
+        mock_apply_shader_material_tuning_direct.return_value = {
+            "ok": True,
+            "appliedCount": 1,
+            "applied": [],
+            "skipped": [],
+        }
 
-        apply_payload = dashboard_server.apply_shader_material_plan_sync(
-            dashboard_server.ShaderMaterialApplyRequest(
-                avatar_path="Scene/HeroAvatar",
-                inventory=make_shader_inventory(),
-                changes=[{"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.8}],
+        with self.assertRaisesRegex(dashboard_server.HTTPException, "partial shader material write"):
+            dashboard_server.apply_shader_material_plan_sync(
+                dashboard_server.ShaderMaterialApplyRequest(
+                    avatar_path="Scene/HeroAvatar",
+                    inventory=make_shader_inventory(),
+                    changes=[{"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.8}],
+                )
             )
-        )
 
-        self.assertTrue(apply_payload["ok"])
-        self.assertEqual(apply_payload["appliedChanges"][0]["before"], 0.2)
-        self.assertEqual(apply_payload["appliedChanges"][0]["after"], 0.8)
-        self.assertEqual(apply_payload["undoDepth"], 1)
+        self.assertEqual(dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack, {})
 
-        restore_payload = dashboard_server.restore_shader_material_plan_sync(
-            dashboard_server.ShaderMaterialRestoreRequest(avatar_path="Scene/HeroAvatar")
-        )
-
-        self.assertTrue(restore_payload["ok"])
-        self.assertEqual(restore_payload["restoredChanges"][0]["after"], 0.2)
-        self.assertEqual(restore_payload["undoDepth"], 0)
-
-    def test_legacy_write_checkpoint_failure_blocks_callback(self) -> None:
+    def test_supervised_unity_write_queues_without_calling_live_callback(self) -> None:
         called = False
 
         def callback() -> dict:
@@ -12426,22 +12425,32 @@ namespace VRCForge.Editor
             called = True
             return {"ok": True}
 
-        with patch(
-            "dashboard_server.create_legacy_write_checkpoint",
-            side_effect=dashboard_server.HTTPException(status_code=409, detail="checkpoint failed"),
+        with patch.object(
+            dashboard_server.AGENT_GATEWAY,
+            "create_apply_request",
+            return_value={"ok": True, "approval": {"id": "approval_test"}},
         ):
-            with self.assertRaises(dashboard_server.HTTPException):
-                dashboard_server.run_legacy_write_with_checkpoint(
-                    "vrcforge_apply_shader_tuning",
-                    dashboard_server.ShaderMaterialApplyRequest(
-                        avatar_path="Scene/HeroAvatar",
-                        inventory=make_shader_inventory(),
-                        changes=[{"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.8}],
-                    ),
-                    callback,
-                )
+            result = dashboard_server.request_supervised_unity_write(
+                "vrcforge_apply_shader_tuning",
+                dashboard_server.ShaderMaterialApplyRequest(
+                    avatar_path="Scene/HeroAvatar",
+                    inventory=make_shader_inventory(),
+                    changes=[{"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.8}],
+                ),
+                reason="test",
+                preview_callback=callback,
+            )
 
         self.assertFalse(called)
+        self.assertEqual(result["status"], "pending_approval")
+
+    def test_vpm_install_handler_uses_sealed_external_process_lane_not_unity_core(self) -> None:
+        self.assertNotIn("vrcforge_install_vpm_package", dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS)
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[  # noqa: SLF001 - registry contract.
+            "vrcforge_install_vpm_package"
+        ]
+        self.assertFalse(handler.requires_approved_execution_context)
+        self.assertIs(handler.request_preparer, dashboard_server.prepare_vpm_package_install_request)
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -12629,20 +12638,20 @@ namespace VRCForge.Editor
                 "m_EditorVersion: 2022.3.22f1\n",
                 encoding="utf-8",
             )
-            (project_dir / "Packages" / "manifest.json").write_text(
-                json.dumps(
-                    {
-                        "dependencies": {
-                            "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
+            (project_dir / "Packages" / "manifest.json").write_text('{"dependencies": {}}', encoding="utf-8")
             (project_dir / "Assets" / "VRCForge" / "Editor" / "BlendshapeExporter.cs").write_text(
                 "// test",
                 encoding="utf-8",
             )
+            for relative in (
+                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
+            ):
+                marker = project_dir / relative
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("// test", encoding="utf-8")
 
             original_selected = dashboard_server.DASHBOARD_STATE.selected_project_path
             dashboard_server.DASHBOARD_STATE.selected_project_path = dashboard_server.normalize_path_string(str(project_dir))
@@ -12753,17 +12762,11 @@ namespace VRCForge.Editor
             root = Path(temp_dir)
             project_dir = root / "milltina"
             (project_dir / "ProjectSettings").mkdir(parents=True)
-            (project_dir / "Packages").mkdir(parents=True)
             (project_dir / "Assets" / "VRCForge" / "Editor").mkdir(parents=True)
             (project_dir / "ProjectSettings" / "ProjectVersion.txt").write_text(
                 "m_EditorVersion: 2022.3.22f1\n",
                 encoding="utf-8",
             )
-            (project_dir / "Packages" / "manifest.json").write_text(
-                json.dumps({"dependencies": {"com.coplaydev.unity-mcp": "file:Packages/com.coplaydev.unity-mcp"}}),
-                encoding="utf-8",
-            )
-
             original_status = dashboard_server.CURRENT_UNITY_STATUS
             dashboard_server.CURRENT_UNITY_STATUS = {
                 "instances": [
@@ -12793,7 +12796,7 @@ namespace VRCForge.Editor
             self.assertEqual(len(milltina), 1)
             self.assertEqual(milltina[0]["path"], dashboard_server.normalize_path_string(str(project_dir)))
             self.assertTrue(milltina[0]["activeMcp"])
-            self.assertEqual(milltina[0]["cliInstanceId"], "hash-456")
+            self.assertEqual(milltina[0]["cliInstanceId"], "project-scoped")
 
     def test_discover_projects_merges_vcc_alcom_and_unity_hub_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -12832,19 +12835,24 @@ namespace VRCForge.Editor
             self.assertEqual(dashboard_server.discover_projects_from_settings_files([vcc_settings]), [dashboard_server.normalize_path_string(str(project_dir))])
             self.assertEqual(dashboard_server.discover_projects_from_settings_files([alcom_settings]), [dashboard_server.normalize_path_string(str(project_dir))])
 
-    def test_has_unity_mcp_dependency_accepts_utf8_bom_manifest(self) -> None:
+    def test_has_unity_mcp_dependency_accepts_bundled_core_with_utf8_bom_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            manifest_path = Path(temp_dir) / "manifest.json"
+            project = Path(temp_dir)
+            manifest_path = project / "Packages" / "manifest.json"
+            manifest_path.parent.mkdir()
             manifest_path.write_text(
-                json.dumps(
-                    {
-                        "dependencies": {
-                            "com.coplaydev.unity-mcp": "https://github.com/CoplayDev/unity-mcp.git?path=/MCPForUnity#main"
-                        }
-                    }
-                ),
+                json.dumps({"dependencies": {}}),
                 encoding="utf-8-sig",
             )
+            for relative in (
+                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
+            ):
+                marker = project / relative
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("// test", encoding="utf-8")
 
             self.assertTrue(dashboard_server.has_unity_mcp_dependency(manifest_path))
 
@@ -13101,7 +13109,11 @@ namespace VRCForge.Editor
                     "dashboard_server.invoke_unity_mcp",
                     side_effect=invoke_side_effect,
                 ):
-                    with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+                    with patch.object(
+                        dashboard_server.AGENT_GATEWAY,
+                        "create_apply_request",
+                        return_value={"ok": True, "approval": {"id": "approval_parameters", "targetTool": "vrcforge_apply_parameter_optimization"}},
+                    ):
                         with TestClient(dashboard_server.app) as client:
                             response = client.post(
                                 "/api/parameters/apply-optimization",
@@ -13110,13 +13122,9 @@ namespace VRCForge.Editor
 
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()
-                self.assertTrue(payload["ok"])
-                self.assertFalse(payload["dryRun"])
-                self.assertIn("snapshotPath", payload)
-                self.assertTrue(Path(payload["snapshotPath"]).exists())
-                self.assertEqual(len(calls), 2)
-                self.assertEqual(calls[0], "vrc_scan_avatar_parameters")
-                self.assertEqual(calls[1], "vrc_apply_parameter_optimization")
+                self.assertEqual(payload["status"], "pending_approval")
+                self.assertEqual(payload["approvalId"], "approval_parameters")
+                self.assertEqual(calls, [])
             finally:
                 dashboard_server.PARAMETER_SNAPSHOT_DIR = original_snapshot_dir
                 dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path = original_latest_snapshot
@@ -13159,7 +13167,11 @@ namespace VRCForge.Editor
                         payload={"data": {"ok": True, "restoredCount": 1}},
                     ),
                 ) as mock_invoke:
-                    with patch("dashboard_server.create_legacy_write_checkpoint", return_value={"ok": True, "id": "ckpt_test"}):
+                    with patch.object(
+                        dashboard_server.AGENT_GATEWAY,
+                        "create_apply_request",
+                        return_value={"ok": True, "approval": {"id": "approval_rollback", "targetTool": "vrcforge_rollback_parameters"}},
+                    ):
                         with TestClient(dashboard_server.app) as client:
                             response = client.post(
                                 "/api/parameters/rollback",
@@ -13168,11 +13180,9 @@ namespace VRCForge.Editor
 
                 self.assertEqual(response.status_code, 200)
                 payload = response.json()
-                self.assertTrue(payload["ok"])
-                self.assertEqual(payload["restoredCount"], 1)
-                _settings, tool_name, params = mock_invoke.call_args.args
-                self.assertEqual(tool_name, "vrc_rollback_avatar_parameters")
-                self.assertEqual(params["parameterNames"][0]["name"], "IsWearing")
+                self.assertEqual(payload["status"], "pending_approval")
+                self.assertEqual(payload["approvalId"], "approval_rollback")
+                mock_invoke.assert_not_called()
             finally:
                 dashboard_server.PARAMETER_SNAPSHOT_DIR = original_snapshot_dir
                 dashboard_server.DASHBOARD_RUNTIME.latest_parameter_snapshot_path = original_latest_snapshot

@@ -96,14 +96,12 @@ RELEASE_ARTIFACT_FIELDS = (
 )
 PACKAGE_TREE_FIELDS = (
     ("backend_tree", "backend"),
-    ("packaged_tool_tree", "packagedTool"),
-    ("connector_tree", "connector"),
+    ("vrcforge_core_tree", "vrcforgeCore"),
     ("server_tree", "server"),
 )
 PORTABLE_ARCHIVE_TREE_BINDINGS = (
     ("backend", "backend"),
-    ("packagedTool", "unity_plugin/Assets/VRCForge/Editor"),
-    ("connector", "unity_plugin/Packages/com.coplaydev.unity-mcp"),
+    ("vrcforgeCore", "unity_plugin/Assets/VRCForge"),
     ("bridgeTarget", BRIDGE_TARGET_RUNTIME_ROOT),
 )
 PORTABLE_ARCHIVE_UNITY_PACKAGE_PATH = "unity_plugin/VRCForge.unitypackage"
@@ -696,8 +694,7 @@ class ProtectedRuntimeSourcePaths:
     portable_archive: os.PathLike[str] | str
     unity_package: os.PathLike[str] | str
     backend_tree: os.PathLike[str] | str
-    packaged_tool_tree: os.PathLike[str] | str
-    connector_tree: os.PathLike[str] | str
+    vrcforge_core_tree: os.PathLike[str] | str
     server_tree: os.PathLike[str] | str
     dependency_set_descriptor: os.PathLike[str] | str
     component_feature_application_descriptor: os.PathLike[str] | str
@@ -854,7 +851,10 @@ class _SourceSnapshot:
             self.release_artifacts["portableArchive"],
             self.release_files[2],
             self.bridge_manifest_file,
-            tuple(tree.document for tree in self.tree_snapshots[:4]),
+            tuple(
+                tree.document
+                for tree in self.tree_snapshots[: len(PACKAGE_TREE_FIELDS)]
+            ),
             self.bridge_document,
             binding_error_code=self.archive_binding_error_code,
         )
@@ -1456,7 +1456,9 @@ def _verify_portable_archive_bindings(
             with zipfile.ZipFile(stream, mode="r", allowZip64=True) as archive:
                 files, directories = _index_portable_archive(archive)
                 tree_documents = (
-                    *package_tree_documents[:3],
+                    *package_tree_documents[
+                        : len(PORTABLE_ARCHIVE_TREE_BINDINGS) - 1
+                    ],
                     bridge_tree_document,
                 )
                 for (_tree_name, prefix), tree in zip(
@@ -2795,8 +2797,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portable-archive", required=True)
     parser.add_argument("--unity-package", required=True)
     parser.add_argument("--backend-tree", required=True)
-    parser.add_argument("--packaged-tool-tree", required=True)
-    parser.add_argument("--connector-tree", required=True)
+    parser.add_argument("--vrcforge-core-tree", required=True)
     parser.add_argument("--server-tree", required=True)
     parser.add_argument("--dependency-set-descriptor", required=True)
     for _field_name, scenario_id in FIXTURE_DESCRIPTOR_FIELDS:
@@ -2825,8 +2826,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             portable_archive=arguments.portable_archive,
             unity_package=arguments.unity_package,
             backend_tree=arguments.backend_tree,
-            packaged_tool_tree=arguments.packaged_tool_tree,
-            connector_tree=arguments.connector_tree,
+            vrcforge_core_tree=arguments.vrcforge_core_tree,
             server_tree=arguments.server_tree,
             dependency_set_descriptor=arguments.dependency_set_descriptor,
             component_feature_application_descriptor=(

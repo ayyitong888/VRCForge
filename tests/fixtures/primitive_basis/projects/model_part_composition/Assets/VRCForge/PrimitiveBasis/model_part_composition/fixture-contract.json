@@ -24,7 +24,7 @@
     },
     {
       "path": "Packages/packages-lock.json",
-      "sha256": "1d08f76f9854f0a83796cfb83cddbf5b1fa315663a33f5854777711410b80256"
+      "sha256": "b6b54dee94864c04bdf7223710576394b952182a2a3b2ab22dd4dd6489db2b92"
     },
     {
       "path": "ProjectSettings/ProjectVersion.txt",
@@ -32,11 +32,6 @@
     }
   ],
   "requiredPackages": [
-    {
-      "id": "com.coplaydev.unity-mcp",
-      "version": "9.6.9-beta.7",
-      "provisioning": "exact_artifact"
-    },
     {
       "id": "com.vrchat.avatars",
       "version": "3.10.3",

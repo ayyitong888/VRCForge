@@ -157,7 +157,7 @@ def facts(phase: str) -> dict[str, object]:
             "count": 0,
             "projectRemoved": True,
             "unityProcessExited": True,
-            "bridgePortReleased": True,
+            "projectMcpCoreRemoved": True,
         },
     }[phase]
 

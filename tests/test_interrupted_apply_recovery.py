@@ -192,6 +192,44 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             self.assertTrue(restored["ok"])
             self.assertFalse((project / "Assets" / "generated-after-prepare-warning.txt").exists())
 
+    def test_nonrecoverable_unity_prepare_failure_blocks_before_archive_or_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = create_unity_project(root)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.checkpoint_prepare_handler = lambda _path: {
+                "ok": False,
+                "blocking": True,
+                "code": "unsaved_open_scene",
+                "error": "Save every open scene before an App-approved write.",
+            }
+            calls: list[dict] = []
+
+            gateway.register_write_handler(
+                "vrcforge_test_unsaved_scene_write",
+                "Unsaved scene write",
+                "high",
+                lambda arguments: calls.append(arguments) or {"ok": True},
+            )
+            request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_test_unsaved_scene_write",
+                    "arguments": {"projectRoot": str(project)},
+                }
+            )
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+            self.assertFalse(applied["ok"])
+            checkpoint = applied["checkpoint"]
+            self.assertFalse(checkpoint["ok"])
+            self.assertTrue(checkpoint["blocking"])
+            self.assertEqual(checkpoint["status"], "failed")
+            self.assertEqual(checkpoint["code"], "unsaved_open_scene")
+            self.assertNotIn("strategy", checkpoint)
+            self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

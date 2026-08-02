@@ -71,7 +71,7 @@ const FIXTURE_BOOTSTRAP_TYPE: &str =
 const FIXTURE_RUN_ID_ENVIRONMENT: &str = "VRCFORGE_PRIMITIVE_BASIS_RUN_ID";
 const FIXTURE_READY_MARKER: &str = "Library/VRCForge/primitive-basis-model-part-ready.json";
 const FIXTURE_TREE_DIGEST_HEX: &str =
-    "4ed18185887cf82afda50a7ad1e3c0db65a366796a08eecd7f57c9913e7d77d4";
+    "061d219ba52786197a4838fe312bc9169ea83146889a6f3684165557b3baa907";
 const FIXTURE_PROJECT_FILES: [(&str, &str); 3] = [
     (
         "Packages/manifest.json",
@@ -79,15 +79,14 @@ const FIXTURE_PROJECT_FILES: [(&str, &str); 3] = [
     ),
     (
         "Packages/packages-lock.json",
-        "1d08f76f9854f0a83796cfb83cddbf5b1fa315663a33f5854777711410b80256",
+        "b6b54dee94864c04bdf7223710576394b952182a2a3b2ab22dd4dd6489db2b92",
     ),
     (
         "ProjectSettings/ProjectVersion.txt",
         "0599d0a5e5f574ce3aaf02f6f98a477bd75b97ddd6a1cf9a9466c603c3d7b6ca",
     ),
 ];
-const FIXTURE_REQUIRED_PACKAGES: [(&str, &str); 5] = [
-    ("com.coplaydev.unity-mcp", "9.6.9-beta.7"),
+const FIXTURE_REQUIRED_PACKAGES: [(&str, &str); 4] = [
     ("com.vrchat.avatars", "3.10.3"),
     ("com.vrchat.base", "3.10.3"),
     ("nadena.dev.modular-avatar", "1.17.1"),
@@ -127,8 +126,8 @@ const FIXTURE_BASELINE_FILES: [(&str, u64, &str); 8] = [
     ),
     (
         "fixture-contract.json",
-        2028,
-        "68a466d27cdb6718586fa74661d7337404c684c6a1c5a21e0af618c7b790e74d",
+        1904,
+        "03d1b74f0c0ddab4c7cf26b21890679cb9f65a5ecab022d2bbd7fb19cbce6097",
     ),
     (
         "fixture-contract.json.meta",
@@ -183,7 +182,7 @@ const RELEASE_ARTIFACTS: [(&str, u64); 3] = [
     ("portableArchive", MAX_ARCHIVE_BYTES),
     ("unityPackage", MAX_ARCHIVE_BYTES),
 ];
-const PACKAGE_TREE_NAMES: [&str; 4] = ["backend", "packagedTool", "connector", "server"];
+const PACKAGE_TREE_NAMES: [&str; 3] = ["backend", "vrcforgeCore", "server"];
 const FIXTURE_SCENARIOS: [&str; 4] = [
     "component_feature_application",
     "parameter_optimization",
@@ -244,8 +243,7 @@ struct ProtectedEvidenceManifestProjection {
     portable_digest: Digest,
     unity_package_digest: Digest,
     backend_tree_digest: Digest,
-    packaged_tool_tree_digest: Digest,
-    connector_tree_digest: Digest,
+    vrcforge_core_tree_digest: Digest,
     server_tree_digest: Digest,
     fixture_set_descriptor_digest: Digest,
     fixture_set_digest: Digest,
@@ -683,12 +681,12 @@ fn build_model_part_supervisor_policy_at(
             package.evidence.backend_tree_digest,
             package.role_digests[1],
             package.evidence.unity_package_digest,
-            package.evidence.packaged_tool_tree_digest,
-            package.evidence.packaged_tool_tree_digest,
+            package.evidence.vrcforge_core_tree_digest,
+            package.evidence.vrcforge_core_tree_digest,
             package.role_digests[4],
             package.role_digests[5],
             package.role_digests[6],
-            package.evidence.connector_tree_digest,
+            package.evidence.vrcforge_core_tree_digest,
             package.evidence.server_tree_digest,
             package.dependency_set.set_digest,
             package.binding_digest,
@@ -1205,9 +1203,8 @@ fn validate_v2_runtime_source_sections(
                 portable_digest: release_digests[1],
                 unity_package_digest: release_digests[2],
                 backend_tree_digest: package_tree_digests[0],
-                packaged_tool_tree_digest: package_tree_digests[1],
-                connector_tree_digest: package_tree_digests[2],
-                server_tree_digest: package_tree_digests[3],
+                vrcforge_core_tree_digest: package_tree_digests[1],
+                server_tree_digest: package_tree_digests[2],
                 fixture_set_descriptor_digest,
                 fixture_set_digest,
                 fixture_descriptor_digest,
@@ -2620,9 +2617,8 @@ mod tests {
             },
             "packageTrees": {
                 "backend": tree_record(205),
-                "packagedTool": tree_record(207),
-                "connector": tree_record(209),
-                "server": tree_record(211),
+                "vrcforgeCore": tree_record(207),
+                "server": tree_record(209),
             },
             "dependencySet": {
                 "descriptorSchema": DEPENDENCY_SET_SCHEMA,
@@ -2861,25 +2857,41 @@ mod tests {
                     };
                     contract["projectFiles"][index][field] = Value::String("drift".to_owned());
                 }
-                20..=34 => {
+                20..=31 => {
                     let index = (mutation - 20) / 3;
                     let field = ["id", "version", "provisioning"][(mutation - 20) % 3];
                     contract["requiredPackages"][index][field] = Value::String("drift".to_owned());
                 }
-                35 => contract["runtime"]["bootstrapType"] = Value::String("drift".to_owned()),
-                36 => contract["runtime"]["runIdEnvironment"] = Value::String("drift".to_owned()),
-                37 => contract["runtime"]["readyMarker"] = Value::String("drift".to_owned()),
-                38 => {
+                32 => contract["runtime"]["bootstrapType"] = Value::String("drift".to_owned()),
+                33 => contract["runtime"]["runIdEnvironment"] = Value::String("drift".to_owned()),
+                34 => contract["runtime"]["readyMarker"] = Value::String("drift".to_owned()),
+                35 => {
                     contract.as_object_mut().unwrap().remove("primitiveId");
                 }
-                39 => {
+                36 => {
                     contract["unexpected"] = Value::Bool(true);
                 }
-                40 => contract["projectFiles"].as_array_mut().unwrap().swap(0, 1),
-                41 => contract["requiredPackages"]
+                37 => contract["projectFiles"].as_array_mut().unwrap().swap(0, 1),
+                38 => contract["requiredPackages"]
                     .as_array_mut()
                     .unwrap()
                     .swap(0, 1),
+                39 => {
+                    contract["requiredPackages"].as_array_mut().unwrap().pop();
+                }
+                40 => {
+                    let duplicate = contract["requiredPackages"][0].clone();
+                    contract["requiredPackages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(duplicate);
+                }
+                41 => {
+                    contract["requiredPackages"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("unexpected".to_owned(), Value::Bool(true));
+                }
                 _ => unreachable!(),
             }
             let bytes = serde_json::to_vec(&contract).unwrap();
@@ -3409,7 +3421,7 @@ mod tests {
 
     #[test]
     fn policy_source_rejects_every_v2_release_tree_dependency_and_fixture_drift() {
-        for mutation in 0..40 {
+        for mutation in 0..55 {
             let value = fixture();
             let mut manifest = value.manifest.clone();
             match mutation {
@@ -3582,6 +3594,66 @@ mod tests {
                 }
                 39 => {
                     manifest["fixtureSet"]["materializedRoots"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("unexpected".to_owned(), Value::Bool(true));
+                }
+                40 => {
+                    manifest["packageTrees"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("vrcforgeCore");
+                }
+                41 => {
+                    manifest["packageTrees"]["vrcforgeCore"]["schema"] =
+                        Value::String("invalid".to_owned())
+                }
+                42 => {
+                    manifest["packageTrees"]["vrcforgeCore"]["treeDigest"] =
+                        Value::String("00".repeat(32))
+                }
+                43 => {
+                    manifest["packageTrees"]["vrcforgeCore"]["bindingDigest"] =
+                        Value::String("00".repeat(32))
+                }
+                44 => {
+                    manifest["packageTrees"]["vrcforgeCore"]["directoryCount"] =
+                        Value::from(MAX_POLICY_TREE_ENTRIES + 1)
+                }
+                45 => manifest["packageTrees"]["vrcforgeCore"]["entryCount"] = Value::from(0),
+                46 => {
+                    manifest["packageTrees"]["vrcforgeCore"]["byteCount"] =
+                        Value::from(MAX_POLICY_TREE_BYTES + 1)
+                }
+                47 => {
+                    manifest["packageTrees"]["vrcforgeCore"]
+                        .as_object_mut()
+                        .unwrap()
+                        .insert("unexpected".to_owned(), Value::Bool(true));
+                }
+                48 => {
+                    manifest["packageTrees"]["server"]["schema"] =
+                        Value::String("invalid".to_owned())
+                }
+                49 => {
+                    manifest["packageTrees"]["server"]["treeDigest"] =
+                        Value::String("00".repeat(32))
+                }
+                50 => {
+                    manifest["packageTrees"]["server"]["bindingDigest"] =
+                        Value::String("00".repeat(32))
+                }
+                51 => {
+                    manifest["packageTrees"]["server"]["directoryCount"] =
+                        Value::from(MAX_POLICY_TREE_ENTRIES + 1)
+                }
+                52 => manifest["packageTrees"]["server"]["entryCount"] = Value::from(0),
+                53 => {
+                    manifest["packageTrees"]["server"]["byteCount"] =
+                        Value::from(MAX_POLICY_TREE_BYTES + 1)
+                }
+                54 => {
+                    manifest["packageTrees"]["server"]
                         .as_object_mut()
                         .unwrap()
                         .insert("unexpected".to_owned(), Value::Bool(true));

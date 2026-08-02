@@ -18,7 +18,8 @@ def test_missing_settings_use_in_memory_defaults_without_creating_file(tmp_path:
     settings = load_runtime_settings_safely(path)
 
     assert settings.unity_mcp_host == "127.0.0.1"
-    assert settings.unity_mcp_port == 8080
+    assert settings.unity_mcp_port == 0
+    assert settings.unity_mcp_command == []
     assert not path.exists()
     assert runtime_settings_diagnostic() == {
         "status": "warning",
@@ -52,7 +53,7 @@ def test_valid_settings_clear_fallback_diagnostic(tmp_path: Path) -> None:
     settings = load_runtime_settings_safely(path)
 
     assert settings.llm_provider == "ollama"
-    assert settings.unity_mcp_port == 8123
+    assert settings.unity_mcp_port == 0
     assert runtime_settings_diagnostic()["fallbackActive"] is False
     assert read_runtime_settings_document_safely(path)["dashboard"] == {"project_roots": []}
 
@@ -97,7 +98,7 @@ def test_runtime_settings_accept_utf8_bom_without_rewriting_source(tmp_path: Pat
 
     settings = load_runtime_settings_safely(path)
 
-    assert settings.unity_mcp_port == 8124
+    assert settings.unity_mcp_port == 0
     assert runtime_settings_diagnostic(path)["code"] == "healthy"
     assert read_runtime_settings_document_safely(path)["llm"]["provider"] == "ollama"
     assert path.read_bytes() == original

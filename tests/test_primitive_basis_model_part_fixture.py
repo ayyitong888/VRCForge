@@ -73,13 +73,13 @@ def test_model_part_fixture_is_pinned_and_materializes() -> None:
     )
 
     assert fixtures.descriptor_digest == (
-        "e1e1422cdc40af2a3a0a7aef7d43ddac21e0961c8edaad31bae38ed792f28ea6"
+        "224bece5f977b9e82dfdb255ced6a90abd92ed821d2f3fe6e69195994276ac7a"
     )
     assert fixture.descriptor_digest == (
-        "80be020fb612159898506a69b1e4c32ca9665b951b5704da06931b0c1f16db5d"
+        "2a8f5d84c60b5410fce5a256e030fdeea2e9e7d216a395b4128dc74067437b5f"
     )
     assert fixture.digest == (
-        "5e2173a4f73b505078947e452341f6f9ae75277f17e00e39aaa0f301d072e4e9"
+        "408c0b41be6d45a2cca1b8edebc664211687b5623c87eccffb2936842d446299"
     )
     assert fixture.materialized is True
     assert fixture.materialization_error == ""
@@ -88,7 +88,7 @@ def test_model_part_fixture_is_pinned_and_materializes() -> None:
     )
     assert all(not item.materialization_error for item in fixtures.fixtures)
     assert fixtures.digest == (
-        "8c6a3cd60ed64b819f0f4fbe33a7e81772d14ba4394866e277b3329c31f60471"
+        "a634ab6ed15afc66c2b9e808f42e30189b7e9c19f04af4f4bff2d0d51accc5fa"
     )
 
 
@@ -129,11 +129,6 @@ def test_model_part_fixture_contract_binds_project_files_and_dependencies() -> N
         assert entry["sha256"] == sha256_file(path)
 
     assert contract["requiredPackages"] == [
-        {
-            "id": "com.coplaydev.unity-mcp",
-            "version": "9.6.9-beta.7",
-            "provisioning": "exact_artifact",
-        },
         {
             "id": "com.vrchat.avatars",
             "version": "3.10.3",
@@ -206,7 +201,6 @@ def test_model_part_fixture_contract_binds_project_files_and_dependencies() -> N
         assert locked_dependencies[name]["depth"] == 0
         assert locked_dependencies[name]["source"] == "builtin"
     for name in (
-        "com.coplaydev.unity-mcp",
         "com.vrchat.avatars",
         "com.vrchat.base",
         "nadena.dev.modular-avatar",
@@ -217,7 +211,9 @@ def test_model_part_fixture_contract_binds_project_files_and_dependencies() -> N
         assert locked_dependencies[name]["source"] == "embedded"
     assert locked_dependencies["com.unity.nuget.newtonsoft-json"]["version"] == "3.2.1"
     assert locked_dependencies["com.unity.burst"]["version"] == "1.8.12"
-    assert locked_dependencies["com.unity.test-framework"]["version"] == "1.1.33"
+    assert "com.coplaydev.unity-mcp" not in locked_dependencies
+    assert "com.unity.test-framework" not in locked_dependencies
+    assert "com.unity.ext.nunit" not in locked_dependencies
     assert locked_dependencies["com.unity.xr.management"]["version"] == "4.4.0"
     assert (PROJECT_ROOT / "ProjectSettings" / "ProjectVersion.txt").read_text(
         encoding="utf-8"

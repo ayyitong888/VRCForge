@@ -26,13 +26,19 @@ namespace VRCForge.Editor
         private static readonly object JobLock = new object();
         private static readonly Dictionary<string, SetupOutfitJob> Jobs = new Dictionary<string, SetupOutfitJob>();
         private static readonly TimeSpan CompletedJobRetention = TimeSpan.FromMinutes(10);
+        private const string JobSessionPrefix = "VRCForge.SetupOutfit.Job.";
+        private const string JobSessionIndexKey = "VRCForge.SetupOutfit.JobIndex.v1";
 
         private sealed class SetupOutfitJob
         {
             public string jobId { get; set; } = "";
             public string avatarPath { get; set; } = "";
             public string outfitPath { get; set; } = "";
+            public string outfitGlobalObjectId { get; set; } = "";
+            public string approvedObjectReceiptNonce { get; set; } = "";
             public bool saveScene { get; set; }
+            public bool continuationConsumed { get; set; }
+            public bool mutationStarted { get; set; }
             public string status { get; set; } = "pending";
             public JObject result { get; set; }
             public DateTime createdUtc { get; set; } = DateTime.UtcNow;
@@ -47,6 +53,9 @@ namespace VRCForge.Editor
 
             [VRCForgeParameter("Hierarchy path of the outfit object under the avatar root.", Required = true)]
             public string outfitPath { get; set; } = "";
+
+            [VRCForgeParameter("Approval-generated continuation nonce registered by vrc_instantiate_prefab.", Required = false)]
+            public string approvedObjectReceiptNonce { get; set; } = "";
 
             [VRCForgeParameter("Must be true to actually run Setup Outfit. False returns a readiness preview.", Required = false)]
             public bool? confirmSetup { get; set; } = false;
@@ -107,6 +116,8 @@ namespace VRCForge.Editor
                 jobId = jobId,
                 avatarPath = previewPayload["avatarPath"]?.ToString() ?? parameters.avatarPath ?? "",
                 outfitPath = previewPayload["outfitPath"]?.ToString() ?? parameters.outfitPath ?? "",
+                outfitGlobalObjectId = previewPayload["outfitGlobalObjectId"]?.ToString() ?? "",
+                approvedObjectReceiptNonce = (parameters.approvedObjectReceiptNonce ?? "").Trim(),
                 saveScene = parameters.saveScene != false,
             };
 
@@ -114,6 +125,7 @@ namespace VRCForge.Editor
             {
                 Jobs[jobId] = job;
             }
+            PersistJob(job);
 
             EditorApplication.delayCall += () => RunSetupJob(jobId);
 
@@ -142,6 +154,7 @@ namespace VRCForge.Editor
                 }
                 job.status = "running";
                 job.startedUtc = DateTime.UtcNow;
+                PersistJob(job);
             }
 
             try
@@ -155,6 +168,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
+                var recoveryRequired = job.mutationStarted || job.continuationConsumed;
                 var payload = new JObject
                 {
                     ["ok"] = false,
@@ -164,6 +178,11 @@ namespace VRCForge.Editor
                     ["jobId"] = jobId,
                     ["avatarPath"] = job.avatarPath,
                     ["outfitPath"] = job.outfitPath,
+                    ["outfitGlobalObjectId"] = job.outfitGlobalObjectId,
+                    ["continuationConsumed"] = job.continuationConsumed,
+                    ["committed"] = recoveryRequired,
+                    ["commitState"] = recoveryRequired ? "unknown" : "not_started",
+                    ["checkpointRecoveryRequired"] = recoveryRequired,
                     ["error"] = ex.Message,
                     ["stackTrace"] = ex.StackTrace ?? "",
                 };
@@ -177,6 +196,7 @@ namespace VRCForge.Editor
             {
                 avatarPath = job.avatarPath,
                 outfitPath = job.outfitPath,
+                approvedObjectReceiptNonce = "",
                 confirmSetup = true,
                 saveScene = job.saveScene,
             };
@@ -185,6 +205,26 @@ namespace VRCForge.Editor
                 ?? throw new InvalidOperationException(
                     "Modular Avatar runtime types were not found. Install the Modular Avatar package first.");
             var payload = BuildPreviewPayload(parameters, mergeArmatureType, out var outfit, out var existingMerge);
+            if (string.IsNullOrWhiteSpace(job.outfitGlobalObjectId)
+                || !string.Equals(
+                    GlobalObjectId.GetGlobalObjectIdSlow(outfit.gameObject).ToString(),
+                    job.outfitGlobalObjectId,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Setup Outfit target identity drifted after approval.");
+            }
+            if (!string.IsNullOrWhiteSpace(job.approvedObjectReceiptNonce))
+            {
+                VRCForgeApprovedObjectReceipt.Consume(
+                    job.approvedObjectReceiptNonce,
+                    ToolName,
+                    outfit.gameObject);
+                job.continuationConsumed = true;
+                payload["continuationConsumed"] = true;
+                PersistJob(job);
+            }
+            job.mutationStarted = true;
+            PersistJob(job);
             var setupEntryPoint = ExecuteSetupOutfit(outfit.gameObject);
 
             var mergeAfter = outfit.GetComponentsInChildren(mergeArmatureType, true).Length;
@@ -197,6 +237,11 @@ namespace VRCForge.Editor
 
             EditorSceneManager.MarkSceneDirty(outfit.gameObject.scene);
             var sceneSaved = parameters.saveScene != false && SaveTargetScene(outfit.gameObject.scene);
+            var postOutfitGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(outfit.gameObject).ToString();
+            if (!string.Equals(postOutfitGlobalObjectId, job.outfitGlobalObjectId, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("Setup Outfit target identity changed during execution.");
+            }
 
             payload["confirmed"] = true;
             payload["setupEntryPoint"] = setupEntryPoint;
@@ -204,6 +249,10 @@ namespace VRCForge.Editor
             payload["mergeArmaturesAfter"] = mergeAfter;
             payload["modularAvatarComponents"] = JObject.FromObject(componentTypes);
             payload["sceneSaved"] = sceneSaved;
+            payload["outfitGlobalObjectId"] = postOutfitGlobalObjectId;
+            payload["committed"] = true;
+            payload["commitState"] = "complete";
+            payload["checkpointRecoveryRequired"] = false;
             if (mergeAfter <= existingMerge && existingMerge == 0)
             {
                 throw new InvalidOperationException(
@@ -229,6 +278,8 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException("outfitPath must point to an outfit object, not the avatar root.");
             }
 
+            var outfitGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(outfit.gameObject).ToString();
+
             existingMerge = outfit.GetComponentsInChildren(mergeArmatureType, true).Length;
             if (existingMerge > 0)
             {
@@ -249,6 +300,8 @@ namespace VRCForge.Editor
                 ["avatarPath"] = GetTransformPath(avatarRoot),
                 ["avatarName"] = descriptor.name,
                 ["outfitPath"] = GetTransformPath(outfit),
+                ["outfitGlobalObjectId"] = outfitGlobalObjectId,
+                ["continuationConsumed"] = false,
                 ["modularAvatarFound"] = true,
                 ["existingMergeArmatures"] = existingMerge,
                 ["outfitHasAnimator"] = hasAnimator,
@@ -278,22 +331,24 @@ namespace VRCForge.Editor
 
         private static void CompleteJob(string jobId, string status, JObject payload)
         {
+            SetupOutfitJob completedJob;
             lock (JobLock)
             {
-                if (!Jobs.TryGetValue(jobId, out var job))
+                if (!Jobs.TryGetValue(jobId, out completedJob))
                 {
                     return;
                 }
-                job.status = status;
-                job.completedUtc = DateTime.UtcNow;
-                payload["completedUtc"] = job.completedUtc.Value.ToString("o");
-                if (job.startedUtc.HasValue)
+                completedJob.status = status;
+                completedJob.completedUtc = DateTime.UtcNow;
+                payload["completedUtc"] = completedJob.completedUtc.Value.ToString("o");
+                if (completedJob.startedUtc.HasValue)
                 {
-                    payload["startedUtc"] = job.startedUtc.Value.ToString("o");
+                    payload["startedUtc"] = completedJob.startedUtc.Value.ToString("o");
                 }
-                payload["createdUtc"] = job.createdUtc.ToString("o");
-                job.result = payload;
+                payload["createdUtc"] = completedJob.createdUtc.ToString("o");
+                completedJob.result = payload;
             }
+            PersistJob(completedJob);
         }
 
         private static JObject PollJob(string jobId)
@@ -304,14 +359,43 @@ namespace VRCForge.Editor
             {
                 if (!Jobs.TryGetValue(jobId, out var job))
                 {
+                    var persisted = LoadPersistedJob(jobId);
+                    if (persisted != null)
+                    {
+                        var persistedResult = persisted["result"] as JObject;
+                        if (persistedResult != null)
+                        {
+                            return (JObject)persistedResult.DeepClone();
+                        }
+                        var continuationConsumed = persisted["continuationConsumed"]?.Value<bool>() == true;
+                        var mutationStarted = persisted["mutationStarted"]?.Value<bool>() == true;
+                        var recoveryRequired = mutationStarted || continuationConsumed;
+                        return new JObject
+                        {
+                            ["ok"] = false,
+                            ["pending"] = false,
+                            ["status"] = "unavailable",
+                            ["jobId"] = jobId,
+                            ["reason"] = "editor_reloaded_after_setup_job_started",
+                            ["retryable"] = false,
+                            ["avatarPath"] = persisted["avatarPath"]?.ToString() ?? "",
+                            ["outfitPath"] = persisted["outfitPath"]?.ToString() ?? "",
+                            ["outfitGlobalObjectId"] = persisted["outfitGlobalObjectId"]?.ToString() ?? "",
+                            ["continuationConsumed"] = continuationConsumed,
+                            ["mutationStarted"] = mutationStarted,
+                            ["committed"] = recoveryRequired,
+                            ["commitState"] = recoveryRequired ? "unknown" : "not_started",
+                            ["checkpointRecoveryRequired"] = recoveryRequired,
+                        };
+                    }
                     return new JObject
                     {
                         ["ok"] = false,
                         ["pending"] = false,
-                        ["status"] = "error",
+                        ["status"] = "unavailable",
                         ["jobId"] = jobId,
-                        ["outfitPath"] = "",
-                        ["error"] = $"Setup Outfit job was not found: {jobId}",
+                        ["reason"] = "job_not_found_or_editor_reloaded",
+                        ["retryable"] = false,
                     };
                 }
 
@@ -329,6 +413,9 @@ namespace VRCForge.Editor
                     ["jobId"] = job.jobId,
                     ["avatarPath"] = job.avatarPath,
                     ["outfitPath"] = job.outfitPath,
+                    ["outfitGlobalObjectId"] = job.outfitGlobalObjectId,
+                    ["continuationConsumed"] = job.continuationConsumed,
+                    ["mutationStarted"] = job.mutationStarted,
                     ["createdUtc"] = job.createdUtc.ToString("o"),
                 };
                 if (job.startedUtc.HasValue)
@@ -351,7 +438,119 @@ namespace VRCForge.Editor
                 foreach (var jobId in stale)
                 {
                     Jobs.Remove(jobId);
+                    SessionState.EraseString(JobSessionPrefix + jobId);
                 }
+            }
+            var retainedIds = LoadPersistedJobIndex()
+                .Where(jobId => LoadPersistedJob(jobId) != null)
+                .ToList();
+            SavePersistedJobIndex(retainedIds);
+        }
+
+        private static void PersistJob(SetupOutfitJob job)
+        {
+            if (job == null || string.IsNullOrWhiteSpace(job.jobId))
+            {
+                return;
+            }
+            var payload = new JObject
+            {
+                ["schema"] = "vrcforge.setup-outfit-job.v1",
+                ["jobId"] = job.jobId,
+                ["avatarPath"] = job.avatarPath,
+                ["outfitPath"] = job.outfitPath,
+                ["outfitGlobalObjectId"] = job.outfitGlobalObjectId,
+                ["status"] = job.status,
+                ["continuationConsumed"] = job.continuationConsumed,
+                ["mutationStarted"] = job.mutationStarted,
+                ["createdUtc"] = job.createdUtc.ToString("o"),
+                ["startedUtc"] = job.startedUtc?.ToString("o"),
+                ["completedUtc"] = job.completedUtc?.ToString("o"),
+                ["result"] = job.result == null ? null : job.result.DeepClone(),
+            };
+            SessionState.SetString(JobSessionPrefix + job.jobId, payload.ToString(Newtonsoft.Json.Formatting.None));
+            var persistedIds = LoadPersistedJobIndex();
+            if (!persistedIds.Contains(job.jobId))
+            {
+                persistedIds.Add(job.jobId);
+                SavePersistedJobIndex(persistedIds);
+            }
+        }
+
+        private static List<string> LoadPersistedJobIndex()
+        {
+            var raw = SessionState.GetString(JobSessionIndexKey, "");
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return new List<string>();
+            }
+            try
+            {
+                return JArray.Parse(raw)
+                    .Values<string>()
+                    .Where(jobId => !string.IsNullOrWhiteSpace(jobId)
+                        && jobId.Length == 32
+                        && jobId.All(Uri.IsHexDigit))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+            }
+            catch
+            {
+                SessionState.EraseString(JobSessionIndexKey);
+                return new List<string>();
+            }
+        }
+
+        private static void SavePersistedJobIndex(IEnumerable<string> jobIds)
+        {
+            var retained = jobIds.Distinct(StringComparer.Ordinal).ToList();
+            if (retained.Count == 0)
+            {
+                SessionState.EraseString(JobSessionIndexKey);
+                return;
+            }
+            SessionState.SetString(
+                JobSessionIndexKey,
+                JArray.FromObject(retained).ToString(Newtonsoft.Json.Formatting.None));
+        }
+
+        private static JObject LoadPersistedJob(string jobId)
+        {
+            if (string.IsNullOrWhiteSpace(jobId) || jobId.Length != 32 || jobId.Any(character => !Uri.IsHexDigit(character)))
+            {
+                return null;
+            }
+            var raw = SessionState.GetString(JobSessionPrefix + jobId, "");
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+            try
+            {
+                var payload = JObject.Parse(raw);
+                if (!string.Equals(payload["schema"]?.ToString(), "vrcforge.setup-outfit-job.v1", StringComparison.Ordinal)
+                    || !string.Equals(payload["jobId"]?.ToString(), jobId, StringComparison.Ordinal))
+                {
+                    SessionState.EraseString(JobSessionPrefix + jobId);
+                    return null;
+                }
+                var retainedAtText = payload["completedUtc"]?.ToString();
+                if (string.IsNullOrWhiteSpace(retainedAtText))
+                {
+                    retainedAtText = payload["createdUtc"]?.ToString();
+                }
+                if (!DateTimeOffset.TryParse(retainedAtText, out var retainedAt)
+                    || retainedAt.UtcDateTime < DateTime.UtcNow - CompletedJobRetention)
+                {
+                    SessionState.EraseString(JobSessionPrefix + jobId);
+                    return null;
+                }
+                return payload;
+            }
+            catch
+            {
+                SessionState.EraseString(JobSessionPrefix + jobId);
+                return null;
             }
         }
 

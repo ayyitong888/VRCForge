@@ -18,6 +18,7 @@ import unittest
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -541,11 +542,15 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
     def test_unitypackage_import_hands_off_to_outfit_lane_with_vault_path(self) -> None:
         data = make_unitypackage_bytes({"asset/model.fbx": b"mesh"})
         stored = self.vault.ingest(data=data, name="outfit.unitypackage", declared_type="application/gzip", chat_id="chat-1")
-        preview = {"ok": True, "plan": {"readyToApply": True, "kind": "unitypackage_direct"}}
+        project = Path(self.tmp.name) / "PackageProject"
+        for directory in ("Assets", "Packages", "ProjectSettings"):
+            (project / directory).mkdir(parents=True, exist_ok=True)
+        package_path = self.vault.root / "files" / f"{stored['payloadHash']}.unitypackage"
+        preview = {"ok": True, "plan": {"readyToApply": True, "kind": "unitypackage_import", "projectPath": str(project), "source": {"actualPackagePath": str(package_path)}, "expectedAssetPaths": []}}
         with patch("dashboard_server.plan_outfit_import_sync", return_value=preview) as plan_mock:
             response = self.client.post(
                 "/api/app/chat-attachments/import",
-                json={"payloadHash": stored["payloadHash"], "projectPath": "D:/FakeProject"},
+                json={"payloadHash": stored["payloadHash"], "projectPath": str(project)},
             )
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -560,19 +565,25 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
         data = make_unitypackage_bytes({"asset/model.fbx": b"mesh"})
         stored = self.vault.ingest(data=data, name="outfit.unitypackage", declared_type="application/gzip", chat_id="chat-1")
         preview = {"ok": True, "plan": {"readyToApply": False}, "error": "unresolved conflicts"}
+        project = Path(self.tmp.name) / "BlockedPackageProject"
+        for directory in ("Assets", "Packages", "ProjectSettings"):
+            (project / directory).mkdir(parents=True, exist_ok=True)
         with patch("dashboard_server.plan_outfit_import_sync", return_value=preview):
             response = self.client.post(
                 "/api/app/chat-attachments/import",
-                json={"payloadHash": stored["payloadHash"]},
+                json={"payloadHash": stored["payloadHash"], "projectPath": str(project)},
             )
         self.assertEqual(response.status_code, 400)
 
     def test_image_import_creates_supervised_copy_approval(self) -> None:
         data = make_png_bytes(pad=b"\x00" * 32)
         stored = self.vault.ingest(data=data, name="ref.png", declared_type="image/png", chat_id="chat-1")
+        project = Path(self.tmp.name) / "ImageImportProject"
+        for directory in ("Assets", "Packages", "ProjectSettings"):
+            (project / directory).mkdir(parents=True, exist_ok=True)
         response = self.client.post(
             "/api/app/chat-attachments/import",
-            json={"payloadHash": stored["payloadHash"], "projectPath": "D:/FakeProject", "targetFolder": "Assets/VRCForge/Imports"},
+            json={"payloadHash": stored["payloadHash"], "projectPath": str(project), "targetFolder": "Assets/VRCForge/Imports"},
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -582,12 +593,15 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
     def test_archive_execution_rejects_bytes_changed_after_approval(self) -> None:
         data = make_zip_bytes({"Assets/example.prefab": b"prefab"})
         stored = self.vault.ingest(data=data, name="pack.zip", declared_type="application/zip", chat_id="chat-1")
+        project = Path(self.tmp.name) / "DriftProject"
+        for directory in ("Assets", "Packages", "ProjectSettings"):
+            (project / directory).mkdir(parents=True, exist_ok=True)
+        prepared, _preview = dashboard_server.prepare_import_chat_archive_request({"payloadHash": stored["payloadHash"], "projectPath": str(project)}, None)
         path = self.vault.root / "files" / f"{stored['payloadHash']}.zip"
         path.write_bytes(make_zip_bytes({"Assets/replaced.prefab": b"changed"}))
-        with self.assertRaises(dashboard_server.AgentGatewayError) as ctx:
-            dashboard_server.import_chat_archive_sync({"payloadHash": stored["payloadHash"]})
-        self.assertEqual(ctx.exception.status_code, 409)
-        self.assertFalse(path.exists())
+        with self.assertRaises(Exception):
+            dashboard_server.import_chat_archive_approved_sync(prepared)
+        self.assertFalse((project / "Assets" / "VRCForge").exists())
 
     def test_generic_zip_extracts_only_allowlisted_assets_into_unique_managed_folder(self) -> None:
         project = Path(self.tmp.name) / "UnityProject"
@@ -596,17 +610,15 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
         (project / "Packages").mkdir()
         data = make_zip_bytes({"Folder/example.prefab": b"prefab", "Folder/readme.txt": b"readme"})
         stored = self.vault.ingest(data=data, name="pack.zip", declared_type="application/zip", chat_id="chat-1")
+        prepared, _preview = dashboard_server.prepare_import_chat_archive_request(
+            {"payloadHash": stored["payloadHash"], "projectPath": str(project), "targetFolder": "Assets/VRCForge/Imports"},
+            None,
+        )
         with (
-            patch("dashboard_server.plan_outfit_import_sync", return_value={"ok": False, "error": "not an outfit"}),
-            patch("dashboard_server.refresh_asset_database_sync", return_value={"ok": True}),
+            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
+            patch("dashboard_server.invoke_unity_mcp", return_value=dashboard_server.McpResult(0, "", "", {"ok": True})),
         ):
-            result = dashboard_server.import_chat_archive_sync(
-                {
-                    "payloadHash": stored["payloadHash"],
-                    "projectPath": str(project),
-                    "targetFolder": "Assets/VRCForge/Imports",
-                }
-            )
+            result = dashboard_server.import_chat_archive_approved_sync(prepared)
         self.assertTrue(result["ok"])
         self.assertEqual(result["kind"], "managed_zip_extract")
         self.assertEqual(result["copiedFileCount"], 2)
@@ -626,15 +638,15 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
                 declared_type="application/zip",
                 chat_id="chat-1",
             )
-            with patch("dashboard_server.plan_outfit_import_sync", return_value={"ok": False, "error": "not an outfit"}):
-                with self.assertRaises(dashboard_server.AgentGatewayError):
-                    dashboard_server.import_chat_archive_sync(
-                        {
-                            "payloadHash": stored["payloadHash"],
-                            "projectPath": str(project),
-                            "targetFolder": "Assets/VRCForge/Imports",
-                        }
-                    )
+            with self.assertRaises(ValueError):
+                dashboard_server.prepare_import_chat_archive_request(
+                    {
+                        "payloadHash": stored["payloadHash"],
+                        "projectPath": str(project),
+                        "targetFolder": "Assets/VRCForge/Imports",
+                    },
+                    None,
+                )
             imports = project / "Assets" / "VRCForge" / "Imports"
             self.assertFalse(imports.exists() and any(imports.iterdir()))
 

@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_server
+from approved_unity_execution import current_approved_unity_execution
 from agent_gateway import AgentGateway
 from atomic_reference_rename import (
     APPROVAL_PREVIEW_SCHEMA,
@@ -1236,11 +1237,19 @@ def test_dashboard_fastapi_preview_request_approval_and_apply_are_one_bound_chai
         payload={"data": apply},
     )
 
+    def invoke_with_bound_execution(_settings, tool_name, arguments, **_kwargs):
+        plan = current_approved_unity_execution()
+        if plan is None:
+            return preview_result
+        claim = plan.claim(tool_name, arguments, project_path)
+        claim.complete()
+        return apply_result
+
     with (
         patch("dashboard_server.load_dashboard_settings"),
         patch(
             "dashboard_server.invoke_unity_mcp",
-            side_effect=[preview_result, preview_result, preview_result, apply_result],
+            side_effect=invoke_with_bound_execution,
         ) as invoke,
     ):
         client = TestClient(dashboard_server.app)

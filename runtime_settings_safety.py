@@ -74,7 +74,7 @@ def _validate_runtime_settings(settings: Settings) -> None:
     timeout = settings.unity_mcp_timeout_seconds
     backoff = settings.unity_mcp_retry_backoff_seconds
     confidence = settings.min_confidence
-    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
         raise ValueError("Unity MCP port is outside the supported range")
     if isinstance(retries, bool) or not isinstance(retries, int) or retries < 1:
         raise ValueError("Unity MCP retries must be a positive integer")
@@ -135,9 +135,9 @@ def _fallback_settings(
         llm_model=str(llm.get("model") or ""),
         llm_api_key_env=str(llm.get("api_key_env") or ""),
         gemini_thinking_level=str(llm.get("thinking_level") or ""),
-        unity_mcp_command=["unity-mcp"],
+        unity_mcp_command=[],
         unity_mcp_host="127.0.0.1",
-        unity_mcp_port=8080,
+        unity_mcp_port=0,
         unity_mcp_instance="",
         unity_mcp_retries=3,
         unity_mcp_retry_backoff_seconds=2.0,

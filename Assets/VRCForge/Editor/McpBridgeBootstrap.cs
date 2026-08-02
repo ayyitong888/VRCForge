@@ -6,15 +6,62 @@ namespace VRCForge.Editor
     [InitializeOnLoad]
     public static class McpBridgeBootstrap
     {
-        private const string AutoConnectKey = "VRCForge.McpBridgeBootstrap.AutoConnect";
+        // Version the preference so a disabled legacy bridge cannot suppress
+        // first-run startup of the packaged 2026-07-28 Core after import.
+        private const string AutoConnectKey = "VRCForge.McpBridgeBootstrap.2026-07-28.AutoConnect";
+        private const double AutoConnectRetrySeconds = 5.0;
+        private static double nextAutoConnectAttempt;
 
         static McpBridgeBootstrap()
         {
             AssemblyReloadEvents.beforeAssemblyReload += StopBridge;
             EditorApplication.quitting += StopBridge;
-            if (!Application.isBatchMode && EditorPrefs.GetBool(AutoConnectKey, true))
+            QueueAutoConnect();
+        }
+
+        [InitializeOnLoadMethod]
+        private static void QueueAutoConnectAfterReload()
+        {
+            QueueAutoConnect();
+        }
+
+        private static void QueueAutoConnect()
+        {
+            EditorApplication.update -= EnsureAutoConnected;
+            if (Application.isBatchMode || !EditorPrefs.GetBool(AutoConnectKey, true))
             {
-                EditorApplication.delayCall += StartBridgeNow;
+                return;
+            }
+            nextAutoConnectAttempt = 0.0;
+            EditorApplication.update += EnsureAutoConnected;
+        }
+
+        private static void EnsureAutoConnected()
+        {
+            if (Application.isBatchMode || !EditorPrefs.GetBool(AutoConnectKey, true))
+            {
+                EditorApplication.update -= EnsureAutoConnected;
+                return;
+            }
+            if (VRCForgeMcpCoreServer.IsReady)
+            {
+                EditorApplication.update -= EnsureAutoConnected;
+                return;
+            }
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating
+                || EditorApplication.timeSinceStartup < nextAutoConnectAttempt)
+            {
+                return;
+            }
+            nextAutoConnectAttempt = EditorApplication.timeSinceStartup + AutoConnectRetrySeconds;
+            StartBridgeNow();
+            if (VRCForgeMcpCoreServer.IsReady)
+            {
+                EditorApplication.update -= EnsureAutoConnected;
+            }
+            else
+            {
+                nextAutoConnectAttempt = EditorApplication.timeSinceStartup + AutoConnectRetrySeconds;
             }
         }
 
@@ -29,6 +76,14 @@ namespace VRCForge.Editor
         {
             var enabled = !EditorPrefs.GetBool(AutoConnectKey, true);
             EditorPrefs.SetBool(AutoConnectKey, enabled);
+            if (enabled)
+            {
+                QueueAutoConnect();
+            }
+            else
+            {
+                EditorApplication.update -= EnsureAutoConnected;
+            }
             Menu.SetChecked("VRCForge/MCP/Auto Connect Enabled", enabled);
             Debug.Log("[VRCForge MCP] Auto connect " + (enabled ? "enabled" : "disabled") + ".");
         }
@@ -42,6 +97,7 @@ namespace VRCForge.Editor
 
         private static void StopBridge()
         {
+            EditorApplication.update -= EnsureAutoConnected;
             VRCForgeMcpCoreServer.Stop();
         }
     }

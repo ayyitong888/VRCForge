@@ -121,8 +121,8 @@ _CLEANUP_FIELDS = {
     "bridgeLauncherExited",
     "bridgeListenerExited",
     "appPortReleased",
-    "bridgePortReleased",
     "projectRemoved",
+    "projectMcpCoreRemoved",
     "observedAt",
 }
 _ENVELOPE_FIELDS_V1 = {

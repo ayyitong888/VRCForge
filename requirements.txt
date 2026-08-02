@@ -11,9 +11,8 @@ anthropic>=0.34.0
 google-genai>=1.16.1
 openai>=1.30.0
 
-# Unity MCP bridge client/server helper.
-mcp[cli]>=1.27.0
-mcpforunityserver>=9.6.8
+# VRCForge-owned Unity MCP Core client helper. The server is bundled in the
+# Unity package and must not be installed as a Python runtime dependency.
 
 # Signed offline .vsk skill packages.
 cryptography>=43.0.0

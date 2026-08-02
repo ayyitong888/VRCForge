@@ -24,12 +24,63 @@ namespace VRCForge.Editor
                 var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
                 ValidateProject(@params);
                 EnsureEditorReady();
-                AssetDatabase.SaveAssets();
-                if (!EditorSceneManager.SaveOpenScenes())
+
+                var loadedScenes = LoadedScenes();
+                var unsavedScenes = loadedScenes
+                    .Where(scene => string.IsNullOrWhiteSpace(scene.path))
+                    .Select((scene, index) => new
+                    {
+                        index,
+                        name = string.IsNullOrWhiteSpace(scene.name) ? "Untitled" : scene.name
+                    })
+                    .ToList();
+                if (unsavedScenes.Count > 0)
                 {
-                    return new ErrorResponse("Could not save all open scenes before checkpointing.");
+                    return new ErrorResponse(
+                        "unsaved_open_scene",
+                        new
+                        {
+                            message = "Save every open scene before an App-approved write so VRCForge can create a recoverable checkpoint.",
+                            blocking = true,
+                            recoverable = false,
+                            scenes = unsavedScenes
+                        });
                 }
-                var scenes = OpenProjectScenePaths();
+
+                var unsupportedScenes = loadedScenes
+                    .Where(scene => !scene.path.StartsWith("Assets/", StringComparison.Ordinal))
+                    .Select(scene => scene.path)
+                    .ToList();
+                if (unsupportedScenes.Count > 0)
+                {
+                    return new ErrorResponse(
+                        "scene_outside_project_assets",
+                        new
+                        {
+                            message = "Every open scene must be saved under this project's Assets folder before an App-approved write.",
+                            blocking = true,
+                            recoverable = false,
+                            scenes = unsupportedScenes
+                        });
+                }
+
+                foreach (var scene in loadedScenes)
+                {
+                    if (!EditorSceneManager.SaveScene(scene))
+                    {
+                        return new ErrorResponse(
+                            "scene_save_failed",
+                            new
+                            {
+                                message = $"Unity could not save the open scene '{scene.path}' before checkpointing.",
+                                blocking = true,
+                                recoverable = false,
+                                scene = scene.path
+                            });
+                    }
+                }
+                AssetDatabase.SaveAssets();
+                var scenes = loadedScenes.Select(scene => scene.path).ToList();
                 return new SuccessResponse(
                     "Saved open scenes and dirty assets before checkpointing.",
                     new
@@ -80,14 +131,22 @@ namespace VRCForge.Editor
 
         internal static List<string> OpenProjectScenePaths()
         {
-            var scenes = new List<string>();
+            return LoadedScenes()
+                .Where(scene => !string.IsNullOrWhiteSpace(scene.path)
+                    && scene.path.StartsWith("Assets/", StringComparison.Ordinal))
+                .Select(scene => scene.path)
+                .ToList();
+        }
+
+        internal static List<Scene> LoadedScenes()
+        {
+            var scenes = new List<Scene>();
             for (var index = 0; index < SceneManager.sceneCount; index++)
             {
                 var scene = SceneManager.GetSceneAt(index);
-                if (scene.IsValid() && scene.isLoaded && !string.IsNullOrWhiteSpace(scene.path)
-                    && scene.path.StartsWith("Assets/", StringComparison.Ordinal))
+                if (scene.IsValid() && scene.isLoaded)
                 {
-                    scenes.Add(scene.path);
+                    scenes.Add(scene);
                 }
             }
             return scenes;

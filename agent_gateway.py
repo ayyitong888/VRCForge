@@ -20,7 +20,7 @@ import zlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Sequence
 
 from agent_memory_store import AgentMemoryStore
 from desktop_operations import (
@@ -39,6 +39,13 @@ from background_goal_runtime import (
     classify_runtime_plan_outcome,
     classify_runtime_step_failure,
 )
+from approved_unity_execution import (
+    bind_approved_unity_execution,
+    create_approved_unity_execution_plan,
+    freeze_approved_unity_execution_plan,
+    validate_frozen_approved_unity_execution_plan,
+)
+from agent_mcp_2026 import Mcp2026Router, create_agent_mcp_2026_asgi_app
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -48,6 +55,10 @@ CheckpointPrepareHandler = Callable[[Path, dict[str, Any]], dict[str, Any]]
 WriteRequestPreparer = Callable[
     [dict[str, Any], Any],
     tuple[dict[str, Any], Any],
+]
+ApprovedUnityExecutionPlanBuilder = Callable[
+    [dict[str, Any]],
+    Sequence[tuple[str, dict[str, Any]]],
 ]
 
 RUNTIME_SKILL_SUPPORT_MAX_FILES = 16
@@ -221,6 +232,8 @@ class AgentWriteHandler:
     request_preparer: WriteRequestPreparer | None = None
     manual_approval_resolver: ManualApprovalResolver | None = None
     checkpoint_prepare_handler: CheckpointPrepareHandler | None = None
+    requires_approved_execution_context: bool = False
+    approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None
 
 
 @dataclass
@@ -1853,6 +1866,8 @@ class AgentGateway:
         request_preparer: WriteRequestPreparer | None = None,
         manual_approval_resolver: ManualApprovalResolver | None = None,
         checkpoint_prepare_handler: CheckpointPrepareHandler | None = None,
+        requires_approved_execution_context: bool = False,
+        approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None,
     ) -> None:
         self._write_handlers[name] = AgentWriteHandler(
             name=name,
@@ -1864,6 +1879,8 @@ class AgentGateway:
             request_preparer=request_preparer,
             manual_approval_resolver=manual_approval_resolver,
             checkpoint_prepare_handler=checkpoint_prepare_handler,
+            requires_approved_execution_context=requires_approved_execution_context,
+            approved_execution_plan_builder=approved_execution_plan_builder,
         )
 
     def ensure_config(self) -> AgentGatewayConfig:
@@ -5745,6 +5762,23 @@ class AgentGateway:
                 "userConstraintsApplied": True,
                 "userConstraintsPath": str(user_constraints.path),
             }
+        approved_execution_plan: dict[str, Any] | None = None
+        if write_handler.requires_approved_execution_context:
+            if write_handler.approved_execution_plan_builder is None:
+                raise AgentGatewayError(
+                    f"Unity write target is not yet bound to an exact Core execution plan: {target_tool}",
+                    status_code=409,
+                )
+            try:
+                planned_calls = write_handler.approved_execution_plan_builder(dict(arguments))
+                approved_execution_plan = freeze_approved_unity_execution_plan(planned_calls)
+            except AgentGatewayError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - malformed plans must fail before approval exists.
+                raise AgentGatewayError(
+                    f"Could not freeze the exact Core execution plan for {target_tool}.",
+                    status_code=409,
+                ) from exc
         approval = self._new_approval(
             agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent"),
             target_tool=target_tool,
@@ -5756,6 +5790,7 @@ class AgentGateway:
             requires_explicit_approval=requires_explicit_for_mode,
             explicit_approval_reason=explicit_approval_reason,
             goal_delivery_id=str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or "").strip(),
+            approved_execution_plan=approved_execution_plan,
         )
         if include_arguments_digest:
             approval["argumentsDigest"] = stable_hash(
@@ -6049,7 +6084,15 @@ class AgentGateway:
                                 checkpoint=checkpoint,
                                 arguments_digest=handler_arguments_digest,
                             )
-                        result = write_handler.handler(arguments)
+                        result = self._call_write_handler(
+                            write_handler,
+                            target_tool,
+                            approval_id,
+                            checkpoint,
+                            arguments,
+                            handler_arguments_digest,
+                            ensure_dict(approval.get("approvedUnityExecutionPlan")),
+                        )
             else:
                 if requires_checkpoint:
                     with self._checkpoint_storage_lock:
@@ -6076,7 +6119,15 @@ class AgentGateway:
                         checkpoint=checkpoint,
                         arguments_digest=handler_arguments_digest,
                     )
-                result = write_handler.handler(arguments)
+                result = self._call_write_handler(
+                    write_handler,
+                    target_tool,
+                    approval_id,
+                    checkpoint,
+                    arguments,
+                    handler_arguments_digest,
+                    ensure_dict(approval.get("approvedUnityExecutionPlan")),
+                )
             if isinstance(result, dict) and result.get("ok") is False:
                 no_write_conflict = bool(
                     target_tool == PROJECT_CHAT_CHECKPOINT_TARGET
@@ -7239,6 +7290,81 @@ class AgentGateway:
         self.append_audit({"event": "checkpoint_restored", **payload})
         return payload
 
+    def _call_write_handler(
+        self,
+        write_handler: AgentWriteHandler,
+        target_tool: str,
+        approval_id: str,
+        checkpoint: dict[str, Any] | None,
+        arguments: dict[str, Any],
+        handler_arguments_digest: str,
+        frozen_execution_plan: dict[str, Any],
+    ) -> Any:
+        handler_arguments = dict(arguments)
+        handler_arguments.pop("_vrcforge_approved_execution", None)
+        if not write_handler.requires_approved_execution_context:
+            return write_handler.handler(handler_arguments)
+        checkpoint_id = str(ensure_dict(checkpoint).get("id") or "").strip()
+        if not checkpoint or checkpoint.get("ok") is not True or not checkpoint_id:
+            raise AgentGatewayError(
+                "The Unity write cannot start without a successful bound checkpoint.",
+                status_code=409,
+            )
+        project_root = str(ensure_dict(checkpoint).get("projectRoot") or "").strip()
+        if not project_root:
+            raise AgentGatewayError(
+                "The Unity write checkpoint is missing its exact project binding.",
+                status_code=409,
+            )
+        if write_handler.approved_execution_plan_builder is None:
+            raise AgentGatewayError(
+                "The Unity write no longer has an exact Core execution plan builder.",
+                status_code=409,
+            )
+        try:
+            persisted_plan = validate_frozen_approved_unity_execution_plan(frozen_execution_plan)
+            recomputed_plan_json = freeze_approved_unity_execution_plan(
+                write_handler.approved_execution_plan_builder(dict(handler_arguments))
+            )
+            recomputed_plan = validate_frozen_approved_unity_execution_plan(recomputed_plan_json)
+        except Exception as exc:  # noqa: BLE001 - plan loss/drift is a hard write boundary.
+            raise AgentGatewayError(
+                "The approved Unity execution plan is unavailable or invalid.",
+                status_code=409,
+            ) from exc
+        if persisted_plan.plan_digest != recomputed_plan.plan_digest:
+            raise AgentGatewayError(
+                "The approved Unity execution plan drifted after approval.",
+                status_code=409,
+            )
+        now_ms = int(time.time() * 1000)
+        execution_context = {
+            "lane": "approved_write",
+            "approvalId": str(approval_id),
+            "checkpointId": checkpoint_id,
+            "targetTool": str(target_tool),
+            "projectRoot": project_root,
+            "handlerArgumentsSha256": str(handler_arguments_digest),
+            "issuedAtUnixMs": now_ms,
+            "expiresAtUnixMs": now_ms + 60_000,
+        }
+        execution_plan = create_approved_unity_execution_plan(
+            execution_context,
+            frozen_execution_plan,
+        )
+        try:
+            with bind_approved_unity_execution(execution_plan):
+                result = write_handler.handler(handler_arguments)
+        finally:
+            if not execution_plan.consumed:
+                execution_plan.burn()
+        if not execution_plan.consumed:
+            raise AgentGatewayError(
+                "The approved Unity execution plan was not consumed exactly.",
+                status_code=409,
+            )
+        return result
+
     def _create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
         with self._checkpoint_storage_lock:
             return self._create_pre_write_checkpoint_locked(approval, arguments)
@@ -7329,6 +7455,21 @@ class AgentGateway:
             record["unityPrepare"] = prepare_result
             if not prepare_result.get("ok"):
                 warning = str(prepare_result.get("error") or "Unity could not prepare a rollback checkpoint.")
+                if prepare_result.get("blocking") is True:
+                    record.update(
+                        {
+                            "ok": False,
+                            "blocking": True,
+                            "status": "failed",
+                            "code": str(
+                                prepare_result.get("code")
+                                or "unity_checkpoint_prepare_blocked"
+                            ),
+                            "error": warning,
+                        }
+                    )
+                    self._append_checkpoint(record)
+                    return record
                 record["unityPrepareWarning"] = warning
                 record["warnings"] = [
                     *ensure_string_list(record.get("warnings")),
@@ -10726,11 +10867,20 @@ class AgentGateway:
             or ""
         ).strip()
 
+        scene_root_target = intent.get("targetMode") == "scene_root"
+        if scene_root_target and explicit_target:
+            return _base(
+                summary="Conflicting Unity write targets were rejected.",
+                reply="请求同时指定了活动场景根节点和模型路径，无法安全判断写入位置。请只保留一个目标。",
+                deterministicTerminal=True,
+                nextStep="done",
+            )
+
         # 2) 否则从 loop_state 里找已扫描到的模型列表。
         scanned = self._avatars_from_loop_state(loop_state)
         already_scanned = scanned is not None
 
-        if not explicit_target and not already_scanned:
+        if not explicit_target and not scene_root_target and not already_scanned:
             # 先扫描：调用只读的 vrcforge_list_avatars，结果回灌后再决定下一步。
             route = self._runtime_skill_route(
                 "vrcforge_list_avatars", dict(params), "avatar write intent: scan first"
@@ -10749,7 +10899,7 @@ class AgentGateway:
             )
 
         target = explicit_target
-        if not target and already_scanned:
+        if not target and not scene_root_target and already_scanned:
             avatars = scanned or []
             if len(avatars) == 0:
                 return _base(
@@ -10770,16 +10920,24 @@ class AgentGateway:
             target = avatars[0]
 
         write_params = self._build_avatar_write_params(intent, target, params)
-        return _base(
-            summary=f"Prepared a supervised Unity write on {target}.",
-            reply=(
+        target_label = "the active scene root" if scene_root_target else target
+        reply = (
+            "已明确选择当前活动场景的根节点。"
+            "我来发起一个加对象的写入请求，走审批/检查点后再真正落地。"
+            if scene_root_target
+            else (
                 f"工程里只有 {target} 这一个模型，直接选它。"
                 f"我来发起一个加对象的写入请求，走审批/检查点后再真正落地。"
-            ),
+            )
+        )
+        return _base(
+            summary=f"Prepared a supervised Unity write on {target_label}.",
+            reply=reply,
             writeNeeded=True,
             writeTool="vrcforge_create_gameobject",
             writeParams=write_params,
-            resolvedAvatar=target,
+            resolvedAvatar=target if not scene_root_target else "",
+            resolvedTarget="scene_root" if scene_root_target else target,
             continueLoop=False,
             expectedResult="A supervised write approval will be created.",
             nextStep="request_write",
@@ -10812,8 +10970,9 @@ class AgentGateway:
             "parentPath": target,
             "preview": False,
             "writeIntent": intent.get("kind"),
-            "targetAvatar": target,
         }
+        if target:
+            request["targetAvatar"] = target
         for key in (
             "projectPath",
             "project_path",
@@ -12002,6 +12161,7 @@ class AgentGateway:
         requires_explicit_approval: bool = False,
         explicit_approval_reason: str = "",
         goal_delivery_id: str = "",
+        approved_execution_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._signal_background_activity("pending_approval")
         now = datetime.now(timezone.utc)
@@ -12029,6 +12189,8 @@ class AgentGateway:
             approval["explicitApprovalReason"] = explicit_approval_reason or "This write request requires explicit user approval."
         if goal_delivery_id:
             approval["goalDeliveryId"] = goal_delivery_id
+        if approved_execution_plan is not None:
+            approval["approvedUnityExecutionPlan"] = approved_execution_plan
         if user_constraints and user_constraints.content:
             approval["userConstraintsApplied"] = True
             approval["userConstraintsPath"] = str(user_constraints.path)
@@ -12187,118 +12349,31 @@ class AgentGateway:
 
 
 def create_agent_mcp_app(gateway: AgentGateway):
-    from mcp.server.fastmcp import FastMCP
-    from mcp.server.transport_security import TransportSecuritySettings
+    def list_tools() -> list[dict[str, Any]]:
+        manifest = gateway.build_manifest()
+        tools = manifest.get("tools")
+        if not isinstance(tools, list):
+            raise RuntimeError("Agent Gateway manifest did not return a tool list.")
+        return [dict(tool) for tool in tools if isinstance(tool, dict)]
 
-    mcp = FastMCP(
-        "VRCForge Agent Gateway",
-        instructions=(
-            "Use VRCForge tools for supervised VRChat avatar debugging. "
-            "Read, plan, and preview tools run directly. Writes require an approval request."
-        ),
-        streamable_http_path="/mcp",
-        stateless_http=True,
-        json_response=True,
-        transport_security=TransportSecuritySettings(
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*", "testserver"],
-            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
-        ),
+    def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return gateway.call_tool(name, arguments, agent_name="mcp-agent")
+
+    def validate_bearer(token: str) -> bool:
+        config = gateway.ensure_config()
+        return bool(config.enabled and config.token and hmac.compare_digest(token, config.token))
+
+    router = Mcp2026Router(
+        list_tools,
+        call_tool,
+        server_name="VRCForge Agent Gateway",
+        server_version="1.4.0",
     )
-
-    def register(name: str):
-        async def tool(params: dict[str, Any] | None = None, agent_name: str = "mcp-agent") -> dict[str, Any]:
-            return gateway.call_tool(name, params or {}, agent_name=agent_name)
-
-        mcp.tool(name=name)(tool)
-
-    for tool_name in [
-        "vrcforge_agent_observe",
-        "vrcforge_agent_message",
-        "vrcforge_classify_shell",
-        "vrcforge_execute_shell",
-        "vrcforge_skill_manifest",
-        "vrcforge_skill_check",
-        "vrcforge_tool_registry",
-        "vrcforge_external_agent_connectors",
-        "vrcforge_list_skill_packages",
-        "vrcforge_preflight_skill_package",
-        "vrcforge_scan_project_index",
-        "vrcforge_inspect_outfit_package",
-        "vrcforge_inspect_chat_attachment",
-        "vrcforge_plan_outfit_import",
-        "vrcforge_health",
-        "vrcforge_unity_status",
-        "vrcforge_unity_tools",
-        "vrcforge_list_avatars",
-        "vrcforge_scan_blendshapes",
-        "vrcforge_scan_materials",
-        "vrcforge_scan_modular_avatar",
-        "vrcforge_inspect_modular_avatar_component",
-        "vrcforge_inspect_primitive_basis_fixture",
-        "vrcforge_scan_vrcfury",
-        "vrcforge_scan_avatar_items",
-        "vrcforge_scan_fx_animator",
-        "vrcforge_scan_animation_bindings",
-        "vrcforge_scan_avatar_controls",
-        "vrcforge_scan_wardrobe",
-        "vrcforge_scan_parameters",
-        "vrcforge_run_validation_report",
-        "vrcforge_build_test_readiness",
-        "vrcforge_optimization_plan",
-        "vrcforge_optimization_validation_delta",
-        *OPTIMIZATION_GATEWAY_TOOL_NAMES,
-        *STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
-        *AVATAR_ENCRYPTION_TOOL_NAMES,
-        "vrcforge_create_safe_backup",
-        "vrcforge_preview_restore_backup",
-        "vrcforge_list_checkpoints",
-        "vrcforge_preview_restore_checkpoint",
-        "vrcforge_list_interrupted_apply_recoveries",
-        "vrcforge_preview_interrupted_apply_recovery",
-        "vrcforge_export_interrupted_apply_incident_bundle",
-        "vrcforge_scan_avatar_performance",
-        "vrcforge_scan_thry_avatar_performance",
-        "vrcforge_package_manager_status",
-        "vrcforge_package_install_plan",
-        "vrcforge_package_install_request",
-        "vrcforge_diagnose_package_install_errors",
-        "vrcforge_preview_setup_outfit",
-        "vrcforge_preview_add_wardrobe_outfit",
-        "vrcforge_preview_add_outfit_part",
-        "vrcforge_preview_add_modular_avatar_component",
-        "vrcforge_preview_manage_wardrobe",
-        "vrcforge_preview_ensure_expression_parameter",
-        "vrcforge_preview_ensure_expression_menu_control",
-        "vrcforge_preview_ensure_animator_state",
-        "vrcforge_read_avatar_descriptor",
-        "vrcforge_preview_write_avatar_descriptor",
-        "vrcforge_preview_write_animation_curve",
-        "vrcforge_preview_manage_expression_parameters",
-        "vrcforge_preview_manage_expression_menu",
-        "vrcforge_preview_manage_fx_animator",
-        "vrcforge_preview_create_wardrobe",
-        "vrcforge_preview_add_outfit",
-        "vrcforge_capture_status",
-        "vrcforge_capture_screenshot",
-        "vrcforge_vision_audit",
-        "vrcforge_read_recent_logs",
-        "vrcforge_get_compile_errors",
-        "vrcforge_get_property",
-        "vrcforge_get_gameobject",
-        "vrcforge_find_assets",
-        "vrcforge_get_asset_info",
-        "vrcforge_plan_face_tuning",
-        "vrcforge_plan_shader_tuning",
-        "vrcforge_preview_blendshape_apply",
-        "vrcforge_preview_shader_apply",
-        "vrcforge_request_apply",
-        "vrcforge_restore_last_backup",
-    ]:
-        register(tool_name)
-
-    app = mcp.streamable_http_app()
-    app.state.fastmcp_server = mcp
-    return app
+    return create_agent_mcp_2026_asgi_app(
+        router,
+        bearer_validator=validate_bearer,
+        route_path="/mcp",
+    )
 
 
 def tokenize_command(command: str) -> list[str]:
@@ -12938,6 +13013,10 @@ _WRITE_INTENT_CN_NOUN = ("对象", "物体", "节点")
 _OBJECT_NAME_RE = re.compile(
     r"(?:叫做|叫作|叫|名为|命名为|named|name[d]?|called)\s*[\"'“”‘’]?([A-Za-z0-9_\-一-鿿]+)"
 )
+_SCENE_ROOT_TARGET_RE = re.compile(
+    r"(?:活动场景(?:的)?根节点|场景(?:的)?根节点|\b(?:the\s+)?active\s+scene\s+root\b|\b(?:the\s+)?scene\s+root\b)",
+    re.IGNORECASE,
+)
 
 
 def detect_avatar_write_intent(message: str) -> dict[str, Any] | None:
@@ -12960,10 +13039,12 @@ def detect_avatar_write_intent(message: str) -> dict[str, Any] | None:
     if not (explicit_phrase or (has_verb and has_object_noun)):
         return None
     name_match = _OBJECT_NAME_RE.search(text)
+    scene_root_target = bool(_SCENE_ROOT_TARGET_RE.search(text))
     return {
         "kind": "add_object",
         "objectName": name_match.group(1) if name_match else "GameObject",
         "target": "",
+        "targetMode": "scene_root" if scene_root_target else "",
     }
 
 

@@ -41,15 +41,19 @@ def legacy_provider_api_type(provider: str) -> str:
 def normalize_provider_api_type(provider: str, model: str, api_type: object) -> tuple[str, str]:
     """Validate requested transport and return (requested, resolved).
 
-    ``None`` is deliberately a legacy signal, rather than ``auto``: existing
-    saved configurations must retain their established provider transport.
+    A missing transport normally retains the provider's historical default.
+    The exact released DeepSeek Flash model is migrated to ``auto`` so older
+    saved accounts use its Responses API without requiring a manual resave.
     """
 
     provider_id = str(provider).strip().lower()
     # DeepSeek model identifiers are protocol values, not display labels.  Do
     # not silently canonicalize a near-match onto a different transport.
     model_id = str(model).strip()
-    requested = legacy_provider_api_type(provider_id) if api_type is None else str(api_type).strip().lower()
+    if api_type is None and provider_id == "deepseek" and model_id == "deepseek-v4-flash":
+        requested = "auto"
+    else:
+        requested = legacy_provider_api_type(provider_id) if api_type is None else str(api_type).strip().lower()
     if requested not in API_TYPES:
         raise ProviderApiTypeError(_API_TYPE_ERROR)
 

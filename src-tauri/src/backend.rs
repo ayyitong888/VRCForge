@@ -841,7 +841,11 @@ fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path)
         .map_err(|_| "primitive live executable could not be opened".to_string())?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 1024 * 1024];
+    // Keep the executable hashing workspace off the main thread's stack.
+    // Optimized builds may inline this helper into the pre-Tauri bootstrap;
+    // a 1 MiB fixed array there exhausted the Windows GUI thread stack before
+    // the ordinary (non-private) launch could take its early-return path.
+    let mut buffer = vec![0u8; 64 * 1024];
     loop {
         let count = file
             .read(&mut buffer)
@@ -902,10 +906,7 @@ pub(crate) fn prepare_runtime_files(root: &Path, user_data: &Path) -> Result<(),
                 "thinking_level": ""
             },
             "unity_mcp": {
-                "command": ["uvx", "--from", "mcpforunityserver", "unity-mcp"],
-                "host": "127.0.0.1",
-                "port": 8080,
-                "instance": "",
+                "project_path": "",
                 "retries": 3,
                 "retry_backoff_seconds": 2.0,
                 "timeout_seconds": 30,

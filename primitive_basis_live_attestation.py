@@ -204,7 +204,7 @@ _FACT_FIELDS: dict[str, set[str]] = {
         "count",
         "projectRemoved",
         "unityProcessExited",
-        "bridgePortReleased",
+        "projectMcpCoreRemoved",
     },
 }
 
@@ -1035,7 +1035,7 @@ def _validate_facts(phase: str, facts: Mapping[str, Any]) -> None:
         "restored",
         "projectRemoved",
         "unityProcessExited",
-        "bridgePortReleased",
+        "projectMcpCoreRemoved",
     ):
         if key in facts and type(facts[key]) is not bool:
             raise LiveAttestationError("live boolean fact is invalid")
@@ -1171,7 +1171,7 @@ def _validate_receipt_invariants(
         or residue["inventoryDigest"] != detect["inventoryDigest"]
         or residue["projectRemoved"] is not True
         or residue["unityProcessExited"] is not True
-        or residue["bridgePortReleased"] is not True
+        or residue["projectMcpCoreRemoved"] is not True
     ):
         raise LiveAttestationError("live residue remains")
 

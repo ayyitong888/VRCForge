@@ -591,6 +591,11 @@ def test_optimizer_apply_request_requires_explicit_approval_even_in_auto_mode(mo
         "ensure_config",
         lambda: AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
     )
+    monkeypatch.setattr(
+        dashboard_server,
+        "get_gameobject_sync",
+        lambda _params: {"ok": True, "components": [{"type": "AvatarOptimizer"}]},
+    )
     try:
         payload = dashboard_server.request_optimization_apply_sync(
             {
@@ -833,31 +838,23 @@ def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_
     assert ready["applyArguments"]["componentType"] == "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier"
 
 
-def test_configure_optimizer_component_saves_dirty_scene_assets(monkeypatch, tmp_path: Path) -> None:
+def test_configure_optimizer_component_uses_prepared_core_calls(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
-    added_requests: list[dict] = []
-    property_requests: list[dict] = []
-    save_requests: list[Path] = []
+    components: list[dict] = []
+    core_calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(dashboard_server, "get_gameobject_sync", lambda _params: {"ok": True, "components": components})
+    def invoke(_settings, tool_name, arguments):
+        core_calls.append((tool_name, arguments))
+        if tool_name == "vrc_add_component":
+            components.append({"type": arguments["componentType"]})
+            return dashboard_server.McpResult(0, "", "", {"ok": True})
+        return dashboard_server.McpResult(0, "", "", {"ok": True, "newValue": arguments["value"]})
 
-    monkeypatch.setattr(dashboard_server, "_component_already_present", lambda *_args: (False, {}))
-    monkeypatch.setattr(
-        dashboard_server,
-        "add_component_sync",
-        lambda request: added_requests.append(request) or {"ok": True, "componentIndex": 0},
-    )
-    monkeypatch.setattr(
-        dashboard_server,
-        "set_component_property_sync",
-        lambda request: property_requests.append(request) or {"ok": True, "propertyPath": request["propertyPath"]},
-    )
-    monkeypatch.setattr(
-        dashboard_server,
-        "prepare_unity_checkpoint_sync",
-        lambda path: save_requests.append(path) or {"ok": True, "projectPath": str(path), "stdout": "saved", "stderr": ""},
-    )
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    monkeypatch.setattr(dashboard_server, "read_component_property_sync", lambda _params: {"ok": True, "propertyValue": {"Kind": "RelativeVertexCount", "Value": 0.9}})
 
-    result = dashboard_server.configure_optimizer_component_sync(
+    prepared, _ = dashboard_server.prepare_configure_optimizer_component_request(
         {
             "projectPath": str(project),
             "avatarPath": "Avatar",
@@ -867,31 +864,30 @@ def test_configure_optimizer_component_saves_dirty_scene_assets(monkeypatch, tmp
             "componentType": "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier",
             "profile": "pc_conservative",
             "options": {"rendererPath": "Avatar/HatAccessory", "relativeVertexCount": 0.9},
-        }
+        }, {}
     )
+    result = dashboard_server.configure_optimizer_component_sync(prepared)
 
     assert result["ok"] is True
-    assert added_requests[0]["gameObjectPath"] == "Avatar/HatAccessory"
-    assert property_requests[0]["propertyPath"] == "target"
-    assert save_requests == [project]
-    assert result["save"]["ok"] is True
-    assert any(step["id"] == "save_dirty_scene_assets" and step["status"] == "done" for step in result["steps"])
+    assert core_calls[0][0] == "vrc_add_component"
+    assert core_calls[0][1]["gameObjectPath"] == "Avatar/HatAccessory"
+    assert core_calls[1][0] == "vrc_set_property"
+    assert core_calls[1][1]["propertyPath"] == "target"
 
 
-def test_configure_optimizer_component_fails_when_dirty_scene_save_fails(monkeypatch, tmp_path: Path) -> None:
+def test_configure_optimizer_component_reuses_the_actual_component_index(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
-
-    monkeypatch.setattr(dashboard_server, "_component_already_present", lambda *_args: (False, {}))
-    monkeypatch.setattr(dashboard_server, "add_component_sync", lambda _request: {"ok": True, "componentIndex": 0})
-    monkeypatch.setattr(dashboard_server, "set_component_property_sync", lambda request: {"ok": True, "propertyPath": request["propertyPath"]})
+    property_requests: list[dict] = []
+    components = [{"type": "A"}, {"type": "B"}, {"type": "C"}, {"type": "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier"}]
+    monkeypatch.setattr(dashboard_server, "get_gameobject_sync", lambda _params: {"ok": True, "components": components})
     monkeypatch.setattr(
         dashboard_server,
-        "prepare_unity_checkpoint_sync",
-        lambda _path: {"ok": False, "stderr": "could not save scene"},
+        "invoke_unity_mcp",
+        lambda _settings, tool_name, arguments: property_requests.append(arguments) or dashboard_server.McpResult(0, "", "", {"ok": True, "newValue": arguments["value"]}),
     )
-
-    result = dashboard_server.configure_optimizer_component_sync(
+    monkeypatch.setattr(dashboard_server, "read_component_property_sync", lambda _params: {"ok": True, "propertyValue": {"Kind": "RelativeVertexCount", "Value": 0.9}})
+    prepared, _ = dashboard_server.prepare_configure_optimizer_component_request(
         {
             "projectPath": str(project),
             "avatarPath": "Avatar",
@@ -901,12 +897,45 @@ def test_configure_optimizer_component_fails_when_dirty_scene_save_fails(monkeyp
             "componentType": "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier",
             "profile": "pc_conservative",
             "options": {"rendererPath": "Avatar/HatAccessory", "relativeVertexCount": 0.9},
-        }
+        }, {}
     )
+    result = dashboard_server.configure_optimizer_component_sync(prepared)
 
-    assert result["ok"] is False
-    assert "could not save scene" in result["error"]
-    assert any(step["id"] == "save_dirty_scene_assets" and step["status"] == "failed" for step in result["steps"])
+    assert result["ok"] is True
+    assert property_requests
+    assert {request["componentIndex"] for request in property_requests} == {3}
+
+
+def test_configure_optimizer_component_does_not_take_a_post_write_checkpoint(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "UnityProject"
+    make_unity_project(project)
+
+    components: list[dict] = []
+    monkeypatch.setattr(dashboard_server, "get_gameobject_sync", lambda _params: {"ok": True, "components": components})
+    def invoke(_settings, tool_name, arguments):
+        if tool_name == "vrc_add_component":
+            components.append({"type": arguments["componentType"]})
+            return dashboard_server.McpResult(0, "", "", {"ok": True})
+        return dashboard_server.McpResult(0, "", "", {"ok": True, "newValue": arguments["value"]})
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    monkeypatch.setattr(dashboard_server, "read_component_property_sync", lambda _params: {"ok": True, "propertyValue": {"Kind": "RelativeVertexCount", "Value": 0.9}})
+    monkeypatch.setattr(dashboard_server, "prepare_unity_checkpoint_sync", lambda _path: pytest.fail("post-write checkpoint must not run"))
+    prepared, _ = dashboard_server.prepare_configure_optimizer_component_request(
+        {
+            "projectPath": str(project),
+            "avatarPath": "Avatar",
+            "targetPath": "Avatar/HatAccessory",
+            "optimizerId": "meshia",
+            "mode": "meshia_simplify",
+            "componentType": "Meshia.MeshSimplification.Ndmf.MeshiaMeshSimplifier",
+            "profile": "pc_conservative",
+            "options": {"rendererPath": "Avatar/HatAccessory", "relativeVertexCount": 0.9},
+        }, {}
+    )
+    result = dashboard_server.configure_optimizer_component_sync(prepared)
+
+    assert result["ok"] is True
 
 
 def test_vrcfury_parameter_request_uses_authoritative_clone_writer(
@@ -1249,12 +1278,13 @@ def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypa
         "locate_vpm_package_managers",
         lambda: [
             {
-                "name": "vpm",
-                "path": "C:/tools/vpm.exe",
-                "kind": "cli",
-                "label": "VCC vpm CLI",
+                "name": "vrc-get",
+                "path": "C:/tools/vrc-get.exe",
+                "kind": "managed-cli",
+                "label": "VRCForge managed vrc-get CLI",
                 "supportsCommandInstall": True,
                 "supportsUiHandoff": False,
+                "source": "vrcforge-managed",
             }
         ],
     )
@@ -1294,7 +1324,7 @@ def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypa
     assert "Optimizer package install requests" in captured["params"]["explicit_approval_reason"]
 
 
-def test_vrc_get_install_command_uses_prerelease_before_package(monkeypatch, tmp_path: Path) -> None:
+def test_vrc_get_install_rejects_unprepared_direct_execution(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
     calls: list[list[str]] = []
@@ -1338,16 +1368,13 @@ def test_vrc_get_install_command_uses_prerelease_before_package(monkeypatch, tmp
         }
     )
 
-    assert result["ok"] is True
-    assert calls
-    command = calls[0]
-    assert command[:4] == ["C:/tools/vrc-get.exe", "install", "-p", str(project)]
-    assert "--prerelease" in command
-    assert command[-1] == "com.anatawa12.avatar-optimizer"
-    assert refresh_calls[-1]["resolvePackages"] is True
+    assert result["ok"] is False
+    assert "seal" in result["error"].lower()
+    assert calls == []
+    assert refresh_calls == []
 
 
-def test_vrc_get_install_adds_requested_repository_before_install(monkeypatch, tmp_path: Path) -> None:
+def test_vrc_get_install_never_mutates_repository_from_direct_execution(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
     calls: list[list[str]] = []
@@ -1391,16 +1418,12 @@ def test_vrc_get_install_adds_requested_repository_before_install(monkeypatch, t
         }
     )
 
-    assert result["ok"] is True
-    assert calls[0] == ["C:/tools/vrc-get.exe", "repo", "add", "https://poiyomi.github.io/vpm/index.json"]
-    assert calls[1] == ["C:/tools/vrc-get.exe", "update"]
-    assert calls[2][-1] == "com.poiyomi.toon"
-    assert refresh_calls[-1]["resolvePackages"] is True
-    assert refresh_calls[-1]["packageResolveTimeoutSeconds"] == 180
-    assert result["repository"] == "https://poiyomi.github.io/vpm/index.json"
+    assert result["ok"] is False
+    assert calls == []
+    assert refresh_calls == []
 
 
-def test_vrc_get_install_tolerates_existing_repository_before_install(monkeypatch, tmp_path: Path) -> None:
+def test_legacy_repository_install_branch_is_absent(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
     calls: list[list[str]] = []
@@ -1447,13 +1470,10 @@ def test_vrc_get_install_tolerates_existing_repository_before_install(monkeypatc
         }
     )
 
-    assert result["ok"] is True
-    assert calls[0] == ["C:/tools/vrc-get.exe", "repo", "add", "https://poiyomi.github.io/vpm/index.json"]
-    assert calls[1] == ["C:/tools/vrc-get.exe", "update"]
-    assert calls[2][-1] == "com.poiyomi.toon"
-    assert result["preflightResults"][0]["ignoredNonZero"] is True
-    assert len(result["preflightResults"]) == 2
-    assert refresh_calls[-1]["resolvePackages"] is True
+    assert result["ok"] is False
+    assert calls == []
+    assert refresh_calls == []
+    assert not hasattr(dashboard_server, "install_vpm_package_legacy_sync")
 
 
 def test_public_optimization_docs_include_roadmap_sequence() -> None:

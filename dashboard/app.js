@@ -189,9 +189,6 @@ function cacheRefs() {
     "scene-avatar-select",
     "refresh-avatars-btn",
     "load-blendshapes-btn",
-    "unity-host",
-    "unity-port",
-    "unity-instance",
     "sync-state-btn",
     "unity-status-btn",
     "unity-tools-btn",
@@ -489,9 +486,6 @@ function applyBootstrap(payload) {
 }
 
 function applyDashboardState(payload) {
-  refs["unity-host"].value = payload.unityHost || refs["unity-host"].value;
-  refs["unity-port"].value = payload.unityPort ?? refs["unity-port"].value;
-  refs["unity-instance"].value = payload.unityInstance || "";
   state.selectedProjectPath = payload.selectedProjectPath || "";
   selectProjectOption(state.selectedProjectPath);
   if (payload.currentAvatarName) {
@@ -672,9 +666,7 @@ function syncMockModeText() {
 function buildConnectionPayload() {
   return {
     settings_path: ".gemini/settings.json",
-    unity_host: refs["unity-host"].value.trim(),
-    unity_port: Number(refs["unity-port"].value || 8080),
-    unity_instance: refs["unity-instance"].value.trim(),
+    project_path: refs["project-select"].value || state.selectedProjectPath || null,
   };
 }
 
@@ -1056,6 +1048,19 @@ async function postJson(path, payload = {}) {
   return data;
 }
 
+function isPendingUnityApproval(payload) {
+  return payload?.status === "pending_approval" && Boolean(payload?.approvalId || payload?.approval?.id);
+}
+
+function pendingUnityApprovalMessage(payload) {
+  const approvalId = payload?.approvalId || payload?.approval?.id || "";
+  return `Unity 写入正在等待审批${approvalId ? `（${approvalId}）` : ""}；尚未应用。`;
+}
+
+function approvedExecutionResult(payload) {
+  return payload?.execution?.result || payload?.execution || payload?.result || payload;
+}
+
 async function getJson(path) {
   const response = await fetch(path);
   const text = await response.text();
@@ -1080,10 +1085,6 @@ async function syncDashboardState() {
 }
 
 async function onProjectSelected() {
-  const selectedProject = refs["project-select"].value;
-  if (selectedProject) {
-    refs["unity-instance"].value = projectNameFromPath(selectedProject);
-  }
   await syncDashboardState();
 }
 
@@ -1340,6 +1341,10 @@ async function applyManualBlendshapes() {
     ...buildDashboardRequest(),
     adjustments,
   });
+  if (isPendingUnityApproval(payload)) {
+    refs["summary-output"].textContent = pendingUnityApprovalMessage(payload);
+    return;
+  }
 
   for (const item of payload.appliedAdjustments || []) {
     const key = blendshapeKey(item.rendererPath, item.blendshapeName);
@@ -1359,6 +1364,10 @@ async function undoManualBlendshapes() {
     ...buildConnectionPayload(),
     avatar_path: state.selectedAvatarPath,
   });
+  if (isPendingUnityApproval(payload)) {
+    refs["summary-output"].textContent = pendingUnityApprovalMessage(payload);
+    return;
+  }
   for (const item of payload.restoredAdjustments || []) {
     const key = blendshapeKey(item.rendererPath, item.blendshapeName);
     state.blendshapeBaseline[key] = item.targetWeight;
@@ -1606,6 +1615,10 @@ async function handlePresetAction(button) {
 
 async function reapplyHistoryRecord(historyId) {
   const payload = await postJson(`/api/tuning/history/${encodeURIComponent(historyId)}/reapply`, buildDashboardRequest());
+  if (isPendingUnityApproval(payload)) {
+    refs["summary-output"].textContent = pendingUnityApprovalMessage(payload);
+    return payload;
+  }
   state.currentHistoryRecord = payload.historyRecord || state.currentHistoryRecord;
   state.undoDepth = payload.undoDepth || state.undoDepth;
   state.lastAiChanges = payload.changePreview || state.lastAiChanges;
@@ -1617,6 +1630,10 @@ async function reapplyHistoryRecord(historyId) {
 
 async function applyPreset(presetId) {
   const payload = await postJson(`/api/tuning/presets/${encodeURIComponent(presetId)}/apply`, buildDashboardRequest());
+  if (isPendingUnityApproval(payload)) {
+    refs["summary-output"].textContent = pendingUnityApprovalMessage(payload);
+    return payload;
+  }
   state.undoDepth = payload.undoDepth || state.undoDepth;
   state.lastAiChanges = payload.changePreview || state.lastAiChanges;
   applyDirectAdjustmentsToBlendshapeState(payload.appliedAdjustments || []);
@@ -1969,11 +1986,16 @@ function renderClothes() {
       const nextValue = checkbox.checked;
       checkbox.disabled = true;
       try {
-        await postJson("/api/clothes/toggle", {
+        const payload = await postJson("/api/clothes/toggle", {
           ...buildConnectionPayload(),
           object_path: item.objectPath,
           active: nextValue,
         });
+        if (isPendingUnityApproval(payload)) {
+          checkbox.checked = !nextValue;
+          refs["summary-output"].textContent = pendingUnityApprovalMessage(payload);
+          return;
+        }
         item.active = nextValue;
       } catch (error) {
         checkbox.checked = !nextValue;
@@ -2019,6 +2041,10 @@ async function applyClothesFx() {
     items: state.clothes,
     dry_run: isDryRun,
   });
+  if (isPendingUnityApproval(payload)) {
+    refs["fx-output"].textContent = pendingUnityApprovalMessage(payload);
+    return;
+  }
   
   refs["fx-apply-panel"].classList.remove("hidden");
   refs["fx-apply-count"].textContent = `${payload.result?.createdCount ?? payload.createdCount ?? state.clothes.length} 件`;
@@ -2081,6 +2107,10 @@ async function applyParameterOptimization() {
     suggestions: suggestions,
     dry_run: isDryRun,
   });
+  if (isPendingUnityApproval(payload)) {
+    refs["param-output"].textContent = pendingUnityApprovalMessage(payload);
+    return;
+  }
 
   refs["param-diff-panel"].classList.remove("hidden");
   refs["param-diff-count"].textContent = `${payload.appliedCount ?? 0} 项`;
@@ -2106,6 +2136,10 @@ async function rollbackParameterOptimization() {
     avatar_path: state.selectedAvatarPath || null,
     snapshot_path: state.latestParameterSnapshotPath || null,
   });
+  if (isPendingUnityApproval(payload)) {
+    refs["param-output"].textContent = pendingUnityApprovalMessage(payload);
+    return;
+  }
 
   state.latestParameterSnapshotPath = payload.snapshotPath || state.latestParameterSnapshotPath;
   refs["param-output"].textContent = prettyJson(payload.result || payload);
@@ -2286,6 +2320,10 @@ async function applyShaderPlan() {
     changes,
     history_id: state.shaderHistoryRecord?.id || null,
   });
+  if (isPendingUnityApproval(payload)) {
+    refs["shader-output"].textContent = pendingUnityApprovalMessage(payload);
+    return;
+  }
   refs["shader-output"].textContent = prettyJson({
     applied: payload.appliedChanges || [],
     skipped: payload.skippedChanges || [],
@@ -2299,6 +2337,10 @@ async function restoreShaderPlan() {
     ...buildConnectionPayload(),
     avatar_path: state.selectedAvatarPath || null,
   });
+  if (isPendingUnityApproval(payload)) {
+    refs["shader-output"].textContent = pendingUnityApprovalMessage(payload);
+    return;
+  }
   refs["shader-output"].textContent = prettyJson({
     restored: payload.restoredChanges || [],
     skipped: payload.skippedChanges || [],
@@ -2521,6 +2563,10 @@ async function handleShaderHistoryAction(button) {
   const id = button.dataset.historyId;
   if (button.dataset.shaderHistoryAction === "reapply") {
     const payload = await postJson(`/api/shader/history/${encodeURIComponent(id)}/reapply`, buildShaderTuningRequest());
+    if (isPendingUnityApproval(payload)) {
+      refs["shader-output"].textContent = pendingUnityApprovalMessage(payload);
+      return;
+    }
     refs["shader-output"].textContent = prettyJson({
       applied: payload.appliedChanges || [],
       skipped: payload.skippedChanges || [],
@@ -2538,6 +2584,10 @@ async function handleShaderPresetAction(button) {
   const action = button.dataset.shaderPresetAction;
   if (action === "apply") {
     const payload = await postJson(`/api/shader/presets/${encodeURIComponent(id)}/apply`, buildShaderTuningRequest());
+    if (isPendingUnityApproval(payload)) {
+      refs["shader-output"].textContent = pendingUnityApprovalMessage(payload);
+      return;
+    }
     refs["shader-output"].textContent = prettyJson({
       applied: payload.appliedChanges || [],
       skipped: payload.skippedChanges || [],
@@ -3053,10 +3103,6 @@ function applyUnityStatus(payload) {
     ? (missingTools.length ? "已连接 / 工具缺失" : "已连接")
     : "未连接";
   refs["unity-status-light"].className = `light ${connected ? "light-on" : "light-off"}`;
-  const activeCliInstance = payload.activeInstance?.cliInstanceId || payload.activeInstance?.hash || payload.activeInstance?.project || payload.activeInstance?.sessionId || "";
-  if (!refs["unity-instance"].value && activeCliInstance) {
-    refs["unity-instance"].value = activeCliInstance;
-  }
   const lines = [
     formatConnectionResult("Unity MCP", connected, getConnectionFailureReason(payload)),
     `MCP Server: ${payload.mcpServerReachable ? "reachable" : "not reachable"}`,
@@ -3088,14 +3134,6 @@ function renderProjects(payload) {
 }
 
 async function onProjectSelected() {
-  const selectedProject = refs["project-select"].value;
-  const selectedOption = refs["project-select"].selectedOptions?.[0];
-  const instanceId = selectedOption?.dataset?.instanceId || "";
-  if (instanceId) {
-    refs["unity-instance"].value = instanceId;
-  } else if (selectedProject) {
-    refs["unity-instance"].value = selectedOption?.dataset?.projectName || projectNameFromPath(selectedProject);
-  }
   await syncDashboardState();
 }
 
@@ -3106,9 +3144,8 @@ async function loadUnityTools() {
   const lines = [
     formatConnectionResult("Unity MCP tools", connected, reason),
     `Total tools: ${payload.totalTools ?? 0}`,
-    `Default/CoplayDev tools: ${payload.defaultToolsCount ?? 0}`,
     `VRCForge tools: ${payload.vrcForgeToolsCount ?? 0}`,
-    `Active instance: ${payload.instance || refs["unity-instance"].value || "(auto)"}`,
+    `Project MCP Core: ${payload.instance || payload.activeInstance?.project || "automatic discovery"}`,
   ];
   if (payload.missingRequiredVrcForgeTools?.length) {
     lines.push(`Missing required VRCForge tools: ${payload.missingRequiredVrcForgeTools.join(", ")}`);

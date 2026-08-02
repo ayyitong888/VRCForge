@@ -263,7 +263,7 @@ def test_create_rejects_duplicate_package_json_key(tmp_path: Path) -> None:
 
 def test_create_rejects_package_json_dependency_edge_drift(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
-    package_path = fixture.package_json["com.coplaydev.unity-mcp"]
+    package_path = fixture.package_json["com.vrchat.avatars"]
     document = json.loads(package_path.read_text(encoding="utf-8"))
     document["dependencies"]["com.unity.modules.physics"] = "1.0.0"
     _write_json(package_path, document)

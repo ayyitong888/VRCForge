@@ -47,18 +47,6 @@ function Get-RequiredProperty {
     return $InputObject.PSObject.Properties[$Name].Value
 }
 
-function Resolve-PythonExe {
-    $command = Get-Command python.exe -ErrorAction SilentlyContinue
-    if (-not $command) {
-        $command = Get-Command python -ErrorAction SilentlyContinue
-    }
-    if ($command) {
-        return $command.Source
-    }
-
-    throw "Python is required to verify the fixed bridge runtime in the release archive."
-}
-
 function Get-StreamSha256 {
     param(
         [System.IO.Stream]$Stream
@@ -359,46 +347,6 @@ try {
     }
 
     $stagedPayloadZip = Join-Path $stagingRoot ([System.IO.Path]::GetFileName($payloadZip))
-    $payloadManifestEntries = @($manifestArtifacts | Where-Object {
-        [string]$_.name -ceq [System.IO.Path]::GetFileName($payloadZip)
-    })
-    if ($payloadManifestEntries.Count -ne 1) {
-        throw "Release manifest payload binding is unavailable for bridge verification."
-    }
-    $manifestBridgeRuntime = Get-RequiredProperty `
-        -InputObject $manifest `
-        -Name "bridgeTargetRuntime" `
-        -Context "Release manifest"
-    $pythonExe = Resolve-PythonExe
-    $bridgeArchiveVerifier = Join-Path $PSScriptRoot "verify_bridge_target_release.py"
-    $bridgeArchiveLines = @(& $pythonExe `
-        $bridgeArchiveVerifier `
-        "--release-manifest" $manifestPath `
-        "--payload-zip" $stagedPayloadZip 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "The staged fixed bridge runtime archive verification failed."
-    }
-    try {
-        $bridgeArchiveReceipt = (
-            $bridgeArchiveLines -join [Environment]::NewLine
-        ) | ConvertFrom-Json
-    } catch {
-        throw "The staged fixed bridge runtime archive receipt was not valid JSON."
-    }
-    if (
-        $bridgeArchiveReceipt.ok -ne $true -or
-        $bridgeArchiveReceipt.schema -cne "vrcforge.bridge_target_release_verification.v1" -or
-        $bridgeArchiveReceipt.verifiedFromArchive -ne $true -or
-        [string]$bridgeArchiveReceipt.payloadSha256 -cne ([string]$payloadManifestEntries[0].sha256).ToLowerInvariant() -or
-        [string]$bridgeArchiveReceipt.manifestSha256 -cne [string]$manifestBridgeRuntime.manifestSha256 -or
-        [string]$bridgeArchiveReceipt.executableSha256 -cne [string]$manifestBridgeRuntime.executableSha256 -or
-        [string]$bridgeArchiveReceipt.treeDigest -cne [string]$manifestBridgeRuntime.treeDigest -or
-        [uint64]$bridgeArchiveReceipt.directoryCount -ne [uint64]$manifestBridgeRuntime.directoryCount -or
-        [uint64]$bridgeArchiveReceipt.entryCount -ne [uint64]$manifestBridgeRuntime.entryCount -or
-        [uint64]$bridgeArchiveReceipt.byteCount -ne [uint64]$manifestBridgeRuntime.byteCount
-    ) {
-        throw "The staged fixed bridge runtime archive receipt was inconsistent."
-    }
 
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem

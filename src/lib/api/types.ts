@@ -991,7 +991,14 @@ export type UnityMcpRepairResult = {
 export type ProjectSnapshot = {
   selectedProjectPath?: string;
   unityEditorPath?: string;
-  projects?: Array<{ name?: string; path?: string; editorVersion?: string; unityVersion?: string; sources?: string[] }>;
+  projects?: Array<{
+    name?: string;
+    path?: string;
+    editorVersion?: string;
+    unityVersion?: string;
+    sources?: string[];
+    activeMcp?: boolean;
+  }>;
   scan?: {
     status?: string;
     cached?: boolean;
@@ -1006,6 +1013,10 @@ export type ProjectSnapshot = {
     addedProjects?: Array<{ name?: string; path?: string; source?: string }>;
     removedProjects?: Array<{ name?: string; path?: string; source?: string }>;
   };
+};
+
+export type ProjectSelectionState = {
+  selectedProjectPath?: string;
 };
 
 export type AppBootstrap = {
@@ -1023,6 +1034,7 @@ export type AppBootstrap = {
     components: Record<string, HealthComponent>;
     projectRoot?: string;
     projects?: ProjectSnapshot;
+    state?: ProjectSelectionState;
   };
   agentManifest: AgentManifest;
   apiConfig?: ApiConfig;

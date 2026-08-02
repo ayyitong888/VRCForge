@@ -279,6 +279,13 @@ pub(crate) struct DesktopTimeoutRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopProjectSelectionRequest {
+    project_path: String,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopWorkspaceDiffRequest {
     root: Option<String>,
@@ -818,9 +825,23 @@ pub fn record_agent_run_queued(
 }
 
 pub(crate) fn approval_scope_body(request: &DesktopApprovalScopeRequest) -> serde_json::Value {
+    let expected_project_root = request
+        .expected_project_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // A request without an exact project root is a no-project/global action.
+    // Never serialize it as project-scoped, even if a caller explicitly sends
+    // `globalOnly: false`, because the backend cannot bind that action to the
+    // project that owns the pending approval.
+    let global_only = if expected_project_root.is_some() {
+        request.global_only.unwrap_or(false)
+    } else {
+        true
+    };
     serde_json::json!({
-        "expectedProjectRoot": request.expected_project_root,
-        "globalOnly": request.global_only,
+        "expectedProjectRoot": expected_project_root,
+        "globalOnly": global_only,
     })
 }
 
@@ -1062,6 +1083,22 @@ pub async fn refresh_projects(request: DesktopTimeoutRequest) -> Result<serde_js
             "/api/projects/refresh".to_string(),
             None,
             request.timeout_ms.or(Some(30_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn select_unity_project(
+    request: DesktopProjectSelectionRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            "/api/state".to_string(),
+            Some(serde_json::json!({"projectPath": request.project_path})),
+            request.timeout_ms.or(Some(20_000)),
         )
         .map(sanitize_webview_response)
     })

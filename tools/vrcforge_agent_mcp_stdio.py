@@ -12,7 +12,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from agent_mcp_2026 import Mcp2026Router, run_stdio_loop
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8757"
@@ -213,43 +217,51 @@ class VRCForgeBridge:
 
 
 def run_stdio_server(bridge: VRCForgeBridge) -> None:
-    preflight = bridge.preflight()
-    mcp = FastMCP(
-        DEFAULT_SERVER_NAME,
-        instructions=(
-            "Use VRCForge for supervised VRChat avatar work. Read and preview tools run through "
-            "the local VRCForge gateway. Writes must be requested with vrcforge_request_apply; "
-            "VRCForge Desktop owns approval, checkpoint, apply, validation, and rollback."
-        ),
-    )
-
-    @mcp.tool(name="vrcforge_bridge_preflight")
-    async def bridge_preflight() -> dict[str, Any]:
-        return bridge.preflight()
-
-    if preflight.get("runtimeOnline"):
+    def list_tools() -> list[dict[str, Any]]:
+        tools: list[dict[str, Any]] = [
+            {
+                "name": "vrcforge_bridge_preflight",
+                "description": "Check whether the local VRCForge App gateway is authenticated and ready.",
+                "inputSchema": {"type": "object", "additionalProperties": False},
+            }
+        ]
+        if not bridge.preflight().get("runtimeOnline"):
+            return tools
         try:
             manifest = bridge.manifest()
         except Exception:
-            manifest = {}
-        tools = manifest.get("tools") if isinstance(manifest, dict) else []
-        for item in tools:
+            return tools
+        manifest_tools = manifest.get("tools") if isinstance(manifest, dict) else []
+        for item in manifest_tools:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "").strip()
             if not name or name in HIDDEN_EXTERNAL_TOOLS:
                 continue
-            register_proxy_tool(mcp, bridge, name, str(item.get("description") or name))
+            tools.append(
+                {
+                    **item,
+                    "name": name,
+                    "description": str(item.get("description") or name),
+                    "inputSchema": item.get("inputSchema")
+                    if isinstance(item.get("inputSchema"), dict)
+                    else {"type": "object", "additionalProperties": True},
+                }
+            )
+        return tools
 
-    mcp.run("stdio")
+    def call_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if tool_name == "vrcforge_bridge_preflight":
+            return bridge.preflight()
+        return bridge.call_tool(tool_name, arguments, agent_name="external-stdio-agent")
 
-
-def register_proxy_tool(mcp: FastMCP, bridge: VRCForgeBridge, tool_name: str, description: str) -> None:
-    async def proxy(params: dict[str, Any] | None = None, agent_name: str = "external-stdio-agent") -> dict[str, Any]:
-        return bridge.call_tool(tool_name, params or {}, agent_name=agent_name)
-
-    proxy.__name__ = f"proxy_{tool_name}"
-    mcp.tool(name=tool_name, description=description)(proxy)
+    router = Mcp2026Router(
+        list_tools,
+        call_tool,
+        server_name=DEFAULT_SERVER_NAME,
+        server_version="1.4.0",
+    )
+    run_stdio_loop(router)
 
 
 def read_json_file(path: Path | None) -> dict[str, Any]:

@@ -69,6 +69,16 @@ namespace VRCForge.Editor
         {
             return Path.GetFileNameWithoutExtension(assetPath ?? string.Empty);
         }
+
+        internal static int CountHierarchyPath(string hierarchyPath, int sceneHandle)
+        {
+            var normalized = ComponentCrudCore.NormalizePath(hierarchyPath);
+            return Resources.FindObjectsOfTypeAll<GameObject>().Count(go =>
+                go != null
+                && go.scene.IsValid()
+                && go.scene.handle == sceneHandle
+                && string.Equals(ComponentCrudCore.GetHierarchyPath(go.transform), normalized, StringComparison.Ordinal));
+        }
     }
 
     [VRCForgeTool(
@@ -189,6 +199,7 @@ namespace VRCForge.Editor
 
             [VRCForgeParameter("Asset GUID (used when assetPath is omitted).", Required = false)]
             public string guid { get; set; } = "";
+
         }
 
         public static object HandleCommand(JObject @params)
@@ -202,9 +213,9 @@ namespace VRCForge.Editor
                 {
                     return new ErrorResponse($"No asset found at '{path}'.");
                 }
-
                 var type = AssetDatabase.GetMainAssetTypeAtPath(path);
                 var resolvedGuid = AssetDatabase.AssetPathToGUID(path);
+                var dependencyHash = AssetDatabase.GetAssetDependencyHash(path).ToString();
                 var importer = AssetImporter.GetAtPath(path);
 
                 var prefabAssetType = PrefabUtility.GetPrefabAssetType(asset);
@@ -224,6 +235,7 @@ namespace VRCForge.Editor
                 {
                     assetPath = path,
                     guid = resolvedGuid,
+                    dependencyHash,
                     name = asset.name,
                     assetType = type != null ? type.FullName : null,
                     importerType = importer != null ? importer.GetType().FullName : null,
@@ -269,6 +281,27 @@ namespace VRCForge.Editor
             [VRCForgeParameter("Keep the instance's world position/rotation/scale when parenting (default true).", Required = false)]
             public bool? worldPositionStays { get; set; } = true;
 
+            [VRCForgeParameter("Optional exact prefab GUID expected by the approved plan; mismatch fails closed.", Required = false)]
+            public string expectedPrefabGuid { get; set; } = "";
+
+            [VRCForgeParameter("Optional exact AssetDatabase dependency hash expected by the approved plan; mismatch fails closed.", Required = false)]
+            public string expectedAssetDependencyHash { get; set; } = "";
+
+            [VRCForgeParameter("Optional exact active/parent scene path expected for the new instance.", Required = false)]
+            public string expectedScenePath { get; set; } = "";
+
+            [VRCForgeParameter("Optional exact parent GlobalObjectId expected by the approved plan.", Required = false)]
+            public string expectedParentGlobalObjectId { get; set; } = "";
+
+            [VRCForgeParameter("Optional exact hierarchy path expected for the new instance; it must be absent before mutation.", Required = false)]
+            public string expectedResultPath { get; set; } = "";
+
+            [VRCForgeParameter("Approval-generated 64-hex nonce that binds Unity's new GlobalObjectId to the exact ordered continuation tools.", Required = false)]
+            public string approvedObjectReceiptNonce { get; set; } = "";
+
+            [VRCForgeParameter("Exact ordered continuation tools approved for the newly instantiated object.", Required = false)]
+            public string[] approvedContinuationTools { get; set; } = Array.Empty<string>();
+
             [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
             public bool? preview { get; set; } = false;
         }
@@ -276,6 +309,12 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<InstantiatePrefabParameters>() ?? new InstantiatePrefabParameters();
+            var mutationStarted = false;
+            var mutatedPath = "";
+            var mutatedGlobalObjectId = "";
+            var continuationNonce = (p.approvedObjectReceiptNonce ?? "").Trim();
+            var continuationCount = 0;
+            var continuationReserved = false;
             try
             {
                 var path = AssetPrefabCore.ResolveAssetPath(p.assetPath, p.guid);
@@ -288,6 +327,18 @@ namespace VRCForge.Editor
                 {
                     return new ErrorResponse($"Asset at '{path}' is not a prefab (type '{asset.GetType().Name}').");
                 }
+                var prefabGuid = AssetDatabase.AssetPathToGUID(path);
+                if (!string.IsNullOrWhiteSpace(p.expectedPrefabGuid)
+                    && !string.Equals(prefabGuid, p.expectedPrefabGuid.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return new ErrorResponse("Prefab GUID drifted from the approved expectation.");
+                }
+                var dependencyHash = AssetDatabase.GetAssetDependencyHash(path).ToString();
+                if (!string.IsNullOrWhiteSpace(p.expectedAssetDependencyHash)
+                    && !string.Equals(dependencyHash, p.expectedAssetDependencyHash.Trim(), StringComparison.Ordinal))
+                {
+                    return new ErrorResponse("Prefab dependency hash drifted from the approved expectation.");
+                }
 
                 GameObject parent = null;
                 var parentPath = ComponentCrudCore.NormalizePath(p.parentPath);
@@ -296,7 +347,36 @@ namespace VRCForge.Editor
                     parent = ComponentCrudCore.ResolveGameObject(parentPath);
                 }
                 var resolvedParentPath = parent != null ? ComponentCrudCore.GetHierarchyPath(parent.transform) : null;
+                var scene = parent != null ? parent.scene : UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+                var scenePath = scene.path;
+                if (!string.IsNullOrWhiteSpace(p.expectedScenePath) && !string.Equals(scenePath, p.expectedScenePath.Trim(), StringComparison.Ordinal))
+                {
+                    return new ErrorResponse("Target scene drifted from the approved expectation.");
+                }
+                var parentGlobalObjectId = parent != null ? GlobalObjectId.GetGlobalObjectIdSlow(parent).ToString() : "";
+                if (!string.IsNullOrWhiteSpace(p.expectedParentGlobalObjectId)
+                    && !string.Equals(parentGlobalObjectId, p.expectedParentGlobalObjectId.Trim(), StringComparison.Ordinal))
+                {
+                    return new ErrorResponse("Prefab parent GlobalObjectId drifted from the approved expectation.");
+                }
                 var instanceName = string.IsNullOrWhiteSpace(p.name) ? asset.name : p.name.Trim();
+                if (instanceName.Contains("/"))
+                {
+                    return new ErrorResponse("Prefab instance name cannot contain '/'.");
+                }
+                var expectedResultPath = string.IsNullOrEmpty(resolvedParentPath)
+                    ? instanceName
+                    : resolvedParentPath + "/" + instanceName;
+                if (!string.IsNullOrWhiteSpace(p.expectedResultPath)
+                    && !string.Equals(expectedResultPath, ComponentCrudCore.NormalizePath(p.expectedResultPath), StringComparison.Ordinal))
+                {
+                    return new ErrorResponse("Prefab result path differs from the approved expectation.");
+                }
+                if (!string.IsNullOrWhiteSpace(p.expectedResultPath)
+                    && AssetPrefabCore.CountHierarchyPath(expectedResultPath, scene.handle) != 0)
+                {
+                    return new ErrorResponse("Approval-bound prefab result path is no longer absent.");
+                }
                 var worldPositionStays = p.worldPositionStays ?? true;
 
                 if (p.preview ?? false)
@@ -306,8 +386,13 @@ namespace VRCForge.Editor
                         action = "instantiate_prefab",
                         preview = true,
                         assetPath = path,
+                        prefabGuid,
+                        dependencyHash,
+                        scenePath,
                         name = instanceName,
-                        parentPath = resolvedParentPath
+                        parentPath = resolvedParentPath,
+                        parentGlobalObjectId,
+                        expectedResultPath
                     };
                     return new SuccessResponse(
                         parent != null
@@ -316,11 +401,22 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
+                if (!string.IsNullOrWhiteSpace(continuationNonce) || (p.approvedContinuationTools?.Length ?? 0) > 0)
+                {
+                    continuationCount = VRCForgeApprovedObjectReceipt.Reserve(
+                        continuationNonce,
+                        p.approvedContinuationTools ?? Array.Empty<string>());
+                    continuationReserved = true;
+                }
+
                 var instance = PrefabUtility.InstantiatePrefab(asset) as GameObject;
                 if (instance == null)
                 {
+                    VRCForgeApprovedObjectReceipt.CancelReservation(continuationNonce);
+                    continuationReserved = false;
                     return new ErrorResponse($"Unity refused to instantiate the prefab at '{path}'.");
                 }
+                mutationStarted = true;
                 Undo.RegisterCreatedObjectUndo(instance, $"Instantiate {instanceName}");
                 if (parent != null)
                 {
@@ -337,6 +433,33 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(instance);
 
                 var goPath = ComponentCrudCore.GetHierarchyPath(instance.transform);
+                mutatedPath = goPath;
+                if (!string.Equals(goPath, expectedResultPath, StringComparison.Ordinal)
+                    || AssetPrefabCore.CountHierarchyPath(goPath, scene.handle) != 1)
+                {
+                    VRCForgeApprovedObjectReceipt.CancelReservation(continuationNonce);
+                    continuationReserved = false;
+                    return CommittedFailure("Instantiated prefab hierarchy readback did not match the approved target.", mutatedPath, mutatedGlobalObjectId);
+                }
+                var globalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(instance).ToString();
+                mutatedGlobalObjectId = globalObjectId;
+                var readbackPrefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(instance);
+                var readbackPrefabGuid = string.IsNullOrEmpty(readbackPrefabPath) ? "" : AssetDatabase.AssetPathToGUID(readbackPrefabPath);
+                if (!string.Equals(readbackPrefabGuid, prefabGuid, StringComparison.OrdinalIgnoreCase))
+                {
+                    VRCForgeApprovedObjectReceipt.CancelReservation(continuationNonce);
+                    continuationReserved = false;
+                    return CommittedFailure("Instantiated prefab identity readback did not match the approved asset.", mutatedPath, mutatedGlobalObjectId);
+                }
+                if (continuationReserved)
+                {
+                    var boundGlobalObjectId = VRCForgeApprovedObjectReceipt.Bind(continuationNonce, instance);
+                    continuationReserved = false;
+                    if (!string.Equals(boundGlobalObjectId, globalObjectId, StringComparison.Ordinal))
+                    {
+                        return CommittedFailure("Instantiated prefab continuation identity did not match its readback.", mutatedPath, mutatedGlobalObjectId);
+                    }
+                }
                 var payload = new
                 {
                     action = "instantiate_prefab",
@@ -345,14 +468,42 @@ namespace VRCForge.Editor
                     gameObjectPath = goPath,
                     name = instance.name,
                     parentPath = resolvedParentPath,
-                    instanceId = instance.GetInstanceID()
+                    instanceId = instance.GetInstanceID(),
+                    prefabGuid,
+                    dependencyHash,
+                    scenePath,
+                    parentGlobalObjectId,
+                    globalObjectId,
+                    continuationRegistered = continuationCount > 0,
+                    continuationCount
                 };
                 return new SuccessResponse($"Instantiated '{path}' as '{goPath}'.", payload);
             }
             catch (Exception ex)
             {
+                if (continuationReserved)
+                {
+                    VRCForgeApprovedObjectReceipt.CancelReservation(continuationNonce);
+                }
+                if (mutationStarted)
+                {
+                    return CommittedFailure($"Instantiate prefab failed after mutation: {ex.Message}", mutatedPath, mutatedGlobalObjectId);
+                }
                 return new ErrorResponse($"Instantiate prefab failed: {ex.Message}");
             }
+        }
+
+        private static ErrorResponse CommittedFailure(string message, string gameObjectPath, string globalObjectId)
+        {
+            return new ErrorResponse(message, new
+            {
+                ok = false,
+                committed = true,
+                commitState = "unknown",
+                checkpointRecoveryRequired = true,
+                gameObjectPath = gameObjectPath ?? "",
+                globalObjectId = globalObjectId ?? "",
+            });
         }
     }
 
@@ -369,6 +520,21 @@ namespace VRCForge.Editor
             [VRCForgeParameter("Full hierarchy path or unique name of the prefab instance root to unpack.", Required = true)]
             public string gameObjectPath { get; set; } = "";
 
+            [VRCForgeParameter("Optional exact GlobalObjectId expected for the prefab instance root.", Required = false)]
+            public string expectedGlobalObjectId { get; set; } = "";
+
+            [VRCForgeParameter("Optional exact prefab asset GUID expected before unpacking.", Required = false)]
+            public string expectedPrefabGuid { get; set; } = "";
+
+            [VRCForgeParameter("Optional exact prefab dependency hash expected before unpacking.", Required = false)]
+            public string expectedAssetDependencyHash { get; set; } = "";
+
+            [VRCForgeParameter("Optional exact scene path expected before unpacking.", Required = false)]
+            public string expectedScenePath { get; set; } = "";
+
+            [VRCForgeParameter("Approval-generated continuation nonce registered by vrc_instantiate_prefab.", Required = false)]
+            public string approvedObjectReceiptNonce { get; set; } = "";
+
             [VRCForgeParameter("Unpack mode: 'outermost' (default, only this prefab layer) or 'completely' (all nested prefabs).", Required = false)]
             public string mode { get; set; } = "outermost";
 
@@ -379,10 +545,30 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<UnpackPrefabParameters>() ?? new UnpackPrefabParameters();
+            var mutationStarted = false;
+            var mutatedPath = "";
+            var mutatedGlobalObjectId = "";
             try
             {
                 var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
                 var goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
+                mutatedPath = goPath;
+                var globalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
+                mutatedGlobalObjectId = globalObjectId;
+                if (!string.IsNullOrWhiteSpace(p.expectedGlobalObjectId) && !string.Equals(globalObjectId, p.expectedGlobalObjectId.Trim(), StringComparison.Ordinal))
+                    return new ErrorResponse("Prefab instance GlobalObjectId drifted from the approved expectation.");
+                var prefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go);
+                var prefabGuid = string.IsNullOrEmpty(prefabPath) ? "" : AssetDatabase.AssetPathToGUID(prefabPath);
+                if (!string.IsNullOrWhiteSpace(p.expectedPrefabGuid) && !string.Equals(prefabGuid, p.expectedPrefabGuid.Trim(), StringComparison.OrdinalIgnoreCase))
+                    return new ErrorResponse("Prefab asset GUID drifted from the approved expectation.");
+                var dependencyHash = string.IsNullOrEmpty(prefabPath) ? "" : AssetDatabase.GetAssetDependencyHash(prefabPath).ToString();
+                if (!string.IsNullOrWhiteSpace(p.expectedAssetDependencyHash)
+                    && !string.Equals(dependencyHash, p.expectedAssetDependencyHash.Trim(), StringComparison.Ordinal))
+                    return new ErrorResponse("Prefab dependency hash drifted from the approved expectation.");
+                var scenePath = go.scene.path;
+                if (!string.IsNullOrWhiteSpace(p.expectedScenePath)
+                    && !string.Equals(scenePath, p.expectedScenePath.Trim(), StringComparison.Ordinal))
+                    return new ErrorResponse("Prefab instance scene drifted from the approved expectation.");
 
                 if (!PrefabUtility.IsOutermostPrefabInstanceRoot(go))
                 {
@@ -405,14 +591,36 @@ namespace VRCForge.Editor
                         preview = true,
                         gameObjectPath = goPath,
                         unpackMode = modeLabel
+                        , globalObjectId
+                        , prefabGuid
+                        , dependencyHash
+                        , scenePath
                     };
                     return new SuccessResponse(
                         $"Preview: would unpack prefab instance '{goPath}' ({modeLabel}).",
                         previewPayload);
                 }
 
+                var continuationConsumed = false;
+                if (!string.IsNullOrWhiteSpace(p.approvedObjectReceiptNonce))
+                {
+                    VRCForgeApprovedObjectReceipt.Consume(
+                        p.approvedObjectReceiptNonce.Trim(),
+                        ToolName,
+                        go);
+                    continuationConsumed = true;
+                }
+
                 PrefabUtility.UnpackPrefabInstance(go, unpackMode, InteractionMode.UserAction);
+                mutationStarted = true;
                 EditorUtility.SetDirty(go);
+                var readbackGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
+                var readbackPrefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go);
+                var unpacked = string.IsNullOrEmpty(readbackPrefabPath) && !PrefabUtility.IsPartOfAnyPrefab(go);
+                if (!unpacked)
+                {
+                    return CommittedFailure("Prefab unpack readback still reports a prefab instance.", mutatedPath, mutatedGlobalObjectId);
+                }
 
                 var payload = new
                 {
@@ -420,13 +628,37 @@ namespace VRCForge.Editor
                     preview = false,
                     gameObjectPath = goPath,
                     unpackMode = modeLabel
+                    , previousGlobalObjectId = globalObjectId
+                    , globalObjectId = readbackGlobalObjectId
+                    , prefabGuid
+                    , dependencyHash
+                    , scenePath
+                    , unpacked
+                    , continuationConsumed
                 };
                 return new SuccessResponse($"Unpacked prefab instance '{goPath}' ({modeLabel}).", payload);
             }
             catch (Exception ex)
             {
+                if (mutationStarted)
+                {
+                    return CommittedFailure($"Unpack prefab failed after mutation: {ex.Message}", mutatedPath, mutatedGlobalObjectId);
+                }
                 return new ErrorResponse($"Unpack prefab failed: {ex.Message}");
             }
+        }
+
+        private static ErrorResponse CommittedFailure(string message, string gameObjectPath, string globalObjectId)
+        {
+            return new ErrorResponse(message, new
+            {
+                ok = false,
+                committed = true,
+                commitState = "unknown",
+                checkpointRecoveryRequired = true,
+                gameObjectPath = gameObjectPath ?? "",
+                globalObjectId = globalObjectId ?? "",
+            });
         }
     }
 }
