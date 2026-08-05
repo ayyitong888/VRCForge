@@ -15,7 +15,7 @@ Redistribution and modified versions must comply with GPL-3.0, including:
 
 This software is provided without warranty. Users should back up their Unity / VRChat avatar projects before using asset-writing features.
 
-Bundled third-party component:
+Bundled third-party components and notices:
 
 * uv Windows runtime
   * Upstream: https://github.com/astral-sh/uv
@@ -23,5 +23,8 @@ Bundled third-party component:
   * The upstream license files and VRCForge distribution notes are preserved in
     binary release payloads under `licenses/`.
 
-The Unity MCP Core and Unity tool registry shipped in `VRCForge.unitypackage`
-are VRCForge-owned first-party code. No third-party Unity MCP package is bundled.
+The MCP Core runtime, command catalogue, input schema metadata, and tool result
+contract shipped in `VRCForge.unitypackage` are VRCForge-owned implementations.
+No third-party Unity MCP package or runtime is bundled.
+Notices from withdrawn development candidates are not distributed because no
+code from those retired external Unity MCP contracts remains in this release.

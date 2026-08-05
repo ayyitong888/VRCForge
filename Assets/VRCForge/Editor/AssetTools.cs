@@ -14,9 +14,9 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_scan_animation_bindings",
-        Description = "Scan AnimationClip bindings for object toggles, blendshapes, material properties, and unsupported asset-reference writes."
+    [VRCForgeCommand(
+        toolId: "vrc_scan_animation_bindings",
+        Summary = "Scan AnimationClip bindings for object toggles, blendshapes, material properties, and unsupported asset-reference writes."
     )]
     public static class AssetTools
     {
@@ -25,25 +25,25 @@ namespace VRCForge.Editor
 
         public class ScanAnimationBindingsParameters
         {
-            [VRCForgeParameter("Optional avatar root hierarchy path used to discover FX clips.", Required = false)]
+            [VRCForgeInput("Optional avatar root hierarchy path used to discover FX clips.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
 
-            [VRCForgeParameter("Optional AnimatorController asset path used to discover clips.", Required = false)]
+            [VRCForgeInput("Optional AnimatorController asset path used to discover clips.", IsRequired = false)]
             public string controllerPath { get; set; } = "";
 
-            [VRCForgeParameter("Optional explicit AnimationClip asset paths.", Required = false)]
+            [VRCForgeInput("Optional explicit AnimationClip asset paths.", IsRequired = false)]
             public List<string> clipPaths { get; set; } = new List<string>();
 
-            [VRCForgeParameter("When true, scan all AnimationClip assets in the project.", Required = false)]
+            [VRCForgeInput("When true, scan all AnimationClip assets in the project.", IsRequired = false)]
             public bool? includeAllProjectClips { get; set; } = false;
 
-            [VRCForgeParameter("Maximum number of clips to scan.", Required = false)]
+            [VRCForgeInput("Maximum number of clips to scan.", IsRequired = false)]
             public int? maxClips { get; set; } = 300;
 
-            [VRCForgeParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
+            [VRCForgeInput("Asset-relative or absolute output path. Leave empty to skip writing JSON.", IsRequired = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeInput("Refresh the Unity AssetDatabase after writing JSON.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 
@@ -77,13 +77,13 @@ namespace VRCForge.Editor
                     payload.absoluteOutputPath = absolutePath.Replace("\\", "/");
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Scanned {payload.summary.clipCount} animation clip(s) with {payload.summary.bindingCount} binding(s).",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Animation binding scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Animation binding scan failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

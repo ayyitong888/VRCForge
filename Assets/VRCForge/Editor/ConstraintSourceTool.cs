@@ -15,9 +15,9 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_set_constraint_sources",
-        Description = "Preview or replace the ordered sources of one exact saved-scene constraint through a fixed compatibility schema."
+    [VRCForgeCommand(
+        toolId: "vrc_set_constraint_sources",
+        Summary = "Preview or replace the ordered sources of one exact saved-scene constraint through a fixed compatibility schema."
     )]
     public static class ConstraintSourceTool
     {
@@ -28,6 +28,33 @@ namespace VRCForge.Editor
         private const string ComponentDigestSchema = "vrcforge.constraint_component.v1";
         private const string StructuredSchemaId = "vrcforge.constraint_sources.fixed.v1";
         private const int MaximumSources = 64;
+
+        public class Parameters
+        {
+            [VRCForgeInput("Saved scene asset path.", IsRequired = true)] public string scenePath { get; set; } = "";
+            [VRCForgeInput("Exact hierarchy path of the constraint host.", IsRequired = true)] public string gameObjectPath { get; set; } = "";
+            [VRCForgeInput("Constraint kind from the fixed compatibility schema.", IsRequired = true)] public string constraintKind { get; set; } = "";
+            [VRCForgeInput("Zero-based matching constraint component index.", IsRequired = false)] public int? componentIndex { get; set; } = 0;
+            [VRCForgeInput("Ordered typed constraint-source entries.", IsRequired = true)] public object[] sources { get; set; } = new object[0];
+            [VRCForgeInput("Return a verified non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Save the scene during apply; required for apply.", IsRequired = false)] public bool? saveScene { get; set; } = false;
+            [VRCForgeInput("Expected active Unity project root.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
+            [VRCForgeInput("Expected saved scene path.", IsRequired = false)] public string expectedScenePath { get; set; } = "";
+            [VRCForgeInput("Expected scene GUID.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
+            [VRCForgeInput("Expected scene handle.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
+            [VRCForgeInput("Expected scene file digest.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
+            [VRCForgeInput("Expected scene file identity.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
+            [VRCForgeInput("Expected scene meta digest.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
+            [VRCForgeInput("Expected scene meta identity.", IsRequired = false)] public string expectedSceneMetaIdentity { get; set; } = "";
+            [VRCForgeInput("Expected constraint host hierarchy path.", IsRequired = false)] public string expectedGameObjectPath { get; set; } = "";
+            [VRCForgeInput("Expected constraint kind.", IsRequired = false)] public string expectedConstraintKind { get; set; } = "";
+            [VRCForgeInput("Expected concrete constraint component type.", IsRequired = false)] public string expectedComponentType { get; set; } = "";
+            [VRCForgeInput("Expected constraint component index.", IsRequired = false)] public int? expectedComponentIndex { get; set; }
+            [VRCForgeInput("Expected constraint component identity.", IsRequired = false)] public string expectedComponentId { get; set; } = "";
+            [VRCForgeInput("Expected constraint component GlobalObjectId.", IsRequired = false)] public string expectedComponentGlobalId { get; set; } = "";
+            [VRCForgeInput("Expected pre-change source digest.", IsRequired = false)] public string expectedBeforeSourcesDigest { get; set; } = "";
+            [VRCForgeInput("Expected requested source digest.", IsRequired = false)] public string expectedTargetSourcesDigest { get; set; } = "";
+        }
 
         private static readonly Dictionary<string, string> ComponentTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -127,15 +154,15 @@ namespace VRCForge.Editor
             }
             catch (ConstraintSourceToolException exception)
             {
-                return new ErrorResponse(exception.Message);
+                return VRCForgeToolResult.Failed(exception.Message);
             }
             catch (SceneObjectCopyException exception)
             {
-                return new ErrorResponse(exception.Message);
+                return VRCForgeToolResult.Failed(exception.Message);
             }
             catch (Exception)
             {
-                return new ErrorResponse("Constraint source operation failed closed.");
+                return VRCForgeToolResult.Failed("Constraint source operation failed closed.");
             }
         }
 
@@ -200,7 +227,7 @@ namespace VRCForge.Editor
             var message = restored
                 ? "Constraint source operation failed after restoring the verified pre-state."
                 : "Constraint source operation failed; checkpoint restore is required.";
-            return new ErrorResponse(
+            return VRCForgeToolResult.Failed(
                 message,
                 new
                 {
@@ -448,7 +475,7 @@ namespace VRCForge.Editor
             bool changed,
             bool saved)
         {
-            return new SuccessResponse(
+            return VRCForgeToolResult.Completed(
                 preview ? "Constraint source preview completed." : "Constraint source operation verified.",
                 new
                 {
@@ -584,14 +611,14 @@ namespace VRCForge.Editor
                 ComponentAssemblyName = "VRC.SDK3.Dynamics.Constraint",
                 ComponentAssemblyVersion = "1.0.0.0",
                 ComponentAssemblyPublicKeyToken = string.Empty,
-                ComponentAssemblySha256 = "4c80361ee9938695ceb6e773875cba85ab3bbdce850262328a541e903ff39dab",
+                ComponentAssemblySha256 = "560c36c5660abb4a91e9f330653e8d39a047b7648c1b2e862a037c7df71e2df0",
                 ListMemberName = "Sources",
                 ListTypeName = "VRC.Dynamics.VRCConstraintSourceKeyableList",
                 ElementTypeName = "VRC.Dynamics.VRCConstraintSource",
                 AssemblyName = "VRC.Dynamics",
                 AssemblyVersion = "1.0.0.0",
                 AssemblyPublicKeyToken = string.Empty,
-                AssemblySha256 = "34177c7d681783c9c0b25727b763d920d34fc3f9619b5edc48a765ff19de3243",
+                AssemblySha256 = "c0343a61b88778726b5b510cc05c0d9b6e9b4df7ca17cf1e4de32b2551136b89",
                 MaximumItems = MaximumSources,
                 RequireUniqueObjectReferences = true,
                 Fields = new List<StructuredFieldSchema>

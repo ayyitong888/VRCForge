@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+from agent_mcp_2026 import PROTOCOL_VERSION
+
 
 def test_find_vrcforge_executable_prefers_current_packaged_root(monkeypatch, tmp_path: Path) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
@@ -63,3 +65,85 @@ def test_stdio_bridge_start_runtime_is_explicit_opt_in() -> None:
     parsed = module.parse_args(["--start-runtime", "--no-start"])
     assert parsed.start_runtime is True
     assert parsed.no_start is True
+
+
+def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> None:
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+
+    class Bridge:
+        calls = []
+
+        def preflight(self):
+            return {"runtimeOnline": True}
+
+        def manifest(self, exposure_layer="planning"):
+            read_tool = {
+                "name": "vrcforge_read_status",
+                "description": "Read status",
+                "inputSchema": {"type": "object"},
+            }
+            tools = [read_tool]
+            if exposure_layer == "execution":
+                tools.append(
+                    {
+                        "name": "vrcforge_request_apply",
+                        "description": "Request an approved write",
+                        "inputSchema": {"type": "object"},
+                    }
+                )
+            return {"tools": tools}
+
+        def call_tool(self, tool_name, arguments, **_kwargs):
+            self.calls.append((tool_name, arguments))
+            return {"ok": True, "queued": tool_name}
+
+    captured = {}
+    monkeypatch.setattr(module, "run_stdio_loop", lambda router: captured.setdefault("router", router))
+    module.run_stdio_server(Bridge())
+    router = captured["router"]
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "stdio-test", "version": "1.4.0"},
+    }
+
+    planning, planning_status = router.handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": meta}}
+    )
+    execution, execution_status = router.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {"_meta": meta, "exposureLayer": "execution"},
+        }
+    )
+
+    assert planning_status == 200
+    assert execution_status == 200
+    planning_names = {tool["name"] for tool in planning["result"]["tools"]}
+    execution_names = {tool["name"] for tool in execution["result"]["tools"]}
+    assert "vrcforge_request_apply" not in planning_names
+    assert "vrcforge_request_apply" in execution_names
+    for tool in execution["result"]["tools"]:
+        assert "When to use:" in tool["description"]
+        assert "When NOT to use:" in tool["description"]
+        assert "Negative example:" in tool["description"]
+
+    called, called_status = router.handle(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "_meta": meta,
+                "name": "vrcforge_request_apply",
+                "arguments": {"target_tool": "vrcforge_create_gameobject"},
+            },
+        }
+    )
+    assert called_status == 200
+    assert called["result"]["structuredContent"]["ok"] is True
+    assert Bridge.calls == [
+        ("vrcforge_request_apply", {"target_tool": "vrcforge_create_gameobject"})
+    ]

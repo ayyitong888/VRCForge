@@ -12,9 +12,9 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_scan_avatar_items",
-        Description = "Scan avatar GameObjects and renderer-backed items into a read-only hierarchy inventory."
+    [VRCForgeCommand(
+        toolId: "vrc_scan_avatar_items",
+        Summary = "Scan avatar GameObjects and renderer-backed items into a read-only hierarchy inventory."
     )]
     public static class GameObjectTools
     {
@@ -30,16 +30,16 @@ namespace VRCForge.Editor
 
         public class ScanAvatarItemsParameters
         {
-            [VRCForgeParameter("Optional avatar root hierarchy path. If empty, all scene avatar roots are scanned.", Required = false)]
+            [VRCForgeInput("Optional avatar root hierarchy path. If empty, all scene avatar roots are scanned.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
 
-            [VRCForgeParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
+            [VRCForgeInput("Asset-relative or absolute output path. Leave empty to skip writing JSON.", IsRequired = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [VRCForgeParameter("Maximum number of hierarchy items to return.", Required = false)]
+            [VRCForgeInput("Maximum number of hierarchy items to return.", IsRequired = false)]
             public int? maxItems { get; set; } = 500;
 
-            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeInput("Refresh the Unity AssetDatabase after writing JSON.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 
@@ -68,13 +68,13 @@ namespace VRCForge.Editor
                     payload.absoluteOutputPath = absolutePath.Replace("\\", "/");
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Scanned {payload.summary.itemCount} avatar item(s) from {payload.summary.avatarCount} avatar(s).",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Avatar item scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Avatar item scan failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

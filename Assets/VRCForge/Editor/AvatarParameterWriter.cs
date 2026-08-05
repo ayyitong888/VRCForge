@@ -10,12 +10,20 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_apply_parameter_optimization",
-        Description = "Apply selected VRCExpressionParameters type optimizations via a predefined VRCForge tool."
+    [VRCForgeCommand(
+        toolId: "vrc_apply_parameter_optimization",
+        Summary = "Apply selected VRCExpressionParameters type optimizations via a predefined VRCForge tool."
     )]
     public static class AvatarParameterOptimizationApplier
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar root hierarchy path; empty is allowed only when selection is unambiguous.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("One or more parameter suggestions; each entry requires the existing parameter name.", IsRequired = true)]
+            public JArray suggestions { get; set; } = new JArray();
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -24,14 +32,14 @@ namespace VRCForge.Editor
                 var suggestions = @params?["suggestions"] as JArray;
                 if (suggestions == null || suggestions.Count == 0)
                 {
-                    return new ErrorResponse("Missing required parameter: suggestions");
+                    return VRCForgeToolResult.Failed("Missing required parameter: suggestions");
                 }
 
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
                 var parametersAsset = descriptor.expressionParameters;
                 if (parametersAsset == null || parametersAsset.parameters == null)
                 {
-                    return new ErrorResponse("Avatar has no VRCExpressionParameters asset.");
+                    return VRCForgeToolResult.Failed("Avatar has no VRCExpressionParameters asset.");
                 }
 
                 var requestedNames = suggestions
@@ -66,7 +74,7 @@ namespace VRCForge.Editor
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Applied {applied.Count} parameter optimization(s).",
                     new
                     {
@@ -78,7 +86,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Parameter optimization apply failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Parameter optimization apply failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -123,12 +131,20 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_rollback_avatar_parameters",
-        Description = "Restore VRCExpressionParameters from a dashboard snapshot via a predefined VRCForge tool."
+    [VRCForgeCommand(
+        toolId: "vrc_rollback_avatar_parameters",
+        Summary = "Restore VRCExpressionParameters from a dashboard snapshot via a predefined VRCForge tool."
     )]
     public static class AvatarParameterRollbackTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar root hierarchy path; empty is allowed only when selection is unambiguous.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Snapshot parameter entries. Each entry supports name, valueType, defaultValue, saved, and networkSynced.", IsRequired = true)]
+            public JArray parameterNames { get; set; } = new JArray();
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -137,14 +153,14 @@ namespace VRCForge.Editor
                 var parameterItems = @params?["parameterNames"] as JArray;
                 if (parameterItems == null)
                 {
-                    return new ErrorResponse("Missing required parameter: parameterNames");
+                    return VRCForgeToolResult.Failed("Missing required parameter: parameterNames");
                 }
 
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
                 var parametersAsset = descriptor.expressionParameters;
                 if (parametersAsset == null)
                 {
-                    return new ErrorResponse("Avatar has no VRCExpressionParameters asset.");
+                    return VRCForgeToolResult.Failed("Avatar has no VRCExpressionParameters asset.");
                 }
 
                 var restored = new List<VRCExpressionParameters.Parameter>();
@@ -171,7 +187,7 @@ namespace VRCForge.Editor
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Restored {restored.Count} avatar parameter(s).",
                     new
                     {
@@ -182,7 +198,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Parameter rollback failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Parameter rollback failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

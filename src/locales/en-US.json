@@ -445,7 +445,11 @@
     "step2DoneDesc": "Model bound",
     "step2TodoDesc": "Bind AI model",
     "step3DoneDesc": "Project selected",
-    "step3TodoDesc": "Select Unity project"
+    "step3TodoDesc": "Select the exact Unity project you imported VRCForge into",
+    "selectProject": "Select Project",
+    "importAndSelectProject": "Import All from VRCForge.unitypackage, then select that open project here.",
+    "keepUnityOpen": "Keep the selected Unity project open and wait for compilation, then Retry. Detected {{count}} / {{total}} tools.",
+    "toolsConnected": "Connected — {{count}} / {{total}} tools"
   },
   "executionMode": {
     "approval": "Restricted",
@@ -547,6 +551,14 @@
     "reason": "Reason",
     "reject": "Reject",
     "approve": "Approve",
+    "approveOnce": "Allow once",
+    "allowFuture": "Always allow this category",
+    "blockingTitle": "Approval required before continuing",
+    "blockingDescription": "Review each requested change before the chat can continue.",
+    "notificationTitle": "VRCForge approval required",
+    "notificationBody": "{{target}} is waiting for your decision.",
+    "notificationExpired": "This approval is no longer pending. Refresh the workspace and try again.",
+    "notificationFailed": "The approval action could not be started. Refresh the workspace and try again.",
     "awaitingInline": "Awaiting approval — handle in the approval area above the input",
     "modifyPrompt": "Revise approval {{id}} ({{target}}):",
     "pendingContextTitle": "Pending approval context",
@@ -564,7 +576,26 @@
     "contextReason": "Reason",
     "contextDetails": "Details",
     "revisionReason": "User requested changes before approval.",
-    "revisionNote": "Revise approval {{id}}: {{target}}"
+    "revisionNote": "Revise approval {{id}}: {{target}}",
+    "presentation": {
+      "project": "Project",
+      "rollback": "Undo",
+      "currentProject": "Current project",
+      "sceneRoot": "the scene root",
+      "newObject": "New GameObject",
+      "savedCheckpoint": "the saved checkpoint",
+      "createObjectTitle": "Create “{{name}}”",
+      "createObjectSummary": "Adds a new object under {{parent}}.",
+      "restoreTitle": "Restore a project checkpoint",
+      "restoreSummary": "Restores the project to checkpoint {{checkpoint}}.",
+      "commandTitle": "Run a requested project command",
+      "commandSummary": "Runs one requested operation for {{project}}.",
+      "genericTitle": "Change the Unity project",
+      "genericSummary": "Applies one requested change to {{project}}.",
+      "rollbackAvailable": "A checkpoint is created first. Restoring it requires separate approval.",
+      "restoreEffect": "Restores the previously saved state. It cannot repeat this rollback automatically.",
+      "rollbackDepends": "Review the details before allowing. Undo support depends on this operation."
+    }
   },
   "shell": {
     "exitCode": "Exit code {{code}}",

@@ -244,9 +244,11 @@ export type SupportBundleResult = {
 export type AgentApproval = {
   id: string;
   status: string;
+  projectRoot?: string;
   targetTool?: string;
   riskLevel?: string;
   reason?: string;
+  allowFutureEligible?: boolean;
   createdAt?: string;
   arguments?: Record<string, unknown>;
   paramsSummary?: Record<string, unknown>;

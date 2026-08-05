@@ -26,6 +26,8 @@ class FakeResponses:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
+        if isinstance(self.result, list) and self.result and isinstance(self.result[0], dict) and "type" not in self.result[0]:
+            return self.result.pop(0)
         return self.result
 
 
@@ -82,6 +84,41 @@ def test_probe_modes_are_tool_free_and_structured_when_requested() -> None:
     assert plain.text == "plain" and "tools" not in plain_call and "tool_choice" not in plain_call
     assert structured_call["text"] == {"format": {"type": "json_object"}}
     assert "tools" not in structured_call and "tool_choice" not in structured_call
+
+
+def test_nonstream_empty_completion_retries_once_then_succeeds() -> None:
+    adapter, holder = adapter_for([
+        {"output": [{"type": "reasoning", "content": [{"type": "reasoning_text", "text": "thinking"}]}]},
+        {"output": [{"type": "message", "content": [{"type": "output_text", "text": '{"ok":true}'}]}]},
+    ])
+
+    response = adapter.send_request(ProviderRuntimeRequest(
+        model="deepseek-v4-flash",
+        prompt="p",
+        instructions="s",
+        mode="probe",
+        structured_output=True,
+    ))
+
+    assert response.text == '{"ok":true}'
+    assert len(holder["client"].responses.calls) == 2
+
+
+def test_nonstream_empty_completion_retries_only_once() -> None:
+    adapter, holder = adapter_for([
+        {"output": [{"type": "reasoning"}]},
+        {"output": [{"type": "reasoning"}]},
+    ])
+
+    with pytest.raises(RuntimeError, match="no message or planner action"):
+        adapter.send_request(ProviderRuntimeRequest(
+            model="deepseek-v4-flash",
+            prompt="p",
+            instructions="s",
+            mode="probe",
+        ))
+
+    assert len(holder["client"].responses.calls) == 2
 
 
 @contextmanager

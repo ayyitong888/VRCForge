@@ -7,23 +7,53 @@ import hashlib
 import json
 import os
 import socket
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
-from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+from unity_mcp_tool_contract import (
+    EXPECTED_TOOL_COUNT,
+    EXPECTED_TOOL_NAMES,
+    PLANNING_TOOL_NAMES,
+    READ_ONLY_TOOL_NAMES,
+)
 
 
 TRANSPORT_SCHEMA = "vrcforge.mcp.transport.v2"
 MODERN_PROTOCOL_VERSION = "2026-07-28"
 APP_SETUP_OUTFIT_POLL_LANE = "app_setup_outfit_poll"
+APP_UNITYPACKAGE_IMPORT_POLL_LANE = "app_unitypackage_import_poll"
 SUPPORTED_PROTOCOL_VERSIONS = (MODERN_PROTOCOL_VERSION,)
 MAX_FRAME_BYTES = 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 5.0
+_ACTIVE_CALL_AUDIT_CAPTURE: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "vrcforge_unity_mcp_call_audit_capture",
+    default=None,
+)
 
 
 class UnityMcpCoreError(RuntimeError):
     """A deliberately non-sensitive Core discovery or transport failure."""
+
+
+@contextmanager
+def capture_unity_mcp_core_call_audits() -> Iterator[list[dict[str, Any]]]:
+    """Collect safe Core call-audit records made in the current request context."""
+    captured: list[dict[str, Any]] = []
+    token = _ACTIVE_CALL_AUDIT_CAPTURE.set(captured)
+    try:
+        yield captured
+    finally:
+        _ACTIVE_CALL_AUDIT_CAPTURE.reset(token)
+
+
+def _record_unity_mcp_core_call_audit(audit: dict[str, Any]) -> None:
+    captured = _ACTIVE_CALL_AUDIT_CAPTURE.get()
+    if captured is not None:
+        captured.append(dict(audit))
 
 
 @dataclass(frozen=True)
@@ -98,28 +128,40 @@ class UnityMcpCoreClient:
     def protocol_version(self) -> str:
         return MODERN_PROTOCOL_VERSION
 
-    def list_tools(self) -> list[dict[str, Any]]:
-        result = self._request("tools/list", {})
+    def list_tools(self, *, exposure_layer: str = "planning") -> list[dict[str, Any]]:
+        if exposure_layer not in {"planning", "execution"}:
+            raise ValueError("exposure_layer must be planning or execution.")
+        result = self._request("tools/list", {"exposureLayer": exposure_layer})
         tools = result.get("tools") if isinstance(result, dict) else None
         if not isinstance(tools, list) or not all(isinstance(tool, dict) for tool in tools):
             raise UnityMcpCoreError("Unity MCP Core returned an invalid tools list.")
         names = [tool.get("name") for tool in tools]
-        if len(tools) != EXPECTED_TOOL_COUNT or not all(isinstance(name, str) and name for name in names):
+        expected_names = PLANNING_TOOL_NAMES if exposure_layer == "planning" else EXPECTED_TOOL_NAMES
+        if len(tools) != len(expected_names) or not all(isinstance(name, str) and name for name in names):
             raise UnityMcpCoreError("Unity MCP Core returned an invalid tools list.")
-        if len(set(names)) != EXPECTED_TOOL_COUNT or set(names) != EXPECTED_TOOL_NAMES:
+        if len(set(names)) != len(expected_names) or set(names) != expected_names:
             raise UnityMcpCoreError("Unity MCP Core tool contract does not match the packaged VRCForge tools.")
         for tool in tools:
             name = tool["name"]
             input_schema = tool.get("inputSchema")
             annotations = tool.get("annotations")
             metadata = tool.get("_meta")
+            description = tool.get("description")
             if not isinstance(input_schema, dict) or input_schema.get("type") != "object" \
                     or not isinstance(annotations, dict) or not isinstance(metadata, dict):
                 raise UnityMcpCoreError("Unity MCP Core tool metadata is invalid.")
             is_read_only = name in READ_ONLY_TOOL_NAMES
             if annotations.get("readOnlyHint") is not (True if is_read_only else None) \
                     or annotations.get("destructiveHint") is not (None if is_read_only else True) \
-                    or metadata.get("permission") != ("ReadOnly" if is_read_only else "RequiresApproval"):
+                    or metadata.get("permission") != ("ReadOnly" if is_read_only else "RequiresApproval") \
+                    or not isinstance(metadata.get("whenToUse"), str) or not metadata["whenToUse"].strip() \
+                    or not isinstance(metadata.get("doNotUse"), str) or not metadata["doNotUse"].strip() \
+                    or not isinstance(metadata.get("negativeExample"), str) or not metadata["negativeExample"].strip() \
+                    or metadata.get("exposureLayer") not in {"planning", "execution"} \
+                    or not isinstance(description, str) \
+                    or "When to use:" not in description \
+                    or "When NOT to use:" not in description \
+                    or "Negative example:" not in description:
                 raise UnityMcpCoreError("Unity MCP Core tool permissions do not match the packaged VRCForge tools.")
         return tools
 
@@ -134,15 +176,72 @@ class UnityMcpCoreClient:
         if isinstance(execution_context, dict) and execution_context.get("lane") == APP_SETUP_OUTFIT_POLL_LANE:
             if name != "vrc_setup_outfit" or not _is_strict_setup_outfit_job_poll(arguments):
                 raise ValueError("Setup Outfit job polling requires exact jobId arguments.")
-        result = self._request("tools/call", {"name": name, "arguments": arguments or {}}, execution_context=execution_context)
-        if not isinstance(result, dict):
-            raise UnityMcpCoreError("Unity MCP Core returned an invalid tool result.")
-        return result
+        if isinstance(execution_context, dict) and execution_context.get("lane") == APP_UNITYPACKAGE_IMPORT_POLL_LANE:
+            if name != "vrc_import_unitypackage" or not _is_strict_unitypackage_import_job_poll(arguments):
+                raise ValueError("UnityPackage import job polling requires exact jobId arguments.")
+        call_arguments = arguments or {}
+        request_id = _new_request_id()
+        started_at = time.perf_counter()
+        audit_base = {
+            "requestId": request_id,
+            "toolName": name,
+            "argumentKeys": sorted(call_arguments),
+            "inputSha256": canonical_arguments_sha256(call_arguments),
+        }
+        try:
+            result = self._request(
+                "tools/call",
+                {"name": name, "arguments": call_arguments},
+                execution_context=execution_context,
+                request_id=request_id,
+            )
+            if not isinstance(result, dict):
+                raise UnityMcpCoreError("Unity MCP Core returned an invalid tool result.")
+            _validate_tool_result(result)
+        except Exception as exc:
+            _record_unity_mcp_core_call_audit(
+                {
+                    **audit_base,
+                    "resultSummary": "error",
+                    "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
+                    "errorClass": type(exc).__name__,
+                }
+            )
+            raise
+        audited = dict(result)
+        metadata = dict(audited.get("_meta") or {}) if isinstance(audited.get("_meta"), dict) else {}
+        structured = audited.get("structuredContent")
+        status = "error" if audited.get("isError") is True else (
+            "pending" if isinstance(structured, dict) and structured.get("_mcp_status") == "pending" else "complete"
+        )
+        call_audit = {
+            **audit_base,
+            "resultSummary": status,
+            "durationMs": round((time.perf_counter() - started_at) * 1000, 3),
+        }
+        metadata["io.vrcforge/callAudit"] = call_audit
+        _record_unity_mcp_core_call_audit(call_audit)
+        audited["_meta"] = metadata
+        return audited
 
-    def _request(self, method: str, params: dict[str, Any], *, execution_context: dict[str, Any] | None = None) -> Any:
-        return self._modern_request(method, params, execution_context=execution_context)
+    def _request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        execution_context: dict[str, Any] | None = None,
+        request_id: int | None = None,
+    ) -> Any:
+        return self._modern_request(method, params, execution_context=execution_context, request_id=request_id)
 
-    def _modern_request(self, method: str, params: dict[str, Any], *, execution_context: dict[str, Any] | None) -> Any:
+    def _modern_request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        execution_context: dict[str, Any] | None,
+        request_id: int | None = None,
+    ) -> Any:
         try:
             with self._open_connection() as connection:
                 self._send_modern(connection, 1, "server/discover", {})
@@ -151,8 +250,9 @@ class UnityMcpCoreClient:
                 if not isinstance(supported, list) or not all(isinstance(version, str) for version in supported) \
                         or MODERN_PROTOCOL_VERSION not in supported:
                     raise UnityMcpCoreError("Unity MCP Core modern discovery failed.")
-                self._send_modern(connection, 2, method, params, execution_context=execution_context)
-                return self._receive_modern_response(connection, 2)
+                call_id = request_id if request_id is not None else 2
+                self._send_modern(connection, call_id, method, params, execution_context=execution_context)
+                return self._receive_modern_response(connection, call_id)
         except UnityMcpCoreError:
             raise
         except (OSError, UnicodeError, json.JSONDecodeError):
@@ -227,6 +327,28 @@ class UnityMcpCoreClient:
 
 
 
+def _validate_tool_result(result: dict[str, Any]) -> None:
+    content = result.get("content")
+    if not isinstance(result.get("isError"), bool) \
+            or not isinstance(content, list) or not content \
+            or not all(
+                isinstance(block, dict)
+                and block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+                and bool(block["text"].strip())
+                for block in content
+            ):
+        raise UnityMcpCoreError("Unity MCP Core returned an invalid tool result.")
+
+    structured = result.get("structuredContent")
+    if result["isError"] is False:
+        if not isinstance(structured, dict) or structured.get("success") is not True:
+            raise UnityMcpCoreError("Unity MCP Core returned an invalid tool result.")
+    elif structured is not None \
+            and (not isinstance(structured, dict) or structured.get("success") is not False):
+        raise UnityMcpCoreError("Unity MCP Core returned an invalid tool result.")
+
+
 def _is_strict_setup_outfit_job_poll(arguments: Any) -> bool:
     if not isinstance(arguments, dict) or set(arguments) != {"jobId"}:
         return False
@@ -234,6 +356,10 @@ def _is_strict_setup_outfit_job_poll(arguments: Any) -> bool:
     if not isinstance(job_id, str) or len(job_id) != 32:
         return False
     return all(character in "0123456789abcdefABCDEF" for character in job_id)
+
+
+def _is_strict_unitypackage_import_job_poll(arguments: Any) -> bool:
+    return _is_strict_setup_outfit_job_poll(arguments)
 
 
 def _encode_payload(payload: dict[str, Any], direction: str) -> bytes:
@@ -261,6 +387,10 @@ def canonical_arguments_sha256(arguments: dict[str, Any]) -> str:
     except (TypeError, ValueError, UnicodeError):
         raise ValueError("arguments must be JSON-compatible.") from None
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _new_request_id() -> int:
+    return 2 + int.from_bytes(os.urandom(8), "big") % (2**63 - 3)
 
 
 def _decode_payload(data: bytes, direction: str) -> dict[str, Any]:

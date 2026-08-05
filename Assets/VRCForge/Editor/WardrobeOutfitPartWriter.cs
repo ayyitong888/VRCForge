@@ -25,14 +25,44 @@ namespace VRCForge.Editor
     // when outfit N is not worn the toggle is inert (the int!=N transition forces
     // the part back off). Add-only: never rewrites the wardrobe's own states/clips.
     // Supports preview.
-    [VRCForgeTool(
-        name: "vrc_add_outfit_part",
-        Description = "Add an int-gated part toggle (e.g. a hat) to one outfit value of an existing int-exclusive wardrobe. Creates a Bool parameter, a dedicated FX layer (Off default; Off->On = int Equals N AND bool true; On->Off = bool false OR int != N), authors on/off clips, sets the part scene-default off, and adds a menu toggle. Add-only. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_add_outfit_part",
+        Summary = "Add an int-gated part toggle (e.g. a hat) to one outfit value of an existing int-exclusive wardrobe. Creates a Bool parameter, a dedicated FX layer (Off default; Off->On = int Equals N AND bool true; On->Off = bool false OR int != N), authors on/off clips, sets the part scene-default off, and adds a menu toggle. Add-only. Supports preview."
     )]
     public static class WardrobeOutfitPartWriter
     {
         public const string ToolName = "vrc_add_outfit_part";
         private const string DefaultClipDir = "Assets/VRCForge/Generated/Wardrobe";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Avatar root path; empty is allowed only when the descriptor selection is unambiguous.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Existing Int wardrobe parameter name.", IsRequired = true)]
+            public string parameterName { get; set; } = "";
+            [VRCForgeInput("Display name for the new part toggle.", IsRequired = true)]
+            public string partName { get; set; } = "";
+            [VRCForgeInput("Existing wardrobe Int value that gates this part.", IsRequired = true)]
+            public int? value { get; set; }
+            [VRCForgeInput("Avatar-relative scene object paths to toggle.", IsRequired = true)]
+            public string[] objectPaths { get; set; } = new string[0];
+            [VRCForgeInput("Optional Bool expression parameter name; defaults from partName.", IsRequired = false)]
+            public string partParameterName { get; set; } = "";
+            [VRCForgeInput("Report the authoring plan without modifying assets or the scene.", IsRequired = false)]
+            public bool? preview { get; set; } = false;
+            [VRCForgeInput("Create a matching expression-menu toggle when capacity permits.", IsRequired = false)]
+            public bool? addMenuToggle { get; set; } = true;
+            [VRCForgeInput("Set the part scene objects inactive before authoring clips.", IsRequired = false)]
+            public bool? setObjectsDefaultOff { get; set; } = true;
+            [VRCForgeInput("Initial Bool toggle value.", IsRequired = false)]
+            public bool? defaultOn { get; set; } = false;
+            [VRCForgeInput("Optional submenu path for the toggle.", IsRequired = false)]
+            public string subMenuName { get; set; } = "";
+            [VRCForgeInput("Assets-relative directory for generated animation clips.", IsRequired = false)]
+            public string clipOutputDir { get; set; } = DefaultClipDir;
+            [VRCForgeInput("Optional Write Defaults setting; defaults to the existing wardrobe convention.", IsRequired = false)]
+            public bool? writeDefaults { get; set; }
+        }
 
         public static object HandleCommand(JObject @params)
         {
@@ -52,15 +82,15 @@ namespace VRCForge.Editor
 
                 if (string.IsNullOrWhiteSpace(parameterName))
                 {
-                    return new ErrorResponse("Missing required parameter: parameterName (the existing int wardrobe parameter the part is gated on).");
+                    return VRCForgeToolResult.Failed("Missing required parameter: parameterName (the existing int wardrobe parameter the part is gated on).");
                 }
                 if (string.IsNullOrWhiteSpace(partName))
                 {
-                    return new ErrorResponse("Missing required parameter: partName (display name for the new part toggle).");
+                    return VRCForgeToolResult.Failed("Missing required parameter: partName (display name for the new part toggle).");
                 }
                 if (@params["value"] == null && @params["outfitValue"] == null)
                 {
-                    return new ErrorResponse("Missing required parameter: value (the wardrobe int value N this part belongs to).");
+                    return VRCForgeToolResult.Failed("Missing required parameter: value (the wardrobe int value N this part belongs to).");
                 }
                 var outfitValue = (@params["value"] ?? @params["outfitValue"]).ToObject<int>();
 
@@ -72,7 +102,7 @@ namespace VRCForge.Editor
                 var objectInputs = ReadStringArray(@params, "objectPaths", "onObjectPaths");
                 if (objectInputs.Count == 0)
                 {
-                    return new ErrorResponse("Missing required parameter: objectPaths (the part's scene objects to toggle on/off).");
+                    return VRCForgeToolResult.Failed("Missing required parameter: objectPaths (the part's scene objects to toggle on/off).");
                 }
 
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
@@ -83,13 +113,13 @@ namespace VRCForge.Editor
                 var parametersAsset = descriptor.expressionParameters;
                 if (parametersAsset == null || parametersAsset.parameters == null)
                 {
-                    return new ErrorResponse("Avatar has no VRCExpressionParameters; cannot resolve the wardrobe int parameter.");
+                    return VRCForgeToolResult.Failed("Avatar has no VRCExpressionParameters; cannot resolve the wardrobe int parameter.");
                 }
                 var intParam = parametersAsset.parameters.FirstOrDefault(p =>
                     p != null && p.name == parameterName && p.valueType == VRCExpressionParameters.ValueType.Int);
                 if (intParam == null)
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         $"Parameter '{parameterName}' is not an existing Int expression parameter. " +
                         "Build the wardrobe (and its outfit value) first, then add parts to it.");
                 }
@@ -98,7 +128,7 @@ namespace VRCForge.Editor
                 var fxController = GetFxController(descriptor);
                 if (fxController == null)
                 {
-                    return new ErrorResponse("No FX AnimatorController found on the avatar.");
+                    return VRCForgeToolResult.Failed("No FX AnimatorController found on the avatar.");
                 }
                 var fxControllerPath = AssetDatabase.GetAssetPath(fxController);
                 var wardrobeLayerIndex = FindWardrobeLayerIndex(fxController, parameterName);
@@ -143,7 +173,7 @@ namespace VRCForge.Editor
                 }
                 if (unresolved.Count > 0)
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         "Could not resolve these part object path(s) under the avatar '" + descriptor.name + "': " +
                         string.Join(", ", unresolved) + ". Use a path relative to the avatar root or a unique object name.");
                 }
@@ -155,7 +185,7 @@ namespace VRCForge.Editor
                     p != null && p.name == partParameterName && p.valueType == VRCExpressionParameters.ValueType.Bool);
                 if (boolParamExists && !boolParamIsBool)
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         $"Parameter '{partParameterName}' already exists but is not a Bool parameter. " +
                         "Pass a different partParameterName for this part toggle.");
                 }
@@ -208,7 +238,7 @@ namespace VRCForge.Editor
 
                 if (preview)
                 {
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would add part '{partName}' (bool '{partParameterName}') gated on '{parameterName}' == {outfitValue} on '{descriptor.name}'.",
                         new { ok = true, preview = true, plan });
                 }
@@ -331,7 +361,7 @@ namespace VRCForge.Editor
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Added part '{partName}' (bool '{partParameterName}') gated on '{parameterName}' == {outfitValue} on '{descriptor.name}'.",
                     new
                     {
@@ -360,7 +390,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Add outfit part failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Add outfit part failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

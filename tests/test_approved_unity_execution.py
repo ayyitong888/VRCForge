@@ -184,6 +184,55 @@ def test_approved_write_transport_failure_is_uncertain_and_never_retries(
     assert plan.uncertain_state is True
 
 
+def test_approved_write_preserves_a_bounded_safe_core_rejection_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _descriptor(tmp_path)
+    attempts = 0
+
+    class RejectingCoreClient:
+        def __init__(self, _project: str, *, timeout_seconds: int) -> None:
+            pass
+
+        def call_tool(self, _name: str, _arguments: dict, *, execution_context=None) -> dict:
+            nonlocal attempts
+            attempts += 1
+            return {
+                "isError": True,
+                "structuredContent": {
+                    "success": False,
+                    "code": "unitypackage_import_failed",
+                    "error": "api_key=must-not-appear C:\\Users\\private\\fixture.unitypackage",
+                },
+                "content": [{"type": "text", "text": "password=also-private"}],
+            }
+
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", RejectingCoreClient)
+    plan = create_approved_unity_execution_plan(
+        _context(tmp_path, issued=0, expires=9_999_999_999_999),
+        [("vrc_write", {"value": 1})],
+    )
+    with bind_approved_unity_execution(plan):
+        with pytest.raises(agent.UnityMcpError, match="Reason code: unitypackage_import_failed") as error:
+            agent.invoke_unity_mcp(_settings(tmp_path), "vrc_write", {"value": 1})
+
+    assert "must-not-appear" not in str(error.value)
+    assert "also-private" not in str(error.value)
+    assert "C:\\Users" not in str(error.value)
+    assert attempts == 1
+    assert plan.consumed is True
+
+
+def test_core_rejection_summary_rejects_free_text_and_noncanonical_codes() -> None:
+    assert agent.summarize_unity_mcp_core_rejection(
+        {"isError": True, "content": [{"type": "text", "text": "password=private"}]}
+    ) == ""
+    assert agent.summarize_unity_mcp_core_rejection(
+        {"isError": True, "structuredContent": {"code": "invalid code: C:\\Users\\private"}}
+    ) == ""
+
+
 def test_read_calls_keep_retry_behavior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _descriptor(tmp_path)
     attempts = 0

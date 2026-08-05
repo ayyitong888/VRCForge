@@ -361,8 +361,8 @@ def test_rollback_verify_requires_git_like_ma_vrcf_ndmf_coverage(tmp_path: Path)
     assert coverage["checkpoint.packages"]["evidence"]["unityCacheCleanup"] == [
         "Library/Bee",
         "Library/ScriptAssemblies",
-        "Library/PackageCache",
     ]
+    assert coverage["checkpoint.packages"]["evidence"]["unityCachePreserved"] == ["Library/PackageCache"]
     assert coverage["checkpoint.project_settings"]["status"] == "pass"
     assert coverage["rollback.post_restore_validation"]["status"] == "pass"
     assert coverage["ecosystem.modular_avatar"]["status"] == "pass"

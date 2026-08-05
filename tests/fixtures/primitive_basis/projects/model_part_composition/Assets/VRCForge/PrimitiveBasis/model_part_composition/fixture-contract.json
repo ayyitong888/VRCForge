@@ -34,12 +34,12 @@
   "requiredPackages": [
     {
       "id": "com.vrchat.avatars",
-      "version": "3.10.3",
+      "version": "3.10.4",
       "provisioning": "exact_artifact"
     },
     {
       "id": "com.vrchat.base",
-      "version": "3.10.3",
+      "version": "3.10.4",
       "provisioning": "exact_artifact"
     },
     {

@@ -12,6 +12,17 @@ def test_create_wardrobe_freezes_the_three_exact_core_calls() -> None:
     assert plan[2][1]["menuPath"] == "Wardrobe"
 
 
+def test_create_wardrobe_is_workflow_only_not_a_generic_core_write() -> None:
+    assert "vrc_create_wardrobe" not in dashboard.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST
+    assert [name for name, _ in build_workflow_execution_plan(
+        "vrcforge_create_wardrobe", {"avatarPath": "Avatar", "parameterName": "Clothes"}
+    )] == [
+        "vrc_ensure_expression_parameter",
+        "vrc_ensure_animator_state",
+        "vrc_ensure_expression_menu_control",
+    ]
+
+
 @pytest.mark.parametrize(("target", "tool"), [
     ("vrcforge_add_wardrobe_outfit", "vrc_add_wardrobe_outfit"),
     ("vrcforge_manage_wardrobe", "vrc_manage_wardrobe"),

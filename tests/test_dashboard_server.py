@@ -3200,6 +3200,68 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in filtered], [approval_a["approval"]["id"]])
 
+    def test_runtime_snapshot_keeps_app_wide_approval_inbox_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            project_a = root / "ProjectA"
+            project_b = root / "ProjectB"
+            gateway.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
+            gateway.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
+            approval_a = gateway.create_apply_request(
+                {"target_tool": "tool_a", "arguments": {"projectRoot": str(project_a)}, "reason": "A"}
+            )["approval"]
+            approval_b = gateway.create_apply_request(
+                {"target_tool": "tool_b", "arguments": {"projectRoot": str(project_b)}, "reason": "B"}
+            )["approval"]
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            dashboard_server.AGENT_GATEWAY = gateway
+            try:
+                with patch("dashboard_server.build_workspace_diff_summary", return_value={"ok": True}):
+                    snapshot = dashboard_server.read_app_runtime_snapshot(projectRoot=str(project_a))
+                with (
+                    patch("dashboard_server.build_bootstrap_app_health", return_value={}),
+                    patch("dashboard_server.serialize_app_api_config", return_value={}),
+                    patch("dashboard_server.serialize_app_vision_config", return_value={}),
+                    patch("dashboard_server.safe_agent_manifest", return_value={}),
+                    patch("dashboard_server.safe_agent_health", return_value={}),
+                    patch("dashboard_server.safe_permission_state", return_value={}),
+                    patch.object(gateway, "advanced_settings_state", return_value={}),
+                ):
+                    bootstrap = dashboard_server.build_agentic_app_bootstrap_payload()
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
+        snapshot_approvals = snapshot["approvals"]
+        self.assertEqual(snapshot_approvals["count"], 2)
+        self.assertEqual(
+            {item["id"] for item in snapshot_approvals["approvals"]},
+            {approval_a["id"], approval_b["id"]},
+        )
+        self.assertEqual(
+            {item["projectRoot"] for item in snapshot_approvals["approvals"]},
+            {str(project_a), str(project_b)},
+        )
+        self.assertEqual(
+            {item["id"] for item in bootstrap["approvals"]},
+            {approval_a["id"], approval_b["id"]},
+        )
+
+    def test_external_mcp_pending_callback_broadcasts_approval_refresh(self) -> None:
+        async def exercise() -> AsyncMock:
+            broadcast = AsyncMock()
+            with patch.object(dashboard_server.EVENT_BUS, "broadcast", broadcast):
+                dashboard_server._notify_mcp_pending_approval({"id": "approval-id"})
+                await asyncio.sleep(0)
+            return broadcast
+
+        broadcast = asyncio.run(exercise())
+
+        broadcast.assert_awaited_once()
+        event_name, payload = broadcast.await_args.args
+        self.assertEqual(event_name, "agentApprovals")
+        self.assertIn("approvals", payload)
+
     def test_agent_approval_scope_checks_project_aliases_on_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -3654,7 +3716,10 @@ class DashboardServerTests(unittest.TestCase):
         dashboard_server.DASHBOARD_STATE.selected_project_path = private_project_path
 
         try:
-            with TestClient(dashboard_server.app) as client:
+            with patch(
+                "dashboard_server._selected_project_path_from_health",
+                return_value=private_project_path,
+            ), TestClient(dashboard_server.app) as client:
                 response = client.get("/api/app/doctor")
         finally:
             dashboard_server.DASHBOARD_STATE.selected_project_path = original_project_path
@@ -3801,9 +3866,10 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "Avatar"
             for relative in (
-                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
                 "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
                 "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
             ):
                 target = project / relative
@@ -3830,9 +3896,10 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir)
             required = (
-                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
                 "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
                 "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
             )
             for relative in required:
@@ -3851,9 +3918,10 @@ class DashboardServerTests(unittest.TestCase):
             manifest.parent.mkdir(parents=True)
             manifest.write_text('{"dependencies":{}}', encoding="utf-8")
             for relative in (
-                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
                 "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
                 "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
             ):
                 target = project / relative
@@ -3870,9 +3938,10 @@ class DashboardServerTests(unittest.TestCase):
             descriptor.parent.mkdir(parents=True)
             descriptor.write_text("{}", encoding="utf-8")
             for relative in (
-                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
                 "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
                 "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
             ):
                 marker = project / relative
@@ -3902,9 +3971,10 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir) / "AvatarProject"
             for relative in (
-                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
                 "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
                 "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
                 "Packages/manifest.json",
                 "ProjectSettings/ProjectVersion.txt",
@@ -4711,6 +4781,27 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIs(seen["mock_execute"], False)
         self.assertIs(seen["save_artifacts"], True)
 
+    def test_blendshape_gateway_preserves_core_inventory_fields(self) -> None:
+        export_payload = {
+            "generatedAtUtc": "2026-08-04T00:00:00Z",
+            "summary": {"avatarCount": 1, "blendshapeCount": 1},
+            "avatars": [{"avatarPath": "Scene/Avatar", "renderers": []}],
+        }
+        selected = SimpleNamespace(avatar_name="Avatar", avatar_path="Scene/Avatar")
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
+            patch("dashboard_server.load_dashboard_export_payload", return_value=(export_payload, "unity-mcp export", False)),
+            patch("dashboard_server.resolve_avatar_selection", return_value=selected),
+            patch("dashboard_server.remember_loaded_avatar"),
+            patch("dashboard_server.serialize_selected_avatar", return_value={"avatarName": "Avatar", "avatarPath": "Scene/Avatar"}),
+            patch("dashboard_server.serialize_blendshape_details", return_value=[]),
+        ):
+            payload = dashboard_server.read_avatar_blendshapes_sync(dashboard_server.AvatarBlendshapeListRequest())
+
+        self.assertEqual(payload["generatedAtUtc"], export_payload["generatedAtUtc"])
+        self.assertEqual(payload["summary"], export_payload["summary"])
+        self.assertEqual(payload["avatars"], export_payload["avatars"])
+
     def test_app_auth_validation_checks_loopback_origin_and_token(self) -> None:
         original_required = dashboard_server.APP_AUTH_REQUIRED
         original_token = dashboard_server.APP_SESSION_TOKEN
@@ -5302,6 +5393,127 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(len(payload["steps"]), 3)
         self.assertEqual(payload["plan"]["nextStep"], "done")
         self.assertNotIn("loopSuppression", payload["plan"])
+
+    def test_runtime_loop_never_executes_a_fourth_tool_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            calls: list[str] = []
+            plans = []
+            for index in range(4):
+                name = f"vrcforge_test_tool_budget_{index}"
+                gateway.register_tool(
+                    name,
+                    "Tool-call budget fixture.",
+                    "read/debug",
+                    lambda _params, current=name: calls.append(current) or {"ok": True},
+                )
+                plans.append(
+                    {
+                        "summary": "request another distinct read",
+                        "reply": "continuing",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": name,
+                        "skillParams": {"index": index},
+                        "continueLoop": True,
+                    }
+                )
+
+            with patch.object(gateway, "_plan_agent_turn", side_effect=plans):
+                payload = gateway.runtime_message({"message": "exercise tool-call budget"})
+
+        self.assertEqual(calls, [f"vrcforge_test_tool_budget_{index}" for index in range(3)])
+        self.assertEqual(len([step for step in payload["steps"] if step["kind"] == "skill"]), 3)
+        self.assertEqual(payload["plan"]["nextStep"], "paused")
+        self.assertTrue(payload["plan"]["stepLimitReached"])
+        self.assertTrue(payload["plan"]["toolCallLimitReached"])
+        self.assertEqual(payload["plan"]["toolCallCount"], 3)
+        self.assertEqual(payload["plan"]["remainingAction"]["tool"], "vrcforge_test_tool_budget_3")
+        self.assertIn("尚未执行：vrcforge_test_tool_budget_3", payload["plan"]["reply"])
+
+    def test_desktop_bootstrap_counts_toward_three_tool_call_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            calls: list[str] = []
+            gateway.register_tool(
+                "vrcforge_agent_desktop_action",
+                "Desktop bootstrap fixture.",
+                "read/debug",
+                lambda _params: calls.append("bootstrap") or {"applications": [], "windows": []},
+            )
+            plans = []
+            for index in range(3):
+                name = f"vrcforge_test_after_bootstrap_{index}"
+                gateway.register_tool(
+                    name,
+                    "Post-bootstrap budget fixture.",
+                    "read/debug",
+                    lambda _params, current=name: calls.append(current) or {"ok": True},
+                )
+                plans.append(
+                    {
+                        "summary": "request another read after bootstrap",
+                        "reply": "continuing",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": name,
+                        "skillParams": {"index": index},
+                        "continueLoop": True,
+                    }
+                )
+
+            with (
+                patch.object(gateway, "consume_computer_use_turn_grant"),
+                patch.object(gateway, "_plan_agent_turn", side_effect=plans),
+            ):
+                payload = gateway.runtime_message(
+                    {"message": "exercise bootstrap tool-call budget", "_computerUseRequested": True}
+                )
+
+        self.assertEqual(calls, ["bootstrap", "vrcforge_test_after_bootstrap_0", "vrcforge_test_after_bootstrap_1"])
+        self.assertNotIn("vrcforge_test_after_bootstrap_2", calls)
+        self.assertTrue(payload["plan"]["toolCallLimitReached"])
+        self.assertEqual(payload["plan"]["toolCallCount"], 3)
+
+    def test_desktop_bootstrap_runs_once_per_runtime_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            calls: list[str] = []
+            gateway.register_tool(
+                "vrcforge_agent_desktop_action",
+                "Desktop bootstrap fixture.",
+                "read/debug",
+                lambda _params: calls.append("bootstrap") or {"applications": [], "windows": []},
+            )
+            terminal = {
+                "summary": "done",
+                "reply": "done",
+                "planner": "test",
+                "nextStep": "done",
+            }
+            with (
+                patch.object(gateway, "consume_computer_use_turn_grant"),
+                patch.object(gateway, "_plan_agent_turn", return_value=terminal),
+            ):
+                first = gateway.runtime_message(
+                    {"session_id": "same-session", "message": "first", "_computerUseRequested": True}
+                )
+                second = gateway.runtime_message(
+                    {"session_id": "same-session", "message": "second", "_computerUseRequested": True}
+                )
+                gateway.runtime_message(
+                    {"session_id": "other-session", "message": "third", "_computerUseRequested": True}
+                )
+
+        self.assertEqual(calls, ["bootstrap", "bootstrap"])
+        self.assertEqual(first["steps"][0]["tool"], "vrcforge_agent_desktop_action")
+        self.assertNotIn("steps", second)
+        self.assertEqual(gateway._runtime_sessions["same-session"]["desktopBootstrapToolCalls"], 1)
 
     def test_agent_question_keeps_goal_delivery_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6197,9 +6409,12 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
+        self.assertTrue(all("When to use:" in tool["description"] for tool in payload["tools"]))
+        self.assertTrue(all("When NOT to use:" in tool["description"] for tool in payload["tools"]))
+        self.assertTrue(all("Negative example:" in tool["description"] for tool in payload["tools"]))
         self.assertIn("vrcforge_agent_observe", tool_names)
         self.assertIn("vrcforge_agent_message", tool_names)
         self.assertNotIn("vrcforge_agent_desktop_action", tool_names)
@@ -6215,7 +6430,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_external_agent_connectors", tool_names)
         self.assertIn("vrcforge_list_skill_packages", tool_names)
         self.assertIn("vrcforge_preflight_skill_package", tool_names)
-        self.assertIn("vrcforge_capture_screenshot", tool_names)
+        self.assertNotIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertNotIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_get_compile_errors", tool_names)
@@ -7224,14 +7439,19 @@ class DashboardServerTests(unittest.TestCase):
             listed = client.post(
                 "/mcp",
                 headers={**base_headers, "Mcp-Method": "tools/list"},
-                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": meta}},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {"_meta": meta, "exposureLayer": "execution"},
+                },
             )
             self.assertEqual(listed.status_code, 200)
 
         tool_names = {tool["name"] for tool in listed.json()["result"]["tools"]}
         self.assertIn("vrcforge_agent_message", tool_names)
         self.assertIn("vrcforge_execute_shell", tool_names)
-        self.assertIn("vrcforge_capture_screenshot", tool_names)
+        self.assertNotIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertNotIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_get_compile_errors", tool_names)
@@ -7263,6 +7483,23 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("vrcforge_avatar_encryption_addon_apply", tool_names)
         self.assertNotIn("vrcforge_avatar_encryption_addon_remove", tool_names)
 
+        with TestClient(dashboard_server.app) as client:
+            planning = client.post(
+                "/mcp",
+                headers={**base_headers, "Mcp-Method": "tools/list"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/list",
+                    "params": {"_meta": meta, "exposureLayer": "planning"},
+                },
+            )
+        self.assertEqual(planning.status_code, 200)
+        planning_tools = planning.json()["result"]["tools"]
+        self.assertTrue(planning_tools)
+        self.assertTrue(all(tool["_meta"]["permission"] == "ReadOnly" for tool in planning_tools))
+        self.assertNotIn("vrcforge_request_apply", {tool["name"] for tool in planning_tools})
+
     def test_phase2_unity_tools_are_registered_without_roslyn(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         expected_tools = {
@@ -7277,8 +7514,8 @@ class DashboardServerTests(unittest.TestCase):
         for filename, tool_name in expected_tools.items():
             source = (editor_dir / filename).read_text(encoding="utf-8")
             phase2_text.append(source)
-            self.assertIn("[VRCForgeTool(", source)
-            self.assertIn(f'name: "{tool_name}"', source)
+            self.assertIn("[VRCForgeCommand(", source)
+            self.assertIn(f'toolId: "{tool_name}"', source)
             self.assertIn("public static object HandleCommand(JObject @params)", source)
 
         combined = "\n".join(phase2_text)
@@ -7324,8 +7561,8 @@ class DashboardServerTests(unittest.TestCase):
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         source = (editor_dir / "WardrobeScanner.cs").read_text(encoding="utf-8")
         # Declares the read-only int-exclusive wardrobe detection tool.
-        self.assertIn("[VRCForgeTool(", source)
-        self.assertIn('name: "vrc_scan_wardrobe"', source)
+        self.assertIn("[VRCForgeCommand(", source)
+        self.assertIn('toolId: "vrc_scan_wardrobe"', source)
         self.assertIn("public static object HandleCommand(JObject @params)", source)
         # Captures the menu toggle's int value (the gap the older scanners lacked).
         self.assertIn("control.value", source)
@@ -7427,8 +7664,8 @@ class DashboardServerTests(unittest.TestCase):
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         source = (editor_dir / "WardrobeOutfitWriter.cs").read_text(encoding="utf-8")
         # Declares the int-exclusive add-outfit write tool.
-        self.assertIn("[VRCForgeTool(", source)
-        self.assertIn('name: "vrc_add_wardrobe_outfit"', source)
+        self.assertIn("[VRCForgeCommand(", source)
+        self.assertIn('toolId: "vrc_add_wardrobe_outfit"', source)
         self.assertIn("public static object HandleCommand(JObject @params)", source)
         # Assigns the next free int value and gates an Any-State Equals N transition.
         self.assertIn("AnimatorConditionMode.Equals", source)
@@ -7459,8 +7696,8 @@ class DashboardServerTests(unittest.TestCase):
     def test_wardrobe_manager_writer_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         source = (editor_dir / "WardrobeManagerWriter.cs").read_text(encoding="utf-8")
-        self.assertIn("[VRCForgeTool(", source)
-        self.assertIn('name: "vrc_manage_wardrobe"', source)
+        self.assertIn("[VRCForgeCommand(", source)
+        self.assertIn('toolId: "vrc_manage_wardrobe"', source)
         self.assertIn("public static object HandleCommand(JObject @params)", source)
         for action in (
             "remove_outfit",
@@ -7490,10 +7727,10 @@ class DashboardServerTests(unittest.TestCase):
     def test_avatar_authoring_primitives_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
         source = (editor_dir / "UnityAvatarAuthoringCrud.cs").read_text(encoding="utf-8")
-        self.assertIn("[VRCForgeTool(", source)
-        self.assertIn('name: "vrc_ensure_expression_parameter"', source)
-        self.assertIn('name: "vrc_ensure_expression_menu_control"', source)
-        self.assertIn('name: "vrc_ensure_animator_state"', source)
+        self.assertIn("[VRCForgeCommand(", source)
+        self.assertIn('toolId: "vrc_ensure_expression_parameter"', source)
+        self.assertIn('toolId: "vrc_ensure_expression_menu_control"', source)
+        self.assertIn('toolId: "vrc_ensure_animator_state"', source)
         self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 3)
         # Generic primitives cover the scan-detectable int-exclusive wardrobe triangle.
         self.assertIn("VRCExpressionParameters.ValueType.Int", source)
@@ -7519,7 +7756,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
         write_targets = {item["name"] for item in payload["writeTargets"]}
@@ -7598,6 +7835,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params_by_tool["vrc_ensure_animator_state"]["layerName"], "Clothes")
         self.assertEqual(params_by_tool["vrc_ensure_expression_menu_control"]["menuPath"], "Wardrobe")
         self.assertTrue(all(call.args[2]["preview"] for call in mock_invoke.call_args_list))
+        self.assertTrue(
+            all(call.kwargs.get("execution_context") == {"lane": "app_preview"} for call in mock_invoke.call_args_list)
+        )
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -7645,6 +7885,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["outfitName"], "Hoodie")
         self.assertEqual(params["objectPaths"], ["Outfits/Hoodie"])
         self.assertTrue(params["preview"])
+        self.assertEqual(mock_invoke.call_args.kwargs.get("execution_context"), {"lane": "app_preview"})
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -7684,8 +7925,8 @@ class DashboardServerTests(unittest.TestCase):
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         source = (editor_dir / "WardrobeOutfitPartWriter.cs").read_text(encoding="utf-8")
         # Declares the int-gated part toggle write tool.
-        self.assertIn("[VRCForgeTool(", source)
-        self.assertIn('name: "vrc_add_outfit_part"', source)
+        self.assertIn("[VRCForgeCommand(", source)
+        self.assertIn('toolId: "vrc_add_outfit_part"', source)
         self.assertIn("public static object HandleCommand(JObject @params)", source)
         # Off -> On requires (int Equals N) AND (bool true); On -> Off fires on
         # (bool false) OR (int != N), so the toggle is inert unless outfit N is worn.
@@ -7711,8 +7952,8 @@ class DashboardServerTests(unittest.TestCase):
     def test_ma_component_writer_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"
         source = (editor_dir / "MAComponentWriter.cs").read_text(encoding="utf-8")
-        self.assertIn("[VRCForgeTool(", source)
-        self.assertIn('name: "vrc_add_modular_avatar_component"', source)
+        self.assertIn("[VRCForgeCommand(", source)
+        self.assertIn('toolId: "vrc_add_modular_avatar_component"', source)
         self.assertIn("public static object HandleCommand(JObject @params)", source)
         # Reflection-only MA access: no hard compile-time dependency on the package.
         self.assertIn("nadena.dev.modular_avatar.core.", source)
@@ -7745,7 +7986,7 @@ class DashboardServerTests(unittest.TestCase):
         )
         # The paired inspector is read-only and reports exact component and
         # AvatarObjectReference state for post-apply/readback evidence.
-        self.assertIn('name: "vrc_inspect_modular_avatar_component"', source)
+        self.assertIn('toolId: "vrc_inspect_modular_avatar_component"', source)
         self.assertIn("HandleInspectCommand", source)
         self.assertIn("present = components.Length > 0", source)
         self.assertIn("count = components.Length", source)
@@ -7767,7 +8008,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
         write_targets = {item["name"] for item in payload["writeTargets"]}
@@ -7819,6 +8060,34 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["value"], 2)
         self.assertEqual(params["objectPaths"], ["Outfits/Hoodie/Hat"])
         self.assertTrue(params["preview"])
+        self.assertEqual(mock_invoke.call_args.kwargs.get("execution_context"), {"lane": "app_preview"})
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_modular_avatar_component_preview_uses_app_preview_lane(
+        self,
+        mock_load_settings,
+        mock_invoke,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "preview": True}},
+        )
+
+        result = dashboard_server.preview_add_modular_avatar_component_sync(
+            {
+                "avatarPath": "Scene/HeroAvatar",
+                "gameObjectPath": "Scene/HeroAvatar/Outfit",
+                "componentType": "MergeArmature",
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(mock_invoke.call_args.args[1], "vrc_add_modular_avatar_component")
+        self.assertEqual(mock_invoke.call_args.kwargs.get("execution_context"), {"lane": "app_preview"})
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -7973,7 +8242,7 @@ class DashboardServerTests(unittest.TestCase):
             "vrc_manage_expression_menu",
             "vrc_manage_fx_animator",
         ):
-            self.assertIn(f'name: "{tool_name}"', source)
+            self.assertIn(f'toolId: "{tool_name}"', source)
         self.assertIn("Undo.RegisterCompleteObjectUndo", source)
         self.assertIn("AnimationUtility.SetEditorCurve", source)
         self.assertIn("VRCAvatarDescriptor", source)
@@ -7987,7 +8256,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
         write_targets = {item["name"] for item in payload["writeTargets"]}
@@ -8043,9 +8312,54 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(tool_name, expected_tool)
             if expected_tool != "vrc_read_avatar_descriptor":
                 self.assertTrue(forwarded["preview"])
+                self.assertEqual(
+                    mock_invoke.call_args.kwargs.get("execution_context"),
+                    {"lane": "app_preview"},
+                )
 
         _, _tool_name, curve_params = mock_invoke.call_args.args
         self.assertIn("action", curve_params)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_ensure_preview_wrappers_use_app_preview_lane(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "preview": True}},
+        )
+        calls = [
+            (
+                dashboard_server.ensure_expression_parameter_sync,
+                {"avatarPath": "Avatar", "parameterName": "Clothes"},
+                "vrc_ensure_expression_parameter",
+            ),
+            (
+                dashboard_server.ensure_expression_menu_control_sync,
+                {"avatarPath": "Avatar", "controlName": "Clothes"},
+                "vrc_ensure_expression_menu_control",
+            ),
+            (
+                dashboard_server.ensure_animator_state_sync,
+                {
+                    "avatarPath": "Avatar",
+                    "layerName": "FX",
+                    "stateName": "Clothes",
+                    "parameterName": "Clothes",
+                },
+                "vrc_ensure_animator_state",
+            ),
+        ]
+        for wrapper, params, tool_name in calls:
+            with self.subTest(tool_name=tool_name):
+                mock_invoke.reset_mock()
+                result = wrapper(params, preview=True)
+                self.assertTrue(result["ok"])
+                self.assertEqual(mock_invoke.call_args.args[1], tool_name)
+                self.assertTrue(mock_invoke.call_args.args[2]["preview"])
+                self.assertEqual(mock_invoke.call_args.kwargs.get("execution_context"), {"lane": "app_preview"})
 
     def test_manage_wardrobe_request_parses_actions_values_and_flags(self) -> None:
         request = dashboard_server.build_manage_wardrobe_request(
@@ -8093,6 +8407,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["action"], "remove_outfit")
         self.assertEqual(params["targetValue"], 3)
         self.assertTrue(params["preview"])
+        self.assertEqual(mock_invoke.call_args.kwargs.get("execution_context"), {"lane": "app_preview"})
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -8151,10 +8466,12 @@ class DashboardServerTests(unittest.TestCase):
 
             original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
             original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler
             original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler
             try:
                 dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
                 dashboard_server.AGENT_GATEWAY.register_write_handler(
                     "vrcforge_test_checkpoint_write",
                     "Test checkpoint write.",
@@ -8189,6 +8506,7 @@ class DashboardServerTests(unittest.TestCase):
             finally:
                 dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
                 dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = original_restore_prepare
                 dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = original_reload
 
     def test_archive_checkpoint_restores_non_git_unity_project(self) -> None:
@@ -8207,7 +8525,7 @@ class DashboardServerTests(unittest.TestCase):
             prepared: list[Path] = []
             reloaded: list[Path] = []
             gateway.checkpoint_prepare_handler = lambda path: prepared.append(path) or {"ok": True}
-            gateway.checkpoint_restore_handler = lambda path: reloaded.append(path) or {"ok": True}
+            gateway.checkpoint_restore_handler = lambda path, _prepare: reloaded.append(path) or {"ok": True}
 
             def write_handler(args: dict) -> dict:
                 project_root = Path(args["projectRoot"])
@@ -8251,12 +8569,128 @@ class DashboardServerTests(unittest.TestCase):
             self.assertFalse((project / "Assets" / "generated.txt").exists())
             self.assertFalse(bee_cache.exists())
             self.assertFalse(script_cache.exists())
-            self.assertFalse(package_cache.exists())
+            self.assertTrue(package_cache.is_dir())
+            self.assertEqual((package_cache / "stale-package").read_text(encoding="utf-8"), "stale")
             self.assertFalse(restored["unityCacheCleanup"]["skipped"])
             self.assertIn(str(bee_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
             self.assertIn(str(script_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
-            self.assertIn(str(package_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
+            self.assertNotIn(str(package_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
+            self.assertIn(str(package_cache.resolve()), restored["unityCacheCleanup"]["preserved"])
             self.assertEqual(reloaded, [project.resolve()])
+
+    def test_archive_restore_closes_unity_before_files_and_reloads_exact_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            existing = project / "Assets" / "existing.txt"
+            existing.write_text("before", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3", encoding="utf-8"
+            )
+
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            events: list[tuple[str, str]] = []
+            restore_context = {
+                "ok": True,
+                "phase": "prepare_restore",
+                "scenes": ["Assets/Avatar.unity", "Assets/Lighting.unity"],
+                "activeScenePath": "Assets/Lighting.unity",
+            }
+
+            def prepare_restore(_path: Path) -> dict[str, object]:
+                events.append(("prepare", existing.read_text(encoding="utf-8")))
+                return dict(restore_context)
+
+            def reload_restore(_path: Path, prepared: dict[str, object]) -> dict[str, object]:
+                self.assertEqual(prepared, restore_context)
+                events.append(("reload", existing.read_text(encoding="utf-8")))
+                return {"ok": True}
+
+            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_restore_prepare_handler = prepare_restore
+            gateway.checkpoint_restore_handler = reload_restore
+            def write_restore_transaction(_args: dict[str, object]) -> dict[str, object]:
+                existing.write_text("after", encoding="utf-8")
+                return {"ok": True}
+
+            gateway.register_write_handler(
+                "vrcforge_test_restore_transaction",
+                "Restore transaction ordering test.",
+                "high",
+                write_restore_transaction,
+            )
+            request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_test_restore_transaction",
+                    "arguments": {"projectRoot": str(project)},
+                }
+            )
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+            restored = gateway.restore_checkpoint(
+                {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
+            )
+
+            self.assertTrue(restored["ok"])
+            self.assertEqual(events, [("prepare", "after"), ("reload", "before")])
+            self.assertEqual(restored["unityRestorePrepare"], restore_context)
+
+    def test_archive_restore_prepare_failure_leaves_project_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            existing = project / "Assets" / "existing.txt"
+            existing.write_text("before", encoding="utf-8")
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3", encoding="utf-8"
+            )
+
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_restore_prepare_handler = lambda _path: {
+                "ok": False,
+                "error": "Unity scene close failed.",
+            }
+            gateway.checkpoint_restore_handler = lambda _path, _prepare: self.fail(
+                "Reload must not run when restore preparation fails."
+            )
+            def write_restore_prepare_failure(_args: dict[str, object]) -> dict[str, object]:
+                existing.write_text("after", encoding="utf-8")
+                return {"ok": True}
+
+            gateway.register_write_handler(
+                "vrcforge_test_restore_prepare_failure",
+                "Restore prepare failure test.",
+                "high",
+                write_restore_prepare_failure,
+            )
+            request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_test_restore_prepare_failure",
+                    "arguments": {"projectRoot": str(project)},
+                }
+            )
+            approval_id = request["approval"]["id"]
+            gateway.approve(approval_id)
+            applied = gateway.apply_approved({"approval_id": approval_id})
+
+            restored = gateway.restore_checkpoint(
+                {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
+            )
+
+            self.assertFalse(restored["ok"])
+            self.assertEqual(restored["status"], "restore_prepare_failed")
+            self.assertEqual(existing.read_text(encoding="utf-8"), "after")
 
     def test_archive_checkpoint_rejects_mutable_archive_path_outside_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8371,7 +8805,7 @@ class DashboardServerTests(unittest.TestCase):
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-            gateway.checkpoint_restore_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_restore_handler = lambda _path, _prepare: {"ok": True}
 
             def write_handler(args: dict) -> dict:
                 project_root = Path(args["projectRoot"])
@@ -8429,7 +8863,9 @@ class DashboardServerTests(unittest.TestCase):
             self.assertFalse(generated.exists())
             restored_manifest = json.loads(manifest.read_text(encoding="utf-8"))
             self.assertIn("com.vrcfury.vrcfury", restored_manifest["dependencies"])
-            self.assertFalse((project / "Library" / "PackageCache").exists())
+            package_cache = project / "Library" / "PackageCache"
+            self.assertTrue(package_cache.is_dir())
+            self.assertEqual((package_cache / "com.vrcfury.vrcfury@1.1334.0").read_text(encoding="utf-8"), "stale")
             self.assertFalse((project / "Library" / "Bee").exists())
             self.assertFalse((project / "Library" / "ScriptAssemblies").exists())
             restore_audit = restored["rollbackCoverageAudit"]
@@ -8656,7 +9092,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(checkpoint["blocking"])
         self.assertEqual(checkpoint["status"], "failed")
 
-    def test_checkpoint_archive_restore_succeeds_when_unity_reload_fails(self) -> None:
+    def test_checkpoint_archive_restore_fails_closed_when_unity_reload_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project = root / "UnityProject"
@@ -8670,7 +9106,7 @@ class DashboardServerTests(unittest.TestCase):
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-            gateway.checkpoint_restore_handler = lambda _path: {"ok": False, "error": "Unity bridge unavailable"}
+            gateway.checkpoint_restore_handler = lambda _path, _prepare: {"ok": False, "error": "Unity bridge unavailable"}
 
             def write_handler(args: dict) -> dict:
                 project_root = Path(args["projectRoot"])
@@ -8690,11 +9126,198 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(applied["ok"])
             restored = gateway.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
 
-            self.assertTrue(restored["ok"])
-            self.assertEqual(restored["status"], "restored_with_unity_reload_warning")
-            self.assertIn("Unity bridge unavailable", restored["unityReloadWarning"])
+            self.assertFalse(restored["ok"])
+            self.assertTrue(restored["restored"])
+            self.assertEqual(restored["status"], "restored_unity_reload_failed")
+            self.assertTrue(restored["checkpointRecoveryRequired"])
+            self.assertIn("Unity bridge unavailable", restored["error"])
             self.assertEqual(existing.read_text(encoding="utf-8"), "before")
             self.assertFalse((project / "Assets" / "generated.txt").exists())
+
+    def test_checkpoint_reload_transport_close_waits_for_new_core_without_resending(self) -> None:
+        project = Path("C:/Unity/ReloadProject")
+        settings = SimpleNamespace(
+            unity_mcp_timeout_seconds=180,
+            unity_mcp_retries=3,
+            unity_mcp_retry_backoff_seconds=2,
+        )
+        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        ready = {
+            "ok": True,
+            "projectPath": str(project),
+            "coreReady": True,
+            "domainReloadObserved": True,
+        }
+        connection_closed = dashboard_server.UnityMcpError("reload transport failed")
+        connection_closed.__cause__ = dashboard_server.UnityMcpCoreError(
+            dashboard_server.CHECKPOINT_RELOAD_CONNECTION_CLOSED_ERROR
+        )
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=settings),
+            patch("dashboard_server.load_unity_mcp_core_connection", return_value=previous),
+            patch(
+                "dashboard_server.invoke_unity_mcp",
+                side_effect=connection_closed,
+            ) as invoke,
+            patch("dashboard_server._wait_for_reloaded_unity_core", return_value=ready) as wait_ready,
+        ):
+            result = dashboard_server.reload_unity_checkpoint_sync(project)
+
+        self.assertEqual(result, ready)
+        self.assertEqual(settings.unity_mcp_retries, 1)
+        self.assertEqual(
+            settings.unity_mcp_timeout_seconds,
+            dashboard_server.CHECKPOINT_RELOAD_CALL_TIMEOUT_SECONDS,
+        )
+        invoke.assert_called_once()
+        wait_ready.assert_called_once_with(project, previous)
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    @patch("dashboard_server.load_unity_mcp_core_connection", side_effect=dashboard_server.UnityMcpCoreError("offline"))
+    def test_checkpoint_reload_forwards_exact_prepared_scenes_and_active_scene(
+        self,
+        _load_connection,
+        load_settings,
+        invoke,
+    ) -> None:
+        load_settings.return_value = SimpleNamespace(
+            unity_mcp_timeout_seconds=30,
+            unity_mcp_retries=3,
+        )
+        invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            payload={"structuredContent": {"success": True, "data": {"ok": True}}},
+        )
+        project = Path("C:/Unity/ReloadProject")
+        prepared = {
+            "ok": True,
+            "scenes": ["Assets/Avatar.unity", "Assets/Lighting.unity"],
+            "activeScenePath": "Assets/Lighting.unity",
+        }
+
+        result = dashboard_server.reload_unity_checkpoint_sync(project, prepared)
+
+        self.assertTrue(result["ok"])
+        _settings, tool_name, arguments = invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_reload_after_checkpoint_restore")
+        self.assertEqual(arguments["scenePaths"], prepared["scenes"])
+        self.assertEqual(arguments["activeScenePath"], prepared["activeScenePath"])
+        self.assertEqual(invoke.call_args.kwargs["execution_context"], {"lane": "app_safety_control"})
+
+    def test_checkpoint_reload_transport_close_times_out_without_resending(self) -> None:
+        project = Path("C:/Unity/ReloadProject")
+        settings = SimpleNamespace(
+            unity_mcp_timeout_seconds=30,
+            unity_mcp_retries=3,
+            unity_mcp_retry_backoff_seconds=2,
+        )
+        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        not_ready = {"ok": False, "error": "Core readiness timed out."}
+        connection_closed = dashboard_server.UnityMcpError("reload transport failed")
+        connection_closed.__cause__ = dashboard_server.UnityMcpCoreError(
+            dashboard_server.CHECKPOINT_RELOAD_CONNECTION_CLOSED_ERROR
+        )
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=settings),
+            patch("dashboard_server.load_unity_mcp_core_connection", return_value=previous),
+            patch(
+                "dashboard_server.invoke_unity_mcp",
+                side_effect=connection_closed,
+            ) as invoke,
+            patch("dashboard_server._wait_for_reloaded_unity_core", return_value=not_ready),
+        ):
+            result = dashboard_server.reload_unity_checkpoint_sync(project)
+
+        self.assertEqual(result, not_ready)
+        invoke.assert_called_once()
+
+    def test_checkpoint_reload_non_close_failure_never_waits_for_new_core(self) -> None:
+        project = Path("C:/Unity/ReloadProject")
+        settings = SimpleNamespace(
+            unity_mcp_timeout_seconds=30,
+            unity_mcp_retries=3,
+            unity_mcp_retry_backoff_seconds=2,
+        )
+        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        protocol_failure = dashboard_server.UnityMcpError("reload transport failed")
+        protocol_failure.__cause__ = dashboard_server.UnityMcpCoreError(
+            "Unity MCP Core returned an invalid transport response."
+        )
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=settings),
+            patch("dashboard_server.load_unity_mcp_core_connection", return_value=previous),
+            patch("dashboard_server.invoke_unity_mcp", side_effect=protocol_failure) as invoke,
+            patch("dashboard_server._wait_for_reloaded_unity_core") as wait_ready,
+        ):
+            result = dashboard_server.reload_unity_checkpoint_sync(project)
+
+        self.assertFalse(result["ok"])
+        self.assertIn("did not confirm", result["error"])
+        invoke.assert_called_once()
+        wait_ready.assert_not_called()
+
+    def test_checkpoint_reload_readiness_requires_same_process_new_instance_and_full_tools(self) -> None:
+        project = Path("C:/Unity/ReloadProject")
+        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        unchanged = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        replaced = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="new")
+        core_client = Mock()
+        core_client.list_tools.return_value = [
+            {"name": name} for name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
+        ]
+        with (
+            patch(
+                "dashboard_server.load_unity_mcp_core_connection",
+                side_effect=[unchanged, replaced],
+            ),
+            patch("dashboard_server.UnityMcpCoreClient", return_value=core_client) as client_type,
+            patch("dashboard_server.time.monotonic", side_effect=[0.0, 0.0, 0.1, 0.2, 0.3]),
+            patch("dashboard_server.time.sleep"),
+        ):
+            result = dashboard_server._wait_for_reloaded_unity_core(
+                project,
+                previous,
+                timeout_seconds=1.0,
+                poll_seconds=0.01,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["domainReloadObserved"])
+        client_type.assert_called_once_with(project, timeout_seconds=1.0)
+        core_client.list_tools.assert_called_once_with(exposure_layer="execution")
+
+    def test_checkpoint_reload_readiness_rejects_wrong_process_and_incomplete_tools(self) -> None:
+        project = Path("C:/Unity/ReloadProject")
+        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="old")
+        wrong_process = SimpleNamespace(process_id=88, project_hash="project-hash", instance_id="new-a")
+        incomplete = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="new-b")
+        core_client = Mock()
+        core_client.list_tools.return_value = [{"name": "vrc_get_compile_errors"}]
+        with (
+            patch(
+                "dashboard_server.load_unity_mcp_core_connection",
+                side_effect=[wrong_process, incomplete],
+            ),
+            patch("dashboard_server.UnityMcpCoreClient", return_value=core_client),
+            patch(
+                "dashboard_server.time.monotonic",
+                side_effect=[0.0, 0.0, 0.1, 0.2, 0.3, 0.4, 1.1],
+            ),
+            patch("dashboard_server.time.sleep"),
+        ):
+            result = dashboard_server._wait_for_reloaded_unity_core(
+                project,
+                previous,
+                timeout_seconds=1.0,
+                poll_seconds=0.01,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("did not become ready", result["error"])
+        core_client.list_tools.assert_called_once_with(exposure_layer="execution")
 
     def test_checkpoint_tools_registered_with_restore_as_write_target(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -8703,7 +9326,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
         write_targets = {item["name"] for item in payload["writeTargets"]}
@@ -8720,7 +9343,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            manifest = client.get("/api/agent/manifest", headers=headers).json()
+            manifest = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
             registry = client.get("/api/app/tools/registry").json()
 
         targets = {item["name"]: item for item in manifest["writeTargets"]}
@@ -8762,11 +9385,22 @@ class DashboardServerTests(unittest.TestCase):
             / "Editor"
             / "CheckpointRecoveryTool.cs"
         ).read_text(encoding="utf-8")
-        self.assertIn('name: "vrc_prepare_checkpoint"', source)
-        self.assertIn('name: "vrc_reload_after_checkpoint_restore"', source)
+        self.assertIn('toolId: "vrc_prepare_checkpoint"', source)
+        self.assertIn('toolId: "vrc_reload_after_checkpoint_restore"', source)
         self.assertNotIn("EditorSceneManager.SaveOpenScenes", source)
         self.assertIn('"unsaved_open_scene"', source)
         self.assertIn('"scene_outside_project_assets"', source)
+        self.assertIn('private const string NdmfPreviewSceneGuid = "8cbd3f19cef3477439841053ced0661b";', source)
+        self.assertIn("scene.isDirty || !scene.isSubScene", source)
+        self.assertIn("scene == SceneManager.GetActiveScene()", source)
+        self.assertIn('string.Equals(scene.name, "___NDMF Preview___", StringComparison.Ordinal)', source)
+        self.assertIn("AssetDatabase.GUIDToAssetPath(NdmfPreviewSceneGuid)", source)
+        self.assertIn("ignoredTransientScenes", source)
+        self.assertIn("!CheckpointPrepareTool.IsKnownTransientPreviewScene(scene)", source)
+        self.assertIn("activeScenePath", source)
+        self.assertIn("closedScenes", source)
+        self.assertIn("reopenErrors", source)
+        self.assertIn("recoveryRequired = true", source)
         self.assertIn("EditorSceneManager.SaveScene(scene)", source)
         self.assertLess(
             source.index('"unsaved_open_scene"'),
@@ -8813,6 +9447,31 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("packageResolve", source)
         self.assertIn('status = "started"', source)
 
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_setup_outfit_preview_uses_strict_app_preview_lane(
+        self,
+        mock_load_settings,
+        mock_invoke,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"ok": True, "confirmed": False, "outfitPath": "Avatar/Outfit"}},
+        )
+
+        result = dashboard_server.preview_setup_outfit_sync(
+            {"avatarPath": "Avatar", "outfitPath": "Avatar/Outfit", "saveScene": False}
+        )
+
+        self.assertTrue(result["ok"])
+        _settings, tool_name, arguments = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_setup_outfit")
+        self.assertFalse(arguments["confirmSetup"])
+        self.assertEqual(mock_invoke.call_args.kwargs.get("execution_context"), {"lane": "app_preview"})
+
     def test_setup_outfit_uses_modular_avatar_public_api(self) -> None:
         source = (
             Path(__file__).resolve().parents[1]
@@ -8839,6 +9498,17 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("SaveTargetScene(outfit.gameObject.scene)", source)
         self.assertIn("EditorSceneManager.SaveScene(scene)", source)
         self.assertNotIn("EditorSceneManager.SaveOpenScenes", source)
+
+    def test_setup_outfit_preview_requires_humanoid_avatar_hips(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Editor"
+            / "SetupOutfitTool.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("avatarHasHumanoidHips", source)
+        self.assertIn('["ready"] = hasSkinnedMesh && avatarHasHumanoidHips', source)
 
     def test_setup_outfit_write_uses_job_polling(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "dashboard_server.py").read_text(encoding="utf-8")
@@ -9026,6 +9696,7 @@ class DashboardServerTests(unittest.TestCase):
 
             original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
             original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler
             original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler
 
             def write_handler(args: dict) -> dict:
@@ -9034,7 +9705,8 @@ class DashboardServerTests(unittest.TestCase):
 
             try:
                 dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
                 dashboard_server.AGENT_GATEWAY.register_write_handler(
                     "vrcforge_test_checkpoint_write",
                     "Test checkpoint write.",
@@ -9070,6 +9742,7 @@ class DashboardServerTests(unittest.TestCase):
             finally:
                 dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
                 dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = original_restore_prepare
                 dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = original_reload
 
     def test_adjustment_checkpoint_timeline_supports_crud_select_apply_and_overwrite(self) -> None:
@@ -9083,10 +9756,12 @@ class DashboardServerTests(unittest.TestCase):
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
 
             original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler
             original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler
             try:
                 dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
                 with TestClient(dashboard_server.app) as client:
                     created = client.post(
                         "/api/app/adjustment-checkpoints",
@@ -9146,6 +9821,7 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(listed_with_deleted["count"], 1)
             finally:
                 dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = original_restore_prepare
                 dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = original_reload
 
     def test_face_shader_checkpoint_records_auto_adjustment_timeline_entries(self) -> None:
@@ -9189,7 +9865,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
         write_targets = {item["name"] for item in payload["writeTargets"]}
@@ -9470,8 +10146,8 @@ class DashboardServerTests(unittest.TestCase):
             "vrc_remove_component",
             "vrc_set_property",
         ):
-            self.assertIn(f'name: "{tool_name}"', source)
-        self.assertIn("[VRCForgeTool(", source)
+            self.assertIn(f'toolId: "{tool_name}"', source)
+        self.assertIn("[VRCForgeCommand(", source)
         self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 4)
         # Write tools must register Undo entries so the checkpoint timeline can roll them back.
         self.assertIn("Undo.AddComponent", source)
@@ -9485,7 +10161,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
         write_targets = {item["name"] for item in payload["writeTargets"]}
@@ -9619,8 +10295,8 @@ class DashboardServerTests(unittest.TestCase):
             "vrc_delete_gameobject",
             "vrc_set_gameobject_active",
         ):
-            self.assertIn(f'name: "{tool_name}"', source)
-        self.assertIn("[VRCForgeTool(", source)
+            self.assertIn(f'toolId: "{tool_name}"', source)
+        self.assertIn("[VRCForgeCommand(", source)
         self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 6)
         # Reuses the shared reflection core rather than hard-referencing MA/VRC SDK assemblies.
         self.assertIn("ComponentCrudCore.ResolveGameObject", source)
@@ -9629,6 +10305,26 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Undo.SetTransformParent", source)
         self.assertIn("Undo.DestroyObjectImmediate", source)
         self.assertIn("Undo.RecordObject", source)
+        create_source = source[source.index("public static class CreateGameObjectTool") : source.index("public static class RenameGameObjectTool")]
+        self.assertIn("EditorSceneManager.SaveScene(targetScene)", create_source)
+        self.assertIn("GlobalObjectId.GetGlobalObjectIdSlow(readback)", create_source)
+        self.assertIn("sceneSaved = true", create_source)
+        self.assertIn("persistedReadback = true", create_source)
+        self.assertIn("SceneObjectCopyCore.ResolveSavedScene", create_source)
+        self.assertIn("SceneObjectCopyCore.ResolveUniqueGameObject", create_source)
+        self.assertIn("AssetPrefabCore.CountHierarchyPath", create_source)
+        self.assertIn("parent.scene.handle != targetScene.handle", create_source)
+        self.assertIn("UnityEngine.Object.DestroyImmediate(created)", create_source)
+        self.assertIn("EditorSceneManager.SaveScene(beforeScene.Scene)", create_source)
+        self.assertIn("cleanup.FileDigest == beforeScene.FileDigest", create_source)
+        self.assertIn("cleanup.FileIdentity == beforeScene.FileIdentity", create_source)
+        self.assertIn("AssetPrefabCore.CountHierarchyPath(createdPath, cleanup.Handle) == 0", create_source)
+        self.assertNotIn("Undo.RevertAllDownToGroup", create_source)
+        self.assertIn("checkpointRecoveryRequired = !restored", create_source)
+        self.assertLess(
+            create_source.index('ResolveSavedScene(targetScene.path, "target scene")'),
+            create_source.index("created = new GameObject(name)"),
+        )
         # read payload must avoid auto-unwrap keys (data/result/payload/value).
         self.assertNotIn("value =", source)
 
@@ -9639,7 +10335,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
         write_targets = {item["name"] for item in payload["writeTargets"]}
@@ -9801,8 +10497,8 @@ class DashboardServerTests(unittest.TestCase):
             "vrc_instantiate_prefab",
             "vrc_unpack_prefab",
         ):
-            self.assertIn(f'name: "{tool_name}"', source)
-        self.assertIn("[VRCForgeTool(", source)
+            self.assertIn(f'toolId: "{tool_name}"', source)
+        self.assertIn("[VRCForgeCommand(", source)
         self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 4)
         # Reuses the shared reflection core rather than hard-referencing MA/VRC SDK assemblies.
         self.assertIn("ComponentCrudCore.ResolveGameObject", source)
@@ -9822,7 +10518,7 @@ class DashboardServerTests(unittest.TestCase):
         headers = {"Authorization": f"Bearer {config.token}"}
 
         with TestClient(dashboard_server.app) as client:
-            payload = client.get("/api/agent/manifest", headers=headers).json()
+            payload = client.get("/api/agent/manifest?exposure_layer=execution", headers=headers).json()
 
         tool_names = {tool["name"] for tool in payload["tools"]}
         write_targets = {item["name"] for item in payload["writeTargets"]}
@@ -9948,9 +10644,9 @@ class DashboardServerTests(unittest.TestCase):
         combined = "\n".join(path.read_text(encoding="utf-8") for path in editor_dir.glob("*.cs"))
 
         self.assertIn('MenuItem("VRCForge/MCP/Start Bridge Now")', combined)
-        self.assertIn('private const string MenuPath = "VRCForge/Uninstall VRCForge Unity Plugin"', combined)
+        self.assertIn('[MenuItem("VRCForge/Uninstall VRCForge...")]', combined)
         self.assertIn("Assets/VRCForge/blendshapes_export.json", combined)
-        self.assertIn('".vrcforge", "backups"', combined)
+        self.assertIn('DefaultBackupRoot = "Library/VRCForge/Backups"', combined)
         old_brand = "VRC" + "AutoRig"
         self.assertNotIn(f'MenuItem("{old_brand}', combined)
         self.assertNotIn(f"[{old_brand}", combined)
@@ -9963,9 +10659,10 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             project = Path(temp_dir)
             for relative in (
-                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
                 "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
                 "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
             ):
                 marker = project / relative
@@ -10339,7 +11036,7 @@ class DashboardServerTests(unittest.TestCase):
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
             core = project / "Assets" / "VRCForge" / "Core" / "MCP"
             core.mkdir(parents=True)
-            for name in ("VRCForgeToolAttribute.cs", "VRCForgeToolRegistry.cs", "VRCForgeResponse.cs"):
+            for name in ("VRCForgeCommandAttribute.cs", "VRCForgeInputAttribute.cs", "VRCForgeToolRegistry.cs", "VRCForgeToolResult.cs"):
                 (core / name).write_text("// core\n", encoding="utf-8")
             (editor / "MCP").mkdir()
             (editor / "MCP" / "VRCForgeMcpCoreServer.cs").write_text("// core server\n", encoding="utf-8")
@@ -10805,6 +11502,7 @@ namespace VRCForge.Editor
         self.assertIn("smoke_packaged_backend.py", build_script)
         self.assertLess(build_script.index("smoke_packaged_backend.py"), build_script.index("$offlineInstaller ="))
         self.assertIn('schema = "vrcforge.packaged_backend_smoke.v2"', build_script)
+        self.assertNotIn("CoplayDev-Unity-MCP-LICENSE.txt", build_script)
         self.assertNotIn("CoplayDev-Unity-MCP-DISTRIBUTION-NOTES.txt", build_script)
         self.assertIn("Install-UvRuntime", build_script)
         self.assertIn("uv-x86_64-pc-windows-msvc.zip", build_script)
@@ -10813,7 +11511,7 @@ namespace VRCForge.Editor
         self.assertIn("start_dashboard.cmd", build_script)
         self.assertIn("VRCForge-NOTICE.txt", build_script)
         self.assertIn("build_unitypackage.ps1", build_script)
-        self.assertIn("PayloadDownloadUrl is required", build_script)
+        self.assertIn("PayloadDownloadUrl must exactly match the official version-bound release asset URL", build_script)
         self.assertIn("win-x64", build_script)
         self.assertIn("-p:DebugType=none", build_script)
         self.assertIn("-p:DebugSymbols=false", build_script)
@@ -10843,17 +11541,19 @@ namespace VRCForge.Editor
         self.assertIn("<DebugSymbols>false</DebugSymbols>", launcher_project)
         self.assertIn("VRCForge_Offline_Installer_x64.exe", offline_nsis)
         self.assertIn("VRCForge_Web_Installer_x64.exe", web_nsis)
-        self.assertIn("$PROGRAMFILES64\\VRCForge", offline_nsis)
-        self.assertIn("$LOCALAPPDATA\\VRCForge\\agentic-app\\config", offline_nsis)
-        self.assertIn("$LOCALAPPDATA\\VRCForge\\agentic-app\\config", web_nsis)
+        for source in (offline_nsis, web_nsis):
+            self.assertIn('!define INSTALL_LEAF "VRCForge"', source)
+            self.assertIn('!define USER_DATA_RELATIVE "VRCForge\\agentic-app"', source)
+            self.assertIn('StrCpy $UserDataRoot "$LOCALAPPDATA\\${USER_DATA_RELATIVE}"', source)
+            self.assertIn('CreateDirectory "$UserDataRoot\\config"', source)
         self.assertIn("nsDialogs.nsh", offline_nsis)
         self.assertIn("nsDialogs.nsh", web_nsis)
         self.assertIn("MUI_UNGETLANGUAGE", offline_nsis)
         self.assertIn("MUI_UNGETLANGUAGE", web_nsis)
         self.assertIn("UninstallShortcutName", offline_nsis)
         self.assertIn("UninstallShortcutName", web_nsis)
-        self.assertIn('CreateShortCut "$SMPROGRAMS\\VRCForge\\$(UninstallShortcutName)"', offline_nsis)
-        self.assertIn('CreateShortCut "$SMPROGRAMS\\VRCForge\\$(UninstallShortcutName)"', web_nsis)
+        self.assertIn('CreateShortCut "$SMPROGRAMS\\${START_MENU_GROUP}\\$(UninstallShortcutName)"', offline_nsis)
+        self.assertIn('CreateShortCut "$SMPROGRAMS\\${START_MENU_GROUP}\\$(UninstallShortcutName)"', web_nsis)
         for shortcut_name in (
             "Uninstall VRCForge.lnk",
             "卸载 VRCForge.lnk",
@@ -10867,10 +11567,28 @@ namespace VRCForge.Editor
         self.assertIn("--cleanup-user-data", offline_nsis)
         self.assertIn("--cleanup-user-data", web_nsis)
         self.assertNotIn("powershell -NoProfile", offline_nsis)
-        self.assertNotIn("powershell -NoProfile", web_nsis)
         self.assertNotIn("NSISdl::download", web_nsis)
-        self.assertIn("certutil -urlcache -f", web_nsis)
-        self.assertIn("certutil -hashfile", web_nsis)
+        self.assertNotIn("taskkill", offline_nsis)
+        self.assertNotIn("taskkill", web_nsis)
+        for vulnerable_command in ("cmd /D /C", "certutil", "findstr", "tar.exe"):
+            self.assertNotIn(vulnerable_command, web_nsis)
+        self.assertIn("$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe", web_nsis)
+        self.assertIn("$WINDIR\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe", web_nsis)
+        self.assertIn("$WINDIR\\Sysnative\\WindowsPowerShell\\v1.0\\powershell.exe", offline_nsis)
+        self.assertIn("-WindowStyle Hidden", web_nsis)
+        self.assertIn("-WindowStyle Hidden", offline_nsis)
+        self.assertIn('InstallDir "$PROGRAMFILES64\\${INSTALL_LEAF}"', offline_nsis)
+        self.assertIn('InstallDir "$PROGRAMFILES64\\${INSTALL_LEAF}"', web_nsis)
+        self.assertNotIn('StrCpy $INSTDIR "$PROGRAMFILES64\\VRCForge"', offline_nsis)
+        self.assertNotIn('StrCpy $INSTDIR "$PROGRAMFILES64\\VRCForge"', web_nsis)
+        self.assertIn("VRCForge_WebPayload.ps1", web_nsis)
+        self.assertIn("VRCForge_WebPayload.ps1", offline_nsis)
+        self.assertIn("-Action ValidateDestination", web_nsis)
+        self.assertIn("-Action ValidateDestination", offline_nsis)
+        self.assertIn('-ProgramFilesRoot "$PROGRAMFILES64"', web_nsis)
+        self.assertIn('-ProgramFilesRoot "$PROGRAMFILES64"', offline_nsis)
+        self.assertIn("-Action Prepare", web_nsis)
+        self.assertIn("-Action Extract", web_nsis)
         self.assertIn("Pop $0", offline_nsis)
         self.assertIn("Pop $0", web_nsis)
         self.assertIn("Call un.ClearUserDataIfRequested", offline_nsis)
@@ -10930,11 +11648,8 @@ namespace VRCForge.Editor
         self.assertIn('"--draft"', publish_script)
         self.assertIn("Refusing remote asset mutation", publish_script)
         self.assertIn("-ExpectedDraft $true", publish_script)
-        self.assertIn("$draftReleaseId = [long]$draftRelease.id", publish_script)
-        self.assertIn(
-            '& gh api --method PATCH "repos/{owner}/{repo}/releases/$draftReleaseId" -F draft=false',
-            publish_script,
-        )
+        self.assertIn("$draftReleaseId = [long]$draftReleaseByTag.id", publish_script)
+        self.assertNotIn("--method PATCH", publish_script)
         self.assertIn("Get-GitHubReleaseSnapshot -ReleaseId $draftReleaseId", publish_script)
         self.assertIn("-ExpectedReleaseId $draftReleaseId", publish_script)
         self.assertIn("-ExpectedName $releaseTitle", publish_script)
@@ -10948,9 +11663,9 @@ namespace VRCForge.Editor
             publish_script,
         )
         self.assertIn("[string]$_.name -ceq $artifactName", publish_script)
-        self.assertIn("[long]$publishedTagRelease.id -ne $draftReleaseId", publish_script)
+        self.assertIn("[long]$draftTagRelease.id -ne $draftReleaseId", publish_script)
         self.assertNotIn("gh release edit", publish_script)
-        self.assertIn("-ExpectedDraft $false", publish_script)
+        self.assertNotIn("-ExpectedDraft $false", publish_script)
         self.assertLess(
             publish_script.index("Copy-Item -LiteralPath $sourceArtifact -Destination $stagedArtifact"),
             publish_script.index("Get-StreamSha256 -Stream $guardStream"),
@@ -10960,20 +11675,8 @@ namespace VRCForge.Editor
             publish_script.index("& gh @createArgs"),
         )
         self.assertLess(
+            publish_script.index("Get-GitHubReleaseSnapshot -ReleaseId $draftReleaseId"),
             publish_script.index("-ExpectedDraft $true"),
-            publish_script.index(
-                '& gh api --method PATCH "repos/{owner}/{repo}/releases/$draftReleaseId" -F draft=false'
-            ),
-        )
-        self.assertLess(
-            publish_script.index(
-                '& gh api --method PATCH "repos/{owner}/{repo}/releases/$draftReleaseId" -F draft=false'
-            ),
-            publish_script.index("-ExpectedDraft $false"),
-        )
-        self.assertLess(
-            publish_script.index("-ExpectedDraft $false"),
-            publish_script.index("[long]$publishedTagRelease.id -ne $draftReleaseId"),
         )
         self.assertLess(
             publish_script.index("$guardStream.Dispose()"),
@@ -11020,6 +11723,7 @@ namespace VRCForge.Editor
         self.assertIn("MIT License", (uv_root / "LICENSE-MIT").read_text(encoding="utf-8"))
         self.assertIn("Apache License", (uv_root / "LICENSE-APACHE").read_text(encoding="utf-8"))
         self.assertIn("uv Windows runtime", manifest_text)
+        self.assertNotIn("CoplayDev", manifest_text)
         self.assertIn("requiredLicenseFiles", manifest_text)
         self.assertIn("Assert-LicenseFile", general_gate)
         self.assertIn("VRCForge MCP2 Core is bundled", runtime_manager)
@@ -11184,6 +11888,35 @@ namespace VRCForge.Editor
         payload = dashboard_server.extract_tool_result_payload(result)
 
         self.assertEqual(payload, [0])
+
+    def test_extract_tool_result_payload_unwraps_mcp_2026_structured_content(self) -> None:
+        result = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            payload={
+                "resultType": "complete",
+                "structuredContent": {
+                    "success": True,
+                    "data": {
+                        "gameObjectPath": "Main Camera/Child",
+                        "sceneSaved": True,
+                        "persistedReadback": True,
+                    },
+                },
+            },
+        )
+
+        payload = dashboard_server.extract_tool_result_payload(result)
+
+        self.assertEqual(
+            payload,
+            {
+                "gameObjectPath": "Main Camera/Child",
+                "sceneSaved": True,
+                "persistedReadback": True,
+            },
+        )
 
     def test_checkpoint_result_preserves_nonrecoverable_unity_rejection(self) -> None:
         result = dashboard_server.McpResult(
@@ -11522,20 +12255,18 @@ namespace VRCForge.Editor
         self.assertEqual(create_request.call_args.args[0]["target_tool"], "vrcforge_apply_blendshapes")
         self.assertEqual(create_request.call_args.args[0]["arguments"]["adjustments"][0]["target_weight"], 42.0)
 
-    @patch("dashboard_server.capture_blendshape_visual_proof")
     @patch("dashboard_server.verify_live_blendshape_changes")
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
     @patch("dashboard_server.load_dashboard_export_payload")
     @patch("dashboard_server.create_blendshape_plan")
-    def test_pipeline_run_live_uses_direct_apply_and_returns_change_preview(
+    def test_pipeline_run_live_queues_approval_without_direct_apply(
         self,
         mock_create_blendshape_plan,
         mock_load_dashboard_export_payload,
         mock_load_settings,
         mock_invoke_unity_mcp,
         mock_verify_live_blendshape_changes,
-        mock_capture_blendshape_visual_proof,
     ) -> None:
         mock_load_settings.return_value = SimpleNamespace(
             llm_provider="gemini",
@@ -11590,16 +12321,6 @@ namespace VRCForge.Editor
                 "verificationStatus": "verified",
             }
         ]
-
-        def capture_proof_side_effect(*, stage, current_proof, **_kwargs):
-            proof = dict(current_proof or {})
-            proof[stage] = {
-                "imagePath": f"artifacts/dashboard/latest/blendshape_{stage}.png",
-                "imageUrl": f"/artifacts/latest/blendshape_{stage}.png",
-            }
-            return proof
-
-        mock_capture_blendshape_visual_proof.side_effect = capture_proof_side_effect
 
         with patch.object(
             dashboard_server.AGENT_GATEWAY,
@@ -12065,7 +12786,7 @@ namespace VRCForge.Editor
     def test_material_shader_tool_has_precondition_impact_and_exact_readback(self) -> None:
         source = Path("Assets/VRCForge/Editor/MaterialShaderTool.cs").read_text(encoding="utf-8-sig")
 
-        self.assertIn('name: "vrc_set_material_shader"', source)
+        self.assertIn('toolId: "vrc_set_material_shader"', source)
         self.assertIn('"vrcforge.material_shader_assignment.v1"', source)
         self.assertIn("ResolveShader(shaderName, shaderAssetPath)", source)
         self.assertIn("shaderAssetPath", source)
@@ -12452,6 +13173,61 @@ namespace VRCForge.Editor
         self.assertFalse(handler.requires_approved_execution_context)
         self.assertIs(handler.request_preparer, dashboard_server.prepare_vpm_package_install_request)
 
+    def test_safe_backup_is_approval_bound_to_one_canonical_core_call(self) -> None:
+        self.assertNotIn("vrcforge_create_safe_backup", dashboard_server.AGENT_GATEWAY._tools)  # noqa: SLF001 - manifest boundary.
+        self.assertIn("vrcforge_create_safe_backup", dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS)
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[  # noqa: SLF001 - registry contract.
+            "vrcforge_create_safe_backup"
+        ]
+        self.assertTrue(handler.requires_approved_execution_context)
+        self.assertIs(handler.checkpoint_prepare_handler, dashboard_server.prepare_authoritative_unity_checkpoint_sync)
+        self.assertIs(handler.approved_execution_plan_builder, dashboard_server.build_safe_backup_execution_plan)
+
+        arguments = {
+            "avatarPath": "Scene/HeroAvatar",
+            "assetPaths": ["Assets/Hero.prefab"],
+            "includeOpenScenes": False,
+        }
+        expected_call = (
+            "vrc_create_safe_backup",
+            {
+                "avatarPath": "Scene/HeroAvatar",
+                "assetPaths": ["Assets/Hero.prefab"],
+                "includeOpenScenes": False,
+                "refreshAssets": False,
+            },
+        )
+        self.assertEqual(dashboard_server.build_safe_backup_execution_plan(arguments), [expected_call])
+        self.assertEqual(dashboard_server.build_safe_backup_core_request(arguments), expected_call[1])
+
+    def test_safe_backup_rejects_caller_selected_backup_root(self) -> None:
+        for key in ("backupRoot", "backup_root"):
+            with self.assertRaisesRegex(ValueError, "Custom backupRoot"):
+                dashboard_server.build_safe_backup_core_request({key: "Assets/UnsafeBackups"})
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_safe_backup_restore_preview_uses_app_preview_lane(
+        self,
+        mock_load_settings,
+        mock_invoke_unity_mcp,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke_unity_mcp.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"confirmed": False, "planned": []}},
+        )
+
+        result = dashboard_server.preview_safe_backup_restore_sync({"backupId": "vrcforge_backup_test"})
+
+        self.assertTrue(result["ok"])
+        _settings, tool_name, arguments = mock_invoke_unity_mcp.call_args.args
+        self.assertEqual(tool_name, "vrc_restore_safe_backup")
+        self.assertFalse(arguments["confirmRestore"])
+        self.assertEqual(mock_invoke_unity_mcp.call_args.kwargs["execution_context"], {"lane": "app_preview"})
+
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
     def test_clothes_scan_reads_avatar_menu_and_parameters(
@@ -12516,33 +13292,18 @@ namespace VRCForge.Editor
         self.assertEqual(tool_name, "vrc_scan_avatar_parameters")
         self.assertEqual(params["outputPath"], "")
 
-    @patch("dashboard_server.invoke_unity_mcp")
-    @patch("dashboard_server.load_dashboard_settings")
-    def test_vision_capture_uses_direct_scene_view_tool(
-        self,
-        mock_load_settings,
-        mock_invoke_unity_mcp,
-    ) -> None:
-        mock_load_settings.return_value = SimpleNamespace()
-        image_path = str((dashboard_server.ARTIFACTS_DIR / "dashboard" / "latest" / "vision_capture.png").resolve())
-        mock_invoke_unity_mcp.return_value = dashboard_server.McpResult(
-            exit_code=0,
-            stdout="ok",
-            stderr="",
-            payload={"data": {"imagePath": image_path, "width": 960, "height": 960}},
-        )
+    @patch("dashboard_server.AGENT_GATEWAY.create_apply_request")
+    def test_vision_capture_requests_approved_scene_view_write(self, mock_create_apply_request) -> None:
+        mock_create_apply_request.return_value = {"ok": True, "status": "pending", "approvalId": "approval_capture"}
 
         with TestClient(dashboard_server.app) as client:
             response = client.post("/api/vision/capture", json={"avatar_path": "Scene/HeroAvatar"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["imageUrl"].startswith("/artifacts/latest/vision_capture.png?"))
-        self.assertIn("artifact_sig=", response.json()["imageUrl"])
-        _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
-        self.assertEqual(tool_name, "vrc_capture_scene_view")
-        self.assertFalse(params["setRotation"])
-        self.assertEqual(params["avatarPath"], "Scene/HeroAvatar")
-        self.assertFalse(params["requirePlayMode"])
+        self.assertEqual(response.json()["status"], "pending")
+        payload = mock_create_apply_request.call_args.args[0]
+        self.assertEqual(payload["target_tool"], "vrcforge_capture_screenshot")
+        self.assertEqual(payload["arguments"]["avatar_path"], "Scene/HeroAvatar")
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -12644,9 +13405,10 @@ namespace VRCForge.Editor
                 encoding="utf-8",
             )
             for relative in (
-                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
                 "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
                 "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
             ):
                 marker = project_dir / relative
@@ -12820,7 +13582,11 @@ namespace VRCForge.Editor
                 encoding="utf-8",
             )
 
-            with patch("dashboard_server.discover_vcc_projects", return_value=[str(project_dir)]), patch(
+            with patch.object(dashboard_server.DASHBOARD_STATE, "selected_project_path", ""), patch.object(
+                dashboard_server, "CURRENT_UNITY_STATUS", {"instances": []}
+            ), patch("dashboard_server.load_project_prefs", return_value={"customPaths": []}), patch(
+                "dashboard_server.discover_vcc_projects", return_value=[str(project_dir)]
+            ), patch(
                 "dashboard_server.discover_alcom_projects", return_value=[str(project_dir)]
             ), patch("dashboard_server.discover_unity_hub_projects", return_value=[
                 {"name": "Avatar Project", "path": str(project_dir), "editorVersion": "2022.3.22f1"}
@@ -12845,9 +13611,10 @@ namespace VRCForge.Editor
                 encoding="utf-8-sig",
             )
             for relative in (
-                "Assets/VRCForge/Core/MCP/VRCForgeToolAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
                 "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
-                "Assets/VRCForge/Core/MCP/VRCForgeResponse.cs",
+                "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
                 "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
             ):
                 marker = project / relative
@@ -13190,24 +13957,18 @@ namespace VRCForge.Editor
     # ------------------------------------------------------------------
     # /api/vision/capture-multi (needs Unity — verify endpoint exists + 503)
     # ------------------------------------------------------------------
-    @patch("dashboard_server.invoke_unity_mcp", side_effect=dashboard_server.UnityMcpError("not connected"))
-    @patch("dashboard_server.load_dashboard_settings")
-    def test_capture_multi_endpoint_fails_gracefully_when_unity_offline(
-        self, mock_load_settings, _mock_invoke
-    ) -> None:
-        mock_load_settings.return_value = SimpleNamespace(
-            unity_mcp_timeout_seconds=5,
-            unity_mcp_host="127.0.0.1",
-            unity_mcp_port=8080,
-            unity_mcp_instance="",
-            execute_tool_name="vrc_apply_blendshapes",
-        )
+    @patch("dashboard_server.AGENT_GATEWAY.create_apply_request")
+    def test_capture_multi_endpoint_requests_approval(self, mock_create_apply_request) -> None:
+        mock_create_apply_request.return_value = {"ok": True, "status": "pending", "approvalId": "approval_multi_capture"}
         with TestClient(dashboard_server.app) as client:
             response = client.post(
                 "/api/vision/capture-multi",
                 json={"angles": ["front", "back"], "width": 512, "height": 512},
             )
-        self.assertIn(response.status_code, (400, 503))
+        self.assertEqual(response.status_code, 200)
+        payload = mock_create_apply_request.call_args.args[0]
+        self.assertEqual(payload["target_tool"], "vrcforge_capture_multi_screenshot")
+        self.assertEqual(payload["arguments"]["angles"], ["front", "back"])
 
     # ------------------------------------------------------------------
     # /api/vision/audit-multi — validates multi-path logic

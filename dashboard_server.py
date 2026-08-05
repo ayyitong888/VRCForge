@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
 from threading import Lock, RLock, Thread
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, Mapping
 from urllib.parse import urlsplit
 
 import uvicorn
@@ -58,9 +58,11 @@ from agent_gateway import (
     ensure_dict,
     normalize_bool,
     normalize_checkpoint_archive_max_size_mb,
+    normalize_exposure_layer,
     parse_skill_markdown,
     redact_sensitive,
 )
+from approval_auto_review import review_saved_project_category_approval
 from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
 from authoritative_unity_writes import (
     AuthoritativeUnityWriteError,
@@ -240,6 +242,7 @@ from outfit_import_planner import (
     build_post_import_outfit_validation,
     detect_magenta_materials,
 )
+from mcp_trigger_selection import SelectionReceiptAuthority, plan_mcp_tool_selection, tools_for_exposure_layer
 from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
 from path_to_skill import DEFAULT_MIN_VRCFORGE_VERSION, PathToSkillError, build_path_to_skill_source
 from primitive_basis_live_attestation import (
@@ -436,6 +439,7 @@ def app_auth_disabled_for_test_process() -> bool:
 
 APP_SESSION_TOKEN = resolve_app_session_token()
 APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN) and not app_auth_disabled_for_test_process()
+MCP_TRIGGER_SELECTION_RECEIPTS = SelectionReceiptAuthority(ttl_seconds=900, max_receipts=256)
 APP_DASHBOARD_SESSION_COOKIE = "vrcforge_dashboard_session"
 APP_INTERNAL_SHUTDOWN_PATH = "/api/app/runtime/shutdown"
 PRIMITIVE_BASIS_LIVE_SESSION = (
@@ -562,6 +566,9 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_instantiate_prefab",
         "vrcforge_unpack_prefab",
         "vrcforge_configure_optimizer_component",
+        "vrcforge_create_safe_backup",
+        "vrcforge_capture_screenshot",
+        "vrcforge_capture_multi_screenshot",
         "vrcforge_restore_safe_backup",
         "vrcforge_unity_mcp_write",
         "vrcforge_export_vrm",
@@ -589,7 +596,6 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         "vrc_manage_wardrobe",
         "vrc_add_outfit_part",
         "vrc_add_modular_avatar_component",
-        "vrc_create_wardrobe",
         "vrc_write_avatar_descriptor",
         "vrc_write_animation_curve",
         "vrc_manage_expression_parameters",
@@ -1049,8 +1055,8 @@ class ClothingToggleRequest(ConnectionRequest):
 
 class VisionCaptureRequest(ConnectionRequest):
     avatar_path: str | None = None
-    width: int = 960
-    height: int = 960
+    width: int = Field(default=960, ge=256, le=2048)
+    height: int = Field(default=960, ge=256, le=2048)
     require_play_mode: bool = False
 
 
@@ -1082,8 +1088,8 @@ class ParameterRollbackRequest(AvatarScopedConnectionRequest):
 class VisionCaptureMultiRequest(ConnectionRequest):
     avatar_path: str | None = None
     angles: list[str] = Field(default_factory=lambda: ["front", "side_left", "side_right", "back"])
-    width: int = 960
-    height: int = 960
+    width: int = Field(default=960, ge=256, le=2048)
+    height: int = Field(default=960, ge=256, le=2048)
     require_play_mode: bool = False
 
 
@@ -1374,6 +1380,7 @@ class AgentApprovalRevisionRequest(BaseModel):
 class AgentApprovalScopeRequest(BaseModel):
     expected_project_root: str | None = Field(default=None, alias="expectedProjectRoot")
     global_only: bool = Field(default=False, alias="globalOnly")
+    allow_future_category: bool = Field(default=False, alias="allowFutureCategory")
 
     model_config = {"populate_by_name": True}
 
@@ -1690,6 +1697,22 @@ class ProviderTestRequest(ApiConfigRequest):
     capability: Literal["text", "structured", "vision"] = "text"
 
 
+class McpSelectionAcceptanceRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    visible_tools: list[dict[str, Any]] = Field(
+        min_length=1,
+        max_length=64,
+        alias="visibleTools",
+    )
+    exposure_layer: Literal["planning", "execution"] = Field(default="planning", alias="exposureLayer")
+
+    model_config = {"populate_by_name": True}
+
+
+class McpSelectionAcceptanceVerifyRequest(McpSelectionAcceptanceRequest):
+    result: dict[str, Any]
+
+
 class AgentCompactRequest(BaseModel):
     history: list[dict[str, Any]] = Field(default_factory=list)
     source_digest: str = Field(default="", alias="sourceDigest")
@@ -1962,12 +1985,21 @@ AGENT_MCP_APP = None
 AGENT_MCP_CONTEXT = None
 
 
+def _notify_mcp_pending_approval(_approval: dict[str, Any]) -> None:
+    """Schedule the narrow external-MCP pending-approval UI refresh."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()}))
+
+
 async def initialize_agent_mcp_mount() -> None:
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
 
     try:
-        app_payload = create_agent_mcp_app(AGENT_GATEWAY)
+        app_payload = create_agent_mcp_app(AGENT_GATEWAY, on_pending_approval=_notify_mcp_pending_approval)
         AGENT_MCP_APP = app_payload
         AGENT_MCP_CONTEXT = None
         AGENT_MCP_MOUNT.app = app_payload
@@ -2321,7 +2353,6 @@ def read_agentic_app_bootstrap(refreshProjects: bool = False) -> dict[str, Any]:
 
 
 def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> dict[str, Any]:
-    selected_project = str(getattr(DASHBOARD_STATE, "selected_project_path", "") or "").strip()
     return {
         "ok": True,
         "app": {
@@ -2338,7 +2369,9 @@ def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> di
         "agentHealth": safe_agent_health(),
         "permission": safe_permission_state(),
         "advancedSettings": AGENT_GATEWAY.advanced_settings_state(),
-        "approvals": safe_approval_list(project_root=selected_project),
+        # Pending writes form one App-wide inbox. Each decision still rechecks
+        # the approval's own exact projectRoot before execution.
+        "approvals": safe_approval_list(),
     }
 
 
@@ -2510,7 +2543,6 @@ def read_app_runtime_snapshot(
     includePatch: bool = False,
     globalOnly: bool = False,
 ) -> dict[str, Any]:
-    effective_global_only = bool(globalOnly or not projectRoot)
     scoped_ledgers = bool(str(sessionId or "").strip() or str(projectRoot or "").strip())
     workspace_diff = build_workspace_diff_summary(projectRoot, include_patch=includePatch)
     if scoped_ledgers:
@@ -2556,11 +2588,15 @@ def read_app_runtime_snapshot(
         }
     except Exception:  # noqa: BLE001 - runtime sidebar summary fails closed.
         pass
+    approval_items = AGENT_GATEWAY.list_approvals()
     return {
         "ok": True,
         "schema": "vrcforge.desktop_runtime_snapshot.v1",
         "workspaceDiff": workspace_diff,
-        "approvals": AGENT_GATEWAY.list_approvals(project_root=projectRoot, global_only=effective_global_only),
+        # Approvals form one App-wide inbox. Their own projectRoot travels with
+        # each item and is rechecked on every decision, so switching chats must
+        # not hide a pending write or change its execution scope.
+        "approvals": {"approvals": approval_items, "count": len(approval_items)},
         "runs": runs,
         "desktopActions": desktop_actions,
         "activeDesktopActions": AGENT_GATEWAY.list_active_desktop_actions(limit=8),
@@ -3875,6 +3911,12 @@ async def app_agent_approve_and_execute(
     global_only = bool(request.global_only if request else True)
 
     def approve() -> dict[str, Any]:
+        if request and request.allow_future_category:
+            return AGENT_GATEWAY.approve_with_project_category_rule(
+                approval_id,
+                expected_project_root=expected_project_root,
+                global_only=global_only,
+            )
         return AGENT_GATEWAY.approve(
             approval_id,
             expected_project_root=expected_project_root,
@@ -9230,15 +9272,15 @@ def read_app_tool_registry() -> dict[str, Any]:
 
 
 @app.get("/api/agent/manifest")
-def read_agent_manifest(request: Request) -> dict[str, Any]:
+def read_agent_manifest(request: Request, exposure_layer: Literal["planning", "execution"] = "planning") -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=True)
-    return AGENT_GATEWAY.build_manifest()
+    return AGENT_GATEWAY.build_manifest(exposure_layer)
 
 
 @app.get("/api/agent/tools/registry")
-def read_agent_tool_registry(request: Request) -> dict[str, Any]:
+def read_agent_tool_registry(request: Request, exposure_layer: Literal["planning", "execution"] = "planning") -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=True)
-    return AGENT_GATEWAY.build_tool_registry()
+    return AGENT_GATEWAY.build_tool_registry(exposure_layer=exposure_layer)
 
 
 @app.get("/api/agent/health")
@@ -9248,9 +9290,9 @@ def read_agent_health(request: Request) -> dict[str, Any]:
 
 
 @app.get("/api/agent/skills")
-def read_agent_skills(request: Request) -> dict[str, Any]:
+def read_agent_skills(request: Request, exposure_layer: Literal["planning", "execution"] = "planning") -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=True)
-    return AGENT_GATEWAY.build_skill_registry()
+    return AGENT_GATEWAY.build_skill_registry(exposure_layer=exposure_layer)
 
 
 @app.get("/api/agent/skills/check")
@@ -9265,7 +9307,7 @@ def create_agent_session(request: Request, session_request: AgentSessionRequest)
     return {
         "ok": True,
         "agentName": session_request.agent_name,
-        "manifest": AGENT_GATEWAY.build_manifest(),
+        "manifest": AGENT_GATEWAY.build_manifest("planning"),
     }
 
 
@@ -9636,6 +9678,39 @@ def read_reasoning_variants(request: ReasoningVariantsRequest) -> dict[str, Any]
     """Return the backend-owned provider/model reasoning capability descriptor."""
 
     return reasoning_variants_descriptor(request.provider, request.model, request.api_type)
+
+
+@app.post("/api/app/provider/mcp-selection")
+async def request_mcp_selection_acceptance(request: McpSelectionAcceptanceRequest) -> dict[str, Any]:
+    """Issue one process-owned, selection-only receipt through the authenticated App API."""
+
+    visible_tools = tools_for_exposure_layer(request.visible_tools, request.exposure_layer)
+    if not visible_tools:
+        raise HTTPException(status_code=422, detail="No tools are available in the requested exposure layer.")
+    return await asyncio.to_thread(
+        mcp_trigger_selection_planner,
+        request.message,
+        visible_tools,
+        request.exposure_layer,
+    )
+
+
+@app.post("/api/app/provider/mcp-selection/verify")
+def verify_mcp_selection_acceptance(request: McpSelectionAcceptanceVerifyRequest) -> dict[str, Any]:
+    """Consume a valid receipt; the process-owned authority lives only for this backend lifetime."""
+
+    visible_tools = tools_for_exposure_layer(request.visible_tools, request.exposure_layer)
+    accepted = verify_mcp_trigger_selection_receipt(
+        request.message,
+        visible_tools,
+        request.result,
+        request.exposure_layer,
+    )
+    return {
+        "ok": accepted,
+        "schema": "vrcforge.mcp_selection_verification.v1",
+        "accepted": accepted,
+    }
 
 
 def _resolve_install_source_assets() -> Path:
@@ -10305,6 +10380,9 @@ def read_avatar_blendshapes_sync(request: AvatarBlendshapeListRequest) -> dict[s
             "ok": True,
             "exportSource": export_source,
             "executionMode": "mock" if using_mock_execute else "live-unity",
+            "generatedAtUtc": export_payload.get("generatedAtUtc"),
+            "summary": export_payload.get("summary", {}),
+            "avatars": export_payload.get("avatars", []),
             "selectedAvatar": serialize_selected_avatar(selected_avatar),
             "blendshapes": blendshapes,
             "filterScope": "face",
@@ -13479,28 +13557,182 @@ def dedupe_strings(values: list[str]) -> list[str]:
     return deduped
 
 
+_VISION_CAPTURE_RESERVED_ARGUMENTS = {
+    PREPARED_UNITY_EXECUTION_ARGUMENT_KEY,
+    "outputPath", "output_path", "imagePath", "image_path", "captureScope", "capture_scope",
+    "setRotation", "set_rotation", "restoreView", "restore_view", "pitch", "yaw", "roll",
+    "statusOnly", "status_only", "preview",
+}
+
+
+def _reject_capture_reserved_arguments(arguments: dict[str, Any]) -> None:
+    reserved = sorted(
+        key
+        for key in arguments
+        if key in _VISION_CAPTURE_RESERVED_ARGUMENTS or key.startswith("_vrcforge_")
+    )
+    if reserved:
+        raise RuntimeError("Screenshot capture arguments include reserved Core fields: " + ", ".join(reserved))
+
+
+def _normalize_capture_angles(raw_angles: Any) -> list[str]:
+    if not isinstance(raw_angles, list) or not raw_angles:
+        raise RuntimeError("Screenshot capture angles must be a non-empty list.")
+    normalized: list[str] = []
+    for raw_angle in raw_angles:
+        if not isinstance(raw_angle, str):
+            raise RuntimeError("Screenshot capture angles must be strings.")
+        angle = raw_angle.strip().lower()
+        if angle not in _ANGLE_CAMERA_ROTATIONS:
+            raise RuntimeError(f"Unsupported screenshot capture angle: {angle or '<empty>'}.")
+        if angle not in normalized:
+            normalized.append(angle)
+    if len(normalized) > 4:
+        raise RuntimeError("Screenshot capture supports at most four unique angles.")
+    return normalized
+
+
+def _vision_capture_output_path(file_name: str) -> Path:
+    dashboard_root = DASHBOARD_ARTIFACTS_DIR.resolve()
+    latest_dir = (dashboard_root / "latest").resolve()
+    if latest_dir.parent != dashboard_root:
+        raise RuntimeError("Dashboard latest artifact directory is outside the dashboard artifact root.")
+    output_path = (latest_dir / file_name).resolve()
+    if output_path.parent != latest_dir:
+        raise RuntimeError("Screenshot output path is outside the dashboard artifact directory.")
+    return output_path
+
+
+def _scene_view_capture_call(
+    request: VisionCaptureRequest | VisionCaptureMultiRequest,
+    output_path: Path,
+    *,
+    angle: str | None = None,
+) -> dict[str, Any]:
+    pitch, yaw, roll = _ANGLE_CAMERA_ROTATIONS.get(angle or "", (0.0, 0.0, 0.0))
+    return {
+        "outputPath": str(output_path),
+        "width": request.width,
+        "height": request.height,
+        "pitch": pitch,
+        "yaw": yaw,
+        "roll": roll,
+        "setRotation": bool(angle),
+        "restoreView": True,
+        "avatarPath": request.avatar_path or "",
+        "captureScope": "face" if angle else "avatar",
+        "requirePlayMode": request.require_play_mode,
+    }
+
+
+def _prepared_capture_base(request: VisionCaptureRequest | VisionCaptureMultiRequest) -> dict[str, Any]:
+    return {
+        "settings_path": request.settings_path,
+        "unity_host": request.unity_host,
+        "unity_port": request.unity_port,
+        "unity_instance": request.unity_instance,
+        "project_path": request.project_path,
+        "avatar_path": request.avatar_path,
+        "width": request.width,
+        "height": request.height,
+        "require_play_mode": request.require_play_mode,
+    }
+
+
+def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    _reject_capture_reserved_arguments(arguments)
+    request = VisionCaptureRequest(**arguments)
+    output_path = _vision_capture_output_path("vision_capture.png")
+    call = _scene_view_capture_call(request, output_path)
+    prepared = install_prepared_calls(
+        _prepared_capture_base(request),
+        [("vrc_capture_scene_view", call)],
+        {"outputPaths": [str(output_path)], "captureKind": "single"},
+    )
+    return prepared, {"ok": True, "captureKind": "single", "outputPaths": [str(output_path)], "calls": [call]}
+
+
+def prepare_capture_multi_screenshot_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    _reject_capture_reserved_arguments(arguments)
+    raw_angles = arguments.get("angles", list(_ANGLE_CAMERA_ROTATIONS))
+    angles = _normalize_capture_angles(raw_angles)
+    request = VisionCaptureMultiRequest(**{**arguments, "angles": angles})
+    calls: list[tuple[str, dict[str, Any]]] = []
+    output_paths: list[str] = []
+    for angle in angles:
+        output_path = _vision_capture_output_path(f"vision_{angle}.png")
+        calls.append(("vrc_capture_scene_view", _scene_view_capture_call(request, output_path, angle=angle)))
+        output_paths.append(str(output_path))
+    prepared_base = _prepared_capture_base(request)
+    prepared_base["angles"] = angles
+    prepared = install_prepared_calls(
+        prepared_base,
+        calls,
+        {"outputPaths": output_paths, "angles": angles, "captureKind": "multi"},
+    )
+    return prepared, {"ok": True, "captureKind": "multi", "angles": angles, "outputPaths": output_paths, "calls": [call for _, call in calls]}
+
+
+def _execute_prepared_scene_view_capture(
+    arguments: dict[str, Any],
+    request: VisionCaptureRequest | VisionCaptureMultiRequest,
+    expected_calls: list[tuple[str, dict[str, Any]]],
+    angles: list[str],
+) -> dict[str, Any]:
+    settings = load_dashboard_settings(request)
+    captures: list[dict[str, Any]] = []
+    for index, (expected_tool, expected_arguments) in enumerate(expected_calls):
+        tool_name, tool_arguments = prepared_call(arguments, index)
+        if tool_name != expected_tool or tool_arguments != expected_arguments:
+            raise RuntimeError("Prepared screenshot Core call drifted after approval.")
+        result = invoke_unity_mcp(settings, tool_name, tool_arguments)
+        payload = ensure_dict_payload(extract_tool_result_payload(result), "vision capture")
+        image_path = str(payload.get("imagePath") or expected_arguments["outputPath"])
+        approved_path = Path(expected_arguments["outputPath"]).resolve()
+        returned_path = Path(image_path).resolve()
+        if os.path.normcase(str(returned_path)) != os.path.normcase(str(approved_path)):
+            raise RuntimeError("Unity returned a screenshot path outside the approved capture plan.")
+        if not approved_path.is_file() or approved_path.stat().st_size <= 0:
+            raise RuntimeError("Unity did not create the approved screenshot artifact.")
+        image_path = str(approved_path)
+        capture = {"imagePath": image_path, "imageUrl": to_artifact_url(image_path), "capture": payload}
+        if angles:
+            angle = angles[index]
+            pitch, yaw, roll = _ANGLE_CAMERA_ROTATIONS[angle]
+            capture.update({"angle": angle, "rotation": {"pitch": pitch, "yaw": yaw, "roll": roll}})
+        captures.append(capture)
+    if not captures:
+        raise RuntimeError("Prepared screenshot plan contains no Core calls.")
+    DASHBOARD_RUNTIME.latest_screenshot_path = captures[0]["imagePath"]
+    DASHBOARD_RUNTIME.latest_screenshot_url = captures[0]["imageUrl"]
+    return {"ok": True, "captures": captures}
+
+
+def capture_avatar_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
+    request = VisionCaptureRequest(**arguments)
+    expected = _scene_view_capture_call(request, _vision_capture_output_path("vision_capture.png"))
+    payload = _execute_prepared_scene_view_capture(arguments, request, [("vrc_capture_scene_view", expected)], [])
+    capture = payload["captures"][0]
+    emit_log("success", "vision", "Screenshot captured through approval.", {"imagePath": capture["imagePath"]})
+    return {"ok": True, **capture}
+
+
+def capture_avatar_multi_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
+    request = VisionCaptureMultiRequest(**arguments)
+    angles = _normalize_capture_angles(request.angles)
+    expected_calls = [
+        ("vrc_capture_scene_view", _scene_view_capture_call(request, _vision_capture_output_path(f"vision_{angle}.png"), angle=angle))
+        for angle in angles
+    ]
+    payload = _execute_prepared_scene_view_capture(arguments, request, expected_calls, angles)
+    emit_log("success", "vision", "Multi-angle screenshots captured through approval.", {"angles": angles, "count": len(payload["captures"])})
+    return payload
+
+
 def capture_avatar_screenshot_sync(request: VisionCaptureRequest) -> dict[str, Any]:
-    try:
-        settings = load_dashboard_settings(request)
-        output_path = (DASHBOARD_ARTIFACTS_DIR / "latest" / "vision_capture.png").resolve()
-        payload = capture_scene_view_direct(
-            settings=settings,
-            output_path=output_path,
-            width=request.width,
-            height=request.height,
-            avatar_path=request.avatar_path,
-            set_rotation=False,
-            require_play_mode=request.require_play_mode,
-        )
-        image_path = payload.get("imagePath") or str(output_path)
-        image_url = to_artifact_url(image_path)
-        DASHBOARD_RUNTIME.latest_screenshot_path = image_path
-        DASHBOARD_RUNTIME.latest_screenshot_url = image_url
-        emit_log("success", "vision", "Screenshot captured for visual audit.", {"imagePath": image_path})
-        return {"ok": True, "imagePath": image_path, "imageUrl": image_url, "capture": payload}
-    except (RuntimeError, UnityMcpError) as exc:
-        emit_log("error", "vision", "Failed to capture screenshot.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
+    return AGENT_GATEWAY.create_apply_request(
+        {"target_tool": "vrcforge_capture_screenshot", "arguments": request.model_dump(), "reason": "Capture one approved Unity scene-view artifact."}
+    )
 
 
 def read_vision_capture_status_sync(request: VisionCaptureStatusRequest) -> dict[str, Any]:
@@ -13740,49 +13972,9 @@ _ANGLE_CAMERA_ROTATIONS: dict[str, tuple[float, float, float]] = {
 
 
 def capture_avatar_multi_screenshot_sync(request: VisionCaptureMultiRequest) -> dict[str, Any]:
-    try:
-        settings = load_dashboard_settings(request)
-        angles = [a.strip().lower() for a in (request.angles or list(_ANGLE_CAMERA_ROTATIONS.keys()))]
-        output_dir = (DASHBOARD_ARTIFACTS_DIR / "latest").resolve()
-        captures: list[dict[str, Any]] = []
-
-        for angle in angles:
-            out_path = output_dir / f"vision_{angle}.png"
-            pitch, yaw, roll = _ANGLE_CAMERA_ROTATIONS.get(angle, (10.0, 0.0, 0.0))
-            payload = capture_scene_view_direct(
-                settings=settings,
-                output_path=out_path,
-                width=request.width,
-                height=request.height,
-                pitch=pitch,
-                yaw=yaw,
-                roll=roll,
-                set_rotation=True,
-                avatar_path=request.avatar_path,
-                capture_scope="face",
-                require_play_mode=request.require_play_mode,
-            )
-            image_path = payload.get("imagePath") or str(out_path)
-            image_url = to_artifact_url(image_path)
-            captures.append(
-                {
-                    "angle": angle,
-                    "imagePath": image_path,
-                    "imageUrl": image_url,
-                    "rotation": {"pitch": pitch, "yaw": yaw, "roll": roll},
-                    "capture": payload,
-                }
-            )
-
-        if captures:
-            DASHBOARD_RUNTIME.latest_screenshot_path = captures[0]["imagePath"]
-            DASHBOARD_RUNTIME.latest_screenshot_url = captures[0]["imageUrl"]
-
-        emit_log("success", "vision", "Multi-angle screenshots captured.", {"angles": angles, "count": len(captures)})
-        return {"ok": True, "captures": captures}
-    except (RuntimeError, UnityMcpError) as exc:
-        emit_log("error", "vision", "Failed to capture multi-angle screenshots.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
+    return AGENT_GATEWAY.create_apply_request(
+        {"target_tool": "vrcforge_capture_multi_screenshot", "arguments": request.model_dump(), "reason": "Capture approved fixed-angle Unity scene-view artifacts."}
+    )
 
 
 def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict[str, Any]:
@@ -13972,14 +14164,14 @@ def run_face_tuning_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
                 request=request, settings=settings, selected_avatar=selected_avatar, plan=plan,
                 change_preview=list(evidence.get("changePreview") or []), reference_context=evidence.get("referenceContext"),
                 locked_blendshapes=list(evidence.get("lockedBlendshapes") or []), applied=True,
-                visual_proof={"status": "unavailable", "reason": "Capture is deferred to a separately authorized read-only operation."}, artifacts=artifacts,
+                visual_proof={"status": "unavailable", "reason": "Capture is deferred to a separately approved screenshot write."}, artifacts=artifacts,
             ))
         except Exception as metadata_exc:  # The Unity mutation already succeeded; never suggest a retry.
             warnings.append(f"Post-apply metadata was not saved: {metadata_exc}")
         return {
             "ok": True, "executionMode": "live-unity", "selectedAvatar": serialize_selected_avatar(selected_avatar),
             "plan": evidence["plan"], "changePreview": evidence.get("changePreview") or [], "verifiedChanges": verified_changes,
-            "visualProof": {"status": "unavailable", "reason": "Capture is deferred to a separately authorized read-only operation."},
+            "visualProof": {"status": "unavailable", "reason": "Capture is deferred to a separately approved screenshot write."},
             "preview": evidence.get("preview") or {}, "applyPayload": evidence.get("applyPayload") or "",
             "result": serialize_result(result), "summary": summary, "artifacts": artifacts, "historyRecord": history_record,
             "lockedBlendshapes": evidence.get("lockedBlendshapes") or [],
@@ -14088,23 +14280,15 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             elif using_mock_execute:
                 result = mock_execute_payload(apply_payload_json, selected_avatar, export_source)
             else:
-                visual_proof = capture_blendshape_visual_proof(
-                    settings=settings,
-                    selected_avatar=selected_avatar,
-                    stage="before",
-                    current_proof=visual_proof,
-                )
+                visual_proof = {
+                    "status": "unavailable",
+                    "reason": "Capture is deferred to a separately approved screenshot write.",
+                }
                 direct_adjustments = build_direct_blendshape_adjustments_from_plan(plan)
                 undo_items = build_undo_items_from_change_preview(change_preview)
                 result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, direct_adjustments)
                 push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
                 time.sleep(0.15)
-                visual_proof = capture_blendshape_visual_proof(
-                    settings=settings,
-                    selected_avatar=selected_avatar,
-                    stage="after",
-                    current_proof=visual_proof,
-                )
                 verified_changes = verify_live_blendshape_changes(
                     settings=settings,
                     selected_avatar=selected_avatar,
@@ -14312,6 +14496,81 @@ def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
 AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan
 
 
+def mcp_trigger_selection_config_binding(config: DashboardApiConfig) -> tuple[str, str, str, str]:
+    """Freeze the nonsecret provider identity used by one acceptance receipt."""
+
+    _requested_api_type, resolved_api_type = normalize_provider_api_type(
+        config.provider, config.model, config.api_type
+    )
+    config_digest = hashlib.sha256(
+        json.dumps(
+            {
+                "provider": config.provider,
+                "model": config.model,
+                "baseUrl": config.base_url,
+                "apiType": config.api_type or "auto",
+                "resolvedApiType": resolved_api_type,
+                "thinkingLevel": config.thinking_level,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return config.provider, config.model, config_digest, resolved_api_type
+
+
+def mcp_trigger_selection_planner(
+    message: str,
+    visible_tools: list[dict[str, Any]],
+    exposure_layer: str = "planning",
+) -> dict[str, Any]:
+    """Call the configured provider once without entering the runtime execution loop."""
+
+    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    if provider_requires_api_key(config.provider) and not config.api_key:
+        raise RuntimeError("LLM API key is not configured for selection acceptance.")
+    provider, model, config_digest, resolved_api_type = mcp_trigger_selection_config_binding(config)
+    result = plan_mcp_tool_selection(
+        message,
+        visible_tools,
+        provider=provider,
+        model=model,
+        request_text=lambda prompt: _run_provider_text_probe(config, prompt, structured=True),
+    )
+    result["providerEvidence"] = MCP_TRIGGER_SELECTION_RECEIPTS.issue(
+        message,
+        visible_tools,
+        result,
+        provider=provider,
+        model=model,
+        config_digest=config_digest,
+        resolved_api_type=resolved_api_type,
+        exposure_layer=exposure_layer,
+    )
+    return result
+
+
+def verify_mcp_trigger_selection_receipt(
+    message: str,
+    visible_tools: list[dict[str, Any]],
+    result: dict[str, Any],
+    exposure_layer: str = "planning",
+) -> bool:
+    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    provider, model, config_digest, resolved_api_type = mcp_trigger_selection_config_binding(config)
+    return MCP_TRIGGER_SELECTION_RECEIPTS.verify_and_consume(
+        message,
+        visible_tools,
+        result,
+        provider=provider,
+        model=model,
+        config_digest=config_digest,
+        resolved_api_type=resolved_api_type,
+        exposure_layer=exposure_layer,
+    )
+
+
 def _agent_gateway_context_compact(
     history: list[dict[str, Any]],
     metadata: dict[str, Any],
@@ -14443,6 +14702,9 @@ def extract_tool_result_payload(result: McpResult) -> Any:
                 break
             visited.add(marker)
 
+            if "structuredContent" in candidate and isinstance(candidate["structuredContent"], dict):
+                candidate = candidate["structuredContent"]
+                continue
             if "data" in candidate and isinstance(candidate["data"], dict):
                 candidate = candidate["data"]
                 continue
@@ -14666,57 +14928,6 @@ def scan_avatar_parameters_direct(settings: Settings, avatar_path: str | None) -
     return payload
 
 
-def capture_scene_view_direct(
-    settings: Settings,
-    output_path: Path,
-    width: int,
-    height: int,
-    avatar_path: str | None = None,
-    pitch: float = 0.0,
-    yaw: float = 0.0,
-    roll: float = 0.0,
-    set_rotation: bool = False,
-    capture_scope: str = "avatar",
-    require_play_mode: bool = False,
-) -> dict[str, Any]:
-    result = invoke_unity_mcp(
-        settings,
-        "vrc_capture_scene_view",
-        {
-            "outputPath": str(output_path),
-            "width": width,
-            "height": height,
-            "pitch": pitch,
-            "yaw": yaw,
-            "roll": roll,
-            "setRotation": set_rotation,
-            "restoreView": True,
-            "avatarPath": avatar_path or "",
-            "captureScope": capture_scope,
-            "requirePlayMode": require_play_mode,
-        },
-    )
-    payload = extract_tool_result_payload(result)
-    if isinstance(payload, dict):
-        return payload
-
-    if output_path.exists():
-        return {
-            "imagePath": str(output_path),
-            "width": width,
-            "height": height,
-            "pitch": pitch,
-            "yaw": yaw,
-            "roll": roll,
-            "setRotation": set_rotation,
-            "avatarPath": avatar_path or "",
-            "captureScope": capture_scope,
-            "requirePlayMode": require_play_mode,
-        }
-
-    return ensure_dict_payload(payload, "vision capture")
-
-
 def capture_scene_view_status_direct(settings: Settings, require_play_mode: bool = False) -> dict[str, Any]:
     result = invoke_unity_mcp(
         settings,
@@ -14902,40 +15113,6 @@ def build_plan_change_preview(
             }
         )
     return changes
-
-
-def capture_blendshape_visual_proof(
-    settings: Settings,
-    selected_avatar: SelectedAvatar,
-    stage: str,
-    current_proof: dict[str, Any] | None,
-) -> dict[str, Any]:
-    proof = dict(current_proof or {})
-    output_dir = (DASHBOARD_ARTIFACTS_DIR / "latest").resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"blendshape_{stage}.png"
-
-    try:
-        payload = capture_scene_view_direct(
-            settings=settings,
-            output_path=output_path,
-            width=960,
-            height=960,
-            avatar_path=selected_avatar.avatar_path,
-            set_rotation=False,
-        )
-        image_path = payload.get("imagePath") or str(output_path)
-        proof[stage] = {
-            "imagePath": image_path,
-            "imageUrl": to_artifact_url(image_path),
-            "capture": payload,
-        }
-        emit_log("info", "pipeline", f"Captured blendshape {stage} proof image.", {"imagePath": image_path})
-    except Exception as exc:
-        proof.setdefault("errors", []).append({"stage": stage, "error": str(exc)})
-        emit_log("warning", "pipeline", f"Failed to capture blendshape {stage} proof image.", {"error": str(exc)})
-
-    return proof
 
 
 def verify_live_blendshape_changes(
@@ -15872,7 +16049,7 @@ def build_vrcforge_mcp_core_status(project_root: Path, settings: Settings) -> di
         tool_items = UnityMcpCoreClient(
             project_root,
             timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 10), 30)),
-        ).list_tools()
+        ).list_tools(exposure_layer="execution")
         names = sorted(
             str(item.get("name") or "")
             for item in tool_items
@@ -17450,7 +17627,12 @@ def vrcforge_mcp_core_installed(project_root: Path) -> bool:
     core_root = project_root / "Assets" / "VRCForge" / "Core" / "MCP"
     return all(
         (core_root / name).is_file()
-        for name in ("VRCForgeToolAttribute.cs", "VRCForgeToolRegistry.cs", "VRCForgeResponse.cs")
+        for name in (
+            "VRCForgeCommandAttribute.cs",
+            "VRCForgeInputAttribute.cs",
+            "VRCForgeToolRegistry.cs",
+            "VRCForgeToolResult.cs",
+        )
     ) and (project_root / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").is_file()
 
 
@@ -17784,7 +17966,9 @@ def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured
                 prompt=prompt,
                 instructions="You are a provider connectivity probe. Return only the requested result.",
                 reasoning_effort=config.thinking_level,
-                max_output_tokens=64,
+                # Structured selection needs room for a final JSON message even
+                # when the provider emits bounded reasoning before the answer.
+                max_output_tokens=512 if structured else 64,
                 mode="probe",
                 structured_output=structured,
             )
@@ -17843,6 +18027,15 @@ def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured
         return ""
     message = getattr(choices[0], "message", None)
     return str(getattr(message, "content", "") or "")
+
+
+def _review_saved_project_category_approval(approval: dict[str, Any]) -> str:
+    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    return review_saved_project_category_approval(
+        approval,
+        model=config.model,
+        request_text=lambda prompt: _run_provider_text_probe(config, prompt, structured=True),
+    )
 
 
 def _provider_probe_settings(config: DashboardApiConfig) -> Settings:
@@ -18710,19 +18903,139 @@ def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
     return normalize_unity_checkpoint_result(result, project_root)
 
 
-def reload_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
+CHECKPOINT_RELOAD_CALL_TIMEOUT_SECONDS = 20
+CHECKPOINT_RELOAD_READY_TIMEOUT_SECONDS = 70
+CHECKPOINT_RELOAD_READY_POLL_SECONDS = 0.5
+CHECKPOINT_RELOAD_CONNECTION_CLOSED_ERROR = "Unity MCP Core connection closed unexpectedly."
+
+
+def prepare_unity_checkpoint_restore_sync(project_root: Path) -> dict[str, Any]:
     live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
     if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
-        return live_connection.reload_checkpoint(project_root)
+        return live_connection.prepare_restore_checkpoint(project_root)
     settings = load_dashboard_settings(build_agent_connection_request({}))
-    settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 180)
+    settings.unity_mcp_timeout_seconds = min(
+        max(int(settings.unity_mcp_timeout_seconds or 30), 1),
+        CHECKPOINT_RELOAD_CALL_TIMEOUT_SECONDS,
+    )
+    settings.unity_mcp_retries = 1
     result = invoke_unity_mcp(
         settings,
         "vrc_reload_after_checkpoint_restore",
-        {"projectPath": str(project_root)},
+        {
+            "projectPath": str(project_root),
+            "phase": "prepare_restore",
+        },
         execution_context={"lane": "app_safety_control"},
         preserve_tool_error=True,
     )
+    return normalize_unity_checkpoint_result(result, project_root)
+
+
+def _checkpoint_reload_connection_closed(error: BaseException) -> bool:
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if (
+            isinstance(current, UnityMcpCoreError)
+            and str(current) == CHECKPOINT_RELOAD_CONNECTION_CLOSED_ERROR
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _wait_for_reloaded_unity_core(
+    project_root: Path,
+    previous_connection: Any,
+    *,
+    timeout_seconds: float = CHECKPOINT_RELOAD_READY_TIMEOUT_SECONDS,
+    poll_seconds: float = CHECKPOINT_RELOAD_READY_POLL_SECONDS,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while time.monotonic() < deadline:
+        try:
+            current = load_unity_mcp_core_connection(project_root)
+            if (
+                current.process_id == previous_connection.process_id
+                and current.project_hash == previous_connection.project_hash
+                and current.instance_id != previous_connection.instance_id
+            ):
+                remaining = max(1.0, deadline - time.monotonic())
+                tools = UnityMcpCoreClient(
+                    project_root,
+                    timeout_seconds=min(3.0, remaining),
+                ).list_tools(exposure_layer="execution")
+                tool_names = {
+                    str(item.get("name") or "")
+                    for item in tools
+                    if isinstance(item, dict)
+                }
+                if (
+                    len(tools) != len(REQUIRED_VRCFORGE_UNITY_TOOLS)
+                    or tool_names != set(REQUIRED_VRCFORGE_UNITY_TOOLS)
+                ):
+                    raise UnityMcpCoreError("Unity MCP Core tool contract is not ready.")
+                return {
+                    "ok": True,
+                    "projectPath": str(project_root),
+                    "coreReady": True,
+                    "domainReloadObserved": True,
+                }
+        except (OSError, UnityMcpCoreError):
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(max(0.0, poll_seconds), remaining))
+    return {
+        "ok": False,
+        "error": "Unity MCP Core did not become ready after the checkpoint reload connection closed.",
+    }
+
+
+def reload_unity_checkpoint_sync(
+    project_root: Path,
+    restore_prepare: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
+    if isinstance(live_connection, PrimitiveBasisLiveUnityConnection):
+        return live_connection.reload_checkpoint(project_root, restore_prepare)
+    try:
+        previous_connection = load_unity_mcp_core_connection(project_root)
+    except UnityMcpCoreError:
+        previous_connection = None
+    settings = load_dashboard_settings(build_agent_connection_request({}))
+    settings.unity_mcp_timeout_seconds = min(
+        max(int(settings.unity_mcp_timeout_seconds or 30), 1),
+        CHECKPOINT_RELOAD_CALL_TIMEOUT_SECONDS,
+    )
+    settings.unity_mcp_retries = 1
+    try:
+        prepared_scenes_raw = ensure_dict(restore_prepare).get("scenes")
+        prepared_scenes = normalize_string_list(
+            prepared_scenes_raw if isinstance(prepared_scenes_raw, list) else []
+        )
+        active_scene_path = str(ensure_dict(restore_prepare).get("activeScenePath") or "").strip()
+        result = invoke_unity_mcp(
+            settings,
+            "vrc_reload_after_checkpoint_restore",
+            {
+                "projectPath": str(project_root),
+                "phase": "reload",
+                "scenePaths": prepared_scenes,
+                "activeScenePath": active_scene_path,
+            },
+            execution_context={"lane": "app_safety_control"},
+            preserve_tool_error=True,
+        )
+    except UnityMcpError as exc:
+        if previous_connection is None or not _checkpoint_reload_connection_closed(exc):
+            return {
+                "ok": False,
+                "error": "Unity did not confirm the checkpoint reload command.",
+            }
+        return _wait_for_reloaded_unity_core(project_root, previous_connection)
     return normalize_unity_checkpoint_result(result, project_root)
 
 
@@ -18869,7 +19182,13 @@ def prepare_authoritative_unity_checkpoint_sync(
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
     nested_tool = str(arguments.get("toolName") or arguments.get("tool_name") or "").strip()
-    if nested_tool not in {PARAMETER_BIT_PACKING_TOOL, ATOMIC_REFERENCE_RENAME_TOOL}:
+    if nested_tool not in {
+        PARAMETER_BIT_PACKING_TOOL,
+        ATOMIC_REFERENCE_RENAME_TOOL,
+        CONSTRAINT_SOURCE_TOOL,
+        DUPLICATE_SCENE_OBJECT_TOOL,
+        SAVE_SCENE_OBJECT_AS_PREFAB_TOOL,
+    }:
         return prepare_unity_checkpoint_sync(project_root)
     approved_write_arguments = copy.deepcopy(arguments)
     approved_write_arguments.pop("_vrcforge_user_constraints", None)
@@ -19282,7 +19601,14 @@ def ensure_expression_parameter_sync(params: dict[str, Any], preview: bool = Fal
         return {"ok": False, "error": "parameterName is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_ensure_expression_parameter", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_ensure_expression_parameter",
+                request,
+                execution_context={"lane": "app_preview"} if preview else None,
+            )
+        ),
         "ensure expression parameter",
     )
     payload.setdefault("ok", True)
@@ -19312,7 +19638,14 @@ def ensure_expression_menu_control_sync(params: dict[str, Any], preview: bool = 
         return {"ok": False, "error": "controlName is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_ensure_expression_menu_control", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_ensure_expression_menu_control",
+                request,
+                execution_context={"lane": "app_preview"} if preview else None,
+            )
+        ),
         "ensure expression menu control",
     )
     payload.setdefault("ok", True)
@@ -19348,7 +19681,14 @@ def ensure_animator_state_sync(params: dict[str, Any], preview: bool = False) ->
         return {"ok": False, "error": "parameterName is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_ensure_animator_state", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_ensure_animator_state",
+                request,
+                execution_context={"lane": "app_preview"} if preview else None,
+            )
+        ),
         "ensure animator state",
     )
     payload.setdefault("ok", True)
@@ -19493,7 +19833,14 @@ def write_avatar_descriptor_sync(params: dict[str, Any], preview: bool = False) 
     request = _avatar_primitive_request(params, preview=preview)
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_write_avatar_descriptor", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_write_avatar_descriptor",
+                request,
+                execution_context={"lane": "app_preview"} if preview else None,
+            )
+        ),
         "write avatar descriptor",
     )
     payload.setdefault("ok", True)
@@ -19509,7 +19856,14 @@ def write_animation_curve_sync(params: dict[str, Any], preview: bool = False) ->
         return {"ok": False, "error": "propertyName is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_write_animation_curve", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_write_animation_curve",
+                request,
+                execution_context={"lane": "app_preview"} if preview else None,
+            )
+        ),
         "write animation curve",
     )
     payload.setdefault("ok", True)
@@ -19523,7 +19877,14 @@ def manage_expression_parameters_sync(params: dict[str, Any], preview: bool = Fa
         return {"ok": False, "error": "action is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_manage_expression_parameters", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_manage_expression_parameters",
+                request,
+                execution_context={"lane": "app_preview"} if preview else None,
+            )
+        ),
         "manage expression parameters",
     )
     payload.setdefault("ok", True)
@@ -19537,7 +19898,14 @@ def manage_expression_menu_sync(params: dict[str, Any], preview: bool = False) -
         return {"ok": False, "error": "action is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_manage_expression_menu", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_manage_expression_menu",
+                request,
+                execution_context={"lane": "app_preview"} if preview else None,
+            )
+        ),
         "manage expression menu",
     )
     payload.setdefault("ok", True)
@@ -19551,7 +19919,14 @@ def manage_fx_animator_sync(params: dict[str, Any], preview: bool = False) -> di
         return {"ok": False, "error": "action is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_manage_fx_animator", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_manage_fx_animator",
+                request,
+                execution_context={"lane": "app_preview"} if preview else None,
+            )
+        ),
         "manage FX animator",
     )
     payload.setdefault("ok", True)
@@ -19665,17 +20040,8 @@ def scan_avatar_parameters_gateway_sync(params: dict[str, Any]) -> dict[str, Any
 
 def create_safe_backup_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
+    request = build_safe_backup_core_request(params)
     settings = load_dashboard_settings(build_agent_connection_request(params))
-    asset_paths = params.get("asset_paths") or params.get("assetPaths") or []
-    request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-        "assetPaths": [str(item) for item in asset_paths if str(item).strip()],
-        "includeOpenScenes": bool(params.get("include_open_scenes", params.get("includeOpenScenes", True))),
-        "refreshAssets": False,
-    }
-    backup_root = str(params.get("backup_root") or params.get("backupRoot") or "").strip()
-    if backup_root:
-        request["backupRoot"] = backup_root
     payload = ensure_dict_payload(
         extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_create_safe_backup", request)),
         "safe backup",
@@ -19683,6 +20049,31 @@ def create_safe_backup_sync(params: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("ok", True)
     emit_log("info", "backup", "Safe backup snapshot created.", {"backupPath": payload.get("backup_path")})
     return payload
+
+
+def build_safe_backup_core_request(params: dict[str, Any] | None) -> dict[str, Any]:
+    """Canonical approved Core payload; backups stay in the project-owned default root."""
+    request_params = dict(params or {})
+    requested_root = str(
+        request_params.get("backup_root") or request_params.get("backupRoot") or ""
+    ).strip()
+    if requested_root:
+        raise ValueError("Custom backupRoot is not supported by the approved safe backup lane.")
+    raw_asset_paths = request_params.get("asset_paths") or request_params.get("assetPaths") or []
+    if not isinstance(raw_asset_paths, list):
+        raise ValueError("assetPaths must be an array.")
+    return {
+        "avatarPath": str(request_params.get("avatar_path") or request_params.get("avatarPath") or "").strip(),
+        "assetPaths": [str(item) for item in raw_asset_paths if str(item).strip()],
+        "includeOpenScenes": bool(
+            request_params.get("include_open_scenes", request_params.get("includeOpenScenes", True))
+        ),
+        "refreshAssets": False,
+    }
+
+
+def build_safe_backup_execution_plan(params: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    return [("vrc_create_safe_backup", build_safe_backup_core_request(params))]
 
 
 def build_safe_backup_restore_request(params: dict[str, Any], confirm: bool) -> dict[str, Any]:
@@ -19707,7 +20098,12 @@ def preview_safe_backup_restore_sync(params: dict[str, Any]) -> dict[str, Any]:
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
         extract_tool_result_payload(
-            invoke_unity_mcp(settings, "vrc_restore_safe_backup", build_safe_backup_restore_request(params, False))
+            invoke_unity_mcp(
+                settings,
+                "vrc_restore_safe_backup",
+                build_safe_backup_restore_request(params, False),
+                execution_context={"lane": "app_preview"},
+            )
         ),
         "safe backup restore preview",
     )
@@ -20511,7 +20907,14 @@ def preview_setup_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "outfitPath is required."}
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_setup_outfit", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_setup_outfit",
+                request,
+                execution_context={"lane": "app_preview"},
+            )
+        ),
         "setup outfit preview",
     )
     payload.setdefault("ok", True)
@@ -20802,7 +21205,14 @@ def preview_add_wardrobe_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
         return invalid
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_wardrobe_outfit", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_add_wardrobe_outfit",
+                request,
+                execution_context={"lane": "app_preview"},
+            )
+        ),
         "add wardrobe outfit preview",
     )
     payload.setdefault("ok", True)
@@ -20899,7 +21309,14 @@ def preview_add_outfit_part_sync(params: dict[str, Any]) -> dict[str, Any]:
         return invalid
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_outfit_part", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_add_outfit_part",
+                request,
+                execution_context={"lane": "app_preview"},
+            )
+        ),
         "add outfit part preview",
     )
     payload.setdefault("ok", True)
@@ -20970,7 +21387,14 @@ def preview_add_modular_avatar_component_sync(params: dict[str, Any]) -> dict[st
         return invalid
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_modular_avatar_component", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_add_modular_avatar_component",
+                request,
+                execution_context={"lane": "app_preview"},
+            )
+        ),
         "add modular avatar component preview",
     )
     payload.setdefault("ok", True)
@@ -21190,7 +21614,14 @@ def preview_manage_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
         return invalid
     settings = load_dashboard_settings(build_agent_connection_request(params))
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_manage_wardrobe", request)),
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_manage_wardrobe",
+                request,
+                execution_context={"lane": "app_preview"},
+            )
+        ),
         "manage wardrobe preview",
     )
     payload.setdefault("ok", True)
@@ -23686,6 +24117,8 @@ OUTFIT_IMPORT_ALLOWED_SUFFIXES = {
 }
 OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES = 512 * 1024 * 1024
 OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_RATIO = 100.0
+OUTFIT_IMPORT_JOB_TIMEOUT_SECONDS = 180.0
+OUTFIT_IMPORT_JOB_POLL_SECONDS = 0.5
 
 
 def _prepared_import_path_identity(path: Path, label: str) -> dict[str, Any]:
@@ -23781,6 +24214,77 @@ def _require_prepared_import_asset_receipts(
             raise RuntimeError("Unity Core expected-asset readback did not match approval.")
         receipts.append({"assetPath": asset_path, "guid": guid, "assetType": asset_type})
     return receipts
+
+
+def _require_prepared_import_job_receipt(
+    payload: dict[str, Any],
+    project_identity: dict[str, Any],
+    identity: dict[str, Any],
+    expected_asset_paths: list[str],
+) -> str:
+    job_id = str(payload.get("jobId") or "").strip().lower()
+    if len(job_id) != 32 or any(character not in "0123456789abcdef" for character in job_id):
+        raise RuntimeError("Unity Core import job receipt is invalid.")
+    if (
+        str(payload.get("projectPath") or "") != project_identity["projectPath"]
+        or str(payload.get("unityPackagePath") or "").replace("\\", "/")
+        != str(identity["path"]).replace("\\", "/")
+        or str(payload.get("expectedSha256") or "").lower() != str(identity["sha256"]).lower()
+        or int(payload.get("expectedSize", -1)) != int(identity["size"])
+    ):
+        raise RuntimeError("Unity Core import receipt project/path did not match the prepared call.")
+    raw_paths = payload.get("expectedAssetPaths")
+    if not isinstance(raw_paths, list) or [str(path).replace("\\", "/") for path in raw_paths] != expected_asset_paths:
+        raise RuntimeError("Unity Core import receipt asset paths did not match approval.")
+    return job_id
+
+
+def _wait_for_unitypackage_import_job(
+    settings: Any,
+    initial_payload: dict[str, Any],
+) -> dict[str, Any]:
+    job_id = str(initial_payload.get("jobId") or "").strip().lower()
+    if len(job_id) != 32 or any(character not in "0123456789abcdef" for character in job_id):
+        raise RuntimeError("Unity Core import job id is invalid.")
+    poll_settings = copy.copy(settings)
+    try:
+        poll_settings.unity_mcp_timeout_seconds = min(
+            int(getattr(settings, "unity_mcp_timeout_seconds", 30) or 30), 8
+        )
+    except Exception:  # noqa: BLE001 - tests may use a minimal settings object.
+        pass
+    deadline = time.monotonic() + OUTFIT_IMPORT_JOB_TIMEOUT_SECONDS
+    payload = initial_payload
+    while payload.get("pending") is True and time.monotonic() < deadline:
+        time.sleep(min(OUTFIT_IMPORT_JOB_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+        if time.monotonic() >= deadline:
+            break
+        payload = ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(
+                    poll_settings,
+                    "vrc_import_unitypackage",
+                    {"jobId": job_id},
+                    execution_context={"lane": "app_unitypackage_import_poll"},
+                )
+            ),
+            "prepared unitypackage import job",
+        )
+        if str(payload.get("jobId") or "").strip().lower() != job_id:
+            raise RuntimeError("Unity Core import job identity drifted while polling.")
+    if payload.get("pending") is True:
+        return {
+            "ok": False,
+            "pending": False,
+            "status": "timeout",
+            "jobId": job_id,
+            "mutationStarted": True,
+            "committed": True,
+            "commitState": "unknown",
+            "checkpointRecoveryRequired": True,
+            "error": "UnityPackage import did not reach a terminal state before timeout.",
+        }
+    return payload
 
 
 def _prepared_outfit_unitypackage_queue(plan_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -23923,6 +24427,7 @@ def prepare_outfit_import_package_request(arguments: dict[str, Any], preview: An
 def import_outfit_package_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
     imports: list[dict[str, Any]] = []
     core_call_started = False
+    import_readback_pending = False
     materialization_receipts: list[dict[str, Any]] = []
 
     def cleanup_materializations() -> str:
@@ -24029,13 +24534,35 @@ def import_outfit_package_approved_sync(arguments: dict[str, Any]) -> dict[str, 
             _require_prepared_import_evidence(expected, tool_arguments, "Core arguments")
             core_call_started = True
             payload = ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(settings, tool_name, tool_arguments)), "prepared unitypackage import")
+            import_readback_pending = payload.get("mutationStarted") is True or payload.get("pending") is True
             if payload.get("ok") is not True:
                 cleanup_error = cleanup_materializations()
                 return {"ok": False, "committed": True, "commitState": "unknown", "checkpointRecoveryRequired": True, "kind": kind, "unityImports": imports, "temporaryCleanupError": cleanup_error or None, "error": payload.get("error") or "UnityPackage import failed after Core invocation."}
-            if str(payload.get("projectPath") or "") != project_identity["projectPath"] or str(payload.get("unityPackagePath") or "").replace("\\", "/") != identity["path"].replace("\\", "/") or str(payload.get("expectedSha256") or "").lower() != str(identity["sha256"]).lower() or int(payload.get("expectedSize", -1)) != int(identity["size"]):
-                raise RuntimeError("Unity Core import receipt project/path did not match the prepared call.")
+            job_id = _require_prepared_import_job_receipt(
+                payload, project_identity, identity, expected_asset_paths
+            )
+            if payload.get("pending") is True:
+                payload = _wait_for_unitypackage_import_job(settings, payload)
+            if payload.get("ok") is not True or str(payload.get("status") or "") != "completed":
+                cleanup_error = cleanup_materializations()
+                return {
+                    "ok": False,
+                    "committed": True,
+                    "commitState": "unknown",
+                    "checkpointRecoveryRequired": True,
+                    "kind": kind,
+                    "unityImports": imports,
+                    "temporaryCleanupError": cleanup_error or None,
+                    "error": payload.get("error") or payload.get("reason") or "UnityPackage import did not complete.",
+                }
+            if str(payload.get("jobId") or "").strip().lower() != job_id:
+                raise RuntimeError("Unity Core import terminal job identity drifted.")
+            _require_prepared_import_job_receipt(
+                payload, project_identity, identity, expected_asset_paths
+            )
             asset_receipts = _require_prepared_import_asset_receipts(payload, expected_asset_paths)
             imports.append({"ok": True, "order": item["order"], "role": item["role"], "path": identity["path"], "expectedAssets": asset_receipts, "unityImport": payload})
+            import_readback_pending = False
             core_call_started = False
         _verify_prepared_import_project_identity(project_identity)
         refresh_tool, refresh_arguments = prepared_call(arguments, len(queue))
@@ -24049,6 +24576,7 @@ def import_outfit_package_approved_sync(arguments: dict[str, Any]) -> dict[str, 
             cleanup_error = cleanup_materializations()
             return {"ok": False, "committed": True, "checkpointRecoveryRequired": True, "kind": kind, "unityImports": imports, "assetDatabaseRefresh": refresh, "temporaryCleanupError": cleanup_error or None, "error": refresh.get("error") or "Asset refresh failed after UnityPackage import."}
         core_call_started = False
+        _verify_prepared_import_project_identity(project_identity)
         cleanup_error = cleanup_materializations()
         if cleanup_error:
             return {"ok": False, "committed": True, "commitState": "complete", "checkpointRecoveryRequired": False, "temporaryCleanupRequired": True, "kind": kind, "unityImports": imports, "assetDatabaseRefresh": refresh, "error": cleanup_error}
@@ -24060,7 +24588,7 @@ def import_outfit_package_approved_sync(arguments: dict[str, Any]) -> dict[str, 
             return {
                 "ok": False,
                 "committed": True,
-                "commitState": "unknown" if core_call_started else "partial",
+                "commitState": "unknown" if core_call_started or import_readback_pending else "partial",
                 "checkpointRecoveryRequired": True,
                 "kind": str(locals().get("kind") or ""),
                 "unityImports": imports,
@@ -24812,9 +25340,9 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "Classify a shell command before execution.", "read/debug", AGENT_GATEWAY.classify_shell)
     AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.execute_shell(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
     AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.execute_approved_shell, write=True)
-    AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda _params: AGENT_GATEWAY.build_manifest())
-    AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda _params: AGENT_GATEWAY.check_skill_registry())
-    AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", lambda _params: AGENT_GATEWAY.build_tool_registry())
+    AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda params: AGENT_GATEWAY.build_manifest(normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
+    AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda params: AGENT_GATEWAY.check_skill_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
+    AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", lambda params: AGENT_GATEWAY.build_tool_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_external_agent_connectors", "Generate loopback MCP connector templates for external coding agents without exposing plaintext tokens.", "read/debug", connector_bundle_sync)
     AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "List installed community .vsk skill packages.", "read/debug", list_skill_packages_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preflight_skill_package", "Inspect and verify a local .vsk skill package before import.", "plan/preview", preflight_skill_package_sync)
@@ -24958,7 +25486,6 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_parameters", "Preview deleting, renaming, reordering, or updating existing expression parameters without writing.", "plan/preview", lambda params: manage_expression_parameters_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_expression_menu", "Preview expression menu control create/update/delete/reorder without writing.", "plan/preview", lambda params: manage_expression_menu_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "Preview FX AnimatorController layer/state/transition create/update/delete without writing.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
-    AGENT_GATEWAY.register_tool("vrcforge_create_safe_backup", "Create a safe backup snapshot of avatar assets and open scenes.", "plan/preview", create_safe_backup_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
@@ -24978,7 +25505,6 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_interrupted_apply_recovery", "Preview the checkpoint restore path for an interrupted approved write.", "plan/preview", lambda params: AGENT_GATEWAY.preview_interrupted_apply_recovery(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_export_interrupted_apply_incident_bundle", "Export a local incident bundle for an interrupted approved write.", "read/debug", lambda params: AGENT_GATEWAY.export_interrupted_apply_incident_bundle(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
-    AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot", "Capture a Unity screenshot for real-scene debugging.", "read/debug", lambda params: capture_avatar_screenshot_sync(VisionCaptureRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_thry_avatar_performance", "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for an avatar.", "read/debug", scan_thry_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.recent_audit_logs(limit=int(params.get("limit", 80)))})
@@ -25052,6 +25578,32 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.create_apply_request, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.apply_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_restore_last_backup", "Request approval to restore the last face or shader backup.", "supervised-write", request_agent_restore_last_backup, write=True)
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_create_safe_backup",
+        "Create a project-owned safe backup snapshot through VRCForge approval and checkpoint controls.",
+        "medium",
+        create_safe_backup_sync,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=build_safe_backup_execution_plan,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_capture_screenshot",
+        "Capture one fixed dashboard scene-view artifact through VRCForge approval and checkpoint controls.",
+        "medium",
+        capture_avatar_screenshot_approved_sync,
+        request_preparer=prepare_capture_screenshot_request,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=build_prepared_execution_plan,
+    )
+    AGENT_GATEWAY.register_write_handler(
+        "vrcforge_capture_multi_screenshot",
+        "Capture up to four fixed-angle dashboard scene-view artifacts through VRCForge approval and checkpoint controls.",
+        "medium",
+        capture_avatar_multi_screenshot_approved_sync,
+        request_preparer=prepare_capture_multi_screenshot_request,
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=build_prepared_execution_plan,
+    )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_apply_blendshapes",
         "Apply validated Blendshape adjustments through VRCForge.",
@@ -25309,6 +25861,8 @@ def register_agent_gateway_tools() -> None:
         "Create a new empty GameObject in the scene through VRCForge.",
         "medium",
         create_gameobject_sync,
+        approval_category="scene-object-create",
+        allow_future_category=True,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_rename_gameobject",
@@ -25460,7 +26014,9 @@ if DASHBOARD_STATE is None:
 
 AGENT_GATEWAY.checkpoint_project_root_resolver = lambda: DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
 AGENT_GATEWAY.checkpoint_prepare_handler = prepare_unity_checkpoint_sync
+AGENT_GATEWAY.checkpoint_restore_prepare_handler = prepare_unity_checkpoint_restore_sync
 AGENT_GATEWAY.checkpoint_restore_handler = reload_unity_checkpoint_sync
+AGENT_GATEWAY.scoped_approval_reviewer_fn = _review_saved_project_category_approval
 
 register_agent_gateway_tools()
 
@@ -25640,15 +26196,42 @@ class PrimitiveBasisLiveUnityConnection:
     def prepare_checkpoint(self, project_root: Path) -> dict[str, Any]:
         return self._checkpoint_call("vrc_prepare_checkpoint", project_root)
 
-    def reload_checkpoint(self, project_root: Path) -> dict[str, Any]:
-        return self._checkpoint_call("vrc_reload_after_checkpoint_restore", project_root)
+    def prepare_restore_checkpoint(self, project_root: Path) -> dict[str, Any]:
+        return self._checkpoint_call(
+            "vrc_reload_after_checkpoint_restore",
+            project_root,
+            {"phase": "prepare_restore"},
+        )
 
-    def _checkpoint_call(self, tool_name: str, project_root: Path) -> dict[str, Any]:
+    def reload_checkpoint(
+        self,
+        project_root: Path,
+        restore_prepare: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        prepared = ensure_dict(restore_prepare)
+        return self._checkpoint_call(
+            "vrc_reload_after_checkpoint_restore",
+            project_root,
+            {
+                "phase": "reload",
+                "scenePaths": normalize_string_list(
+                    prepared.get("scenes") if isinstance(prepared.get("scenes"), list) else []
+                ),
+                "activeScenePath": str(prepared.get("activeScenePath") or "").strip(),
+            },
+        )
+
+    def _checkpoint_call(
+        self,
+        tool_name: str,
+        project_root: Path,
+        extra_arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if normalize_path_string(str(project_root)) != self._project_root:
             raise PrimitiveBasisLiveRuntimeError("The fixed checkpoint project changed.")
         result = self._invoke_result(
             tool_name,
-            {"projectPath": str(project_root), **self._guard_fields()},
+            {"projectPath": str(project_root), **ensure_dict(extra_arguments), **self._guard_fields()},
             preserve_tool_error=True,
         )
         return normalize_unity_checkpoint_result(result, project_root)
@@ -25662,10 +26245,16 @@ class PrimitiveBasisLiveUnityConnection:
     def _invoke_payload(
         self, tool_name: str, arguments: dict[str, Any], label: str
     ) -> dict[str, Any]:
+        result = self._invoke_result(tool_name, arguments)
         payload = ensure_dict_payload(
-            extract_tool_result_payload(self._invoke_result(tool_name, arguments)),
+            extract_tool_result_payload(result),
             label,
         )
+        call_audit = _primitive_live_call_audit(result, tool_name)
+        if call_audit:
+            # Keep only the existing non-sensitive Core audit projection.  In
+            # particular, this does not copy guarded arguments or their hash.
+            payload = {**payload, "_meta": {"io.vrcforge/callAudit": call_audit}}
         payload.setdefault("ok", True)
         return payload
 
@@ -25725,6 +26314,32 @@ def _primitive_live_guard_fields(params: dict[str, Any]) -> dict[str, Any]:
         "expectedUnityExecutableDigest",
     )
     return {name: params[name] for name in names if name in params}
+
+
+def _primitive_live_call_audit(result: McpResult, expected_tool: str) -> dict[str, Any]:
+    """Project the standard Core audit without retaining tool arguments."""
+    raw = result.payload if isinstance(result.payload, Mapping) else {}
+    metadata = raw.get("_meta") if isinstance(raw, Mapping) else None
+    audit = metadata.get("io.vrcforge/callAudit") if isinstance(metadata, Mapping) else None
+    if not isinstance(audit, Mapping) or audit.get("toolName") != expected_tool:
+        return {}
+    request_id = audit.get("requestId")
+    duration_ms = audit.get("durationMs")
+    result_summary = audit.get("resultSummary")
+    if (
+        type(request_id) is not int
+        or request_id <= 0
+        or not isinstance(duration_ms, (int, float))
+        or duration_ms < 0
+        or result_summary not in {"complete", "error", "pending"}
+    ):
+        return {}
+    return {
+        "requestId": request_id,
+        "toolName": expected_tool,
+        "resultSummary": result_summary,
+        "durationMs": duration_ms,
+    }
 
 
 PRIMITIVE_BASIS_LIVE_CONNECTION: PrimitiveBasisLiveUnityConnection | None = None

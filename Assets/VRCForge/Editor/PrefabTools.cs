@@ -11,9 +11,9 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_restore_safe_backup",
-        Description = "Preview or restore files from a VRCForge-created backup snapshot with project identity and overwrite checks."
+    [VRCForgeCommand(
+        toolId: "vrc_restore_safe_backup",
+        Summary = "Preview or restore files from a VRCForge-created backup snapshot with project identity and overwrite checks."
     )]
     public static class PrefabTools
     {
@@ -22,28 +22,28 @@ namespace VRCForge.Editor
 
         public class RestoreSafeBackupParameters
         {
-            [VRCForgeParameter("Absolute or project-relative path to a VRCForge backup folder.", Required = false)]
+            [VRCForgeInput("Absolute or project-relative path to a VRCForge backup folder.", IsRequired = false)]
             public string backupPath { get; set; } = "";
 
-            [VRCForgeParameter("Backup id under backupRoot. Used when backupPath is empty.", Required = false)]
+            [VRCForgeInput("Backup id under backupRoot. Used when backupPath is empty.", IsRequired = false)]
             public string backupId { get; set; } = "";
 
-            [VRCForgeParameter("Project-relative or absolute folder containing backup snapshots.", Required = false)]
+            [VRCForgeInput("Project-relative or absolute folder containing backup snapshots.", IsRequired = false)]
             public string backupRoot { get; set; } = DefaultBackupRoot;
 
-            [VRCForgeParameter("Optional subset of asset paths to restore from the manifest.", Required = false)]
+            [VRCForgeInput("Optional subset of asset paths to restore from the manifest.", IsRequired = false)]
             public List<string> assetPaths { get; set; } = new List<string>();
 
-            [VRCForgeParameter("Must be true to actually copy files. False returns a restore preview.", Required = false)]
+            [VRCForgeInput("Must be true to actually copy files. False returns a restore preview.", IsRequired = false)]
             public bool? confirmRestore { get; set; } = false;
 
-            [VRCForgeParameter("Allow restore when the project identity does not match the backup manifest.", Required = false)]
+            [VRCForgeInput("Allow restore when the project identity does not match the backup manifest.", IsRequired = false)]
             public bool? allowProjectMismatch { get; set; } = false;
 
-            [VRCForgeParameter("Allow overwriting files that changed since the backup was created.", Required = false)]
+            [VRCForgeInput("Allow overwriting files that changed since the backup was created.", IsRequired = false)]
             public bool? allowOverwriteChanged { get; set; } = false;
 
-            [VRCForgeParameter("Refresh the Unity AssetDatabase after files are restored.", Required = false)]
+            [VRCForgeInput("Refresh the Unity AssetDatabase after files are restored.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 
@@ -56,13 +56,13 @@ namespace VRCForge.Editor
             {
                 var payload = PreviewOrRestore(parameters);
                 var action = payload.confirmed ? "Restored" : "Previewed";
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"{action} safe backup '{payload.backup_id}': {payload.summary.restoredCount} restored, {payload.summary.skippedCount} skipped.",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Safe backup restore failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Safe backup restore failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

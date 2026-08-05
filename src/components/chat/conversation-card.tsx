@@ -23,6 +23,7 @@ import {
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
+import { presentApproval } from "../../lib/approval-presentation";
 import type { AgentApproval, AgentReasoningTrace, AgentRuntimeResponse, AgentSkillResult } from "../../lib/api";
 import type { ApprovalActionState, ChatAttachment, ConversationItem, MessageFeedback } from "../../lib/chat-types";
 import { thinkingTraceLabel } from "../../lib/provider-ui";
@@ -46,9 +47,6 @@ export function ConversationCard({
   onRetryItem,
   onEditItem,
   onFeedbackItem,
-  onApprove,
-  onReject,
-  onModifyApproval,
   onImportAttachment,
   onOpenSettings,
   onOpenDoctor,
@@ -391,15 +389,9 @@ export function ConversationCard({
           </RunRow>
         ) : null}
 
-        {approval ? (
+        {approval && approvalAction !== "approve" && approvalAction !== "reject" ? (
           <div style={{ order: timelineOrder.approval }}>
-            <InlineApprovalCard
-              approval={approval}
-              action={approvalAction}
-              onApprove={onApprove}
-              onReject={onReject}
-              onModify={onModifyApproval}
-            />
+            <InlineApprovalCard approval={approval} />
           </div>
         ) : awaitingApproval ? (
           <div className="flex items-center gap-2 px-1 py-1 text-xs text-amber-700" style={{ order: timelineOrder.approval }}>
@@ -809,58 +801,18 @@ function RunRow({
 
 function InlineApprovalCard({
   approval,
-  action,
-  onApprove,
-  onReject,
-  onModify,
 }: {
   approval: AgentApproval;
-  action?: ApprovalActionState;
-  onApprove?: (approvalId: string) => void;
-  onReject?: (approvalId: string) => void;
-  onModify?: (approval: AgentApproval) => void;
 }) {
   const { t } = useTranslation();
-  const busy = Boolean(action);
-  const title = approval.targetTool || approval.preview?.command || t("approval.requestTitle");
-  const detail = approval.paramsSummary || approval.arguments || approval.preview;
+  const presentation = presentApproval(approval, t);
   return (
-    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-sm">
-      <div className="flex min-w-0 items-start gap-2">
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="min-w-0 flex-1 truncate font-medium">{t("approval.needsApproval")}</span>
-            <Badge tone="warn" className="shrink-0">
-              {approval.riskLevel || "write"}
-            </Badge>
-          </div>
-          <div className="mt-1 truncate font-mono text-xs text-foreground">{title}</div>
-          {approval.reason ? <div className="mt-1 text-xs text-muted-foreground">{approval.reason}</div> : null}
-        </div>
-      </div>
-      {detail ? (
-        <details className="mt-2 rounded-md border border-amber-500/20 bg-background/70 px-2 py-1.5 text-xs">
-          <summary className="cursor-pointer text-muted-foreground">{t("approval.viewParameters")}</summary>
-          <pre className="app-scrollbar mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px]">
-            {formatPayload(detail)}
-          </pre>
-        </details>
-      ) : null}
-      <div className="mt-3 flex flex-wrap justify-end gap-2">
-        <Button variant="outline" className="h-8 px-3 text-xs" disabled={busy} onClick={() => onModify?.(approval)}>
-          {action === "modify" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Pencil className="h-3.5 w-3.5" />}
-          {action === "modify" ? t("approval.modifying") : t("approval.modify")}
-        </Button>
-        <Button variant="outline" className="h-8 px-3 text-xs" disabled={busy} onClick={() => onReject?.(approval.id)}>
-          {action === "reject" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
-          {action === "reject" ? t("approval.rejecting") : t("approval.reject")}
-        </Button>
-        <Button className="h-8 px-3 text-xs" disabled={busy} onClick={() => onApprove?.(approval.id)}>
-          {action === "approve" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-          {action === "approve" ? t("approval.executing") : t("approval.approve")}
-        </Button>
-      </div>
+    <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
+      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+      <span className="min-w-0 text-muted-foreground">
+        <span className="font-medium text-foreground">{presentation.title}</span>
+        {` — ${t("approval.awaitingInline")}`}
+      </span>
     </div>
   );
 }

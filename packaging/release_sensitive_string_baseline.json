@@ -1,0 +1,319 @@
+{
+  "entries": [
+    {
+      "path": "tests/fixtures/release_sensitive_strings/obvious_fake_github_token.txt",
+      "rule": "github_token",
+      "sha256": "d550f0926b75c035076889a76caa5e07d53f65feae611ef47d28c8d8c21632e7"
+    },
+    {
+      "path": "scripts/diagnose_packaged_context_compaction.mjs",
+      "rule": "credential_assignment",
+      "sha256": "325ad835687663563efa017f9cce9e1e645d0c38bd4842045cb65fa472afe5af"
+    },
+    {
+      "path": "scripts/diagnose_packaged_memory_restart.mjs",
+      "rule": "credential_assignment",
+      "sha256": "7ad0028ac8c61a598ded5ed59213ac38f8fc6fa21df1ae23c0ffff39f4193739"
+    },
+    {
+      "path": "scripts/diagnose_packaged_subagent_handoff.mjs",
+      "rule": "credential_assignment",
+      "sha256": "b8c9b3e3c83e2bca8f4e411774d3b25513661de20f03ee2277ed13e8906e3bb1"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_install/runner_policy.rs",
+      "rule": "windows_machine_path",
+      "sha256": "09530888ee68cfce87b8167e2b464de9aedf40a2053b661106bf0a42a1b58542"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_install/runner_policy.rs",
+      "rule": "windows_machine_path",
+      "sha256": "4380dcf8ba5d200db6ae79c64b7838b77f91bb8e56d33e2c8940fa4dc98e0a1d"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_install/runner_policy.rs",
+      "rule": "windows_machine_path",
+      "sha256": "4d2f4acae8071bcdc5b86f55bad9ce3c433975fbecc760ab85158280d2401dff"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_install/runner_policy.rs",
+      "rule": "windows_machine_path",
+      "sha256": "64628c323061b44c0001f65e02578785141a11167d6332c24532cc679b8e1edb"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_install/runner_policy.rs",
+      "rule": "windows_machine_path",
+      "sha256": "c65ba1eef8cac3bdb2d682d1f98c5abc14d93c17c4edc7c6c75287645c574827"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_install/runner_policy.rs",
+      "rule": "windows_machine_path",
+      "sha256": "ce5d3bbd212aca3fe5538a1c3dbecae76ab299b171aba8e2063993621986d89b"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "0ce035f6d3806919d749ab496f9d8e55c549bc7d5ad293ed7bdf4546a411c0f3"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "33cda8110c8f86b9959a83f83bf7a0e9be08f80acdc38a92a27e33d88d232c84"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "532ca004756702955db4a7df3fa9d64f98cc315ff34091444863e6f31077bd41"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "55f30a73f1060a4f6856580230a35789d2bd0cad7aac8561816a42c31e8a1dfa"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "88b001dfc313707e484125a69e10f0c4bbeb9621835b13b86495769bbfe4b6e3"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "8a812916c1764e76a3a031411d54619209c1d32b4db696844a974b2e0da93df0"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "8de877c0e14e51612fc393b6d5b13112f599e8e18fcd425d93c866b6f7476141"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "8e346c4812c96c6e429f1076fcb49617afc2c4cd05da07098310f50a35a3c9b3"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "93bd088b7203f23ac01a9953d5a66ff7e44f1b42c9974aead3720bbc58e57c33"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "c623bc6208bbf3d9eaa061e9d7160ff538a878ee2f15fa6d139d4a9222a8084f"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "d53a805642ed72fae4377c9467236cb4e9381cc5838945791ef15c6eedebc4ac"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "e370eb603bb9bf81396db1ba147d8b2e65d2dab96e62fe57d1958f43992d1e6b"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "e7ed371a417622209880f7e02507bdfadd67fd2b1cbf742155ec802b3987d983"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "fa5cde39003a84b680d4e82e9bdc9b723e24df42ce2c619616edb764d1ad7cc2"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "fb2e31ef6551f21f76137019987f1c3f56da79778071c9866835b24a908d3cba"
+    },
+    {
+      "path": "src-tauri/src/primitive_evidence_authority_supervisor_windows/child_environment.rs",
+      "rule": "windows_machine_path",
+      "sha256": "fc9b6f8adf658cd41654f8a720e43162578af9c4094c10e1eeabca6dc0dba537"
+    },
+    {
+      "path": "src-tauri/src/sanitize.rs",
+      "rule": "windows_machine_path",
+      "sha256": "6833805d176676dd1d0844c12cf52328d58c36667a090ba32f7406c514d278b8"
+    },
+    {
+      "path": "src-tauri/src/main.rs",
+      "rule": "credential_assignment",
+      "sha256": "ce3c8616ccabcf2e146a9b9a553e430c76b9128b86813e5f7865300720a1508f"
+    },
+    {
+      "path": "src-tauri/src/main.rs",
+      "rule": "credential_assignment",
+      "sha256": "30c9973f04430710b98732019d7ec42d758d39d1bfd860314633f8ffe9e82a23"
+    },
+    {
+      "path": "src-tauri/src/main.rs",
+      "rule": "credential_assignment",
+      "sha256": "6d06c91d7a7231b532f4f00c6326f254ead8e9772bdfe3ed2371bbdf286adbe6"
+    },
+    {
+      "path": "src-tauri/src/main.rs",
+      "rule": "credential_assignment",
+      "sha256": "be948ed682c0379e97320fc7b75597fe7271c3372d8d0522bc1b951d3cc4b835"
+    },
+    {
+      "path": "tests/test_agent_gateway_skill_package_audit.py",
+      "rule": "openai_api_key",
+      "sha256": "e3d324128805fd216ccf952f3d931b4178430db816be21a7b6cc18033d2287e3"
+    },
+    {
+      "path": "tests/test_background_goal_runtime.py",
+      "rule": "credential_url",
+      "sha256": "d576f1a8979199d9686b9814cb94ebefb32ee817f4c07de476f613dfee2c5849"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "bearer_token",
+      "sha256": "c63c48ce3f7e4ad2763fde90a1de44f0343a7b595184e835b3a748276d7b7260"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "openai_api_key",
+      "sha256": "1b8352d56ca96b2233e49cadc0e79569a9369567b083cc140ecfd8e82c3fcbf2"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "openai_api_key",
+      "sha256": "ce4220196b4abbc84ba61732881712e352645e1c1ceebbc6fac0388d7e92246e"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "windows_machine_path",
+      "sha256": "35bc393907c186467e2afba965b6e2bd94e80a04874e2a75f090bae5f66356da"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "windows_machine_path",
+      "sha256": "7b6bed70bbb8ef4bc5fc4981278b79fceda7b9d0d9cceca1e22809014c1892fe"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "windows_machine_path",
+      "sha256": "9cf3f7e53bcd6dd065bb226e2994e4ab59fa0285b9804ec47d42db1a48dd47a3"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "windows_machine_path",
+      "sha256": "ca6344ea423e528e988f9680ac5acbc982aff1f438f08507578f622d55891c3e"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "windows_machine_path",
+      "sha256": "d9dd73b0bdbbfb1a60f531c26c9ab9a712caa8a243f21fb55744072733b832b4"
+    },
+    {
+      "path": "tests/test_context_compaction.py",
+      "rule": "windows_machine_path",
+      "sha256": "f91acfb26dd9904f8b9230e34221b5928afb743328d76661a215e6ff505689b5"
+    },
+    {
+      "path": "tests/test_dashboard_server.py",
+      "rule": "bearer_token",
+      "sha256": "287f155510ca2bb46acaaaa85e5f891e8de6941c5a3c60dbecb6716b32971fbd"
+    },
+    {
+      "path": "tests/test_dashboard_server.py",
+      "rule": "bearer_token",
+      "sha256": "6f17219d74cbec2cc1544bd16e12a41b26726577b5f9f57cfe514c77c91518c3"
+    },
+    {
+      "path": "tests/test_dashboard_server.py",
+      "rule": "bearer_token",
+      "sha256": "d235c7c1b18844c8e94072d1233dd55794f8f57e93dc93333dc198577fa4e4e8"
+    },
+    {
+      "path": "tests/test_dashboard_server.py",
+      "rule": "credential_url",
+      "sha256": "1b86b6d7a0707c76a7869b0714008b170a9ced558cb13030d1c80426cb4a1228"
+    },
+    {
+      "path": "tests/test_dashboard_server.py",
+      "rule": "windows_machine_path",
+      "sha256": "99fc1d22ffd18072ad7b0f79b8b16bff7a5b12af91eb042394d11270b246f2bd"
+    },
+    {
+      "path": "tests/test_diagnostic_logging.py",
+      "rule": "credential_assignment",
+      "sha256": "01fac800b956711a2822715b49316bb46b2a56a7e1d8f3a6b7487777dd4eb1c3"
+    },
+    {
+      "path": "tests/test_diagnostic_logging.py",
+      "rule": "credential_assignment",
+      "sha256": "beff154813220c857540b196033f5acc42e64167a733d0c6ecc6f7a059acc88a"
+    },
+    {
+      "path": "tests/test_doctor_service.py",
+      "rule": "credential_assignment",
+      "sha256": "69cf48cae481f9a69923fa7ffeda4777e5cca06895fa06f8637f18bb791e8fcb"
+    },
+    {
+      "path": "tests/test_doctor_service.py",
+      "rule": "credential_url",
+      "sha256": "d295d9d04412d40e561b58504c7716907f79155a8f74254d05a9d1c1e3338368"
+    },
+    {
+      "path": "tests/test_doctor_service.py",
+      "rule": "windows_machine_path",
+      "sha256": "cfcce764d79eb49fd1f50815771739fbed52ebe30a4ca485c9684edb4e591cd9"
+    },
+    {
+      "path": "tests/test_external_agent_connectors.py",
+      "rule": "credential_assignment",
+      "sha256": "28358bbe18bf7d01b24662b8603115e9f2cd1b1422bde5e6f6cd98cfe9af5f8c"
+    },
+    {
+      "path": "tests/test_mcp_trigger_selection.py",
+      "rule": "bearer_token",
+      "sha256": "aad6a5f9a26c30aa2cfba9c83d7e97fcf645e6becabca5891437d141d36ded1e"
+    },
+    {
+      "path": "tests/test_memory_consolidation.py",
+      "rule": "credential_url",
+      "sha256": "42fa6fd9447893a68b759b50384abffa9e65911b9b6b8551eff5b3e6034f212f"
+    },
+    {
+      "path": "tests/test_memory_consolidation.py",
+      "rule": "credential_url",
+      "sha256": "8a664bc8ce62cb6822afb7078a5defeff865477bb82c5adafde876c4d4117878"
+    },
+    {
+      "path": "tests/test_memory_consolidation.py",
+      "rule": "credential_url",
+      "sha256": "b5f1bd20db5606b8830be6baaaf6afb3da46bedbbb7c7a7ed9a20482b06ca332"
+    },
+    {
+      "path": "tests/test_memory_review_dashboard.py",
+      "rule": "credential_assignment",
+      "sha256": "572559c357a70491a158b488e3f119f30b76be6c3434c0d0e33673fa79fd60a6"
+    },
+    {
+      "path": "tests/test_memory_review_dashboard.py",
+      "rule": "credential_assignment",
+      "sha256": "ff7a4a39efe831bb97fb94477ef63698c92367a09749b320aea56e2f3529dda5"
+    },
+    {
+      "path": "tests/test_path_to_skill.py",
+      "rule": "bearer_token",
+      "sha256": "e0d18cc884bf63925ccf32bdd5c4183cad01d803097de42ffab00986d1808873"
+    },
+    {
+      "path": "tests/test_path_to_skill.py",
+      "rule": "openai_api_key",
+      "sha256": "d109ac26c6007c60037553eaac1859ae7f0886e36f025599b04f36e1f2963de7"
+    },
+    {
+      "path": "tests/test_release_sensitive_strings.py",
+      "rule": "github_token",
+      "sha256": "149df6444713684c2b2fc9fd9af730b121de941eaa8b2e85505c486e06e5f1a9"
+    },
+    {
+      "path": "tests/test_session_store_integrity.py",
+      "rule": "credential_assignment",
+      "sha256": "394c885e34da21b8b10e420117515ecbe614a2f86c37c49d5d846f754522bdf2"
+    }
+  ]
+}

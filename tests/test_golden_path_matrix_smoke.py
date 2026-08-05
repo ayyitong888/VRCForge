@@ -29,6 +29,7 @@ def make_args(tmp_path: Path, **overrides: Any) -> Namespace:
         "app_token_file": str(token_file),
         "project_root": "",
         "avatar_path": "",
+        "parent_path": "",
         "target_profile": "pc_conservative",
         "include_quest": True,
         "outfit_package": "",
@@ -425,6 +426,29 @@ def test_default_matrix_runs_safe_paths_and_skips_live_writes(tmp_path: Path) ->
     assert matrix["external_agent_write_request_rollback"]["status"] == "skipped"
     assert matrix["vsk_import_dry_run_cleanup"]["status"] == "skipped"
     assert matrix["cli_doctor_readiness_checkpoint"]["status"] == "skipped"
+
+
+def test_external_agent_live_write_forwards_the_exact_parent_path(tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    run_calls: list[list[str]] = []
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        run_calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout='{"ok": true}', stderr="")
+
+    runner = smoke.GoldenPathMatrixSmoke(
+        make_args(
+            tmp_path,
+            include_external_agent=True,
+            include_live_writes=True,
+            parent_path="Scene/Hero",
+        ),
+        run_command_func=fake_run,
+    )
+    runner.external_agent_write_request_rollback()
+
+    assert len(run_calls) == 1
+    assert run_calls[0][-3:] == ["--live-write-rollback", "--parent-path", "Scene/Hero"]
 
 
 def test_safe_default_skips_confirmed_unity_dependencies(tmp_path: Path) -> None:

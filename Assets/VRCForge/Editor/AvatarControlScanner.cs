@@ -14,12 +14,18 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_scan_avatar_controls",
-        Description = "Scan a VRChat avatar expression menu, expression parameters, and scene clothing-like objects via a predefined VRCForge tool."
+    [VRCForgeCommand(
+        toolId: "vrc_scan_avatar_controls",
+        Summary = "Scan a VRChat avatar expression menu, expression parameters, and scene clothing-like objects via a predefined VRCForge tool."
     )]
     public static class AvatarControlScanner
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar root hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Optional JSON output path; leave empty for read-only payload.", IsRequired = false)] public string outputPath { get; set; } = "";
+        }
+
         private static readonly string[] WardrobeKeywords =
         {
             "cloth", "clothes", "clothing", "outfit", "wear", "wardrobe", "dress", "shirt", "skirt",
@@ -64,13 +70,13 @@ namespace VRCForge.Editor
                     response["jsonPath"] = jsonPath;
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Scanned {items.Count} avatar control item(s).",
                     response);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Avatar control scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Avatar control scan failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -468,12 +474,19 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_toggle_scene_object",
-        Description = "Toggle a scene GameObject active state by transform path via a predefined VRCForge tool."
+    [VRCForgeCommand(
+        toolId: "vrc_toggle_scene_object",
+        Summary = "Toggle a scene GameObject active state by transform path via a predefined VRCForge tool."
     )]
     public static class SceneObjectToggler
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Exact loaded scene hierarchy path.", IsRequired = true)] public string objectPath { get; set; } = "";
+            [VRCForgeInput("Requested active-self state.", IsRequired = true)] public bool? active { get; set; }
+            [VRCForgeInput("Save open scenes and assets after the change.", IsRequired = false)] public bool? saveAssets { get; set; } = true;
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -483,7 +496,7 @@ namespace VRCForge.Editor
                 var saveAssets = @params?["saveAssets"]?.Value<bool?>() ?? true;
                 if (string.IsNullOrWhiteSpace(objectPath))
                 {
-                    return new ErrorResponse("Missing required parameter: objectPath");
+                    return VRCForgeToolResult.Failed("Missing required parameter: objectPath");
                 }
 
                 var normalized = NormalizePath(objectPath);
@@ -492,7 +505,7 @@ namespace VRCForge.Editor
                     .FirstOrDefault(item => NormalizePath(GetTransformPath(item)) == normalized);
                 if (target == null)
                 {
-                    return new ErrorResponse($"Scene object not found: {objectPath}");
+                    return VRCForgeToolResult.Failed($"Scene object not found: {objectPath}");
                 }
 
                 target.gameObject.SetActive(active);
@@ -504,7 +517,7 @@ namespace VRCForge.Editor
                     EditorSceneManager.SaveOpenScenes();
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Set {objectPath} active={active}.",
                     new
                     {
@@ -515,7 +528,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Scene object toggle failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Scene object toggle failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

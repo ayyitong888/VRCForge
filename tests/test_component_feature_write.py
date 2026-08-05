@@ -411,7 +411,7 @@ def test_csharp_domain_is_fixed_schema_public_api_only() -> None:
         pytest.skip("C# component feature domain is not written yet")
     source = "\n".join(Path(path).read_text(encoding="utf-8") for path in paths)
     for fragment in (
-        'name: "vrc_create_component_feature"',
+        'toolId: "vrc_create_component_feature"',
         '"CreateToggle"',
         '"CreateArmatureLink"',
         "BindingFlags.Public",
@@ -439,6 +439,9 @@ def test_csharp_domain_is_fixed_schema_public_api_only() -> None:
         "propertyName = args",
     ):
         assert forbidden not in source
+
+    assert "NormalizeScenePath(scene.path)" not in source
+    assert "(scene.path ?? string.Empty).Replace('\\\\', '/')" in source
 
 
 def test_disposable_fixture_declares_all_negative_and_restore_controls() -> None:

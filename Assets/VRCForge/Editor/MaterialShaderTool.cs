@@ -12,9 +12,9 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_set_material_shader",
-        Description = "Preview or assign one persistent project material to a named shader through the supervised project-write lane."
+    [VRCForgeCommand(
+        toolId: "vrc_set_material_shader",
+        Summary = "Preview or assign one persistent project material to a named shader through the supervised project-write lane."
     )]
     public static class MaterialShaderTool
     {
@@ -22,11 +22,39 @@ namespace VRCForge.Editor
         private const int MaxDependencyCandidates = 4096;
         private const int MaxImpactItems = 128;
 
+        public class Parameters
+        {
+            [VRCForgeInput("Target shader name.", IsRequired = true)] public string shaderName { get; set; } = "";
+            [VRCForgeInput("Optional exact shader asset path.", IsRequired = false)] public string shaderAssetPath { get; set; } = "";
+            [VRCForgeInput("Either renderer hierarchy path or persistent material path is required.", IsRequired = false)] public string rendererPath { get; set; } = "";
+            [VRCForgeInput("Optional renderer component identity.", IsRequired = false)] public string rendererComponentId { get; set; } = "";
+            [VRCForgeInput("Persistent material asset path when not targeting a renderer.", IsRequired = false)] public string materialAssetPath { get; set; } = "";
+            [VRCForgeInput("Material slot index for a renderer target.", IsRequired = false)] public int? slotIndex { get; set; } = 0;
+            [VRCForgeInput("Exact active Unity project root.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
+            [VRCForgeInput("Return a non-mutating assignment preview.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Save the material asset during apply.", IsRequired = false)] public bool? saveAssets { get; set; } = true;
+            [VRCForgeInput("Expected current material shader name from preview.", IsRequired = false)] public string expectedBeforeShader { get; set; } = "";
+            [VRCForgeInput("Expected current shader asset path from preview.", IsRequired = false)] public string expectedBeforeShaderAssetPath { get; set; } = "";
+            [VRCForgeInput("Expected current shader asset GUID from preview.", IsRequired = false)] public string expectedBeforeShaderAssetGuid { get; set; } = "";
+            [VRCForgeInput("Expected persistent material asset path from preview.", IsRequired = false)] public string expectedMaterialAssetPath { get; set; } = "";
+            [VRCForgeInput("Expected persistent material asset GUID from preview.", IsRequired = false)] public string expectedMaterialAssetGuid { get; set; } = "";
+            [VRCForgeInput("Expected persistent material file digest from preview.", IsRequired = false)] public string expectedMaterialFileDigest { get; set; } = "";
+            [VRCForgeInput("Expected shared-material impact digest from preview.", IsRequired = false)] public string expectedSharedImpactDigest { get; set; } = "";
+            [VRCForgeInput("Expected renderer scene path from preview.", IsRequired = false)] public string expectedRendererScenePath { get; set; } = "";
+            [VRCForgeInput("Expected renderer scene GUID from preview.", IsRequired = false)] public string expectedRendererSceneGuid { get; set; } = "";
+            [VRCForgeInput("Expected renderer scene handle from preview.", IsRequired = false)] public int? expectedRendererSceneHandle { get; set; }
+            [VRCForgeInput("Expected renderer component identity from preview.", IsRequired = false)] public string expectedRendererComponentId { get; set; } = "";
+            [VRCForgeInput("Expected renderer component type from preview.", IsRequired = false)] public string expectedRendererComponentType { get; set; } = "";
+            [VRCForgeInput("Expected renderer component index from preview.", IsRequired = false)] public int? expectedRendererComponentIndex { get; set; }
+            [VRCForgeInput("Expected resolved target shader asset path from preview.", IsRequired = false)] public string expectedShaderAssetPath { get; set; } = "";
+            [VRCForgeInput("Expected resolved target shader asset GUID from preview.", IsRequired = false)] public string expectedShaderAssetGuid { get; set; } = "";
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
             {
-                var shaderName = (@params?["shaderName"]?.ToString() ?? @params?["targetShader"]?.ToString() ?? string.Empty).Trim();
+                var shaderName = (@params?["shaderName"]?.ToString() ?? string.Empty).Trim();
                 var shaderAssetPath = NormalizeOptionalAssetPath(@params?["shaderAssetPath"]?.ToString(), allowPackages: true);
                 var rendererPath = (@params?["rendererPath"]?.ToString() ?? string.Empty).Trim();
                 var rendererComponentId = NormalizeHex(@params?["rendererComponentId"]?.ToString(), 64, allowEmpty: true);
@@ -53,20 +81,20 @@ namespace VRCForge.Editor
 
                 if (string.IsNullOrWhiteSpace(shaderName))
                 {
-                    return new ErrorResponse("shaderName is required.");
+                    return VRCForgeToolResult.Failed("shaderName is required.");
                 }
                 if (!MatchesCurrentProject(expectedProjectPath))
                 {
-                    return new ErrorResponse("The selected Unity project does not match the active editor instance.");
+                    return VRCForgeToolResult.Failed("The selected Unity project does not match the active editor instance.");
                 }
 
                 if (!string.IsNullOrWhiteSpace(rendererPath) && !string.IsNullOrWhiteSpace(materialAssetPath))
                 {
-                    return new ErrorResponse("rendererPath and materialAssetPath cannot be combined.");
+                    return VRCForgeToolResult.Failed("rendererPath and materialAssetPath cannot be combined.");
                 }
                 if (!string.IsNullOrWhiteSpace(materialAssetPath) && !string.IsNullOrWhiteSpace(rendererComponentId))
                 {
-                    return new ErrorResponse("rendererComponentId cannot be combined with materialAssetPath.");
+                    return VRCForgeToolResult.Failed("rendererComponentId cannot be combined with materialAssetPath.");
                 }
 
                 if (!preview
@@ -82,23 +110,23 @@ namespace VRCForge.Editor
                         || (!string.IsNullOrWhiteSpace(rendererPath)
                             && (@params?["expectedRendererScenePath"] == null
                                 || @params?["expectedRendererSceneGuid"] == null
-                                || expectedRendererSceneHandle <= 0
+                                || expectedRendererSceneHandle == 0
                                 || string.IsNullOrWhiteSpace(expectedRendererComponentId)
                                 || string.IsNullOrWhiteSpace(expectedRendererComponentType)
                                 || expectedRendererComponentIndex < 0))))
                 {
-                    return new ErrorResponse("Verified material and shader preconditions are required for apply.");
+                    return VRCForgeToolResult.Failed("Verified material and shader preconditions are required for apply.");
                 }
 
                 if (!preview && !saveAssets)
                 {
-                    return new ErrorResponse("saveAssets must be true for apply.");
+                    return VRCForgeToolResult.Failed("saveAssets must be true for apply.");
                 }
 
                 var shader = ResolveShader(shaderName, shaderAssetPath);
                 if (shader == null)
                 {
-                    return new ErrorResponse("The requested shader could not be resolved.");
+                    return VRCForgeToolResult.Failed("The requested shader could not be resolved.");
                 }
                 var resolvedShaderAssetPath = NormalizeResolvedShaderAssetPath(AssetDatabase.GetAssetPath(shader));
                 var resolvedShaderAssetGuid = string.IsNullOrWhiteSpace(resolvedShaderAssetPath)
@@ -108,13 +136,13 @@ namespace VRCForge.Editor
                     && (!string.Equals(resolvedShaderAssetPath, expectedShaderAssetPath, StringComparison.Ordinal)
                         || !string.Equals(resolvedShaderAssetGuid, expectedShaderAssetGuid, StringComparison.OrdinalIgnoreCase)))
                 {
-                    return new ErrorResponse("The resolved shader asset no longer matches the verified preview.");
+                    return VRCForgeToolResult.Failed("The resolved shader asset no longer matches the verified preview.");
                 }
 
                 var target = ResolveMaterialTarget(rendererPath, rendererComponentId, materialAssetPath, slotIndex);
                 if (target.material == null)
                 {
-                    return new ErrorResponse("Material target could not be resolved.");
+                    return VRCForgeToolResult.Failed("Material target could not be resolved.");
                 }
 
                 var materialEvidence = InspectWritableMaterialAsset(target.material);
@@ -132,14 +160,14 @@ namespace VRCForge.Editor
                         || !string.Equals(beforeShaderAssetPath, expectedBeforeShaderAssetPath, StringComparison.Ordinal)
                         || !string.Equals(beforeShaderAssetGuid, expectedBeforeShaderAssetGuid, StringComparison.OrdinalIgnoreCase)))
                 {
-                    return new ErrorResponse("The material shader no longer matches the verified preview.");
+                    return VRCForgeToolResult.Failed("The material shader no longer matches the verified preview.");
                 }
                 if (!preview
                     && (!string.Equals(persistentMaterialPath, expectedMaterialAssetPath, StringComparison.Ordinal)
                         || !string.Equals(materialEvidence.assetGuid, expectedMaterialAssetGuid, StringComparison.OrdinalIgnoreCase)
                         || !string.Equals(materialEvidence.fileDigest, expectedMaterialFileDigest, StringComparison.OrdinalIgnoreCase)))
                 {
-                    return new ErrorResponse("The material asset no longer matches the verified preview.");
+                    return VRCForgeToolResult.Failed("The material asset no longer matches the verified preview.");
                 }
                 if (!preview
                     && !string.IsNullOrWhiteSpace(rendererPath)
@@ -150,7 +178,7 @@ namespace VRCForge.Editor
                         || !string.Equals(target.rendererComponentType, expectedRendererComponentType, StringComparison.Ordinal)
                         || target.rendererComponentIndex != expectedRendererComponentIndex))
                 {
-                    return new ErrorResponse("The renderer component no longer matches the verified preview.");
+                    return VRCForgeToolResult.Failed("The renderer component no longer matches the verified preview.");
                 }
 
                 var sharedImpactResult = BuildSharedMaterialImpact(target.material, persistentMaterialPath);
@@ -160,7 +188,7 @@ namespace VRCForge.Editor
                 var sharedImpactTailDigest = sharedImpactResult.tailDigest;
                 if (!preview && !string.Equals(sharedImpactDigest, expectedSharedImpactDigest, StringComparison.OrdinalIgnoreCase))
                 {
-                    return new ErrorResponse("Shared material impact changed after the verified preview.");
+                    return VRCForgeToolResult.Failed("Shared material impact changed after the verified preview.");
                 }
                 var wouldChange = beforeShaderObject != shader;
                 var changed = false;
@@ -169,7 +197,7 @@ namespace VRCForge.Editor
                 {
                     if (!string.Equals(ComputeFileSha256(materialEvidence.filePath), materialEvidence.fileDigest, StringComparison.OrdinalIgnoreCase))
                     {
-                        return new ErrorResponse("The material file changed after the verified preview.");
+                        return VRCForgeToolResult.Failed("The material file changed after the verified preview.");
                     }
                     Undo.RecordObject(target.material, "Set VRCForge material shader");
                     target.material.shader = shader;
@@ -202,7 +230,7 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("Material shader readback did not match the requested shader.");
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     preview ? "Material shader preview completed." : "Material shader assignment applied.",
                     new
                     {
@@ -243,7 +271,7 @@ namespace VRCForge.Editor
             }
             catch (Exception)
             {
-                return new ErrorResponse("Material shader assignment failed.");
+                return VRCForgeToolResult.Failed("Material shader assignment failed.");
             }
         }
 

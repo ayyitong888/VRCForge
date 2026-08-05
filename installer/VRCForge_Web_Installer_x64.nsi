@@ -7,8 +7,44 @@
 !ifndef PAYLOAD_SHA256
   !error "PAYLOAD_SHA256 is required"
 !endif
+!ifndef PAYLOAD_LENGTH
+  !error "PAYLOAD_LENGTH is required"
+!endif
+!ifndef WEB_PAYLOAD_HELPER
+  !error "WEB_PAYLOAD_HELPER is required"
+!endif
+!ifndef WEB_PAYLOAD_HELPER_SHA256
+  !error "WEB_PAYLOAD_HELPER_SHA256 is required"
+!endif
+
+!define APP_USER_MODEL_ID "app.vrcforge.agentic"
 !ifndef OUTFILE
   !define OUTFILE "VRCForge_Web_Installer_x64.exe"
+!endif
+
+!ifdef SMOKE_ID
+  !error "SMOKE_ID cannot be supplied directly; use VRCFORGE_SMOKE_BUILD with the validated environment value."
+!endif
+!ifdef VRCFORGE_SMOKE_BUILD
+  ; Keep the untrusted smoke token out of the compiler shell command. The
+  ; validated environment value is expanded only after this command succeeds.
+  !system '"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "ValidateNsisSmokeIdentity.ps1"' = 0
+  !define SMOKE_ID "$%VRCFORGE_NSIS_SMOKE_ID%"
+  !define INSTALL_LEAF "VRCForge-Smoke-${SMOKE_ID}"
+  !define STATE_TAG "VRCForge-Smoke-${SMOKE_ID}"
+  !define UNINSTALL_KEY "VRCForge-Smoke-${SMOKE_ID}"
+  !define INSTALLER_LANGUAGE_KEY "Software\VRCForge\InstallerSmoke\${SMOKE_ID}"
+  !define START_MENU_GROUP "VRCForge Smoke ${SMOKE_ID}"
+  !define DESKTOP_SHORTCUT "VRCForge Smoke ${SMOKE_ID}.lnk"
+  !define USER_DATA_RELATIVE "VRCForge\installer-smoke\${SMOKE_ID}"
+!else
+  !define INSTALL_LEAF "VRCForge"
+  !define STATE_TAG "VRCForge"
+  !define UNINSTALL_KEY "VRCForge"
+  !define INSTALLER_LANGUAGE_KEY "Software\VRCForge"
+  !define START_MENU_GROUP "VRCForge"
+  !define DESKTOP_SHORTCUT "VRCForge.lnk"
+  !define USER_DATA_RELATIVE "VRCForge\agentic-app"
 !endif
 
 Unicode true
@@ -17,10 +53,17 @@ Unicode true
 !include "MUI2.nsh"
 Var ClearUserDataCheckbox
 Var ClearUserData
+Var PayloadStatePath
+Var PayloadStageRoot
+Var TrustedPowerShellPath
+Var HelperStatePath
+Var HelperPayloadPath
+Var HelperSourcePath
+Var UserDataRoot
 
 Name "VRCForge ${VERSION} x64 Web Installer"
 OutFile "${OUTFILE}"
-InstallDir "$PROGRAMFILES64\VRCForge"
+InstallDir "$PROGRAMFILES64\${INSTALL_LEAF}"
 RequestExecutionLevel admin
 SetCompressor /SOLID lzma
 BrandingText "VRCForge ${VERSION}"
@@ -36,7 +79,6 @@ BrandingText "VRCForge ${VERSION}"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "..\LICENSE"
-!insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -48,7 +90,7 @@ UninstPage custom un.UserDataOptionsPage un.UserDataOptionsLeave
 ; Persist the chosen installer language so the uninstaller reuses it
 ; (MUI_UNGETLANGUAGE reads this value instead of asking again).
 !define MUI_LANGDLL_REGISTRY_ROOT "HKCU"
-!define MUI_LANGDLL_REGISTRY_KEY "Software\VRCForge"
+!define MUI_LANGDLL_REGISTRY_KEY "${INSTALLER_LANGUAGE_KEY}"
 !define MUI_LANGDLL_REGISTRY_VALUENAME "InstallerLanguage"
 ; Unicode installer: offer every bundled language regardless of system codepage.
 !define MUI_LANGDLL_ALLLANGUAGES
@@ -86,10 +128,10 @@ LangString ClearUserDataCheckboxText ${LANG_SIMPCHINESE} "清除用户数据和�
 LangString ClearUserDataCheckboxText ${LANG_TRADCHINESE} "清除使用者資料與歷史對話"
 LangString ClearUserDataCheckboxText ${LANG_JAPANESE} "ユーザーデータとチャット履歴を削除する"
 LangString ClearUserDataCheckboxText ${LANG_ENGLISH} "Clear user data and chat history"
-LangString UninstallKeptUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件已移除。用户数据仍保留在 $LOCALAPPDATA\VRCForge\agentic-app。"
-LangString UninstallKeptUserData ${LANG_TRADCHINESE} "VRCForge 程式檔案已移除。使用者資料仍保留在 $LOCALAPPDATA\VRCForge\agentic-app。"
-LangString UninstallKeptUserData ${LANG_JAPANESE} "VRCForge のプログラムファイルを削除しました。ユーザーデータは $LOCALAPPDATA\VRCForge\agentic-app に保持されています。"
-LangString UninstallKeptUserData ${LANG_ENGLISH} "VRCForge program files were removed. User data remains in $LOCALAPPDATA\VRCForge\agentic-app."
+LangString UninstallKeptUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件已移除。用户数据仍保留在 $LOCALAPPDATA\${USER_DATA_RELATIVE}。"
+LangString UninstallKeptUserData ${LANG_TRADCHINESE} "VRCForge 程式檔案已移除。使用者資料仍保留在 $LOCALAPPDATA\${USER_DATA_RELATIVE}。"
+LangString UninstallKeptUserData ${LANG_JAPANESE} "VRCForge のプログラムファイルを削除しました。ユーザーデータは $LOCALAPPDATA\${USER_DATA_RELATIVE} に保持されています。"
+LangString UninstallKeptUserData ${LANG_ENGLISH} "VRCForge program files were removed. User data remains in $LOCALAPPDATA\${USER_DATA_RELATIVE}."
 LangString UninstallClearedUserData ${LANG_SIMPCHINESE} "VRCForge 程序文件、用户数据和已知项目中的历史对话已移除。"
 LangString UninstallClearedUserData ${LANG_TRADCHINESE} "VRCForge 程式檔案、使用者資料以及已知專案中的歷史對話已移除。"
 LangString UninstallClearedUserData ${LANG_JAPANESE} "VRCForge のプログラムファイル、ユーザーデータ、既知プロジェクトのチャット履歴を削除しました。"
@@ -134,11 +176,71 @@ Function un.onInit
   !insertmacro MUI_UNGETLANGUAGE
 FunctionEnd
 
-!macro StopVRCForgeProcesses
-  nsExec::ExecToLog 'taskkill /F /IM VRCForge.exe /T'
-  nsExec::ExecToLog 'taskkill /F /IM vrcforge_backend.exe /T'
-  Sleep 800
+!macro DefineProtectedHelperFunctions Prefix
+Function ${Prefix}ValidateScopedInstallDir
+  StrCpy $0 0
+  StrCmp "$INSTDIR" "$PROGRAMFILES64\${INSTALL_LEAF}" 0 +2
+    Return
+  StrCpy $0 1
+FunctionEnd
+Function ${Prefix}CleanupProtectedHelper
+  ${If} $HelperPayloadPath != ""
+    System::Call 'kernel32::GetFileAttributes(t "$HelperPayloadPath") i .r9'
+    IntOp $9 $9 & 0x400
+    ${If} $9 == 0
+      RMDir /r "$HelperPayloadPath"
+    ${EndIf}
+  ${EndIf}
+  StrCpy $HelperPayloadPath ""
+FunctionEnd
+Function ${Prefix}PrepareProtectedHelper
+  System::Call 'kernel32::GetTempFileName(t "$PROGRAMFILES64", t "vfg", i 0, t .r8) i .r9'
+  ${If} $9 == 0
+    Abort
+  ${EndIf}
+  Delete "$8"
+  CreateDirectory "$8"
+  System::Call 'kernel32::GetFileAttributes(t "$8") i .r9'
+  IntOp $7 $9 & 0x10
+  IntOp $9 $9 & 0x400
+  ${If} $7 == 0
+    Abort
+  ${EndIf}
+  ${If} $9 != 0
+    Abort
+  ${EndIf}
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$8" /setowner "*S-1-5-32-544" /Q'
+  Pop $9
+  ${If} $9 != 0
+    Abort
+  ${EndIf}
+  nsExec::ExecToLog '"$SYSDIR\icacls.exe" "$8" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /Q'
+  Pop $9
+  ${If} $9 != 0
+    Abort
+  ${EndIf}
+  CopyFiles /SILENT "$HelperStatePath" "$8\VRCForge_WebPayload.ps1"
+  StrCpy $HelperPayloadPath "$8"
+  nsExec::ExecToLog '"$TrustedPowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command "$$a=(Get-FileHash -Algorithm SHA256 -LiteralPath $\'$HelperPayloadPath\VRCForge_WebPayload.ps1$\').Hash;if($$a -ieq $\'${WEB_PAYLOAD_HELPER_SHA256}$\'){exit 0};exit 1"'
+  Pop $0
+  ${If} $0 != 0
+    Call ${Prefix}CleanupProtectedHelper
+  ${EndIf}
+FunctionEnd
+Function ${Prefix}ValidateInstallBoundary
+  StrCpy $HelperStatePath "$HelperSourcePath"
+  Call ${Prefix}PrepareProtectedHelper
+  ${If} $0 == 0
+    nsExec::ExecToLog '"$TrustedPowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$HelperPayloadPath\VRCForge_WebPayload.ps1" -Action ValidateDestination -Version "${VERSION}" -ProgramFilesRoot "$PROGRAMFILES64" -DestinationRoot "$INSTDIR" -ExpectedInstallLeaf "${INSTALL_LEAF}" -StateTag "${STATE_TAG}"'
+    Pop $0
+    Push $0
+    Call ${Prefix}CleanupProtectedHelper
+    Pop $0
+  ${EndIf}
+FunctionEnd
 !macroend
+!insertmacro DefineProtectedHelperFunctions ""
+!insertmacro DefineProtectedHelperFunctions "un."
 
 Function un.UserDataOptionsPage
   IfSilent 0 +2
@@ -162,92 +264,145 @@ Function un.ClearUserDataIfRequested
   ${If} $ClearUserData == ${BST_CHECKED}
     DetailPrint "$(ClearingUserDataText)"
     ${If} ${FileExists} "$INSTDIR\backend\vrcforge_backend.exe"
-      nsExec::ExecToLog '"$INSTDIR\backend\vrcforge_backend.exe" --cleanup-user-data --cleanup-user-data-root "$LOCALAPPDATA\VRCForge\agentic-app"'
+      nsExec::ExecToLog '"$INSTDIR\backend\vrcforge_backend.exe" --cleanup-user-data --cleanup-user-data-root "$UserDataRoot"'
       Pop $0
       ${If} $0 != 0
-        RMDir /r "$LOCALAPPDATA\VRCForge\agentic-app"
+        RMDir /r "$UserDataRoot"
       ${EndIf}
     ${Else}
-      RMDir /r "$LOCALAPPDATA\VRCForge\agentic-app"
+      RMDir /r "$UserDataRoot"
     ${EndIf}
   ${EndIf}
 FunctionEnd
 
 Section "Install"
   SetRegView 64
+  ; A silent /D override is accepted only after the protected helper restricts
+  ; it to the VRCForge production or isolated smoke leaf under Program Files.
+  InitPluginsDir
+  Call ValidateScopedInstallDir
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "The requested install directory does not match this installer identity."
+    Abort
+  ${EndIf}
+  SetOutPath "$PLUGINSDIR"
+  File /oname=VRCForge_WebPayload.ps1 "${WEB_PAYLOAD_HELPER}"
+  StrCpy $TrustedPowerShellPath "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  ${IfNot} ${FileExists} "$TrustedPowerShellPath"
+    StrCpy $TrustedPowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  ${EndIf}
+  StrCpy $HelperSourcePath "$PLUGINSDIR\VRCForge_WebPayload.ps1"
+  Call ValidateInstallBoundary
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "The protected Program Files installation boundary could not be verified."
+    Abort
+  ${EndIf}
+  StrCpy $PayloadStatePath "$PLUGINSDIR\payload-stage.txt"
   DetailPrint "$(DownloadingText)"
-  CreateDirectory "$TEMP\VRCForge"
-  nsExec::ExecToLog 'cmd /D /C certutil -urlcache -f "${DOWNLOAD_URL}" "$TEMP\VRCForge\payload.zip"'
-  Pop $0
+  StrCpy $HelperSourcePath "$PLUGINSDIR\VRCForge_WebPayload.ps1"
+  StrCpy $HelperStatePath "$HelperSourcePath"
+  Call PrepareProtectedHelper
+  ${If} $0 == 0
+    nsExec::ExecToLog '"$TrustedPowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$HelperPayloadPath\VRCForge_WebPayload.ps1" -Action Prepare -Version "${VERSION}" -ProgramFilesRoot "$PROGRAMFILES64" -PayloadUrl "${DOWNLOAD_URL}" -ExpectedSha256 "${PAYLOAD_SHA256}" -ExpectedLength "${PAYLOAD_LENGTH}" -StatePath "$PayloadStatePath" -ExpectedInstallLeaf "${INSTALL_LEAF}" -StateTag "${STATE_TAG}"'
+    Pop $0
+    Push $0
+    Call CleanupProtectedHelper
+    Pop $0
+  ${EndIf}
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "$(DownloadFailedText)"
     Abort
   ${EndIf}
-
-  DetailPrint "$(VerifyingText)"
-  nsExec::ExecToLog 'cmd /D /C certutil -hashfile "$TEMP\VRCForge\payload.zip" SHA256 > "$TEMP\VRCForge\payload.sha256" && findstr /I /C:"${PAYLOAD_SHA256}" "$TEMP\VRCForge\payload.sha256" >NUL'
-  Pop $0
-  ${If} $0 != 0
+  FileOpen $0 "$PayloadStatePath" r
+  ${If} $0 == ""
+    MessageBox MB_ICONSTOP "$(DownloadFailedText)"
+    Abort
+  ${EndIf}
+  FileRead $0 $PayloadStageRoot
+  FileClose $0
+  ${If} $PayloadStageRoot == ""
     MessageBox MB_ICONSTOP "$(HashMismatchText)"
     Abort
   ${EndIf}
 
-  !insertmacro StopVRCForgeProcesses
-  RMDir /r "$INSTDIR\backend"
-  RMDir /r "$INSTDIR\dashboard"
-  RMDir /r "$INSTDIR\unity_plugin"
-  RMDir /r "$INSTDIR\tools"
-  RMDir /r "$INSTDIR\licenses"
-  CreateDirectory "$INSTDIR"
-
+  DetailPrint "$(VerifyingText)"
   DetailPrint "$(ExtractingText)"
-  nsExec::ExecToLog 'tar.exe -xf "$TEMP\VRCForge\payload.zip" -C "$INSTDIR"'
-  Pop $0
+  StrCpy $HelperSourcePath "$PLUGINSDIR\VRCForge_WebPayload.ps1"
+  StrCpy $HelperStatePath "$HelperSourcePath"
+  Call PrepareProtectedHelper
+  ${If} $0 == 0
+    nsExec::ExecToLog '"$TrustedPowerShellPath" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$HelperPayloadPath\VRCForge_WebPayload.ps1" -Action Extract -Version "${VERSION}" -ProgramFilesRoot "$PROGRAMFILES64" -PayloadUrl "${DOWNLOAD_URL}" -ExpectedSha256 "${PAYLOAD_SHA256}" -ExpectedLength "${PAYLOAD_LENGTH}" -StageRoot "$PayloadStageRoot" -DestinationRoot "$INSTDIR" -ExpectedInstallLeaf "${INSTALL_LEAF}" -StateTag "${STATE_TAG}"'
+    Pop $0
+    Push $0
+    Call CleanupProtectedHelper
+    Pop $0
+  ${EndIf}
   ${If} $0 != 0
     MessageBox MB_ICONSTOP "$(ExtractFailedText)"
     Abort
   ${EndIf}
-  RMDir /r "$INSTDIR\config"
-  RMDir /r "$INSTDIR\logs"
-  RMDir /r "$INSTDIR\artifacts"
+  StrCpy $UserDataRoot "$LOCALAPPDATA\${USER_DATA_RELATIVE}"
+  CreateDirectory "$UserDataRoot\config"
+  CreateDirectory "$UserDataRoot\logs"
+  CreateDirectory "$UserDataRoot\artifacts"
+  CreateDirectory "$UserDataRoot\backups"
 
-  CreateDirectory "$LOCALAPPDATA\VRCForge\agentic-app\config"
-  CreateDirectory "$LOCALAPPDATA\VRCForge\agentic-app\logs"
-  CreateDirectory "$LOCALAPPDATA\VRCForge\agentic-app\artifacts"
-  CreateDirectory "$LOCALAPPDATA\VRCForge\agentic-app\backups"
+  CreateDirectory "$SMPROGRAMS\${START_MENU_GROUP}"
+  CreateShortCut "$DESKTOP\${DESKTOP_SHORTCUT}" "$INSTDIR\VRCForge.exe"
+  CreateShortCut "$SMPROGRAMS\${START_MENU_GROUP}\VRCForge.lnk" "$INSTDIR\VRCForge.exe"
+  CreateShortCut "$SMPROGRAMS\${START_MENU_GROUP}\$(UninstallShortcutName)" "$INSTDIR\Uninstall.exe"
 
-  CreateDirectory "$SMPROGRAMS\VRCForge"
-  CreateShortCut "$DESKTOP\VRCForge.lnk" "$INSTDIR\VRCForge.exe"
-  CreateShortCut "$SMPROGRAMS\VRCForge\VRCForge.lnk" "$INSTDIR\VRCForge.exe"
-  CreateShortCut "$SMPROGRAMS\VRCForge\$(UninstallShortcutName)" "$INSTDIR\Uninstall.exe"
+  !ifndef VRCFORGE_SMOKE_BUILD
+    WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "DisplayName" "VRCForge"
+    WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "IconBackgroundColor" "0"
+    WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "IconUri" "$INSTDIR\VRCForge.ico"
+  !endif
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "DisplayName" "VRCForge"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "DisplayVersion" "${VERSION}"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "Publisher" "VRCForge"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "InstallLocation" "$INSTDIR"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "DisplayIcon" "$INSTDIR\VRCForge.exe"
-  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "NoModify" 1
-  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge" "NoRepair" 1
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayName" "VRCForge"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "Publisher" "VRCForge"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "UninstallString" "$\"$INSTDIR\Uninstall.exe$\""
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\VRCForge.exe"
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "NoModify" 1
+  WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}" "NoRepair" 1
 SectionEnd
 
 Section "Uninstall"
   SetRegView 64
-  !insertmacro StopVRCForgeProcesses
-  Delete "$DESKTOP\VRCForge.lnk"
-  Delete "$SMPROGRAMS\VRCForge\VRCForge.lnk"
-  Delete "$SMPROGRAMS\VRCForge\Uninstall VRCForge.lnk"
-  Delete "$SMPROGRAMS\VRCForge\卸载 VRCForge.lnk"
-  Delete "$SMPROGRAMS\VRCForge\解除安裝 VRCForge.lnk"
-  Delete "$SMPROGRAMS\VRCForge\VRCForge をアンインストール.lnk"
-  RMDir "$SMPROGRAMS\VRCForge"
+  Call un.ValidateScopedInstallDir
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "The uninstall directory does not match this installer identity."
+    Abort
+  ${EndIf}
+  StrCpy $UserDataRoot "$LOCALAPPDATA\${USER_DATA_RELATIVE}"
+  StrCpy $TrustedPowerShellPath "$WINDIR\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  ${IfNot} ${FileExists} "$TrustedPowerShellPath"
+    StrCpy $TrustedPowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  ${EndIf}
+  StrCpy $HelperSourcePath "$INSTDIR\installer\VRCForge_WebPayload.ps1"
+  Call un.ValidateInstallBoundary
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP "The protected Program Files uninstall boundary could not be verified."
+    Abort
+  ${EndIf}
+  Delete "$DESKTOP\${DESKTOP_SHORTCUT}"
+  Delete "$SMPROGRAMS\${START_MENU_GROUP}\VRCForge.lnk"
+  Delete "$SMPROGRAMS\${START_MENU_GROUP}\Uninstall VRCForge.lnk"
+  Delete "$SMPROGRAMS\${START_MENU_GROUP}\卸载 VRCForge.lnk"
+  Delete "$SMPROGRAMS\${START_MENU_GROUP}\解除安裝 VRCForge.lnk"
+  Delete "$SMPROGRAMS\${START_MENU_GROUP}\VRCForge をアンインストール.lnk"
+  RMDir "$SMPROGRAMS\${START_MENU_GROUP}"
   Call un.ClearUserDataIfRequested
   RMDir /r "$INSTDIR"
-  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge"
+  DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${UNINSTALL_KEY}"
+  !ifndef VRCFORGE_SMOKE_BUILD
+    DeleteRegKey HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}"
+  !endif
   ; Remove the persisted installer language last; it was already read in un.onInit.
-  DeleteRegValue HKCU "Software\VRCForge" "InstallerLanguage"
-  DeleteRegKey /ifempty HKCU "Software\VRCForge"
+  DeleteRegValue HKCU "${INSTALLER_LANGUAGE_KEY}" "InstallerLanguage"
+  DeleteRegKey /ifempty HKCU "${INSTALLER_LANGUAGE_KEY}"
   ${If} $ClearUserData == ${BST_CHECKED}
     MessageBox MB_OK "$(UninstallClearedUserData)"
   ${Else}

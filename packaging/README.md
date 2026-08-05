@@ -22,7 +22,7 @@ not the primary release entry point.
 - the VRCForge-owned Unity package or paired desktop/backend trust contract fails
 - uv runtime license / notice gate fails
 - .NET SDK 8.0+ or NSIS is missing
-- the web installer download URL is not provided
+- the web installer download URL is not the exact official version-bound HTTPS asset
 
 For an unpublished next-version acceptance build, `packaging/build_local.ps1`
 may package an unpushed `VERSION` that differs from `origin/main`. That wrapper
@@ -51,6 +51,12 @@ bundled third-party component there before shipping it. A release must stop if a
 bundled component lacks a recognized redistributable license, required license
 text, or required notice/distribution notes.
 
+The release build also scans the actual source inputs immediately before
+packaging and all four generated artifacts afterward for high-confidence
+private-key, credential, token, credential-URL, and local-machine-path markers.
+Any finding stops the build. Diagnostics report only the member path, line, and
+rule; the matched value is never printed.
+
 Windows x64 payloads bundle the official uv runtime under `tools/uv/` for
 backend-managed support tooling without requiring a system Python or uv
 installation. uv is licensed `MIT OR Apache-2.0`; preserve:
@@ -76,12 +82,12 @@ with approval, checkpoint, rollback, and proof gates.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 1.3.6 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.3.6/VRCForge_Windows_x64_1.3.6.zip `
+  -Version 1.4.0 `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.4.0/VRCForge_Windows_x64_1.4.0.zip `
   -UvDownloadSha256 ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 1.3.6
+  -Version 1.4.0
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -103,9 +109,9 @@ unverified artifact/hash evidence.
 Do not upload artifacts built from a newer commit into an older existing tag.
 If release contents change after `v<VERSION>` was already created, bump
 `VERSION`, push that version commit, build with the matching
-`-PayloadDownloadUrl`, then publish the new tag/release. The web installer
-downloads exactly the URL passed at build time, so that URL must point to the
-payload zip generated from the same commit.
+`-PayloadDownloadUrl`, then publish the new tag/release. The build derives and
+enforces the exact official version-bound HTTPS asset URL; alternate hosts,
+paths, query strings, fragments, tag names, and payload filenames fail closed.
 
 Release smoke should also verify first-run resilience: optional failures in
 user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill
@@ -137,6 +143,10 @@ automatic reconnect after Unity domain reload and App restart. Folder entries
 in the `.unitypackage` must contain only folder metadata and no empty `asset`
 payload, otherwise Unity can fail with `Failed to copy package file to
 Assets/VRCForge/Editor` on first import.
+The same disposable-project pass must exercise
+`VRCForge > Uninstall VRCForge...`, restart the Editor, and verify that
+`Assets/VRCForge`, VRCForge menus, the Core listener, and the versioned
+auto-connect EditorPrefs key are absent.
 
 External-agent release smoke must verify both config generation and the
 supervised write/rollback path. The preflight smoke temporarily enables the
@@ -145,7 +155,7 @@ writes to Unity and rolls back:
 
 ```powershell
 npm run smoke:external-agent
-npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject
+npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject --parent-path Avatar
 ```
 
 The live report must show `vrcforge_request_apply` advertised, direct apply
@@ -167,12 +177,12 @@ paste that artifact manually. The bundle must not be auto-attached to issues.
 Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
-python scripts\smoke_stable_readiness_gate.py --version 1.3.6 --latest-stable 1.3.6 --stable-refresh
+python scripts\smoke_stable_readiness_gate.py --version 1.4.0 --latest-stable 1.3.6
 ```
 
 This gate checks current target-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
-pointers when they exist in the checkout. For the current `1.3.6` target stable line,
+pointers when they exist in the checkout. For the current `1.4.0` target release,
 the gate also checks that public docs distinguish source/target from the latest published release,
 direct avatar-encryption writers are not exposed, and the public surface is
 only the private-addon connector request interface with explicit approval,

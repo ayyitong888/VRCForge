@@ -22,12 +22,67 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_build_parameter_bit_packed_clone",
-        Description = "Preview or build one verified parameter-packed avatar clone through the public avatar preprocess pipeline."
+    [VRCForgeCommand(
+        toolId: "vrc_build_parameter_bit_packed_clone",
+        Summary = "Preview or build one verified parameter-packed avatar clone through the public avatar preprocess pipeline."
     )]
     public static class ParameterBitPackingTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Saved source scene asset path.", IsRequired = true)] public string sourceScenePath { get; set; } = "";
+            [VRCForgeInput("Source avatar hierarchy path.", IsRequired = true)] public string sourceAvatarPath { get; set; } = "";
+            [VRCForgeInput("Name for the generated clone.", IsRequired = true)] public string outputCloneName { get; set; } = "";
+            [VRCForgeInput("Return the verified plan without mutation.", IsRequired = false, DefaultLiteral = "false")] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Run public build callbacks. Must be false for preview and true for apply.", IsRequired = false, DefaultLiteral = "false")] public bool? runBuildCallbacks { get; set; } = false;
+            [VRCForgeInput("Must remain false; this tool never saves a scene.", IsRequired = false, DefaultLiteral = "false")] public bool? saveScene { get; set; } = false;
+            [VRCForgeInput("Verified project path from preview; required for apply.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
+            [VRCForgeInput("Verified source or output digest/identity receipt from preview; required for apply where named.", IsRequired = false)] public string expectedSourceSceneGuid { get; set; } = "";
+            [VRCForgeInput("Verified source scene file digest from preview; required for apply.", IsRequired = false)] public string expectedSourceSceneFileDigest { get; set; } = "";
+            [VRCForgeInput("Verified source scene metadata digest from preview; required for apply.", IsRequired = false)] public string expectedSourceSceneMetaDigest { get; set; } = "";
+            [VRCForgeInput("Verified source avatar global object ID from preview; required for apply.", IsRequired = false)] public string expectedSourceGlobalObjectId { get; set; } = "";
+            [VRCForgeInput("Verified source hierarchy digest from preview; required for apply.", IsRequired = false)] public string expectedSourceHierarchyDigest { get; set; } = "";
+            [VRCForgeInput("Verified source state digest from preview; required for apply.", IsRequired = false)] public string expectedSourceStateDigest { get; set; } = "";
+            [VRCForgeInput("Verified source asset-set digest from preview; required for apply.", IsRequired = false)] public string expectedSourceAssetSetDigest { get; set; } = "";
+            [VRCForgeInput("Verified source asset count from preview; required for apply.", IsRequired = false)] public int? expectedSourceAssetCount { get; set; }
+            [VRCForgeInput("Verified parameter state digest from preview; required for apply.", IsRequired = false)] public string expectedParameterStateDigest { get; set; } = "";
+            [VRCForgeInput("Verified controller state digest from preview; required for apply.", IsRequired = false)] public string expectedControllerStateDigest { get; set; } = "";
+            [VRCForgeInput("Verified menu state digest from preview; required for apply.", IsRequired = false)] public string expectedMenuStateDigest { get; set; } = "";
+            [VRCForgeInput("Verified source behavior evidence digest from preview; required for apply.", IsRequired = false)] public string expectedSourceBehaviorEvidenceDigest { get; set; } = "";
+            [VRCForgeInput("Verified source cost bits from preview; required for apply.", IsRequired = false)] public int? expectedSourceCostBits { get; set; }
+            [VRCForgeInput("Verified parameter count from preview; required for apply.", IsRequired = false)] public int? expectedParameterCount { get; set; }
+            [VRCForgeInput("Verified safe candidate digest from preview; required for apply.", IsRequired = false)] public string expectedSafeCandidateDigest { get; set; } = "";
+            [VRCForgeInput("Verified safe candidate count from preview; required for apply.", IsRequired = false)] public int? expectedSafeCandidateCount { get; set; }
+            [VRCForgeInput("Verified excluded parameter digest from preview; required for apply.", IsRequired = false)] public string expectedExcludedDigest { get; set; } = "";
+            [VRCForgeInput("Verified excluded parameter count from preview; required for apply.", IsRequired = false)] public int? expectedExcludedCount { get; set; }
+            [VRCForgeInput("Verified capability digest from preview; required for apply.", IsRequired = false)] public string expectedCapabilityDigest { get; set; } = "";
+            [VRCForgeInput("Verified package root identity digest from preview; required for apply.", IsRequired = false)] public string expectedPackageRootIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Verified project root identity digest from preview; required for apply.", IsRequired = false)] public string expectedRootIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Verified project root identity count from preview; required for apply.", IsRequired = false)] public int? expectedRootIdentityCount { get; set; }
+            [VRCForgeInput("Verified generated-root existence from preview; required for apply.", IsRequired = false)] public bool? expectedGeneratedRootExistsBefore { get; set; }
+            [VRCForgeInput("Verified generated tree digest from preview; required for apply.", IsRequired = false)] public string expectedGeneratedTreeDigestBefore { get; set; } = "";
+            [VRCForgeInput("Verified generated tree entry count from preview; required for apply.", IsRequired = false)] public int? expectedGeneratedEntryCountBefore { get; set; }
+            [VRCForgeInput("Verified generated tree content digest from preview; required for apply.", IsRequired = false)] public string expectedGeneratedContentDigestBefore { get; set; } = "";
+            [VRCForgeInput("Verified generated tree byte count from preview; required for apply.", IsRequired = false)] public long? expectedGeneratedByteCountBefore { get; set; }
+            [VRCForgeInput("Verified auxiliary package root identity digest from preview; required for apply.", IsRequired = false)] public string expectedAuxiliaryPackageRootIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Verified auxiliary package manifest digest from preview; required for apply.", IsRequired = false)] public string expectedAuxiliaryPackageManifestDigest { get; set; } = "";
+            [VRCForgeInput("Verified auxiliary package manifest identity from preview; required for apply.", IsRequired = false)] public string expectedAuxiliaryPackageManifestIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Verified auxiliary generated-root existence from preview; required for apply.", IsRequired = false)] public bool? expectedAuxiliaryRootExistsBefore { get; set; }
+            [VRCForgeInput("Verified auxiliary tree digest from preview; required for apply.", IsRequired = false)] public string expectedAuxiliaryTreeDigestBefore { get; set; } = "";
+            [VRCForgeInput("Verified auxiliary tree content digest from preview; required for apply.", IsRequired = false)] public string expectedAuxiliaryContentDigestBefore { get; set; } = "";
+            [VRCForgeInput("Verified auxiliary tree entry count from preview; required for apply.", IsRequired = false)] public int? expectedAuxiliaryEntryCountBefore { get; set; }
+            [VRCForgeInput("Verified auxiliary tree byte count from preview; required for apply.", IsRequired = false)] public long? expectedAuxiliaryByteCountBefore { get; set; }
+            [VRCForgeInput("Verified preference digest from preview; required for apply.", IsRequired = false)] public string expectedPreferenceDigest { get; set; } = "";
+            [VRCForgeInput("Verified protected tree digest from preview; required for apply.", IsRequired = false)] public string expectedProtectedTreeDigestBefore { get; set; } = "";
+            [VRCForgeInput("Verified protected tree entry count from preview; required for apply.", IsRequired = false)] public int? expectedProtectedEntryCountBefore { get; set; }
+            [VRCForgeInput("Verified output scene name from preview; required for apply.", IsRequired = false)] public string expectedOutputSceneName { get; set; } = "";
+            [VRCForgeInput("Verified output prefab path from preview; required for apply.", IsRequired = false)] public string expectedOutputPrefabPath { get; set; } = "";
+            [VRCForgeInput("Verified output tree digest from preview; required for apply.", IsRequired = false)] public string expectedOutputTreeDigestBefore { get; set; } = "";
+            [VRCForgeInput("Verified output tree entry count from preview; required for apply.", IsRequired = false)] public int? expectedOutputEntryCountBefore { get; set; }
+            [VRCForgeInput("Verified output-root existence from preview; required for apply.", IsRequired = false)] public bool? expectedOutputRootExistsBefore { get; set; }
+            [VRCForgeInput("Verified preview digest from preview; required for apply.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
+        }
+
         private const string ResultSchema = "vrcforge.parameter_bit_packing.v2";
         private const string CapabilitySchema = "vrcforge.parameter_capability.v2";
         private const string CallbackAssemblySetSchema = "vrcforge.avatar_callback_assembly_set.v1";
@@ -59,7 +114,11 @@ namespace VRCForge.Editor
         private const string SdkCallbackAssemblyName = "VRCSDKBase-Editor";
         private const string SdkCallbackAssemblyVersion = "1.0.0.0";
         private const string SdkCallbackAssemblyPublicKeyToken = "";
-        private const string SdkCallbackAssemblySha256 = "952abdd2e9f696acba1fa773402d824fac4f0c6dd0b1b3488df8e4a3d870eba9";
+        private static readonly HashSet<string> SdkCallbackAssemblySha256Allowlist = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "952abdd2e9f696acba1fa773402d824fac4f0c6dd0b1b3488df8e4a3d870eba9",
+            "459431464320780e90fdbccbd36c1d0657a4a74ec65e87afd8c68530725d080b"
+        };
         private const string CallbackTypeName = "VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks";
         private const string CallbackSignature = "public static System.Boolean OnPreprocessAvatar(UnityEngine.GameObject)";
         private const string RegisteredHookType = "VF.Hooks.ParameterCompressorHook";
@@ -86,6 +145,15 @@ namespace VRCForge.Editor
                 CallbackRosterDigest = "a345576b0aad61991a4518413a5685d3b9df85e9ad33af50ff6b04a71d0f920e",
                 CallbackAssemblySetCount = 7,
                 CallbackAssemblySetDigest = "2eebf5d668c881ac7b208191e488c6a69c896549473fb44281d12c07404dc221"
+            },
+            new CapabilityProfile
+            {
+                Id = "embedded-sdk-3-10-4-v1",
+                CallbackAssemblySha256 = "4308c899e3b978a101e7cf3bfd117887b1fdf688ce53f559d8bf45106c6e34a0",
+                CallbackRosterCount = 21,
+                CallbackRosterDigest = "539f2d064d593e4e6010632f81e655c89fbece418b6249dcd6b641129ca78c96",
+                CallbackAssemblySetCount = 5,
+                CallbackAssemblySetDigest = "4b2ca1bdeef87a1a926e383e0036992875c4af8ee702e6da55107be5476279b6"
             }
         };
         private const string GeneratedRoot = "Packages/com.vrcfury.temp/Builds";
@@ -163,6 +231,7 @@ namespace VRCForge.Editor
             "expectedPackageRootIdentityDigest",
             "expectedRootIdentityDigest",
             "expectedRootIdentityCount",
+            "expectedGeneratedRootExistsBefore",
             "expectedGeneratedTreeDigestBefore",
             "expectedGeneratedEntryCountBefore",
             "expectedGeneratedContentDigestBefore",
@@ -232,13 +301,13 @@ namespace VRCForge.Editor
                 operationStage = "capability_capture";
                 var capability = CaptureCapability();
                 operationStage = "generated_tree_capture";
-                beforeGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
+                beforeGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: false);
                 operationStage = "auxiliary_generated_capture";
                 beforeAuxiliary = CaptureAuxiliaryGenerated();
                 operationStage = "output_tree_capture";
                 beforeOutput = CaptureManagedTree(OutputRoot, OutputTreeSchema);
                 operationStage = "root_identity_capture";
-                beforeRoots = CaptureRootIdentities();
+                beforeRoots = CaptureRootIdentities(beforeGenerated);
                 operationStage = "protected_tree_capture";
                 beforeProtected = CaptureProtectedTree();
                 operationStage = "output_preview";
@@ -261,7 +330,7 @@ namespace VRCForge.Editor
                 if (preview)
                 {
                     operationStage = "preview_response";
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         "Parameter bit-packing preview completed.",
                         BuildPreviewPayload(
                             beforeSource,
@@ -292,11 +361,11 @@ namespace VRCForge.Editor
                     previewDigest
                 );
 
-                stableInputLeases = HoldStableInputs(beforeSource, capability, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots);
+                stableInputLeases = HoldStableInputs(beforeSource, capability, beforeGenerated, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots);
                 {
                     var leases = stableInputLeases;
                     operationStage = "stable_input_verification";
-                    VerifyStableInputs(beforeSource, capability, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots, leases);
+                    VerifyStableInputs(beforeSource, capability, beforeGenerated, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots, leases);
                     Require(CapturePreferences().ReceiptDigest == preferences.ReceiptDigest, "A parameter build preference changed after preview.");
                     operationStage = "project_cleanliness_recheck";
                     RequireNoDirtyProjectAssets();
@@ -319,7 +388,7 @@ namespace VRCForge.Editor
                     operationStage = "clone_asset_staging";
                     PrepareCloneAssets(clone, outputScene);
                     EnsureNonInteractiveBuildPolicy(clone);
-                    VerifyStableInputs(beforeSource, capability, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots, leases);
+                    VerifyStableInputs(beforeSource, capability, beforeGenerated, beforeAuxiliary, beforeOutput, beforeProtected, beforeRoots, leases);
 
                     operationStage = "public_preprocess";
                     bool callbacksOk;
@@ -349,13 +418,14 @@ namespace VRCForge.Editor
                     operationStage = "protected_tree_verification";
                     var callbackProtected = CaptureProtectedTree();
                     Require(callbackProtected.Digest == beforeProtected.Digest && callbackProtected.EntryCount == beforeProtected.EntryCount, "The public preprocess pipeline wrote outside the generated build root.");
-                    var callbackRoots = CaptureRootIdentities();
+                    var callbackRoots = CaptureRootIdentities(beforeGenerated);
                     Require(callbackRoots.Digest == beforeRoots.Digest && callbackRoots.EntryCount == beforeRoots.EntryCount, "A project root identity changed during clone preprocessing.");
                     operationStage = "generated_scope_verification";
                     var callbackGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
                     var callbackDelta = CompareGeneratedTrees(beforeGenerated, callbackGenerated);
                     Require(callbackDelta.Added.Count > 0, "The public preprocess pipeline produced no generated assets.");
                     RequireGeneratedSubtree(callbackDelta.Added, outputCloneName);
+                    cacheTransaction.ObserveMutation(callbackGenerated);
 
                     operationStage = "output_descriptor_verification";
                     var cloneDescriptor = clone.GetComponent<VRCAvatarDescriptor>();
@@ -384,6 +454,7 @@ namespace VRCForge.Editor
                         VerifyStableInputs(
                             beforeSource,
                             capability,
+                            beforeGenerated,
                             beforeAuxiliary,
                             beforeOutput,
                             beforeProtected,
@@ -481,6 +552,7 @@ namespace VRCForge.Editor
                     var afterGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
                     var generatedDelta = CompareGeneratedTrees(beforeGenerated, afterGenerated);
                     Require(!AssetDatabase.IsValidFolder(StagingRoot) && !AssetDatabase.IsValidFolder(temporaryOutputRoot), "The package temporary build root contains operation residue.");
+                    cacheTransaction.ObserveMutation(afterGenerated);
                     var temporaryDeltaDigest = ComputeTreeDeltaDigest(generatedDelta, "vrcforge.parameter_temporary_delta.v1");
                     var afterOutput = CaptureManagedTree(OutputRoot, OutputTreeSchema);
                     var outputDelta = CompareGeneratedTrees(beforeOutput, afterOutput);
@@ -543,8 +615,9 @@ namespace VRCForge.Editor
                     operationStage = "cache_restore";
                     Require(cacheTransaction.Restore(allowAuxiliaryRootDirty: true), "The dependency cache could not be restored exactly.");
                     RequireNoDirtyProjectAssets();
-                    var restoredGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
-                    Require(restoredGenerated.ContentDigest == beforeGenerated.ContentDigest
+                    var restoredGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: beforeGenerated.Exists);
+                    Require(restoredGenerated.Exists == beforeGenerated.Exists
+                        && restoredGenerated.ContentDigest == beforeGenerated.ContentDigest
                         && restoredGenerated.EntryCount == beforeGenerated.EntryCount
                         && restoredGenerated.TotalBytes == beforeGenerated.TotalBytes,
                         "The dependency cache differs from its approved baseline.");
@@ -556,6 +629,7 @@ namespace VRCForge.Editor
                     VerifyStableInputs(
                         beforeSource,
                         capability,
+                        beforeGenerated,
                         beforeAuxiliary,
                         beforeOutput,
                         beforeProtected,
@@ -571,7 +645,7 @@ namespace VRCForge.Editor
                     Require(afterPreferences.ReceiptDigest == preferences.ReceiptDigest, "A parameter build preference changed during apply.");
                     var afterProtected = CaptureProtectedTree();
                     Require(afterProtected.Digest == beforeProtected.Digest && afterProtected.EntryCount == beforeProtected.EntryCount, "The persistent output escaped the generated build root.");
-                    var afterRoots = CaptureRootIdentities();
+                    var afterRoots = CaptureRootIdentities(beforeGenerated);
                     Require(afterRoots.Digest == beforeRoots.Digest && afterRoots.EntryCount == beforeRoots.EntryCount, "A project root identity changed before final readback.");
 
                     auxiliaryTransaction.Complete();
@@ -624,7 +698,7 @@ namespace VRCForge.Editor
                         false,
                         "verified"
                     );
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         "Parameter bit-packing clone verified.",
                         new
                         {
@@ -717,6 +791,8 @@ namespace VRCForge.Editor
                                 root = GeneratedRoot,
                                 stagingRoot = StagingRoot,
                                 stagingRemoved = true,
+                                rootExistsBefore = beforeGenerated.Exists,
+                                rootExistsAfter = afterGenerated.Exists,
                                 treeDigestBefore = beforeGenerated.Digest,
                                 contentDigestBefore = beforeGenerated.ContentDigest,
                                 entryCountBefore = beforeGenerated.EntryCount,
@@ -818,7 +894,7 @@ namespace VRCForge.Editor
                 var reason = exception is ParameterBitPackingException
                     ? " " + exception.Message
                     : string.Empty;
-                return new ErrorResponse(
+                return VRCForgeToolResult.Failed(
                     restored
                         ? "Parameter bit-packing failed after restoring the verified pre-state." + reason
                         : "Parameter bit-packing failed; checkpoint restore is required." + reason,
@@ -837,11 +913,11 @@ namespace VRCForge.Editor
             }
             catch (ParameterBitPackingException exception)
             {
-                return new ErrorResponse(exception.Message);
+                return VRCForgeToolResult.Failed(exception.Message);
             }
             catch (Exception exception)
             {
-                return new ErrorResponse(
+                return VRCForgeToolResult.Failed(
                     "Parameter bit-packing operation failed closed during "
                     + operationStage
                     + " ("
@@ -896,7 +972,7 @@ namespace VRCForge.Editor
                     protectedEntryCountBefore = protectedTree.EntryCount,
                     rootIdentityDigestBefore = roots.Digest,
                     rootIdentityCountBefore = roots.EntryCount,
-                    exists = true,
+                    exists = generated.Exists,
                     reparseFree = true
                 },
                 auxiliaryGenerated = new
@@ -1010,6 +1086,7 @@ namespace VRCForge.Editor
             Require(ReadExpectedString(request, "expectedPackageRootIdentityDigest") == capability.PackageRootIdentityDigest, "The package root identity changed after preview.");
             Require(ReadExpectedString(request, "expectedRootIdentityDigest") == roots.Digest, "A project root identity changed after preview.");
             Require(ReadExpectedInt(request, "expectedRootIdentityCount") == roots.EntryCount, "The project root identity set changed after preview.");
+            Require(ReadExpectedBool(request, "expectedGeneratedRootExistsBefore") == generated.Exists, "The generated build root state changed after preview.");
             Require(ReadExpectedString(request, "expectedGeneratedTreeDigestBefore") == generated.Digest, "The generated build root changed after preview.");
             Require(ReadExpectedInt(request, "expectedGeneratedEntryCountBefore") == generated.EntryCount, "The generated build root count changed after preview.");
             Require(ReadExpectedString(request, "expectedGeneratedContentDigestBefore") == generated.ContentDigest, "The generated build root content changed after preview.");
@@ -1137,7 +1214,7 @@ namespace VRCForge.Editor
             Require(sdkName.Name == SdkCallbackAssemblyName && sdkName.Version.ToString() == SdkCallbackAssemblyVersion, "The public callback assembly identity is not allowlisted.");
             Require(PublicKeyToken(sdkName) == SdkCallbackAssemblyPublicKeyToken, "The public callback assembly signature state is not allowlisted.");
             var sdkHash = Sha256File(sdkAssembly.Location);
-            Require(sdkHash == SdkCallbackAssemblySha256, "The public callback assembly bytes are not allowlisted.");
+            Require(SdkCallbackAssemblySha256Allowlist.Contains(sdkHash), "The public callback assembly bytes are not allowlisted.");
             var callbackMethod = typeof(VRCBuildPipelineCallbacks).GetMethod(
                 "OnPreprocessAvatar",
                 BindingFlags.Public | BindingFlags.Static,
@@ -2020,8 +2097,9 @@ namespace VRCForge.Editor
                 && (expected.Tree.Exists || actual.Tree.Digest == expected.Tree.Digest);
         }
 
-        private static RootIdentitySnapshot CaptureRootIdentities()
+        private static RootIdentitySnapshot CaptureRootIdentities(TreeSnapshot generatedBaseline)
         {
+            Require(generatedBaseline != null, "The generated cache root baseline is unavailable.");
             var entries = new SortedDictionary<string, FileIdentity>(StringComparer.Ordinal);
             foreach (var root in RequiredRootPaths())
             {
@@ -2029,6 +2107,22 @@ namespace VRCForge.Editor
                 var identity = CaptureIdentity(root.Value, true);
                 Require(!identity.IsReparsePoint && identity.NumberOfLinks == 1, "A required project root is linked or reparsed.");
                 entries.Add(root.Key, identity);
+            }
+            if (generatedBaseline.Exists)
+            {
+                var generatedRoot = AbsoluteProjectPath(GeneratedRoot);
+                Require(Directory.Exists(generatedRoot), "The generated cache root is missing.");
+                var generatedIdentity = CaptureIdentity(generatedRoot, true);
+                Require(!generatedIdentity.IsReparsePoint && generatedIdentity.NumberOfLinks == 1,
+                    "The generated cache root is linked or reparsed.");
+                entries.Add(GeneratedRoot, generatedIdentity);
+            }
+            else
+            {
+                entries.Add(GeneratedRoot, new FileIdentity
+                {
+                    Digest = Sha256Utf8(RootIdentitySchema + ".absent\n" + Frame(GeneratedRoot))
+                });
             }
             return RootIdentitySnapshot.FromEntries(entries);
         }
@@ -2043,7 +2137,6 @@ namespace VRCForge.Editor
                 new KeyValuePair<string, string>("Packages", Path.Combine(project, "Packages")),
                 new KeyValuePair<string, string>("ProjectSettings", Path.Combine(project, "ProjectSettings")),
                 new KeyValuePair<string, string>("Packages/com.vrcfury.temp", Path.Combine(project, "Packages", "com.vrcfury.temp")),
-                new KeyValuePair<string, string>(GeneratedRoot, AbsoluteProjectPath(GeneratedRoot)),
                 new KeyValuePair<string, string>(AuxiliaryPackageRoot, AbsoluteProjectPath(AuxiliaryPackageRoot))
             };
         }
@@ -2094,7 +2187,21 @@ namespace VRCForge.Editor
         private static TreeSnapshot CaptureTree(string assetPath, string schema, bool requireExists)
         {
             var absolute = AbsoluteProjectPath(assetPath);
-            if (requireExists) Require(Directory.Exists(absolute), "The package generated build root is missing.");
+            if (!Directory.Exists(absolute))
+            {
+                Require(!File.Exists(absolute), "The package generated build root collides with a file.");
+                Require(!File.Exists(absolute + ".meta"), "The package generated build root metadata exists without its directory.");
+                Require(!requireExists, "The package generated build root is missing.");
+                return new TreeSnapshot
+                {
+                    Digest = Sha256Utf8(schema + "\n" + Frame(false)),
+                    ContentDigest = Sha256Utf8(schema + ".content\n" + Frame(false)),
+                    EntryCount = 0,
+                    TotalBytes = 0,
+                    Entries = new SortedDictionary<string, TreeEntry>(StringComparer.Ordinal),
+                    Exists = false
+                };
+            }
             return CaptureTreeAbsolute(absolute, schema);
         }
 
@@ -2686,6 +2793,7 @@ namespace VRCForge.Editor
         private static StableInputLeases HoldStableInputs(
             SourceSnapshot source,
             CapabilitySnapshot capability,
+            TreeSnapshot generatedTree,
             AuxiliaryGeneratedSnapshot auxiliary,
             TreeSnapshot outputTree,
             TreeSnapshot protectedTree,
@@ -2704,6 +2812,7 @@ namespace VRCForge.Editor
                 pathKinds.Add(path, isDirectory);
             }
             foreach (var path in RequiredRootPaths()) Add(path.Value, true);
+            if (generatedTree.Exists) Add(AbsoluteProjectPath(GeneratedRoot), true);
             foreach (var entry in protectedTree.Entries.Values)
             {
                 Add(AbsoluteProjectPath(entry.RelativePath), entry.Kind == "D");
@@ -2743,7 +2852,7 @@ namespace VRCForge.Editor
                     }
                 }
                 var stablePaths = paths.Select(item => item.Key).ToArray();
-                Require(roots.EntryCount == RequiredRootPaths().Count, "The stable root lease set is incomplete.");
+                Require(roots.EntryCount == RequiredRootPaths().Count + 1, "The stable root lease set is incomplete.");
                 return new StableInputLeases(stablePaths, leases);
             }
             catch
@@ -2756,6 +2865,7 @@ namespace VRCForge.Editor
         private static void VerifyStableInputs(
             SourceSnapshot source,
             CapabilitySnapshot capability,
+            TreeSnapshot generatedTree,
             AuxiliaryGeneratedSnapshot auxiliary,
             TreeSnapshot outputTree,
             TreeSnapshot protectedTree,
@@ -2769,7 +2879,7 @@ namespace VRCForge.Editor
             Require(Sha256File(source.SceneFilePath) == source.SceneFileDigest && Sha256File(source.SceneMetaPath) == source.SceneMetaDigest, "The source scene changed while leases were acquired.");
             var refreshedCapability = CaptureCapability();
             Require(refreshedCapability.CapabilityDigest == capability.CapabilityDigest, "The package capability changed while leases were acquired.");
-            var refreshedRoots = CaptureRootIdentities();
+            var refreshedRoots = CaptureRootIdentities(generatedTree);
             Require(refreshedRoots.Digest == roots.Digest && refreshedRoots.EntryCount == roots.EntryCount, "A project root identity changed while leases were acquired.");
             if (verifyAuxiliaryTree)
             {
@@ -2913,23 +3023,31 @@ namespace VRCForge.Editor
                 }
                 else if (beforeGenerated != null)
                 {
-                    var current = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
-                    var delta = CompareGeneratedTrees(beforeGenerated, current);
-                    Require(delta.Modified.Count == 0 && delta.Removed.Count == 0,
-                        "The generated cache changed without an owning transaction.");
-                    foreach (var first in delta.Added.Select(entry => entry.RelativePath.Split('/')[0].Replace(".meta", string.Empty)).Distinct(StringComparer.Ordinal))
+                    if (!beforeGenerated.Exists)
                     {
-                        Require(!string.IsNullOrWhiteSpace(first),
-                            "The generated cache delta is not safely removable.");
-                        AssetDatabase.DeleteAsset(GeneratedRoot + "/" + first);
+                        Require(!CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: false).Exists,
+                            "The absent generated cache changed without an owning transaction.");
                     }
-                    RequireNoDirtyProjectAssets(GeneratedRoot);
-                    AssetDatabase.SaveAssets();
-                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                    var restoredGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
-                    Require(restoredGenerated.Digest == beforeGenerated.Digest
-                            && restoredGenerated.EntryCount == beforeGenerated.EntryCount,
-                        "The generated cache did not return to its baseline.");
+                    else
+                    {
+                        var current = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
+                        var delta = CompareGeneratedTrees(beforeGenerated, current);
+                        Require(delta.Modified.Count == 0 && delta.Removed.Count == 0,
+                            "The generated cache changed without an owning transaction.");
+                        foreach (var first in delta.Added.Select(entry => entry.RelativePath.Split('/')[0].Replace(".meta", string.Empty)).Distinct(StringComparer.Ordinal))
+                        {
+                            Require(!string.IsNullOrWhiteSpace(first),
+                                "The generated cache delta is not safely removable.");
+                            AssetDatabase.DeleteAsset(GeneratedRoot + "/" + first);
+                        }
+                        RequireNoDirtyProjectAssets(GeneratedRoot);
+                        AssetDatabase.SaveAssets();
+                        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+                        var restoredGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
+                        Require(restoredGenerated.Digest == beforeGenerated.Digest
+                                && restoredGenerated.EntryCount == beforeGenerated.EntryCount,
+                            "The generated cache did not return to its baseline.");
+                    }
                 }
             });
 
@@ -2950,7 +3068,7 @@ namespace VRCForge.Editor
                 }
                 if (beforeRoots != null)
                 {
-                    var rootsAfter = CaptureRootIdentities();
+                    var rootsAfter = CaptureRootIdentities(beforeGenerated);
                     Require(rootsAfter.Digest == beforeRoots.Digest
                             && rootsAfter.EntryCount == beforeRoots.EntryCount,
                         "A project root identity differs after cleanup.");
@@ -4915,6 +5033,8 @@ namespace VRCForge.Editor
             private readonly string baselineContentDigest;
             private readonly int baselineEntryCount;
             private readonly long baselineByteCount;
+            private CreatedAssetFolder createdRoot;
+            private TreeSnapshot observed;
             private bool prepared;
             private bool restored;
             private bool closingStarted;
@@ -4948,6 +5068,21 @@ namespace VRCForge.Editor
             internal bool Prepared => prepared;
             internal bool Restored => restored;
             internal bool Completed => completed;
+
+            internal void ObserveMutation(TreeSnapshot expected)
+            {
+                Require(prepared && !restored && !completed && expected != null && expected.Exists,
+                    "The generated cache transaction cannot observe in its current state.");
+                var current = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
+                Require(current.Digest == expected.Digest
+                        && current.ContentDigest == expected.ContentDigest
+                        && current.EntryCount == expected.EntryCount
+                        && current.TotalBytes == expected.TotalBytes,
+                    "The generated cache changed before its owned observation.");
+                if (!baseline.Exists) RequireCreatedCacheRootIdentity(AbsoluteProjectPath(GeneratedRoot));
+                observed = current;
+                WriteJournal("observed", false);
+            }
 
             internal static CacheTransaction Plan(TreeSnapshot baseline)
             {
@@ -5047,6 +5182,17 @@ namespace VRCForge.Editor
                 Directory.CreateDirectory(backupRoot);
                 RequireSafeDirectory(backupRoot, "The cache backup root is linked or reparsed.");
                 WriteJournal("preparing", false);
+                if (!baseline.Exists)
+                {
+                    var cacheRoot = AbsoluteProjectPath(GeneratedRoot);
+                    Require(!Directory.Exists(cacheRoot) && !File.Exists(cacheRoot) && !File.Exists(cacheRoot + ".meta"),
+                        "The absent generated cache baseline changed before apply.");
+                    Require(AssetDatabase.IsValidFolder("Packages/com.vrcfury.temp"),
+                        "The generated cache parent package is unavailable.");
+                    var createdGuid = AssetDatabase.CreateFolder("Packages/com.vrcfury.temp", "Builds");
+                    Require(IsGuid(createdGuid), "The generated cache root could not be created.");
+                    createdRoot = CaptureCreatedCacheRoot(createdGuid.ToLowerInvariant());
+                }
                 CopyTree(AbsoluteProjectPath(GeneratedRoot), backupRoot);
                 var backup = CaptureTreeAbsolute(backupRoot, CacheContentSchema + ".backup");
                 Require(
@@ -5073,6 +5219,15 @@ namespace VRCForge.Editor
                     var cacheRoot = AbsoluteProjectPath(GeneratedRoot);
                     Require(Directory.Exists(cacheRoot), "The generated cache root is missing during restore.");
                     var restoreTarget = CaptureTreeAbsolute(cacheRoot, CacheContentSchema + ".restore_target");
+                    if (!baseline.Exists)
+                    {
+                        Require(observed != null
+                                && restoreTarget.ContentDigest == ReframeContentDigest(observed, CacheContentSchema + ".restore_target")
+                                && restoreTarget.EntryCount == observed.EntryCount
+                                && restoreTarget.TotalBytes == observed.TotalBytes,
+                            "The operation-created generated cache changed after its owned observation.");
+                        RequireCreatedCacheRootIdentity(cacheRoot);
+                    }
                     Require(restoreTarget.EntryCount <= CacheBackupMaxEntries,
                         "The generated restore target exceeds the bounded entry limit.");
                     Require(restoreTarget.TotalBytes <= CacheBackupMaxBytes,
@@ -5104,6 +5259,7 @@ namespace VRCForge.Editor
                     Require(!Directory.EnumerateFileSystemEntries(cacheRoot, "*", SearchOption.TopDirectoryOnly).Any(),
                         "The generated cache could not be emptied for exact restore.");
                     CopyTree(backupRoot, cacheRoot);
+                    if (!baseline.Exists) DeleteCreatedCacheRoot(cacheRoot);
                     if (allowAuxiliaryRootDirty)
                     {
                         RequireNoDirtyProjectAssets(GeneratedRoot, AuxiliaryGeneratedRoot);
@@ -5111,8 +5267,9 @@ namespace VRCForge.Editor
                     else RequireNoDirtyProjectAssets(GeneratedRoot);
                     AssetDatabase.SaveAssets();
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
-                    var finalSnapshot = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
-                    if (finalSnapshot.ContentDigest != baselineContentDigest
+                    var finalSnapshot = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: baseline.Exists);
+                    if (finalSnapshot.Exists != baseline.Exists
+                        || finalSnapshot.ContentDigest != baselineContentDigest
                         || finalSnapshot.EntryCount != baselineEntryCount
                         || finalSnapshot.TotalBytes != baselineByteCount)
                     {
@@ -5136,6 +5293,14 @@ namespace VRCForge.Editor
                 if (completed) return true;
                 try
                 {
+                    if (!baseline.Exists && (Directory.Exists(AbsoluteProjectPath(GeneratedRoot))
+                        || File.Exists(AbsoluteProjectPath(GeneratedRoot) + ".meta")))
+                    {
+                        var incompleteRoot = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
+                        Require(incompleteRoot.EntryCount == 0 && incompleteRoot.TotalBytes == 0,
+                            "The incomplete operation-created generated cache is not empty.");
+                        DeleteCreatedCacheRoot(AbsoluteProjectPath(GeneratedRoot));
+                    }
                     if (Directory.Exists(transactionRoot))
                     {
                         RequireSafeDirectory(transactionRoot, "The incomplete cache transaction root is linked or reparsed.");
@@ -5199,8 +5364,9 @@ namespace VRCForge.Editor
             {
                 try
                 {
-                    var current = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: true);
-                    return current.ContentDigest == baselineContentDigest
+                    var current = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: baseline.Exists);
+                    return current.Exists == baseline.Exists
+                        && current.ContentDigest == baselineContentDigest
                         && current.EntryCount == baselineEntryCount
                         && current.TotalBytes == baselineByteCount;
                 }
@@ -5270,6 +5436,15 @@ namespace VRCForge.Editor
                     ["journalId"] = JournalId,
                     ["state"] = state,
                     ["cacheRoot"] = GeneratedRoot,
+                    ["baselineRootExists"] = baseline.Exists,
+                    ["createdRootGuid"] = createdRoot == null ? "" : createdRoot.Guid,
+                    ["createdRootIdentityDigest"] = createdRoot == null ? "" : createdRoot.DirectoryIdentityDigest,
+                    ["createdRootMetaIdentityDigest"] = createdRoot == null ? "" : createdRoot.MetaIdentityDigest,
+                    ["createdRootMetaDigest"] = createdRoot == null ? "" : createdRoot.MetaDigest,
+                    ["observedTreeDigest"] = observed == null ? "" : observed.Digest,
+                    ["observedContentDigest"] = observed == null ? "" : observed.ContentDigest,
+                    ["observedEntryCount"] = observed == null ? 0 : observed.EntryCount,
+                    ["observedByteCount"] = observed == null ? 0 : observed.TotalBytes,
                     ["baselineContentDigest"] = baselineContentDigest,
                     ["baselineEntryCount"] = baselineEntryCount,
                     ["baselineByteCount"] = baselineByteCount,
@@ -5277,6 +5452,53 @@ namespace VRCForge.Editor
                 };
                 var bytes = Encoding.UTF8.GetBytes(payload.ToString(Newtonsoft.Json.Formatting.None));
                 PublishTransactionJournal(journalPath, bytes);
+            }
+
+            private static CreatedAssetFolder CaptureCreatedCacheRoot(string expectedGuid)
+            {
+                var absolute = AbsoluteProjectPath(GeneratedRoot);
+                Require(Directory.Exists(absolute), "The operation-created generated cache root is missing.");
+                var rootIdentity = CaptureIdentity(absolute, true);
+                Require(!rootIdentity.IsReparsePoint && rootIdentity.NumberOfLinks == 1,
+                    "The operation-created generated cache root is linked or reparsed.");
+                var metaPath = absolute + ".meta";
+                RequireStableRegularFile(metaPath);
+                var metaIdentity = CaptureIdentity(metaPath, false);
+                Require(AssetDatabase.AssetPathToGUID(GeneratedRoot).ToLowerInvariant() == expectedGuid
+                        && ParseMetaGuid(ReadStableFileBytes(metaPath)) == expectedGuid,
+                    "The operation-created generated cache root GUID is inconsistent.");
+                return new CreatedAssetFolder
+                {
+                    AssetPath = GeneratedRoot,
+                    Guid = expectedGuid,
+                    DirectoryIdentityDigest = rootIdentity.Digest,
+                    MetaIdentityDigest = metaIdentity.Digest,
+                    MetaDigest = Sha256File(metaPath)
+                };
+            }
+
+            private void DeleteCreatedCacheRoot(string cacheRoot)
+            {
+                RequireCreatedCacheRootIdentity(cacheRoot);
+                var metaPath = cacheRoot + ".meta";
+                Require(AssetDatabase.DeleteAsset(GeneratedRoot),
+                    "The operation-created generated cache root could not be removed.");
+                Require(!Directory.Exists(cacheRoot) && !File.Exists(cacheRoot) && !File.Exists(metaPath),
+                    "The operation-created generated cache root remains after cleanup.");
+            }
+
+            private void RequireCreatedCacheRootIdentity(string cacheRoot)
+            {
+                Require(createdRoot != null && createdRoot.AssetPath == GeneratedRoot,
+                    "The generated cache root ownership evidence is unavailable.");
+                Require(CaptureIdentity(cacheRoot, true).Digest == createdRoot.DirectoryIdentityDigest,
+                    "The operation-created generated cache root identity changed before cleanup.");
+                var metaPath = cacheRoot + ".meta";
+                RequireStableRegularFile(metaPath);
+                Require(CaptureIdentity(metaPath, false).Digest == createdRoot.MetaIdentityDigest
+                        && Sha256File(metaPath) == createdRoot.MetaDigest
+                        && AssetDatabase.AssetPathToGUID(GeneratedRoot).ToLowerInvariant() == createdRoot.Guid,
+                    "The operation-created generated cache metadata changed before cleanup.");
             }
 
             internal static void CopyTree(string sourceRoot, string destinationRoot)

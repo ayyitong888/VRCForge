@@ -96,6 +96,24 @@ namespace VRCForge.Editor
                 "vrc_read_avatar_descriptor",
             };
 
+        // Planning exposes direct reads plus tools that Core can execute through
+        // its exact no-write payload lane. All other tools remain execution-only.
+        private static readonly HashSet<string> ExpectedPlanningNames =
+            new HashSet<string>(ExpectedReadOnlyNames, StringComparer.Ordinal)
+            {
+                "vrc_capture_scene_view",
+                "vrc_export_blendshapes",
+                "vrc_scan_animation_bindings",
+                "vrc_scan_avatar_controls",
+                "vrc_scan_avatar_items",
+                "vrc_scan_avatar_materials",
+                "vrc_scan_avatar_parameters",
+                "vrc_scan_avatar_performance",
+                "vrc_scan_fx_animator",
+                "vrc_scan_thry_avatar_performance",
+                "vrc_scan_wardrobe",
+            };
+
         internal static ISet<string> ExpectedToolNames
         {
             get { return new HashSet<string>(ExpectedTypes.Keys, StringComparer.Ordinal); }
@@ -104,6 +122,11 @@ namespace VRCForge.Editor
         internal static ISet<string> ExpectedReadOnlyToolNames
         {
             get { return new HashSet<string>(ExpectedReadOnlyNames, StringComparer.Ordinal); }
+        }
+
+        internal static ISet<string> ExpectedPlanningToolNames
+        {
+            get { return new HashSet<string>(ExpectedPlanningNames, StringComparer.Ordinal); }
         }
 
         internal static VRCForgeToolDescriptor[] SnapshotExact(IEnumerable<VRCForgeToolDescriptor> candidates)
@@ -145,8 +168,8 @@ namespace VRCForge.Editor
                 && descriptor.ToolType != null
                 && string.Equals(descriptor.ToolType.FullName, expectedType, StringComparison.Ordinal)
                 && descriptor.Permission == (ExpectedReadOnlyNames.Contains(descriptor.Name)
-                    ? VRCForgeToolPermission.ReadOnly
-                    : VRCForgeToolPermission.RequiresApproval);
+                    ? VRCForgeCommandAccess.ReadOnly
+                    : VRCForgeCommandAccess.RequiresApproval);
         }
     }
 }

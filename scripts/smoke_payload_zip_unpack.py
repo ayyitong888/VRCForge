@@ -18,6 +18,10 @@ SCHEMA = "vrcforge.payload_zip_unpack.v1"
 REQUIRED_PAYLOAD_FILES = (
     "VRCForge.exe",
     "VERSION",
+    "README.md",
+    "USER_MANUAL.md",
+    "DEPENDENCIES.md",
+    "installer/VRCForge_WebPayload.ps1",
     "start_dashboard.cmd",
     "backend/vrcforge_backend.exe",
     "dashboard/index.html",
@@ -25,6 +29,10 @@ REQUIRED_PAYLOAD_FILES = (
     "tools/uv/uvx.exe",
     "unity_plugin/VRCForge.unitypackage",
     "licenses/VRCForge-GPL-3.0.txt",
+    "licenses/VRCForge-NOTICE.txt",
+    "licenses/uv-LICENSE-MIT.txt",
+    "licenses/uv-LICENSE-APACHE-2.0.txt",
+    "licenses/uv-DISTRIBUTION-NOTES.txt",
 )
 
 

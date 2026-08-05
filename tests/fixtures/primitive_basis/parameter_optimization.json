@@ -3,8 +3,8 @@
   "scenarioId": "parameter_optimization",
   "fixtureRoot": "Assets/VRCForge/PrimitiveBasis/parameter_optimization",
   "baselineManifest": "baseline.json",
-  "expectedBaselineDigest": "e0383836b1b7d08264d320bb790b323cb70ccdab57eb3aacd08881a484f7d79e",
-  "expectedTreeDigest": "f13fd537f73ee93cf60b4736b1dcbcf3e26f896c82144eb06b164264ffaafbfa",
+  "expectedBaselineDigest": "62d78769dfe80bf8406c19dedd8e18eb8958c8a7796f676a1a9dc5c97ad61230",
+  "expectedTreeDigest": "6d9f198a39804797991e35b58b25f8576bd09e830389a9807288b9baf7d00277",
   "requiredPrimitives": [
     "parameter_bit_pack"
   ]

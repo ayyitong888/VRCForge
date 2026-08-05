@@ -89,7 +89,7 @@ export function useApprovalExecution({
     setRuntimeNotice(t("approval.modifyNotice"));
     setApprovalActions((current) => ({ ...current, [approval.id]: "modify" }));
     setError("");
-    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
+    const approvalScope = scopeForApproval(approval.id);
     try {
       await requestApprovalRevision(endpoint, approval.id, {
         reason: t("approval.revisionReason"),
@@ -105,10 +105,10 @@ export function useApprovalExecution({
     }
   }
 
-  async function approveShell(approvalId: string) {
+  async function approveShell(approvalId: string, allowFutureCategory = false) {
     setApprovalActions((current) => ({ ...current, [approvalId]: "approve" }));
     setError("");
-    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
+    const approvalScope = scopeForApproval(approvalId, allowFutureCategory);
     const pendingTargetTool = pendingApprovalItems.find((approval) => approval.id === approvalId)?.targetTool || "";
     try {
       const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
@@ -155,7 +155,7 @@ export function useApprovalExecution({
   async function rejectShell(approvalId: string) {
     setApprovalActions((current) => ({ ...current, [approvalId]: "reject" }));
     setError("");
-    const approvalScope = { expectedProjectRoot: activeRuntimeProjectPath || undefined, globalOnly: !activeRuntimeProjectPath };
+    const approvalScope = scopeForApproval(approvalId);
     try {
       await rejectAgentApproval(endpoint, approvalId, approvalScope);
       if (activeChatId) {
@@ -181,6 +181,18 @@ export function useApprovalExecution({
       delete next[approvalId];
       return next;
     });
+  }
+
+  function scopeForApproval(approvalId: string, allowFutureCategory = false) {
+    const approval = pendingApprovalItems.find((item) => item.id === approvalId);
+    const projectRoot = approval
+      ? approval.projectRoot?.trim() || ""
+      : activeRuntimeProjectPath.trim();
+    return {
+      expectedProjectRoot: projectRoot || undefined,
+      globalOnly: !projectRoot,
+      ...(allowFutureCategory ? { allowFutureCategory: true } : {}),
+    };
   }
 
   return {

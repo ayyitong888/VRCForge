@@ -24,12 +24,20 @@ namespace VRCForge.Editor
     // For every outfit it also reads the clip's m_IsActive curves (which objects it turns
     // on vs off) and the state's Write Defaults flag, because exclusivity in this style
     // relies on WD + scene-default-off alternates. This is read-only.
-    [VRCForgeTool(
-        name: "vrc_scan_wardrobe",
-        Description = "Detect VRChat int-exclusive wardrobe(s): reconcile an expression Int parameter, menu toggle values (recursing SubMenus), FX layer Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults flags. Read-only."
+    [VRCForgeCommand(
+        toolId: "vrc_scan_wardrobe",
+        Summary = "Detect VRChat int-exclusive wardrobe(s): reconcile an expression Int parameter, menu toggle values (recursing SubMenus), FX layer Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults flags. Read-only."
     )]
     public static class WardrobeScanner
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Avatar root path; empty is allowed only when the descriptor selection is unambiguous.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Optional output JSON path. Omit to return the scan only.", IsRequired = false)]
+            public string outputPath { get; set; } = "";
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -82,7 +90,7 @@ namespace VRCForge.Editor
 
                 var jsonPath = WriteJsonIfRequested(outputPath, payload);
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Detected {wardrobes.Count} wardrobe(s), {wardrobeCandidates.Count} candidate wardrobe(s), and {looseControls.Count} loose control group(s) on '{descriptor.name}'.",
                     new
                     {
@@ -102,7 +110,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Wardrobe scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Wardrobe scan failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

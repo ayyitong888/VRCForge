@@ -8,6 +8,7 @@ import pytest
 
 from agent_gateway import AgentGateway, AgentGatewayError
 from approved_unity_execution import current_approved_unity_execution
+from unity_mcp_core_client import UnityMcpCoreClient
 
 
 def create_project(root: Path) -> Path:
@@ -46,6 +47,110 @@ def approved_write(
     approval_id = request["approval"]["id"]
     gateway.approve(approval_id)
     return gateway.apply_approved({"approval_id": approval_id})
+
+
+def _core_result(*, pending: bool = False) -> dict[str, object]:
+    structured: dict[str, object] = {"success": True}
+    if pending:
+        structured["_mcp_status"] = "pending"
+    return {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": "ok"}],
+        "structuredContent": structured,
+        "isError": False,
+    }
+
+
+def _approved_trace_write(gateway: AgentGateway, project: Path, handler) -> dict[str, object]:
+    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.register_write_handler(
+        "vrcforge_trace_write",
+        (
+            "When to use: Run the approved trace fixture.\n"
+            "When NOT to use: Do not use for unrelated project operations.\n"
+            "Negative example: Do not use for a read-only request."
+        ),
+        "high",
+        handler,
+    )
+    request = gateway.create_apply_request(
+        {"target_tool": "vrcforge_trace_write", "arguments": {"projectRoot": str(project)}}
+    )
+    approval_id = str(request["approval"]["id"])
+    gateway.approve(approval_id)
+    return gateway.apply_approved({"approval_id": approval_id})
+
+
+def test_approved_handler_trace_survives_stripped_core_meta(tmp_path: Path, monkeypatch) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    client = object.__new__(UnityMcpCoreClient)
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: _core_result())
+
+    def handler(_arguments):
+        result = client.call_tool("vrc_create_gameobject", {"name": "trace-secret"})
+        return {"ok": result["structuredContent"]["success"]}
+
+    execution = _approved_trace_write(gateway, project, handler)
+
+    assert execution["ok"] is True
+    trace = execution["requestTrace"]
+    assert trace["approvalId"] == execution["approval"]["id"]
+    assert trace["targetTool"] == "vrcforge_trace_write"
+    assert trace["executionId"].startswith("exec_")
+    assert [audit["toolName"] for audit in trace["unityCoreCallAudits"]] == ["vrc_create_gameobject"]
+    assert "trace-secret" not in json.dumps(trace)
+    applied = next(item for item in gateway.recent_audit_logs(100) if item.get("event") == "approval_applied")
+    assert applied["requestTrace"] == trace
+
+
+def test_approved_handler_failure_keeps_core_error_trace(tmp_path: Path, monkeypatch) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    client = object.__new__(UnityMcpCoreClient)
+
+    def fail(*_args, **_kwargs):
+        raise TimeoutError("fixture timeout")
+
+    monkeypatch.setattr(client, "_request", fail)
+    execution = _approved_trace_write(
+        gateway,
+        project,
+        lambda _arguments: client.call_tool("vrc_create_gameobject", {"name": "trace-secret"}),
+    )
+
+    assert execution["ok"] is False
+    trace = execution["requestTrace"]
+    assert len(trace["unityCoreCallAudits"]) == 1
+    assert trace["unityCoreCallAudits"][0]["resultSummary"] == "error"
+    assert trace["unityCoreCallAudits"][0]["errorClass"] == "TimeoutError"
+    failed = next(item for item in gateway.recent_audit_logs(100) if item.get("event") == "approval_failed")
+    assert failed["requestTrace"] == trace
+
+
+def test_approved_handler_preserves_ordered_unique_multi_core_trace_with_pending(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    client = object.__new__(UnityMcpCoreClient)
+    responses = iter([_core_result(), _core_result(pending=True)])
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: next(responses))
+
+    def handler(_arguments):
+        client.call_tool("vrc_import_unitypackage", {"path": "fixture"})
+        pending = client.call_tool("vrc_refresh_asset_database", {})
+        return {"ok": True, "pending": pending["structuredContent"]["_mcp_status"] == "pending"}
+
+    execution = _approved_trace_write(gateway, project, handler)
+
+    audits = execution["requestTrace"]["unityCoreCallAudits"]
+    assert [audit["toolName"] for audit in audits] == [
+        "vrc_import_unitypackage",
+        "vrc_refresh_asset_database",
+    ]
+    assert len({audit["requestId"] for audit in audits}) == 2
+    assert [audit["resultSummary"] for audit in audits] == ["complete", "pending"]
 
 
 def test_argument_digest_requires_internal_opt_in(tmp_path: Path) -> None:
@@ -426,3 +531,76 @@ def test_final_handler_arguments_are_bound_after_constraint_refresh(
     assert result["ok"] is False
     assert observed_digest and observed_digest != expected_digest
     assert handler_calls == 0
+
+
+def test_mixed_approval_and_rejection_are_isolated_and_auditable(tmp_path: Path) -> None:
+    """One pending write may apply while a sibling rejection remains side-effect free."""
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    calls: list[str] = []
+
+    def approved_handler(_arguments: dict[str, object]) -> dict[str, object]:
+        calls.append("approved")
+        return {"ok": True, "sceneSaved": True}
+
+    def rejected_handler(_arguments: dict[str, object]) -> dict[str, object]:
+        calls.append("rejected")
+        return {"ok": True, "sceneSaved": True}
+
+    gateway.register_write_handler(
+        "vrcforge_test_mixed_approved", "Mixed approved", "high", approved_handler
+    )
+    gateway.register_write_handler(
+        "vrcforge_test_mixed_rejected", "Mixed rejected", "high", rejected_handler
+    )
+    approved_request = gateway.create_apply_request(
+        {"target_tool": "vrcforge_test_mixed_approved", "arguments": {"projectRoot": str(project)}}
+    )["approval"]
+    rejected_request = gateway.create_apply_request(
+        {"target_tool": "vrcforge_test_mixed_rejected", "arguments": {"projectRoot": str(project)}}
+    )["approval"]
+    approved_id = str(approved_request["id"])
+    rejected_id = str(rejected_request["id"])
+
+    assert approved_id != rejected_id
+    assert approved_request["status"] == rejected_request["status"] == "pending"
+    assert approved_request["createdAt"] and rejected_request["createdAt"]
+
+    assert gateway.approve(approved_id)["ok"] is True
+    applied = gateway.apply_approved({"approval_id": approved_id})
+    assert applied["ok"] is True
+    assert applied["status"] == "applied"
+    assert applied["checkpoint"]["ok"] is True
+    assert applied["checkpoint"]["id"]
+    assert calls == ["approved"]
+
+    rejected = gateway.reject(rejected_id)
+    assert rejected["ok"] is True
+    assert rejected["approval"]["status"] == "rejected"
+    rejected_apply = gateway.apply_approved({"approval_id": rejected_id})
+    assert rejected_apply["ok"] is False
+    assert rejected_apply["status"] == "rejected"
+    assert calls == ["approved"]
+
+    approvals = {item["id"]: item for item in gateway.list_approvals(include_expired=True)}
+    assert approvals[approved_id]["status"] == "applied"
+    assert approvals[approved_id]["appliedAt"]
+    assert approvals[approved_id]["checkpoint"]["id"] == applied["checkpoint"]["id"]
+    assert approvals[rejected_id]["status"] == "rejected"
+    assert approvals[rejected_id]["rejectedAt"]
+    assert "checkpoint" not in approvals[rejected_id]
+
+    audit = gateway.recent_audit_logs(limit=100)
+    assert any(
+        item.get("event") == "approval_applied"
+        and item.get("approval", {}).get("id") == approved_id
+        and item.get("approval", {}).get("checkpoint", {}).get("id") == applied["checkpoint"]["id"]
+        for item in audit
+    )
+    assert any(
+        item.get("event") == "approval_rejected"
+        and item.get("approval", {}).get("id") == rejected_id
+        and item.get("approval", {}).get("rejectedAt")
+        for item in audit
+    )

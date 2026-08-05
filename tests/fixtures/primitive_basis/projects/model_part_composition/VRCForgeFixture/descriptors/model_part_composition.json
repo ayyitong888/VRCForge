@@ -3,8 +3,8 @@
   "scenarioId": "model_part_composition",
   "fixtureRoot": "Assets/VRCForge/PrimitiveBasis/model_part_composition",
   "baselineManifest": "baseline.json",
-  "expectedBaselineDigest": "b1288cf980ea597acfff107c3b83f4bcd153ee061bdc6a95ee47b6e08b92e0b7",
-  "expectedTreeDigest": "061d219ba52786197a4838fe312bc9169ea83146889a6f3684165557b3baa907",
+  "expectedBaselineDigest": "f9115541d1303393a893888e1bf39da74b539d88fa71ab5f13109d75c385cbf5",
+  "expectedTreeDigest": "eb6b2aa1b96e86723047d04d3e5059491d6fc5dae8534f8334ff55940676b622",
   "requiredPrimitives": [
     "non_destructive_part_composition"
   ]

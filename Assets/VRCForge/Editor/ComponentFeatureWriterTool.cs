@@ -10,12 +10,48 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_create_component_feature",
-        Description = "Preview or CreateNew one fixed-schema component feature through the supervised scene-write lane."
+    [VRCForgeCommand(
+        toolId: "vrc_create_component_feature",
+        Summary = "Preview or CreateNew one fixed-schema component feature through the supervised scene-write lane."
     )]
     public static class ComponentFeatureWriterTool
     {
+        public enum FeatureKind { toggle, armature_link }
+
+        public class Parameters
+        {
+            [VRCForgeInput("Saved scene asset path.", IsRequired = true)] public string scenePath { get; set; } = "";
+            [VRCForgeInput("Scene object hierarchy path that receives the feature.", IsRequired = true)] public string gameObjectPath { get; set; } = "";
+            [VRCForgeInput("Feature kind.", IsRequired = true)] public FeatureKind featureKind { get; set; }
+            [VRCForgeInput("Return the verified plan without mutation.", IsRequired = true)] public bool preview { get; set; }
+            [VRCForgeInput("Must be false for preview and true for apply.", IsRequired = true)] public bool saveScene { get; set; }
+            [VRCForgeInput("Menu path; required only for toggle.", IsRequired = false)] public string menuPath { get; set; } = "";
+            [VRCForgeInput("One to 32 target object paths; required only for toggle.", IsRequired = false)] public string[] targetObjectPaths { get; set; } = new string[0];
+            [VRCForgeInput("Use a slider control; required only for toggle.", IsRequired = false)] public bool? slider { get; set; }
+            [VRCForgeInput("Default toggle state; required only for toggle.", IsRequired = false)] public bool? defaultOn { get; set; }
+            [VRCForgeInput("Persist the toggle parameter; required only for toggle.", IsRequired = false)] public bool? saved { get; set; }
+            [VRCForgeInput("Optional global parameter; valid only for toggle.", IsRequired = false)] public string globalParameter { get; set; } = "";
+            [VRCForgeInput("Source armature path; required only for armature_link.", IsRequired = false)] public string linkFromPath { get; set; } = "";
+            [VRCForgeInput("One to eight target objects with targetKind, target, and optional offset; required only for armature_link.", IsRequired = false)] public JArray linkTargets { get; set; } = new JArray();
+            [VRCForgeInput("Link recursively; required only for armature_link.", IsRequired = false)] public bool? recursive { get; set; }
+            [VRCForgeInput("Align linked transforms; required only for armature_link.", IsRequired = false)] public bool? align { get; set; }
+            [VRCForgeInput("Verified project path from preview; required for apply (allowed for preview receipt binding).", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
+            [VRCForgeInput("Verified scene GUID from preview; required for apply.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
+            [VRCForgeInput("Verified scene handle from preview; required for apply.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
+            [VRCForgeInput("Verified scene file digest from preview; required for apply.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
+            [VRCForgeInput("Verified scene file identity from preview; required for apply.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
+            [VRCForgeInput("Verified scene metadata digest from preview; required for apply.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
+            [VRCForgeInput("Verified scene metadata identity from preview; required for apply.", IsRequired = false)] public string expectedSceneMetaIdentity { get; set; } = "";
+            [VRCForgeInput("Verified host object identity from preview; required for apply.", IsRequired = false)] public string expectedHostObjectId { get; set; } = "";
+            [VRCForgeInput("Verified component type from preview; required for apply.", IsRequired = false)] public string expectedComponentType { get; set; } = "";
+            [VRCForgeInput("Verified component index from preview; required for apply.", IsRequired = false)] public int? expectedComponentIndex { get; set; }
+            [VRCForgeInput("Verified component identity seed from preview; required for apply.", IsRequired = false)] public string expectedComponentIdentitySeed { get; set; } = "";
+            [VRCForgeInput("Verified existing feature digest from preview; required for apply.", IsRequired = false)] public string expectedBeforeFeatureDigest { get; set; } = "";
+            [VRCForgeInput("Verified target feature digest from preview; required for apply.", IsRequired = false)] public string expectedTargetFeatureDigest { get; set; } = "";
+            [VRCForgeInput("Verified compatibility digest from preview; required for apply.", IsRequired = false)] public string expectedCompatibilityDigest { get; set; } = "";
+            [VRCForgeInput("Verified preview digest from preview; required for apply.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
+        }
+
         public const string ToolName = "vrc_create_component_feature";
 
         private static readonly HashSet<string> CommonRequestKeys = new HashSet<string>(

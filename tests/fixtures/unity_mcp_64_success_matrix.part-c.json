@@ -1,0 +1,183 @@
+{
+  "schema": "vrcforge.unity_mcp_64_success_matrix.part.v1",
+  "part": "c",
+  "description": "Production-success matrix for the 22 remaining commands. Placeholders are bound only by the disposable acceptance runner after its read/preview evidence is available.",
+  "cases": [
+    {
+      "tool": "vrc_restore_safe_backup",
+      "mode": "approved_apply",
+      "minimalArguments": { "backupId": "${SAFE_BACKUP_ID}", "assetPaths": ["${RESTORABLE_ASSET_PATH}"], "confirmRestore": true, "allowProjectMismatch": false, "allowOverwriteChanged": false, "refreshAssets": true },
+      "requiredFixtures": ["VRCForge-created safe backup for this same disposable project", "a deliberate reversible post-backup mutation"],
+      "successFields": ["confirmed", "project_identity_matches", "restored", "summary.restoredCount"],
+      "cleanup": "Read the restored asset and verify it matches the pre-mutation baseline; no extra cleanup."
+    },
+    {
+      "tool": "vrc_rollback_avatar_parameters",
+      "mode": "approved_apply",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "parameterNames": ["${PREVIOUS_PARAMETER_ENTRY}"] },
+      "requiredFixtures": ["VRChat SDK avatar descriptor with VRCExpressionParameters", "dashboard-produced parameter snapshot"],
+      "successFields": ["ok", "restoredCount", "assetPath"],
+      "cleanup": "Read parameters and restore the fixture baseline through the checkpoint/backup lane."
+    },
+    {
+      "tool": "vrc_save_scene_object_as_prefab",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "sourceScenePath": "${SAVED_SCENE_PATH}", "sourceObjectPath": "${SCENE_OBJECT_PATH}", "prefabAssetPath": "${NEW_PREFAB_ASSET_PATH}", "preview": false, "saveAssets": true, "overwrite": false, "${PREFAB_PREVIEW_RECEIPT}": null },
+      "requiredFixtures": ["saved fixture scene", "existing source hierarchy", "previous preview result", "new absent target asset path"],
+      "successFields": ["verified", "changed", "saved", "source.unchanged", "target.assetPath", "target.assetGuid", "target.readbackExact"],
+      "cleanup": "Delete only the run-owned generated prefab and its meta through the checkpoint/fixture cleanup."
+    },
+    {
+      "tool": "vrc_scan_animation_bindings",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "controllerPath": "", "clipPaths": ["${ANIMATION_CLIP_PATH}"], "includeAllProjectClips": false, "maxClips": 1, "outputPath": "", "refreshAssets": false },
+      "requiredFixtures": ["AnimationClip with at least one known editor binding"],
+      "successFields": ["clips", "summary.clipCount", "summary.bindingCount"],
+      "cleanup": "None."
+    },
+    {
+      "tool": "vrc_scan_avatar_controls",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outputPath": "" },
+      "requiredFixtures": ["VRChat SDK avatar descriptor; expression assets may be fixture-provided"],
+      "successFields": ["avatarPath", "avatarName", "itemCount", "items"],
+      "cleanup": "None."
+    },
+    {
+      "tool": "vrc_scan_avatar_items",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outputPath": "", "maxItems": 2000, "refreshAssets": false },
+      "requiredFixtures": ["VRChat SDK avatar descriptor with hierarchy/renderers"],
+      "successFields": ["summary.avatarCount", "summary.itemCount", "items"],
+      "cleanup": "None."
+    },
+    {
+      "tool": "vrc_scan_avatar_materials",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outputPath": "", "refreshAssets": false },
+      "requiredFixtures": ["VRChat SDK avatar with persistent material-backed renderer"],
+      "successFields": ["summary.materialCount", "summary.rendererCount", "materials"],
+      "cleanup": "None."
+    },
+    {
+      "tool": "vrc_scan_avatar_parameters",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outputPath": "" },
+      "requiredFixtures": ["VRChat SDK avatar descriptor with VRCExpressionParameters"],
+      "successFields": ["avatarPath", "totalParameters", "parameterNames", "suggestions"],
+      "cleanup": "None."
+    },
+    {
+      "tool": "vrc_scan_avatar_performance",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outputPath": "", "isMobile": false },
+      "requiredFixtures": ["VRChat SDK avatar descriptor and SDK performance-statistics support"],
+      "successFields": ["avatarPath", "avatarName", "overallRating", "ratings", "stats"],
+      "cleanup": "None."
+    },
+    {
+      "tool": "vrc_scan_fx_animator",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "controllerPath": "${FX_CONTROLLER_PATH}", "outputPath": "", "refreshAssets": false },
+      "requiredFixtures": ["AnimatorController with a known layer/state/parameter"],
+      "successFields": ["controller_path", "layers", "parameters", "animation_clips", "summary"],
+      "cleanup": "None."
+    },
+    {
+      "tool": "vrc_scan_thry_avatar_performance",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outputPath": "" },
+      "requiredFixtures": ["VRChat SDK avatar descriptor", "installed compatible Thry/VRC Avatar Performance Tools assembly discoverable by reflection"],
+      "successFields": ["schema", "avatarPath", "combinedBytes"],
+      "cleanup": "None. Dependency absence is not a success or an unsupported pass for 64/64 acceptance."
+    },
+    {
+      "tool": "vrc_scan_wardrobe",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outputPath": "" },
+      "requiredFixtures": ["VRChat SDK avatar with expression parameter, menu and FX int-exclusive wardrobe fixture"],
+      "successFields": ["avatarPath", "wardrobes", "wardrobeCandidates", "looseControls"],
+      "cleanup": "None."
+    },
+    {
+      "tool": "vrc_set_constraint_sources",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "scenePath": "${SAVED_SCENE_PATH}", "gameObjectPath": "${CONSTRAINT_OBJECT_PATH}", "constraintKind": "${CONSTRAINT_KIND}", "componentIndex": 0, "sources": [{ "sourcePath": "${CONSTRAINT_SOURCE}", "weight": 1.0 }], "preview": false, "saveScene": true, "${CONSTRAINT_PREVIEW_RECEIPT}": null },
+      "requiredFixtures": ["saved scene with supported constraint", "typed source target", "previous preview result"],
+      "successFields": ["verified", "changed", "saved", "componentId", "beforeSourcesDigest", "targetSourcesDigest"],
+      "cleanup": "Restore the saved fixture scene through the checkpoint/backup lane."
+    },
+    {
+      "tool": "vrc_set_gameobject_active",
+      "mode": "approved_apply",
+      "minimalArguments": { "gameObjectPath": "${TOGGLE_OBJECT_PATH}", "active": false, "preview": false },
+      "requiredFixtures": ["unique existing scene GameObject"],
+      "successFields": ["action", "gameObjectPath", "oldActive", "newActive"],
+      "cleanup": "Restore active state by checkpoint/backup, not a second unapproved mutation."
+    },
+    {
+      "tool": "vrc_set_material_shader",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "materialAssetPath": "${PERSISTENT_MATERIAL_PATH}", "shaderName": "${TARGET_SHADER_NAME}", "slotIndex": 0, "expectedProjectPath": "${PROJECT_PATH}", "preview": false, "saveAssets": true, "${MATERIAL_PREVIEW_RECEIPT}": null },
+      "requiredFixtures": ["persistent material in Assets", "resolvable shader", "previous exact preview evidence"],
+      "successFields": ["verified", "changed", "saved", "materialAssetGuid", "afterShader", "materialFileDigestAfter", "sharedImpactDigest"],
+      "cleanup": "Restore material from the run-owned backup/checkpoint."
+    },
+    {
+      "tool": "vrc_set_property",
+      "mode": "approved_apply",
+      "minimalArguments": { "gameObjectPath": "${PROPERTY_OBJECT_PATH}", "componentType": "BoxCollider", "componentIndex": 0, "propertyPath": "size", "value": { "x": 2, "y": 1, "z": 1 }, "preview": false },
+      "requiredFixtures": ["scene object with BoxCollider and writable size.x"],
+      "successFields": ["action", "gameObjectPath", "componentType", "propertyPath", "oldValue", "newValue"],
+      "cleanup": "Restore component state through checkpoint/backup."
+    },
+    {
+      "tool": "vrc_set_texture_import_settings",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "textureAssetPath": "${TEXTURE_PATH}", "platform": "standalone", "maxTextureSize": 512, "format": "automatic", "compression": "normal", "crunch": false, "quality": 50, "expectedProjectPath": "${PROJECT_PATH}", "preview": false, "saveAndReimport": true, "${TEXTURE_PREVIEW_RECEIPT}": null },
+      "requiredFixtures": ["run-owned texture under Assets", "previous exact importer preview evidence"],
+      "successFields": ["verified", "changed", "saved", "reimported", "textureAssetGuid", "importerSettingsDigestAfter", "targetSettingsDigest"],
+      "cleanup": "Restore the texture and .meta from checkpoint/backup, then reload/recheck Core."
+    },
+    {
+      "tool": "vrc_setup_outfit",
+      "mode": "approved_async_apply",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outfitPath": "${OUTFIT_PATH}", "confirmSetup": true, "saveScene": true, "approvedObjectReceiptNonce": "${OPTIONAL_INSTANTIATE_RECEIPT_NONCE}" },
+      "requiredFixtures": ["VRChat SDK avatar", "installed NDMF and Modular Avatar packages", "outfit hierarchy valid for Modular Avatar Setup Outfit"],
+      "successFields": ["confirmed", "pending", "jobId", "status", "sceneSaved", "committed", "commitState", "checkpointRecoveryRequired", "outfitGlobalObjectId"],
+      "cleanup": "Poll the same jobId until status=completed and then restore the fixture scene through checkpoint/backup."
+    },
+    {
+      "tool": "vrc_toggle_scene_object",
+      "mode": "approved_apply",
+      "minimalArguments": { "objectPath": "${TOGGLE_OBJECT_PATH}", "active": false, "saveAssets": true },
+      "requiredFixtures": ["unique existing scene GameObject"],
+      "successFields": ["objectPath", "active", "saved"],
+      "cleanup": "Restore active state through checkpoint/backup."
+    },
+    {
+      "tool": "vrc_unpack_prefab",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "gameObjectPath": "${OUTERMOST_PREFAB_INSTANCE_PATH}", "mode": "outermost", "preview": false, "expectedGlobalObjectId": "${PREVIEW_GLOBAL_OBJECT_ID}", "expectedPrefabGuid": "${PREVIEW_PREFAB_GUID}", "expectedAssetDependencyHash": "${PREVIEW_DEPENDENCY_HASH}", "expectedScenePath": "${SAVED_SCENE_PATH}" },
+      "requiredFixtures": ["saved scene with outermost prefab instance", "previous preview evidence"],
+      "successFields": ["unpacked", "previousGlobalObjectId", "globalObjectId", "prefabGuid", "dependencyHash", "scenePath"],
+      "cleanup": "Restore the fixture scene through checkpoint/backup."
+    },
+    {
+      "tool": "vrc_write_animation_curve",
+      "mode": "approved_apply",
+      "minimalArguments": { "action": "set_curve", "clipPath": "${RUN_OWNED_CLIP_PATH}", "bindingPath": "${CURVE_OBJECT_PATH}", "componentType": "GameObject", "propertyName": "m_IsActive", "constantFloat": 1, "preview": false },
+      "requiredFixtures": ["run-owned Assets directory; target binding hierarchy"],
+      "successFields": ["action", "clipPath", "bindingPath", "componentType", "propertyName"],
+      "cleanup": "Delete the run-owned clip or restore fixture state through checkpoint/backup."
+    },
+    {
+      "tool": "vrc_write_avatar_descriptor",
+      "mode": "approved_apply",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "viewPosition": { "x": 0, "y": 1.5, "z": 0 }, "preview": false },
+      "requiredFixtures": ["VRChat SDK avatar descriptor"],
+      "successFields": ["action", "avatarPath", "changedFields"],
+      "cleanup": "Restore descriptor through checkpoint/backup."
+    }
+  ]
+}

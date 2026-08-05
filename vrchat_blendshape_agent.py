@@ -2914,7 +2914,10 @@ def invoke_unity_mcp(
     core_descriptor = Path(core_project) / "Library" / "VRCForge" / "mcp-core.json" if core_project else None
     core_installed = bool(
         core_project
-        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolAttribute.cs").is_file()
+        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeCommandAttribute.cs").is_file()
+        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeInputAttribute.cs").is_file()
+        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolRegistry.cs").is_file()
+        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolResult.cs").is_file()
         and (Path(core_project) / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").is_file()
     )
 
@@ -2955,7 +2958,9 @@ def invoke_unity_mcp(
             ) from exc
         serialized = json.dumps(core_result, ensure_ascii=False, separators=(",", ":"))
         if core_result.get("isError") is True:
-            raise UnityMcpError("Unity MCP Core rejected the approved tool execution.")
+            detail = summarize_unity_mcp_core_rejection(core_result)
+            suffix = f" Reason code: {detail}." if detail else ""
+            raise UnityMcpError(f"Unity MCP Core rejected the approved tool execution.{suffix}")
         return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
 
     last_error: Exception | None = None
@@ -3014,7 +3019,7 @@ def read_unity_mcp_core_status(settings: Settings) -> dict[str, Any]:
         tools = UnityMcpCoreClient(
             project_root,
             timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
-        ).list_tools()
+        ).list_tools(exposure_layer="execution")
     except Exception as exc:  # noqa: BLE001 - present one actionable readiness message.
         raise UnityMcpError(
             "VRCForge MCP Core is not ready for the configured Unity project. "
@@ -3041,6 +3046,14 @@ def extract_mcp_error(payload: Any | None) -> str | None:
         return str(payload.get("error") or payload.get("message") or json.dumps(payload, ensure_ascii=False))
 
     return None
+
+
+def summarize_unity_mcp_core_rejection(payload: Any | None) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    structured = payload.get("structuredContent")
+    code = str(structured.get("code") or "").strip() if isinstance(structured, dict) else ""
+    return code if re.fullmatch(r"[a-z][a-z0-9_]{0,79}", code) else ""
 
 
 def try_parse_json(text: str) -> Any | None:

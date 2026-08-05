@@ -416,6 +416,7 @@ def test_provider_test_routes_flash_responses_probe_without_chat(capability, exp
     payload = response.json()
     assert payload["ok"] is True and payload["apiType"] == "responses" and payload["resolvedApiType"] == "responses"
     assert len(requests) == 1 and requests[0].mode == "probe" and requests[0].structured_output is structured
+    assert requests[0].max_output_tokens == (512 if structured else 64)
 
 
 def test_provider_connection_test_reports_unsupported_variant_without_sending():

@@ -293,7 +293,7 @@ def test_noop_preview_is_valid_but_still_requires_the_supervised_apply_contract(
 def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None:
     source = Path("Assets/VRCForge/Editor/TextureImportSettingsTool.cs").read_text(encoding="utf-8-sig")
 
-    assert 'name: "vrc_set_texture_import_settings"' in source
+    assert 'toolId: "vrc_set_texture_import_settings"' in source
     assert "TextureImporter.GetAtPath" in source
     assert "TextureImporter.IsDefaultPlatformTextureFormatValid" in source
     assert "TextureImporter.IsPlatformTextureFormatValid" in source

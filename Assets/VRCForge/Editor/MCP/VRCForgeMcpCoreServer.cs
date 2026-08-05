@@ -54,6 +54,19 @@ namespace VRCForge.Editor
             "vrc_create_component_feature",
             "vrc_build_parameter_bit_packed_clone",
             "vrc_atomic_reference_rename",
+            "vrc_restore_safe_backup",
+            "vrc_ensure_expression_parameter",
+            "vrc_ensure_expression_menu_control",
+            "vrc_ensure_animator_state",
+            "vrc_write_avatar_descriptor",
+            "vrc_write_animation_curve",
+            "vrc_manage_expression_parameters",
+            "vrc_manage_expression_menu",
+            "vrc_manage_fx_animator",
+            "vrc_add_wardrobe_outfit",
+            "vrc_add_outfit_part",
+            "vrc_add_modular_avatar_component",
+            "vrc_manage_wardrobe",
         };
         private static readonly HashSet<string> SafetyControlTools = new HashSet<string>(StringComparer.Ordinal)
         {
@@ -70,7 +83,8 @@ namespace VRCForge.Editor
             AppPreview = 1,
             AppSafetyControl = 2,
             AppSetupOutfitPoll = 3,
-            ApprovedWrite = 4,
+            AppUnityPackageImportPoll = 4,
+            ApprovedWrite = 5,
         }
 
         private sealed class VRCForgeMcpProtocolException : Exception { }
@@ -305,7 +319,7 @@ namespace VRCForge.Editor
                 {
                     throw new InvalidOperationException("The packaged VRCForge MCP tool contract is invalid.");
                 }
-                if (descriptor.Permission == VRCForgeToolPermission.ReadOnly)
+                if (descriptor.Permission == VRCForgeCommandAccess.ReadOnly)
                 {
                     readOnly.Add(descriptor.Name);
                 }
@@ -313,7 +327,7 @@ namespace VRCForge.Editor
             var preview = new HashSet<string>(PreviewTools, StringComparer.Ordinal);
             var safety = new HashSet<string>(SafetyControlTools, StringComparer.Ordinal);
             if (all.Count != VRCForgeMcpToolContract.ToolCount
-                || readOnly.Count != 8 || preview.Count != 8 || safety.Count != 2
+                || readOnly.Count != 8 || preview.Count != 21 || safety.Count != 2
                 || !all.SetEquals(VRCForgeMcpToolContract.ExpectedToolNames)
                 || !readOnly.SetEquals(VRCForgeMcpToolContract.ExpectedReadOnlyToolNames)
                 || !all.IsSupersetOf(preview) || !all.IsSupersetOf(safety)
@@ -607,7 +621,19 @@ namespace VRCForge.Editor
 
             if (string.Equals(method, "tools/list", StringComparison.Ordinal))
             {
-                return hasId ? Result(id, ToolsListResult(true), true) : null;
+                var exposureLayerToken = parameters == null ? null : parameters["exposureLayer"];
+                if (exposureLayerToken != null && exposureLayerToken.Type != JTokenType.String)
+                {
+                    return hasId ? Error(id, -32602, "exposureLayer must be planning or execution.") : null;
+                }
+                var exposureLayer = exposureLayerToken == null ? null : (string)exposureLayerToken;
+                exposureLayer = string.IsNullOrEmpty(exposureLayer) ? "planning" : exposureLayer;
+                if (!string.Equals(exposureLayer, "planning", StringComparison.Ordinal)
+                    && !string.Equals(exposureLayer, "execution", StringComparison.Ordinal))
+                {
+                    return hasId ? Error(id, -32602, "exposureLayer must be planning or execution.") : null;
+                }
+                return hasId ? Result(id, ToolsListResult(true, exposureLayer), true) : null;
             }
             if (string.Equals(method, "tools/call", StringComparison.Ordinal))
             {
@@ -630,6 +656,15 @@ namespace VRCForge.Editor
             return hasId ? Error(id, -32601, "Method not found.") : null;
         }
 
+        private static VRCForgeMcpMetadataError ValidateProtocolVersion(JObject metadata)
+        {
+            var token = metadata["io.modelcontextprotocol/protocolVersion"];
+            var requested = token != null && token.Type == JTokenType.String ? (string)token : string.Empty;
+            if (string.Equals(requested, ModernProtocolVersion, StringComparison.Ordinal)) return null;
+            var message = string.CompareOrdinal(requested, ModernProtocolVersion) < 0 ? "MCP client protocol is outdated. Update the client to protocol version 2026-07-28." : "Unsupported protocol version.";
+            return new VRCForgeMcpMetadataError { Code = -32022, Message = message, Data = new JObject { ["supported"] = new JArray(ModernProtocolVersion), ["requested"] = requested } };
+        }
+
         private static VRCForgeMcpMetadataError ValidateModernMetadata(JObject parameters)
         {
             var metadata = parameters == null ? null : parameters["_meta"] as JObject;
@@ -642,27 +677,8 @@ namespace VRCForge.Editor
                     Data = new JObject { ["requiredCapabilities"] = new JObject() },
                 };
             }
-            var requestedVersion = metadata["io.modelcontextprotocol/protocolVersion"];
-            if (!string.Equals(
-                    requestedVersion != null && requestedVersion.Type == JTokenType.String
-                        ? (string)requestedVersion
-                        : null,
-                    ModernProtocolVersion,
-                    StringComparison.Ordinal))
-            {
-                return new VRCForgeMcpMetadataError
-                {
-                    Code = -32022,
-                    Message = "Unsupported protocol version.",
-                    Data = new JObject
-                    {
-                        ["supported"] = new JArray(ModernProtocolVersion),
-                        ["requested"] = requestedVersion != null && requestedVersion.Type == JTokenType.String
-                            ? (string)requestedVersion
-                            : string.Empty,
-                    },
-                };
-            }
+            var protocolError = ValidateProtocolVersion(metadata);
+            if (protocolError != null) return protocolError;
             if (!(metadata["io.modelcontextprotocol/clientCapabilities"] is JObject))
             {
                 return new VRCForgeMcpMetadataError
@@ -699,11 +715,11 @@ namespace VRCForge.Editor
             }
             catch (KeyNotFoundException)
             {
-                return ToolError("Unknown VRCForge tool.", modern);
+                return ToolError("unknown_tool", "Unknown VRCForge tool.", modern);
             }
 
-            if (descriptor.Permission == VRCForgeToolPermission.ReadOnly
-                || IsStrictBlendshapePayloadRead(toolName, arguments))
+            if (descriptor.Permission == VRCForgeCommandAccess.ReadOnly
+                || IsStrictNoWritePayloadRead(toolName, arguments))
             {
                 return QueueInvocation(toolName, arguments, null, InvocationLane.DirectRead, client, null, modern);
             }
@@ -712,12 +728,12 @@ namespace VRCForge.Editor
             var executionContext = metadata == null ? null : metadata[ApprovedExecutionMetaKey] as JObject;
             if (executionContext == null)
             {
-                return ToolError("This tool requires the VRCForge App approval and checkpoint lane.", modern);
+                return ToolError("approval_required", "This tool requires the VRCForge App approval and checkpoint lane.", modern);
             }
             VRCForgeMcpPeerProcessEvidence peerEvidence;
             if (!VRCForgeMcpPeerProcessVerifier.TryScreenManagedBackendPeer(client, out peerEvidence))
             {
-                return ToolError("The VRCForge managed peer eligibility check failed.", modern);
+                return ToolError("managed_peer_ineligible", "The VRCForge managed peer eligibility check failed.", modern);
             }
             int claimedProcessId;
             try
@@ -733,7 +749,7 @@ namespace VRCForge.Editor
             }
             if (claimedProcessId != peerEvidence.ProcessId)
             {
-                return ToolError("The VRCForge App process binding is invalid.", modern);
+                return ToolError("app_process_binding_invalid", "The VRCForge App process binding is invalid.", modern);
             }
 
             var laneName = (string)executionContext["lane"];
@@ -741,17 +757,17 @@ namespace VRCForge.Editor
             if (string.Equals(laneName, "app_preview", StringComparison.Ordinal))
             {
                 lane = InvocationLane.AppPreview;
-                if (!PreviewTools.Contains(toolName) || !HasExplicitPreviewRequest(arguments))
+                if (!HasAllowedPreviewRequest(toolName, arguments))
                 {
-                    return ToolError("The App preview request is not allowed.", modern);
+                    return ToolError("preview_not_allowed", "The App preview request is not allowed.", modern);
                 }
             }
             else if (string.Equals(laneName, "app_safety_control", StringComparison.Ordinal))
             {
                 lane = InvocationLane.AppSafetyControl;
-                if (!SafetyControlTools.Contains(toolName))
+                if (!IsStrictSafetyControlRequest(toolName, arguments))
                 {
-                    return ToolError("The App safety-control tool is not allowed.", modern);
+                    return ToolError("safety_control_not_allowed", "The App safety-control tool is not allowed.", modern);
                 }
             }
             else if (string.Equals(laneName, "app_setup_outfit_poll", StringComparison.Ordinal))
@@ -760,7 +776,16 @@ namespace VRCForge.Editor
                 if (!IsStrictSetupOutfitJobPoll(toolName, arguments)
                     || !ValidateManagedAppInstanceContext(executionContext))
                 {
-                    return ToolError("The App Setup Outfit job poll is not allowed.", modern);
+                    return ToolError("setup_outfit_poll_not_allowed", "The App Setup Outfit job poll is not allowed.", modern);
+                }
+            }
+            else if (string.Equals(laneName, "app_unitypackage_import_poll", StringComparison.Ordinal))
+            {
+                lane = InvocationLane.AppUnityPackageImportPoll;
+                if (!IsStrictUnityPackageImportJobPoll(toolName, arguments)
+                    || !ValidateManagedAppInstanceContext(executionContext))
+                {
+                    return ToolError("unitypackage_import_poll_not_allowed", "The App UnityPackage import job poll is not allowed.", modern);
                 }
             }
             else if (string.Equals(laneName, "approved_write", StringComparison.Ordinal))
@@ -768,33 +793,129 @@ namespace VRCForge.Editor
                 lane = InvocationLane.ApprovedWrite;
                 if (!ValidateApprovedExecutionContext(executionContext, toolName, arguments))
                 {
-                    return ToolError("The approved execution context is invalid or expired.", modern);
+                    return ToolError("approved_execution_invalid", "The approved execution context is invalid or expired.", modern);
                 }
             }
             else
             {
-                return ToolError("The VRCForge App execution lane is invalid.", modern);
+                return ToolError("app_lane_invalid", "The VRCForge App execution lane is invalid.", modern);
             }
 
             return QueueInvocation(toolName, arguments, executionContext, lane, client, peerEvidence, modern);
         }
 
-        private static bool IsStrictBlendshapePayloadRead(string toolName, JObject arguments)
+        private static bool IsStrictNoWritePayloadRead(string toolName, JObject arguments)
         {
-            if (!string.Equals(toolName, "vrc_export_blendshapes", StringComparison.Ordinal)
-                || arguments == null || arguments.Count != 3)
+            if (arguments == null)
             {
                 return false;
             }
-            var outputPath = arguments["outputPath"];
-            var refreshAssets = arguments["refreshAssets"];
-            var returnPayloadOnly = arguments["returnPayloadOnly"];
-            return outputPath != null && outputPath.Type == JTokenType.String
-                && string.IsNullOrEmpty((string)outputPath)
-                && refreshAssets != null && refreshAssets.Type == JTokenType.Boolean
-                && !refreshAssets.Value<bool>()
-                && returnPayloadOnly != null && returnPayloadOnly.Type == JTokenType.Boolean
-                && returnPayloadOnly.Value<bool>();
+            if (string.Equals(toolName, "vrc_export_blendshapes", StringComparison.Ordinal))
+            {
+                return HasExactKeys(arguments, "outputPath", "refreshAssets", "returnPayloadOnly")
+                    && HasEmptyOutputPath(arguments)
+                    && HasFalseBoolean(arguments, "refreshAssets")
+                    && HasTrueBoolean(arguments, "returnPayloadOnly");
+            }
+            if (string.Equals(toolName, "vrc_scan_avatar_controls", StringComparison.Ordinal)
+                || string.Equals(toolName, "vrc_scan_avatar_parameters", StringComparison.Ordinal)
+                || string.Equals(toolName, "vrc_scan_wardrobe", StringComparison.Ordinal)
+                || string.Equals(toolName, "vrc_scan_thry_avatar_performance", StringComparison.Ordinal))
+            {
+                return HasExactKeys(arguments, "avatarPath", "outputPath")
+                    && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments);
+            }
+            if (string.Equals(toolName, "vrc_scan_avatar_materials", StringComparison.Ordinal))
+            {
+                return HasExactKeys(arguments, "avatarPath", "outputPath", "refreshAssets")
+                    && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
+                    && HasFalseBoolean(arguments, "refreshAssets");
+            }
+            if (string.Equals(toolName, "vrc_scan_avatar_items", StringComparison.Ordinal))
+            {
+                return HasExactKeys(arguments, "avatarPath", "outputPath", "maxItems", "refreshAssets")
+                    && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
+                    && HasBoundedInteger(arguments, "maxItems", 1, 2000)
+                    && HasFalseBoolean(arguments, "refreshAssets");
+            }
+            if (string.Equals(toolName, "vrc_scan_fx_animator", StringComparison.Ordinal))
+            {
+                return HasExactKeys(arguments, "avatarPath", "outputPath", "controllerPath", "refreshAssets")
+                    && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
+                    && HasString(arguments, "controllerPath") && HasFalseBoolean(arguments, "refreshAssets");
+            }
+            if (string.Equals(toolName, "vrc_scan_animation_bindings", StringComparison.Ordinal))
+            {
+                return HasExactKeys(arguments, "avatarPath", "outputPath", "controllerPath", "clipPaths", "includeAllProjectClips", "maxClips", "refreshAssets")
+                    && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
+                    && HasString(arguments, "controllerPath") && HasStringArray(arguments, "clipPaths")
+                    && HasBoolean(arguments, "includeAllProjectClips")
+                    && HasBoundedInteger(arguments, "maxClips", 1, 2000)
+                    && HasFalseBoolean(arguments, "refreshAssets");
+            }
+            if (string.Equals(toolName, "vrc_scan_avatar_performance", StringComparison.Ordinal))
+            {
+                return HasExactKeys(arguments, "avatarPath", "outputPath", "isMobile")
+                    && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
+                    && HasBoolean(arguments, "isMobile");
+            }
+            return string.Equals(toolName, "vrc_capture_scene_view", StringComparison.Ordinal)
+                && HasExactKeys(arguments, "statusOnly", "requirePlayMode")
+                && HasTrueBoolean(arguments, "statusOnly") && HasBoolean(arguments, "requirePlayMode");
+        }
+
+        private static bool HasExactKeys(JObject arguments, params string[] names)
+        {
+            return arguments.Count == names.Length
+                && names.All(name => arguments[name] != null);
+        }
+
+        private static bool HasString(JObject arguments, string name)
+        {
+            return arguments[name].Type == JTokenType.String;
+        }
+
+        private static bool HasNonEmptyString(JObject arguments, string name)
+        {
+            return HasString(arguments, name) && !string.IsNullOrWhiteSpace((string)arguments[name]);
+        }
+
+        private static bool HasEmptyOutputPath(JObject arguments)
+        {
+            return HasString(arguments, "outputPath") && string.IsNullOrEmpty((string)arguments["outputPath"]);
+        }
+
+        private static bool HasBoolean(JObject arguments, string name)
+        {
+            return arguments[name].Type == JTokenType.Boolean;
+        }
+
+        private static bool HasTrueBoolean(JObject arguments, string name)
+        {
+            return HasBoolean(arguments, name) && arguments[name].Value<bool>();
+        }
+
+        private static bool HasFalseBoolean(JObject arguments, string name)
+        {
+            return HasBoolean(arguments, name) && !arguments[name].Value<bool>();
+        }
+
+        private static bool HasBoundedInteger(JObject arguments, string name, int minimum, int maximum)
+        {
+            var value = arguments[name];
+            if (value.Type != JTokenType.Integer)
+            {
+                return false;
+            }
+            var integer = value.Value<long>();
+            return integer >= minimum && integer <= maximum;
+        }
+
+        private static bool HasStringArray(JObject arguments, string name)
+        {
+            var values = arguments[name] as JArray;
+            return values != null && values.Count <= 2000
+                && values.All(item => item != null && item.Type == JTokenType.String);
         }
 
         private static JObject QueueInvocation(
@@ -836,6 +957,112 @@ namespace VRCForge.Editor
             return pending.Response;
         }
 
+        private static bool HasAllowedPreviewRequest(string toolName, JObject arguments)
+        {
+            if (string.Equals(toolName, "vrc_restore_safe_backup", StringComparison.Ordinal))
+            {
+                return HasStrictRestoreBackupPreviewRequest(arguments);
+            }
+            if (string.Equals(toolName, "vrc_setup_outfit", StringComparison.Ordinal))
+            {
+                return HasStrictSetupOutfitPreviewRequest(arguments);
+            }
+            return PreviewTools.Contains(toolName) && HasExplicitPreviewRequest(arguments);
+        }
+
+        private static bool IsStrictSafetyControlRequest(string toolName, JObject arguments)
+        {
+            var isPrepareCheckpoint = string.Equals(toolName, "vrc_prepare_checkpoint", StringComparison.Ordinal);
+            if (!(isPrepareCheckpoint
+                    || string.Equals(toolName, "vrc_reload_after_checkpoint_restore", StringComparison.Ordinal))
+                || arguments == null)
+            {
+                return false;
+            }
+            if (isPrepareCheckpoint && HasExactKeys(arguments, "projectPath"))
+            {
+                return HasNonEmptyString(arguments, "projectPath");
+            }
+            if (isPrepareCheckpoint && HasExactKeys(arguments,
+                    "projectPath", "expectedRunIdDigest", "expectedProjectPathDigest",
+                    "expectedUnityProcessId", "expectedUnityProcessStartedAtUtc", "expectedUnityExecutableDigest")
+                && HasCompleteSafetyControlLiveBinding(arguments))
+            {
+                return true;
+            }
+            if (!string.Equals(toolName, "vrc_reload_after_checkpoint_restore", StringComparison.Ordinal)
+                || !HasNonEmptyString(arguments, "projectPath")
+                || !HasNonEmptyString(arguments, "phase"))
+            {
+                return false;
+            }
+            var phase = (string)arguments["phase"];
+            if (string.Equals(phase, "prepare_restore", StringComparison.Ordinal))
+            {
+                return HasExactKeys(arguments, "projectPath", "phase")
+                    || (HasExactKeys(arguments,
+                            "projectPath", "phase", "expectedRunIdDigest", "expectedProjectPathDigest",
+                            "expectedUnityProcessId", "expectedUnityProcessStartedAtUtc", "expectedUnityExecutableDigest")
+                        && HasCompleteSafetyControlLiveBinding(arguments));
+            }
+            if (!string.Equals(phase, "reload", StringComparison.Ordinal)
+                || !HasStringArray(arguments, "scenePaths")
+                || !HasString(arguments, "activeScenePath"))
+            {
+                return false;
+            }
+            return HasExactKeys(arguments, "projectPath", "phase", "scenePaths", "activeScenePath")
+                || (HasExactKeys(arguments,
+                        "projectPath", "phase", "scenePaths", "activeScenePath",
+                        "expectedRunIdDigest", "expectedProjectPathDigest", "expectedUnityProcessId",
+                        "expectedUnityProcessStartedAtUtc", "expectedUnityExecutableDigest")
+                    && HasCompleteSafetyControlLiveBinding(arguments));
+        }
+
+        private static bool HasCompleteSafetyControlLiveBinding(JObject arguments)
+        {
+            return HasNonEmptyString(arguments, "projectPath")
+                && HasNonEmptyString(arguments, "expectedRunIdDigest")
+                && HasNonEmptyString(arguments, "expectedProjectPathDigest")
+                && HasBoundedInteger(arguments, "expectedUnityProcessId", 1, int.MaxValue)
+                && HasNonEmptyString(arguments, "expectedUnityProcessStartedAtUtc")
+                && HasNonEmptyString(arguments, "expectedUnityExecutableDigest");
+        }
+
+        private static bool HasStrictRestoreBackupPreviewRequest(JObject arguments)
+        {
+            if (arguments == null
+                || !(HasExactKeys(arguments,
+                        "backupPath", "backupId", "assetPaths", "confirmRestore",
+                        "allowProjectMismatch", "allowOverwriteChanged", "refreshAssets")
+                    || HasExactKeys(arguments,
+                        "backupPath", "backupId", "assetPaths", "confirmRestore",
+                        "allowProjectMismatch", "allowOverwriteChanged", "refreshAssets", "backupRoot")))
+            {
+                return false;
+            }
+            return HasString(arguments, "backupPath")
+                && HasString(arguments, "backupId")
+                && HasStringArray(arguments, "assetPaths")
+                && ((JArray)arguments["assetPaths"]).Count <= 2000
+                && HasFalseBoolean(arguments, "confirmRestore")
+                && HasFalseBoolean(arguments, "allowProjectMismatch")
+                && HasFalseBoolean(arguments, "allowOverwriteChanged")
+                && HasFalseBoolean(arguments, "refreshAssets")
+                && (arguments["backupRoot"] == null || HasString(arguments, "backupRoot"));
+        }
+
+        private static bool HasStrictSetupOutfitPreviewRequest(JObject arguments)
+        {
+            return arguments != null
+                && HasExactKeys(arguments, "avatarPath", "outfitPath", "confirmSetup", "saveScene")
+                && HasString(arguments, "avatarPath")
+                && HasNonEmptyString(arguments, "outfitPath")
+                && HasFalseBoolean(arguments, "confirmSetup")
+                && arguments["saveScene"] != null
+                && arguments["saveScene"].Type == JTokenType.Boolean;
+        }
+
         private static bool HasExplicitPreviewRequest(JObject arguments)
         {
             return arguments != null
@@ -874,14 +1101,21 @@ namespace VRCForge.Editor
                 if (!VRCForgeMcpToolContract.IsExpectedDescriptor(descriptor)
                     || !IsInvocationStillAuthorized(pending, descriptor))
                 {
-                    throw new VRCForgeMcpProtocolException();
+                    pending.Response = ToolError(
+                        "invocation_revalidation_failed",
+                        "VRCForge tool authorization changed before execution.",
+                        pending.Modern);
+                    return;
                 }
                 var result = descriptor.Handler.Invoke(null, new object[] { pending.Arguments });
                 pending.Response = ToolResult(result, pending.Modern);
             }
             catch (Exception)
             {
-                pending.Response = ToolError("VRCForge tool execution failed.", pending.Modern);
+                pending.Response = ToolError(
+                    "tool_handler_exception",
+                    "VRCForge tool execution failed.",
+                    pending.Modern);
             }
             finally
             {
@@ -900,25 +1134,30 @@ namespace VRCForge.Editor
             }
             if (pending.Lane == InvocationLane.DirectRead)
             {
-                return descriptor.Permission == VRCForgeToolPermission.ReadOnly
-                    || IsStrictBlendshapePayloadRead(pending.ToolName, pending.Arguments);
+                return descriptor.Permission == VRCForgeCommandAccess.ReadOnly
+                    || IsStrictNoWritePayloadRead(pending.ToolName, pending.Arguments);
             }
-            if (descriptor.Permission == VRCForgeToolPermission.ReadOnly
+            if (descriptor.Permission == VRCForgeCommandAccess.ReadOnly
                 || !ReverifyManagedPeer(pending))
             {
                 return false;
             }
             if (pending.Lane == InvocationLane.AppPreview)
             {
-                return PreviewTools.Contains(pending.ToolName);
+                return HasAllowedPreviewRequest(pending.ToolName, pending.Arguments);
             }
             if (pending.Lane == InvocationLane.AppSafetyControl)
             {
-                return SafetyControlTools.Contains(pending.ToolName);
+                return IsStrictSafetyControlRequest(pending.ToolName, pending.Arguments);
             }
             if (pending.Lane == InvocationLane.AppSetupOutfitPoll)
             {
                 return IsStrictSetupOutfitJobPoll(pending.ToolName, pending.Arguments)
+                    && ValidateManagedAppInstanceContext(pending.ExecutionContext);
+            }
+            if (pending.Lane == InvocationLane.AppUnityPackageImportPoll)
+            {
+                return IsStrictUnityPackageImportJobPoll(pending.ToolName, pending.Arguments)
                     && ValidateManagedAppInstanceContext(pending.ExecutionContext);
             }
             return pending.Lane == InvocationLane.ApprovedWrite
@@ -934,6 +1173,21 @@ namespace VRCForge.Editor
         private static bool IsStrictSetupOutfitJobPoll(string toolName, JObject arguments)
         {
             if (!string.Equals(toolName, "vrc_setup_outfit", StringComparison.Ordinal)
+                || arguments == null
+                || arguments.Properties().Count() != 1)
+            {
+                return false;
+            }
+            var jobId = arguments["jobId"];
+            Guid parsed;
+            return jobId != null
+                && jobId.Type == JTokenType.String
+                && Guid.TryParseExact((string)jobId, "N", out parsed);
+        }
+
+        private static bool IsStrictUnityPackageImportJobPoll(string toolName, JObject arguments)
+        {
+            if (!string.Equals(toolName, "vrc_import_unitypackage", StringComparison.Ordinal)
                 || arguments == null
                 || arguments.Properties().Count() != 1)
             {
@@ -1156,8 +1410,11 @@ namespace VRCForge.Editor
 
         private static JObject ToolResult(object value, bool modern)
         {
-            var tokenValue = value == null ? JValue.CreateNull() : JToken.FromObject(value);
-            var isError = value is IMcpResponse response && !response.Success;
+            var commandResult = value as VRCForgeToolResult;
+            var tokenValue = commandResult != null
+                ? commandResult.ToStructuredContent()
+                : value == null ? JValue.CreateNull() : JToken.FromObject(value);
+            var isError = commandResult != null && !commandResult.IsSuccessful;
             var structured = tokenValue as JObject ?? new JObject { ["result"] = tokenValue.DeepClone() };
             var result = new JObject
             {
@@ -1179,13 +1436,18 @@ namespace VRCForge.Editor
             return result;
         }
 
-        private static JObject ToolError(string message, bool modern)
+        private static JObject ToolError(string code, string message, bool modern)
         {
             var result = new JObject
             {
                 ["content"] = new JArray
                 {
                     new JObject { ["type"] = "text", ["text"] = message },
+                },
+                ["structuredContent"] = new JObject
+                {
+                    ["success"] = false,
+                    ["code"] = code,
                 },
                 ["isError"] = true,
             };
@@ -1213,15 +1475,20 @@ namespace VRCForge.Editor
             };
         }
 
-        private static JObject ToolsListResult(bool modern)
+        private static JObject ToolsListResult(bool modern, string exposureLayer)
         {
             var result = new JArray();
             var orderedTools = new List<VRCForgeToolDescriptor>(tools);
             orderedTools.Sort((left, right) => string.CompareOrdinal(left.Name, right.Name));
             foreach (var descriptor in orderedTools)
             {
+                if (string.Equals(exposureLayer, "planning", StringComparison.Ordinal)
+                    && !VRCForgeMcpToolContract.ExpectedPlanningToolNames.Contains(descriptor.Name))
+                {
+                    continue;
+                }
                 var annotations = new JObject();
-                if (descriptor.Permission == VRCForgeToolPermission.ReadOnly)
+                if (descriptor.Permission == VRCForgeCommandAccess.ReadOnly)
                 {
                     annotations["readOnlyHint"] = true;
                 }
@@ -1229,10 +1496,30 @@ namespace VRCForge.Editor
                 {
                     annotations["destructiveHint"] = true;
                 }
+                var writeTool = descriptor.Permission != VRCForgeCommandAccess.ReadOnly;
+                var planningCapable = VRCForgeMcpToolContract.ExpectedPlanningToolNames.Contains(descriptor.Name);
+                var whenToUse = descriptor.Description;
+                var whenNotToUse = writeTool && planningCapable
+                    ? "During planning, do not request an output path or any project mutation; output-producing variants require execution mode and the VRCForge App approval lane."
+                    : writeTool
+                    ? "Do not use while planning, for hypothetical or quoted requests, or without an explicit project change request and the VRCForge App approval lane."
+                    : "Do not use for general questions, quoted examples, hypothetical requests, or when the user explicitly forbids project inspection.";
+                var negativeExample = writeTool && planningCapable
+                    ? "Negative example: Run " + descriptor.Name + " during planning and save its report into Assets."
+                    : writeTool
+                    ? "Negative example: Explain " + descriptor.Name + " conceptually, but do not modify the Unity project."
+                    : "Negative example: Mention " + descriptor.Name + " without inspecting the current Unity project.";
+                var description = "When to use: " + whenToUse + "\nWhen NOT to use: "
+                    + whenNotToUse + "\n" + negativeExample;
                 var metadata = new JObject
                 {
                     ["permission"] = descriptor.Permission.ToString(),
                     ["group"] = descriptor.Group,
+                    ["whenToUse"] = whenToUse,
+                    ["doNotUse"] = whenNotToUse + " " + negativeExample,
+                    ["negativeExample"] = negativeExample.Substring("Negative example: ".Length),
+                    ["exposureLayer"] = planningCapable
+                        ? "planning" : "execution",
                     ["poll"] = descriptor.RequiresPolling
                         ? new JObject { ["action"] = descriptor.PollAction, ["maxSeconds"] = descriptor.MaxPollSeconds }
                         : JValue.CreateNull()
@@ -1240,13 +1527,13 @@ namespace VRCForge.Editor
                 result.Add(new JObject
                 {
                     ["name"] = descriptor.Name,
-                    ["description"] = descriptor.Description,
+                    ["description"] = description,
                     ["inputSchema"] = descriptor.CreateInputSchema(),
                     ["annotations"] = annotations,
                     ["_meta"] = metadata
                 });
             }
-            var response = new JObject { ["tools"] = result };
+            var response = new JObject { ["tools"] = result, ["exposureLayer"] = exposureLayer };
             if (modern)
             {
                 response["ttlMs"] = 3000;

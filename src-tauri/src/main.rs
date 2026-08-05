@@ -23,6 +23,7 @@ use tauri::{
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::HeaderValue;
 
+mod approval_notification_windows;
 mod backend;
 #[cfg(windows)]
 mod capture_helper;
@@ -39,6 +40,7 @@ mod primitive_evidence_authority_windows;
 mod primitive_evidence_controller_launcher_windows;
 mod sanitize;
 
+use approval_notification_windows::*;
 use backend::*;
 use commands::*;
 use event_bridge::*;
@@ -74,6 +76,8 @@ fn main() {
     }
     #[cfg(windows)]
     configure_webview2_accessibility();
+    #[cfg(windows)]
+    let _ = bind_approval_notification_identity();
     let primitive_live_bootstrap =
         read_primitive_live_bootstrap_from_stdin().unwrap_or_else(|_| {
             eprintln!("VRCForge primitive live bootstrap was rejected.");
@@ -88,6 +92,9 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .manage(backend_state)
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_title(&app_window_title(&app.package_info().version.to_string()))?;
+            }
             let open_chat_item =
                 MenuItem::with_id(app, "open_chat", "打开对话", true, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "打开窗口", true, None::<&str>)?;
@@ -135,6 +142,7 @@ fn main() {
             apply_adjustment_checkpoint,
             answer_agent_question,
             approve_agent_approval,
+            show_approval_notification,
             begin_developer_options_challenge,
             begin_chat_attachment_upload,
             bind_agent_goal_owner,
@@ -276,6 +284,10 @@ fn main() {
         .expect("error while running VRCForge");
 }
 
+fn app_window_title(version: &str) -> String {
+    format!("VRCForge {version}")
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -287,7 +299,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 mod tests {
     use super::{
         advanced_settings_update_body, app_session_challenge_signature,
-        app_session_challenge_signature_matches, approval_scope_body,
+        app_session_challenge_signature_matches, app_window_title, approval_scope_body,
         developer_options_challenge_path, diagnostics_update_body, extract_challenge_signature,
         force_child_exit, hmac_sha256_hex, percent_encode_query_component, prepare_runtime_files,
         primitive_live_bootstrap_requested, provider_config_body, resolve_logs_folder,
@@ -318,6 +330,14 @@ mod tests {
             .expect("system clock should be after Unix epoch")
             .as_nanos();
         env::temp_dir().join(format!("vrcforge-{label}-{}-{nonce}", process::id()))
+    }
+
+    #[test]
+    fn window_title_includes_the_packaged_app_version() {
+        assert_eq!(
+            app_window_title(env!("CARGO_PKG_VERSION")),
+            format!("VRCForge {}", env!("CARGO_PKG_VERSION")),
+        );
     }
 
     fn create_dashboard(root: &Path) {
@@ -814,6 +834,19 @@ mod tests {
         let body = approval_scope_body(&request);
         assert_eq!(body["globalOnly"], false);
         assert_eq!(body["expectedProjectRoot"], r"E:\unity\Acceptance");
+    }
+
+    #[test]
+    fn approval_scope_forwards_optional_future_category_permission() {
+        let request: DesktopApprovalScopeRequest = serde_json::from_value(serde_json::json!({
+            "approvalId": "approval-id",
+            "expectedProjectRoot": r"E:\unity\Acceptance",
+            "allowFutureCategory": true,
+        }))
+        .expect("approval scope should deserialize");
+
+        let body = approval_scope_body(&request);
+        assert_eq!(body["allowFutureCategory"], true);
     }
 
     #[test]

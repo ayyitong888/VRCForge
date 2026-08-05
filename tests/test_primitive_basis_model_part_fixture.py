@@ -73,13 +73,13 @@ def test_model_part_fixture_is_pinned_and_materializes() -> None:
     )
 
     assert fixtures.descriptor_digest == (
-        "224bece5f977b9e82dfdb255ced6a90abd92ed821d2f3fe6e69195994276ac7a"
+        "9529e953b6dd428fa396be33e0da3d86ccc89339229be76059d8d25520d63a04"
     )
     assert fixture.descriptor_digest == (
-        "2a8f5d84c60b5410fce5a256e030fdeea2e9e7d216a395b4128dc74067437b5f"
+        "66b73558e841d1cf73023515669556e9f19f8be55689e754ca5357a9c6377240"
     )
     assert fixture.digest == (
-        "408c0b41be6d45a2cca1b8edebc664211687b5623c87eccffb2936842d446299"
+        "87d1d5ae45323a6ed79b59cf19d970517612aa5483593c500ad0074140edd62f"
     )
     assert fixture.materialized is True
     assert fixture.materialization_error == ""
@@ -88,7 +88,7 @@ def test_model_part_fixture_is_pinned_and_materializes() -> None:
     )
     assert all(not item.materialization_error for item in fixtures.fixtures)
     assert fixtures.digest == (
-        "a634ab6ed15afc66c2b9e808f42e30189b7e9c19f04af4f4bff2d0d51accc5fa"
+        "01d548c4e6654fafcb21f6a4158e5da638764f33f2b77b5555fdd21b7ec12c8c"
     )
 
 
@@ -131,12 +131,12 @@ def test_model_part_fixture_contract_binds_project_files_and_dependencies() -> N
     assert contract["requiredPackages"] == [
         {
             "id": "com.vrchat.avatars",
-            "version": "3.10.3",
+            "version": "3.10.4",
             "provisioning": "exact_artifact",
         },
         {
             "id": "com.vrchat.base",
-            "version": "3.10.3",
+            "version": "3.10.4",
             "provisioning": "exact_artifact",
         },
         {
@@ -273,15 +273,15 @@ def test_model_part_live_editor_contract_is_bound_and_reloadable() -> None:
     assert "process.StartTime.ToUniversalTime()" in guard
 
     inspector = INSPECTOR_PATH.read_text(encoding="utf-8")
-    assert 'name: "vrc_inspect_primitive_basis_fixture"' in inspector
-    assert 'name: "vrc_reload_primitive_basis_fixture"' in inspector
+    assert 'toolId: "vrc_inspect_primitive_basis_fixture"' in inspector
+    assert 'toolId: "vrc_reload_primitive_basis_fixture"' in inspector
     assert "activeScene.isDirty" in inspector
     assert "EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single)" in inspector
     assert 'FindType("nadena.dev.ndmf.runtime.components.NDMFAvatarRoot")' in inspector
 
     writer = WRITER_PATH.read_text(encoding="utf-8")
     assert "PrimitiveBasisLiveGuard.RequireBoundRequest(@params)" in writer
-    assert 'name: "vrc_inspect_modular_avatar_component"' in writer
+    assert 'toolId: "vrc_inspect_modular_avatar_component"' in writer
     assert "AvatarObjectReference" in writer
 
 

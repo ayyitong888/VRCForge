@@ -32,7 +32,7 @@ MISSING_REQUIRED_CLIENT_CAPABILITY = -32021
 UNSUPPORTED_PROTOCOL_VERSION = -32022
 
 JsonObject = dict[str, Any]
-ToolListCallback = Callable[[], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
+ToolListCallback = Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
 ToolCallCallback = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
 BearerValidator = Callable[[str], bool | Awaitable[bool]]
 
@@ -84,9 +84,24 @@ def _normalise_tool(tool: Mapping[str, Any]) -> JsonObject:
         schema = {"type": "object", "additionalProperties": True}
     elif schema.get("type") != "object":
         raise Mcp2026Error(-32603, "Tool catalogue inputSchema must be an object schema", 500)
+    is_write = bool(tool.get("write") or tool.get("requiresApproval"))
+    summary = str(tool.get("description") or name).strip()
+    if not all(section in summary for section in ("When to use:", "When NOT to use:", "Negative example:")):
+        when_not = (
+            "Do not use while planning, for hypothetical or quoted requests, or without an explicit "
+            "project change request and the VRCForge App approval lane."
+            if is_write
+            else "Do not use for general questions, quoted examples, hypothetical requests, or when the user forbids inspection."
+        )
+        negative = (
+            f"Explain {name} conceptually, but do not modify the project."
+            if is_write
+            else f"Mention {name} without inspecting the current project."
+        )
+        summary = f"When to use: {summary}\nWhen NOT to use: {when_not}\nNegative example: {negative}"
     normalised: JsonObject = {
         "name": str(name),
-        "description": str(tool.get("description") or name),
+        "description": summary,
         "inputSchema": dict(schema),
     }
     title = tool.get("title")
@@ -95,13 +110,14 @@ def _normalise_tool(tool: Mapping[str, Any]) -> JsonObject:
     output_schema = tool.get("outputSchema") or tool.get("outputsSchema")
     if isinstance(output_schema, Mapping):
         normalised["outputSchema"] = dict(output_schema)
-    is_write = bool(tool.get("write") or tool.get("requiresApproval"))
     normalised["annotations"] = {
         "readOnlyHint": not is_write,
         "destructiveHint": False,
         "openWorldHint": False,
     }
+    supplied_meta = tool.get("_meta") if isinstance(tool.get("_meta"), Mapping) else {}
     normalised["_meta"] = {
+        **dict(supplied_meta),
         "permission": "RequiresApproval" if is_write else "ReadOnly",
     }
     return normalised
@@ -186,6 +202,10 @@ def _validate_request(message: Any) -> tuple[Any, str, JsonObject]:
         client_info = meta[CLIENT_INFO_META_KEY]
         if not isinstance(client_info, Mapping) or not _is_nonempty_string(client_info.get("name")) or not _is_nonempty_string(client_info.get("version")):
             raise Mcp2026Error(-32602, "MCP clientInfo must contain non-empty name and version")
+    if "exposureLayer" in params:
+        exposure_layer = params.get("exposureLayer")
+        if not isinstance(exposure_layer, str) or exposure_layer not in {"planning", "execution"}:
+            raise Mcp2026Error(-32602, "exposureLayer must be planning or execution")
     return request_id, method, dict(params)
 
 
@@ -231,7 +251,7 @@ class Mcp2026Router:
                     server_version=self.server_version,
                 ), 200
             if method == "tools/list":
-                supplied_tools = await _resolve(self._tool_list())
+                supplied_tools = await _resolve(self._tool_list(params))
                 if not isinstance(supplied_tools, Sequence) or isinstance(supplied_tools, (str, bytes, bytearray)):
                     raise Mcp2026Error(-32603, "Tool catalogue must return a sequence", 500)
                 tools = [_normalise_tool(tool) for tool in supplied_tools if isinstance(tool, Mapping)]
@@ -251,7 +271,13 @@ class Mcp2026Router:
                 arguments = params.get("arguments", {})
                 if not _is_nonempty_string(tool_name) or not isinstance(arguments, Mapping):
                     raise Mcp2026Error(-32602, "tools/call requires a non-empty name and object arguments")
-                supplied_tools = await _resolve(self._tool_list())
+                # Tool visibility is a discovery concern. Standard MCP clients do
+                # not repeat a tools/list exposure hint on tools/call, so validate
+                # the call against the explicit execution catalogue by default;
+                # the callback still enforces auth, permissions and approval.
+                catalogue_params = dict(params)
+                catalogue_params.setdefault("exposureLayer", "execution")
+                supplied_tools = await _resolve(self._tool_list(catalogue_params))
                 if not isinstance(supplied_tools, Sequence) or isinstance(supplied_tools, (str, bytes, bytearray)):
                     raise Mcp2026Error(-32603, "Tool catalogue must return a sequence", 500)
                 allowed_names = {

@@ -69,6 +69,7 @@ import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
 import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
+import { presentApproval } from "./lib/approval-presentation";
 import {
   COLLAPSED_LEFT_PANE_WIDTH,
   DEVELOPER_OPTIONS_ENABLED_KEY,
@@ -114,10 +115,12 @@ import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, Co
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { resolveComputerUseAccentHex } from "./lib/computer-use-visuals";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
+import { sortSidebarProjects } from "./lib/sidebar-project-order";
 import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
 import { buildRuntimeSchedule } from "./lib/runtime-schedule";
 import { buildEmptyProjectState } from "./lib/sidebar-view";
 import { buildRuntimeWorkspaceViewModel } from "./lib/runtime-workspace-view";
+import { parseApprovalNotificationAction, showApprovalNotification } from "./lib/approval-notifications";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
 import {
   createMarkdownSmokeChatState,
@@ -298,6 +301,13 @@ export default function App() {
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
   const projectInitRef = useRef(false);
   const refreshRuntimeRunsRef = useRef<(includeEvents?: boolean, target?: string) => Promise<void>>(async () => undefined);
+  const pendingApprovalsRef = useRef<AgentApproval[]>([]);
+  const approvalActionHandlersRef = useRef<{
+    approve: (approvalId: string, allowFutureCategory?: boolean) => void;
+    reject: (approvalId: string) => void;
+  } | null>(null);
+  const knownApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
+  const exhaustedApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
   const runtimeStartingRef = useRef(false);
   const startupLaunchStartedAtRef = useRef<number | null>(null);
   const backendReadyStatusRef = useRef<"idle" | "starting" | "ready" | "error">("idle");
@@ -474,7 +484,7 @@ export default function App() {
     t,
   });
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
-  const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount > 0;
+  const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount === 64;
   const {
     optimizationReport,
     optimizationTargetProfile,
@@ -574,6 +584,16 @@ export default function App() {
     || bootstrap?.health.projects?.selectedProjectPath
     || ""
   ).trim();
+  const onboardingSelectedProjectReady = Boolean(
+    activeProjectPath
+    && projects.some(
+      (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath),
+    )
+  );
+  const onboardingProjectMatchesBackend = !authoritativeSelectedProjectPath || (
+    normalizeProjectPathKey(authoritativeSelectedProjectPath) === normalizeProjectPathKey(activeProjectPath)
+  );
+  const onboardingUnityToolsReady = onboardingSelectedProjectReady && onboardingProjectMatchesBackend && vrcForgeToolsReady;
   const externalAgentConnected = Boolean(connectorStatus?.gateway?.enabled);
   const chatAvailable = providerConfigured || externalAgentConnected;
   const chatDisabledReason = !runtimeConnected
@@ -717,7 +737,17 @@ export default function App() {
     expandProjectGroup,
     initialChatState,
   });
+  const sidebarProjectItems = useMemo(
+    () => sortSidebarProjects(projectItems, chats, pinnedProjectSet),
+    [chats, pinnedProjectSet, projectItems],
+  );
   chatSessionActionsRef.current = { selectProject, newConversation };
+
+  function openTemporaryChat() {
+    projectInitRef.current = true;
+    newTemporaryChat();
+  }
+
   const conversation = activeChat?.items ?? [];
   const sessionId = activeChat?.sessionId ?? "";
   const activeRuntimeProjectPath = activeChat?.projectPath || activeProjectPath;
@@ -980,6 +1010,100 @@ export default function App() {
     loadCheckpoints,
     reloadChatStorageState,
   });
+  pendingApprovalsRef.current = pendingApprovalItems;
+  approvalActionHandlersRef.current = { approve: approveShell, reject: rejectShell };
+
+  useEffect(() => {
+    if (agentApprovals === null) {
+      return;
+    }
+    const pendingIds = new Set(pendingApprovalItems.map((approval) => approval.id));
+    for (const approvalId of knownApprovalNotificationIdsRef.current) {
+      if (!pendingIds.has(approvalId)) {
+        knownApprovalNotificationIdsRef.current.delete(approvalId);
+      }
+    }
+    for (const approvalId of exhaustedApprovalNotificationIdsRef.current) {
+      if (!pendingIds.has(approvalId)) {
+        exhaustedApprovalNotificationIdsRef.current.delete(approvalId);
+      }
+    }
+    for (const approval of pendingApprovalItems) {
+      if (
+        knownApprovalNotificationIdsRef.current.has(approval.id) ||
+        exhaustedApprovalNotificationIdsRef.current.has(approval.id) ||
+        !isTauriRuntime()
+      ) {
+        continue;
+      }
+      knownApprovalNotificationIdsRef.current.add(approval.id);
+      const presentation = presentApproval(approval, t);
+      const notify = () =>
+        showApprovalNotification(
+          approval,
+          t("approval.notificationTitle"),
+          t("approval.notificationBody", { target: presentation.title }),
+          t("approval.approveOnce"),
+          t("approval.reject"),
+        );
+      void notify().catch(() =>
+        new Promise<void>((resolve) => window.setTimeout(resolve, 1_500))
+          .then(() => {
+            if (!pendingApprovalsRef.current.some((item) => item.id === approval.id)) {
+              knownApprovalNotificationIdsRef.current.delete(approval.id);
+              return;
+            }
+            return notify();
+          })
+          .catch((cause) => {
+            knownApprovalNotificationIdsRef.current.delete(approval.id);
+            exhaustedApprovalNotificationIdsRef.current.add(approval.id);
+            setError(cause instanceof Error ? cause.message : String(cause));
+          }),
+      );
+    }
+  }, [agentApprovals, pendingApprovalItems, t]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    let active = true;
+    let unlistenAction: (() => void) | null = null;
+    void listen<unknown>("vrcforge-approval-notification-action", (event) => {
+      const action = parseApprovalNotificationAction(event.payload);
+      if (!action || !active) {
+        return;
+      }
+      const approval = pendingApprovalsRef.current.find((item) => item.id === action.approvalId);
+      if (!approval) {
+        setError(t("approval.notificationExpired"));
+        return;
+      }
+      const handlers = approvalActionHandlersRef.current;
+      if (!handlers) {
+        setError(t("approval.notificationFailed"));
+        return;
+      }
+      if (action.action === "approve") {
+        handlers.approve(approval.id);
+      } else {
+        handlers.reject(approval.id);
+      }
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenAction = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
+    return () => {
+      active = false;
+      unlistenAction?.();
+    };
+  }, [t]);
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -1299,11 +1423,11 @@ export default function App() {
     if (!showOnboarding || !onboardingMinimized) {
       return;
     }
-    const stepStates = [runtimeConnected, Boolean(apiConfig?.apiKeyPresent), projectItems.length > 0];
+    const stepStates = [onboardingSelectedProjectReady, onboardingUnityToolsReady, Boolean(apiConfig?.apiKeyPresent)];
     if (stepStates[Math.min(onboardingStep, stepStates.length - 1)]) {
       setOnboardingMinimized(false);
     }
-  }, [showOnboarding, onboardingMinimized, onboardingStep, runtimeConnected, apiConfig?.apiKeyPresent, projectItems.length]);
+  }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, apiConfig?.apiKeyPresent]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -1340,7 +1464,7 @@ export default function App() {
   }, [conversation.length]);
 
   useEffect(() => {
-    if (activeProjectPath || !authoritativeSelectedProjectPath) {
+    if (projectInitRef.current || activeProjectPath || !authoritativeSelectedProjectPath) {
       return;
     }
     projectInitRef.current = true;
@@ -1505,7 +1629,7 @@ export default function App() {
       setActiveView("chat");
       setError("");
       if (!activeChatId) {
-        newTemporaryChat();
+        openTemporaryChat();
       }
     })
       .then((unlisten) => {
@@ -2737,7 +2861,7 @@ export default function App() {
           activeChatId={activeChatId}
           runtimeConnected={runtimeConnected}
           loadingProjects={loadingProjects}
-          projectItems={projectItems}
+          projectItems={sidebarProjectItems}
           chatSidebar={chatSidebar}
           backgroundGoalUnreadByChat={backgroundGoalState?.unreadByChat || {}}
           emptyProjectState={emptyProjectState}
@@ -2750,7 +2874,7 @@ export default function App() {
           renameDraft={renameDraft}
           projectDisplayName={projectDisplayName}
           onToggleSidebar={() => setLeftSidebarCollapsed((value) => !value)}
-          onNewTemporaryChat={newTemporaryChat}
+          onNewTemporaryChat={openTemporaryChat}
           onOpenProjectPicker={() => {
             setProjectModalError("");
             setShowProjectModal(true);
@@ -3119,6 +3243,7 @@ export default function App() {
               onConversationMouseUp={handleConversationMouseUp}
               onConversationScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
               pendingApprovalForResponse={pendingApprovalForResponse}
+              scopedPendingApprovals={pendingApprovalItems}
               approvalActions={approvalActions}
               messageFeedback={messageFeedback}
               latestRetryableItemId={latestRetryableItemId}
@@ -3138,6 +3263,7 @@ export default function App() {
           {activeView !== "chat" ? (
             <PendingApprovalsStrip
               approvals={pendingApprovalItems}
+              actions={approvalActions}
               loading={loading}
               onApprove={approveShell}
               onReject={rejectShell}
@@ -3235,8 +3361,10 @@ export default function App() {
         minimized={onboardingMinimized}
         stepIndex={onboardingStep}
         runtimeConnected={runtimeConnected}
+        selectedProjectReady={onboardingSelectedProjectReady}
+        unityToolsReady={onboardingUnityToolsReady}
+        unityToolsCount={vrcForgeToolsCount}
         apiKeyPresent={Boolean(apiConfig?.apiKeyPresent)}
-        hasProjects={projectItems.length > 0}
         loadingRuntime={loading}
         currentLanguage={i18n.language}
         onRetryRuntime={() => void startRuntime()}

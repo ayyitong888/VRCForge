@@ -19,7 +19,6 @@ REQUEST_ARGUMENT_KEYS = (
     "materialAssetPath",
     "slotIndex",
     "shaderName",
-    "targetShader",
     "shaderAssetPath",
 )
 
@@ -36,6 +35,8 @@ def build_wrapper_arguments(params: dict[str, Any]) -> dict[str, Any]:
     nested = wrapper.get("arguments")
     if not isinstance(nested, dict):
         nested = wrapper.get("params")
+    if "targetShader" in wrapper or (isinstance(nested, dict) and "targetShader" in nested):
+        raise MaterialShaderAssignmentError("targetShader is unsupported; use shaderName.")
     if not isinstance(nested, dict):
         nested = {key: wrapper[key] for key in REQUEST_ARGUMENT_KEYS if key in wrapper}
     for key in REQUEST_ARGUMENT_KEYS:
@@ -49,6 +50,8 @@ def build_wrapper_arguments(params: dict[str, Any]) -> dict[str, Any]:
 
 def build_preview_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
     request = arguments if isinstance(arguments, dict) else {}
+    if "targetShader" in request:
+        raise MaterialShaderAssignmentError("targetShader is unsupported; use shaderName.")
     preview_arguments = {
         key: deepcopy(request[key])
         for key in REQUEST_ARGUMENT_KEYS
@@ -70,7 +73,7 @@ def bind_authoritative_preview(
         raise MaterialShaderAssignmentError("Material shader arguments are required.")
 
     requested_shader = _bounded_text(
-        nested.get("shaderName") or nested.get("targetShader"),
+        nested.get("shaderName"),
         label="shaderName",
         max_length=512,
     )
@@ -169,7 +172,7 @@ def bind_authoritative_preview(
     renderer_scene_handle = _bounded_int(
         result.get("rendererSceneHandle"),
         label="rendererSceneHandle",
-        minimum=-1,
+        minimum=-2_147_483_648,
         maximum=2_147_483_647,
     )
     renderer_component_id = str(result.get("rendererComponentId") or "").strip().lower()
@@ -195,7 +198,7 @@ def bind_authoritative_preview(
             label="rendererComponentType",
             max_length=512,
         )
-        if renderer_component_index < 0 or renderer_scene_handle <= 0:
+        if renderer_component_index < 0 or renderer_scene_handle == 0:
             raise MaterialShaderAssignmentError("Renderer component identity is incomplete.")
     elif (
         renderer_scene_path
@@ -279,7 +282,6 @@ def bind_authoritative_preview(
         raise MaterialShaderAssignmentError("Material shader preview wouldChange is inconsistent.")
 
     canonical_nested = deepcopy(nested)
-    canonical_nested.pop("targetShader", None)
     canonical_nested["shaderName"] = actual_requested_shader
     canonical_nested["preview"] = False
     canonical_nested["saveAssets"] = True
@@ -401,12 +403,7 @@ def _canonical_shared_impact(value: Any) -> dict[str, Any]:
             {
                 "scenePath": scene_path,
                 "sceneGuid": scene_guid,
-                "sceneHandle": _bounded_int(
-                    slot.get("sceneHandle"),
-                    label="sceneHandle",
-                    minimum=1,
-                    maximum=2_147_483_647,
-                ),
+                "sceneHandle": _nonzero_int32(slot.get("sceneHandle"), label="sceneHandle"),
                 "rendererPath": _bounded_text(
                     slot.get("rendererPath"),
                     label="rendererPath",
@@ -606,6 +603,18 @@ def _bounded_int(value: Any, *, label: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise MaterialShaderAssignmentError(f"{label} is outside the supported range.")
     return value
+
+
+def _nonzero_int32(value: Any, *, label: str) -> int:
+    parsed = _bounded_int(
+        value,
+        label=label,
+        minimum=-2_147_483_648,
+        maximum=2_147_483_647,
+    )
+    if parsed == 0:
+        raise MaterialShaderAssignmentError(f"{label} must be nonzero.")
+    return parsed
 
 
 def _bounded_text(value: Any, *, label: str, max_length: int) -> str:

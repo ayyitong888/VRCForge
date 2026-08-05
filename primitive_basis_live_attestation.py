@@ -399,6 +399,8 @@ class PrimitiveBasisLiveSession:
         facts: Mapping[str, Any],
         *,
         authoritative_event: Mapping[str, Any],
+        core_call_audit: Mapping[str, Any] | None = None,
+        core_call_result: Mapping[str, Any] | None = None,
         observed_at: datetime | None = None,
     ) -> dict[str, Any]:
         if self._state != "running" or self._started_at is None:
@@ -443,6 +445,12 @@ class PrimitiveBasisLiveSession:
             "facts": safe_facts,
             "authoritativeEventDigest": event_digest,
         }
+        if (core_call_audit is None) is not (core_call_result is None):
+            raise LiveAttestationError("live Core call audit and result must be recorded together")
+        if core_call_audit is not None:
+            receipt["coreCallAudit"] = _validate_core_call_audit(core_call_audit)
+        if core_call_result is not None:
+            receipt["coreCallResult"] = _validate_core_call_result(core_call_result)
         if self._binding.origin_ticket_digest:
             receipt["originTicketDigest"] = self._binding.origin_ticket_digest
         self._receipts.append(receipt)
@@ -984,11 +992,11 @@ def _validate_receipt(
     if not isinstance(value, Mapping):
         raise LiveAttestationError("live receipt must be an object")
     trusted = bool(bootstrap.origin_ticket_digest)
-    _require_exact_fields(
-        value,
-        _TRUSTED_RECEIPT_FIELDS if trusted else _COMMON_RECEIPT_FIELDS,
-        "live receipt",
-    )
+    expected_fields = _TRUSTED_RECEIPT_FIELDS if trusted else _COMMON_RECEIPT_FIELDS
+    actual_fields = set(value)
+    optional_fields = {"coreCallAudit", "coreCallResult"}
+    if actual_fields not in (expected_fields, expected_fields | optional_fields):
+        raise LiveAttestationError("live receipt fields are invalid")
     phase = LIVE_PHASES[sequence - 1]
     expected = {
         "schema": TRUSTED_LIVE_RECEIPT_SCHEMA if trusted else LIVE_RECEIPT_SCHEMA,
@@ -1009,6 +1017,10 @@ def _validate_receipt(
         raise LiveAttestationError("live receipt binding mismatch")
     if _parse_utc(value.get("observedAt")) is None:
         raise LiveAttestationError("live receipt timestamp is invalid")
+    if "coreCallAudit" in value:
+        _validate_core_call_audit(value["coreCallAudit"])
+    if "coreCallResult" in value:
+        _validate_core_call_result(value["coreCallResult"])
     _require_digest(value.get("authoritativeEventDigest"), "authoritative event digest")
     facts = value.get("facts")
     if not isinstance(facts, Mapping):
@@ -1048,6 +1060,57 @@ def _validate_facts(phase: str, facts: Mapping[str, Any]) -> None:
         expected_tool = RESTORE_TARGET_TOOL if phase.startswith("restore_") else MODEL_TARGET_TOOL
         if facts["targetTool"] != expected_tool:
             raise LiveAttestationError("live target tool is invalid")
+
+
+def _validate_core_call_audit(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"requestId", "toolName", "resultSummary", "durationMs"}:
+        raise LiveAttestationError("live Core call audit is invalid")
+    request_id = value.get("requestId")
+    duration_ms = value.get("durationMs")
+    if (
+        type(request_id) is not int
+        or request_id <= 0
+        or value.get("toolName") != "vrc_reload_primitive_basis_fixture"
+        or value.get("resultSummary") != "complete"
+        or not isinstance(duration_ms, (int, float))
+        or isinstance(duration_ms, bool)
+        or duration_ms < 0
+    ):
+        raise LiveAttestationError("live Core call audit is invalid")
+    return {
+        "requestId": request_id,
+        "toolName": "vrc_reload_primitive_basis_fixture",
+        "resultSummary": "complete",
+        "durationMs": duration_ms,
+    }
+
+
+def _validate_core_call_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "schema",
+        "reloaded",
+        "sceneDirty",
+        "scenePath",
+        "unityProcessId",
+        "unityProcessStartedAtUtc",
+        "unityExecutableDigest",
+        "projectPathDigest",
+    }
+    if not isinstance(value, Mapping) or set(value) != required:
+        raise LiveAttestationError("live Core call result is invalid")
+    if (
+        value.get("schema") != "vrcforge.primitive_basis_scene_reload.v1"
+        or value.get("reloaded") is not True
+        or value.get("sceneDirty") is not False
+        or not isinstance(value.get("scenePath"), str)
+        or type(value.get("unityProcessId")) is not int
+        or value["unityProcessId"] <= 0
+        or not isinstance(value.get("unityProcessStartedAtUtc"), str)
+    ):
+        raise LiveAttestationError("live Core call result is invalid")
+    _require_digest(value.get("unityExecutableDigest"), "unity executable digest")
+    _require_digest(value.get("projectPathDigest"), "project path digest")
+    return json.loads(json.dumps(value))
 
 
 def _validate_receipt_invariants(

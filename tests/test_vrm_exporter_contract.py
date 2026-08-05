@@ -11,8 +11,8 @@ SOURCE = (ROOT / "Assets" / "VRCForge" / "Editor" / "VrmExporter.cs").read_text(
 
 
 def test_vrm_exporter_uses_the_current_vrm10_static_api_without_a_fake_fallback():
-    assert '[VRCForgeTool(' in SOURCE
-    assert 'name: "vrc_export_vrm"' in SOURCE
+    assert '[VRCForgeCommand(' in SOURCE
+    assert 'toolId: "vrc_export_vrm"' in SOURCE
     assert '"UniVRM10.Vrm10Exporter"' in SOURCE
     assert '"UniGLTF.GltfExportSettings"' in SOURCE
     assert '"UniVRM10.VRM10ObjectMeta"' in SOURCE
@@ -21,7 +21,7 @@ def test_vrm_exporter_uses_the_current_vrm10_static_api_without_a_fake_fallback(
     assert '"VRM.VRMExporter"' not in SOURCE
     assert "Export(GameObject)" not in SOURCE
     assert "UniVRM VRM 1.0 dependency unavailable" in SOURCE
-    assert "return new ErrorResponse" in SOURCE
+    assert "return VRCForgeToolResult.Failed" in SOURCE
 
 
 def test_vrm_export_requires_rights_author_and_a_valid_humanoid():

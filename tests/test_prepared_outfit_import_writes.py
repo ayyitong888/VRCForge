@@ -11,6 +11,46 @@ import dashboard_server
 from prepared_unity_execution import PREPARED_UNITY_EXECUTION_ARGUMENT_KEY, build_prepared_execution_plan
 
 
+JOB_ID = "a" * 32
+
+
+def _pending_import(arguments: dict, job_id: str = JOB_ID) -> dashboard_server.McpResult:
+    return dashboard_server.McpResult(0, "", "", {
+        "ok": True,
+        "pending": True,
+        "status": "pending",
+        "jobId": job_id,
+        "mutationStarted": True,
+        "projectPath": arguments["projectPath"],
+        "unityPackagePath": arguments["unityPackagePath"],
+        "expectedSha256": arguments["expectedSha256"],
+        "expectedSize": arguments["expectedSize"],
+        "expectedAssetPaths": arguments["expectedAssetPaths"],
+    })
+
+
+def _completed_import(arguments: dict, job_id: str = JOB_ID) -> dashboard_server.McpResult:
+    return dashboard_server.McpResult(0, "", "", {
+        "ok": True,
+        "pending": False,
+        "status": "completed",
+        "jobId": job_id,
+        "mutationStarted": True,
+        "committed": True,
+        "commitState": "complete",
+        "checkpointRecoveryRequired": False,
+        "projectPath": arguments["projectPath"],
+        "unityPackagePath": arguments["unityPackagePath"],
+        "expectedSha256": arguments["expectedSha256"],
+        "expectedSize": arguments["expectedSize"],
+        "expectedAssetPaths": arguments["expectedAssetPaths"],
+        "expectedAssets": [
+            {"assetPath": path, "guid": "a" * 32, "assetType": "UnityEngine.GameObject"}
+            for path in arguments["expectedAssetPaths"]
+        ],
+    })
+
+
 def _project(tmp_path: Path) -> Path:
     root = tmp_path / "Project"
     (root / "Assets").mkdir(parents=True)
@@ -61,17 +101,23 @@ def test_prepared_import_executes_exact_calls_and_verifies_receipts(tmp_path: Pa
     prepared, _ = dashboard_server.prepare_outfit_import_package_request({"packagePath": str(package), "projectPath": str(project)}, None)
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
     calls: list[tuple[str, dict]] = []
+    start_arguments: dict = {}
 
-    def invoke(_settings, tool, arguments):
+    def invoke(_settings, tool, arguments, **kwargs):
         calls.append((tool, arguments))
+        if tool == "vrc_import_unitypackage" and "expectedSha256" in arguments:
+            start_arguments.update(arguments)
+            return _pending_import(arguments)
         if tool == "vrc_import_unitypackage":
-            return dashboard_server.McpResult(0, "", "", {"ok": True, "projectPath": arguments["projectPath"], "unityPackagePath": arguments["unityPackagePath"], "expectedSha256": arguments["expectedSha256"], "expectedSize": arguments["expectedSize"], "expectedAssets": [{"assetPath": path, "guid": "a" * 32, "assetType": "UnityEngine.GameObject"} for path in arguments["expectedAssetPaths"]]})
+            assert kwargs["execution_context"] == {"lane": "app_unitypackage_import_poll"}
+            return _completed_import(start_arguments)
         return dashboard_server.McpResult(0, "", "", {"ok": True})
 
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
     result = dashboard_server.import_outfit_package_approved_sync(prepared)
     assert result["ok"] is True
-    assert calls == build_prepared_execution_plan(prepared)
+    assert [call for call in calls if "expectedSha256" in call[1] or call[0] == "vrc_refresh_asset_database"] == build_prepared_execution_plan(prepared)
+    assert [call for call in calls if set(call[1]) == {"jobId"}] == [("vrc_import_unitypackage", {"jobId": JOB_ID})]
 
 
 def test_prepared_import_rejects_wrong_sha_or_size_receipt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -80,7 +126,7 @@ def test_prepared_import_rejects_wrong_sha_or_size_receipt(tmp_path: Path, monke
     monkeypatch.setattr(dashboard_server, "plan_outfit_import_sync", lambda _arguments: _plan(project, package))
     prepared, _ = dashboard_server.prepare_outfit_import_package_request({"packagePath": str(package), "projectPath": str(project)}, None)
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
-    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", lambda _settings, tool, arguments: dashboard_server.McpResult(0, "", "", {"ok": True, "projectPath": arguments["projectPath"], "unityPackagePath": arguments.get("unityPackagePath", ""), "expectedSha256": "0" * 64, "expectedSize": arguments.get("expectedSize", 0), "expectedAssets": []}) if tool == "vrc_import_unitypackage" else dashboard_server.McpResult(0, "", "", {"ok": True}))
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", lambda _settings, tool, arguments, **_kwargs: dashboard_server.McpResult(0, "", "", {**_pending_import(arguments).payload, "expectedSha256": "0" * 64}) if tool == "vrc_import_unitypackage" else dashboard_server.McpResult(0, "", "", {"ok": True}))
     result = dashboard_server.import_outfit_package_approved_sync(prepared)
     assert result["ok"] is False
     assert result["committed"] is True
@@ -117,14 +163,19 @@ def test_prepared_import_second_core_uncertainty_requires_recovery(tmp_path: Pat
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
     call_count = 0
 
-    def invoke(_settings, tool, arguments):
+    starts: list[dict] = []
+
+    def invoke(_settings, tool, arguments, **_kwargs):
         nonlocal call_count
         if tool != "vrc_import_unitypackage":
             return dashboard_server.McpResult(0, "", "", {"ok": True})
+        if set(arguments) == {"jobId"}:
+            return _completed_import(starts[-1], arguments["jobId"])
         call_count += 1
         if call_count == 2:
             raise dashboard_server.UnityMcpError("lost receipt")
-        return dashboard_server.McpResult(0, "", "", {"ok": True, "projectPath": arguments["projectPath"], "unityPackagePath": arguments["unityPackagePath"], "expectedSha256": arguments["expectedSha256"], "expectedSize": arguments["expectedSize"], "expectedAssets": []})
+        starts.append(dict(arguments))
+        return _pending_import(arguments)
 
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
     result = dashboard_server.import_outfit_package_approved_sync(prepared)
@@ -133,6 +184,52 @@ def test_prepared_import_second_core_uncertainty_requires_recovery(tmp_path: Pat
     assert result["commitState"] == "unknown"
     assert result["checkpointRecoveryRequired"] is True
     assert len(result["unityImports"]) == 1
+
+
+def test_prepared_import_timeout_never_retries_write_or_runs_refresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, package = _project(tmp_path), tmp_path / "Dress.unitypackage"
+    package.write_bytes(b"package")
+    monkeypatch.setattr(dashboard_server, "plan_outfit_import_sync", lambda _arguments: _plan(project, package))
+    prepared, _ = dashboard_server.prepare_outfit_import_package_request({"packagePath": str(package), "projectPath": str(project)}, None)
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    monkeypatch.setattr(dashboard_server, "OUTFIT_IMPORT_JOB_TIMEOUT_SECONDS", 0.0)
+    calls: list[tuple[str, dict]] = []
+
+    def invoke(_settings, tool, arguments, **_kwargs):
+        calls.append((tool, arguments))
+        assert tool == "vrc_import_unitypackage" and "expectedSha256" in arguments
+        return _pending_import(arguments)
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    result = dashboard_server.import_outfit_package_approved_sync(prepared)
+    assert result["ok"] is False
+    assert result["commitState"] == "unknown"
+    assert result["checkpointRecoveryRequired"] is True
+    assert calls == [build_prepared_execution_plan(prepared)[0]]
+
+
+def test_prepared_import_poll_transport_error_never_retries_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project, package = _project(tmp_path), tmp_path / "Dress.unitypackage"
+    package.write_bytes(b"package")
+    monkeypatch.setattr(dashboard_server, "plan_outfit_import_sync", lambda _arguments: _plan(project, package))
+    prepared, _ = dashboard_server.prepare_outfit_import_package_request({"packagePath": str(package), "projectPath": str(project)}, None)
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
+    monkeypatch.setattr(dashboard_server, "OUTFIT_IMPORT_JOB_POLL_SECONDS", 0.0)
+    calls: list[tuple[str, dict]] = []
+
+    def invoke(_settings, tool, arguments, **_kwargs):
+        calls.append((tool, arguments))
+        if "expectedSha256" in arguments:
+            return _pending_import(arguments)
+        raise dashboard_server.UnityMcpError("poll transport lost")
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    result = dashboard_server.import_outfit_package_approved_sync(prepared)
+    assert result["ok"] is False
+    assert result["commitState"] == "unknown"
+    assert result["checkpointRecoveryRequired"] is True
+    assert [call for call in calls if "expectedSha256" in call[1]] == [build_prepared_execution_plan(prepared)[0]]
+    assert all(call[0] != "vrc_refresh_asset_database" for call in calls)
 
 
 def test_prepared_import_rejects_unsafe_expected_asset_before_core(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,10 +258,15 @@ def test_nested_zip_and_loose_branches_are_prepared_and_execute_exactly(tmp_path
 
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
 
-    def invoke(_settings, tool, arguments):
-        if tool == "vrc_import_unitypackage":
+    start_arguments: dict = {}
+
+    def invoke(_settings, tool, arguments, **_kwargs):
+        if tool == "vrc_import_unitypackage" and "expectedSha256" in arguments:
             assert Path(arguments["unityPackagePath"]).read_bytes() == b"nested-package"
-            return dashboard_server.McpResult(0, "", "", {"ok": True, "projectPath": arguments["projectPath"], "unityPackagePath": arguments["unityPackagePath"], "expectedSha256": arguments["expectedSha256"], "expectedSize": arguments["expectedSize"], "expectedAssets": []})
+            start_arguments.update(arguments)
+            return _pending_import(arguments)
+        if tool == "vrc_import_unitypackage":
+            return _completed_import(start_arguments)
         return dashboard_server.McpResult(0, "", "", {"ok": True})
 
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
@@ -202,4 +304,13 @@ def test_unitypackage_core_source_holds_read_handle_and_echoes_bound_identity() 
     assert "expectedAssetPaths" in source
     assert "AssetDatabase.GetMainAssetTypeAtPath(assetPath)" in source
     assert "AssetDatabase.AssetPathToGUID(assetPath)" in source
-    assert "expectedAssets = expectedAssets" in source
+    assert "OnImportCompleted" in source
+    assert "ReadExpectedAssets(job.expectedAssetPaths)" in source
+    assert "!job.startedForThisJob" in source
+    assert "expectedEventPackageName = Path.GetFileNameWithoutExtension(packagePath)" in source
+    assert "if (!MatchesExpectedPackageEvent(job, packageName))" in source
+    assert source.count("MatchesExpectedPackageEvent(job, packageName)") == 2
+    assert "job.importEventPackageName = packageName ??" in source
+    assert "string.Equals(job.importEventPackageName, packageName ??" in source
+    assert "ActiveJobForEvent(packageName)" in source
+    assert "app_unitypackage_import_poll" in (dashboard_server.ROOT_DIR / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").read_text(encoding="utf-8")

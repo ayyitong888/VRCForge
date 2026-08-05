@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
@@ -95,7 +95,14 @@ class VRCForgeBridge:
             report["launch"] = launch
 
         try:
-            manifest = self.request_json("GET", "/api/agent/manifest", token=token, allow_http_error=False)
+            planning_manifest = self.request_json(
+                "GET", "/api/agent/manifest?exposure_layer=planning", token=token, allow_http_error=False
+            )
+            manifest = self.request_json(
+                "GET", "/api/agent/manifest?exposure_layer=execution", token=token, allow_http_error=False
+            )
+            planning_tools = planning_manifest.get("tools") if isinstance(planning_manifest, dict) else []
+            planning_names = {str(tool.get("name") or "") for tool in planning_tools if isinstance(tool, dict)}
             tools = manifest.get("tools") if isinstance(manifest, dict) else []
             tool_names = {str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)}
             report["runtimeOnline"] = True
@@ -108,6 +115,7 @@ class VRCForgeBridge:
                 bool(manifest.get("enabled"))
                 and bool(manifest.get("allowWriteRequests"))
                 and "vrcforge_request_apply" in tool_names
+                and "vrcforge_request_apply" not in planning_names
                 and not bool(HIDDEN_EXTERNAL_TOOLS & tool_names)
             )
             if not report["ok"]:
@@ -127,9 +135,15 @@ class VRCForgeBridge:
             payload={"agent_name": agent_name, "params": params or {}},
         )
 
-    def manifest(self) -> dict[str, Any]:
+    def manifest(self, exposure_layer: str = "planning") -> dict[str, Any]:
+        if exposure_layer not in {"planning", "execution"}:
+            raise ValueError("exposure_layer must be planning or execution")
         token = self.require_token()
-        return self.request_json("GET", "/api/agent/manifest", token=token)
+        return self.request_json(
+            "GET",
+            f"/api/agent/manifest?exposure_layer={exposure_layer}",
+            token=token,
+        )
 
     def require_token(self) -> str:
         config_path = self.resolve_config_path()
@@ -217,7 +231,10 @@ class VRCForgeBridge:
 
 
 def run_stdio_server(bridge: VRCForgeBridge) -> None:
-    def list_tools() -> list[dict[str, Any]]:
+    def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        exposure_layer = str(params.get("exposureLayer") or "planning")
+        if exposure_layer not in {"planning", "execution"}:
+            raise ValueError("exposureLayer must be planning or execution")
         tools: list[dict[str, Any]] = [
             {
                 "name": "vrcforge_bridge_preflight",
@@ -228,7 +245,7 @@ def run_stdio_server(bridge: VRCForgeBridge) -> None:
         if not bridge.preflight().get("runtimeOnline"):
             return tools
         try:
-            manifest = bridge.manifest()
+            manifest = bridge.manifest(exposure_layer)
         except Exception:
             return tools
         manifest_tools = manifest.get("tools") if isinstance(manifest, dict) else []

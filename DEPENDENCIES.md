@@ -40,6 +40,10 @@ lifecycle bootstrap, and all 64 Unity tools under `Assets/VRCForge`. No separate
 MCP server/package, Unity manifest edit, Python command, `uvx` command, or token
 copy is required. The App and package support only protocol `2026-07-28`.
 
+Remove the Unity integration from `VRCForge > Uninstall VRCForge...`. That
+explicit command stops the bundled Core, deletes only its versioned
+auto-connect preference, and removes the product-owned `Assets/VRCForge` root.
+
 将发布文件 `VRCForge.unitypackage` 导入普通 VRChat Avatar 工程即可。它会把
 VRCForge 自有的项目级 MCP Core、生命周期引导程序和全部 64 个 Unity 工具安装到
 `Assets/VRCForge`。不需要额外 MCP 服务或包、Unity manifest 修改、Python/`uvx`
@@ -47,8 +51,13 @@ VRCForge 自有的项目级 MCP Core、生命周期引导程序和全部 64 个 
 
 | Package | How to install | Required | 用途 |
 | --- | --- | --- | --- |
-| VRChat SDK - Avatars | Install through VRChat Creator Companion | Yes | Provides Avatar Descriptor, Expression Parameters, Expression Menu, and VRChat avatar APIs |
-| Unity Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) | Usually pulled in by SDK/packages; add from Unity Package Manager if Unity reports missing `Newtonsoft.Json` | Yes if missing | JSON parsing inside Unity editor tools |
+| VRChat SDK - Avatars | Install through VRChat Creator Companion | Yes | Provides Avatar Descriptor, Expression Parameters, Expression Menu, VRChat avatar APIs, and the supported project baseline |
+| Unity Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) | Already present in the supported VCC Avatar project baseline; VRCForge never fetches or edits this package | Baseline | JSON parsing inside Unity editor tools |
+
+The release acceptance import is performed with network package resolution
+disabled and requires `Packages/manifest.json` plus `packages-lock.json` to stay
+byte-identical. Importing or upgrading `VRCForge.unitypackage` never adds a UPM
+package, edits a manifest, or asks the user to install a dependency manually.
 
 Before every release build, all bundled third-party components must pass
 `packaging/check_third_party_licenses.ps1`. Any new bundled dependency must be

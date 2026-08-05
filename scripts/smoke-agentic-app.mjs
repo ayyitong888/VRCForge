@@ -13,6 +13,7 @@ const port = Number(process.env.VRCFORGE_SMOKE_PORT || 8769);
 const endpoint = `http://127.0.0.1:${port}`;
 const appSessionToken = "vrcforge-smoke-session-token";
 const shellProjectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "vrcforge-agentic-shell-"));
+const frontendDir = process.env.VRCFORGE_SMOKE_FRONTEND_DIR || path.join(root, "dist");
 
 fs.rmSync(smokeRoot, { recursive: true, force: true });
 for (const dir of [configDir, logsDir, artifactsDir]) {
@@ -57,8 +58,90 @@ if (!fs.existsSync(settingsPath)) {
   );
 }
 
-assertFile(path.join(root, "dist", "index.html"), "Frontend build output is missing. Run npm run build first.");
+assertFile(path.join(frontendDir, "index.html"), "Frontend build output is missing. Run the frontend build first.");
 assertFile(path.join(root, "src-tauri", "tauri.conf.json"), "Tauri config is missing.");
+assertSourceContract(
+  path.join(root, "src", "components", "approvals", "scoped-pending-approval-card.tsx"),
+  ["allowFutureEligible", "allowFutureCategory", "data-scoped-pending-approval", "data-approval-composer-replacement"],
+  "Scoped approval UI must expose the guarded once/future/reject actions.",
+);
+assertSourceContract(
+  path.join(root, "src", "components", "chat", "chat-workspace.tsx"),
+  [
+    "data-empty-chat-content",
+    "data-chat-history-scroll",
+    "data-chat-composer-dock",
+    "!approvalComposer ? composer(false) : null",
+    "approvalComposer || composer(true)",
+    "scopedPendingApprovals",
+    "ScopedPendingApprovalCard",
+  ],
+  "Pending approvals must replace the bottom composer dock while conversation history stays visible.",
+);
+assertSourceContract(
+  path.join(root, "src", "App.tsx"),
+  ["scopedPendingApprovals={pendingApprovalItems}"],
+  "Pending approvals must remain visible after switching project or temporary chat scope.",
+);
+assertSourceContract(
+  path.join(root, "src", "App.tsx"),
+  ["showApprovalNotification", "vrcforge-approval-notification-action", "scopedPendingApprovals", "presentApproval"],
+  "Desktop notification and chat approval wiring must remain connected.",
+);
+assertSourceContract(
+  path.join(root, "src", "lib", "approval-presentation.ts"),
+  [
+    "createObjectTitle",
+    "restoreTitle",
+    "rollbackAvailable",
+    "technicalDetails",
+    "agentReason",
+    "riskLevel",
+  ],
+  "Approval requests must have a user-facing summary while technical values stay in details.",
+);
+assertSourceContract(
+  path.join(root, "src", "components", "approvals", "scoped-pending-approval-card.tsx"),
+  ["presentApproval", "visibleApprovals", "approval.presentation.project", "approval.presentation.rollback"],
+  "The composer approval card must hide in-flight approvals and use the localized user presentation.",
+);
+assertSourceContract(
+  path.join(root, "src", "components", "approvals", "pending-approvals-strip.tsx"),
+  ["presentApproval", "visibleApprovals", "allowFutureEligible", "technicalDetails"],
+  "The non-chat approval surface must match the scoped user-facing approval contract.",
+);
+assertSourceContract(
+  path.join(root, "src", "components", "chat", "conversation-card.tsx"),
+  ["presentApproval", "approvalAction !== \"approve\"", "approvalAction !== \"reject\"", "<InlineApprovalCard approval={approval}"],
+  "Conversation history must show only a read-only approval hint and hide it once a decision starts.",
+);
+for (const locale of ["en-US", "zh-CN", "zh-TW", "ja-JP"]) {
+  const localeValue = JSON.parse(fs.readFileSync(path.join(root, "src", "locales", `${locale}.json`), "utf8"));
+  for (const key of [
+    "project",
+    "rollback",
+    "createObjectTitle",
+    "restoreTitle",
+    "genericTitle",
+    "rollbackAvailable",
+    "restoreEffect",
+  ]) {
+    assert(localeValue?.approval?.presentation?.[key], `${locale} is missing approval.presentation.${key}.`);
+  }
+}
+const scopedApprovalSource = fs.readFileSync(
+  path.join(root, "src", "components", "approvals", "scoped-pending-approval-card.tsx"),
+  "utf8",
+);
+assert(!scopedApprovalSource.includes("approval.riskLevel"), "The primary approval card must not expose the raw risk badge.");
+const pendingApprovalSource = fs.readFileSync(
+  path.join(root, "src", "components", "approvals", "pending-approvals-strip.tsx"),
+  "utf8",
+);
+assert(!pendingApprovalSource.includes("approval.riskLevel"), "The secondary approval card must not expose the raw risk badge.");
+const toastSource = fs.readFileSync(path.join(root, "src-tauri", "src", "approval_notification_windows.rs"), "utf8");
+assert(toastSource.includes('APPROVAL_NOTIFICATION_DISPLAY_NAME: &str = "VRCForge"'), "Toast registration must use VRCForge display identity.");
+assert(!toastSource.includes("POWERSHELL_APP_ID"), "Approval toasts must not fall back to the Windows PowerShell identity.");
 
 const python = process.env.PYTHON || "python";
 const child = spawn(python, ["dashboard_server.py", "--host", "127.0.0.1", "--port", String(port)], {
@@ -231,6 +314,12 @@ function assertFile(filePath, message) {
   if (!fs.existsSync(filePath)) {
     throw new Error(message);
   }
+}
+
+function assertSourceContract(filePath, requiredTokens, message) {
+  assertFile(filePath, message);
+  const source = fs.readFileSync(filePath, "utf8");
+  assert(requiredTokens.every((token) => source.includes(token)), message);
 }
 
 function assert(condition, message) {

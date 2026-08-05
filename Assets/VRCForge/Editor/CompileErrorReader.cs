@@ -80,10 +80,10 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_get_compile_errors",
-        Description = "Read-only: report C# compile errors from the last compilation pass (CompilationPipeline capture with Unity Console fallback).",
-        Permission = VRCForgeToolPermission.ReadOnly
+    [VRCForgeCommand(
+        toolId: "vrc_get_compile_errors",
+        Summary = "Read-only: report C# compile errors from the last compilation pass (CompilationPipeline capture with Unity Console fallback).",
+        Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class CompileErrorReader
     {
@@ -93,10 +93,10 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [VRCForgeParameter("Maximum number of errors to return. Clamped to 1-200.", Required = false)]
+            [VRCForgeInput("Maximum number of errors to return. Clamped to 1-200.", IsRequired = false)]
             public int? maxErrors { get; set; } = DefaultMaxErrors;
 
-            [VRCForgeParameter("If true (default), fall back to scanning the Unity Console for 'error CS' entries when no pipeline capture exists.", Required = false)]
+            [VRCForgeInput("If true (default), fall back to scanning the Unity Console for 'error CS' entries when no pipeline capture exists.", IsRequired = false)]
             public bool? includeConsoleFallback { get; set; } = true;
         }
 
@@ -110,11 +110,11 @@ namespace VRCForge.Editor
                 var includeConsoleFallback = parameters.includeConsoleFallback ?? true;
 
                 var payload = BuildPayload(maxErrors, includeConsoleFallback, identity);
-                return new SuccessResponse("Compile errors checked.", payload);
+                return VRCForgeToolResult.Completed("Compile errors checked.", payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Compile error check failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Compile error check failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

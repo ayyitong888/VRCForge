@@ -49,6 +49,7 @@ class ProviderRuntimeResponse:
 
 
 _TOOL_NAME = "vrcforge_plan_action"
+_EMPTY_COMPLETION_ERROR = "DeepSeek Responses returned no message or planner action."
 _TOOL_SCHEMA = {
     "type": "function",
     "name": _TOOL_NAME,
@@ -131,7 +132,16 @@ class DeepSeekResponsesAdapter:
             return self._consume_stream(
                 client.responses.create(**payload, stream=True), request.stream_callback, planner_mode=request.mode == "planner"
             )
-        return self.parse_response(client.responses.create(**payload), planner_mode=request.mode == "planner")
+        for attempt in range(2):
+            try:
+                return self.parse_response(
+                    client.responses.create(**payload),
+                    planner_mode=request.mode == "planner",
+                )
+            except RuntimeError as exc:
+                if attempt != 0 or str(exc) != _EMPTY_COMPLETION_ERROR:
+                    raise
+        raise AssertionError("bounded DeepSeek Responses retry loop exhausted unexpectedly")
 
     def parse_response(self, response: Any, *, planner_mode: bool = True) -> ProviderRuntimeResponse:
         output = _as_list(_value(response, "output"))
@@ -147,7 +157,7 @@ class DeepSeekResponsesAdapter:
         if not text:
             text = "".join(_message_text(item) for item in output if str(_value(item, "type") or "") == "message")
         if not text:
-            raise RuntimeError("DeepSeek Responses returned no message or planner action.")
+            raise RuntimeError(_EMPTY_COMPLETION_ERROR)
         return ProviderRuntimeResponse(text=text, usage=_usage(response), reasoning_summary=_summaries(output))
 
     def parse_tool_call(self, item: Any) -> str:

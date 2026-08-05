@@ -71,7 +71,7 @@ const FIXTURE_BOOTSTRAP_TYPE: &str =
 const FIXTURE_RUN_ID_ENVIRONMENT: &str = "VRCFORGE_PRIMITIVE_BASIS_RUN_ID";
 const FIXTURE_READY_MARKER: &str = "Library/VRCForge/primitive-basis-model-part-ready.json";
 const FIXTURE_TREE_DIGEST_HEX: &str =
-    "061d219ba52786197a4838fe312bc9169ea83146889a6f3684165557b3baa907";
+    "eb6b2aa1b96e86723047d04d3e5059491d6fc5dae8534f8334ff55940676b622";
 const FIXTURE_PROJECT_FILES: [(&str, &str); 3] = [
     (
         "Packages/manifest.json",
@@ -87,8 +87,8 @@ const FIXTURE_PROJECT_FILES: [(&str, &str); 3] = [
     ),
 ];
 const FIXTURE_REQUIRED_PACKAGES: [(&str, &str); 4] = [
-    ("com.vrchat.avatars", "3.10.3"),
-    ("com.vrchat.base", "3.10.3"),
+    ("com.vrchat.avatars", "3.10.4"),
+    ("com.vrchat.base", "3.10.4"),
     ("nadena.dev.modular-avatar", "1.17.1"),
     ("nadena.dev.ndmf", "1.13.1"),
 ];
@@ -127,7 +127,7 @@ const FIXTURE_BASELINE_FILES: [(&str, u64, &str); 8] = [
     (
         "fixture-contract.json",
         1904,
-        "03d1b74f0c0ddab4c7cf26b21890679cb9f65a5ecab022d2bbd7fb19cbce6097",
+        "43c687eb885d3cce9f2549979585b41da2445e04c68a14d1f902f10b47ed00fc",
     ),
     (
         "fixture-contract.json.meta",

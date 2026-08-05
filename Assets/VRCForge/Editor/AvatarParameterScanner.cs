@@ -13,12 +13,18 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_scan_avatar_parameters",
-        Description = "Read VRChat avatar expression parameters and build simple optimization suggestions via a predefined VRCForge tool."
+    [VRCForgeCommand(
+        toolId: "vrc_scan_avatar_parameters",
+        Summary = "Read VRChat avatar expression parameters and build simple optimization suggestions via a predefined VRCForge tool."
     )]
     public static class AvatarParameterScanner
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar root hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Optional JSON output path; leave empty for read-only payload.", IsRequired = false)] public string outputPath { get; set; } = "";
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -54,13 +60,13 @@ namespace VRCForge.Editor
                     response["jsonPath"] = jsonPath;
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Scanned {parameters.Count} avatar parameter(s).",
                     response);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Avatar parameter scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Avatar parameter scan failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

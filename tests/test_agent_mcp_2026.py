@@ -25,7 +25,7 @@ def _request(method, params=None, request_id=1):
 @pytest.fixture
 def router():
     return Mcp2026Router(
-        lambda: [{"name": "echo", "description": "Echo", "inputSchema": {"type": "object"}}, {"name": "generic"}],
+        lambda _params: [{"name": "echo", "description": "Echo", "inputSchema": {"type": "object"}}, {"name": "generic"}],
         lambda name, arguments: {"ok": True, "echo": f"{name}:{arguments.get('value', '')}"},
         server_name="VRCForge",
         server_version="1.4.0",
@@ -43,12 +43,41 @@ def test_discover_list_and_call_are_strict_2026(router):
     listed, status = router.handle(_request("tools/list"))
     assert status == 200
     assert listed["result"]["tools"][1]["inputSchema"] == {"type": "object", "additionalProperties": True}
+    assert "When to use:" in listed["result"]["tools"][0]["description"]
+    assert "When NOT to use:" in listed["result"]["tools"][0]["description"]
+    assert "Negative example:" in listed["result"]["tools"][0]["description"]
 
     called, status = router.handle(_request("tools/call", {"name": "echo", "arguments": {"value": "ok"}}))
     assert status == 200
     assert called["result"]["structuredContent"] == {"ok": True, "echo": "echo:ok"}
     assert json.loads(called["result"]["content"][0]["text"]) == called["result"]["structuredContent"]
     assert called["result"]["isError"] is False
+
+
+def test_call_uses_execution_catalogue_when_client_does_not_repeat_layer() -> None:
+    observed_layers = []
+
+    def list_tools(params):
+        layer = params.get("exposureLayer", "planning")
+        observed_layers.append(layer)
+        if layer == "execution":
+            return [{"name": "write_request"}]
+        return [{"name": "read_status"}]
+
+    routed = Mcp2026Router(
+        list_tools,
+        lambda name, arguments: {"ok": True, "name": name, "arguments": arguments},
+    )
+    listed, listed_status = routed.handle(_request("tools/list"))
+    called, called_status = routed.handle(
+        _request("tools/call", {"name": "write_request", "arguments": {"value": 1}})
+    )
+
+    assert listed_status == 200
+    assert [tool["name"] for tool in listed["result"]["tools"]] == ["read_status"]
+    assert called_status == 200
+    assert called["result"]["structuredContent"]["name"] == "write_request"
+    assert observed_layers == ["planning", "execution"]
 
 
 @pytest.mark.parametrize(
@@ -62,6 +91,8 @@ def test_discover_list_and_call_are_strict_2026(router):
         (_request("unknown"), -32601),
         (_request("tools/call", {"name": "", "arguments": []}), -32602),
         (_request("tools/call", {"name": "hidden", "arguments": {}}), -32602),
+        (_request("tools/list", {"exposureLayer": "legacy"}), -32602),
+        (_request("tools/list", {"exposureLayer": 1}), -32602),
     ],
 )
 def test_router_rejects_legacy_and_bad_shapes(router, message, code):
@@ -167,7 +198,7 @@ def test_stdio_rejects_oversized_frame_then_continues(router):
 @pytest.mark.parametrize("bad_value", [object(), float("nan")])
 def test_tool_result_must_be_strict_json(bad_value):
     invalid_router = Mcp2026Router(
-        lambda: [{"name": "bad"}],
+        lambda _params: [{"name": "bad"}],
         lambda _name, _arguments: {"value": bad_value},
     )
     response, status = invalid_router.handle(_request("tools/call", {"name": "bad", "arguments": {}}))
@@ -180,7 +211,7 @@ def test_tool_result_cycle_is_shaped_and_stdio_survives():
     cyclic: dict[str, object] = {}
     cyclic["self"] = cyclic
     invalid_router = Mcp2026Router(
-        lambda: [{"name": "bad"}, {"name": "good"}],
+        lambda _params: [{"name": "bad"}, {"name": "good"}],
         lambda name, _arguments: cyclic if name == "bad" else {"ok": True},
     )
     source = io.StringIO(
@@ -197,7 +228,7 @@ def test_tool_result_cycle_is_shaped_and_stdio_survives():
 
 
 def test_async_callbacks_work(router):
-    async def tool_list():
+    async def tool_list(_params):
         return [{"name": "async", "inputSchema": {"type": "object"}}]
 
     async def tool_call(name, args):

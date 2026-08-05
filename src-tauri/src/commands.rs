@@ -184,6 +184,7 @@ pub(crate) struct DesktopApprovalScopeRequest {
     approval_id: String,
     expected_project_root: Option<String>,
     global_only: Option<bool>,
+    allow_future_category: Option<bool>,
     timeout_ms: Option<u64>,
 }
 
@@ -839,25 +840,32 @@ pub(crate) fn approval_scope_body(request: &DesktopApprovalScopeRequest) -> serd
     } else {
         true
     };
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "expectedProjectRoot": expected_project_root,
         "globalOnly": global_only,
-    })
+    });
+    if let Some(allow_future_category) = request.allow_future_category {
+        body["allowFutureCategory"] = serde_json::Value::Bool(allow_future_category);
+    }
+    body
 }
 
 #[tauri::command]
-pub fn approve_agent_approval(
+pub async fn approve_agent_approval(
     request: DesktopApprovalScopeRequest,
 ) -> Result<serde_json::Value, String> {
-    backend_json_request(
-        "POST",
-        format!(
-            "/api/app/agent/approvals/{}/approve",
-            percent_encode_query_component(&request.approval_id)
-        ),
-        Some(approval_scope_body(&request)),
-        request.timeout_ms.or(Some(180_000)),
-    )
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/agent/approvals/{}/approve",
+                percent_encode_query_component(&request.approval_id)
+            ),
+            Some(approval_scope_body(&request)),
+            request.timeout_ms.or(Some(180_000)),
+        )
+    })
+    .await
 }
 
 #[tauri::command]

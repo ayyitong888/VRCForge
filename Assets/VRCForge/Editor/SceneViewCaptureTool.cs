@@ -8,9 +8,9 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_capture_scene_view",
-        Description = "Capture Unity Scene View outside Play Mode, or the current Game View during Play Mode, to a PNG via a predefined VRCForge tool."
+    [VRCForgeCommand(
+        toolId: "vrc_capture_scene_view",
+        Summary = "Capture Unity Scene View outside Play Mode, or the current Game View during Play Mode, to a PNG via a predefined VRCForge tool."
     )]
     public static class SceneViewCaptureTool
     {
@@ -19,6 +19,22 @@ namespace VRCForge.Editor
         private const string GestureManagerRecommendedMessage = "建议安装 Gesture Manager 以获得准确效果 / Gesture Manager recommended for accurate preview";
         private const string GameCameraRenderMessage = "Play Mode capture renders the active Game camera directly to avoid Gesture Manager menu overlays.";
         private const string ScreenCaptureFallbackMessage = "No active non-overlay Game camera was found; falling back to Game View screen capture. Close Gesture Manager menus if they cover the avatar.";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Return capture readiness without writing an image.", IsRequired = false)] public bool? statusOnly { get; set; } = false;
+            [VRCForgeInput("Require Play Mode before capture.", IsRequired = false)] public bool? requirePlayMode { get; set; } = false;
+            [VRCForgeInput("Approved image output path.", IsRequired = false)] public string outputPath { get; set; } = "";
+            [VRCForgeInput("Capture width, from 256 through 2048 pixels.", IsRequired = false)] public int? width { get; set; } = 960;
+            [VRCForgeInput("Capture height, from 256 through 2048 pixels.", IsRequired = false)] public int? height { get; set; } = 960;
+            [VRCForgeInput("Set the Scene view rotation before capture.", IsRequired = false)] public bool? setRotation { get; set; } = false;
+            [VRCForgeInput("Restore the prior Scene view after capture.", IsRequired = false)] public bool? restoreView { get; set; } = true;
+            [VRCForgeInput("Scene view pitch in degrees.", IsRequired = false)] public float? pitch { get; set; } = 0f;
+            [VRCForgeInput("Scene view yaw in degrees.", IsRequired = false)] public float? yaw { get; set; } = 0f;
+            [VRCForgeInput("Scene view roll in degrees.", IsRequired = false)] public float? roll { get; set; } = 0f;
+            [VRCForgeInput("Optional avatar hierarchy path used for avatar-scoped capture.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Capture scope: avatar or scene.", IsRequired = false)] public string captureScope { get; set; } = "avatar";
+        }
 
         public static object HandleCommand(JObject @params)
         {
@@ -29,7 +45,7 @@ namespace VRCForge.Editor
                 var outputPath = (@params?["outputPath"]?.ToString() ?? string.Empty).Trim();
                 if (!statusOnly && string.IsNullOrWhiteSpace(outputPath))
                 {
-                    return new ErrorResponse("Missing required parameter: outputPath");
+                    return VRCForgeToolResult.Failed("Missing required parameter: outputPath");
                 }
 
                 var width = Mathf.Clamp(@params?["width"]?.Value<int?>() ?? 960, 256, 2048);
@@ -61,7 +77,7 @@ namespace VRCForge.Editor
 
                 if (statusOnly)
                 {
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         "Capture status checked.",
                         new
                         {
@@ -79,14 +95,14 @@ namespace VRCForge.Editor
 
                 if (requirePlayMode && !isPlayMode)
                 {
-                    return new ErrorResponse(PlayModeRequiredMessage);
+                    return VRCForgeToolResult.Failed(PlayModeRequiredMessage);
                 }
 
                 var absolutePath = ResolveToAbsolutePath(outputPath);
                 var directory = Path.GetDirectoryName(absolutePath);
                 if (string.IsNullOrEmpty(directory))
                 {
-                    return new ErrorResponse($"Cannot resolve parent folder for screenshot path: {outputPath}");
+                    return VRCForgeToolResult.Failed($"Cannot resolve parent folder for screenshot path: {outputPath}");
                 }
 
                 Directory.CreateDirectory(directory);
@@ -100,7 +116,7 @@ namespace VRCForge.Editor
 
                     TryShowGameView();
                     gameViewCaptureMethod = CaptureGameViewToPng(absolutePath, width, height, warnings);
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Captured Game View screenshot: {absolutePath}",
                         new
                         {
@@ -131,13 +147,13 @@ namespace VRCForge.Editor
                 var sceneView = SceneView.lastActiveSceneView ?? EditorWindow.GetWindow<SceneView>();
                 if (sceneView == null)
                 {
-                    return new ErrorResponse("No SceneView is available for screenshot capture.");
+                    return VRCForgeToolResult.Failed("No SceneView is available for screenshot capture.");
                 }
 
                 var camera = sceneView.camera;
                 if (camera == null)
                 {
-                    return new ErrorResponse("SceneView camera is not available for screenshot capture.");
+                    return VRCForgeToolResult.Failed("SceneView camera is not available for screenshot capture.");
                 }
 
                 sceneView.Show();
@@ -188,7 +204,7 @@ namespace VRCForge.Editor
                     }
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Captured SceneView screenshot: {absolutePath}",
                     new
                     {
@@ -214,7 +230,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"SceneView capture failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"SceneView capture failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

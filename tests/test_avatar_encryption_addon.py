@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -701,7 +702,13 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools() -> None:
         "io.modelcontextprotocol/clientInfo": {"name": "avatar-encryption-test", "version": "1"},
     }
 
-    with TestClient(dashboard_server.app) as client:
+    offline_error = dashboard_server.UnityMcpError(
+        "This Unity project does not have the VRCForge MCP2 unitypackage installed and ready."
+    )
+    with patch(
+        "dashboard_server.scan_shader_materials_direct",
+        side_effect=offline_error,
+    ), TestClient(dashboard_server.app) as client:
         discovered = client.post(
             "/mcp",
             headers={**headers, "Mcp-Method": "server/discover"},
@@ -718,7 +725,12 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools() -> None:
         listed = client.post(
             "/mcp",
             headers={**headers, "Mcp-Method": "tools/list"},
-            json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {"_meta": meta}},
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {"_meta": meta, "exposureLayer": "execution"},
+            },
         )
         assert listed.status_code == 200
         tool_names = {tool["name"] for tool in listed.json()["result"]["tools"]}

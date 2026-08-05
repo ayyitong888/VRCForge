@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -62,8 +63,129 @@ def test_desktop_restores_authoritative_project_without_guessing_first_item() ->
     assert "state?: ProjectSelectionState" in types
 
 
+def test_user_requested_temporary_chat_is_not_overwritten_by_authoritative_project() -> None:
+    app = (REPO_ROOT / "src" / "App.tsx").read_text(encoding="utf-8")
+
+    helper = app.index("function openTemporaryChat()")
+    marks_initialization_complete = app.index("projectInitRef.current = true;", helper)
+    clears_project_scope = app.index("newTemporaryChat();", marks_initialization_complete)
+    restore_guard = app.index(
+        "if (projectInitRef.current || activeProjectPath || !authoritativeSelectedProjectPath)"
+    )
+    authoritative_restore = app.index("setActiveProjectPath(authoritativeSelectedProjectPath)")
+
+    assert helper < marks_initialization_complete < clears_project_scope
+    assert restore_guard < authoritative_restore
+    assert "onNewTemporaryChat={openTemporaryChat}" in app
+
+
+def test_app_approval_actions_keep_the_pending_items_exact_project_scope() -> None:
+    hook = (
+        REPO_ROOT / "src" / "hooks" / "use-approval-execution.ts"
+    ).read_text(encoding="utf-8")
+
+    assert "const approvalScope = scopeForApproval(approval.id);" in hook
+    assert "const approvalScope = scopeForApproval(approvalId, allowFutureCategory);" in hook
+    assert hook.count("const approvalScope = scopeForApproval(approvalId);") == 1
+    assert "approveAgentApproval(endpoint, approvalId, approvalScope)" in hook
+    assert "rejectAgentApproval(endpoint, approvalId, approvalScope)" in hook
+    assert "? approval.projectRoot?.trim() || \"\"" in hook
+    assert ": activeRuntimeProjectPath.trim();" in hook
+    assert "expectedProjectRoot: projectRoot || undefined" in hook
+
+
+def test_approval_allow_split_button_keeps_allow_once_primary_and_future_scoped() -> None:
+    split_button = (
+        REPO_ROOT / "src" / "components" / "approvals" / "approval-allow-split-button.tsx"
+    ).read_text(encoding="utf-8")
+    scoped_card = (
+        REPO_ROOT / "src" / "components" / "approvals" / "scoped-pending-approval-card.tsx"
+    ).read_text(encoding="utf-8")
+    pending_strip = (
+        REPO_ROOT / "src" / "components" / "approvals" / "pending-approvals-strip.tsx"
+    ).read_text(encoding="utf-8")
+
+    assert 'onClick={() => onApprove(approvalId)}' in split_button
+    assert "onApprove(approvalId, true);" in split_button
+    assert 'aria-haspopup="menu"' in split_button
+    assert "ApprovalAllowSplitButton" in scoped_card
+    assert "ApprovalAllowSplitButton" in pending_strip
+
+
+def test_tauri_approval_command_moves_blocking_backend_request_off_the_ui_thread() -> None:
+    commands = (REPO_ROOT / "src-tauri" / "src" / "commands.rs").read_text(encoding="utf-8")
+    approval_start = commands.index("pub async fn approve_agent_approval(")
+    approval_end = commands.index("\n#[tauri::command]", approval_start + 1)
+    approval_command = commands[approval_start:approval_end]
+
+    assert "blocking_backend_json_request(move ||" in approval_command
+    assert "backend_json_request(" in approval_command
+    assert ".await" in approval_command
+
+
 def _build_script() -> str:
     return (REPO_ROOT / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
+
+
+def test_smoke_flavor_is_compile_time_scoped_and_cannot_enter_release_build() -> None:
+    release_build = _build_script()
+    publish = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
+
+    # The normal build/publish paths do not accept the smoke compiler token or
+    # smoke output names, so a smoke binary cannot become a release-manifest asset.
+    assert "SMOKE_ID" not in release_build
+    assert "VRCFORGE_SMOKE_BUILD" not in release_build
+    assert "VRCForge-Smoke-" not in release_build
+    assert "SMOKE_ID" not in publish
+    assert "VRCFORGE_SMOKE_BUILD" not in publish
+    assert "VRCForge-Smoke-" not in publish
+
+    for name in ("VRCForge_Offline_Installer_x64.nsi", "VRCForge_Web_Installer_x64.nsi"):
+        source = (REPO_ROOT / "installer" / name).read_text(encoding="utf-8")
+        assert '!error "SMOKE_ID cannot be supplied directly' in source
+        assert "!ifdef VRCFORGE_SMOKE_BUILD" in source
+        system_command = source.split("!system", 1)[1].split("= 0", 1)[0]
+        assert "${SMOKE_ID}" not in system_command
+        assert "VRCFORGE_NSIS_SMOKE_ID" not in system_command
+        assert "ValidateNsisSmokeIdentity.ps1" in system_command
+        assert '!define SMOKE_ID "$%VRCFORGE_NSIS_SMOKE_ID%"' in source
+
+        assert '!define INSTALL_LEAF "VRCForge-Smoke-${SMOKE_ID}"' in source
+        assert '!define UNINSTALL_KEY "VRCForge-Smoke-${SMOKE_ID}"' in source
+        assert '!define INSTALLER_LANGUAGE_KEY "Software\\VRCForge\\InstallerSmoke\\${SMOKE_ID}"' in source
+        assert '!define START_MENU_GROUP "VRCForge Smoke ${SMOKE_ID}"' in source
+        assert '!define DESKTOP_SHORTCUT "VRCForge Smoke ${SMOKE_ID}.lnk"' in source
+        assert '!define USER_DATA_RELATIVE "VRCForge\\installer-smoke\\${SMOKE_ID}"' in source
+        assert "!else" in source
+        assert '!define INSTALL_LEAF "VRCForge"' in source
+        assert 'InstallDir "$PROGRAMFILES64\\${INSTALL_LEAF}"' in source
+        assert "Function ${Prefix}ValidateScopedInstallDir" in source
+        assert 'StrCmp "$INSTDIR" "$PROGRAMFILES64\\${INSTALL_LEAF}"' in source
+        assert "Call ValidateScopedInstallDir" in source
+        assert "Call un.ValidateScopedInstallDir" in source
+        assert '-ExpectedInstallLeaf "${INSTALL_LEAF}" -StateTag "${STATE_TAG}"' in source
+        assert 'DeleteRegKey HKLM "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${UNINSTALL_KEY}"' in source
+        assert 'DeleteRegKey /ifempty HKCU "${INSTALLER_LANGUAGE_KEY}"' in source
+        assert '!define APP_USER_MODEL_ID "app.vrcforge.agentic"' in source
+        assert 'WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\${APP_USER_MODEL_ID}" "DisplayName" "VRCForge"' in source
+        assert 'WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\${APP_USER_MODEL_ID}" "IconUri" "$INSTDIR\\VRCForge.ico"' in source
+        assert 'DeleteRegKey HKCU "Software\\Classes\\AppUserModelId\\${APP_USER_MODEL_ID}"' in source
+
+    validator = (REPO_ROOT / "installer" / "ValidateNsisSmokeIdentity.ps1").read_text(encoding="utf-8")
+    assert '[Environment]::GetEnvironmentVariable("VRCFORGE_NSIS_SMOKE_ID", "Process")' in validator
+    assert '$smokeId -cnotmatch "^[a-f0-9]{32}$"' in validator
+
+
+def test_payload_helper_accepts_only_the_exact_compiled_scope_identity() -> None:
+    source = (REPO_ROOT / "installer" / "VRCForge_WebPayload.ps1").read_text(encoding="utf-8")
+
+    assert '[string]$ExpectedInstallLeaf = "VRCForge"' in source
+    assert '[string]$StateTag = "VRCForge"' in source
+    assert '$ExpectedInstallLeaf -cne $StateTag' in source
+    assert "$ExpectedInstallLeaf -cmatch '^VRCForge-Smoke-[a-f0-9]{32}$'" in source
+    assert '[string]::Equals([IO.Path]::GetFileName($destination), $ExpectedInstallLeaf, [StringComparison]::Ordinal)' in source
+    assert '"VRCForge Installer Staging-$ExpectedInstallLeaf"' in source
+    assert '"$script:InstallSiblingPrefix-$Kind-"' in source
 
 
 def _authority_bundle_tool() -> str:
@@ -120,11 +242,148 @@ def test_release_python_resolver_supports_the_windows_launcher() -> None:
     assert resolver.index("Get-Command python.exe") < resolver.index("Get-Command py.exe")
 
 
+def test_release_packaged_backend_smoke_reuses_resolved_python() -> None:
+    source = _build_script()
+
+    assert "$pythonExe = Resolve-PythonExe" in source
+    assert "& $pythonExe .\\scripts\\smoke_packaged_backend.py" in source
+    assert "& python .\\scripts\\smoke_packaged_backend.py" not in source
+    assert source.index("$pythonExe = Resolve-PythonExe") < source.index(
+        "& $pythonExe .\\scripts\\smoke_packaged_backend.py"
+    )
+
+
 def test_publish_path_only_accepts_strict_release_policy() -> None:
     source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
 
     assert '[string]$buildPolicy.mode -ne "strict"' in source
     assert "$buildPolicy.releaseEligible -ne $true" in source
+
+
+def test_publish_path_stops_after_verified_draft_and_never_publishes_it() -> None:
+    source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
+
+    assert '"--draft"' in source
+    assert re.search(r"\bdraft\s*=\s*false\b", source, re.IGNORECASE) is None
+    assert re.search(r"-ExpectedDraft\s+\$false\b", source, re.IGNORECASE) is None
+    assert re.search(r"--method\s+PATCH\b", source, re.IGNORECASE) is None
+    assert [value.lower() for value in re.findall(r"-ExpectedDraft\s+\$(true|false)\b", source, re.IGNORECASE)] == ["true"]
+
+    final_verification = source.rindex("Assert-GitHubReleaseSnapshot `")
+    final_tail = source[final_verification:]
+    assert "-ExpectedDraft $true `" in final_tail
+    assert "-ExpectedDraft $false" not in final_tail
+    assert "Get-GitHubReleaseSnapshot" not in final_tail
+    assert 'Write-Host "Created, uploaded, and verified Draft GitHub Release $tag. It remains unpublished."' in final_tail
+
+
+def test_publish_path_requires_version_bound_release_notes_and_reads_them_back() -> None:
+    source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
+    notes = (REPO_ROOT / "docs" / "RELEASE_NOTES_1.4.0.md").read_text(encoding="utf-8")
+
+    assert "function Get-VersionBoundReleaseNotes" in source
+    assert '"${Target}:docs/RELEASE_NOTES_$Version.md"' in source
+    assert "Get-VersionBoundReleaseNotes -Version $Version -Target $target" in source
+    assert "Missing version-bound release notes in target commit:" in source
+    assert "ReadAllText($releaseNotesPath" not in source
+    assert '$stagedReleaseNotesPath = Join-Path $stagingRoot "release-notes.md"' in source
+    assert '[System.IO.File]::WriteAllText($stagedReleaseNotesPath, $releaseNotes' in source
+    assert '"--notes-file", $stagedReleaseNotesPath' in source
+    assert "-ExpectedBody $releaseNotes" in source
+    assert "MCP protocol `2026-07-28`" in notes
+    assert "not code-signed" in notes
+
+
+def test_release_build_binds_web_payload_to_exact_official_url_and_length() -> None:
+    source = _build_script()
+
+    assert '"https://github.com/ayyitong888/VRCForge/releases/download/v$Version/VRCForge_Windows_x64_$Version.zip"' in source
+    assert "PayloadDownloadUrl must exactly match the official version-bound release asset URL" in source
+    assert '"/DPAYLOAD_LENGTH=$payloadLength"' in source
+    assert '"/DWEB_PAYLOAD_HELPER=$payloadWebPayloadHelper"' in source
+    assert '"/DWEB_PAYLOAD_HELPER_SHA256=$webPayloadHelperSha256"' in source
+    assert '"/DPAYLOAD_ZIP=$payloadZip"' in source
+    assert "VRCForge_WebPayload.ps1" in source
+    assert "Assert-MakeNsisVersion" in source
+    assert "NSIS 3.12 or newer is required" in source
+    assert "source or snapshot changed while the installers were being compiled." in source
+
+
+def test_installers_execute_only_the_protected_hash_checked_helper() -> None:
+    helper = (REPO_ROOT / "installer" / "VRCForge_WebPayload.ps1").read_text(encoding="utf-8")
+    build = _build_script()
+    installers = [
+        (REPO_ROOT / "installer" / "VRCForge_Offline_Installer_x64.nsi").read_text(encoding="utf-8"),
+        (REPO_ROOT / "installer" / "VRCForge_Web_Installer_x64.nsi").read_text(encoding="utf-8"),
+    ]
+
+    assert 'Copy-Item -LiteralPath $webPayloadHelper -Destination $payloadWebPayloadHelper -Force' in build
+    assert '$payloadWebPayloadHelperSha256 -cne $webPayloadHelperSha256' in build
+    assert "changed while it was being copied into the payload" in build
+    assert "Assert-InstallNotRunning" in helper
+    assert "Assert-NoReparseTree" in helper
+    assert "Get-InstallSiblingPath \"Stage\"" in helper
+    assert "Get-InstallSiblingPath \"Backup\"" in helper
+    assert "prior installation could not be restored" in helper
+    assert "FileShare]::None" in helper
+    for installer in installers:
+        assert '-File "$PLUGINSDIR' not in installer
+        assert "taskkill" not in installer
+        assert "WEB_PAYLOAD_GZIP_BASE64" not in installer
+        assert "EncodedCommand" not in installer
+        assert 'File "$PLUGINSDIR\\VRCForge_WebPayload.ps1"' not in installer
+        assert "GetTempFileName" in installer
+        assert "icacls.exe" in installer
+        assert "Get-FileHash -Algorithm SHA256" in installer
+        assert "$$a=(Get-FileHash" in installer
+        assert "if($$a -ieq" in installer
+        assert "if($$a -ceq" not in installer
+        assert 'DefineProtectedHelperFunctions "un."' in installer
+        assert "Call ValidateInstallBoundary" in installer
+        assert "Call un.ValidateInstallBoundary" in installer
+        assert "ExecutionPolicy Bypass" in installer
+        assert "SetEnvironmentVariable" not in installer
+    assert 'File /oname=payload.zip "${PAYLOAD_ZIP}"' in installers[0]
+
+
+def test_release_payload_bundles_public_docs_and_requires_all_license_notices() -> None:
+    source = _build_script()
+    payload_smoke = (
+        REPO_ROOT / "scripts" / "smoke_payload_zip_unpack.py"
+    ).read_text(encoding="utf-8")
+
+    for document in ("README.md", "USER_MANUAL.md", "DEPENDENCIES.md"):
+        assert (
+            f'Copy-Item -LiteralPath .\\{document} '
+            f'-Destination (Join-Path $payloadRoot "{document}") -Force'
+        ) in source
+
+    assert (
+        'Copy-Item -LiteralPath .\\src-tauri\\icons\\icon.ico '
+        '-Destination (Join-Path $payloadRoot "VRCForge.ico") -Force'
+    ) in source
+
+    for required_member in (
+        "README.md",
+        "USER_MANUAL.md",
+        "DEPENDENCIES.md",
+        "licenses/VRCForge-GPL-3.0.txt",
+        "licenses/VRCForge-NOTICE.txt",
+        "licenses/uv-LICENSE-MIT.txt",
+        "licenses/uv-LICENSE-APACHE-2.0.txt",
+        "licenses/uv-DISTRIBUTION-NOTES.txt",
+    ):
+        assert f'"{required_member}"' in payload_smoke
+
+
+def test_release_publish_rechecks_web_payload_manifest_binding() -> None:
+    source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
+
+    assert 'Get-RequiredProperty -InputObject $manifest -Name "webPayload"' in source
+    assert "$webPayloadDownloadUrl -cne $expectedWebPayloadDownloadUrl" in source
+    assert "$webPayloadLength -ne $actualPayloadLength" in source
+    assert "$webPayloadHelperSha256.ToLowerInvariant() -cne $expectedWebPayloadHelperSha256" in source
+    assert "web payload digest must match the portable payload artifact digest" in source
 
 
 def test_strict_evidence_attestor_stays_outside_candidate_payload() -> None:

@@ -12,13 +12,21 @@ using VRC.SDK3.Avatars.ScriptableObjects;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_apply_clothing_fx",
-        Description = "Author simple clothing toggle FX assets via a predefined VRCForge tool."
+    [VRCForgeCommand(
+        toolId: "vrc_apply_clothing_fx",
+        Summary = "Author simple clothing toggle FX assets via a predefined VRCForge tool."
     )]
     public static class ClothingFxAuthor
     {
         private const string AssetDir = "Assets/VRCForge/Generated/FX";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar root hierarchy path; empty is allowed only when selection is unambiguous.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("One or more clothing items. Each item may specify displayName/name, parameterName, animationClipName, and sampleObjectPath/objectPath.", IsRequired = true)]
+            public JArray items { get; set; } = new JArray();
+        }
 
         public static object HandleCommand(JObject @params)
         {
@@ -28,7 +36,7 @@ namespace VRCForge.Editor
                 var items = @params?["items"] as JArray;
                 if (items == null || items.Count == 0)
                 {
-                    return new ErrorResponse("Missing required parameter: items");
+                    return VRCForgeToolResult.Failed("Missing required parameter: items");
                 }
 
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
@@ -37,19 +45,19 @@ namespace VRCForge.Editor
                     .animatorController as AnimatorController;
                 if (fxController == null)
                 {
-                    return new ErrorResponse("No FX AnimatorController found on the avatar.");
+                    return VRCForgeToolResult.Failed("No FX AnimatorController found on the avatar.");
                 }
 
                 var parametersAsset = descriptor.expressionParameters;
                 if (parametersAsset == null)
                 {
-                    return new ErrorResponse("No VRCExpressionParameters found on the avatar.");
+                    return VRCForgeToolResult.Failed("No VRCExpressionParameters found on the avatar.");
                 }
 
                 var menuAsset = descriptor.expressionsMenu;
                 if (menuAsset == null)
                 {
-                    return new ErrorResponse("No VRCExpressionsMenu found on the avatar.");
+                    return VRCForgeToolResult.Failed("No VRCExpressionsMenu found on the avatar.");
                 }
 
                 EnsureAssetFolder(AssetDir);
@@ -97,7 +105,7 @@ namespace VRCForge.Editor
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Authored {created.Count} clothing FX item(s).",
                     new
                     {
@@ -111,7 +119,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Clothing FX authoring failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Clothing FX authoring failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

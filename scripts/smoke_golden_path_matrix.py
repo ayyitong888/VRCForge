@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--app-token-file", default="")
     parser.add_argument("--project-root", default="")
     parser.add_argument("--avatar-path", default="")
+    parser.add_argument("--parent-path", default="", help="Exact existing GameObject parent for the external-agent live write smoke.")
     parser.add_argument("--target-profile", default="pc_conservative")
     parser.add_argument("--include-quest", action="store_true", default=True)
     parser.add_argument("--no-quest", dest="include_quest", action="store_false")
@@ -597,7 +598,7 @@ class GoldenPathMatrixSmoke:
         if self.args.optimizer_tool:
             command += ["--optimizer-write-request", "--optimizer-tool", self.args.optimizer_tool, "--target-profile", self.args.target_profile]
         if self.args.include_live_writes:
-            command.append("--live-write-rollback")
+            command += ["--live-write-rollback", "--parent-path", self.args.parent_path]
         self.add_subprocess_path(
             "external_agent_write_request_rollback",
             "External agent read/plan/write-request -> approval -> rollback",

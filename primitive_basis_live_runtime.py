@@ -60,8 +60,8 @@ _INVENTORY_ROOTS = ("Assets", "Packages", "ProjectSettings", "VRCForgeFixture")
 _MAX_INVENTORY_FILES = 50_000
 _MAX_INVENTORY_BYTES = 4 * 1024 * 1024 * 1024
 _REQUIRED_PACKAGE_VERSIONS = {
-    "com.vrchat.avatars": "3.10.3",
-    "com.vrchat.base": "3.10.3",
+    "com.vrchat.avatars": "3.10.4",
+    "com.vrchat.base": "3.10.4",
     "nadena.dev.modular-avatar": "1.17.1",
     "nadena.dev.ndmf": "1.13.1",
 }
@@ -122,6 +122,8 @@ class ModelPartCompositionLiveRuntime:
         self._restore_arguments_digest = ""
         self._pre_apply_project_input_digest = ""
         self._cleanup_facts: tuple[dict[str, Any], dict[str, Any]] | None = None
+        self._reload_core_call_audit: dict[str, Any] | None = None
+        self._reload_core_call_result: dict[str, Any] | None = None
 
     @property
     def state(self) -> str:
@@ -695,7 +697,11 @@ class ModelPartCompositionLiveRuntime:
         with self._lock:
             self._require_running_phase("baseline_comparison")
             project_root = self._require_project_root()
-            self._reload_fixed_scene()
+            reload_payload = self._reload_fixed_scene()
+            reload_audit = _require_reload_core_call_audit(reload_payload)
+            reload_result = _reload_core_call_result(reload_payload)
+            self._reload_core_call_audit = reload_audit
+            self._reload_core_call_result = reload_result
             component = self._inspect_component()
             _require_component_absent(component)
             actual_state_digest = _component_state_digest(project_root, component)
@@ -744,6 +750,8 @@ class ModelPartCompositionLiveRuntime:
             project_root = self._require_project_root()
             if self._cleanup_facts is None:
                 raise PrimitiveBasisLiveRuntimeError("Cleanup was not prepared.")
+            if self._reload_core_call_audit is None or self._reload_core_call_result is None:
+                raise PrimitiveBasisLiveRuntimeError("The fixed scene reload evidence is missing.")
             if project_root.exists():
                 raise PrimitiveBasisLiveRuntimeError("Disposable fixture project still exists.")
             _require_process_exited(self._unity_process_id)
@@ -755,6 +763,8 @@ class ModelPartCompositionLiveRuntime:
                     "source": "checkpoint_and_project_snapshot",
                     "baselineDigest": baseline_facts["actualStateDigest"],
                 },
+                core_call_audit=self._reload_core_call_audit,
+                core_call_result=self._reload_core_call_result,
             )
             self._session.record(
                 "residue",
@@ -1136,6 +1146,45 @@ class ModelPartCompositionLiveRuntime:
         if self._project_root is None:
             raise PrimitiveBasisLiveRuntimeError("The fixed live project is unavailable.")
         return self._project_root
+
+
+def _require_reload_core_call_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
+    metadata = payload.get("_meta")
+    audit = metadata.get("io.vrcforge/callAudit") if isinstance(metadata, Mapping) else None
+    if not isinstance(audit, Mapping):
+        raise PrimitiveBasisLiveRuntimeError("The fixed scene reload lacks Core request evidence.")
+    request_id = audit.get("requestId")
+    duration_ms = audit.get("durationMs")
+    if (
+        type(request_id) is not int
+        or request_id <= 0
+        or audit.get("toolName") != FIXTURE_RELOAD_TOOL
+        or audit.get("resultSummary") != "complete"
+        or not isinstance(duration_ms, (int, float))
+        or isinstance(duration_ms, bool)
+        or duration_ms < 0
+    ):
+        raise PrimitiveBasisLiveRuntimeError("The fixed scene reload Core evidence is invalid.")
+    return {
+        "requestId": request_id,
+        "toolName": FIXTURE_RELOAD_TOOL,
+        "resultSummary": "complete",
+        "durationMs": duration_ms,
+    }
+
+
+def _reload_core_call_result(payload: Mapping[str, Any]) -> dict[str, Any]:
+    fields = (
+        "schema",
+        "reloaded",
+        "sceneDirty",
+        "scenePath",
+        "unityProcessId",
+        "unityProcessStartedAtUtc",
+        "unityExecutableDigest",
+        "projectPathDigest",
+    )
+    return {field: payload[field] for field in fields}
 
 
 def _load_and_verify_fixture_set(

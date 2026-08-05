@@ -9,13 +9,23 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_apply_blendshapes",
-        Description = "Apply explicit blendshape weights to scene avatar renderers via a predefined VRCForge tool."
+    [VRCForgeCommand(
+        toolId: "vrc_apply_blendshapes",
+        Summary = "Apply explicit blendshape weights to scene avatar renderers via a predefined VRCForge tool."
     )]
     public static class BlendshapeApplier
     {
         public const string ToolName = "vrc_apply_blendshapes";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar root hierarchy path used to scope renderer lookup.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("One or more objects containing rendererPath, blendshapeName, and targetWeight.", IsRequired = true)]
+            public JArray adjustments { get; set; } = new JArray();
+            [VRCForgeInput("Save assets and open scenes after applying weights.", IsRequired = false, DefaultLiteral = "true")]
+            public bool? saveAssets { get; set; } = true;
+        }
 
         public static object HandleCommand(JObject @params)
         {
@@ -26,7 +36,7 @@ namespace VRCForge.Editor
                 var adjustments = @params?["adjustments"] as JArray;
                 if (adjustments == null || adjustments.Count == 0)
                 {
-                    return new ErrorResponse("Missing required parameter: adjustments");
+                    return VRCForgeToolResult.Failed("Missing required parameter: adjustments");
                 }
 
                 var applied = new List<object>();
@@ -37,20 +47,20 @@ namespace VRCForge.Editor
                     var targetWeight = token["targetWeight"]?.Value<float?>() ?? float.NaN;
                     if (string.IsNullOrWhiteSpace(rendererPath) || string.IsNullOrWhiteSpace(blendshapeName) || float.IsNaN(targetWeight))
                     {
-                        return new ErrorResponse("Each adjustment requires rendererPath, blendshapeName, and targetWeight.");
+                        return VRCForgeToolResult.Failed("Each adjustment requires rendererPath, blendshapeName, and targetWeight.");
                     }
 
                     var renderer = ResolveRenderer(avatarPath, rendererPath);
                     var mesh = renderer.sharedMesh;
                     if (mesh == null)
                     {
-                        return new ErrorResponse($"Renderer '{rendererPath}' has no shared mesh.");
+                        return VRCForgeToolResult.Failed($"Renderer '{rendererPath}' has no shared mesh.");
                     }
 
                     var blendshapeIndex = mesh.GetBlendShapeIndex(blendshapeName);
                     if (blendshapeIndex < 0)
                     {
-                        return new ErrorResponse($"Blendshape '{blendshapeName}' was not found on renderer '{rendererPath}'.");
+                        return VRCForgeToolResult.Failed($"Blendshape '{blendshapeName}' was not found on renderer '{rendererPath}'.");
                     }
 
                     var previousWeight = renderer.GetBlendShapeWeight(blendshapeIndex);
@@ -75,7 +85,7 @@ namespace VRCForge.Editor
                     EditorSceneManager.SaveOpenScenes();
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Applied {applied.Count} blendshape adjustment(s).",
                     new
                     {
@@ -87,7 +97,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Blendshape apply failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Blendshape apply failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

@@ -96,11 +96,13 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertTrue(payload["ok"])
 
         steps = payload.get("steps") or []
-        self.assertEqual(len(steps), 2, f"expected scan+write, got {steps}")
+        self.assertEqual(len(steps), 3, f"expected scan+execution-phase+write, got {steps}")
         self.assertEqual(steps[0]["kind"], "skill")
         self.assertEqual(steps[0]["tool"], "vrcforge_list_avatars")
-        self.assertEqual(steps[1]["kind"], "write")
-        self.assertEqual(steps[1]["tool"], "vrcforge_create_gameobject")
+        self.assertEqual(steps[1]["kind"], "phase")
+        self.assertEqual(steps[1]["status"], "entered_execution")
+        self.assertEqual(steps[2]["kind"], "write")
+        self.assertEqual(steps[2]["tool"], "vrcforge_create_gameobject")
 
         self.assertIn("write", payload)
         self.assertEqual(payload["write"]["status"], "approval_pending")
@@ -114,7 +116,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(approval["arguments"]["projectPath"], str(project))
 
         self.assertTrue(payload["plan"].get("multiStep"))
-        self.assertEqual(payload["plan"].get("stepCount"), 2)
+        self.assertEqual(payload["plan"].get("stepCount"), 3)
 
         applied_result = dashboard_server.McpResult(
             exit_code=0,
@@ -167,9 +169,11 @@ class AgentLoopP0Tests(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["ok"])
         steps = payload.get("steps") or []
-        self.assertEqual(len(steps), 1)
-        self.assertEqual(steps[0]["kind"], "write")
-        self.assertEqual(steps[0]["tool"], "vrcforge_create_gameobject")
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[0]["kind"], "phase")
+        self.assertEqual(steps[0]["status"], "entered_execution")
+        self.assertEqual(steps[1]["kind"], "write")
+        self.assertEqual(steps[1]["tool"], "vrcforge_create_gameobject")
         self.assertEqual(payload["plan"].get("resolvedTarget"), "scene_root")
 
         approval_id = payload["approval_id"]

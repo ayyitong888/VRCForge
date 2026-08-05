@@ -3,8 +3,8 @@
   "scenarioId": "component_feature_application",
   "fixtureRoot": "Assets/VRCForge/PrimitiveBasis/component_feature_application",
   "baselineManifest": "baseline.json",
-  "expectedBaselineDigest": "caba9e6e9b8446859f483f419c17cccbd4ec669ee961b753f34514f29da161f6",
-  "expectedTreeDigest": "688892fba0c33e6c4dff3c454de110e45d8ca8496496488b7cbc4a102bc3b139",
+  "expectedBaselineDigest": "575106802fdcbff9e05acc6ec559175b0f11bb23b9835025bc5dc711356a6f72",
+  "expectedTreeDigest": "f471018dc87a8688e54e337f32d4a3b1f6bc789326902f829cd3f4bcf2302653",
   "requiredPrimitives": [
     "typed_component_list_write",
     "feature_component_write"

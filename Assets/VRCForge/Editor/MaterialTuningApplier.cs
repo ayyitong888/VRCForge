@@ -8,13 +8,23 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_apply_material_tuning",
-        Description = "Apply validated semantic material parameter changes through shader adapters."
+    [VRCForgeCommand(
+        toolId: "vrc_apply_material_tuning",
+        Summary = "Apply validated semantic material parameter changes through shader adapters."
     )]
     public static class MaterialTuningApplier
     {
         public const string ToolName = "vrc_apply_material_tuning";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar root hierarchy path used to scope material lookup.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("One or more material changes. Each change requires materialId/material_id, semanticProperty/semantic_property, and after, target, or value.", IsRequired = true)]
+            public JArray changes { get; set; } = new JArray();
+            [VRCForgeInput("Save and refresh assets after at least one material change is applied.", IsRequired = false, DefaultLiteral = "true")]
+            public bool? saveAssets { get; set; } = true;
+        }
 
         public static object HandleCommand(JObject @params)
         {
@@ -25,7 +35,7 @@ namespace VRCForge.Editor
                 var changes = @params?["changes"] as JArray;
                 if (changes == null || changes.Count == 0)
                 {
-                    return new ErrorResponse("Missing required parameter: changes");
+                    return VRCForgeToolResult.Failed("Missing required parameter: changes");
                 }
 
                 var materialIndex = BuildMaterialIndex(avatarPath);
@@ -83,7 +93,7 @@ namespace VRCForge.Editor
                     AssetDatabase.Refresh();
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Applied {applied.Count} material tuning change(s); skipped {skipped.Count}.",
                     new
                     {
@@ -97,7 +107,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Material tuning apply failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Material tuning apply failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

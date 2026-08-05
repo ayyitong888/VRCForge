@@ -37,6 +37,7 @@ CAPABILITY_PROFILE_FIXTURES = {
         "callbackRosterDigest": "305bc43e713cc76fe13f16d99e6e1d7137d87c066d6a46a6917196b909de10ba",
         "callbackAssemblySetCount": 3,
         "callbackAssemblySetDigest": "1884970046bc7b2f7194cef03c3c085dffb02df8cc6eddc9173e90fd231794d1",
+        "sdkCallbackAssemblySha256": bitpack.SDK_CALLBACK_ASSEMBLY_SHA256,
     },
     "embedded-extended-v1": {
         "callbackAssemblySha256": "c220c73e91f69aa88425c8cd81cf271a6b484eb5b34cca15a33f6edcde89c8f4",
@@ -44,6 +45,15 @@ CAPABILITY_PROFILE_FIXTURES = {
         "callbackRosterDigest": "a345576b0aad61991a4518413a5685d3b9df85e9ad33af50ff6b04a71d0f920e",
         "callbackAssemblySetCount": 7,
         "callbackAssemblySetDigest": "2eebf5d668c881ac7b208191e488c6a69c896549473fb44281d12c07404dc221",
+        "sdkCallbackAssemblySha256": bitpack.SDK_CALLBACK_ASSEMBLY_SHA256,
+    },
+    "embedded-sdk-3-10-4-v1": {
+        "callbackAssemblySha256": "4308c899e3b978a101e7cf3bfd117887b1fdf688ce53f559d8bf45106c6e34a0",
+        "callbackRosterCount": 21,
+        "callbackRosterDigest": "539f2d064d593e4e6010632f81e655c89fbece418b6249dcd6b641129ca78c96",
+        "callbackAssemblySetCount": 5,
+        "callbackAssemblySetDigest": "4b2ca1bdeef87a1a926e383e0036992875c4af8ee702e6da55107be5476279b6",
+        "sdkCallbackAssemblySha256": bitpack.SDK_3_10_4_CALLBACK_ASSEMBLY_SHA256,
     },
 }
 
@@ -111,7 +121,7 @@ def capability(profile_id: str = "embedded-minimal-v1") -> dict:
         "sdkCallbackAssemblyName": bitpack.SDK_CALLBACK_ASSEMBLY_NAME,
         "sdkCallbackAssemblyVersion": bitpack.SDK_CALLBACK_ASSEMBLY_VERSION,
         "sdkCallbackAssemblyPublicKeyToken": bitpack.SDK_CALLBACK_ASSEMBLY_PUBLIC_KEY_TOKEN,
-        "sdkCallbackAssemblySha256": bitpack.SDK_CALLBACK_ASSEMBLY_SHA256,
+        "sdkCallbackAssemblySha256": profile["sdkCallbackAssemblySha256"],
         "callbackType": bitpack.CALLBACK_TYPE,
         "callbackSignature": bitpack.CALLBACK_SIGNATURE,
         "registeredHookType": bitpack.REGISTERED_HOOK_TYPE,
@@ -563,6 +573,8 @@ def apply_payload(
             "root": bitpack.GENERATED_ROOT,
             "stagingRoot": bitpack.STAGING_ROOT,
             "stagingRemoved": True,
+            "rootExistsBefore": args["expectedGeneratedRootExistsBefore"],
+            "rootExistsAfter": args["expectedGeneratedRootExistsBefore"],
             "treeDigestBefore": args["expectedGeneratedTreeDigestBefore"],
             "contentDigestBefore": args["expectedGeneratedContentDigestBefore"],
             "entryCountBefore": args["expectedGeneratedEntryCountBefore"],
@@ -781,6 +793,7 @@ def test_authoritative_preview_binds_source_capability_cache_preferences_and_emp
     assert args["expectedProtectedEntryCountBefore"] == 1400
     assert args["expectedRootIdentityDigest"] == "c" * 64
     assert args["expectedRootIdentityCount"] == 7
+    assert args["expectedGeneratedRootExistsBefore"] is True
     assert args["expectedExcludedDigest"] == preview_payload()["source"]["excludedDigest"]
     assert set(args) == {
         *request_arguments().keys(),
@@ -810,6 +823,7 @@ def test_authoritative_preview_binds_source_capability_cache_preferences_and_emp
         "expectedPackageRootIdentityDigest",
         "expectedRootIdentityDigest",
         "expectedRootIdentityCount",
+        "expectedGeneratedRootExistsBefore",
         "expectedGeneratedTreeDigestBefore",
         "expectedGeneratedEntryCountBefore",
         "expectedGeneratedContentDigestBefore",
@@ -831,7 +845,33 @@ def test_authoritative_preview_binds_source_capability_cache_preferences_and_emp
         "expectedOutputEntryCountBefore",
         "expectedOutputRootExistsBefore",
         "expectedPreviewDigest",
-    }
+}
+
+
+def test_authoritative_preview_accepts_and_binds_an_absent_generated_baseline() -> None:
+    payload = preview_payload()
+    payload["generated"].update(
+        {
+            "exists": False,
+            "treeDigestBefore": "6" * 64,
+            "contentDigestBefore": "7" * 64,
+            "entryCountBefore": 0,
+            "byteCountBefore": 0,
+        }
+    )
+    payload["previewDigest"] = compute_preview_digest(payload)
+
+    canonical, approval = bind_authoritative_preview(wrapper(), payload)
+    applied = validate_apply_result(
+        canonical["arguments"],
+        apply_payload(canonical["arguments"]),
+    )
+
+    assert canonical["arguments"]["expectedGeneratedRootExistsBefore"] is False
+    assert canonical["arguments"]["expectedGeneratedEntryCountBefore"] == 0
+    assert approval["generated"]["exists"] is False
+    assert applied["generated"]["rootExistsBefore"] is False
+    assert applied["generated"]["rootExistsAfter"] is False
 
 
 @pytest.mark.parametrize(
@@ -839,6 +879,7 @@ def test_authoritative_preview_binds_source_capability_cache_preferences_and_emp
     [
         ("embedded-minimal-v1", "9f42739a6b8d94158c50525e474ade1d294788fbb29dc5733deacdbba7c55c8e"),
         ("embedded-extended-v1", "f6c6bd34af4fca5c3ce734feabcaf227a1f6a9d287e6c3d8f04f933e8390414f"),
+        ("embedded-sdk-3-10-4-v1", "bf946b184b703d6f8c68c68ec8ea60bc995073c2a2e6d98b27c0cde54bf3bc64"),
     ],
 )
 def test_preview_and_apply_accept_each_exact_capability_profile(
@@ -1488,14 +1529,40 @@ def test_public_csharp_tool_uses_only_public_build_dispatch_and_rejects_deprecat
     assert "A cache copy exceeds the bounded entry limit." in source
     assert "A cache copy exceeds the bounded byte limit." in source
     assert "CaptureTreeAbsolute(cacheRoot, CacheContentSchema + \".restore_target\")" in source
+    assert "beforeGenerated = CaptureTree(GeneratedRoot, GeneratedTreeSchema, requireExists: false)" in source
+    assert "AssetDatabase.CreateFolder(\"Packages/com.vrcfury.temp\", \"Builds\")" in source
+    assert "createdRoot = CaptureCreatedCacheRoot" in source
+    assert "if (!baseline.Exists) DeleteCreatedCacheRoot(cacheRoot);" in source
+    assert '["baselineRootExists"] = baseline.Exists' in source
+    assert "finalSnapshot.Exists != baseline.Exists" in source
+    assert "restoredGenerated.Exists == beforeGenerated.Exists" in source
+    assert '"The package generated build root metadata exists without its directory."' in source
+    assert "exists = generated.Exists" in source
+    assert "cacheTransaction.ObserveMutation(callbackGenerated);" in source
+    assert "cacheTransaction.ObserveMutation(afterGenerated);" in source
+    assert '["createdRootIdentityDigest"]' in source
+    assert '["observedTreeDigest"]' in source
+    assert "RequireCreatedCacheRootIdentity(cacheRoot);" in source
+    assert '"The absent generated cache changed without an owning transaction."' in source
+    assert "CaptureRootIdentities(beforeGenerated)" in source
+    assert 'RootIdentitySchema + ".absent\\n" + Frame(GeneratedRoot)' in source
+    assert "if (generatedTree.Exists) Add(AbsoluteProjectPath(GeneratedRoot), true);" in source
+    assert "RequiredRootPaths().Count + 1" in source
     assert "CaptureAssetTreeManifest" in source
     assert "guidPreservingWholeTreeMove = true" in source
     assert '"current-target-only"' in source
     assert "BuildTarget.StandaloneWindows64" in source
     assert "CaptureOutputPrefab" in source
     assert 'CapabilitySchema = "vrcforge.parameter_capability.v2"' in source
+    assert '"952abdd2e9f696acba1fa773402d824fac4f0c6dd0b1b3488df8e4a3d870eba9"' in source
+    assert '"459431464320780e90fdbccbd36c1d0657a4a74ec65e87afd8c68530725d080b"' in source
+    assert "SdkCallbackAssemblySha256Allowlist.Contains(sdkHash)" in source
     assert 'Id = "embedded-minimal-v1"' in source
     assert 'Id = "embedded-extended-v1"' in source
+    assert 'Id = "embedded-sdk-3-10-4-v1"' in source
+    assert 'CallbackAssemblySha256 = "4308c899e3b978a101e7cf3bfd117887b1fdf688ce53f559d8bf45106c6e34a0"' in source
+    assert 'CallbackRosterDigest = "539f2d064d593e4e6010632f81e655c89fbece418b6249dcd6b641129ca78c96"' in source
+    assert 'CallbackAssemblySetDigest = "4b2ca1bdeef87a1a926e383e0036992875c4af8ee702e6da55107be5476279b6"' in source
     assert "CallbackAssemblySetSchema" in source
     assert ".Concat(new[] { runtimeAssembly })" in source
     assert "capability.CallbackAssemblyPaths.Count == capability.CallbackAssemblySetCount" in source
@@ -1756,8 +1823,8 @@ def test_failure_cleanup_breaks_owned_dirty_scope_cycles_and_fails_closed_on_unk
 def test_transaction_close_is_idempotent_and_receipts_follow_verified_terminal_state() -> None:
     source = Path("Assets/VRCForge/Editor/ParameterBitPackingTool.cs").read_text(encoding="utf-8")
 
-    success_start = source.index("var afterRoots = CaptureRootIdentities();")
-    success_end = source.index("return new SuccessResponse(", success_start)
+    success_start = source.index("var afterRoots = CaptureRootIdentities(beforeGenerated);")
+    success_end = source.index("return VRCForgeToolResult.Completed(", success_start)
     success = source[success_start:success_end]
     auxiliary_complete = success.index("auxiliaryTransaction.Complete();")
     cache_complete = success.index("cacheTransaction.Complete();")

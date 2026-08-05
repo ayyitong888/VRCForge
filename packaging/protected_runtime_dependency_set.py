@@ -75,8 +75,8 @@ SCENARIO_DEFINITIONS: dict[str, tuple[str, ...]] = {
 SCENARIO_ORDER = tuple(SCENARIO_DEFINITIONS)
 
 DIRECT_PACKAGE_VERSIONS: dict[str, str] = {
-    "com.vrchat.avatars": "3.10.3",
-    "com.vrchat.base": "3.10.3",
+    "com.vrchat.avatars": "3.10.4",
+    "com.vrchat.base": "3.10.4",
     "com.vrcfury.vrcfury": "1.1334.0",
     "nadena.dev.modular-avatar": "1.17.1",
     "nadena.dev.ndmf": "1.13.1",

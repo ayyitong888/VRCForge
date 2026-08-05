@@ -226,6 +226,28 @@ def test_duplicate_preview_binds_every_expected_before_field() -> None:
     }
 
 
+def test_negative_unity_scene_handles_are_bound_as_signed_nonzero_int32() -> None:
+    payload = _duplicate_payload()
+    payload["source"]["sceneHandle"] = -40626
+    payload["target"]["sceneHandle"] = -40626
+    payload["previewDigest"] = compute_preview_digest(payload)
+
+    canonical, _approval = bind_authoritative_preview(_duplicate_wrapper(), payload)
+
+    assert canonical["arguments"]["expectedSourceSceneHandle"] == -40626
+    assert canonical["arguments"]["expectedTargetSceneHandle"] == -40626
+
+
+@pytest.mark.parametrize("handle", [0, -2_147_483_649, 2_147_483_648])
+def test_invalid_unity_scene_handles_fail_closed(handle: int) -> None:
+    payload = _duplicate_payload()
+    payload["source"]["sceneHandle"] = handle
+    payload["previewDigest"] = compute_preview_digest(payload)
+
+    with pytest.raises(SceneObjectCopyError):
+        bind_authoritative_preview(_duplicate_wrapper(), payload)
+
+
 def test_prefab_preview_binds_create_new_destination_and_source() -> None:
     canonical, approval = bind_authoritative_preview(
         _prefab_wrapper(),
@@ -384,8 +406,8 @@ def test_csharp_domain_declares_both_static_tools_and_hard_fail_closed_guards() 
     )
 
     required_fragments = (
-        'name: "vrc_duplicate_scene_object"',
-        'name: "vrc_save_scene_object_as_prefab"',
+        'toolId: "vrc_duplicate_scene_object"',
+        'toolId: "vrc_save_scene_object_as_prefab"',
         "GlobalObjectId.GetGlobalObjectIdSlow",
         "ComputeHierarchyDigest",
         "expectedPreviewDigest",

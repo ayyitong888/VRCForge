@@ -506,6 +506,9 @@ def test_component_feature_plan_and_approval_use_one_authoritative_mapping(
 
 
 def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
+    assert dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST.issubset(
+        dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
+    )
     for tool_name in (
         DUPLICATE_TOOL_NAME,
         PREFAB_TOOL_NAME,
@@ -543,6 +546,83 @@ def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
     for nested_tool in (PARAMETER_BIT_PACKING_TOOL_NAME, ATOMIC_REFERENCE_RENAME_TOOL_NAME):
         assert write_handler.manual_approval_resolver({"toolName": nested_tool}, {})
     assert write_handler.manual_approval_resolver({"toolName": DUPLICATE_TOOL_NAME}, {}) == ""
+
+
+@pytest.mark.parametrize(
+    ("target_name", "arguments", "expected_plan"),
+    [
+        (
+            "vrcforge_toggle_scene_object",
+            {"objectPath": "Avatar/Hat", "active": True},
+            [
+                (
+                    "vrc_toggle_scene_object",
+                    {"objectPath": "Avatar/Hat", "active": True, "saveAssets": True},
+                )
+            ],
+        ),
+        (
+            "vrcforge_apply_clothing_fx",
+            {"avatarPath": "Assets/Avatar.prefab", "items": [{"name": "Hat"}], "dryRun": False},
+            [("vrc_apply_clothing_fx", {"avatarPath": "Assets/Avatar.prefab", "items": [{"name": "Hat"}]})],
+        ),
+        (
+            "vrcforge_apply_parameter_optimization",
+            {"avatarPath": "Assets/Avatar.prefab", "suggestions": [{"name": "Hat"}], "dryRun": False},
+            [
+                (
+                    "vrc_apply_parameter_optimization",
+                    {"avatarPath": "Assets/Avatar.prefab", "suggestions": [{"name": "Hat"}]},
+                )
+            ],
+        ),
+        (
+            "vrcforge_restore_safe_backup",
+            {"backupId": "backup-1", "assetPaths": ["Assets/Avatar.prefab"]},
+            [
+                (
+                    "vrc_restore_safe_backup",
+                    dashboard_server.build_safe_backup_restore_request(
+                        {"backupId": "backup-1", "assetPaths": ["Assets/Avatar.prefab"]},
+                        True,
+                    ),
+                )
+            ],
+        ),
+    ],
+)
+def test_core_write_handlers_are_approval_gated_with_exact_frozen_plans(
+    target_name: str,
+    arguments: dict[str, object],
+    expected_plan: list[tuple[str, dict[str, object]]],
+) -> None:
+    handler = dashboard_server.AGENT_GATEWAY._write_handlers[target_name]
+    assert handler.requires_approved_execution_context is True
+    assert handler.approved_execution_plan_builder is not None
+    assert handler.approved_execution_plan_builder(arguments) == expected_plan
+
+
+@pytest.mark.parametrize(
+    ("target_name", "arguments"),
+    [
+        (
+            "vrcforge_apply_clothing_fx",
+            {"avatarPath": "Assets/Avatar.prefab", "items": [{"name": "Hat"}], "dryRun": True},
+        ),
+        (
+            "vrcforge_apply_parameter_optimization",
+            {"avatarPath": "Assets/Avatar.prefab", "suggestions": [{"name": "Hat"}], "dryRun": True},
+        ),
+    ],
+)
+def test_tuning_dry_runs_cannot_be_frozen_as_approved_core_plans(
+    target_name: str,
+    arguments: dict[str, object],
+) -> None:
+    handler = dashboard_server.AGENT_GATEWAY._write_handlers[target_name]
+    assert handler.approved_execution_plan_builder is not None
+    with pytest.raises(ValueError, match="dry_run=false"):
+        handler.approved_execution_plan_builder(arguments)
 
 
 def test_strict_apply_exposes_only_the_canonical_validated_receipt() -> None:
@@ -614,14 +694,24 @@ def test_strict_apply_transport_failure_does_not_expose_raw_output() -> None:
     validate.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "nested_tool",
+    [
+        ATOMIC_REFERENCE_RENAME_TOOL_NAME,
+        CONSTRAINT_TOOL_NAME,
+        DUPLICATE_TOOL_NAME,
+        PREFAB_TOOL_NAME,
+    ],
+)
 def test_strict_checkpoint_revalidates_canonical_state_without_saving(
     tmp_path: Path,
+    nested_tool: str,
 ) -> None:
     project = tmp_path / "Project"
     (project / "Assets").mkdir(parents=True)
     approved = {
         "projectPath": str(project.resolve()),
-        "toolName": ATOMIC_REFERENCE_RENAME_TOOL_NAME,
+        "toolName": nested_tool,
         "arguments": {
             "operationKind": "parameter",
             "expectedPlanDigest": "a" * 64,
@@ -695,7 +785,7 @@ def test_existing_unity_writes_keep_the_saving_checkpoint_prepare(tmp_path: Path
             project.resolve(),
             {
                 "projectPath": str(project.resolve()),
-                "toolName": DUPLICATE_TOOL_NAME,
+                "toolName": "vrc_set_gameobject_active",
                 "arguments": {},
             },
         )

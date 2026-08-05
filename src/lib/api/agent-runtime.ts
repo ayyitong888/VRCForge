@@ -753,7 +753,7 @@ export async function compactAgentHistory(
 export async function approveAgentApproval(
   endpoint: string,
   approvalId: string,
-  scope: { expectedProjectRoot?: string; globalOnly?: boolean } = {},
+  scope: { expectedProjectRoot?: string; globalOnly?: boolean; allowFutureCategory?: boolean } = {},
 ): Promise<{ ok: boolean; approval?: AgentApproval; execution?: AgentApprovalExecution }> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("approve_agent_approval", {

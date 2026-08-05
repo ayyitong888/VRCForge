@@ -27,14 +27,50 @@ namespace VRCForge.Editor
     // It NEVER rewrites existing clips/states (per-clip author choices are
     // intentional). Exclusivity for previously-authored outfits is preserved by the
     // wardrobe's Write Defaults + scene-default-off convention. Supports preview.
-    [VRCForgeTool(
-        name: "vrc_add_wardrobe_outfit",
-        Description = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, set new objects scene-default off, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (nested SubMenu overflow). Add-only, never rewrites existing clips. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_add_wardrobe_outfit",
+        Summary = "Add one outfit to an existing int-exclusive wardrobe: assign next int value, set new objects scene-default off, author a clip (own objects on, sibling objects off), add an FX state with Any-State Equals N (Write Defaults matched), and a menu toggle (nested SubMenu overflow). Add-only, never rewrites existing clips. Supports preview."
     )]
     public static class WardrobeOutfitWriter
     {
         public const string ToolName = "vrc_add_wardrobe_outfit";
         private const string DefaultClipDir = "Assets/VRCForge/Generated/Wardrobe";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Avatar root path; empty is allowed only when the descriptor selection is unambiguous.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Existing Int wardrobe parameter name.", IsRequired = true)]
+            public string parameterName { get; set; } = "";
+            [VRCForgeInput("Display name for the new outfit.", IsRequired = true)]
+            public string outfitName { get; set; } = "";
+            [VRCForgeInput("Avatar-relative scene object paths that are active for the new outfit.", IsRequired = true)]
+            public string[] objectPaths { get; set; } = new string[0];
+            [VRCForgeInput("Optional avatar-relative paths that the outfit clip explicitly turns off.", IsRequired = false)]
+            public string[] offObjectPaths { get; set; } = new string[0];
+            [VRCForgeInput("Report the authoring plan without modifying assets or the scene.", IsRequired = false)]
+            public bool? preview { get; set; } = false;
+            [VRCForgeInput("Create a matching expression-menu toggle when capacity permits.", IsRequired = false)]
+            public bool? addMenuToggle { get; set; } = true;
+            [VRCForgeInput("Set new outfit objects inactive before authoring the clip.", IsRequired = false)]
+            public bool? setObjectsDefaultOff { get; set; } = true;
+            [VRCForgeInput("Permit a nested submenu when the menu is full.", IsRequired = false)]
+            public bool? subMenuOverflow { get; set; } = true;
+            [VRCForgeInput("Submenu name used for overflow controls.", IsRequired = false)]
+            public string subMenuName { get; set; } = "Wardrobe";
+            [VRCForgeInput("Assets-relative directory for the generated animation clip.", IsRequired = false)]
+            public string clipOutputDir { get; set; } = DefaultClipDir;
+            [VRCForgeInput("Optional fingerprint from the approved wardrobe scan; rejects drift when supplied.", IsRequired = false)]
+            public string expectedWardrobeFingerprint { get; set; } = "";
+            [VRCForgeInput("Optional approved object receipt nonce required by the continuation lane.", IsRequired = false)]
+            public string approvedObjectReceiptNonce { get; set; } = "";
+            [VRCForgeInput("Optional explicit unused Int value for the new outfit.", IsRequired = false)]
+            public int? value { get; set; }
+            [VRCForgeInput("Optional assigned-value assertion from the approved plan.", IsRequired = false)]
+            public int? expectedAssignedValue { get; set; }
+            [VRCForgeInput("Optional Write Defaults setting; defaults to the existing wardrobe convention.", IsRequired = false)]
+            public bool? writeDefaults { get; set; }
+        }
 
         public static object HandleCommand(JObject @params)
         {
@@ -60,17 +96,17 @@ namespace VRCForge.Editor
 
                 if (string.IsNullOrWhiteSpace(parameterName))
                 {
-                    return new ErrorResponse("Missing required parameter: parameterName (the existing int wardrobe parameter to add to).");
+                    return VRCForgeToolResult.Failed("Missing required parameter: parameterName (the existing int wardrobe parameter to add to).");
                 }
                 if (string.IsNullOrWhiteSpace(outfitName))
                 {
-                    return new ErrorResponse("Missing required parameter: outfitName (display name for the new outfit).");
+                    return VRCForgeToolResult.Failed("Missing required parameter: outfitName (display name for the new outfit).");
                 }
 
                 var objectInputs = ReadStringArray(@params, "objectPaths", "onObjectPaths");
                 if (objectInputs.Count == 0)
                 {
-                    return new ErrorResponse("Missing required parameter: objectPaths (the new outfit's scene objects to turn on).");
+                    return VRCForgeToolResult.Failed("Missing required parameter: objectPaths (the new outfit's scene objects to turn on).");
                 }
                 var explicitOffInputs = ReadStringArray(@params, "offObjectPaths");
 
@@ -84,7 +120,7 @@ namespace VRCForge.Editor
                     var liveFingerprint = WardrobeScanner.ComputeStableFingerprintForAvatar(avatarRootPath);
                     if (!string.Equals(liveFingerprint, expectedWardrobeFingerprint, StringComparison.Ordinal))
                     {
-                        return new ErrorResponse("Wardrobe state drifted from the approved fingerprint.");
+                        return VRCForgeToolResult.Failed("Wardrobe state drifted from the approved fingerprint.");
                     }
                 }
 
@@ -92,13 +128,13 @@ namespace VRCForge.Editor
                 var parametersAsset = descriptor.expressionParameters;
                 if (parametersAsset == null || parametersAsset.parameters == null)
                 {
-                    return new ErrorResponse("Avatar has no VRCExpressionParameters; cannot resolve the wardrobe int parameter.");
+                    return VRCForgeToolResult.Failed("Avatar has no VRCExpressionParameters; cannot resolve the wardrobe int parameter.");
                 }
                 var intParam = parametersAsset.parameters.FirstOrDefault(p =>
                     p != null && p.name == parameterName && p.valueType == VRCExpressionParameters.ValueType.Int);
                 if (intParam == null)
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         $"Parameter '{parameterName}' is not an existing Int expression parameter. " +
                         "This tool adds to an EXISTING int-exclusive wardrobe; build the wardrobe first.");
                 }
@@ -107,13 +143,13 @@ namespace VRCForge.Editor
                 var fxController = GetFxController(descriptor);
                 if (fxController == null)
                 {
-                    return new ErrorResponse("No FX AnimatorController found on the avatar.");
+                    return VRCForgeToolResult.Failed("No FX AnimatorController found on the avatar.");
                 }
                 var fxControllerPath = AssetDatabase.GetAssetPath(fxController);
                 var wardrobeLayerIndex = FindWardrobeLayerIndex(fxController, parameterName);
                 if (wardrobeLayerIndex < 0)
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         $"No FX layer has an Any-State 'Equals' transition on '{parameterName}'. " +
                         "This tool adds to an EXISTING int-exclusive wardrobe layer; none was found for this parameter.");
                 }
@@ -163,7 +199,7 @@ namespace VRCForge.Editor
                     newValue = @params["value"].ToObject<int>();
                     if (existingValues.Contains(newValue))
                     {
-                        return new ErrorResponse($"Requested value {newValue} already exists in wardrobe '{parameterName}'.");
+                        return VRCForgeToolResult.Failed($"Requested value {newValue} already exists in wardrobe '{parameterName}'.");
                     }
                 }
                 else
@@ -173,7 +209,7 @@ namespace VRCForge.Editor
                 if (@params["expectedAssignedValue"] != null
                     && newValue != @params["expectedAssignedValue"].ToObject<int>())
                 {
-                    return new ErrorResponse("Wardrobe assigned value drifted from the approved expectation.");
+                    return VRCForgeToolResult.Failed("Wardrobe assigned value drifted from the approved expectation.");
                 }
 
                 // 5. Resolve the new outfit objects to avatar-root-relative binding paths.
@@ -199,7 +235,7 @@ namespace VRCForge.Editor
                 }
                 if (unresolved.Count > 0)
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         "Could not resolve these object path(s) under the avatar '" + descriptor.name + "': " +
                         string.Join(", ", unresolved) + ". Use a path relative to the avatar root or a unique object name.");
                 }
@@ -220,7 +256,7 @@ namespace VRCForge.Editor
                     }
                     if (offUnresolved.Count > 0)
                     {
-                        return new ErrorResponse(
+                        return VRCForgeToolResult.Failed(
                             "Could not resolve these offObjectPaths under the avatar: " + string.Join(", ", offUnresolved) + ".");
                     }
                 }
@@ -279,7 +315,7 @@ namespace VRCForge.Editor
 
                 if (preview)
                 {
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would add outfit '{outfitName}' as value {newValue} to wardrobe '{parameterName}' on '{descriptor.name}'.",
                         new
                         {
@@ -294,7 +330,7 @@ namespace VRCForge.Editor
                 {
                     if (resolvedTargets.Count != 1)
                     {
-                        return new ErrorResponse("Approval-bound outfit continuation requires exactly one new outfit object.");
+                        return VRCForgeToolResult.Failed("Approval-bound outfit continuation requires exactly one new outfit object.");
                     }
                     VRCForgeApprovedObjectReceipt.Consume(
                         approvedObjectReceiptNonce,
@@ -393,7 +429,7 @@ namespace VRCForge.Editor
                     throw new InvalidOperationException("Wardrobe write readback fingerprint did not advance.");
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Added outfit '{outfitName}' as value {newValue} to wardrobe '{parameterName}' on '{descriptor.name}'.",
                     new
                     {
@@ -426,7 +462,7 @@ namespace VRCForge.Editor
             {
                 if (mutationStarted)
                 {
-                    return new ErrorResponse($"Add wardrobe outfit failed after mutation: {ex.Message}", new
+                    return VRCForgeToolResult.Failed($"Add wardrobe outfit failed after mutation: {ex.Message}", new
                     {
                         ok = false,
                         committed = true,
@@ -438,7 +474,7 @@ namespace VRCForge.Editor
                         continuationConsumed,
                     });
                 }
-                return new ErrorResponse($"Add wardrobe outfit failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Add wardrobe outfit failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

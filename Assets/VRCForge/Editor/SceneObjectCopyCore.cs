@@ -33,16 +33,16 @@ namespace VRCForge.Editor
 
         internal static object Success(object payload)
         {
-            return new SuccessResponse("Scene object copy operation completed.", payload);
+            return VRCForgeToolResult.Completed("Scene object copy operation completed.", payload);
         }
 
         internal static object Failure(Exception exception)
         {
             if (exception is SceneObjectCopyException controlled)
             {
-                return new ErrorResponse(controlled.Message);
+                return VRCForgeToolResult.Failed(controlled.Message);
             }
-            return new ErrorResponse("Scene object copy operation failed closed.");
+            return VRCForgeToolResult.Failed("Scene object copy operation failed closed.");
         }
 
         internal static object BuildMutationFailure(string operation, bool restored)
@@ -54,7 +54,7 @@ namespace VRCForge.Editor
             var message = restored
                 ? "Scene object copy failed after restoring the verified pre-state."
                 : "Scene object copy failed; checkpoint restore is required.";
-            return new ErrorResponse(
+            return VRCForgeToolResult.Failed(
                 message,
                 new
                 {

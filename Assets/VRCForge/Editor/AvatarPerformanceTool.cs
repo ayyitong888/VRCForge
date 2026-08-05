@@ -13,9 +13,9 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_scan_avatar_performance",
-        Description = "Calculate VRChat SDK avatar performance statistics and ranking for a scene avatar (read-only)."
+    [VRCForgeCommand(
+        toolId: "vrc_scan_avatar_performance",
+        Summary = "Calculate VRChat SDK avatar performance statistics and ranking for a scene avatar (read-only)."
     )]
     public static class AvatarPerformanceTool
     {
@@ -23,13 +23,13 @@ namespace VRCForge.Editor
 
         public class AvatarPerformanceParameters
         {
-            [VRCForgeParameter("Avatar root hierarchy path or avatar name.", Required = false)]
+            [VRCForgeInput("Avatar root hierarchy path or avatar name.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
 
-            [VRCForgeParameter("Calculate ratings against mobile (Quest/Android) limits instead of PC limits.", Required = false)]
+            [VRCForgeInput("Calculate ratings against mobile (Quest/Android) limits instead of PC limits.", IsRequired = false)]
             public bool? isMobile { get; set; } = false;
 
-            [VRCForgeParameter("Optional JSON output path for the full report.", Required = false)]
+            [VRCForgeInput("Optional JSON output path for the full report.", IsRequired = false)]
             public string outputPath { get; set; } = "";
         }
 
@@ -47,19 +47,19 @@ namespace VRCForge.Editor
                     payload["jsonPath"] = jsonPath;
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Avatar performance: {payload["overallRating"]} ({payload["avatarName"]}).",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Avatar performance scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Avatar performance scan failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
         private static JObject CalculatePerformance(AvatarPerformanceParameters parameters)
         {
-            var statsType = FindType("VRC.SDKBase.Validation.Performance.AvatarPerformanceStats")
+            var statsType = FindType("VRC.SDKBase.Validation.Performance.Stats.AvatarPerformanceStats")
                 ?? throw new InvalidOperationException("VRC SDK AvatarPerformanceStats type was not found.");
             var perfType = FindType("VRC.SDKBase.Validation.Performance.AvatarPerformance")
                 ?? throw new InvalidOperationException("VRC SDK AvatarPerformance type was not found.");
@@ -309,9 +309,9 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_scan_thry_avatar_performance",
-        Description = "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for a scene avatar."
+    [VRCForgeCommand(
+        toolId: "vrc_scan_thry_avatar_performance",
+        Summary = "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for a scene avatar."
     )]
     public static class ThryAvatarPerformanceTool
     {
@@ -319,10 +319,10 @@ namespace VRCForge.Editor
 
         public class ThryAvatarPerformanceParameters
         {
-            [VRCForgeParameter("Avatar root hierarchy path or avatar name.", Required = false)]
+            [VRCForgeInput("Avatar root hierarchy path or avatar name.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
 
-            [VRCForgeParameter("Optional JSON output path for the full report.", Required = false)]
+            [VRCForgeInput("Optional JSON output path for the full report.", IsRequired = false)]
             public string outputPath { get; set; } = "";
         }
 
@@ -340,13 +340,13 @@ namespace VRCForge.Editor
                     payload["jsonPath"] = jsonPath;
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Thry performance report: {payload["combinedBytes"]} bytes ({payload["avatarName"]}).",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Thry avatar performance scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Thry avatar performance scan failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

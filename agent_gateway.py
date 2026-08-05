@@ -17,7 +17,7 @@ import threading
 import time
 import zipfile
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Sequence
@@ -46,6 +46,7 @@ from approved_unity_execution import (
     validate_frozen_approved_unity_execution_plan,
 )
 from agent_mcp_2026 import Mcp2026Router, create_agent_mcp_2026_asgi_app
+from unity_mcp_core_client import capture_unity_mcp_core_call_audits
 
 
 ToolHandler = Callable[[dict[str, Any]], Any]
@@ -129,7 +130,9 @@ ROLLBACK_FRAMEWORK_PACKAGES = {
         "packageIds": ["nadena.dev.ndmf"],
     },
 }
-UNITY_RESTORE_PACKAGE_CACHE_DIRS = ("Bee", "ScriptAssemblies", "PackageCache")
+UNITY_RESTORE_GENERATED_CACHE_DIRS = ("Bee", "ScriptAssemblies")
+# Unity Package Manager owns this tree and may hold files open; partial deletion corrupts the project cache.
+UNITY_RESTORE_PRESERVED_CACHE_DIRS = ("PackageCache",)
 
 
 class AgentGatewayError(RuntimeError):
@@ -208,6 +211,7 @@ class AgentGatewayConfig:
     background_goal_notifications_enabled: bool = True
     checkpoint_archive_max_size_mb: int = CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
     checkpoint_archive_dir: str = ""
+    project_category_allow_rules: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -234,6 +238,10 @@ class AgentWriteHandler:
     checkpoint_prepare_handler: CheckpointPrepareHandler | None = None
     requires_approved_execution_context: bool = False
     approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None
+    # A category may be remembered only when the handler opts in.  This keeps
+    # future approval rules narrowly tied to an explicitly reviewed tool.
+    approval_category: str = ""
+    allow_future_category: bool = False
 
 
 @dataclass
@@ -252,6 +260,9 @@ RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview"}
 # 同时限制无界 token 消耗、重复工具调用和审批噪声；常规任务应在此之前自然结束。
 # 命中上限时不静默收尾，而是诚实告知「到步数上限、先汇报、可继续」（见循环 else 分支）。
 RUNTIME_AGENT_MAX_STEPS = 25
+RUNTIME_AGENT_MAX_TOOL_CALLS = 3
+EXPOSURE_LAYER_PLANNING = "planning"
+EXPOSURE_LAYER_EXECUTION = "execution"
 RUNTIME_BLOCKED_SKILLS = {
     "vrcforge_agent_message",
     "vrcforge_execute_shell",
@@ -273,6 +284,14 @@ WRAPPER_ONLY_WRITE_TARGETS = {
     "vrcforge_install_vpm_package",
     "vrcforge_repair_project_chat_store",
 }
+SCOPED_ALLOW_RULE_FORBIDDEN_TOKENS = (
+    "delete",
+    "remove",
+    "restore",
+    "shell",
+    "package",
+    "uninstall",
+)
 AVATAR_ENCRYPTION_TOOL_SPECS: tuple[dict[str, Any], ...] = (
     {
         "name": "vrcforge_avatar_encryption_research_report",
@@ -1682,7 +1701,8 @@ class AgentGateway:
         self._runtime_computer_use_context = threading.local()
         self.checkpoint_project_root_resolver: Callable[[], str] | None = None
         self.checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
-        self.checkpoint_restore_handler: Callable[[Path], dict[str, Any]] | None = None
+        self.checkpoint_restore_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
+        self.checkpoint_restore_handler: Callable[[Path, dict[str, Any]], dict[str, Any]] | None = None
         self._lock = threading.RLock()
         self._agent_memory_store = AgentMemoryStore(
             lambda: self.agent_memory_log_path,
@@ -1727,6 +1747,9 @@ class AgentGateway:
         # run step only and must NEVER be merged into llm_context_usage
         # (the chat context meter).
         self.vision_analyze_fn: Callable[[str, list[dict[str, Any]]], Any] | None = None
+        # Host-owned and deliberately optional.  The gateway treats every
+        # result other than the exact string ``allow_auto`` as manual review.
+        self.scoped_approval_reviewer_fn: Callable[[dict[str, Any]], str] | None = None
         # 由宿主在配置/调用 LLM 时更新，例如 "DeepSeek · deepseek-chat"。
         # 写入 plan.plannerLabel 供前端徽章显示真实 provider+model。
         self.llm_planner_label: str = ""
@@ -1868,6 +1891,8 @@ class AgentGateway:
         checkpoint_prepare_handler: CheckpointPrepareHandler | None = None,
         requires_approved_execution_context: bool = False,
         approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None,
+        approval_category: str = "",
+        allow_future_category: bool = False,
     ) -> None:
         self._write_handlers[name] = AgentWriteHandler(
             name=name,
@@ -1881,6 +1906,8 @@ class AgentGateway:
             checkpoint_prepare_handler=checkpoint_prepare_handler,
             requires_approved_execution_context=requires_approved_execution_context,
             approved_execution_plan_builder=approved_execution_plan_builder,
+            approval_category=str(approval_category or "").strip(),
+            allow_future_category=bool(allow_future_category),
         )
 
     def ensure_config(self) -> AgentGatewayConfig:
@@ -1913,6 +1940,7 @@ class AgentGateway:
                 "background_goal_notifications_enabled": True,
                 "checkpoint_archive_max_size_mb": CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
                 "checkpoint_archive_dir": "",
+                "project_category_allow_rules": [],
                 "token_created_at": "",
                 "token_rotated_at": "",
             }
@@ -1945,6 +1973,9 @@ class AgentGateway:
                 ),
                 checkpoint_archive_dir=normalize_checkpoint_archive_dir(
                     raw.get("checkpoint_archive_dir")
+                ),
+                project_category_allow_rules=self._normalize_project_category_allow_rules(
+                    raw.get("project_category_allow_rules")
                 ),
             )
             self._sync_checkpoint_store_override(config)
@@ -1987,9 +2018,32 @@ class AgentGateway:
                 "checkpoint_archive_dir": normalize_checkpoint_archive_dir(
                     config.checkpoint_archive_dir
                 ),
+                "project_category_allow_rules": self._normalize_project_category_allow_rules(
+                    config.project_category_allow_rules
+                ),
             }
             atomic_write_json(self.config_path, payload)
             self._sync_checkpoint_store_override(config)
+
+    @staticmethod
+    def _normalize_project_category_allow_rules(raw: Any) -> list[dict[str, str]]:
+        if not isinstance(raw, list):
+            return []
+        rules: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            project_root = str(item.get("projectRoot") or item.get("project_root") or "").strip()
+            category = str(item.get("category") or "").strip()
+            if not project_root or not category:
+                continue
+            key = (normalize_filesystem_path(project_root), category)
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            rules.append({"projectRoot": key[0], "category": category})
+        return rules
 
     def _sync_checkpoint_store_override(self, config: AgentGatewayConfig) -> None:
         """根据配置里的迁移目录刷新内存覆盖路径，供 checkpoint_store_dir 读取。"""
@@ -2040,14 +2094,15 @@ class AgentGateway:
             raise AgentGatewayError("Approval token is missing or invalid.", status_code=401)
         return config
 
-    def build_manifest(self) -> dict[str, Any]:
+    def build_manifest(self, exposure_layer: str = EXPOSURE_LAYER_EXECUTION) -> dict[str, Any]:
+        exposure_layer = normalize_exposure_layer(exposure_layer)
         config = self.ensure_config()
         permission_context = self.permission_audit_context(config)
         user_constraints = self.read_user_constraints()
         tools = [
             self._serialize_tool(tool, config)
             for tool in self._tools.values()
-            if self._tool_visible(tool, config)
+            if self._tool_visible(tool, config, exposure_layer)
             and (not tool.requires_user_activation or self.computer_use_model_invocable(config))
         ]
         return {
@@ -2067,22 +2122,32 @@ class AgentGateway:
             "roslynRiskAcknowledged": config.roslyn_risk_acknowledged,
             "advancedSettings": self.advanced_settings_state(config),
             "approvalTimeoutSeconds": config.approval_timeout_seconds,
+            "exposureLayer": exposure_layer,
             "tools": tools,
             "toolCount": len(tools),
-            "writeTargets": self.visible_write_targets(config),
-            "skills": self.build_skill_registry(config)["skills"],
+            "writeTargets": self.visible_write_targets(config, exposure_layer),
+            "skills": self.build_skill_registry(config, exposure_layer)["skills"],
             "userConstraints": self._serialize_user_constraints(user_constraints),
         }
 
-    def build_tool_registry(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+    def build_tool_registry(
+        self,
+        config: AgentGatewayConfig | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> dict[str, Any]:
+        exposure_layer = normalize_exposure_layer(exposure_layer)
         config = config or self.ensure_config()
         tools: list[dict[str, Any]] = []
         for tool in self._tools.values():
             if tool.name in EXTERNAL_AGENT_INTERNAL_TOOLS:
                 continue
+            if not self._tool_visible(tool, config, exposure_layer):
+                continue
             tools.append(self._serialize_tool_registry_entry(tool, config))
         for handler in self._write_handlers.values():
             if handler.name in WRAPPER_ONLY_WRITE_TARGETS:
+                continue
+            if not self._write_handler_visible(handler, config, exposure_layer):
                 continue
             tools.append(self._serialize_write_registry_entry(handler, config))
         tools.sort(key=lambda item: (str(item.get("category") or ""), str(item.get("id") or "")))
@@ -2091,23 +2156,32 @@ class AgentGateway:
             "ok": True,
             "schema": "vrcforge.tool_registry.v1",
             "generatedAt": utc_now_iso(),
+            "exposureLayer": exposure_layer,
             "count": len(tools),
             "categories": categories,
             "tools": tools,
         }
 
-    def build_skill_registry(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+    def build_skill_registry(
+        self,
+        config: AgentGatewayConfig | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> dict[str, Any]:
+        exposure_layer = normalize_exposure_layer(exposure_layer)
         config = config or self.ensure_config()
         builtin_skills = self._builtin_skill_definitions(config)
         user_skills = self._load_user_skills()
         skills = [*builtin_skills, *user_skills]
         skills = [self._decorate_skill_validation(skill, config) for skill in skills]
+        if exposure_layer == EXPOSURE_LAYER_PLANNING:
+            skills = [skill for skill in skills if not bool(skill.get("write"))]
         available_count = sum(1 for skill in skills if skill.get("available") and skill.get("enabled", True))
         warning_count = sum(1 for skill in skills if ensure_dict(skill.get("validation")).get("status") == "warning")
         error_count = sum(1 for skill in skills if ensure_dict(skill.get("validation")).get("status") == "error")
         return {
             "ok": True,
             "schema": "vrcforge.skills.v1",
+            "exposureLayer": exposure_layer,
             "skills": skills,
             "count": len(skills),
             "availableCount": available_count,
@@ -2122,9 +2196,13 @@ class AgentGateway:
             },
         }
 
-    def check_skill_registry(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+    def check_skill_registry(
+        self,
+        config: AgentGatewayConfig | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> dict[str, Any]:
         config = config or self.ensure_config()
-        registry = self.build_skill_registry(config)
+        registry = self.build_skill_registry(config, exposure_layer)
         checks = []
         for skill in registry["skills"]:
             validation = ensure_dict(skill.get("validation"))
@@ -2332,43 +2410,80 @@ class AgentGateway:
             raise AgentGatewayError(f"Unknown or unavailable agent tool: {name}", status_code=404)
 
         params = params or {}
+        request_id = f"call_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
+        started_at = time.perf_counter()
         params_summary = self._tool_params_audit(name, params)
         user_constraints = self.read_user_constraints()
         tool_params = self._inject_user_constraints(params, tool, user_constraints)
+        core_call_audits: list[dict[str, Any]] = []
         try:
-            result = tool.handler(tool_params)
-            self.append_audit(
-                {
-                    "event": "tool_call",
-                    "tool": name,
-                    "agent": agent_name,
-                    "paramsSummary": params_summary,
-                    "status": "ok",
-                }
+            with capture_unity_mcp_core_call_audits() as core_call_audits:
+                result = tool.handler(tool_params)
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+            result_summary = summarize_params(result if isinstance(result, dict) else {"result": result})
+            request_trace = (
+                {"gatewayRequestId": request_id, "unityCoreCallAudits": core_call_audits}
+                if core_call_audits
+                else None
             )
-            return {
+            audit_event = {
+                "event": "tool_call",
+                "requestId": request_id,
+                "tool": name,
+                "agent": agent_name,
+                "paramsSummary": params_summary,
+                "resultSummary": result_summary,
+                "durationMs": duration_ms,
+                "status": "ok",
+            }
+            if request_trace is not None:
+                audit_event["requestTrace"] = request_trace
+            self.append_audit(audit_event)
+            response = {
                 "ok": True,
+                "requestId": request_id,
                 "tool": name,
                 "agent": agent_name,
                 "result": result,
+                "resultSummary": result_summary,
+                "durationMs": duration_ms,
             }
+            if request_trace is not None:
+                response["requestTrace"] = request_trace
+            return response
         except Exception as exc:  # noqa: BLE001 - tool errors must be returned to external agents.
-            self.append_audit(
-                {
-                    "event": "tool_call",
-                    "tool": name,
-                    "agent": agent_name,
-                    "paramsSummary": params_summary,
-                    "status": "error",
-                    "error": str(exc),
-                }
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+            request_trace = (
+                {"gatewayRequestId": request_id, "unityCoreCallAudits": core_call_audits}
+                if core_call_audits
+                else None
             )
-            return {
+            audit_event = {
+                "event": "tool_call",
+                "requestId": request_id,
+                "tool": name,
+                "agent": agent_name,
+                "paramsSummary": params_summary,
+                "resultSummary": {"status": "error"},
+                "durationMs": duration_ms,
+                "status": "error",
+                "error": str(exc),
+            }
+            if request_trace is not None:
+                audit_event["requestTrace"] = request_trace
+            self.append_audit(audit_event)
+            response = {
                 "ok": False,
+                "requestId": request_id,
                 "tool": name,
                 "agent": agent_name,
                 "error": str(exc),
+                "resultSummary": {"status": "error"},
+                "durationMs": duration_ms,
             }
+            if request_trace is not None:
+                response["requestTrace"] = request_trace
+            return response
 
     def _run_vision_analysis(
         self,
@@ -2598,6 +2713,10 @@ class AgentGateway:
         last_plan: dict[str, Any] = {}
         iterations = 0
         cap_reached = False
+        tool_call_cap_reached = False
+        tool_calls_used = 0
+        runtime_exposure_layer = EXPOSURE_LAYER_PLANNING
+        remaining_action: dict[str, Any] | None = None
         runtime_compaction: dict[str, Any] | None = None
         runtime_compaction_attempted = False
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
@@ -2610,7 +2729,7 @@ class AgentGateway:
             if runtime_compaction is not None:
                 runtime_compaction = runtime_compaction_cancelled_view(runtime_compaction)
 
-        if bool(params.get("_computerUseRequested")):
+        if bool(params.get("_computerUseRequested")) and not self._runtime_desktop_bootstrap_completed(session_id):
             bootstrap_params: dict[str, Any] = {
                 "action": "computer_use",
                 "prompt": "Discover applications and windows for this user-started Computer Use turn.",
@@ -2631,6 +2750,7 @@ class AgentGateway:
                 bootstrap_params,
                 agent_name,
             )
+            tool_calls_used += 1
             skill_payload = bootstrap_payload
             bootstrap_step: dict[str, Any] = {
                 "tool": "vrcforge_agent_desktop_action",
@@ -2642,6 +2762,11 @@ class AgentGateway:
             if bootstrap_vision is not None:
                 bootstrap_step["desktopVision"] = bootstrap_vision
             loop_state.append(bootstrap_step)
+            self._record_runtime_desktop_bootstrap(
+                session_id,
+                status=str(bootstrap_payload.get("status") or "unknown"),
+                result=bootstrap_payload.get("result"),
+            )
             steps.append(
                 {
                     "index": len(steps),
@@ -2713,6 +2838,7 @@ class AgentGateway:
                 loop_state=loop_state,
                 context_usage=context_usage,
                 reasoning_trace=reasoning_trace,
+                exposure_layer=runtime_exposure_layer,
             )
             iterations += 1
             if self._consume_runtime_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
@@ -2727,6 +2853,34 @@ class AgentGateway:
             last_plan = plan
             if first_plan is None:
                 first_plan = plan
+
+            planned_tool_name = str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
+            planned_tool = self._tools.get(planned_tool_name)
+            planning_selected_write = bool(
+                plan.get("enterExecution")
+                or planned_tool_name in self._write_handlers
+                or (planned_tool is not None and planned_tool.write)
+            )
+            if runtime_exposure_layer == EXPOSURE_LAYER_PLANNING and planning_selected_write:
+                runtime_exposure_layer = EXPOSURE_LAYER_EXECUTION
+                loop_state.append(
+                    {
+                        "tool": "exposure_layer",
+                        "kind": "phase",
+                        "status": "entered_execution",
+                        "result": {"exposureLayer": runtime_exposure_layer},
+                    }
+                )
+                steps.append(
+                    {
+                        "index": len(steps),
+                        "kind": "phase",
+                        "tool": "exposure_layer",
+                        "summary": "Entered execution mode after an explicit project-change request.",
+                        "status": "entered_execution",
+                    }
+                )
+                continue
 
             # 仅首步采用调用方直接给的 shell 命令，避免后续步骤反复重放同一条命令。
             command = param_command if step_index == 0 else ""
@@ -2753,6 +2907,17 @@ class AgentGateway:
                 # 没有工具动作（终止答复 / 未连接 / 让用户选模型）→ 结束本轮。
                 break
 
+            # A turn may still ask the planner for a terminal reply after the
+            # third tool result, but a fourth tool call is never executed.
+            if tool_calls_used >= RUNTIME_AGENT_MAX_TOOL_CALLS:
+                tool_call_cap_reached = True
+                remaining_action = {
+                    "kind": action_kind,
+                    "tool": str(plan.get("writeTool") or plan.get("skillTool") or ("shell" if action_kind == "shell" else "")),
+                    "summary": str(plan.get("summary") or "").strip(),
+                }
+                break
+
             # A successful action is never replayed within the same turn. A
             # failed action may be retried, but only until the bounded failure
             # guard observes the same tool, arguments, and failure class three
@@ -2761,6 +2926,7 @@ class AgentGateway:
                 break
 
             step_tool = ""
+            tool_calls_used += 1
             if action_kind == "shell":
                 step_tool = "shell"
                 step_payload = self.execute_shell(
@@ -2815,6 +2981,12 @@ class AgentGateway:
                         step_params.setdefault("projectRoot", project_root)
                 if step_tool == "vrcforge_agent_desktop_action":
                     step_params.setdefault("clientTurnId", client_turn_id)
+                if step_tool in {
+                    "vrcforge_skill_manifest",
+                    "vrcforge_skill_check",
+                    "vrcforge_tool_registry",
+                }:
+                    step_params.setdefault("exposureLayer", runtime_exposure_layer)
                 step_payload = self._execute_runtime_skill(
                     step_tool, step_params, agent_name
                 )
@@ -2929,6 +3101,19 @@ class AgentGateway:
             notice = (
                 f"（已到本轮 {RUNTIME_AGENT_MAX_STEPS} 步上限，先停下来汇报：上面是这一轮做到的部分。"
                 "需要的话再说一声，我接着往下做。）"
+            )
+            top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
+        if tool_call_cap_reached and isinstance(top_plan, dict):
+            top_plan["stepLimitReached"] = True
+            top_plan["toolCallLimitReached"] = True
+            top_plan["toolCallCount"] = tool_calls_used
+            top_plan["nextStep"] = "paused"
+            top_plan["remainingAction"] = remaining_action or {}
+            base_reply = str(top_plan.get("reply") or "").rstrip()
+            remaining_label = str((remaining_action or {}).get("tool") or (remaining_action or {}).get("kind") or "next action")
+            notice = (
+                f"（已到本轮 {RUNTIME_AGENT_MAX_TOOL_CALLS} 次工具调用上限，先停下来汇报。"
+                f"尚未执行：{remaining_label}。需要的话再说一声，我接着往下做。）"
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
 
@@ -3056,6 +3241,7 @@ class AgentGateway:
             payload["reasoning"] = reasoning_trace
         if context_usage:
             payload["contextUsage"] = context_usage
+        payload["exposureLayer"] = runtime_exposure_layer
         if runtime_compaction:
             payload["contextCompaction"] = runtime_compaction
         if shell_payload is not None:
@@ -3224,6 +3410,28 @@ class AgentGateway:
                 "turns": turns,
             }
             return len(turns)
+
+    def _runtime_desktop_bootstrap_completed(self, session_id: str) -> bool:
+        if not session_id:
+            return False
+        with self._lock:
+            session = self._runtime_sessions.get(session_id)
+            return bool(session and session.get("desktopBootstrapCompleted"))
+
+    def _record_runtime_desktop_bootstrap(self, session_id: str, *, status: str, result: Any) -> None:
+        if not session_id:
+            return
+        now = utc_now_iso()
+        with self._lock:
+            session = self._runtime_sessions.setdefault(
+                session_id,
+                {"id": session_id, "createdAt": now, "updatedAt": now, "turns": []},
+            )
+            session["desktopBootstrapCompleted"] = True
+            session["desktopBootstrapToolCalls"] = 1
+            session["desktopBootstrapStatus"] = summarize_text(status, 80)
+            session["desktopBootstrapSummary"] = summarize_params(result)
+            session["updatedAt"] = now
 
     def runtime_observe(self, session_id: str | None = None, project_root: str = "") -> dict[str, Any]:
         config = self.ensure_config()
@@ -5791,6 +5999,14 @@ class AgentGateway:
             explicit_approval_reason=explicit_approval_reason,
             goal_delivery_id=str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or "").strip(),
             approved_execution_plan=approved_execution_plan,
+            allow_future_eligible=self._write_handler_allows_future_category(
+                write_handler,
+                {
+                    "targetTool": target_tool,
+                    "riskLevel": effective_risk_level,
+                    "requiresExplicitApproval": requires_explicit_for_mode,
+                },
+            ),
         )
         if include_arguments_digest:
             approval["argumentsDigest"] = stable_hash(
@@ -5829,6 +6045,31 @@ class AgentGateway:
                     "targetTool": target_tool,
                 }
             )
+        if execution_mode == "approval" and not requires_explicit_for_mode:
+            stored_approval = self._approvals.get(str(approval.get("id") or ""), approval)
+            scoped_rule = self._matching_project_category_allow_rule(stored_approval, write_handler, config)
+            if scoped_rule is not None:
+                reviewer = self.scoped_approval_reviewer_fn
+                decision = "manual"
+                if reviewer is not None:
+                    try:
+                        decision = str(reviewer(redact_sensitive(dict(stored_approval))) or "manual").strip()
+                    except Exception:
+                        decision = "manual"
+                if decision == "allow_auto":
+                    auto_payload = self._scoped_rule_execute_approval(stored_approval, scoped_rule)
+                    if auto_payload is not None:
+                        return auto_payload
+                self.append_audit(
+                    {
+                        "event": "approval_scoped_rule_manual",
+                        "approvalId": approval.get("id"),
+                        "targetTool": target_tool,
+                        "projectRoot": scoped_rule["projectRoot"],
+                        "category": scoped_rule["category"],
+                        "reviewerDecision": decision if decision == "allow_auto" else "manual",
+                    }
+                )
         return {
             "ok": True,
             "status": "pending",
@@ -5896,6 +6137,76 @@ class AgentGateway:
             payload["result"] = applied.get("result")
         if not applied.get("ok"):
             payload["error"] = str(applied.get("error") or "Auto-approved execution failed.")
+        return payload
+
+    def _matching_project_category_allow_rule(
+        self,
+        approval: dict[str, Any],
+        write_handler: AgentWriteHandler,
+        config: AgentGatewayConfig | None = None,
+    ) -> dict[str, str] | None:
+        if not self._write_handler_allows_future_category(write_handler, approval):
+            return None
+        if bool(approval.get("requiresExplicitApproval")):
+            return None
+        project_root = self._approval_project_root(approval)
+        project_key = normalize_filesystem_path(project_root) if project_root else ""
+        if not project_key:
+            return None
+        active = config or self.ensure_config()
+        for rule in active.project_category_allow_rules:
+            if (
+                rule.get("projectRoot") == project_key
+                and rule.get("category") == write_handler.approval_category
+            ):
+                return {"projectRoot": project_key, "category": write_handler.approval_category}
+        return None
+
+    @staticmethod
+    def _write_handler_allows_future_category(
+        write_handler: AgentWriteHandler, approval: dict[str, Any]
+    ) -> bool:
+        if not write_handler.allow_future_category or not write_handler.approval_category:
+            return False
+        target_tool = str(approval.get("targetTool") or write_handler.name).lower()
+        if any(token in target_tool for token in SCOPED_ALLOW_RULE_FORBIDDEN_TOKENS):
+            return False
+        if normalize_risk_level(str(approval.get("riskLevel") or write_handler.risk_level)) in {"high", "critical"}:
+            return False
+        return not bool(approval.get("requiresExplicitApproval"))
+
+    def _scoped_rule_execute_approval(
+        self, approval: dict[str, Any], rule: dict[str, str]
+    ) -> dict[str, Any] | None:
+        approval_id = str(approval.get("id") or "").strip()
+        if not approval_id:
+            return None
+        approved = self.approve(approval_id)
+        if not approved.get("ok"):
+            return None
+        self.append_audit(
+            {
+                "event": "approval_scoped_rule_auto_approved",
+                "approvalId": approval_id,
+                "targetTool": approval.get("targetTool") or "",
+                "projectRoot": rule["projectRoot"],
+                "category": rule["category"],
+            }
+        )
+        applied = self.apply_approved({"approval_id": approval_id})
+        payload: dict[str, Any] = {
+            "ok": bool(applied.get("ok")),
+            "status": "executed" if applied.get("ok") else "failed",
+            "scopedRuleAutoApproved": True,
+            "approval": applied.get("approval") or approved.get("approval") or approval,
+            "approval_id": approval_id,
+            "approvalId": approval_id,
+            "message": "Approval was auto-approved by the saved project category rule.",
+        }
+        if applied.get("result") is not None:
+            payload["result"] = applied.get("result")
+        if not applied.get("ok"):
+            payload["error"] = str(applied.get("error") or "Scoped-rule execution failed.")
         return payload
 
     def apply_approved(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -6036,6 +6347,9 @@ class AgentGateway:
         checkpoint: dict[str, Any] | None = None
         recovery: dict[str, Any] | None = None
         no_write_conflict = False
+        core_call_audits: list[dict[str, Any]] = []
+        execution_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
+        request_trace: dict[str, Any] | None = None
         try:
             user_constraints = self.read_user_constraints()
             arguments = self._inject_user_constraints_for_apply(
@@ -6084,15 +6398,16 @@ class AgentGateway:
                                 checkpoint=checkpoint,
                                 arguments_digest=handler_arguments_digest,
                             )
-                        result = self._call_write_handler(
-                            write_handler,
-                            target_tool,
-                            approval_id,
-                            checkpoint,
-                            arguments,
-                            handler_arguments_digest,
-                            ensure_dict(approval.get("approvedUnityExecutionPlan")),
-                        )
+                        with capture_unity_mcp_core_call_audits() as core_call_audits:
+                            result = self._call_write_handler(
+                                write_handler,
+                                target_tool,
+                                approval_id,
+                                checkpoint,
+                                arguments,
+                                handler_arguments_digest,
+                                ensure_dict(approval.get("approvedUnityExecutionPlan")),
+                            )
             else:
                 if requires_checkpoint:
                     with self._checkpoint_storage_lock:
@@ -6119,15 +6434,23 @@ class AgentGateway:
                         checkpoint=checkpoint,
                         arguments_digest=handler_arguments_digest,
                     )
-                result = self._call_write_handler(
-                    write_handler,
-                    target_tool,
-                    approval_id,
-                    checkpoint,
-                    arguments,
-                    handler_arguments_digest,
-                    ensure_dict(approval.get("approvedUnityExecutionPlan")),
-                )
+                with capture_unity_mcp_core_call_audits() as core_call_audits:
+                    result = self._call_write_handler(
+                        write_handler,
+                        target_tool,
+                        approval_id,
+                        checkpoint,
+                        arguments,
+                        handler_arguments_digest,
+                        ensure_dict(approval.get("approvedUnityExecutionPlan")),
+                    )
+            if core_call_audits:
+                request_trace = {
+                    "approvalId": approval_id,
+                    "targetTool": target_tool,
+                    "executionId": execution_id,
+                    "unityCoreCallAudits": [dict(audit) for audit in core_call_audits],
+                }
             if isinstance(result, dict) and result.get("ok") is False:
                 no_write_conflict = bool(
                     target_tool == PROJECT_CHAT_CHECKPOINT_TARGET
@@ -6162,6 +6485,8 @@ class AgentGateway:
                 )
                 if memory_evidence is not None:
                     applied_audit["memoryEvidence"] = memory_evidence
+                if request_trace is not None:
+                    applied_audit["requestTrace"] = request_trace
                 self.append_audit(applied_audit)
                 self._append_runtime_run(
                     {
@@ -6186,17 +6511,29 @@ class AgentGateway:
                     result_summary=summarize_params(result if isinstance(result, dict) else {"result": result}),
                 )
             payload = {"ok": True, "status": "applied", "approval": approval, "result": result}
+            if request_trace is not None:
+                payload["requestTrace"] = request_trace
             if checkpoint:
                 payload["checkpoint"] = checkpoint
             return self._attach_linked_goal_resolution(payload, approval)
         except Exception as exc:  # noqa: BLE001
+            if core_call_audits and request_trace is None:
+                request_trace = {
+                    "approvalId": approval_id,
+                    "targetTool": target_tool,
+                    "executionId": execution_id,
+                    "unityCoreCallAudits": [dict(audit) for audit in core_call_audits],
+                }
             with self._lock:
                 approval["status"] = "failed"
                 approval["failedAt"] = utc_now_iso()
                 approval["error"] = str(exc)
                 self._approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
-                self.append_audit({"event": "approval_failed", "approval": approval, **permission_context})
+                failed_audit = {"event": "approval_failed", "approval": approval, **permission_context}
+                if request_trace is not None:
+                    failed_audit["requestTrace"] = request_trace
+                self.append_audit(failed_audit)
                 self._append_runtime_run(
                     {
                         "event": "approval_failed",
@@ -6220,6 +6557,8 @@ class AgentGateway:
                     error=str(exc),
                 )
             payload = {"ok": False, "status": "failed", "approval": approval, "error": str(exc)}
+            if request_trace is not None:
+                payload["requestTrace"] = request_trace
             if checkpoint:
                 payload["checkpoint"] = checkpoint
             return self._attach_linked_goal_resolution(payload, approval)
@@ -6276,6 +6615,65 @@ class AgentGateway:
             expected_project_root=expected_project_root,
             global_only=global_only,
         )
+
+    def approve_with_project_category_rule(
+        self,
+        approval_id: str,
+        *,
+        expected_project_root: str = "",
+        global_only: bool = False,
+    ) -> dict[str, Any]:
+        """Persist one eligible project/category rule, then approve this item.
+
+        The rule is intentionally created only through the human approval
+        endpoint.  Automatic executions never create or widen remembered
+        permissions, and every unsuitable write remains a normal pending item.
+        """
+        with self._lock:
+            approval = self._approvals.get(approval_id)
+            if not approval:
+                raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
+            self._ensure_approval_scope(
+                approval,
+                expected_project_root=expected_project_root,
+                global_only=global_only,
+            )
+            approval = self._refresh_approval_expiry(approval)
+            if approval.get("status") != "pending":
+                return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {approval.get('status')}."}
+            target_tool = str(approval.get("targetTool") or "")
+            write_handler = self._write_handlers.get(target_tool)
+            config = self.ensure_config()
+            rule = self._matching_project_category_allow_rule(approval, write_handler, config) if write_handler else None
+            if write_handler is None or not self._write_handler_allows_future_category(write_handler, approval):
+                raise AgentGatewayError("This write target cannot be remembered for future approvals.", status_code=409)
+            project_root = self._approval_project_root(approval)
+            project_key = normalize_filesystem_path(project_root) if project_root else ""
+            if not project_key:
+                raise AgentGatewayError("A saved approval category requires an exact project root.", status_code=409)
+            if rule is None:
+                config.project_category_allow_rules.append(
+                    {"projectRoot": project_key, "category": write_handler.approval_category}
+                )
+                config.project_category_allow_rules = self._normalize_project_category_allow_rules(
+                    config.project_category_allow_rules
+                )
+                self.save_config(config)
+                self.append_audit(
+                    {
+                        "event": "approval_scoped_rule_granted",
+                        "approvalId": approval_id,
+                        "targetTool": target_tool,
+                        "projectRoot": project_key,
+                        "category": write_handler.approval_category,
+                    }
+                )
+            return self._set_approval_status(
+                approval_id,
+                "approved",
+                expected_project_root=expected_project_root,
+                global_only=global_only,
+            )
 
     def reject(
         self,
@@ -7228,6 +7626,35 @@ class AgentGateway:
         if not available.get("ok"):
             return available
         local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
+        project_root = Path(str(checkpoint.get("projectRoot") or ""))
+        restore_prepare: dict[str, Any] = {}
+        if not local_state_restore and self.checkpoint_restore_prepare_handler is not None:
+            if self.checkpoint_restore_handler is None:
+                return {
+                    "ok": False,
+                    "checkpoint": checkpoint,
+                    "status": "restore_prepare_failed",
+                    "error": "Unity restore preparation is configured without a matching reload handler.",
+                }
+            try:
+                restore_prepare = ensure_dict(
+                    self.checkpoint_restore_prepare_handler(project_root)
+                )
+            except Exception as exc:  # noqa: BLE001 - fail before touching project files.
+                restore_prepare = {"ok": False, "error": str(exc)}
+            if not restore_prepare.get("ok"):
+                payload = {
+                    "ok": False,
+                    "checkpoint": checkpoint,
+                    "status": "restore_prepare_failed",
+                    "unityRestorePrepare": restore_prepare,
+                    "error": str(
+                        restore_prepare.get("error")
+                        or "Unity did not close restored scenes before file recovery."
+                    ),
+                }
+                self.append_audit({"event": "checkpoint_restore_prepare_failed", **payload})
+                return payload
         if local_state_restore:
             payload = (
                 self._restore_project_chat_checkpoint(checkpoint)
@@ -7242,15 +7669,22 @@ class AgentGateway:
             pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
             restore = self._run_git(git_root, ["restore", "--source", ref, "--staged", "--worktree", "--", *pathspecs], timeout_seconds=120)
             if not restore["ok"]:
-                return {"ok": False, "checkpoint": checkpoint, "error": restore["error"], "stdout": restore["stdout"], "stderr": restore["stderr"]}
-            clean = self._run_git(git_root, ["clean", "-fd", "--", *pathspecs], timeout_seconds=120)
-            payload = {
-                "ok": clean["ok"],
-                "checkpoint": checkpoint,
-                "restoredRef": ref,
-                "cleaned": [line for line in clean["stdout"].splitlines() if line.strip()],
-                "error": clean.get("error") or "",
-            }
+                payload = {
+                    "ok": False,
+                    "checkpoint": checkpoint,
+                    "error": restore["error"],
+                    "stdout": restore["stdout"],
+                    "stderr": restore["stderr"],
+                }
+            else:
+                clean = self._run_git(git_root, ["clean", "-fd", "--", *pathspecs], timeout_seconds=120)
+                payload = {
+                    "ok": clean["ok"],
+                    "checkpoint": checkpoint,
+                    "restoredRef": ref,
+                    "cleaned": [line for line in clean["stdout"].splitlines() if line.strip()],
+                    "error": clean.get("error") or "",
+                }
         if payload.get("ok"):
             payload["checkpointId"] = str(checkpoint.get("id") or "")
             payload["restored"] = True
@@ -7259,19 +7693,36 @@ class AgentGateway:
             payload["unityCacheCleanup"] = cache_cleanup
             if cache_cleanup.get("errors"):
                 payload["unityCacheCleanupWarning"] = "; ".join(ensure_string_list(cache_cleanup.get("errors")))
-        if payload.get("ok") and not local_state_restore and self.checkpoint_restore_handler is not None:
+        should_reload_unity = bool(
+            not local_state_restore
+            and self.checkpoint_restore_handler is not None
+            and (payload.get("ok") or restore_prepare.get("ok"))
+        )
+        if should_reload_unity:
             try:
-                reload_result = ensure_dict(self.checkpoint_restore_handler(Path(str(checkpoint["projectRoot"]))))
+                reload_result = ensure_dict(
+                    self.checkpoint_restore_handler(project_root, restore_prepare)
+                )
             except Exception as exc:  # noqa: BLE001
                 reload_result = {"ok": False, "error": str(exc)}
+            if restore_prepare:
+                payload["unityRestorePrepare"] = restore_prepare
             payload["unityReload"] = reload_result
-            if not reload_result.get("ok"):
-                payload["unityReloadWarning"] = str(
+            if payload.get("ok") and not reload_result.get("ok"):
+                payload["ok"] = False
+                payload["status"] = "restored_unity_reload_failed"
+                payload["checkpointRecoveryRequired"] = True
+                payload["error"] = str(
                     reload_result.get("error") or "Unity did not reload after checkpoint restore."
                 )
-                payload["status"] = "restored_with_unity_reload_warning"
-            else:
+            elif payload.get("ok"):
                 payload["status"] = "restored"
+            elif not reload_result.get("ok"):
+                payload["status"] = "restore_failed_unity_reopen_failed"
+                payload["checkpointRecoveryRequired"] = True
+                payload["error"] = str(
+                    reload_result.get("error") or "Unity did not reopen scenes after restore failed."
+                )
         elif payload.get("ok") and local_state_restore:
             payload["status"] = "restored"
         if payload.get("ok"):
@@ -8233,7 +8684,8 @@ class AgentGateway:
         cache_status = "planned" if touches_packages else "skipped"
         cache_details: dict[str, Any] = {
             "requiresPackagesRestore": touches_packages,
-            "targets": [f"Library/{name}" for name in UNITY_RESTORE_PACKAGE_CACHE_DIRS],
+            "targets": [f"Library/{name}" for name in UNITY_RESTORE_GENERATED_CACHE_DIRS],
+            "preserved": [f"Library/{name}" for name in UNITY_RESTORE_PRESERVED_CACHE_DIRS],
         }
         if phase == "restore":
             if not touches_packages:
@@ -8248,7 +8700,7 @@ class AgentGateway:
                 cache_details["errors"] = ensure_string_list(cache_cleanup.get("errors"))
         add_check(
             "package_cache_generated_folders",
-            "Package cache and generated compiler folders",
+            "Generated compiler folders",
             cache_status,
             cache_details,
         )
@@ -8544,7 +8996,7 @@ class AgentGateway:
         library_root = (project_root / "Library").resolve()
         deleted: list[str] = []
         errors: list[str] = []
-        for name in UNITY_RESTORE_PACKAGE_CACHE_DIRS:
+        for name in UNITY_RESTORE_GENERATED_CACHE_DIRS:
             target = (library_root / name).resolve()
             if not is_path_within(target, library_root):
                 errors.append(f"Unsafe Unity cache path skipped: {target}")
@@ -8564,6 +9016,7 @@ class AgentGateway:
             "skipped": False,
             "reason": "checkpoint restores Packages",
             "deleted": deleted,
+            "preserved": [str((library_root / name).resolve()) for name in UNITY_RESTORE_PRESERVED_CACHE_DIRS],
             "errors": errors,
         }
 
@@ -9312,7 +9765,7 @@ class AgentGateway:
             "schema": "vrcforge.skill.v1",
             "name": tool.name,
             "title": override.get("title") or title_from_name(tool.name),
-            "description": tool.description,
+            "description": tool_usage_description(tool.name, tool.description, write=tool.write),
             "category": tool.category,
             "source": "builtin",
             "skillType": "tool",
@@ -9352,7 +9805,7 @@ class AgentGateway:
             "schema": "vrcforge.skill.v1",
             "name": handler.name,
             "title": override.get("title") or title_from_name(handler.name),
-            "description": handler.description,
+            "description": tool_usage_description(handler.name, handler.description, write=True),
             "category": "supervised-write",
             "source": "builtin",
             "skillType": "tool",
@@ -9803,18 +10256,24 @@ class AgentGateway:
             loaded.append({"path": normalized, "content": content})
         return loaded
 
-    def visible_write_targets(self, config: AgentGatewayConfig | None = None) -> list[dict[str, Any]]:
+    def visible_write_targets(
+        self,
+        config: AgentGatewayConfig | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> list[dict[str, Any]]:
         config = config or self.ensure_config()
+        exposure_layer = normalize_exposure_layer(exposure_layer)
         return [
             {
                 "name": handler.name,
-                "description": handler.description,
+                "description": tool_usage_description(handler.name, handler.description, write=True),
                 "riskLevel": handler.risk_level,
                 "advanced": handler.advanced,
                 "rollbackPolicy": self._write_handler_rollback_policy(handler),
             }
             for handler in self._write_handlers.values()
-            if self._write_handler_visible(handler, config) and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
+            if self._write_handler_visible(handler, config, exposure_layer)
+            and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
         ]
 
     def _write_handler_rollback_policy(self, handler: AgentWriteHandler) -> dict[str, Any]:
@@ -10625,6 +11084,7 @@ class AgentGateway:
         loop_state: list[dict[str, Any]] | None = None,
         context_usage: dict[str, Any] | None = None,
         reasoning_trace: dict[str, Any] | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_PLANNING,
     ) -> dict[str, Any]:
         loop_state = loop_state or []
         local_plan = self._local_plan_agent_turn(message, params, observe, loop_state)
@@ -10648,6 +11108,7 @@ class AgentGateway:
             context_usage=context_usage,
             reasoning_trace=reasoning_trace,
             propagate_provider_errors=bool(params.get("_backgroundGoalRun")),
+            exposure_layer=exposure_layer,
         )
         if llm_plan is not None:
             return llm_plan
@@ -10996,12 +11457,19 @@ class AgentGateway:
         context_usage: dict[str, Any] | None = None,
         reasoning_trace: dict[str, Any] | None = None,
         propagate_provider_errors: bool = False,
+        exposure_layer: str = EXPOSURE_LAYER_PLANNING,
     ) -> dict[str, Any] | None:
         plan_fn = self.llm_plan_fn
         if plan_fn is None:
             return None
         try:
-            prompt = self._build_llm_plan_prompt(self._message_with_runtime_context(message, observe), history, loop_state or [], observe=observe)
+            prompt = self._build_llm_plan_prompt(
+                self._message_with_runtime_context(message, observe),
+                history,
+                loop_state or [],
+                observe=observe,
+                exposure_layer=exposure_layer,
+            )
             raw_response = plan_fn(prompt)
             raw_mapping = raw_response if isinstance(raw_response, dict) else {}
             provider_reasoning = ensure_dict(raw_mapping.get("reasoning") or self.llm_reasoning_trace)
@@ -11045,8 +11513,24 @@ class AgentGateway:
             "expectedResult": "",
         }
 
+        if action == "enter_execution" and exposure_layer == EXPOSURE_LAYER_PLANNING:
+            return {
+                **base,
+                "summary": summary or "Enter execution mode for the explicit project-change request.",
+                "enterExecution": True,
+                "continueLoop": True,
+                "expectedResult": "Write tools will become visible without executing a tool.",
+                "nextStep": "enter_execution",
+            }
         if action == "skill" and skill_tool:
-            known_tool = skill_tool in self._tools or self._find_registry_skill(skill_tool) is not None
+            tool = self._tools.get(skill_tool)
+            known_tool = (
+                tool is not None
+                and self._tool_visible(tool, self.ensure_config(), exposure_layer)
+            ) or (
+                exposure_layer == EXPOSURE_LAYER_EXECUTION
+                and self._find_registry_skill(skill_tool) is not None
+            )
             if known_tool:
                 route = self._runtime_skill_route(skill_tool, skill_params, "llm planner")
                 return {
@@ -11441,10 +11925,15 @@ class AgentGateway:
         history: list[dict[str, Any]],
         loop_state: list[dict[str, Any]] | None = None,
         observe: dict[str, Any] | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_PLANNING,
     ) -> str:
         observe = observe or {}
         tool_lines: list[str] = []
+        exposure_layer = normalize_exposure_layer(exposure_layer)
+        config = self.ensure_config()
         for tool in self._tools.values():
+            if not self._tool_visible(tool, config, exposure_layer):
+                continue
             if tool.requires_user_activation and not self.computer_use_model_invocable():
                 continue
             flags = []
@@ -11453,7 +11942,9 @@ class AgentGateway:
             if tool.advanced:
                 flags.append("advanced")
             suffix = f"（{','.join(flags)}）" if flags else ""
-            tool_lines.append(f"- {tool.name}{suffix}: {summarize_text(tool.description, 120)}")
+            tool_lines.append(
+                f"- {tool.name}{suffix}: {summarize_text(tool_usage_description(tool.name, tool.description, write=tool.write), 280)}"
+            )
         history_lines: list[str] = []
         for entry in history:
             role = "用户" if str(entry.get("role") or "user").strip().lower() == "user" else "助手"
@@ -11483,8 +11974,9 @@ class AgentGateway:
             '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
             '2. 执行 PowerShell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
             '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：{"action": "reply", "reply": "<回答>"}\n'
+            '4. 进入执行模式（仅当用户明确要求修改项目）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
             "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
-            "写操作类工具会进入审批流程，可以放心规划；"
+            f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，写工具必须先进入 execution 层且仍走审批；"
             "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
             # VRCForge 自纠回环：失败要读错误、修正后重试或换路，绝不假装成功。
             "如果『已执行步骤』里某一步失败或报错（status 是 failed/error，或结果里带 error/异常/traceback）："
@@ -12013,7 +12505,7 @@ class AgentGateway:
         model_invocable = not tool.requires_user_activation or self.computer_use_model_invocable(config)
         return {
             "name": tool.name,
-            "description": tool.description,
+            "description": tool_usage_description(tool.name, tool.description, write=tool.write),
             "category": tool.category,
             "write": tool.write,
             "advanced": tool.advanced,
@@ -12031,7 +12523,7 @@ class AgentGateway:
             "id": self._registry_tool_id(tool.name),
             "name": tool.name,
             "title": tool.name.replace("vrcforge_", "").replace("_", " ").title(),
-            "description": tool.description,
+            "description": tool_usage_description(tool.name, tool.description, write=tool.write),
             "category": self._registry_category(tool.category, tool.name),
             "risk": risk,
             "requiresApproval": requires_approval,
@@ -12056,7 +12548,7 @@ class AgentGateway:
             "id": self._registry_tool_id(handler.name),
             "name": handler.name,
             "title": handler.name.replace("vrcforge_", "").replace("_", " ").title(),
-            "description": handler.description,
+            "description": tool_usage_description(handler.name, handler.description, write=True),
             "category": self._registry_category("supervised-write", handler.name),
             "risk": "advanced_write" if handler.advanced else "write_request",
             "requiresApproval": True,
@@ -12135,16 +12627,31 @@ class AgentGateway:
             return ["manual-review"]
         return []
 
-    def _tool_visible(self, tool: AgentTool, config: AgentGatewayConfig) -> bool:
+    def _tool_visible(
+        self,
+        tool: AgentTool,
+        config: AgentGatewayConfig,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> bool:
+        exposure_layer = normalize_exposure_layer(exposure_layer)
         if tool.name in EXTERNAL_AGENT_INTERNAL_TOOLS:
             return False
         if tool.advanced and not self.roslyn_available(config):
             return False
         if tool.write and not config.allow_write_requests:
             return False
+        if exposure_layer == EXPOSURE_LAYER_PLANNING and tool.write:
+            return False
         return True
 
-    def _write_handler_visible(self, handler: AgentWriteHandler, config: AgentGatewayConfig) -> bool:
+    def _write_handler_visible(
+        self,
+        handler: AgentWriteHandler,
+        config: AgentGatewayConfig,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> bool:
+        if normalize_exposure_layer(exposure_layer) == EXPOSURE_LAYER_PLANNING:
+            return False
         if handler.advanced and not self.roslyn_available(config):
             return False
         return True
@@ -12162,6 +12669,7 @@ class AgentGateway:
         explicit_approval_reason: str = "",
         goal_delivery_id: str = "",
         approved_execution_plan: dict[str, Any] | None = None,
+        allow_future_eligible: bool = False,
     ) -> dict[str, Any]:
         self._signal_background_activity("pending_approval")
         now = datetime.now(timezone.utc)
@@ -12191,6 +12699,11 @@ class AgentGateway:
             approval["goalDeliveryId"] = goal_delivery_id
         if approved_execution_plan is not None:
             approval["approvedUnityExecutionPlan"] = approved_execution_plan
+        project_root = self._approval_project_root(approval)
+        if project_root:
+            approval["projectRoot"] = project_root
+        if allow_future_eligible:
+            approval["allowFutureEligible"] = True
         if user_constraints and user_constraints.content:
             approval["userConstraintsApplied"] = True
             approval["userConstraintsPath"] = str(user_constraints.path)
@@ -12348,16 +12861,32 @@ class AgentGateway:
         return True
 
 
-def create_agent_mcp_app(gateway: AgentGateway):
-    def list_tools() -> list[dict[str, Any]]:
-        manifest = gateway.build_manifest()
+def create_agent_mcp_app(
+    gateway: AgentGateway,
+    *,
+    on_pending_approval: Callable[[dict[str, Any]], None] | None = None,
+):
+    def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        exposure_layer = normalize_exposure_layer(params.get("exposureLayer"))
+        manifest = gateway.build_manifest(exposure_layer)
         tools = manifest.get("tools")
         if not isinstance(tools, list):
             raise RuntimeError("Agent Gateway manifest did not return a tool list.")
         return [dict(tool) for tool in tools if isinstance(tool, dict)]
 
     def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        return gateway.call_tool(name, arguments, agent_name="mcp-agent")
+        result = gateway.call_tool(name, arguments, agent_name="mcp-agent")
+        if name == "vrcforge_request_apply" and isinstance(result, dict):
+            request_result = ensure_dict(result.get("result"))
+            approval = ensure_dict(request_result.get("approval"))
+            if str(request_result.get("status") or approval.get("status") or "") == "pending" and on_pending_approval:
+                try:
+                    on_pending_approval(redact_sensitive(dict(approval)))
+                except Exception:
+                    # UI notification is advisory; it must not alter an MCP
+                    # response that has already durably created an approval.
+                    pass
+        return result
 
     def validate_bearer(token: str) -> bool:
         config = gateway.ensure_config()
@@ -13200,6 +13729,30 @@ def current_os_key() -> str:
 def title_from_name(name: str) -> str:
     text = re.sub(r"^vrcforge_", "", name or "")
     return " ".join(part.capitalize() for part in re.split(r"[_\-.]+", text) if part) or name
+
+
+def normalize_exposure_layer(value: Any) -> str:
+    layer = str(value or EXPOSURE_LAYER_PLANNING).strip().lower()
+    if layer not in {EXPOSURE_LAYER_PLANNING, EXPOSURE_LAYER_EXECUTION}:
+        raise AgentGatewayError("exposureLayer must be planning or execution.", status_code=400)
+    return layer
+
+
+def tool_usage_description(name: str, summary: str, *, write: bool) -> str:
+    text = str(summary or name).strip()
+    if all(section in text for section in ("When to use:", "When NOT to use:", "Negative example:")):
+        return text
+    when_not = (
+        "Do not use while planning, for hypothetical or quoted requests, or without an explicit project change request and approval."
+        if write
+        else "Do not use for general questions, quoted examples, hypothetical requests, or when the user forbids inspection."
+    )
+    negative = (
+        f"Explain {name} conceptually, but do not modify the project."
+        if write
+        else f"Mention {name} without inspecting the current project."
+    )
+    return f"When to use: {text}\nWhen NOT to use: {when_not}\nNegative example: {negative}"
 
 
 def parse_skill_markdown(path: Path) -> dict[str, Any]:

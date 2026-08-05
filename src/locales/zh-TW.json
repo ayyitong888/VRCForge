@@ -445,7 +445,11 @@
     "step2DoneDesc": "模型已綁定",
     "step2TodoDesc": "綁定 AI 模型",
     "step3DoneDesc": "專案已選擇",
-    "step3TodoDesc": "選擇 Unity 專案"
+    "step3TodoDesc": "選擇剛剛匯入 VRCForge 的正確 Unity 專案",
+    "selectProject": "選擇專案",
+    "importAndSelectProject": "在 Unity 中從 VRCForge.unitypackage 選擇 Import All，然後在這裡選擇該已開啟專案。",
+    "keepUnityOpen": "保持所選 Unity 專案開啟並等待編譯完成，然後重試。已偵測 {{count}} / {{total}} 個工具。",
+    "toolsConnected": "已連線 — {{count}} / {{total}} 個工具"
   },
   "executionMode": {
     "approval": "受限模式",
@@ -547,6 +551,14 @@
     "reason": "原因",
     "reject": "駁回",
     "approve": "同意執行",
+    "approveOnce": "僅允許一次",
+    "allowFuture": "以後允許此類操作",
+    "blockingTitle": "繼續前需要核准",
+    "blockingDescription": "請逐項檢視請求的變更，聊天會在核准完成後繼續。",
+    "notificationTitle": "VRCForge 需要核准",
+    "notificationBody": "{{target}} 正在等待你的決定。",
+    "notificationExpired": "此核准已不再處於待處理狀態。請重新整理工作區後再試。",
+    "notificationFailed": "無法開始核准操作。請重新整理工作區後再試。",
     "awaitingInline": "等待確認 — 請在下方輸入框上方的審批區處理",
     "modifyPrompt": "修改審批 {{id}}（{{target}}）：",
     "pendingContextTitle": "待修改審批上下文",
@@ -564,7 +576,26 @@
     "contextReason": "原因",
     "contextDetails": "詳情",
     "revisionReason": "使用者要求在審批前修改。",
-    "revisionNote": "修改審批 {{id}}：{{target}}"
+    "revisionNote": "修改審批 {{id}}：{{target}}",
+    "presentation": {
+      "project": "專案",
+      "rollback": "復原",
+      "currentProject": "目前專案",
+      "sceneRoot": "場景根目錄",
+      "newObject": "新 GameObject",
+      "savedCheckpoint": "已儲存的檢查點",
+      "createObjectTitle": "建立「{{name}}」",
+      "createObjectSummary": "將在「{{parent}}」下建立一個新物件。",
+      "restoreTitle": "還原專案檢查點",
+      "restoreSummary": "將專案還原到檢查點「{{checkpoint}}」。",
+      "commandTitle": "執行一項專案操作",
+      "commandSummary": "將在「{{project}}」中執行一項要求的操作。",
+      "genericTitle": "變更 Unity 專案",
+      "genericSummary": "將對「{{project}}」套用一項要求的變更。",
+      "rollbackAvailable": "執行前會建立檢查點；還原仍需另行確認。",
+      "restoreEffect": "將還原先前儲存的狀態；不會自動重複復原。",
+      "rollbackDepends": "允許前請查看詳細資料；能否復原取決於這次操作。"
+    }
   },
   "shell": {
     "exitCode": "退出碼 {{code}}",

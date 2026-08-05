@@ -11,9 +11,9 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_setup_outfit",
-        Description = "Validate or run Modular Avatar Setup Outfit on an outfit object parented under a VRChat avatar."
+    [VRCForgeCommand(
+        toolId: "vrc_setup_outfit",
+        Summary = "Validate or run Modular Avatar Setup Outfit on an outfit object parented under a VRChat avatar."
     )]
     public static class SetupOutfitTool
     {
@@ -48,22 +48,22 @@ namespace VRCForge.Editor
 
         public class SetupOutfitParameters
         {
-            [VRCForgeParameter("Avatar root hierarchy path or avatar name.", Required = false)]
+            [VRCForgeInput("Avatar root hierarchy path or avatar name.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
 
-            [VRCForgeParameter("Hierarchy path of the outfit object under the avatar root.", Required = true)]
+            [VRCForgeInput("Hierarchy path of the outfit object under the avatar root.", IsRequired = true)]
             public string outfitPath { get; set; } = "";
 
-            [VRCForgeParameter("Approval-generated continuation nonce registered by vrc_instantiate_prefab.", Required = false)]
+            [VRCForgeInput("Approval-generated continuation nonce registered by vrc_instantiate_prefab.", IsRequired = false)]
             public string approvedObjectReceiptNonce { get; set; } = "";
 
-            [VRCForgeParameter("Must be true to actually run Setup Outfit. False returns a readiness preview.", Required = false)]
+            [VRCForgeInput("Must be true to actually run Setup Outfit. False returns a readiness preview.", IsRequired = false)]
             public bool? confirmSetup { get; set; } = false;
 
-            [VRCForgeParameter("Save the target outfit scene after a confirmed setup.", Required = false)]
+            [VRCForgeInput("Save the target outfit scene after a confirmed setup.", IsRequired = false)]
             public bool? saveScene { get; set; } = true;
 
-            [VRCForgeParameter("Existing Setup Outfit job id to poll.", Required = false)]
+            [VRCForgeInput("Existing Setup Outfit job id to poll.", IsRequired = false)]
             public string jobId { get; set; } = "";
         }
 
@@ -78,13 +78,13 @@ namespace VRCForge.Editor
                     ? PreviewOrSetup(parameters)
                     : PollJob(parameters.jobId);
                 var action = DescribeAction(payload);
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"{action} Modular Avatar Setup Outfit for '{payload["outfitPath"]}'.",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Setup Outfit failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Setup Outfit failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -288,6 +288,14 @@ namespace VRCForge.Editor
 
             var hasAnimator = outfit.GetComponentsInChildren<Animator>(true).Length > 0;
             var hasSkinnedMesh = outfit.GetComponentsInChildren<SkinnedMeshRenderer>(true).Length > 0;
+            var avatarAnimator = avatarRoot.GetComponent<Animator>();
+            var avatarHasHumanoidHips = avatarAnimator != null
+                && avatarAnimator.isHuman
+                && avatarAnimator.GetBoneTransform(HumanBodyBones.Hips) != null;
+            if (!avatarHasHumanoidHips)
+            {
+                warnings.Add("Avatar Animator has no valid humanoid Hips; Modular Avatar Setup Outfit cannot run.");
+            }
             if (!hasSkinnedMesh)
             {
                 warnings.Add("Outfit has no SkinnedMeshRenderer; Setup Outfit may have nothing to merge.");
@@ -304,9 +312,10 @@ namespace VRCForge.Editor
                 ["continuationConsumed"] = false,
                 ["modularAvatarFound"] = true,
                 ["existingMergeArmatures"] = existingMerge,
+                ["avatarHasHumanoidHips"] = avatarHasHumanoidHips,
                 ["outfitHasAnimator"] = hasAnimator,
                 ["outfitHasSkinnedMesh"] = hasSkinnedMesh,
-                ["ready"] = hasSkinnedMesh,
+                ["ready"] = hasSkinnedMesh && avatarHasHumanoidHips,
                 ["warnings"] = new JArray(warnings),
             };
         }

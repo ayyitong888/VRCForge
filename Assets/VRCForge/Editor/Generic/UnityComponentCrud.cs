@@ -514,10 +514,10 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_get_property",
-        Description = "Read a single serialized field/property value from a component on a scene GameObject (read-only).",
-        Permission = VRCForgeToolPermission.ReadOnly
+    [VRCForgeCommand(
+        toolId: "vrc_get_property",
+        Summary = "Read a single serialized field/property value from a component on a scene GameObject (read-only).",
+        Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class GetPropertyTool
     {
@@ -525,16 +525,16 @@ namespace VRCForge.Editor
 
         public class GetPropertyParameters
         {
-            [VRCForgeParameter("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", Required = true)]
+            [VRCForgeInput("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [VRCForgeParameter("Component type. Fully-qualified (e.g. 'UnityEngine.SkinnedMeshRenderer') or unique short name.", Required = true)]
+            [VRCForgeInput("Component type. Fully-qualified (e.g. 'UnityEngine.SkinnedMeshRenderer') or unique short name.", IsRequired = true)]
             public string componentType { get; set; } = "";
 
-            [VRCForgeParameter("Field or property name to read (e.g. 'enabled', 'sharedMesh').", Required = true)]
+            [VRCForgeInput("Field or property name to read (e.g. 'enabled', 'sharedMesh').", IsRequired = true)]
             public string propertyPath { get; set; } = "";
 
-            [VRCForgeParameter("Which component instance to read when several of the same type exist (default 0).", Required = false)]
+            [VRCForgeInput("Which component instance to read when several of the same type exist (default 0).", IsRequired = false)]
             public int? componentIndex { get; set; } = 0;
         }
 
@@ -559,20 +559,20 @@ namespace VRCForge.Editor
                     propertyValue = ComponentCrudCore.DescribeValue(value)
                 };
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"{component.GetType().Name}.{p.propertyPath} = {payload.propertyValue ?? "null"}",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Get property failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Get property failed: {ex.Message}");
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_add_component",
-        Description = "Add a component of a given type to a scene GameObject (Undo-registered). Supports preview mode."
+    [VRCForgeCommand(
+        toolId: "vrc_add_component",
+        Summary = "Add a component of a given type to a scene GameObject (Undo-registered). Supports preview mode."
     )]
     public static class AddComponentTool
     {
@@ -580,13 +580,13 @@ namespace VRCForge.Editor
 
         public class AddComponentParameters
         {
-            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeInput("Full hierarchy path or unique name of the target GameObject.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [VRCForgeParameter("Component type to add. Fully-qualified or unique short name.", Required = true)]
+            [VRCForgeInput("Component type to add. Fully-qualified or unique short name.", IsRequired = true)]
             public string componentType { get; set; } = "";
 
-            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -610,7 +610,7 @@ namespace VRCForge.Editor
                         componentType = type.FullName,
                         existingCount = existing
                     };
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would add '{type.Name}' to '{goPath}' (currently {existing} of this type).",
                         previewPayload);
                 }
@@ -618,7 +618,7 @@ namespace VRCForge.Editor
                 var added = Undo.AddComponent(go, type);
                 if (added == null)
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         $"Unity refused to add '{type.Name}' to '{goPath}' (missing dependency or disallowed type).");
                 }
                 EditorUtility.SetDirty(go);
@@ -632,18 +632,18 @@ namespace VRCForge.Editor
                     componentIndex = go.GetComponents(type).Length - 1,
                     instanceId = added.GetInstanceID()
                 };
-                return new SuccessResponse($"Added '{type.Name}' to '{goPath}'.", payload);
+                return VRCForgeToolResult.Completed($"Added '{type.Name}' to '{goPath}'.", payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Add component failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Add component failed: {ex.Message}");
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_remove_component",
-        Description = "Remove a component of a given type from a scene GameObject (Undo-registered). Supports preview mode."
+    [VRCForgeCommand(
+        toolId: "vrc_remove_component",
+        Summary = "Remove a component of a given type from a scene GameObject (Undo-registered). Supports preview mode."
     )]
     public static class RemoveComponentTool
     {
@@ -651,16 +651,16 @@ namespace VRCForge.Editor
 
         public class RemoveComponentParameters
         {
-            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeInput("Full hierarchy path or unique name of the target GameObject.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [VRCForgeParameter("Component type to remove. Fully-qualified or unique short name.", Required = true)]
+            [VRCForgeInput("Component type to remove. Fully-qualified or unique short name.", IsRequired = true)]
             public string componentType { get; set; } = "";
 
-            [VRCForgeParameter("Which component instance to remove when several of the same type exist (default 0).", Required = false)]
+            [VRCForgeInput("Which component instance to remove when several of the same type exist (default 0).", IsRequired = false)]
             public int? componentIndex { get; set; } = 0;
 
-            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -677,7 +677,7 @@ namespace VRCForge.Editor
 
                 if (component is Transform)
                 {
-                    return new ErrorResponse("Refusing to remove a Transform component; every GameObject requires one.");
+                    return VRCForgeToolResult.Failed("Refusing to remove a Transform component; every GameObject requires one.");
                 }
 
                 if (p.preview ?? false)
@@ -690,7 +690,7 @@ namespace VRCForge.Editor
                         componentType = component.GetType().FullName,
                         componentIndex = index
                     };
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would remove '{component.GetType().Name}' (index {index}) from '{goPath}'.",
                         previewPayload);
                 }
@@ -707,18 +707,18 @@ namespace VRCForge.Editor
                     componentType = removedType,
                     componentIndex = index
                 };
-                return new SuccessResponse($"Removed '{type.Name}' (index {index}) from '{goPath}'.", payload);
+                return VRCForgeToolResult.Completed($"Removed '{type.Name}' (index {index}) from '{goPath}'.", payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Remove component failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Remove component failed: {ex.Message}");
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_set_property",
-        Description = "Set a single field/property on a component of a scene GameObject (Undo-registered). Supports preview mode."
+    [VRCForgeCommand(
+        toolId: "vrc_set_property",
+        Summary = "Set a single field/property on a component of a scene GameObject (Undo-registered). Supports preview mode."
     )]
     public static class SetPropertyTool
     {
@@ -726,19 +726,22 @@ namespace VRCForge.Editor
 
         public class SetPropertyParameters
         {
-            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeInput("Full hierarchy path or unique name of the target GameObject.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [VRCForgeParameter("Component type. Fully-qualified or unique short name.", Required = true)]
+            [VRCForgeInput("Component type. Fully-qualified or unique short name.", IsRequired = true)]
             public string componentType { get; set; } = "";
 
-            [VRCForgeParameter("Field or property name to set (e.g. 'enabled', 'm_Weight').", Required = true)]
+            [VRCForgeInput("Field or property name to set (e.g. 'enabled', 'm_Weight').", IsRequired = true)]
             public string propertyPath { get; set; } = "";
 
-            [VRCForgeParameter("Which component instance to target when several of the same type exist (default 0).", Required = false)]
+            [VRCForgeInput("JSON value to assign to the field or property.", IsRequired = true)]
+            public object value { get; set; }
+
+            [VRCForgeInput("Which component instance to target when several of the same type exist (default 0).", IsRequired = false)]
             public int? componentIndex { get; set; } = 0;
 
-            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -750,7 +753,7 @@ namespace VRCForge.Editor
                 var rawParams = @params ?? new JObject();
                 if (rawParams["value"] == null)
                 {
-                    return new ErrorResponse("Set property requires a 'value' argument.");
+                    return VRCForgeToolResult.Failed("Set property requires a 'value' argument.");
                 }
                 var valueToken = rawParams["value"];
 
@@ -778,7 +781,7 @@ namespace VRCForge.Editor
                         oldValue = ComponentCrudCore.DescribeValue(oldValue),
                         newValue = ComponentCrudCore.DescribeValue(newValue)
                     };
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would set {component.GetType().Name}.{p.propertyPath} to {previewPayload.newValue ?? "null"}.",
                         previewPayload);
                 }
@@ -799,13 +802,13 @@ namespace VRCForge.Editor
                     oldValue = ComponentCrudCore.DescribeValue(oldValue),
                     newValue = ComponentCrudCore.DescribeValue(ComponentCrudCore.GetMemberValue(component, member))
                 };
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Set {component.GetType().Name}.{p.propertyPath} on '{goPath}'.",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Set property failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Set property failed: {ex.Message}");
             }
         }
     }

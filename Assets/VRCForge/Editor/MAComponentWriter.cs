@@ -22,12 +22,32 @@ namespace VRCForge.Editor
     // name is also accepted. Add-only by default (won't duplicate an existing MA
     // component of the same type unless allowDuplicate=true). Undo-registered.
     // Supports preview.
-    [VRCForgeTool(
-        name: "vrc_add_modular_avatar_component",
-        Description = "Add a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters, or a fully-qualified nadena.dev type) to a scene object. Resolves AvatarObjectReference fields from object paths, loads asset/scene object references by member type, and sets scalar/enum fields. Add-only by default, Undo-registered. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_add_modular_avatar_component",
+        Summary = "Add a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters, or a fully-qualified nadena.dev type) to a scene object. Resolves AvatarObjectReference fields from object paths, loads asset/scene object references by member type, and sets scalar/enum fields. Add-only by default, Undo-registered. Supports preview."
     )]
     public static class MAComponentWriter
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Full hierarchy path of the scene object that receives the component.", IsRequired = true)]
+            public string gameObjectPath { get; set; } = "";
+            [VRCForgeInput("Supported Modular Avatar alias or fully qualified nadena.dev component type.", IsRequired = true)]
+            public string componentType { get; set; } = "";
+            [VRCForgeInput("Optional avatar root path used to resolve object references.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Component reference member names mapped to scene or asset paths.", IsRequired = false)]
+            public JObject references { get; set; } = new JObject();
+            [VRCForgeInput("Writable scalar or enum member names mapped to values.", IsRequired = false)]
+            public JObject fields { get; set; } = new JObject();
+            [VRCForgeInput("Report the add plan without modifying the scene.", IsRequired = false)]
+            public bool? preview { get; set; } = false;
+            [VRCForgeInput("Permit adding another component when the same type already exists.", IsRequired = false)]
+            public bool? allowDuplicate { get; set; } = false;
+            [VRCForgeInput("Save the target scene after a successful write.", IsRequired = false)]
+            public bool? saveScene { get; set; } = false;
+        }
+
         public const string ToolName = "vrc_add_modular_avatar_component";
 
         private const string MaNamespace = "nadena.dev.modular_avatar.core.";
@@ -66,11 +86,11 @@ namespace VRCForge.Editor
 
                 if (string.IsNullOrWhiteSpace(gameObjectPath))
                 {
-                    return new ErrorResponse("Missing required parameter: gameObjectPath (the scene object to add the Modular Avatar component to).");
+                    return VRCForgeToolResult.Failed("Missing required parameter: gameObjectPath (the scene object to add the Modular Avatar component to).");
                 }
                 if (string.IsNullOrWhiteSpace(componentTypeInput))
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         "Missing required parameter: componentType. Use one of: "
                         + string.Join(", ", Aliases.Keys.Where(k => k.StartsWith("M", StringComparison.Ordinal) == false || !k.StartsWith("Modular", StringComparison.Ordinal)))
                         + " (or a fully-qualified nadena.dev type).");
@@ -79,13 +99,13 @@ namespace VRCForge.Editor
                 // Resolve MA presence + the target component type.
                 if (FindType(MaNamespace + "ModularAvatarMergeArmature") == null)
                 {
-                    return new ErrorResponse("Modular Avatar runtime types were not found. Install the Modular Avatar package first.");
+                    return VRCForgeToolResult.Failed("Modular Avatar runtime types were not found. Install the Modular Avatar package first.");
                 }
                 var resolvedTypeName = Aliases.TryGetValue(componentTypeInput, out var mapped) ? mapped : componentTypeInput;
                 var componentType = FindType(resolvedTypeName) ?? FindType(MaNamespace + componentTypeInput);
                 if (componentType == null || !typeof(Component).IsAssignableFrom(componentType))
                 {
-                    return new ErrorResponse(
+                    return VRCForgeToolResult.Failed(
                         $"Modular Avatar component type not found: '{componentTypeInput}'. Supported aliases: MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters, MenuItem (or a fully-qualified nadena.dev type).");
                 }
 
@@ -94,7 +114,7 @@ namespace VRCForge.Editor
                 var target = ResolveSceneObject(gameObjectPath, avatarRoot);
                 if (target == null)
                 {
-                    return new ErrorResponse($"Target GameObject not found in the loaded scene(s): '{gameObjectPath}'.");
+                    return VRCForgeToolResult.Failed($"Target GameObject not found in the loaded scene(s): '{gameObjectPath}'.");
                 }
                 var targetPath = GetTransformPath(target.transform);
                 if (avatarRoot == null)
@@ -106,7 +126,7 @@ namespace VRCForge.Editor
                 var warnings = new List<string>();
                 if (existing > 0 && !allowDuplicate)
                 {
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"'{target.name}' already has {existing} {componentType.Name} component(s); skipped (pass allowDuplicate=true to add another).",
                         new
                         {
@@ -135,19 +155,19 @@ namespace VRCForge.Editor
                     var member = ResolveMember(componentType, pair.Key);
                     if (member == null)
                     {
-                        return new ErrorResponse($"Reference field '{pair.Key}' not found on {componentType.Name}.");
+                        return VRCForgeToolResult.Failed($"Reference field '{pair.Key}' not found on {componentType.Name}.");
                     }
                     var memberType = GetMemberType(member);
                     var pathValue = pair.Value?.ToString() ?? string.Empty;
                     var kind = ClassifyReference(memberType);
                     if (kind == ReferenceKind.Unsupported)
                     {
-                        return new ErrorResponse($"Field '{pair.Key}' on {componentType.Name} is type '{memberType.Name}', which is not a supported reference type.");
+                        return VRCForgeToolResult.Failed($"Field '{pair.Key}' on {componentType.Name} is type '{memberType.Name}', which is not a supported reference type.");
                     }
                     var assignment = new AssignmentPlan { member = member, memberType = memberType, raw = pathValue, kind = kind };
                     if (!TryResolveReference(assignment, avatarRoot, out var referenceError))
                     {
-                        return new ErrorResponse(referenceError);
+                        return VRCForgeToolResult.Failed(referenceError);
                     }
                     refPlan.Add(assignment);
                 }
@@ -157,11 +177,11 @@ namespace VRCForge.Editor
                     var member = ResolveMember(componentType, pair.Key);
                     if (member == null)
                     {
-                        return new ErrorResponse($"Field '{pair.Key}' not found on {componentType.Name}.");
+                        return VRCForgeToolResult.Failed($"Field '{pair.Key}' not found on {componentType.Name}.");
                     }
                     if (!CanWriteMember(member))
                     {
-                        return new ErrorResponse($"Field '{pair.Key}' on {componentType.Name} is read-only.");
+                        return VRCForgeToolResult.Failed($"Field '{pair.Key}' on {componentType.Name} is read-only.");
                     }
                     var assignment = new AssignmentPlan { member = member, memberType = GetMemberType(member), token = pair.Value };
                     try
@@ -170,7 +190,7 @@ namespace VRCForge.Editor
                     }
                     catch (Exception ex)
                     {
-                        return new ErrorResponse($"Could not convert field '{pair.Key}' to {assignment.memberType.Name}: {ex.Message}");
+                        return VRCForgeToolResult.Failed($"Could not convert field '{pair.Key}' to {assignment.memberType.Name}: {ex.Message}");
                     }
                     fieldPlan.Add(assignment);
                 }
@@ -179,7 +199,7 @@ namespace VRCForge.Editor
                 {
                     var refDesc = refPlan.Select(p => new { field = p.member.Name, type = p.memberType.Name, path = p.raw, resolved = p.resolvedDisplay, kind = p.kind.ToString() }).ToList();
                     var fieldDesc = fieldPlan.Select(p => new { field = p.member.Name, type = p.memberType.Name, value = p.token?.ToString() }).ToList();
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would add {componentType.Name} to '{target.name}'.",
                         new
                         {
@@ -259,12 +279,12 @@ namespace VRCForge.Editor
                             UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(targetScene);
                         }
                     }
-                    return new ErrorResponse($"Could not configure {componentType.Name}; the added component was rolled back: {ex.Message}");
+                    return VRCForgeToolResult.Failed($"Could not configure {componentType.Name}; the added component was rolled back: {ex.Message}");
                 }
 
                 Undo.CollapseUndoOperations(undoGroup);
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Added {componentType.Name} to '{target.name}'.",
                     new
                     {
@@ -285,7 +305,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Add Modular Avatar component failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Add Modular Avatar component failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -303,15 +323,15 @@ namespace VRCForge.Editor
 
                 if (string.IsNullOrWhiteSpace(gameObjectPath))
                 {
-                    return new ErrorResponse("Missing required parameter: gameObjectPath.");
+                    return VRCForgeToolResult.Failed("Missing required parameter: gameObjectPath.");
                 }
                 if (string.IsNullOrWhiteSpace(componentTypeInput))
                 {
-                    return new ErrorResponse("Missing required parameter: componentType.");
+                    return VRCForgeToolResult.Failed("Missing required parameter: componentType.");
                 }
                 if (FindType(MaNamespace + "ModularAvatarMergeArmature") == null)
                 {
-                    return new ErrorResponse("Modular Avatar runtime types were not found. Install the Modular Avatar package first.");
+                    return VRCForgeToolResult.Failed("Modular Avatar runtime types were not found. Install the Modular Avatar package first.");
                 }
 
                 var resolvedTypeName = Aliases.TryGetValue(componentTypeInput, out var mapped)
@@ -320,14 +340,14 @@ namespace VRCForge.Editor
                 var componentType = FindType(resolvedTypeName) ?? FindType(MaNamespace + componentTypeInput);
                 if (componentType == null || !typeof(Component).IsAssignableFrom(componentType))
                 {
-                    return new ErrorResponse($"Modular Avatar component type not found: '{componentTypeInput}'.");
+                    return VRCForgeToolResult.Failed($"Modular Avatar component type not found: '{componentTypeInput}'.");
                 }
 
                 var avatarRoot = ResolveAvatarRoot(avatarPath);
                 var target = ResolveSceneObject(gameObjectPath, avatarRoot);
                 if (target == null)
                 {
-                    return new ErrorResponse($"Target GameObject not found in the loaded scene(s): '{gameObjectPath}'.");
+                    return VRCForgeToolResult.Failed($"Target GameObject not found in the loaded scene(s): '{gameObjectPath}'.");
                 }
                 if (avatarRoot == null)
                 {
@@ -369,7 +389,7 @@ namespace VRCForge.Editor
                 }
 
                 var targetScene = target.scene;
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Inspected {components.Length} {componentType.Name} component(s) on '{target.name}'.",
                     new
                     {
@@ -386,7 +406,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Inspect Modular Avatar component failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Inspect Modular Avatar component failed: {ex.Message}");
             }
         }
 
@@ -743,14 +763,24 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_inspect_modular_avatar_component",
-        Description = "Read whether a specific Modular Avatar component is present on a scene object, its exact count/type, scene dirty state, and AvatarObjectReference stored/resolved paths without writing.",
-        Permission = VRCForgeToolPermission.ReadOnly
+    [VRCForgeCommand(
+        toolId: "vrc_inspect_modular_avatar_component",
+        Summary = "Read whether a specific Modular Avatar component is present on a scene object, its exact count/type, scene dirty state, and AvatarObjectReference stored/resolved paths without writing.",
+        Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class MAComponentInspector
     {
         public const string ToolName = "vrc_inspect_modular_avatar_component";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Full hierarchy path of the scene object to inspect.", IsRequired = true)]
+            public string gameObjectPath { get; set; } = "";
+            [VRCForgeInput("Supported Modular Avatar alias or fully qualified nadena.dev component type.", IsRequired = true)]
+            public string componentType { get; set; } = "";
+            [VRCForgeInput("Optional avatar root path used to resolve the scene object.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+        }
 
         public static object HandleCommand(JObject @params)
         {

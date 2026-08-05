@@ -197,6 +197,25 @@ def test_v3_finalization_is_one_shot_and_verifies_transaction_chain() -> None:
     assert proof.challenge.hex() not in serialized
 
 
+def test_core_call_audit_and_result_must_be_recorded_as_one_pair() -> None:
+    proof = bootstrap()
+    session = live.PrimitiveBasisLiveSession(proof)
+    session.begin(fixture_digest=DIGEST, project_binding_digest=PROJECT_DIGEST)
+
+    with pytest.raises(live.LiveAttestationError, match="must be recorded together"):
+        session.record(
+            "detect",
+            facts("detect"),
+            authoritative_event={"phase": "detect", "source": "backend"},
+            core_call_audit={
+                "requestId": 1,
+                "toolName": "vrc_reload_primitive_basis_fixture",
+                "resultSummary": "complete",
+                "durationMs": 1.0,
+            },
+        )
+
+
 def test_abandoned_session_retains_only_public_binding_and_erases_proof_key() -> None:
     proof = bootstrap()
     session = live.PrimitiveBasisLiveSession(proof)

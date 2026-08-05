@@ -82,11 +82,17 @@ def test_core_installed_without_descriptor_never_falls_back_to_legacy_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    core_marker = tmp_path / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolAttribute.cs"
+    core_root = tmp_path / "Assets" / "VRCForge" / "Core" / "MCP"
     server_marker = tmp_path / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs"
-    core_marker.parent.mkdir(parents=True)
+    core_root.mkdir(parents=True)
     server_marker.parent.mkdir(parents=True)
-    core_marker.write_text("// marker", encoding="utf-8")
+    for name in (
+        "VRCForgeCommandAttribute.cs",
+        "VRCForgeInputAttribute.cs",
+        "VRCForgeToolRegistry.cs",
+        "VRCForgeToolResult.cs",
+    ):
+        (core_root / name).write_text("// marker", encoding="utf-8")
     server_marker.write_text("// marker", encoding="utf-8")
 
     with pytest.raises(agent.UnityMcpError, match="installed but not ready"):
@@ -108,7 +114,8 @@ def test_cli_status_reads_only_the_project_scoped_core_descriptor(
             observed["projectRoot"] = project_root
             observed["timeout"] = timeout_seconds
 
-        def list_tools(self) -> list[dict[str, str]]:
+        def list_tools(self, *, exposure_layer: str = "planning") -> list[dict[str, str]]:
+            observed["exposureLayer"] = exposure_layer
             return [{"name": "vrc_read"}]
 
     monkeypatch.setattr(agent, "UnityMcpCoreClient", FakeCoreClient)
@@ -117,7 +124,7 @@ def test_cli_status_reads_only_the_project_scoped_core_descriptor(
     assert status["protocolVersion"] == "2026-07-28"
     assert status["transport"] == "vrcforge-mcp-core"
     assert status["tools"] == [{"name": "vrc_read"}]
-    assert observed == {"projectRoot": tmp_path, "timeout": 45}
+    assert observed == {"projectRoot": tmp_path, "timeout": 45, "exposureLayer": "execution"}
 
 
 def test_cli_status_without_project_fails_closed() -> None:

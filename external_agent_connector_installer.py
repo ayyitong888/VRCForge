@@ -406,7 +406,7 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/list",
-                "params": _modern_stdio_request_metadata(),
+                "params": {**_modern_stdio_request_metadata(), "exposureLayer": "execution"},
             },
         )
         listed = _read_json_rpc_response(process, stdout_queue, stderr_queue, 2, timeout_seconds, transcript, stderr_lines)

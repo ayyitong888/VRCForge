@@ -151,6 +151,15 @@ def test_flat_preview_inputs_are_normalized_into_the_write_wrapper_shape() -> No
     assert "rendererPath" not in {key for key in wrapper if key != "arguments"}
 
 
+def test_removed_target_shader_alias_is_rejected_at_the_wrapper_boundary() -> None:
+    with pytest.raises(MaterialShaderAssignmentError, match="use shaderName"):
+        build_wrapper_arguments({"targetShader": "Project/Toon"})
+    with pytest.raises(MaterialShaderAssignmentError, match="use shaderName"):
+        build_wrapper_arguments({"arguments": {"targetShader": "Project/Toon"}})
+    with pytest.raises(MaterialShaderAssignmentError, match="use shaderName"):
+        build_preview_arguments({"targetShader": "Project/Toon"})
+
+
 def test_authoritative_preview_binds_target_file_shader_and_impact_receipts() -> None:
     canonical, preview = bind_authoritative_preview(wrapper_arguments(), preview_payload())
     nested = canonical["arguments"]
@@ -180,6 +189,36 @@ def test_authoritative_preview_binds_target_file_shader_and_impact_receipts() ->
     assert nested["expectedShaderAssetGuid"] == "c" * 32
     assert nested["preview"] is False
     assert nested["saveAssets"] is True
+
+
+def test_negative_unity_scene_handles_bind_for_renderer_and_shared_impact() -> None:
+    payload = preview_payload()
+    payload["rendererSceneHandle"] = -40626
+    payload["sharedImpact"]["loadedRendererSlots"][0]["sceneHandle"] = -40626
+    refresh_impact_receipts(payload)
+
+    canonical, preview = bind_authoritative_preview(wrapper_arguments(), payload)
+
+    assert canonical["arguments"]["expectedRendererSceneHandle"] == -40626
+    assert preview["sharedImpact"]["loadedRendererSlots"][0]["sceneHandle"] == -40626
+
+
+@pytest.mark.parametrize("handle", [0, -2_147_483_649, 2_147_483_648])
+def test_invalid_renderer_scene_handles_fail_closed(handle: int) -> None:
+    payload = preview_payload()
+    payload["rendererSceneHandle"] = handle
+    payload["sharedImpact"]["loadedRendererSlots"][0]["sceneHandle"] = handle
+    refresh_impact_receipts(payload)
+
+    with pytest.raises(MaterialShaderAssignmentError):
+        bind_authoritative_preview(wrapper_arguments(), payload)
+
+
+def test_csharp_material_apply_accepts_signed_nonzero_scene_handles() -> None:
+    source = Path("Assets/VRCForge/Editor/MaterialShaderTool.cs").read_text(encoding="utf-8")
+
+    assert "expectedRendererSceneHandle == 0" in source
+    assert "expectedRendererSceneHandle <= 0" not in source
 
 
 @pytest.mark.parametrize(

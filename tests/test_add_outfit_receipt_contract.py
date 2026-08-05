@@ -10,8 +10,8 @@ CONTINUATION = (ROOT / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeApprove
 
 
 def test_prefab_tools_support_exact_approval_receipts_without_renaming_tools():
-    assert 'name: "vrc_instantiate_prefab"' in CRUD
-    assert 'name: "vrc_unpack_prefab"' in CRUD
+    assert 'toolId: "vrc_instantiate_prefab"' in CRUD
+    assert 'toolId: "vrc_unpack_prefab"' in CRUD
     for field in ("expectedPrefabGuid", "expectedScenePath", "expectedGlobalObjectId", "globalObjectId", "prefabGuid"):
         assert field in CRUD
     for field in ("expectedAssetDependencyHash", "expectedParentGlobalObjectId", "expectedResultPath", "unpacked"):

@@ -222,7 +222,12 @@ def build_launcher_metadata(options: ExternalAgentConnectorOptions | None = None
             "command": opts.smoke_command,
             "args": [opts.smoke_script],
             "preflightArgs": ["--enable-gateway"],
-            "liveWriteRollbackArgs": ["--enable-gateway", "--live-write-rollback"],
+            "liveWriteRollbackArgs": [
+                "--enable-gateway",
+                "--live-write-rollback",
+                "--parent-path",
+                "EXISTING_GAMEOBJECT_PATH",
+            ],
         },
     }
 

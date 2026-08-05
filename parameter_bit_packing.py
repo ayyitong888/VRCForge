@@ -43,6 +43,7 @@ SDK_CALLBACK_ASSEMBLY_NAME = "VRCSDKBase-Editor"
 SDK_CALLBACK_ASSEMBLY_VERSION = "1.0.0.0"
 SDK_CALLBACK_ASSEMBLY_PUBLIC_KEY_TOKEN = ""
 SDK_CALLBACK_ASSEMBLY_SHA256 = "952abdd2e9f696acba1fa773402d824fac4f0c6dd0b1b3488df8e4a3d870eba9"
+SDK_3_10_4_CALLBACK_ASSEMBLY_SHA256 = "459431464320780e90fdbccbd36c1d0657a4a74ec65e87afd8c68530725d080b"
 CALLBACK_TYPE = "VRC.SDKBase.Editor.BuildPipeline.VRCBuildPipelineCallbacks"
 CALLBACK_SIGNATURE = "public static System.Boolean OnPreprocessAvatar(UnityEngine.GameObject)"
 REGISTERED_HOOK_TYPE = "VF.Hooks.ParameterCompressorHook"
@@ -68,6 +69,7 @@ _CAPABILITY_PROFILES = {
         "callbackRosterDigest": MINIMAL_CALLBACK_ROSTER_DIGEST,
         "callbackAssemblySetCount": MINIMAL_CALLBACK_ASSEMBLY_SET_COUNT,
         "callbackAssemblySetDigest": MINIMAL_CALLBACK_ASSEMBLY_SET_DIGEST,
+        "sdkCallbackAssemblySha256": SDK_CALLBACK_ASSEMBLY_SHA256,
     },
     EXTENDED_CAPABILITY_PROFILE_ID: {
         "callbackAssemblySha256": EXTENDED_CALLBACK_ASSEMBLY_SHA256,
@@ -75,6 +77,15 @@ _CAPABILITY_PROFILES = {
         "callbackRosterDigest": EXTENDED_CALLBACK_ROSTER_DIGEST,
         "callbackAssemblySetCount": EXTENDED_CALLBACK_ASSEMBLY_SET_COUNT,
         "callbackAssemblySetDigest": EXTENDED_CALLBACK_ASSEMBLY_SET_DIGEST,
+        "sdkCallbackAssemblySha256": SDK_CALLBACK_ASSEMBLY_SHA256,
+    },
+    "embedded-sdk-3-10-4-v1": {
+        "callbackAssemblySha256": "4308c899e3b978a101e7cf3bfd117887b1fdf688ce53f559d8bf45106c6e34a0",
+        "callbackRosterCount": 21,
+        "callbackRosterDigest": "539f2d064d593e4e6010632f81e655c89fbece418b6249dcd6b641129ca78c96",
+        "callbackAssemblySetCount": 5,
+        "callbackAssemblySetDigest": "4b2ca1bdeef87a1a926e383e0036992875c4af8ee702e6da55107be5476279b6",
+        "sdkCallbackAssemblySha256": SDK_3_10_4_CALLBACK_ASSEMBLY_SHA256,
     },
 }
 
@@ -183,7 +194,7 @@ _APPLY_OUTPUT_KEYS = frozenset(
 )
 _APPLY_GENERATED_KEYS = frozenset(
     {
-        "root", "stagingRoot", "stagingRemoved", "treeDigestBefore",
+        "root", "stagingRoot", "stagingRemoved", "rootExistsBefore", "rootExistsAfter", "treeDigestBefore",
         "contentDigestBefore", "entryCountBefore", "byteCountBefore", "treeDigestAfter",
         "contentDigestAfter", "entryCountAfter", "byteCountAfter", "addedEntryCount",
         "modifiedEntryCount", "removedEntryCount", "targetResidue", "deltaDigest",
@@ -437,6 +448,7 @@ def bind_authoritative_preview(
             "expectedPackageRootIdentityDigest": capability["packageRootIdentityDigest"],
             "expectedRootIdentityDigest": generated["rootIdentityDigestBefore"],
             "expectedRootIdentityCount": generated["rootIdentityCountBefore"],
+            "expectedGeneratedRootExistsBefore": generated["exists"],
             "expectedGeneratedTreeDigestBefore": generated["treeDigestBefore"],
             "expectedGeneratedEntryCountBefore": generated["entryCountBefore"],
             "expectedGeneratedContentDigestBefore": generated["contentDigestBefore"],
@@ -700,6 +712,13 @@ def validate_apply_result(
         raise ParameterBitPackingError("Parameter bit-packing staging root is invalid.")
     if generated.get("stagingRemoved") is not True:
         raise ParameterBitPackingError("Parameter bit-packing staging root was not consumed.")
+    expected_generated_exists = args.get("expectedGeneratedRootExistsBefore")
+    if type(expected_generated_exists) is not bool:
+        raise ParameterBitPackingError("Parameter bit-packing approved generated root state is invalid.")
+    if generated.get("rootExistsBefore") is not expected_generated_exists:
+        raise ParameterBitPackingError("Parameter bit-packing generated root changed before apply.")
+    if generated.get("rootExistsAfter") is not expected_generated_exists:
+        raise ParameterBitPackingError("Parameter bit-packing did not restore the generated root state.")
     if _hex(generated.get("treeDigestBefore"), "treeDigestBefore") != _hex(
         args.get("expectedGeneratedTreeDigestBefore"), "expectedGeneratedTreeDigestBefore"
     ):
@@ -1442,7 +1461,7 @@ def _capability(value: Any) -> dict[str, Any]:
         "sdkCallbackAssemblyName": SDK_CALLBACK_ASSEMBLY_NAME,
         "sdkCallbackAssemblyVersion": SDK_CALLBACK_ASSEMBLY_VERSION,
         "sdkCallbackAssemblyPublicKeyToken": SDK_CALLBACK_ASSEMBLY_PUBLIC_KEY_TOKEN,
-        "sdkCallbackAssemblySha256": SDK_CALLBACK_ASSEMBLY_SHA256,
+        "sdkCallbackAssemblySha256": profile["sdkCallbackAssemblySha256"],
         "callbackType": CALLBACK_TYPE,
         "callbackSignature": CALLBACK_SIGNATURE,
         "registeredHookType": REGISTERED_HOOK_TYPE,
@@ -1484,8 +1503,13 @@ def _generated_before(value: Any) -> dict[str, Any]:
     root_identity_count = _strict_int(
         generated.get("rootIdentityCountBefore"), "rootIdentityCountBefore", 5, 32
     )
-    if generated.get("exists") is not True or generated.get("reparseFree") is not True:
+    exists = generated.get("exists")
+    if type(exists) is not bool or generated.get("reparseFree") is not True:
         raise ParameterBitPackingError("Parameter bit-packing generated root is not a safe directory.")
+    if not exists and (count != 0 or byte_count != 0):
+        raise ParameterBitPackingError(
+            "Parameter bit-packing absent generated baseline has filesystem residue."
+        )
     if generated.get("backupMaxEntries") != CACHE_BACKUP_MAX_ENTRIES:
         raise ParameterBitPackingError("Parameter bit-packing cache entry limit is invalid.")
     if generated.get("backupMaxBytes") != CACHE_BACKUP_MAX_BYTES:
@@ -1505,6 +1529,7 @@ def _generated_before(value: Any) -> dict[str, Any]:
         "protectedEntryCountBefore": protected_count,
         "rootIdentityDigestBefore": root_identity_digest,
         "rootIdentityCountBefore": root_identity_count,
+        "exists": exists,
     }
 
 

@@ -129,6 +129,27 @@ function Resolve-MakeNsisExe {
     throw "NSIS makensis.exe is required to build VRCForge_Web_Installer_x64.exe and VRCForge_Offline_Installer_x64.exe."
 }
 
+function Assert-MakeNsisVersion {
+    param(
+        [string]$MakeNsisExe
+    )
+
+    $versionOutput = @(& $MakeNsisExe /VERSION 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to verify the NSIS compiler version."
+    }
+    $versionText = ($versionOutput -join " ").Trim()
+    $match = [regex]::Match($versionText, "(?i)v?(?<major>[0-9]+)\.(?<minor>[0-9]+)")
+    if (-not $match.Success) {
+        throw "Unable to parse the NSIS compiler version: $versionText"
+    }
+    $major = [int]$match.Groups["major"].Value
+    $minor = [int]$match.Groups["minor"].Value
+    if ($major -lt 3 -or ($major -eq 3 -and $minor -lt 12)) {
+        throw "NSIS 3.12 or newer is required for the restricted elevated plugin staging boundary. found=$versionText"
+    }
+}
+
 function Get-StreamSha256 {
     param(
         [System.IO.Stream]$Stream
@@ -575,6 +596,9 @@ try {
     if ([string]::IsNullOrWhiteSpace($Version)) {
         $Version = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
     }
+    if ($Version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$") {
+        throw "Package version must be a normalized release token. requested=$Version"
+    }
     $sourceVersion = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
     if ($sourceVersion -ne $Version) {
         throw "Package version must match the source VERSION file. requested=$Version source=$sourceVersion"
@@ -622,10 +646,20 @@ try {
     }
 
     $dotnetExe = Resolve-DotNetExe
+    $pythonExe = Resolve-PythonExe
+    & $pythonExe .\packaging\scan_release_sensitive_strings.py --repo-root $repoRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release input sensitive-string scan failed."
+    }
     $nsisExe = Resolve-MakeNsisExe
+    Assert-MakeNsisVersion -MakeNsisExe $nsisExe
 
+    $expectedPayloadDownloadUrl = "https://github.com/ayyitong888/VRCForge/releases/download/v$Version/VRCForge_Windows_x64_$Version.zip"
     if ([string]::IsNullOrWhiteSpace($PayloadDownloadUrl)) {
-        throw "PayloadDownloadUrl is required for VRCForge_Web_Installer_x64.exe."
+        $PayloadDownloadUrl = $expectedPayloadDownloadUrl
+    }
+    if ($PayloadDownloadUrl -cne $expectedPayloadDownloadUrl) {
+        throw "PayloadDownloadUrl must exactly match the official version-bound release asset URL. expected=$expectedPayloadDownloadUrl"
     }
 
     & .\packaging\check_third_party_licenses.ps1
@@ -807,7 +841,23 @@ try {
 
     & .\packaging\build_backend.ps1 -OutputDir (Join-Path $payloadRoot "backend")
 
+    Copy-Item -LiteralPath .\src-tauri\icons\icon.ico -Destination (Join-Path $payloadRoot "VRCForge.ico") -Force
     Copy-Item -LiteralPath .\VERSION -Destination (Join-Path $payloadRoot "VERSION") -Force
+    Copy-Item -LiteralPath .\README.md -Destination (Join-Path $payloadRoot "README.md") -Force
+    Copy-Item -LiteralPath .\USER_MANUAL.md -Destination (Join-Path $payloadRoot "USER_MANUAL.md") -Force
+    Copy-Item -LiteralPath .\DEPENDENCIES.md -Destination (Join-Path $payloadRoot "DEPENDENCIES.md") -Force
+    $webPayloadHelper = Join-Path $repoRoot "installer\VRCForge_WebPayload.ps1"
+    if (-not (Test-Path -LiteralPath $webPayloadHelper -PathType Leaf)) {
+        throw "The secured web payload helper is missing: $webPayloadHelper"
+    }
+    $webPayloadHelperSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $webPayloadHelper).Hash.ToLowerInvariant()
+    New-Item -ItemType Directory -Force -Path (Join-Path $payloadRoot "installer") | Out-Null
+    $payloadWebPayloadHelper = Join-Path $payloadRoot "installer\VRCForge_WebPayload.ps1"
+    Copy-Item -LiteralPath $webPayloadHelper -Destination $payloadWebPayloadHelper -Force
+    $payloadWebPayloadHelperSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadWebPayloadHelper).Hash.ToLowerInvariant()
+    if ($payloadWebPayloadHelperSha256 -cne $webPayloadHelperSha256) {
+        throw "The secured web payload helper changed while it was being copied into the payload."
+    }
     Copy-Item -LiteralPath .\dashboard -Destination (Join-Path $payloadRoot "dashboard") -Recurse -Force
     Copy-Item -LiteralPath .\tools -Destination (Join-Path $payloadRoot "tools") -Recurse -Force
     Get-ChildItem -LiteralPath (Join-Path $payloadRoot "tools") -Recurse -Filter "*.ps1" -ErrorAction SilentlyContinue |
@@ -900,8 +950,12 @@ namespace VRCForge.Editor
     Remove-Item -LiteralPath $payloadZip -Force -ErrorAction SilentlyContinue
     Compress-Archive -Path (Join-Path $payloadRoot "*") -DestinationPath $payloadZip -Force
     $payloadSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadZip).Hash.ToLowerInvariant()
+    $payloadLength = [uint64](Get-Item -LiteralPath $payloadZip -Force).Length
+    if ($payloadLength -le 0) {
+        throw "Portable payload archive must not be empty."
+    }
 
-    & python .\scripts\smoke_packaged_backend.py `
+    & $pythonExe .\scripts\smoke_packaged_backend.py `
         --version $Version `
         --packaged-root $payloadRoot `
         --payload-zip $payloadZip `
@@ -913,14 +967,29 @@ namespace VRCForge.Editor
     $offlineInstaller = Join-Path $releaseRoot "VRCForge_Offline_Installer_x64.exe"
     $webInstaller = Join-Path $releaseRoot "VRCForge_Web_Installer_x64.exe"
 
-    & $nsisExe "/DVERSION=$Version" "/DPAYLOAD_DIR=$payloadRoot" "/DOUTFILE=$offlineInstaller" .\installer\VRCForge_Offline_Installer_x64.nsi
+    & $nsisExe "/DVERSION=$Version" "/DPAYLOAD_ZIP=$payloadZip" "/DPAYLOAD_SHA256=$payloadSha256" "/DPAYLOAD_LENGTH=$payloadLength" "/DWEB_PAYLOAD_HELPER=$payloadWebPayloadHelper" "/DWEB_PAYLOAD_HELPER_SHA256=$webPayloadHelperSha256" "/DOUTFILE=$offlineInstaller" .\installer\VRCForge_Offline_Installer_x64.nsi
     if ($LASTEXITCODE -ne 0) {
         throw "Offline NSIS build failed."
     }
 
-    & $nsisExe "/DVERSION=$Version" "/DDOWNLOAD_URL=$PayloadDownloadUrl" "/DPAYLOAD_SHA256=$payloadSha256" "/DOUTFILE=$webInstaller" .\installer\VRCForge_Web_Installer_x64.nsi
+    & $nsisExe "/DVERSION=$Version" "/DDOWNLOAD_URL=$PayloadDownloadUrl" "/DPAYLOAD_SHA256=$payloadSha256" "/DPAYLOAD_LENGTH=$payloadLength" "/DWEB_PAYLOAD_HELPER=$payloadWebPayloadHelper" "/DWEB_PAYLOAD_HELPER_SHA256=$webPayloadHelperSha256" "/DOUTFILE=$webInstaller" .\installer\VRCForge_Web_Installer_x64.nsi
     if ($LASTEXITCODE -ne 0) {
         throw "Web NSIS build failed."
+    }
+    $webPayloadHelperSha256AfterCompile = (Get-FileHash -Algorithm SHA256 -LiteralPath $webPayloadHelper).Hash.ToLowerInvariant()
+    $payloadWebPayloadHelperSha256AfterCompile = (Get-FileHash -Algorithm SHA256 -LiteralPath $payloadWebPayloadHelper).Hash.ToLowerInvariant()
+    if ($webPayloadHelperSha256AfterCompile -cne $webPayloadHelperSha256 -or
+        $payloadWebPayloadHelperSha256AfterCompile -cne $webPayloadHelperSha256) {
+        throw "The secured web payload helper source or snapshot changed while the installers were being compiled."
+    }
+
+    & $pythonExe .\packaging\scan_release_sensitive_strings.py `
+        --artifact $payloadZip `
+        --artifact $UnityPackagePath `
+        --artifact $offlineInstaller `
+        --artifact $webInstaller
+    if ($LASTEXITCODE -ne 0) {
+        throw "Release artifact sensitive-string scan failed."
     }
 
     $finalSourceVersion = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
@@ -956,6 +1025,12 @@ namespace VRCForge.Editor
         uvDownloadUrl = $uvDownloadUrl
         uvDownloadSha256 = $UvDownloadSha256
         uvRuntime = $uvRuntimeProvenance
+        webPayload = [ordered]@{
+            downloadUrl = $PayloadDownloadUrl
+            length = $payloadLength
+            sha256 = $payloadSha256
+            helperSha256 = $webPayloadHelperSha256
+        }
         packagedDoctorSelfTest = [ordered]@{
             schema = "vrcforge.packaged_backend_smoke.v2"
             passed = $true

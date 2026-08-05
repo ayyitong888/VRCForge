@@ -106,7 +106,12 @@ def test_connector_bundle_includes_launcher_and_smoke_metadata() -> None:
     assert bundle["launcher"]["stdioBridge"]["storesPlaintextToken"] is False
     assert bundle["launcher"]["smoke"]["args"] == [DEFAULT_SMOKE_SCRIPT]
     assert bundle["launcher"]["smoke"]["preflightArgs"] == ["--enable-gateway"]
-    assert bundle["launcher"]["smoke"]["liveWriteRollbackArgs"] == ["--enable-gateway", "--live-write-rollback"]
+    assert bundle["launcher"]["smoke"]["liveWriteRollbackArgs"] == [
+        "--enable-gateway",
+        "--live-write-rollback",
+        "--parent-path",
+        "EXISTING_GAMEOBJECT_PATH",
+    ]
     assert "codexStdio" in bundle["clientConfigs"]
     assert "claudeCodeStdio" in bundle["clientConfigs"]
     assert "claudeCowork" in bundle["clientConfigs"]

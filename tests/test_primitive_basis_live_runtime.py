@@ -153,6 +153,14 @@ class FakeRuntime:
             "projectPathDigest": runtime._hash_text(
                 runtime._normalize_project_root(self.project_root)
             ),
+            "_meta": {
+                "io.vrcforge/callAudit": {
+                    "requestId": 104,
+                    "toolName": runtime.FIXTURE_RELOAD_TOOL,
+                    "resultSummary": "complete",
+                    "durationMs": 1.25,
+                }
+            },
         }
 
     def inspect_component(self, _params: dict[str, object]) -> dict[str, object]:
@@ -444,6 +452,13 @@ def test_fixed_runtime_binds_apply_readback_restore_and_cleanup(tmp_path: Path) 
         project_binding_digest=project_binding,
     )
     report = live.build_live_matrix_report(fixtures, verified)
+    baseline_receipt = next(item for item in verified.receipts if item["phase"] == "baseline_comparison")
+    assert baseline_receipt["coreCallAudit"] == {
+        "requestId": 104,
+        "toolName": runtime.FIXTURE_RELOAD_TOOL,
+        "resultSummary": "complete",
+        "durationMs": 1.25,
+    }
     assert report["ok"] is False
     assert report["transcriptOk"] is True
     assert report["targetOk"] is False
@@ -523,7 +538,10 @@ def test_real_gateway_apply_and_restore_satisfy_live_lifecycle_contract(
         live.PrimitiveBasisLiveSession(bootstrap),
         callbacks,
     )
-    def reload_restored_fixture(path: Path) -> dict[str, object]:
+    def reload_restored_fixture(
+        path: Path,
+        _restore_prepare: dict[str, object],
+    ) -> dict[str, object]:
         assert path.resolve() == project_root.resolve()
         fake.persisted_component_present = False
         return fake.reload_fixture({})

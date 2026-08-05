@@ -1,0 +1,196 @@
+{
+  "schema": "vrcforge.unity_mcp_64_success_matrix.part.v1",
+  "part": "b",
+  "cases": [
+    {
+      "id": "find-assets-prefab",
+      "tool": "vrc_find_assets",
+      "mode": "read_only",
+      "minimalArguments": { "query": "${ASSET_SEARCH_NAME}", "typeName": "Prefab", "folder": "Assets", "limit": 1 },
+      "requiredFixtures": ["An imported Prefab matching ${ASSET_SEARCH_NAME} under Assets."],
+      "successFields": ["filter", "totalFound", "count", "assets[0].assetPath", "assets[0].guid", "assets[0].assetType"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "get-asset-info-prefab",
+      "tool": "vrc_get_asset_info",
+      "mode": "read_only",
+      "minimalArguments": { "assetPath": "${PREFAB_ASSET_PATH}" },
+      "requiredFixtures": ["${PREFAB_ASSET_PATH} is an existing project asset."],
+      "successFields": ["assetPath", "guid", "dependencyHash", "assetType", "importerType", "isPrefab"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "get-compile-errors",
+      "tool": "vrc_get_compile_errors",
+      "mode": "read_only",
+      "minimalArguments": { "maxErrors": 20 },
+      "requiredFixtures": ["Connected Core request has the current Unity process binding."],
+      "successFields": ["isCompiling", "hasErrors", "errorCount", "source", "errors"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "get-gameobject",
+      "tool": "vrc_get_gameobject",
+      "mode": "read_only",
+      "minimalArguments": { "gameObjectPath": "${TARGET_GAMEOBJECT_PATH}" },
+      "requiredFixtures": ["A unique scene GameObject at ${TARGET_GAMEOBJECT_PATH}."],
+      "successFields": ["gameObjectPath", "globalObjectId", "scenePath", "components", "children"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "get-property",
+      "tool": "vrc_get_property",
+      "mode": "read_only",
+      "minimalArguments": { "gameObjectPath": "${TARGET_GAMEOBJECT_PATH}", "componentType": "UnityEngine.Transform", "propertyPath": "position" },
+      "requiredFixtures": ["${TARGET_GAMEOBJECT_PATH} has a Transform component and readable position property."],
+      "successFields": ["gameObjectPath", "componentType", "componentIndex", "propertyPath", "valueType", "propertyValue"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "import-unitypackage",
+      "tool": "vrc_import_unitypackage",
+      "mode": "actual_write",
+      "minimalArguments": { "unityPackagePath": "${PACKAGE_PATH}", "projectPath": "${PROJECT_ROOT}", "expectedSha256": "${PACKAGE_SHA256_LOWER}", "expectedSize": "${PACKAGE_SIZE_BYTES}", "expectedAssetPaths": ["${PACKAGE_EXPECTED_ASSET_PATH}"], "interactive": false },
+      "requiredFixtures": ["A disposable .unitypackage with exact ${PACKAGE_SHA256_LOWER} and ${PACKAGE_SIZE_BYTES}.", "${PACKAGE_EXPECTED_ASSET_PATH} is an expected package asset."],
+      "successFields": ["projectPath", "unityPackagePath", "expectedSha256", "expectedSize", "expectedAssets[0].assetPath", "expectedAssets[0].guid"],
+      "cleanup": ["Remove only the fixture assets introduced by ${PACKAGE_PATH} through the approved cleanup lane.", "Refresh AssetDatabase and verify the fixture asset paths are absent."]
+    },
+    {
+      "id": "inspect-modular-avatar-component",
+      "tool": "vrc_inspect_modular_avatar_component",
+      "mode": "read_only",
+      "minimalArguments": { "gameObjectPath": "${MA_COMPONENT_HOST_PATH}", "componentType": "${MA_COMPONENT_TYPE}", "avatarPath": "${AVATAR_ROOT_PATH}" },
+      "requiredFixtures": ["A scene object with the requested installed Modular Avatar component type."],
+      "successFields": ["action", "gameObjectPath", "present", "count", "type", "sceneDirty", "references"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "inspect-primitive-basis-fixture",
+      "tool": "vrc_inspect_primitive_basis_fixture",
+      "mode": "read_only",
+      "minimalArguments": { "expectedRunIdDigest": "${PRIMITIVE_LIVE_RUN_ID_SHA256_LOWER}" },
+      "requiredFixtures": ["The fixed primitive-basis live fixture is active, saved, clean and bound to ${PRIMITIVE_LIVE_RUN_ID_SHA256_LOWER}."],
+      "successFields": ["schema", "scenarioId", "primitiveId", "activeScenePath", "activeSceneGuid", "sceneDirty", "transformPaths", "rendererPath"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "instantiate-prefab-preview",
+      "tool": "vrc_instantiate_prefab",
+      "mode": "preview",
+      "minimalArguments": { "assetPath": "${PREFAB_ASSET_PATH}", "parentPath": "${PREFAB_PARENT_PATH}", "name": "${PREFAB_INSTANCE_NAME}", "preview": true },
+      "requiredFixtures": ["${PREFAB_ASSET_PATH} is a Prefab asset.", "${PREFAB_PARENT_PATH} exists and ${PREFAB_INSTANCE_NAME} is absent below it."],
+      "successFields": ["action", "preview", "assetPath", "prefabGuid", "dependencyHash", "scenePath", "expectedResultPath"],
+      "cleanup": ["No cleanup: preview=true must leave the scene unchanged."]
+    },
+    {
+      "id": "manage-expression-menu-preview",
+      "tool": "vrc_manage_expression_menu",
+      "mode": "preview",
+      "minimalArguments": { "avatarPath": "${AVATAR_ROOT_PATH}", "action": "delete", "controlName": "${EXISTING_MENU_CONTROL}", "preview": true },
+      "requiredFixtures": ["Avatar has an expressions menu containing ${EXISTING_MENU_CONTROL}."],
+      "successFields": ["preview", "plan.action", "plan.avatarPath", "plan.controlName"],
+      "cleanup": ["No cleanup: preview=true must not alter the menu asset."]
+    },
+    {
+      "id": "manage-expression-parameters-preview",
+      "tool": "vrc_manage_expression_parameters",
+      "mode": "preview",
+      "minimalArguments": { "avatarPath": "${AVATAR_ROOT_PATH}", "action": "delete", "parameterName": "${EXISTING_EXPRESSION_PARAMETER}", "preview": true },
+      "requiredFixtures": ["Avatar has a VRCExpressionParameters asset containing ${EXISTING_EXPRESSION_PARAMETER}."],
+      "successFields": ["preview", "plan.action", "plan.assetPath", "plan.parameterName", "plan.currentCount"],
+      "cleanup": ["No cleanup: preview=true must not alter the parameters asset."]
+    },
+    {
+      "id": "manage-fx-animator-preview",
+      "tool": "vrc_manage_fx_animator",
+      "mode": "preview",
+      "minimalArguments": { "avatarPath": "${AVATAR_ROOT_PATH}", "action": "delete_state", "layerName": "${FX_LAYER_NAME}", "stateName": "${FX_STATE_NAME}", "preview": true },
+      "requiredFixtures": ["Avatar FX controller contains ${FX_LAYER_NAME}/${FX_STATE_NAME}."],
+      "successFields": ["preview", "plan.action", "plan.controllerPath", "plan.layerName", "plan.stateName"],
+      "cleanup": ["No cleanup: preview=true must not alter the FX controller."]
+    },
+    {
+      "id": "manage-wardrobe-preview",
+      "tool": "vrc_manage_wardrobe",
+      "mode": "preview",
+      "minimalArguments": { "avatarPath": "${AVATAR_ROOT_PATH}", "parameterName": "${WARDROBE_PARAMETER}", "action": "set_default", "targetName": "${WARDROBE_OUTFIT_NAME}", "preview": true },
+      "requiredFixtures": ["Avatar has an existing int-exclusive wardrobe with ${WARDROBE_PARAMETER} and ${WARDROBE_OUTFIT_NAME}."],
+      "successFields": ["preview", "plan.action", "plan.parameterName", "plan.targetValues", "plan.affectedMenuControls", "plan.affectedFxStates"],
+      "cleanup": ["No cleanup: preview=true must not alter wardrobe assets or objects."]
+    },
+    {
+      "id": "prepare-checkpoint",
+      "tool": "vrc_prepare_checkpoint",
+      "mode": "safety_control",
+      "minimalArguments": { "projectPath": "${PROJECT_ROOT}" },
+      "requiredFixtures": ["Bound App/Core safety-control request.", "All loaded scenes are saved under Assets and Unity is neither compiling nor in Play Mode."],
+      "successFields": ["projectPath", "scenes", "unityProcessId", "projectPathDigest"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "read-avatar-descriptor",
+      "tool": "vrc_read_avatar_descriptor",
+      "mode": "read_only",
+      "minimalArguments": { "avatarPath": "${AVATAR_ROOT_PATH}" },
+      "requiredFixtures": ["${AVATAR_ROOT_PATH} has a VRCAvatarDescriptor."],
+      "successFields": ["avatarPath", "viewPosition", "lipSync", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "refresh-asset-database",
+      "tool": "vrc_refresh_asset_database",
+      "mode": "actual_write",
+      "minimalArguments": { "projectPath": "${PROJECT_ROOT}", "resolvePackages": false },
+      "requiredFixtures": ["Bound Core is idle: not compiling and not in Play Mode."],
+      "successFields": ["projectPath", "packageResolve.requested"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "reload-after-checkpoint-restore",
+      "tool": "vrc_reload_after_checkpoint_restore",
+      "mode": "safety_control",
+      "minimalArguments": { "projectPath": "${PROJECT_ROOT}" },
+      "requiredFixtures": ["Bound App/Core safety-control request.", "The approved rollback restored every currently open project scene from checkpoint bytes."],
+      "successFields": ["projectPath", "scenes", "unityProcessId", "projectPathDigest"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "reload-primitive-basis-fixture",
+      "tool": "vrc_reload_primitive_basis_fixture",
+      "mode": "safety_control",
+      "minimalArguments": {},
+      "runtimeInjectedArguments": ["expectedRunIdDigest", "expectedProjectPathDigest", "expectedUnityProcessId", "expectedUnityProcessStartedAtUtc", "expectedUnityExecutableDigest"],
+      "requiredFixtures": ["The fixed primitive-basis live fixture is the active clean scene.", "The live runtime injects the one-shot bound process identity; callers must not fabricate it."],
+      "successFields": ["schema", "reloaded", "sceneDirty", "scenePath", "unityProcessId", "projectPathDigest"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "remove-component-preview",
+      "tool": "vrc_remove_component",
+      "mode": "preview",
+      "minimalArguments": { "gameObjectPath": "${REMOVABLE_COMPONENT_HOST_PATH}", "componentType": "BoxCollider", "componentIndex": 0, "preview": true },
+      "requiredFixtures": ["A fixture GameObject has a removable BoxCollider at index 0."],
+      "successFields": ["action", "preview", "gameObjectPath", "componentType", "componentIndex"],
+      "cleanup": ["No cleanup: preview=true must not remove the component."]
+    },
+    {
+      "id": "rename-gameobject-preview",
+      "tool": "vrc_rename_gameobject",
+      "mode": "preview",
+      "minimalArguments": { "gameObjectPath": "${RENAME_TARGET_PATH}", "newName": "${RENAME_TARGET_NEW_NAME}", "preview": true },
+      "requiredFixtures": ["A unique fixture GameObject at ${RENAME_TARGET_PATH}."],
+      "successFields": ["action", "preview", "oldName", "newName", "gameObjectPath"],
+      "cleanup": ["No cleanup: preview=true must not rename the object."]
+    },
+    {
+      "id": "reparent-gameobject-preview",
+      "tool": "vrc_reparent_gameobject",
+      "mode": "preview",
+      "minimalArguments": { "gameObjectPath": "${REPARENT_CHILD_PATH}", "newParentPath": "${REPARENT_PARENT_PATH}", "worldPositionStays": true, "preview": true },
+      "requiredFixtures": ["Distinct fixture child and parent exist; parent is neither the child nor its descendant."],
+      "successFields": ["action", "preview", "gameObjectPath", "oldParentPath", "newParentPath", "worldPositionStays"],
+      "cleanup": ["No cleanup: preview=true must not change hierarchy."]
+    }
+  ]
+}

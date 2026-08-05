@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_gateway import AgentGateway
 from unity_mcp_core_client import (
     MAX_FRAME_BYTES,
     MODERN_PROTOCOL_VERSION,
@@ -17,7 +18,7 @@ from unity_mcp_core_client import (
     UnityMcpCoreClient,
     UnityMcpCoreError,
 )
-from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES, PLANNING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
 
 
 def _read_line(connection: socket.socket) -> dict:
@@ -39,9 +40,29 @@ def _tool_entry(name: str) -> dict:
     is_read_only = name in READ_ONLY_TOOL_NAMES
     return {
         "name": name,
+        "description": (
+            f"When to use: Use {name} for its exact project operation.\n"
+            "When NOT to use: Do not use for unrelated or no-tool requests.\n"
+            f"Negative example: Mention {name} without asking for project work."
+        ),
         "inputSchema": {"type": "object"},
         "annotations": {"readOnlyHint": True} if is_read_only else {"destructiveHint": True},
-        "_meta": {"permission": "ReadOnly" if is_read_only else "RequiresApproval"},
+        "_meta": {
+            "permission": "ReadOnly" if is_read_only else "RequiresApproval",
+            "whenToUse": "Use for the exact described project operation.",
+            "doNotUse": "Do not use for general conversation or without explicit project intent.",
+            "negativeExample": f"Mention {name} without asking for project work.",
+            "exposureLayer": "planning" if name in PLANNING_TOOL_NAMES else "execution",
+        },
+    }
+
+
+def _successful_tool_result() -> dict:
+    return {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": "ok"}],
+        "structuredContent": {"success": True, "message": "ok"},
+        "isError": False,
     }
 
 
@@ -119,13 +140,14 @@ def _modern_handler(connection, seen):
     seen.append(request)
     params = request["message"]["params"]
     if request["message"]["method"] == "tools/list":
+        names = PLANNING_TOOL_NAMES if params.get("exposureLayer") == "planning" else EXPECTED_TOOL_NAMES
         result = {
             "resultType": "complete",
-            "tools": [_tool_entry(name) for name in sorted(EXPECTED_TOOL_NAMES)],
+            "tools": [_tool_entry(name) for name in sorted(names)],
         }
     else:
-        result = {"resultType": "complete", "content": [{"type": "text", "text": "ok"}], "isError": False}
-    _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 2, "result": result}})
+        result = _successful_tool_result()
+    _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": request["message"]["id"], "result": result}})
 
 
 def test_modern_default_discovers_and_sends_metadata_and_bearer_every_request(core_files):
@@ -133,7 +155,7 @@ def test_modern_default_discovers_and_sends_metadata_and_bearer_every_request(co
     server = FakeCore(_modern_handler)
     _write_descriptor(descriptor_path, descriptor, server.port)
     try:
-        assert [tool["name"] for tool in UnityMcpCoreClient(project).list_tools()] == sorted(EXPECTED_TOOL_NAMES)
+        assert [tool["name"] for tool in UnityMcpCoreClient(project).list_tools()] == sorted(PLANNING_TOOL_NAMES)
     finally:
         server.close()
     assert [item["message"]["method"] for item in server.seen] == ["server/discover", "tools/list"]
@@ -143,6 +165,19 @@ def test_modern_default_discovers_and_sends_metadata_and_bearer_every_request(co
         assert metadata["io.modelcontextprotocol/protocolVersion"] == MODERN_PROTOCOL_VERSION
         assert metadata["io.modelcontextprotocol/clientCapabilities"] == {}
         assert metadata["io.modelcontextprotocol/clientInfo"]["name"] == "VRCForge FastAPI"
+    assert server.seen[1]["message"]["params"]["exposureLayer"] == "planning"
+
+
+def test_execution_exposure_returns_the_exact_fixed_64(core_files):
+    project, descriptor_path, descriptor = core_files
+    server = FakeCore(_modern_handler)
+    _write_descriptor(descriptor_path, descriptor, server.port)
+    try:
+        tools = UnityMcpCoreClient(project).list_tools(exposure_layer="execution")
+        assert [tool["name"] for tool in tools] == sorted(EXPECTED_TOOL_NAMES)
+    finally:
+        server.close()
+    assert server.seen[1]["message"]["params"]["exposureLayer"] == "execution"
 
 
 def test_modern_call_keeps_execution_context_out_of_arguments(core_files):
@@ -161,13 +196,167 @@ def test_modern_call_keeps_execution_context_out_of_arguments(core_files):
     assert approved["clientProcessId"] == os.getpid()
     assert approved["projectHash"] == descriptor["projectHash"]
     assert approved["instanceId"] == descriptor["instanceId"]
+    audit = result["_meta"]["io.vrcforge/callAudit"]
+    assert audit["requestId"] == server.seen[1]["message"]["id"]
+    assert audit["toolName"] == "vrc_write"
+    assert audit["argumentKeys"] == ["value"]
+    assert len(audit["inputSha256"]) == 64
+    assert audit["resultSummary"] == "complete"
+    assert audit["durationMs"] >= 0
+
+
+def test_agent_gateway_persists_outer_to_core_request_trace_when_handler_strips_meta(
+    core_files, tmp_path: Path
+):
+    project, descriptor_path, descriptor = core_files
+    server = FakeCore(_modern_handler)
+    _write_descriptor(descriptor_path, descriptor, server.port)
+    gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+
+    def stripped_handler(_params):
+        result = UnityMcpCoreClient(project).call_tool("vrc_write", {"value": "trace"})
+        return {"ok": result["structuredContent"]["success"]}
+
+    gateway.register_tool(
+        "vrcforge_trace_fixture",
+        (
+            "When to use: Trace one Core call.\n"
+            "When NOT to use: Do not use outside this request-correlation fixture.\n"
+            "Negative example: Do not use for unrelated project operations."
+        ),
+        "read/debug",
+        stripped_handler,
+    )
+    try:
+        outcome = gateway.call_tool("vrcforge_trace_fixture", {}, agent_name="trace-test")
+    finally:
+        server.close()
+
+    assert outcome["result"] == {"ok": True}
+    trace = outcome["requestTrace"]
+    assert trace["gatewayRequestId"] == outcome["requestId"]
+    assert len(trace["unityCoreCallAudits"]) == 1
+    core_audit = trace["unityCoreCallAudits"][0]
+    assert core_audit["requestId"] == server.seen[1]["message"]["id"]
+    assert core_audit["toolName"] == "vrc_write"
+    assert core_audit["argumentKeys"] == ["value"]
+    assert len(core_audit["inputSha256"]) == 64
+
+    persisted = [
+        json.loads(line)
+        for line in gateway.audit_log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    tool_event = next(event for event in persisted if event.get("event") == "tool_call")
+    assert tool_event["requestId"] == outcome["requestId"]
+    assert tool_event["requestTrace"] == trace
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_error_class"),
+    [("transport", "TimeoutError"), ("validation", "UnityMcpCoreError")],
+)
+def test_agent_gateway_persists_outer_to_core_request_trace_on_core_failure(
+    core_files, tmp_path: Path, monkeypatch, failure_kind: str, expected_error_class: str
+):
+    project, descriptor_path, descriptor = core_files
+    _write_descriptor(descriptor_path, descriptor, 1)
+    client = UnityMcpCoreClient(project)
+    seen: dict[str, int] = {}
+
+    def failing_request(*_args, **kwargs):
+        seen["requestId"] = kwargs["request_id"]
+        if failure_kind == "transport":
+            raise TimeoutError("fixture transport timeout")
+        return {"resultType": "complete", "content": []}
+
+    monkeypatch.setattr(client, "_request", failing_request)
+    gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+
+    def failing_handler(_params):
+        return client.call_tool("vrc_write", {"value": "trace"})
+
+    gateway.register_tool(
+        "vrcforge_failure_trace_fixture",
+        (
+            "When to use: Trace one failing Core call.\n"
+            "When NOT to use: Do not use outside this request-correlation fixture.\n"
+            "Negative example: Do not use for unrelated project operations."
+        ),
+        "read/debug",
+        failing_handler,
+    )
+
+    outcome = gateway.call_tool("vrcforge_failure_trace_fixture", {}, agent_name="trace-test")
+
+    assert outcome["ok"] is False
+    trace = outcome["requestTrace"]
+    assert trace["gatewayRequestId"] == outcome["requestId"]
+    assert len(trace["unityCoreCallAudits"]) == 1
+    core_audit = trace["unityCoreCallAudits"][0]
+    assert core_audit["requestId"] == seen["requestId"]
+    assert core_audit["toolName"] == "vrc_write"
+    assert core_audit["argumentKeys"] == ["value"]
+    assert len(core_audit["inputSha256"]) == 64
+    assert core_audit["resultSummary"] == "error"
+    assert core_audit["errorClass"] == expected_error_class
+
+    persisted = [
+        json.loads(line)
+        for line in gateway.audit_log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    tool_event = next(event for event in persisted if event.get("event") == "tool_call")
+    assert tool_event["status"] == "error"
+    assert tool_event["requestId"] == outcome["requestId"]
+    assert tool_event["requestTrace"] == trace
+
+
+@pytest.mark.parametrize("result", [
+    {"resultType": "complete", "content": [{"type": "text", "text": "ok"}]},
+    {"resultType": "complete", "content": [], "structuredContent": {"success": True}, "isError": False},
+    {"resultType": "complete", "content": [{"type": "text", "text": "  "}], "structuredContent": {"success": True}, "isError": False},
+    {"resultType": "complete", "content": [{"type": "text", "text": "ok"}], "isError": False},
+    {"resultType": "complete", "content": [{"type": "text", "text": "ok"}], "structuredContent": {"success": False}, "isError": False},
+    {"resultType": "complete", "content": [{"type": "text", "text": "bad"}], "structuredContent": {"success": True}, "isError": True},
+])
+def test_call_rejects_malformed_or_inconsistent_tool_results(core_files, monkeypatch, result):
+    project, descriptor_path, descriptor = core_files
+    _write_descriptor(descriptor_path, descriptor, 1)
+    client = UnityMcpCoreClient(project)
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: result)
+
+    with pytest.raises(UnityMcpCoreError, match="invalid tool result"):
+        client.call_tool("vrc_get_compile_errors", {})
+
+
+def test_call_accepts_transport_tool_error_without_structured_content(core_files, monkeypatch):
+    project, descriptor_path, descriptor = core_files
+    _write_descriptor(descriptor_path, descriptor, 1)
+    client = UnityMcpCoreClient(project)
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: {
+        "resultType": "complete",
+        "content": [{"type": "text", "text": "rejected"}],
+        "isError": True,
+    })
+
+    result = client.call_tool("vrc_get_compile_errors", {})
+
+    assert result["isError"] is True
+    assert result["_meta"]["io.vrcforge/callAudit"]["resultSummary"] == "error"
 
 
 def test_setup_outfit_poll_lane_requires_exact_job_id_shape(core_files, monkeypatch):
     project, descriptor_path, descriptor = core_files
     _write_descriptor(descriptor_path, descriptor, 1)
     client = UnityMcpCoreClient(project)
-    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: {"resultType": "complete"})
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: _successful_tool_result())
     context = {"lane": "app_setup_outfit_poll"}
 
     for name, arguments in (
@@ -179,11 +368,55 @@ def test_setup_outfit_poll_lane_requires_exact_job_id_shape(core_files, monkeypa
         with pytest.raises(ValueError, match="exact jobId"):
             client.call_tool(name, arguments, execution_context=context)
 
-    assert client.call_tool(
+    result = client.call_tool(
         "vrc_setup_outfit",
         {"jobId": "a" * 32},
         execution_context=context,
-    ) == {"resultType": "complete"}
+    )
+    assert result["resultType"] == "complete"
+    assert result["_meta"]["io.vrcforge/callAudit"]["resultSummary"] == "complete"
+
+
+def test_unitypackage_import_poll_lane_requires_exact_job_id_shape(core_files, monkeypatch):
+    project, descriptor_path, descriptor = core_files
+    _write_descriptor(descriptor_path, descriptor, 1)
+    client = UnityMcpCoreClient(project)
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: _successful_tool_result())
+    context = {"lane": "app_unitypackage_import_poll"}
+
+    for name, arguments in (
+        ("vrc_import_unitypackage", {}),
+        ("vrc_import_unitypackage", {"jobId": "a" * 32, "projectPath": "x"}),
+        ("vrc_import_unitypackage", {"jobId": "not-a-guid"}),
+        ("vrc_setup_outfit", {"jobId": "a" * 32}),
+    ):
+        with pytest.raises(ValueError, match="exact jobId"):
+            client.call_tool(name, arguments, execution_context=context)
+
+    result = client.call_tool(
+        "vrc_import_unitypackage",
+        {"jobId": "a" * 32},
+        execution_context=context,
+    )
+    assert result["resultType"] == "complete"
+    assert result["_meta"]["io.vrcforge/callAudit"]["resultSummary"] == "complete"
+
+
+def test_new_client_reconnects_after_core_descriptor_moves_to_a_new_listener(core_files):
+    project, descriptor_path, descriptor = core_files
+    first = FakeCore(_modern_handler)
+    _write_descriptor(descriptor_path, descriptor, first.port)
+    try:
+        assert len(UnityMcpCoreClient(project).list_tools(exposure_layer="execution")) == EXPECTED_TOOL_COUNT
+    finally:
+        first.close()
+
+    second = FakeCore(_modern_handler)
+    _write_descriptor(descriptor_path, descriptor, second.port)
+    try:
+        assert len(UnityMcpCoreClient(project).list_tools(exposure_layer="execution")) == EXPECTED_TOOL_COUNT
+    finally:
+        second.close()
 
 
 def test_modern_requires_complete_result_and_descriptor_bindings(core_files):
@@ -220,7 +453,7 @@ def test_modern_requires_complete_result_and_descriptor_bindings(core_files):
     _write_descriptor(descriptor_path, descriptor, server.port)
     try:
         with pytest.raises(UnityMcpCoreError, match="incomplete"):
-            UnityMcpCoreClient(project).list_tools()
+            UnityMcpCoreClient(project).list_tools(exposure_layer="execution")
     finally:
         server.close()
 
@@ -276,7 +509,7 @@ def test_tools_list_requires_the_exact_fixed_64_name_contract(core_files, tool_n
     _write_descriptor(descriptor_path, descriptor, server.port)
     try:
         with pytest.raises(UnityMcpCoreError):
-            UnityMcpCoreClient(project).list_tools()
+            UnityMcpCoreClient(project).list_tools(exposure_layer="execution")
     finally:
         server.close()
 
@@ -305,7 +538,7 @@ def test_tools_list_rejects_permission_or_schema_drift(core_files, field: str):
     _write_descriptor(descriptor_path, descriptor, server.port)
     try:
         with pytest.raises(UnityMcpCoreError, match="metadata|permissions"):
-            UnityMcpCoreClient(project).list_tools()
+            UnityMcpCoreClient(project).list_tools(exposure_layer="execution")
     finally:
         server.close()
 

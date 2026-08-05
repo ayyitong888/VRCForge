@@ -4362,6 +4362,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-notification",
+ "tauri-winrt-notification",
  "tungstenite",
  "ureq",
  "windows-capture",

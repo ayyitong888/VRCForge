@@ -42,7 +42,28 @@ READ_ONLY_TOOL_NAMES = frozenset(
     }
 )
 
+# Tools visible before the agent explicitly enters execution mode. The extra
+# names are mixed-capability inspectors whose direct Core lane accepts only an
+# exact no-write payload; output-producing variants remain App-approved.
+PLANNING_TOOL_NAMES = READ_ONLY_TOOL_NAMES | frozenset(
+    {
+        "vrc_capture_scene_view",
+        "vrc_export_blendshapes",
+        "vrc_scan_animation_bindings",
+        "vrc_scan_avatar_controls",
+        "vrc_scan_avatar_items",
+        "vrc_scan_avatar_materials",
+        "vrc_scan_avatar_parameters",
+        "vrc_scan_avatar_performance",
+        "vrc_scan_fx_animator",
+        "vrc_scan_thry_avatar_performance",
+        "vrc_scan_wardrobe",
+    }
+)
+
 if len(EXPECTED_TOOL_NAMES) != EXPECTED_TOOL_COUNT:  # pragma: no cover - source-contract invariant.
     raise RuntimeError("VRCForge Unity MCP tool contract is incomplete.")
 if not READ_ONLY_TOOL_NAMES < EXPECTED_TOOL_NAMES:  # pragma: no cover - source-contract invariant.
     raise RuntimeError("VRCForge Unity MCP read-only contract is invalid.")
+if not READ_ONLY_TOOL_NAMES < PLANNING_TOOL_NAMES < EXPECTED_TOOL_NAMES:  # pragma: no cover
+    raise RuntimeError("VRCForge Unity MCP planning exposure contract is invalid.")

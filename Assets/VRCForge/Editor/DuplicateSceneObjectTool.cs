@@ -9,13 +9,45 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_duplicate_scene_object",
-        Description = "Preview or CreateNew-duplicate one saved scene hierarchy beneath an exact saved-scene parent."
+    [VRCForgeCommand(
+        toolId: "vrc_duplicate_scene_object",
+        Summary = "Preview or CreateNew-duplicate one saved scene hierarchy beneath an exact saved-scene parent."
     )]
     public static class DuplicateSceneObjectTool
     {
         public const string ToolName = "vrc_duplicate_scene_object";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Saved source scene asset path.", IsRequired = true)] public string sourceScenePath { get; set; } = "";
+            [VRCForgeInput("Exact source hierarchy path.", IsRequired = true)] public string sourceObjectPath { get; set; } = "";
+            [VRCForgeInput("Saved target parent scene path.", IsRequired = false)] public string targetParentScenePath { get; set; } = "";
+            [VRCForgeInput("Exact target parent hierarchy path.", IsRequired = false)] public string targetParentPath { get; set; } = "";
+            [VRCForgeInput("New duplicated object name.", IsRequired = false)] public string targetName { get; set; } = "";
+            [VRCForgeInput("Preserve world transform while parenting.", IsRequired = false)] public bool? preserveWorldTransform { get; set; } = false;
+            [VRCForgeInput("Return a non-mutating duplicate preview.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Save the target scene for apply.", IsRequired = false)] public bool? saveScene { get; set; } = false;
+            [VRCForgeInput("Must remain false; overwrite is unsupported.", IsRequired = false)] public bool? overwrite { get; set; } = false;
+            [VRCForgeInput("Expected active Unity project root from preview.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
+            [VRCForgeInput("Expected source scene GUID.", IsRequired = false)] public string expectedSourceSceneGuid { get; set; } = "";
+            [VRCForgeInput("Expected source scene handle.", IsRequired = false)] public int? expectedSourceSceneHandle { get; set; }
+            [VRCForgeInput("Expected source object identity.", IsRequired = false)] public string expectedSourceObjectId { get; set; } = "";
+            [VRCForgeInput("Expected source hierarchy digest.", IsRequired = false)] public string expectedSourceHierarchyDigest { get; set; } = "";
+            [VRCForgeInput("Expected source scene file digest.", IsRequired = false)] public string expectedSourceSceneFileDigest { get; set; } = "";
+            [VRCForgeInput("Expected source scene file identity.", IsRequired = false)] public string expectedSourceSceneFileIdentity { get; set; } = "";
+            [VRCForgeInput("Expected source scene meta digest.", IsRequired = false)] public string expectedSourceSceneMetaDigest { get; set; } = "";
+            [VRCForgeInput("Expected source scene meta identity.", IsRequired = false)] public string expectedSourceSceneMetaIdentity { get; set; } = "";
+            [VRCForgeInput("Expected target scene GUID.", IsRequired = false)] public string expectedTargetSceneGuid { get; set; } = "";
+            [VRCForgeInput("Expected target scene handle.", IsRequired = false)] public int? expectedTargetSceneHandle { get; set; }
+            [VRCForgeInput("Expected target parent object identity.", IsRequired = false)] public string expectedTargetParentObjectId { get; set; } = "";
+            [VRCForgeInput("Expected target parent hierarchy digest.", IsRequired = false)] public string expectedTargetParentHierarchyDigest { get; set; } = "";
+            [VRCForgeInput("Expected target scene file digest.", IsRequired = false)] public string expectedTargetSceneFileDigest { get; set; } = "";
+            [VRCForgeInput("Expected target scene file identity.", IsRequired = false)] public string expectedTargetSceneFileIdentity { get; set; } = "";
+            [VRCForgeInput("Expected target scene meta digest.", IsRequired = false)] public string expectedTargetSceneMetaDigest { get; set; } = "";
+            [VRCForgeInput("Expected target scene meta identity.", IsRequired = false)] public string expectedTargetSceneMetaIdentity { get; set; } = "";
+            [VRCForgeInput("Expected destination hierarchy path.", IsRequired = false)] public string expectedDestinationPath { get; set; } = "";
+            [VRCForgeInput("Expected preview digest.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
+        }
 
         public static object HandleCommand(JObject @params)
         {

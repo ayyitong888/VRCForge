@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -45,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--app-token-file", default=os.environ.get("VRCFORGE_APP_TOKEN_FILE", ""))
     parser.add_argument("--project-root", default=os.environ.get("VRCFORGE_SMOKE_PROJECT_ROOT", ""))
     parser.add_argument("--live-write-rollback", action="store_true")
+    parser.add_argument("--parent-path", default="", help="Exact existing GameObject path required for --live-write-rollback.")
     parser.add_argument("--optimizer-write-request", action="store_true", help="Request one optimizer apply through MCP and verify it remains pending; does not approve/apply it.")
     parser.add_argument("--optimizer-tool", default="vrcforge_optimization_lac_apply_request")
     parser.add_argument("--avatar-path", default="")
@@ -76,6 +78,9 @@ class ExternalAgentBridgeSmoke:
         self.previous_permission: str = ""
         self.checkpoint_id: str = ""
         self.created_object_path: str = ""
+        self.scene_path: Path | None = None
+        self.scene_project_path: str = ""
+        self.scene_sha256_before: str = ""
         self.rollback_done = False
         self.connector_payload: dict[str, Any] = {}
 
@@ -107,16 +112,15 @@ class ExternalAgentBridgeSmoke:
                 self.optimizer_write_request()
             if self.args.live_write_rollback:
                 self.live_write_rollback()
-            report["ok"] = all(bool(step.get("ok")) for step in self.steps)
         except Exception as exc:  # noqa: BLE001 - smoke should always produce an evidence report.
             self.step("smoke.error", {"ok": False, "error": str(exc)})
-            report["ok"] = False
         finally:
             if self.args.live_write_rollback and self.checkpoint_id and not self.rollback_done:
                 self.try_emergency_rollback()
                 if self.rollback_done:
                     self.verify_no_residue("rollback.verify_no_residue_after_emergency")
             self.restore_previous_state()
+            report["ok"] = all(bool(step.get("ok")) for step in self.steps)
             report["finishedAt"] = utc_now()
             report["steps"] = self.steps
             report["summary"] = self.build_summary(report["ok"])
@@ -290,12 +294,23 @@ class ExternalAgentBridgeSmoke:
         }
 
     def check_manifest(self) -> dict[str, Any]:
-        payload = self.request_json("GET", "/api/agent/manifest", token=self.gateway_token, allow_http_error=False)
+        planning = self.request_json(
+            "GET", "/api/agent/manifest?exposure_layer=planning", token=self.gateway_token, allow_http_error=False
+        )
+        payload = self.request_json(
+            "GET", "/api/agent/manifest?exposure_layer=execution", token=self.gateway_token, allow_http_error=False
+        )
+        planning_names = {
+            str(tool.get("name") or "")
+            for tool in ensure_list(planning.get("tools"))
+            if isinstance(tool, dict)
+        }
         tools = ensure_list(payload.get("tools"))
         tool_names = {str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)}
         write_targets = {str(item.get("name") or "") for item in ensure_list(payload.get("writeTargets")) if isinstance(item, dict)}
         return {
             "ok": bool(payload.get("enabled"))
+            and "vrcforge_request_apply" not in planning_names
             and "vrcforge_request_apply" in tool_names
             and "vrcforge_create_gameobject" in write_targets
             and not bool(HIDDEN_EXTERNAL_TOOLS & tool_names),
@@ -303,14 +318,42 @@ class ExternalAgentBridgeSmoke:
             "toolCount": len(tool_names),
             "writeTargetCount": len(write_targets),
             "requestApplyAdvertised": "vrcforge_request_apply" in tool_names,
+            "planningRequestApplyHidden": "vrcforge_request_apply" not in planning_names,
             "directApplyAdvertised": sorted(HIDDEN_EXTERNAL_TOOLS & tool_names),
             "createGameObjectTarget": "vrcforge_create_gameobject" in write_targets,
         }
 
     def live_write_rollback(self) -> None:
+        parent_path = str(self.args.parent_path or "").strip()
+        if not parent_path:
+            raise RuntimeError("--parent-path is required for --live-write-rollback.")
         project_root = self.resolve_project_root()
+
+        parent_before = ensure_dict(self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": parent_path}))
+        parent_result = ensure_dict(parent_before.get("result", parent_before))
+        parent_game_object_path = str(parent_result.get("gameObjectPath") or "")
+        scene_path_text = str(parent_result.get("scenePath") or "")
+        self.scene_project_path = scene_path_text
+        self.scene_path = resolve_project_scene_path(project_root, scene_path_text)
+        self.scene_sha256_before = sha256_path(self.scene_path) if self.scene_path else ""
+        self.step(
+            "write.parent_preflight",
+            {
+                "ok": bool(parent_result.get("ok"))
+                and parent_game_object_path == parent_path
+                and self.scene_path is not None
+                and bool(self.scene_sha256_before),
+                "requestedParentPath": parent_path,
+                "gameObjectPath": parent_game_object_path,
+                "scenePath": scene_path_text,
+                "sceneSha256Before": self.scene_sha256_before,
+            },
+        )
+        if not bool(parent_result.get("ok")) or parent_game_object_path != parent_path or not self.scene_path or not self.scene_sha256_before:
+            raise RuntimeError("The explicit parent path did not resolve to one saved scene object.")
+
         object_name = f"VRCForgeExternalAgentSmoke_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-        self.created_object_path = object_name
+        self.created_object_path = f"{parent_path}/{object_name}"
         compile_before = self.mcp_call_tool("vrcforge_get_compile_errors", {"maxErrors": 20})
         self.step("unity.compile_before", compile_result_summary(compile_before))
 
@@ -320,13 +363,13 @@ class ExternalAgentBridgeSmoke:
                 "target_tool": "vrcforge_create_gameobject",
                 "arguments": {
                     "name": object_name,
-                    "parentPath": "",
+                    "parentPath": parent_path,
                     "projectRoot": project_root,
                 },
                 "reason": "External agent bridge smoke: create a temporary scene GameObject, then prove rollback.",
                 "preview": {
                     "action": "create temporary scene GameObject",
-                    "objectPath": object_name,
+                    "objectPath": self.created_object_path,
                     "rollbackRequired": True,
                 },
             },
@@ -362,8 +405,36 @@ class ExternalAgentBridgeSmoke:
         if not self.checkpoint_id:
             raise RuntimeError("Approved write did not return a checkpoint id.")
 
-        exists_after = self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": object_name})
-        self.step("write.verify_object_exists", {"ok": bool(exists_after.get("result", exists_after).get("ok")), "objectPath": object_name})
+        create_result = ensure_dict(execution.get("result"))
+        exists_after = ensure_dict(self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": self.created_object_path}))
+        exists_payload = ensure_dict(exists_after.get("result", exists_after))
+        scene_sha256_after_apply = sha256_path(self.scene_path)
+        self.step(
+            "write.verify_persisted_create",
+            {
+                "ok": bool(exists_payload.get("ok"))
+                and str(exists_payload.get("gameObjectPath") or "") == self.created_object_path
+                and str(exists_payload.get("parentPath") or "") == parent_path
+                and str(exists_payload.get("scenePath") or "") == self.scene_project_path
+                and str(create_result.get("gameObjectPath") or "") == self.created_object_path
+                and str(create_result.get("parentPath") or "") == parent_path
+                and str(create_result.get("scenePath") or "") == self.scene_project_path
+                and create_result.get("sceneSaved") is True
+                and create_result.get("persistedReadback") is True
+                and bool(scene_sha256_after_apply)
+                and scene_sha256_after_apply != self.scene_sha256_before,
+                "gameObjectPath": exists_payload.get("gameObjectPath"),
+                "parentPath": exists_payload.get("parentPath"),
+                "readScenePath": exists_payload.get("scenePath"),
+                "createScenePath": create_result.get("scenePath"),
+                "createSceneSaved": create_result.get("sceneSaved"),
+                "createPersistedReadback": create_result.get("persistedReadback"),
+                "scenePath": self.scene_project_path,
+                "sceneSha256Before": self.scene_sha256_before,
+                "sceneSha256AfterApply": scene_sha256_after_apply,
+                "sceneChangedAfterApply": bool(scene_sha256_after_apply) and scene_sha256_after_apply != self.scene_sha256_before,
+            },
+        )
 
         self.record_validation_after_write(project_root)
 
@@ -373,7 +444,7 @@ class ExternalAgentBridgeSmoke:
                 "target_tool": "vrcforge_restore_checkpoint",
                 "arguments": {"checkpointId": self.checkpoint_id, "confirmRestore": True},
                 "reason": "External agent bridge smoke rollback proof.",
-                "preview": {"checkpointId": self.checkpoint_id, "objectPath": object_name},
+                "preview": {"checkpointId": self.checkpoint_id, "objectPath": self.created_object_path},
             },
         )
         rollback_approval = ensure_dict(rollback_request.get("result", rollback_request).get("approval"))
@@ -404,6 +475,16 @@ class ExternalAgentBridgeSmoke:
         )
 
         self.verify_no_residue("rollback.verify_no_residue")
+        scene_sha256_after_rollback = sha256_path(self.scene_path)
+        self.step(
+            "rollback.verify_scene_sha256",
+            {
+                "ok": bool(self.scene_sha256_before) and scene_sha256_after_rollback == self.scene_sha256_before,
+                "scenePath": self.scene_project_path,
+                "sceneSha256Before": self.scene_sha256_before,
+                "sceneSha256AfterRollback": scene_sha256_after_rollback,
+            },
+        )
         compile_after = self.mcp_call_tool("vrcforge_get_compile_errors", {"maxErrors": 20})
         self.step("unity.compile_after_rollback", compile_result_summary(compile_after))
 
@@ -556,14 +637,14 @@ class ExternalAgentBridgeSmoke:
             return {"ok": False, "error": payload["error"]}
         result = ensure_dict(payload.get("result"))
         if "structuredContent" in result:
-            return ensure_dict(result.get("structuredContent"))
+            return normalize_mcp_tool_payload(result.get("structuredContent"))
         content = ensure_list(result.get("content"))
         if content and isinstance(content[0], dict):
             text = str(content[0].get("text") or "")
             parsed = try_parse_json(text)
             if isinstance(parsed, dict):
-                return parsed
-        return result
+                return normalize_mcp_tool_payload(parsed)
+        return normalize_mcp_tool_payload(result)
 
     def mcp_rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         request_params = {
@@ -881,6 +962,73 @@ def compile_result_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "errorCount": int(result.get("errorCount") or 0),
         "isCompiling": bool(result.get("isCompiling")),
     }
+
+
+def resolve_project_scene_path(project_root: str, scene_path: str) -> Path | None:
+    """Resolve one Unity-reported project-relative scene without following it outside the project."""
+    try:
+        root = Path(project_root).expanduser().resolve(strict=True)
+        raw_scene_path = Path(str(scene_path or "").replace("\\", "/"))
+        if raw_scene_path.is_absolute() or raw_scene_path.suffix.casefold() != ".unity":
+            return None
+        candidate = (root / raw_scene_path).resolve(strict=True)
+        candidate.relative_to(root)
+        return candidate if candidate.is_file() else None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def sha256_path(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return ""
+
+
+def normalize_mcp_tool_payload(value: Any) -> dict[str, Any]:
+    """Unwrap the Agent Gateway and Unity Core structured-result envelopes."""
+    candidate = ensure_dict(value)
+    for _ in range(6):
+        nested_result = candidate.get("result")
+        if isinstance(nested_result, dict) and ("agent" in candidate or "tool" in candidate):
+            candidate = nested_result
+            continue
+        structured = candidate.get("structuredContent")
+        if isinstance(structured, dict):
+            candidate = structured
+            continue
+        content = ensure_list(candidate.get("content"))
+        if content and isinstance(content[0], dict):
+            parsed = try_parse_json(str(content[0].get("text") or ""))
+            if isinstance(parsed, dict):
+                candidate = parsed
+                continue
+        data = candidate.get("data")
+        if isinstance(data, dict):
+            normalized = dict(data)
+            if "success" in candidate:
+                normalized.setdefault("ok", candidate.get("success") is True)
+            if candidate.get("code") not in (None, ""):
+                normalized.setdefault("code", candidate.get("code"))
+            if candidate.get("error") not in (None, ""):
+                normalized.setdefault("error", candidate.get("error"))
+            if candidate.get("message"):
+                normalized.setdefault("message", candidate.get("message"))
+            return normalized
+        if "success" in candidate and "ok" not in candidate:
+            normalized = dict(candidate)
+            normalized["ok"] = candidate.get("success") is True
+            if normalized["ok"] is False and candidate.get("message"):
+                normalized.setdefault("error", candidate.get("message"))
+            return normalized
+        return candidate
+    return candidate
 
 
 def ensure_dict(value: Any) -> dict[str, Any]:

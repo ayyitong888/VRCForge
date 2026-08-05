@@ -17,9 +17,9 @@ namespace VRCForge.Editor
     /// The optional dependency is resolved by its pinned public type contract so
     /// projects without UniVRM continue to compile and never receive a fake file.
     /// </summary>
-    [VRCForgeTool(
-        name: "vrc_export_vrm",
-        Description = "Export one loaded humanoid avatar as a validated VRM 1.0 file through an installed compatible UniVRM package."
+    [VRCForgeCommand(
+        toolId: "vrc_export_vrm",
+        Summary = "Export one loaded humanoid avatar as a validated VRM 1.0 file through an installed compatible UniVRM package."
     )]
     public static class VrmExporter
     {
@@ -35,28 +35,28 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [VRCForgeParameter("Exact avatar hierarchy path, or an avatar root name when it is unique. Leave empty only when exactly one VRChat avatar or valid Humanoid model is loaded.", Required = false)]
+            [VRCForgeInput("Exact avatar hierarchy path, or an avatar root name when it is unique. Leave empty only when exactly one VRChat avatar or valid Humanoid model is loaded.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
 
-            [VRCForgeParameter("Required VRM author/creator name written into the exported metadata.", Required = true)]
+            [VRCForgeInput("Required VRM author/creator name written into the exported metadata.", IsRequired = true)]
             public string author { get; set; } = "";
 
-            [VRCForgeParameter("VRM title. Defaults to the selected avatar root name.", Required = false)]
+            [VRCForgeInput("VRM title. Defaults to the selected avatar root name.", IsRequired = false)]
             public string title { get; set; } = "";
 
-            [VRCForgeParameter("Avatar content version written into VRM metadata. Defaults to 1.0.", Required = false)]
+            [VRCForgeInput("Avatar content version written into VRM metadata. Defaults to 1.0.", IsRequired = false)]
             public string version { get; set; } = "1.0";
 
-            [VRCForgeParameter("Must be true to confirm that the user has the rights needed to export and distribute this avatar content.", Required = true)]
+            [VRCForgeInput("Must be true to confirm that the user has the rights needed to export and distribute this avatar content.", IsRequired = true)]
             public bool? confirmRights { get; set; } = false;
 
-            [VRCForgeParameter("Output path under Assets/VRCForge/Exports. Must use the .vrm extension.", Required = false)]
+            [VRCForgeInput("Output path under Assets/VRCForge/Exports. Must use the .vrm extension.", IsRequired = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [VRCForgeParameter("Replace an existing managed .vrm output. Defaults to false.", Required = false)]
+            [VRCForgeInput("Replace an existing managed .vrm output. Defaults to false.", IsRequired = false)]
             public bool? overwrite { get; set; } = false;
 
-            [VRCForgeParameter("Refresh Unity's AssetDatabase after a validated export.", Required = false)]
+            [VRCForgeInput("Refresh Unity's AssetDatabase after a validated export.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 
@@ -66,13 +66,13 @@ namespace VRCForge.Editor
             try
             {
                 var result = Export(parameters);
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Exported and validated VRM 1.0 for '{result.avatarPath}'.",
                     result);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"VRM 1.0 export failed: {UnwrapMessage(ex)}");
+                return VRCForgeToolResult.Failed($"VRM 1.0 export failed: {UnwrapMessage(ex)}");
             }
         }
 

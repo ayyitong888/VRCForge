@@ -1296,6 +1296,9 @@ def test_dashboard_fastapi_preview_request_approval_and_apply_are_one_bound_chai
             client.close()
 
     assert [call.args[1] for call in invoke.call_args_list] == [TOOL_NAME] * 4
+    preview_calls = [call for call in invoke.call_args_list if call.args[2].get("preview") is True]
+    assert preview_calls
+    assert all(call.kwargs.get("execution_context") == {"lane": "app_preview"} for call in preview_calls)
     assert not any(
         key.startswith("expected")
         for key in invoke.call_args_list[-2].args[2]

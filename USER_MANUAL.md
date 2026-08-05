@@ -5,7 +5,7 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.3.6`. Latest published stable release:
+Current source / target release: `1.4.0`. Latest published stable release:
 `1.3.6` (`v1.3.6`).
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
@@ -106,7 +106,7 @@ Developers and release testers can run:
 
 ```powershell
 npm run smoke:external-agent
-npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject
+npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject --parent-path Avatar
 ```
 
 A passing live smoke must show that `vrcforge_request_apply` is available,
@@ -176,6 +176,13 @@ blocked reason before it can be treated as stable.
    and generated-residue sections before requesting a write.
 
 ### First Rollback
+
+When a write needs approval, its card replaces only the conversation composer;
+chat history remains visible. The main button allows once, the chevron contains
+the eligible future-category choice, and reject makes no change. Windows
+notifications are an additional VRCForge-branded decision surface; the App card
+remains the authoritative place to inspect details. Restore always requires a
+separate approval.
 
 1. Apply only one small supervised change.
 2. Confirm the approval card created a checkpoint id.
@@ -295,6 +302,18 @@ alias key and identity map stay local and are never bundled.
 - `VRCForge.unitypackage`, containing the complete VRCForge-owned MCP Core and 64 Unity tools
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
+
+To uninstall the Unity integration, choose `VRCForge > Uninstall VRCForge...`
+inside the project and confirm. This stops the project-owned MCP Core, clears
+its versioned auto-connect EditorPrefs key, and removes `Assets/VRCForge`.
+Deletion failure is reported without a second destructive retry. This command
+does not delete desktop user data.
+
+`1.4.0` is a breaking install boundary. Do not overwrite-install the App or
+import its Unity package over `1.3.6`. Close VRCForge and Unity, remove the old
+App/runtime and old project integration, then install and import `1.4.0` fresh.
+Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
+`AGENTS.md`, chats, memories, checkpoints, and unrelated Unity project assets.
 
 - Windows
 - Unity 2022.3 LTS

@@ -11,9 +11,9 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_export_blendshapes",
-        Description = "Export all VRChat avatar blendshapes in the open scenes to JSON for LLM semantic matching."
+    [VRCForgeCommand(
+        toolId: "vrc_export_blendshapes",
+        Summary = "Export all VRChat avatar blendshapes in the open scenes to JSON for LLM semantic matching."
     )]
     public static class BlendshapeExporter
     {
@@ -22,13 +22,13 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
-            [VRCForgeParameter("Asset-relative or absolute export path.", Required = false)]
+            [VRCForgeInput("Asset-relative or absolute export path.", IsRequired = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeInput("Refresh the Unity AssetDatabase after writing JSON.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = true;
 
-            [VRCForgeParameter("Return the inventory without writing a file. FastAPI read lane only.", Required = false)]
+            [VRCForgeInput("Return the inventory without writing a file. FastAPI read lane only.", IsRequired = false)]
             public bool? returnPayloadOnly { get; set; } = false;
         }
 
@@ -48,7 +48,7 @@ namespace VRCForge.Editor
                 if (parameters.returnPayloadOnly == true)
                 {
                     var payload = BuildPayload();
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Read {payload.summary.blendshapeCount} blendshapes from {payload.summary.rendererCount} renderers.",
                         payload);
                 }
@@ -56,7 +56,7 @@ namespace VRCForge.Editor
                     string.IsNullOrWhiteSpace(parameters.outputPath) ? DefaultOutputPath : parameters.outputPath,
                     parameters.refreshAssets ?? true);
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Exported {exportResult.summary.blendshapeCount} blendshapes from {exportResult.summary.rendererCount} renderers.",
                     new
                     {
@@ -68,7 +68,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Blendshape export failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Blendshape export failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

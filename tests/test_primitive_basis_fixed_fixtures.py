@@ -33,8 +33,8 @@ RUNTIME_GENERATED_FIXTURES = {
             "primitive-basis-component-feature-application-ready.json"
         ),
         "packages": {
-            "com.vrchat.avatars": "3.10.3",
-            "com.vrchat.base": "3.10.3",
+            "com.vrchat.avatars": "3.10.4",
+            "com.vrchat.base": "3.10.4",
             "com.vrcfury.vrcfury": "1.1334.0",
         },
         "tokens": (
@@ -60,8 +60,8 @@ RUNTIME_GENERATED_FIXTURES = {
             "Library/VRCForge/primitive-basis-parameter-optimization-ready.json"
         ),
         "packages": {
-            "com.vrchat.avatars": "3.10.3",
-            "com.vrchat.base": "3.10.3",
+            "com.vrchat.avatars": "3.10.4",
+            "com.vrchat.base": "3.10.4",
             "com.vrcfury.vrcfury": "1.1334.0",
             "nadena.dev.ndmf": "1.13.1",
         },
@@ -91,8 +91,8 @@ RUNTIME_GENERATED_FIXTURES = {
             "Library/VRCForge/primitive-basis-cross-avatar-accessory-copy-ready.json"
         ),
         "packages": {
-            "com.vrchat.avatars": "3.10.3",
-            "com.vrchat.base": "3.10.3",
+            "com.vrchat.avatars": "3.10.4",
+            "com.vrchat.base": "3.10.4",
         },
         "tokens": (
             'new GameObject("AvatarA")',
@@ -145,10 +145,10 @@ def test_all_four_fixed_fixture_roots_materialize_from_pinned_sources() -> None:
     )
 
     assert fixtures.descriptor_digest == (
-        "224bece5f977b9e82dfdb255ced6a90abd92ed821d2f3fe6e69195994276ac7a"
+        "9529e953b6dd428fa396be33e0da3d86ccc89339229be76059d8d25520d63a04"
     )
     assert fixtures.digest == (
-        "a634ab6ed15afc66c2b9e808f42e30189b7e9c19f04af4f4bff2d0d51accc5fa"
+        "01d548c4e6654fafcb21f6a4158e5da638764f33f2b77b5555fdd21b7ec12c8c"
     )
     assert [fixture.scenario_id for fixture in fixtures.fixtures] == list(
         matrix.SCENARIO_ORDER

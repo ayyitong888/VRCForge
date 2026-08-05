@@ -166,6 +166,45 @@ def test_compile_status_returns_unwrapped_authoritative_payload(monkeypatch, tmp
     assert calls == [("vrc_get_compile_errors", {"maxErrors": 20, **guard})]
 
 
+def test_reload_projection_keeps_only_safe_core_audit(monkeypatch, tmp_path: Path) -> None:
+    project = tmp_path / "FixtureProject"
+    project.mkdir()
+    settings_path = tmp_path / "settings.json"
+    configure_state(monkeypatch, project, settings_path)
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: fixed_settings(project))
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        lambda *_args, **_kwargs: dashboard_server.McpResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            payload={
+                "structuredContent": {"ok": True, "reloaded": True},
+                "_meta": {
+                    "io.vrcforge/callAudit": {
+                        "requestId": 77,
+                        "toolName": "vrc_reload_primitive_basis_fixture",
+                        "resultSummary": "complete",
+                        "durationMs": 2.5,
+                        "argumentKeys": ["expectedRunIdDigest"],
+                        "inputSha256": "a" * 64,
+                    }
+                },
+            },
+        ),
+    )
+    connection = dashboard_server.PrimitiveBasisLiveUnityConnection()
+    connection.bind({"projectPath": str(project)})
+    payload = connection.reload_fixture({"expectedRunIdDigest": "secret-not-retained"})
+    assert payload["_meta"]["io.vrcforge/callAudit"] == {
+        "requestId": 77,
+        "toolName": "vrc_reload_primitive_basis_fixture",
+        "resultSummary": "complete",
+        "durationMs": 2.5,
+    }
+
+
 def test_checkpoint_callbacks_preserve_guarded_unity_identity(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -217,14 +256,35 @@ def test_checkpoint_callbacks_preserve_guarded_unity_identity(
     connection.bind({"projectPath": str(project)})
 
     prepared = connection.prepare_checkpoint(project)
-    reloaded = connection.reload_checkpoint(project)
+    monkeypatch.setattr(dashboard_server, "PRIMITIVE_BASIS_LIVE_CONNECTION", connection)
+    restore_prepared = dashboard_server.prepare_unity_checkpoint_restore_sync(project)
+    restore_prepare = {
+        "ok": True,
+        "scenes": ["Assets/Fixture.unity", "Assets/Lighting.unity"],
+        "activeScenePath": "Assets/Lighting.unity",
+    }
+    reloaded = connection.reload_checkpoint(project, restore_prepare)
 
     assert {key: prepared[key] for key in identity} == identity
+    assert {key: restore_prepared[key] for key in identity} == identity
     assert {key: reloaded[key] for key in identity} == identity
     expected_arguments = {"projectPath": str(project), **guard}
     assert calls == [
         ("vrc_prepare_checkpoint", expected_arguments),
-        ("vrc_reload_after_checkpoint_restore", expected_arguments),
+        (
+            "vrc_reload_after_checkpoint_restore",
+            {"projectPath": str(project), "phase": "prepare_restore", **guard},
+        ),
+        (
+            "vrc_reload_after_checkpoint_restore",
+            {
+                "projectPath": str(project),
+                "phase": "reload",
+                "scenePaths": restore_prepare["scenes"],
+                "activeScenePath": restore_prepare["activeScenePath"],
+                **guard,
+            },
+        ),
     ]
 
 

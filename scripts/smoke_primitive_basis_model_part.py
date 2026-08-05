@@ -49,8 +49,8 @@ FIXTURE_TEMPLATE = (
 )
 MODEL_SCENARIO_ID = "model_part_composition"
 REQUIRED_EXTERNAL_PACKAGES = {
-    "com.vrchat.base": "3.10.3",
-    "com.vrchat.avatars": "3.10.3",
+    "com.vrchat.base": "3.10.4",
+    "com.vrchat.avatars": "3.10.4",
     "nadena.dev.ndmf": "1.13.1",
     "nadena.dev.modular-avatar": "1.17.1",
 }
@@ -175,6 +175,7 @@ class PackagedModelPartSmoke:
         started_at = _utc_now()
         finalization: dict[str, Any] | None = None
         matrix_report: dict[str, Any] | None = None
+        verified = None
         try:
             self.prepared = self.prepare()
             self._launch_desktop()
@@ -307,6 +308,20 @@ class PackagedModelPartSmoke:
             },
             "matrix": matrix_report or {},
             "finalization": finalization or {},
+            "verifiedFinalization": (
+                {
+                    "runId": verified.run_id,
+                    "scenarioId": verified.scenario_id,
+                    "primitiveId": verified.primitive_id,
+                    "fixtureDigest": verified.fixture_digest,
+                    "projectBindingDigest": verified.project_binding_digest,
+                    "runtimeBindingDigest": verified.runtime_binding_digest,
+                    "attestationDigest": verified.attestation_digest,
+                    "finalizedAt": verified.finalized_at,
+                }
+                if verified is not None
+                else {}
+            ),
         }
         safe = redact_public_evidence(report)
         if safe != report:

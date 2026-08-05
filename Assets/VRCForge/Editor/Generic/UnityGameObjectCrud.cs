@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
@@ -26,10 +28,10 @@ namespace VRCForge.Editor
     // what *would* change without mutating, feeding the per-action approval card.
     // ------------------------------------------------------------------
 
-    [VRCForgeTool(
-        name: "vrc_get_gameobject",
-        Description = "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components (read-only).",
-        Permission = VRCForgeToolPermission.ReadOnly
+    [VRCForgeCommand(
+        toolId: "vrc_get_gameobject",
+        Summary = "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components (read-only).",
+        Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class GetGameObjectTool
     {
@@ -37,7 +39,7 @@ namespace VRCForge.Editor
 
         public class GetGameObjectParameters
         {
-            [VRCForgeParameter("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", Required = true)]
+            [VRCForgeInput("Full hierarchy path (e.g. 'Avatar/Body') or unique name of the GameObject.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
         }
 
@@ -90,20 +92,20 @@ namespace VRCForge.Editor
                     children = children
                 };
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"GameObject '{go.name}' at '{payload.gameObjectPath}' ({components.Length} component(s), {t.childCount} child(ren)).",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Get GameObject failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Get GameObject failed: {ex.Message}");
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_create_gameobject",
-        Description = "Create a new empty GameObject, optionally parented under another scene object (Undo-registered). Supports preview mode."
+    [VRCForgeCommand(
+        toolId: "vrc_create_gameobject",
+        Summary = "Create and save a new empty GameObject, optionally parented under another scene object (Undo-registered). Supports preview mode."
     )]
     public static class CreateGameObjectTool
     {
@@ -111,22 +113,28 @@ namespace VRCForge.Editor
 
         public class CreateGameObjectParameters
         {
-            [VRCForgeParameter("Name for the new GameObject (default 'GameObject').", Required = false)]
+            [VRCForgeInput("Name for the new GameObject (default 'GameObject').", IsRequired = false)]
             public string name { get; set; } = "";
 
-            [VRCForgeParameter("Full hierarchy path or unique name of the parent GameObject. Empty creates at the active scene root.", Required = false)]
+            [VRCForgeInput("Full hierarchy path or unique name of the parent GameObject. Empty creates at the active scene root.", IsRequired = false)]
             public string parentPath { get; set; } = "";
 
-            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
         }
 
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<CreateGameObjectParameters>() ?? new CreateGameObjectParameters();
+            var mutationStarted = false;
+            SavedSceneSnapshot beforeScene = null;
+            GameObject created = null;
+            var createdPath = string.Empty;
             try
             {
-                var name = string.IsNullOrWhiteSpace(p.name) ? "GameObject" : p.name.Trim();
+                var name = SceneObjectCopyCore.NormalizeObjectName(
+                    string.IsNullOrWhiteSpace(p.name) ? "GameObject" : p.name.Trim(),
+                    "name");
                 var parentPath = ComponentCrudCore.NormalizePath(p.parentPath);
                 GameObject parent = null;
                 if (!string.IsNullOrEmpty(parentPath))
@@ -134,6 +142,7 @@ namespace VRCForge.Editor
                     parent = ComponentCrudCore.ResolveGameObject(parentPath);
                 }
                 var resolvedParentPath = parent != null ? ComponentCrudCore.GetHierarchyPath(parent.transform) : null;
+                var targetScene = SceneManager.GetActiveScene();
 
                 if (p.preview ?? false)
                 {
@@ -144,43 +153,128 @@ namespace VRCForge.Editor
                         name,
                         parentPath = resolvedParentPath
                     };
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         parent != null
                             ? $"Preview: would create '{name}' under '{resolvedParentPath}'."
                             : $"Preview: would create '{name}' at the active scene root.",
                         previewPayload);
                 }
 
-                var go = new GameObject(name);
-                Undo.RegisterCreatedObjectUndo(go, $"Create {name}");
+                if (parent != null && parent.scene.handle != targetScene.handle)
+                {
+                    return VRCForgeToolResult.Failed("Create GameObject requires the parent to belong to the active scene.");
+                }
+                beforeScene = SceneObjectCopyCore.ResolveSavedScene(targetScene.path, "target scene");
+                if (beforeScene.Handle != targetScene.handle)
+                {
+                    throw new InvalidOperationException("The active saved scene changed before creation.");
+                }
+                createdPath = string.IsNullOrEmpty(resolvedParentPath)
+                    ? name
+                    : resolvedParentPath + "/" + name;
+                if (AssetPrefabCore.CountHierarchyPath(createdPath, targetScene.handle) != 0)
+                {
+                    return VRCForgeToolResult.Failed("Create GameObject requires a unique destination hierarchy path.");
+                }
+
+                created = new GameObject(name);
+                mutationStarted = true;
+                Undo.RegisterCreatedObjectUndo(created, $"Create {name}");
                 if (parent != null)
                 {
-                    Undo.SetTransformParent(go.transform, parent.transform, $"Create {name} under parent");
+                    Undo.SetTransformParent(created.transform, parent.transform, $"Create {name} under parent");
                 }
-                EditorUtility.SetDirty(go);
+                EditorUtility.SetDirty(created);
+                EditorSceneManager.MarkSceneDirty(targetScene);
 
-                var goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
+                if (!EditorSceneManager.SaveScene(targetScene))
+                {
+                    throw new InvalidOperationException("The target scene could not be saved.");
+                }
+                var afterScene = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "saved target scene");
+                var readback = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    afterScene.Scene,
+                    createdPath,
+                    "created object");
+                if (!ReferenceEquals(readback, created)
+                    || AssetPrefabCore.CountHierarchyPath(createdPath, afterScene.Handle) != 1
+                    || afterScene.Guid != beforeScene.Guid
+                    || afterScene.Handle != beforeScene.Handle
+                    || afterScene.FileDigest == beforeScene.FileDigest
+                    || afterScene.MetaDigest != beforeScene.MetaDigest
+                    || afterScene.MetaIdentity != beforeScene.MetaIdentity)
+                {
+                    throw new InvalidOperationException("The created GameObject persisted readback was not exact.");
+                }
+                var globalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(readback);
                 var payload = new
                 {
                     action = "create_gameobject",
                     preview = false,
-                    name = go.name,
-                    gameObjectPath = goPath,
+                    name = readback.name,
+                    gameObjectPath = createdPath,
                     parentPath = resolvedParentPath,
-                    instanceId = go.GetInstanceID()
+                    instanceId = readback.GetInstanceID(),
+                    globalObjectId = globalObjectId.ToString(),
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    sceneFileDigestBefore = beforeScene.FileDigest,
+                    sceneFileDigestAfter = afterScene.FileDigest,
+                    sceneFileIdentityBefore = beforeScene.FileIdentity,
+                    sceneFileIdentityAfter = afterScene.FileIdentity
                 };
-                return new SuccessResponse($"Created GameObject '{goPath}'.", payload);
+                return VRCForgeToolResult.Completed($"Created and saved GameObject '{createdPath}'.", payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Create GameObject failed: {ex.Message}");
+                var restored = !mutationStarted;
+                try
+                {
+                    if (mutationStarted && beforeScene != null)
+                    {
+                        if (created != null)
+                        {
+                            UnityEngine.Object.DestroyImmediate(created);
+                        }
+                        EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
+                        if (EditorSceneManager.SaveScene(beforeScene.Scene))
+                        {
+                            var cleanup = SceneObjectCopyCore.ResolveSavedScene(
+                                beforeScene.Path,
+                                "restored target scene");
+                            restored = cleanup.Guid == beforeScene.Guid
+                                && cleanup.Handle == beforeScene.Handle
+                                && cleanup.FileDigest == beforeScene.FileDigest
+                                && cleanup.FileIdentity == beforeScene.FileIdentity
+                                && cleanup.MetaDigest == beforeScene.MetaDigest
+                                && cleanup.MetaIdentity == beforeScene.MetaIdentity
+                                && AssetPrefabCore.CountHierarchyPath(createdPath, cleanup.Handle) == 0;
+                        }
+                    }
+                }
+                catch
+                {
+                    restored = false;
+                }
+                return VRCForgeToolResult.Failed(
+                    $"Create GameObject failed: {ex.Message}",
+                    new
+                    {
+                        mutationStarted,
+                        restored,
+                        cleanupVerified = restored,
+                        cleanupRequired = !restored,
+                        checkpointRecoveryRequired = !restored,
+                        operationState = restored ? "restored" : "checkpoint_restore_required"
+                    });
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_rename_gameobject",
-        Description = "Rename a scene GameObject (Undo-registered). Supports preview mode."
+    [VRCForgeCommand(
+        toolId: "vrc_rename_gameobject",
+        Summary = "Rename a scene GameObject (Undo-registered). Supports preview mode."
     )]
     public static class RenameGameObjectTool
     {
@@ -188,13 +282,13 @@ namespace VRCForge.Editor
 
         public class RenameGameObjectParameters
         {
-            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeInput("Full hierarchy path or unique name of the target GameObject.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [VRCForgeParameter("New name for the GameObject.", Required = true)]
+            [VRCForgeInput("New name for the GameObject.", IsRequired = true)]
             public string newName { get; set; } = "";
 
-            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -205,7 +299,7 @@ namespace VRCForge.Editor
             {
                 if (string.IsNullOrWhiteSpace(p.newName))
                 {
-                    return new ErrorResponse("Rename requires a non-empty 'newName' argument.");
+                    return VRCForgeToolResult.Failed("Rename requires a non-empty 'newName' argument.");
                 }
                 var newName = p.newName.Trim();
 
@@ -223,7 +317,7 @@ namespace VRCForge.Editor
                         newName,
                         gameObjectPath = oldPath
                     };
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would rename '{oldPath}' to '{newName}'.",
                         previewPayload);
                 }
@@ -242,18 +336,18 @@ namespace VRCForge.Editor
                     oldPath,
                     gameObjectPath = newPath
                 };
-                return new SuccessResponse($"Renamed '{oldName}' to '{go.name}'.", payload);
+                return VRCForgeToolResult.Completed($"Renamed '{oldName}' to '{go.name}'.", payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Rename GameObject failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Rename GameObject failed: {ex.Message}");
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_reparent_gameobject",
-        Description = "Move a scene GameObject under a new parent (or to the scene root) preserving world transform by default (Undo-registered). Supports preview mode."
+    [VRCForgeCommand(
+        toolId: "vrc_reparent_gameobject",
+        Summary = "Move a scene GameObject under a new parent (or to the scene root) preserving world transform by default (Undo-registered). Supports preview mode."
     )]
     public static class ReparentGameObjectTool
     {
@@ -261,16 +355,16 @@ namespace VRCForge.Editor
 
         public class ReparentGameObjectParameters
         {
-            [VRCForgeParameter("Full hierarchy path or unique name of the GameObject to move.", Required = true)]
+            [VRCForgeInput("Full hierarchy path or unique name of the GameObject to move.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [VRCForgeParameter("Full hierarchy path or unique name of the new parent. Empty moves the object to the scene root.", Required = false)]
+            [VRCForgeInput("Full hierarchy path or unique name of the new parent. Empty moves the object to the scene root.", IsRequired = false)]
             public string newParentPath { get; set; } = "";
 
-            [VRCForgeParameter("Keep the object's world position/rotation/scale (default true).", Required = false)]
+            [VRCForgeInput("Keep the object's world position/rotation/scale (default true).", IsRequired = false)]
             public bool? worldPositionStays { get; set; } = true;
 
-            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -291,11 +385,11 @@ namespace VRCForge.Editor
                     newParent = ComponentCrudCore.ResolveGameObject(newParentPath);
                     if (newParent == go)
                     {
-                        return new ErrorResponse("Cannot parent a GameObject to itself.");
+                        return VRCForgeToolResult.Failed("Cannot parent a GameObject to itself.");
                     }
                     if (newParent.transform.IsChildOf(go.transform))
                     {
-                        return new ErrorResponse(
+                        return VRCForgeToolResult.Failed(
                             $"Cannot reparent '{go.name}' under its own descendant '{newParent.name}' (would create a cycle).");
                     }
                 }
@@ -314,7 +408,7 @@ namespace VRCForge.Editor
                         newParentPath = resolvedNewParentPath,
                         worldPositionStays
                     };
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         toRoot
                             ? $"Preview: would move '{go.name}' to the scene root."
                             : $"Preview: would move '{go.name}' under '{resolvedNewParentPath}'.",
@@ -337,7 +431,7 @@ namespace VRCForge.Editor
                     newParentPath = resolvedNewParentPath,
                     worldPositionStays
                 };
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     toRoot
                         ? $"Moved '{go.name}' to the scene root."
                         : $"Moved '{go.name}' under '{resolvedNewParentPath}'.",
@@ -345,14 +439,14 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Reparent GameObject failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Reparent GameObject failed: {ex.Message}");
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_delete_gameobject",
-        Description = "Delete a scene GameObject and its children (Undo-registered). Supports preview mode."
+    [VRCForgeCommand(
+        toolId: "vrc_delete_gameobject",
+        Summary = "Delete a scene GameObject and its children (Undo-registered). Supports preview mode."
     )]
     public static class DeleteGameObjectTool
     {
@@ -360,10 +454,10 @@ namespace VRCForge.Editor
 
         public class DeleteGameObjectParameters
         {
-            [VRCForgeParameter("Full hierarchy path or unique name of the GameObject to delete.", Required = true)]
+            [VRCForgeInput("Full hierarchy path or unique name of the GameObject to delete.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -387,7 +481,7 @@ namespace VRCForge.Editor
                         childCount,
                         componentCount
                     };
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would delete '{goPath}' ({childCount} child(ren), {componentCount} component(s)).",
                         previewPayload);
                 }
@@ -402,18 +496,18 @@ namespace VRCForge.Editor
                     childCount,
                     componentCount
                 };
-                return new SuccessResponse($"Deleted '{goPath}'.", payload);
+                return VRCForgeToolResult.Completed($"Deleted '{goPath}'.", payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Delete GameObject failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Delete GameObject failed: {ex.Message}");
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_set_gameobject_active",
-        Description = "Set a scene GameObject's active-self state (Undo-registered). Supports preview mode."
+    [VRCForgeCommand(
+        toolId: "vrc_set_gameobject_active",
+        Summary = "Set a scene GameObject's active-self state (Undo-registered). Supports preview mode."
     )]
     public static class SetGameObjectActiveTool
     {
@@ -421,13 +515,13 @@ namespace VRCForge.Editor
 
         public class SetGameObjectActiveParameters
         {
-            [VRCForgeParameter("Full hierarchy path or unique name of the target GameObject.", Required = true)]
+            [VRCForgeInput("Full hierarchy path or unique name of the target GameObject.", IsRequired = true)]
             public string gameObjectPath { get; set; } = "";
 
-            [VRCForgeParameter("Desired active-self state (true/false).", Required = true)]
+            [VRCForgeInput("Desired active-self state (true/false).", IsRequired = true)]
             public bool? active { get; set; }
 
-            [VRCForgeParameter("If true, only report what would happen without mutating the scene (default false).", Required = false)]
+            [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
         }
 
@@ -439,7 +533,7 @@ namespace VRCForge.Editor
                 var rawParams = @params ?? new JObject();
                 if (rawParams["active"] == null)
                 {
-                    return new ErrorResponse("Set active requires an 'active' boolean argument.");
+                    return VRCForgeToolResult.Failed("Set active requires an 'active' boolean argument.");
                 }
                 var active = rawParams["active"].ToObject<bool>();
 
@@ -457,7 +551,7 @@ namespace VRCForge.Editor
                         oldActive,
                         newActive = active
                     };
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         $"Preview: would set '{goPath}' active-self {oldActive} -> {active}.",
                         previewPayload);
                 }
@@ -475,11 +569,11 @@ namespace VRCForge.Editor
                     newActive = go.activeSelf,
                     activeInHierarchy = go.activeInHierarchy
                 };
-                return new SuccessResponse($"Set '{goPath}' active-self to {go.activeSelf}.", payload);
+                return VRCForgeToolResult.Completed($"Set '{goPath}' active-self to {go.activeSelf}.", payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Set GameObject active failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Set GameObject active failed: {ex.Message}");
             }
         }
     }

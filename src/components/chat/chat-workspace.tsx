@@ -16,6 +16,7 @@ import { AttachmentStrip, Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard, UserImageAttachments } from "./conversation-card";
+import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-card";
 
 export type QueuedChatTurn = {
   id: string;
@@ -62,6 +63,7 @@ export function ChatWorkspace({
   onConversationMouseUp,
   onConversationScroll,
   pendingApprovalForResponse,
+  scopedPendingApprovals,
   approvalActions,
   messageFeedback,
   latestRetryableItemId,
@@ -122,7 +124,8 @@ export function ChatWorkspace({
   onRetryItem: (itemId: string) => void;
   onEditItem: (itemId: string) => void;
   onFeedbackItem: (itemId: string, value: MessageFeedback) => void;
-  onApprove: (approvalId: string) => void;
+  scopedPendingApprovals: AgentApproval[];
+  onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
   onModifyApproval: (approval: AgentApproval) => void;
   onImportAttachment?: (attachment: ChatAttachment) => void;
@@ -163,37 +166,54 @@ export function ChatWorkspace({
       onBindProject={onBindProject}
     />
   );
+  const approvalComposer = scopedPendingApprovals.length ? (
+    <ScopedPendingApprovalCard
+      approvals={scopedPendingApprovals}
+      actions={approvalActions}
+      disabled={sending}
+      onApprove={onApprove}
+      onReject={onReject}
+    />
+  ) : null;
 
   if (conversation.length === 0) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center p-5 md:p-8">
-        <div className="w-full max-w-3xl">
-          {projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
-          {pendingAgentQuestions.length ? (
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-5 md:p-8" data-empty-chat-content>
+          <div className="w-full max-w-3xl">
+            {projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
+            {pendingAgentQuestions.length ? (
+              <div className="mb-3">
+                <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
+              </div>
+            ) : null}
             <div className="mb-3">
-              <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
+              <BackgroundGoalCatchUpCard
+                deliveries={backgroundGoalDeliveries}
+                providerWarnings={backgroundGoalProviderWarnings}
+                onRendered={onBackgroundGoalCatchUpRendered}
+                onProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
+                onDismiss={onBackgroundGoalCatchUpDismiss}
+              />
             </div>
-          ) : null}
-          <div className="mb-3">
-            <BackgroundGoalCatchUpCard
-              deliveries={backgroundGoalDeliveries}
-              providerWarnings={backgroundGoalProviderWarnings}
-              onRendered={onBackgroundGoalCatchUpRendered}
-              onProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
-              onDismiss={onBackgroundGoalCatchUpDismiss}
-            />
+            <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
+            {!approvalComposer ? composer(false) : null}
           </div>
-          <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
-          {composer(false)}
         </div>
+        {approvalComposer ? (
+          <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
+            <div className="mx-auto max-w-3xl">{approvalComposer}</div>
+          </div>
+        ) : null}
       </div>
     );
   }
 
   return (
-    <>
+    <div className="relative flex min-h-0 flex-1 flex-col">
       <div
         className="min-h-0 flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8"
+        data-chat-history-scroll
         onMouseUp={onConversationMouseUp}
         onScroll={onConversationScroll}
       >
@@ -259,7 +279,7 @@ export function ChatWorkspace({
           <div ref={conversationEndRef} />
         </div>
       </div>
-      <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2">
+      <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
         <div className="mx-auto max-w-3xl">
           {pendingAgentQuestions.length ? (
             <div className="mb-3">
@@ -267,10 +287,10 @@ export function ChatWorkspace({
             </div>
           ) : null}
           <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
-          {composer(true)}
+          {approvalComposer || composer(true)}
         </div>
       </div>
-    </>
+    </div>
   );
 }
 

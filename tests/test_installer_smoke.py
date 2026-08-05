@@ -8,6 +8,7 @@ from subprocess import CompletedProcess
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "smoke_installer_install_uninstall.py"
+SMOKE_ID = "a" * 32
 
 
 def load_installer_smoke():
@@ -23,8 +24,9 @@ def make_args(tmp_path: Path, installer: Path, **overrides: object) -> Namespace
     values = {
         "installer": str(installer),
         "upgrade_installer": "",
-        "install_dir": str(tmp_path / "Program Files" / "VRCForge"),
-        "user_data_root": "",
+        "smoke_id": SMOKE_ID,
+        "install_dir": str(tmp_path / "Program Files" / f"VRCForge-Smoke-{SMOKE_ID}"),
+        "user_data_root": str(tmp_path / "LocalAppData" / "VRCForge" / "installer-smoke" / SMOKE_ID),
         "timeout": 1.0,
         "backend_port": 8791,
         "dry_run": False,
@@ -76,6 +78,8 @@ def test_dry_run_writes_skipped_phase_evidence_without_admin_or_userdata_changes
     smoke = load_installer_smoke()
     local_app_data = tmp_path / "LocalAppData"
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.delenv("ProgramW6432", raising=False)
     installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
     installer.write_bytes(b"fake-installer")
 
@@ -89,13 +93,17 @@ def test_dry_run_writes_skipped_phase_evidence_without_admin_or_userdata_changes
         "upgrade": "skipped",
         "preservation": "skipped",
     }
-    assert report["userData"]["root"] == str((local_app_data / "VRCForge" / "agentic-app").resolve())
-    assert not (local_app_data / "VRCForge" / "agentic-app").exists()
+    assert report["userData"]["root"] == str((local_app_data / "VRCForge" / "installer-smoke" / SMOKE_ID).resolve())
+    assert report["userData"]["matchesSmokeScope"] is True
+    assert report["smoke"]["id"] == SMOKE_ID
+    assert not (local_app_data / "VRCForge" / "installer-smoke" / SMOKE_ID).exists()
 
 
 def test_dry_run_allows_missing_installer_but_records_it(tmp_path, monkeypatch):
     smoke = load_installer_smoke()
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.delenv("ProgramW6432", raising=False)
     missing_installer = tmp_path / "missing.exe"
 
     report = smoke.run_smoke(make_args(tmp_path, missing_installer, dry_run=True))
@@ -111,6 +119,8 @@ def test_dry_run_allows_missing_installer_but_records_it(tmp_path, monkeypatch):
 def test_non_admin_report_marks_install_uninstall_blocked_and_upgrade_skipped(tmp_path, monkeypatch):
     smoke = load_installer_smoke()
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.delenv("ProgramW6432", raising=False)
     monkeypatch.setattr(smoke, "is_admin", lambda: False)
     installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
     installer.write_bytes(b"fake-installer")
@@ -193,10 +203,13 @@ def test_failure_before_install_does_not_remove_preexisting_directory(tmp_path, 
     smoke = load_installer_smoke()
     installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
     installer.write_bytes(b"fake-installer")
-    install_dir = tmp_path / "Program Files" / "VRCForge"
+    install_dir = tmp_path / "Program Files" / f"VRCForge-Smoke-{SMOKE_ID}"
     install_dir.mkdir(parents=True)
     marker = install_dir / "owned-by-user.txt"
     marker.write_text("keep", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.delenv("ProgramW6432", raising=False)
     monkeypatch.setattr(smoke, "is_admin", lambda: True)
 
     report = smoke.run_smoke(make_args(tmp_path, installer, install_dir=str(install_dir)))
@@ -210,7 +223,10 @@ def test_health_failure_uninstalls_only_payload_created_by_smoke(tmp_path, monke
     smoke = load_installer_smoke()
     installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
     installer.write_bytes(b"fake-installer")
-    install_dir = tmp_path / "Program Files" / "VRCForge"
+    install_dir = tmp_path / "Program Files" / f"VRCForge-Smoke-{SMOKE_ID}"
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.delenv("ProgramW6432", raising=False)
     monkeypatch.setattr(smoke, "is_admin", lambda: True)
     monkeypatch.setattr(smoke, "wait_for_health", lambda port, timeout, process=None: {})
 
@@ -265,7 +281,7 @@ def test_health_failure_uninstalls_only_payload_created_by_smoke(tmp_path, monke
 def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkeypatch):
     smoke = load_installer_smoke()
     local_app_data = tmp_path / "LocalAppData"
-    install_dir = tmp_path / "Program Files" / "VRCForge"
+    install_dir = tmp_path / "Program Files" / f"VRCForge-Smoke-{SMOKE_ID}"
     first_installer = tmp_path / "old" / "VRCForge_Offline_Installer_x64.exe"
     upgrade_installer = tmp_path / "new" / "VRCForge_Offline_Installer_x64.exe"
     first_installer.parent.mkdir(parents=True)
@@ -273,6 +289,8 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
     first_installer.write_bytes(b"old")
     upgrade_installer.write_bytes(b"new")
     monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.delenv("ProgramW6432", raising=False)
     monkeypatch.setattr(smoke, "is_admin", lambda: True)
     monkeypatch.setattr(smoke, "wait_for_health", lambda port, timeout, process=None: {"version": "0.9-test", "portableMode": True})
 
@@ -335,5 +353,39 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
     }
     sentinel = Path(report["userData"]["sentinelPath"])
     assert sentinel.is_file()
-    assert sentinel.parent == local_app_data / "VRCForge" / "agentic-app"
+    assert sentinel.parent == local_app_data / "VRCForge" / "installer-smoke" / SMOKE_ID
     assert not install_dir.exists()
+
+
+def test_smoke_scope_rejects_missing_or_mismatched_identity(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    program_files = tmp_path / "Program Files"
+    local_app_data = tmp_path / "LocalAppData"
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("ProgramW6432", raising=False)
+
+    expected_install = program_files / f"VRCForge-Smoke-{SMOKE_ID}"
+    expected_user_data = local_app_data / "VRCForge" / "installer-smoke" / SMOKE_ID
+    assert smoke.smoke_scope_step(SMOKE_ID, expected_install.resolve(), expected_user_data.resolve())["ok"] is True
+    assert smoke.smoke_scope_step("A" * 32, expected_install.resolve(), expected_user_data.resolve())["ok"] is False
+    assert smoke.smoke_scope_step(SMOKE_ID, (program_files / "VRCForge").resolve(), expected_user_data.resolve())["ok"] is False
+    assert smoke.smoke_scope_step(SMOKE_ID, expected_install.resolve(), (local_app_data / "VRCForge" / "agentic-app").resolve())["ok"] is False
+
+
+def test_dry_run_rejects_an_unscoped_or_mismatched_smoke_target(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "LocalAppData"))
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
+    installer.write_bytes(b"fake-installer")
+
+    report = smoke.run_smoke(
+        make_args(tmp_path, installer, smoke_id="", install_dir=str(tmp_path / "Program Files" / "VRCForge"), dry_run=True)
+    )
+
+    assert report["ok"] is False
+    assert report["summary"]["status"] == "failed"
+    assert report["steps"][-1]["name"] == "installer_smoke.error"
+    assert "exact isolated smoke identity" in report["steps"][-1]["error"]

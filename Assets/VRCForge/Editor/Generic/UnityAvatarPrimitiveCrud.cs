@@ -275,20 +275,25 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_read_avatar_descriptor",
-        Description = "Read VRCAvatarDescriptor core authoring fields: viewpoint, lip sync, visemes, expressions, playable layers, and eye-look summary.",
-        Permission = VRCForgeToolPermission.ReadOnly
+    [VRCForgeCommand(
+        toolId: "vrc_read_avatar_descriptor",
+        Summary = "Read VRCAvatarDescriptor core authoring fields: viewpoint, lip sync, visemes, expressions, playable layers, and eye-look summary.",
+        Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class ReadAvatarDescriptorTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar hierarchy path; Unity resolves the selected/single descriptor when omitted.", IsRequired = false)] public string avatarPath { get; set; } = "";
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
             {
                 @params = @params ?? new JObject();
                 var descriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(@params["avatarPath"]?.ToString() ?? "");
-                return new SuccessResponse("Read avatar descriptor.", new
+                return VRCForgeToolResult.Completed("Read avatar descriptor.", new
                 {
                     ok = true,
                     avatarPath = AvatarPrimitiveCrudCore.GetTransformPath(descriptor.transform),
@@ -306,7 +311,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Read avatar descriptor failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Read avatar descriptor failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -363,12 +368,27 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_write_avatar_descriptor",
-        Description = "Write selected VRCAvatarDescriptor fields: viewpoint, lip sync, viseme mesh/blendshapes, expression assets, playable-layer controllers, and eye-look enable flag. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_write_avatar_descriptor",
+        Summary = "Write selected VRCAvatarDescriptor fields: viewpoint, lip sync, viseme mesh/blendshapes, expression assets, playable-layer controllers, and eye-look enable flag. Supports preview."
     )]
     public static class WriteAvatarDescriptorTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Optional avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Return the descriptor change plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Optional viewpoint vector object with x, y, and z.", IsRequired = false)] public object viewPosition { get; set; }
+            [VRCForgeInput("Optional avatar lip-sync mode.", IsRequired = false)] public string lipSync { get; set; } = "";
+            [VRCForgeInput("Optional scene path to the viseme SkinnedMeshRenderer.", IsRequired = false)] public string visemeSkinnedMeshPath { get; set; } = "";
+            [VRCForgeInput("Optional viseme blendshape-name array.", IsRequired = false)] public object[] visemeBlendShapes { get; set; }
+            [VRCForgeInput("Optional expression-parameters asset path.", IsRequired = false)] public string expressionParametersPath { get; set; } = "";
+            [VRCForgeInput("Optional expressions-menu asset path.", IsRequired = false)] public string expressionsMenuPath { get; set; } = "";
+            [VRCForgeInput("Optional base playable-layer update array.", IsRequired = false)] public object[] baseAnimationLayers { get; set; }
+            [VRCForgeInput("Optional special playable-layer update array.", IsRequired = false)] public object[] specialAnimationLayers { get; set; }
+            [VRCForgeInput("Optional eye-look enabled flag.", IsRequired = false)] public bool? eyeLookEnabled { get; set; }
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -379,7 +399,7 @@ namespace VRCForge.Editor
                 var plan = BuildPlan(descriptor, @params);
                 if (preview)
                 {
-                    return new SuccessResponse("Preview: would write avatar descriptor fields.", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed("Preview: would write avatar descriptor fields.", new { ok = true, preview = true, plan });
                 }
 
                 Undo.RegisterCompleteObjectUndo(descriptor, "Write avatar descriptor");
@@ -387,7 +407,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(descriptor);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
-                return new SuccessResponse("Avatar descriptor updated.", new
+                return VRCForgeToolResult.Completed("Avatar descriptor updated.", new
                 {
                     ok = true,
                     preview = false,
@@ -398,7 +418,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Write avatar descriptor failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Write avatar descriptor failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -563,12 +583,25 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_write_animation_curve",
-        Description = "Create, replace, or delete a single AnimationClip editor curve binding. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_write_animation_curve",
+        Summary = "Create, replace, or delete a single AnimationClip editor curve binding. Supports preview."
     )]
     public static class WriteAnimationCurveTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Curve action: set_curve or delete_curve.", IsRequired = false)] public string action { get; set; } = "set_curve";
+            [VRCForgeInput("AnimationClip asset path.", IsRequired = true)] public string clipPath { get; set; } = "";
+            [VRCForgeInput("Return the curve change plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Optional relative binding path.", IsRequired = false)] public string bindingPath { get; set; } = "";
+            [VRCForgeInput("Optional compatibility alias for bindingPath.", IsRequired = false)] public string objectPath { get; set; } = "";
+            [VRCForgeInput("Binding component type.", IsRequired = false)] public string componentType { get; set; } = "GameObject";
+            [VRCForgeInput("Serialized animation property name.", IsRequired = true)] public string propertyName { get; set; } = "";
+            [VRCForgeInput("Optional animation keyframe array.", IsRequired = false)] public object[] keys { get; set; }
+            [VRCForgeInput("Optional constant curve value.", IsRequired = false)] public float? constantFloat { get; set; }
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -579,14 +612,14 @@ namespace VRCForge.Editor
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
                 if (string.IsNullOrWhiteSpace(clipPath))
                 {
-                    return new ErrorResponse("clipPath is required.");
+                    return VRCForgeToolResult.Failed("clipPath is required.");
                 }
                 var bindingPath = AvatarPrimitiveCrudCore.NormalizePath(@params["bindingPath"]?.ToString() ?? @params["objectPath"]?.ToString() ?? "");
                 var componentTypeText = @params["componentType"]?.ToString() ?? "GameObject";
                 var propertyName = (@params["propertyName"]?.ToString() ?? "").Trim();
                 if (string.IsNullOrWhiteSpace(propertyName))
                 {
-                    return new ErrorResponse("propertyName is required.");
+                    return VRCForgeToolResult.Failed("propertyName is required.");
                 }
                 var type = AvatarPrimitiveCrudCore.FindType(componentTypeText)
                     ?? throw new InvalidOperationException($"Binding component type not found: {componentTypeText}");
@@ -603,13 +636,13 @@ namespace VRCForge.Editor
                 };
                 if (preview)
                 {
-                    return new SuccessResponse($"Preview: would {action} on AnimationClip '{clipPath}'.", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would {action} on AnimationClip '{clipPath}'.", new { ok = true, preview = true, plan });
                 }
 
                 var clip = LoadOrCreateClip(clipPath, action != "delete_curve");
                 if (clip == null)
                 {
-                    return new ErrorResponse($"AnimationClip not found for delete: {clipPath}");
+                    return VRCForgeToolResult.Failed($"AnimationClip not found for delete: {clipPath}");
                 }
                 Undo.RegisterCompleteObjectUndo(clip, "Write animation curve");
                 var binding = new EditorCurveBinding { path = bindingPath, type = type, propertyName = propertyName };
@@ -624,7 +657,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(clip);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
-                return new SuccessResponse($"Animation curve action '{action}' completed.", new
+                return VRCForgeToolResult.Completed($"Animation curve action '{action}' completed.", new
                 {
                     ok = true,
                     preview = false,
@@ -637,7 +670,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Write animation curve failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Write animation curve failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -693,12 +726,26 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_manage_expression_parameters",
-        Description = "Manage existing VRCExpressionParameters entries: update, delete, rename, or reorder. Use vrc_ensure_expression_parameter for first-time create. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_manage_expression_parameters",
+        Summary = "Manage existing VRCExpressionParameters entries: update, delete, rename, or reorder. Use vrc_ensure_expression_parameter for first-time create. Supports preview."
     )]
     public static class ManageExpressionParametersTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Parameter management action: update, delete, rename, or reorder.", IsRequired = true)] public string action { get; set; } = "";
+            [VRCForgeInput("Return the parameter-management plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Optional avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Existing parameter name for update, delete, or rename.", IsRequired = false)] public string parameterName { get; set; } = "";
+            [VRCForgeInput("New parameter name for rename.", IsRequired = false)] public string newName { get; set; } = "";
+            [VRCForgeInput("Ordered parameter-name array for reorder.", IsRequired = false)] public object[] orderNames { get; set; }
+            [VRCForgeInput("Optional expression parameter value type for update.", IsRequired = false)] public string valueType { get; set; } = "";
+            [VRCForgeInput("Optional expression parameter default value for update.", IsRequired = false)] public float? defaultValue { get; set; }
+            [VRCForgeInput("Optional persisted flag for update.", IsRequired = false)] public bool? saved { get; set; }
+            [VRCForgeInput("Optional network-synchronization flag for update.", IsRequired = false)] public bool? networkSynced { get; set; }
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -711,7 +758,7 @@ namespace VRCForge.Editor
                 var plan = BuildPlan(action, descriptor, asset, @params);
                 if (preview)
                 {
-                    return new SuccessResponse($"Preview: would manage expression parameters ({action}).", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would manage expression parameters ({action}).", new { ok = true, preview = true, plan });
                 }
 
                 Undo.RegisterCompleteObjectUndo(asset, "Manage expression parameters");
@@ -719,7 +766,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(asset);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
-                return new SuccessResponse($"Expression parameter action '{action}' completed.", new
+                return VRCForgeToolResult.Completed($"Expression parameter action '{action}' completed.", new
                 {
                     ok = true,
                     preview = false,
@@ -730,7 +777,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Manage expression parameters failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Manage expression parameters failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -820,12 +867,33 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_manage_expression_menu",
-        Description = "Manage VRCExpressionsMenu controls: create, update, delete, or reorder controls in a root menu or submenu. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_manage_expression_menu",
+        Summary = "Manage VRCExpressionsMenu controls: create, update, delete, or reorder controls in a root menu or submenu. Supports preview."
     )]
     public static class ManageExpressionMenuTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Menu management action: create, update, delete, or reorder.", IsRequired = true)] public string action { get; set; } = "";
+            [VRCForgeInput("Return the menu-management plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Optional avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Asset directory for a newly created root or submenu.", IsRequired = false)] public string assetDir { get; set; } = "";
+            [VRCForgeInput("Optional slash-delimited submenu path.", IsRequired = false)] public string menuPath { get; set; } = "";
+            [VRCForgeInput("Existing or new control name.", IsRequired = false)] public string controlName { get; set; } = "";
+            [VRCForgeInput("Optional existing control index.", IsRequired = false)] public int? controlIndex { get; set; }
+            [VRCForgeInput("Optional new control name.", IsRequired = false)] public string newName { get; set; } = "";
+            [VRCForgeInput("Optional expression-menu control type.", IsRequired = false)] public string controlType { get; set; } = "";
+            [VRCForgeInput("Optional control float value.", IsRequired = false)] public float? controlFloat { get; set; }
+            [VRCForgeInput("Optional compatibility control value.", IsRequired = false)] public float? value { get; set; }
+            [VRCForgeInput("Optional bound expression parameter name.", IsRequired = false)] public string parameterName { get; set; } = "";
+            [VRCForgeInput("Optional icon asset path.", IsRequired = false)] public string iconAssetPath { get; set; } = "";
+            [VRCForgeInput("Optional submenu asset path.", IsRequired = false)] public string subMenuAssetPath { get; set; } = "";
+            [VRCForgeInput("Create a submenu when one is not assigned.", IsRequired = false)] public bool? createSubMenu { get; set; }
+            [VRCForgeInput("Optional submenu parameter-name array.", IsRequired = false)] public object[] subParameters { get; set; }
+            [VRCForgeInput("Ordered control-name array for reorder.", IsRequired = false)] public object[] orderNames { get; set; }
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -839,7 +907,7 @@ namespace VRCForge.Editor
                 var plan = BuildPlan(action, descriptor, root, @params);
                 if (preview)
                 {
-                    return new SuccessResponse($"Preview: would manage expression menu ({action}).", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would manage expression menu ({action}).", new { ok = true, preview = true, plan });
                 }
 
                 if (root == null)
@@ -853,7 +921,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(root);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
-                return new SuccessResponse($"Expression menu action '{action}' completed.", new
+                return VRCForgeToolResult.Completed($"Expression menu action '{action}' completed.", new
                 {
                     ok = true,
                     preview = false,
@@ -865,7 +933,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Manage expression menu failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Manage expression menu failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -1101,12 +1169,38 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_manage_fx_animator",
-        Description = "Manage FX AnimatorController layers, states, Any-State transitions, conditions, motions, and deletion. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_manage_fx_animator",
+        Summary = "Manage FX AnimatorController layers, states, Any-State transitions, conditions, motions, and deletion. Supports preview."
     )]
     public static class ManageFxAnimatorTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("FX animator action.", IsRequired = true)] public string action { get; set; } = "";
+            [VRCForgeInput("Return the FX animator change plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Optional avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Asset directory for a newly created FX controller or motion clip.", IsRequired = false)] public string assetDir { get; set; } = "";
+            [VRCForgeInput("FX layer name.", IsRequired = false)] public string layerName { get; set; } = "";
+            [VRCForgeInput("State name.", IsRequired = false)] public string stateName { get; set; } = "";
+            [VRCForgeInput("Destination state name for a transition.", IsRequired = false)] public string destinationStateName { get; set; } = "";
+            [VRCForgeInput("Optional explicit animator controller asset path.", IsRequired = false)] public string controllerPath { get; set; } = "";
+            [VRCForgeInput("Optional compatibility alias for controllerPath.", IsRequired = false)] public string fxControllerPath { get; set; } = "";
+            [VRCForgeInput("Optional new state name.", IsRequired = false)] public string newName { get; set; } = "";
+            [VRCForgeInput("Optional write-defaults flag.", IsRequired = false)] public bool? writeDefaults { get; set; }
+            [VRCForgeInput("Optional motion AnimationClip asset path.", IsRequired = false)] public string motionClipPath { get; set; } = "";
+            [VRCForgeInput("Optional state speed.", IsRequired = false)] public float? speed { get; set; }
+            [VRCForgeInput("Optional Any-State transition exit-time flag.", IsRequired = false)] public bool? hasExitTime { get; set; }
+            [VRCForgeInput("Optional Any-State transition exit time.", IsRequired = false)] public float? exitTime { get; set; }
+            [VRCForgeInput("Optional Any-State transition duration.", IsRequired = false)] public float? duration { get; set; }
+            [VRCForgeInput("Optional Any-State self-transition flag.", IsRequired = false)] public bool? canTransitionToSelf { get; set; }
+            [VRCForgeInput("Optional transition index for deletion.", IsRequired = false)] public int? transitionIndex { get; set; }
+            [VRCForgeInput("Optional transition-condition object array.", IsRequired = false)] public object[] conditions { get; set; }
+            [VRCForgeInput("Optional single transition condition parameter.", IsRequired = false)] public string parameterName { get; set; } = "";
+            [VRCForgeInput("Optional single transition condition mode.", IsRequired = false)] public string conditionMode { get; set; } = "";
+            [VRCForgeInput("Optional single transition condition threshold.", IsRequired = false)] public float? threshold { get; set; }
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -1131,7 +1225,7 @@ namespace VRCForge.Editor
                 };
                 if (preview)
                 {
-                    return new SuccessResponse($"Preview: would manage FX animator ({action}).", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would manage FX animator ({action}).", new { ok = true, preview = true, plan });
                 }
 
                 Undo.RegisterCompleteObjectUndo(controller, "Manage FX animator");
@@ -1139,7 +1233,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(controller);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
-                return new SuccessResponse($"FX animator action '{action}' completed.", new
+                return VRCForgeToolResult.Completed($"FX animator action '{action}' completed.", new
                 {
                     ok = true,
                     preview = false,
@@ -1150,7 +1244,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Manage FX animator failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Manage FX animator failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

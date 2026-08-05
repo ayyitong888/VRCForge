@@ -13,10 +13,10 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_inspect_primitive_basis_fixture",
-        Description = "Read the fixed primitive-basis fixture identity, active scene, ready marker, and project binding without writing.",
-        Permission = VRCForgeToolPermission.ReadOnly
+    [VRCForgeCommand(
+        toolId: "vrc_inspect_primitive_basis_fixture",
+        Summary = "Read the fixed primitive-basis fixture identity, active scene, ready marker, and project binding without writing.",
+        Access = VRCForgeCommandAccess.ReadOnly
     )]
     public static class PrimitiveBasisFixtureInspector
     {
@@ -28,6 +28,11 @@ namespace VRCForge.Editor
         private const string BaselinePath = "Assets/VRCForge/PrimitiveBasis/model_part_composition/baseline.json";
         private const string ReadyMarkerPath = "Library/VRCForge/primitive-basis-model-part-ready.json";
 
+        public class Parameters
+        {
+            [VRCForgeInput("Lowercase SHA-256 digest binding this inspection to the live fixture run.", IsRequired = true)] public string expectedRunIdDigest { get; set; } = "";
+        }
+
         public static object HandleCommand(JObject parameters)
         {
             try
@@ -35,7 +40,7 @@ namespace VRCForge.Editor
                 var expectedRunIdDigest = (parameters?["expectedRunIdDigest"]?.ToString() ?? string.Empty).Trim();
                 if (!PrimitiveBasisLiveGuard.IsSha256(expectedRunIdDigest))
                 {
-                    return new ErrorResponse("expectedRunIdDigest must be a lowercase SHA-256 digest.");
+                    return VRCForgeToolResult.Failed("expectedRunIdDigest must be a lowercase SHA-256 digest.");
                 }
                 var processIdentity = PrimitiveBasisLiveGuard.InspectBootstrap(expectedRunIdDigest);
 
@@ -48,7 +53,7 @@ namespace VRCForge.Editor
                 var readyRunIdDigest = (marker["runIdDigest"]?.ToString() ?? string.Empty).Trim();
                 if (!string.Equals(readyRunIdDigest, expectedRunIdDigest, StringComparison.Ordinal))
                 {
-                    return new ErrorResponse("The fixture ready marker belongs to another live run.");
+                    return VRCForgeToolResult.Failed("The fixture ready marker belongs to another live run.");
                 }
 
                 var activeScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
@@ -60,11 +65,11 @@ namespace VRCForge.Editor
                     || !string.Equals(activeScenePath, ScenePath, StringComparison.Ordinal)
                     || string.IsNullOrWhiteSpace(activeSceneGuid))
                 {
-                    return new ErrorResponse("The fixed primitive-basis scene is not the active loaded scene.");
+                    return VRCForgeToolResult.Failed("The fixed primitive-basis scene is not the active loaded scene.");
                 }
                 var hierarchy = RequireFixedHierarchy(activeScene);
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     "Inspected the fixed primitive-basis fixture without writing.",
                     new
                     {
@@ -97,7 +102,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Primitive-basis fixture inspection failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Primitive-basis fixture inspection failed: {ex.Message}");
             }
         }
 
@@ -108,7 +113,7 @@ namespace VRCForge.Editor
                 var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(parameters);
                 if (identity == null)
                 {
-                    return new ErrorResponse("The fixed live transport binding is required.");
+                    return VRCForgeToolResult.Failed("The fixed live transport binding is required.");
                 }
                 var activeScene = SceneManager.GetActiveScene();
                 if (!activeScene.IsValid()
@@ -116,15 +121,15 @@ namespace VRCForge.Editor
                     || activeScene.isDirty
                     || !string.Equals((activeScene.path ?? string.Empty).Replace("\\", "/"), ScenePath, StringComparison.Ordinal))
                 {
-                    return new ErrorResponse("The fixed primitive-basis scene cannot be reloaded from its current state.");
+                    return VRCForgeToolResult.Failed("The fixed primitive-basis scene cannot be reloaded from its current state.");
                 }
                 var reloaded = EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
                 if (!reloaded.IsValid() || !reloaded.isLoaded || reloaded.isDirty)
                 {
-                    return new ErrorResponse("The fixed primitive-basis scene did not reload cleanly.");
+                    return VRCForgeToolResult.Failed("The fixed primitive-basis scene did not reload cleanly.");
                 }
                 RequireFixedHierarchy(reloaded);
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     "Reloaded the fixed primitive-basis scene from its saved bytes.",
                     new
                     {
@@ -141,7 +146,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Primitive-basis fixture reload failed: {ex.Message}");
+                return VRCForgeToolResult.Failed($"Primitive-basis fixture reload failed: {ex.Message}");
             }
         }
 
@@ -258,13 +263,22 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_reload_primitive_basis_fixture",
-        Description = "Reload the fixed live primitive-basis scene from its saved bytes after validating the one-shot process binding."
+    [VRCForgeCommand(
+        toolId: "vrc_reload_primitive_basis_fixture",
+        Summary = "Reload the fixed live primitive-basis scene from its saved bytes after validating the one-shot process binding."
     )]
     public static class PrimitiveBasisFixtureReloader
     {
         public const string ToolName = "vrc_reload_primitive_basis_fixture";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Live-run SHA-256 digest.", IsRequired = true)] public string expectedRunIdDigest { get; set; } = "";
+            [VRCForgeInput("Expected Unity project-root SHA-256 digest.", IsRequired = true)] public string expectedProjectPathDigest { get; set; } = "";
+            [VRCForgeInput("Expected Unity process id.", IsRequired = true)] public int? expectedUnityProcessId { get; set; }
+            [VRCForgeInput("Expected Unity process start time in UTC.", IsRequired = true)] public string expectedUnityProcessStartedAtUtc { get; set; } = "";
+            [VRCForgeInput("Expected Unity executable SHA-256 digest.", IsRequired = true)] public string expectedUnityExecutableDigest { get; set; } = "";
+        }
 
         public static object HandleCommand(JObject parameters)
         {

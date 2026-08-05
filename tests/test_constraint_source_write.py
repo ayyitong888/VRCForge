@@ -251,7 +251,7 @@ def test_csharp_core_exposes_only_registered_typed_schemas() -> None:
     assert "ManagedElementFactory" in core
     assert "CollectionFactory" in core
     assert "ValidateSerializedShape" in core
-    assert 'name: "vrc_set_constraint_sources"' in tool
+    assert 'toolId: "vrc_set_constraint_sources"' in tool
     assert '@params["propertyPath"]' not in tool
     assert '@params["memberName"]' not in tool
     assert "expectedSceneFileIdentity" in tool

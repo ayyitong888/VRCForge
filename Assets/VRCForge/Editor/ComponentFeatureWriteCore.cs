@@ -251,21 +251,21 @@ namespace VRCForge.Editor
 
         internal static object Success(object payload)
         {
-            return new SuccessResponse("Component feature operation completed.", payload);
+            return VRCForgeToolResult.Completed("Component feature operation completed.", payload);
         }
 
         internal static object Failure(Exception exception)
         {
             if (exception is ComponentFeatureWriteException controlled)
             {
-                return new ErrorResponse(controlled.Message);
+                return VRCForgeToolResult.Failed(controlled.Message);
             }
-            return new ErrorResponse("Component feature operation failed closed.");
+            return VRCForgeToolResult.Failed("Component feature operation failed closed.");
         }
 
         internal static object BuildMutationFailure(bool restored)
         {
-            return new ErrorResponse(
+            return VRCForgeToolResult.Failed(
                 restored
                     ? "Component feature apply failed after restoring the verified pre-state."
                     : "Component feature apply failed; checkpoint restore is required.",
@@ -655,7 +655,10 @@ namespace VRCForge.Editor
                 .Select(SceneManager.GetSceneAt)
                 .Where(scene => scene.IsValid()
                     && scene.isLoaded
-                    && NormalizeScenePath(scene.path) == normalized)
+                    && string.Equals(
+                        (scene.path ?? string.Empty).Replace('\\', '/'),
+                        normalized,
+                        StringComparison.Ordinal))
                 .ToList();
             if (matches.Count != 1)
             {

@@ -23,13 +23,43 @@ namespace VRCForge.Editor
     //   - delete_wardrobe: remove the expression parameter, menu toggles, and FX
     //     wardrobe bindings/layers; scene objects are preserved unless requested.
     // All writes support preview and Undo. Asset deletion is opt-in.
-    [VRCForgeTool(
-        name: "vrc_manage_wardrobe",
-        Description = "Manage an existing int-exclusive wardrobe: remove/rename/reorder outfits, set the default int value, or delete wardrobe bindings. Supports preview; destructive object/asset deletion is opt-in."
+    [VRCForgeCommand(
+        toolId: "vrc_manage_wardrobe",
+        Summary = "Manage an existing int-exclusive wardrobe: remove/rename/reorder outfits, set the default int value, or delete wardrobe bindings. Supports preview; destructive object/asset deletion is opt-in."
     )]
     public static class WardrobeManagerWriter
     {
         private const string DefaultAssetDir = "Assets/VRCForge/Generated/Wardrobe";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Operation: remove_outfit, rename_outfit, reorder_outfits, set_default, or delete_wardrobe.", IsRequired = true)]
+            public string action { get; set; } = "";
+            [VRCForgeInput("Avatar root path; empty is allowed only when the descriptor selection is unambiguous.", IsRequired = false)]
+            public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Existing Int wardrobe parameter name.", IsRequired = true)]
+            public string parameterName { get; set; } = "";
+            [VRCForgeInput("Target outfit/control/state name for single-outfit actions.", IsRequired = false)]
+            public string targetName { get; set; } = "";
+            [VRCForgeInput("Target Int value for single-outfit actions.", IsRequired = false)]
+            public int? targetValue { get; set; }
+            [VRCForgeInput("New outfit name, required for rename_outfit.", IsRequired = false)]
+            public string newName { get; set; } = "";
+            [VRCForgeInput("Ordered wardrobe Int values, required for reorder_outfits.", IsRequired = false)]
+            public int[] orderValues { get; set; } = new int[0];
+            [VRCForgeInput("Report the action plan without modifying assets or the scene.", IsRequired = false)]
+            public bool? preview { get; set; } = false;
+            [VRCForgeInput("Delete selected scene objects when removing an outfit.", IsRequired = false)]
+            public bool? deleteObjects { get; set; } = false;
+            [VRCForgeInput("Deactivate selected scene objects when removing an outfit.", IsRequired = false)]
+            public bool? deactivateObjects { get; set; }
+            [VRCForgeInput("Delete generated clip assets where safe.", IsRequired = false)]
+            public bool? deleteGeneratedAssets { get; set; } = false;
+            [VRCForgeInput("Required acknowledgement for delete_wardrobe.", IsRequired = false)]
+            public bool? confirmDeleteWardrobe { get; set; } = false;
+            [VRCForgeInput("Assets-relative generated-clip directory used for cleanup.", IsRequired = false)]
+            public string assetDir { get; set; } = DefaultAssetDir;
+        }
 
         public static object HandleCommand(JObject @params)
         {
@@ -54,19 +84,19 @@ namespace VRCForge.Editor
 
                 if (string.IsNullOrWhiteSpace(action))
                 {
-                    return new ErrorResponse("action is required: remove_outfit, rename_outfit, reorder_outfits, set_default, or delete_wardrobe.");
+                    return VRCForgeToolResult.Failed("action is required: remove_outfit, rename_outfit, reorder_outfits, set_default, or delete_wardrobe.");
                 }
                 if (string.IsNullOrWhiteSpace(parameterName))
                 {
-                    return new ErrorResponse("parameterName is required.");
+                    return VRCForgeToolResult.Failed("parameterName is required.");
                 }
                 if (action == "rename_outfit" && string.IsNullOrWhiteSpace(newName))
                 {
-                    return new ErrorResponse("newName is required for rename_outfit.");
+                    return VRCForgeToolResult.Failed("newName is required for rename_outfit.");
                 }
                 if (action == "delete_wardrobe" && !confirmDeleteWardrobe)
                 {
-                    return new ErrorResponse("confirmDeleteWardrobe=true is required for delete_wardrobe.");
+                    return VRCForgeToolResult.Failed("confirmDeleteWardrobe=true is required for delete_wardrobe.");
                 }
 
                 var descriptor = ResolveAvatarDescriptor(avatarPath);
@@ -82,7 +112,7 @@ namespace VRCForge.Editor
                     targetValues = ReadIntArray(@params, "orderValues", "order_values");
                     if (targetValues.Count == 0)
                     {
-                        return new ErrorResponse("orderValues is required for reorder_outfits.");
+                        return VRCForgeToolResult.Failed("orderValues is required for reorder_outfits.");
                     }
                 }
                 else if (action == "set_default")
@@ -97,7 +127,7 @@ namespace VRCForge.Editor
                 var plan = BuildPlan(action, descriptor, context, targetValues, newName, deleteObjects, deactivateObjects, deleteGeneratedAssets);
                 if (preview)
                 {
-                    return new SuccessResponse($"Preview: would {action} for wardrobe '{parameterName}'.", new
+                    return VRCForgeToolResult.Completed($"Preview: would {action} for wardrobe '{parameterName}'.", new
                     {
                         ok = true,
                         preview = true,
@@ -112,7 +142,7 @@ namespace VRCForge.Editor
                 AssetDatabase.Refresh();
                 Undo.CollapseUndoOperations(undoGroup);
 
-                return new SuccessResponse($"Wardrobe action '{action}' completed for '{parameterName}'.", new
+                return VRCForgeToolResult.Completed($"Wardrobe action '{action}' completed for '{parameterName}'.", new
                 {
                     ok = true,
                     preview = false,
@@ -133,7 +163,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Manage wardrobe failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Manage wardrobe failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

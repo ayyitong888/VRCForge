@@ -221,12 +221,24 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_ensure_expression_parameter",
-        Description = "Create or update an avatar VRCExpressionParameters entry (Bool/Int/Float), creating the parameters asset if missing. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_ensure_expression_parameter",
+        Summary = "Create or update an avatar VRCExpressionParameters entry (Bool/Int/Float), creating the parameters asset if missing. Supports preview."
     )]
     public static class EnsureExpressionParameterTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Expression parameter name.", IsRequired = true)] public string parameterName { get; set; } = "";
+            [VRCForgeInput("Expression parameter value type.", IsRequired = false)] public string valueType { get; set; } = "Int";
+            [VRCForgeInput("Default parameter value.", IsRequired = false)] public float? defaultValue { get; set; } = 0f;
+            [VRCForgeInput("Persist the parameter in avatar data.", IsRequired = false)] public bool? saved { get; set; } = true;
+            [VRCForgeInput("Synchronize the parameter over the network.", IsRequired = false)] public bool? networkSynced { get; set; } = true;
+            [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Asset directory for a newly created expression-parameters asset.", IsRequired = false)] public string assetDir { get; set; } = "";
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -242,7 +254,7 @@ namespace VRCForge.Editor
                 var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString() ?? "");
                 if (string.IsNullOrWhiteSpace(parameterName))
                 {
-                    return new ErrorResponse("parameterName is required.");
+                    return VRCForgeToolResult.Failed("parameterName is required.");
                 }
 
                 var descriptor = AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
@@ -265,7 +277,7 @@ namespace VRCForge.Editor
                 };
                 if (preview)
                 {
-                    return new SuccessResponse($"Preview: would ensure expression parameter '{parameterName}'.", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would ensure expression parameter '{parameterName}'.", new { ok = true, preview = true, plan });
                 }
 
                 asset = AvatarAuthoringCrudCore.EnsureExpressionParametersAsset(descriptor, assetDir);
@@ -292,7 +304,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(asset);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
-                return new SuccessResponse($"Ensured expression parameter '{parameterName}'.", new
+                return VRCForgeToolResult.Completed($"Ensured expression parameter '{parameterName}'.", new
                 {
                     ok = true,
                     preview = false,
@@ -305,17 +317,29 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Ensure expression parameter failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Ensure expression parameter failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_ensure_expression_menu_control",
-        Description = "Create an avatar expression menu control under a menu path, creating root/submenus when needed. Supports Toggle/SubMenu and preview."
+    [VRCForgeCommand(
+        toolId: "vrc_ensure_expression_menu_control",
+        Summary = "Create an avatar expression menu control under a menu path, creating root/submenus when needed. Supports Toggle/SubMenu and preview."
     )]
     public static class EnsureExpressionMenuControlTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Optional target menu asset path.", IsRequired = false)] public string menuPath { get; set; } = "";
+            [VRCForgeInput("Display name for the control.", IsRequired = false)] public string controlName { get; set; } = "Control";
+            [VRCForgeInput("Expression menu control type.", IsRequired = false)] public string controlType { get; set; } = "Toggle";
+            [VRCForgeInput("Bound expression parameter name.", IsRequired = true)] public string parameterName { get; set; } = "";
+            [VRCForgeInput("Control parameter value.", IsRequired = false)] public float? controlValue { get; set; } = 0f;
+            [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Asset directory for a newly created expression menu.", IsRequired = false)] public string assetDir { get; set; } = "";
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -331,7 +355,7 @@ namespace VRCForge.Editor
                 var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString() ?? "");
                 if (string.IsNullOrWhiteSpace(controlName))
                 {
-                    return new ErrorResponse("controlName is required.");
+                    return VRCForgeToolResult.Failed("controlName is required.");
                 }
 
                 var descriptor = AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
@@ -354,7 +378,7 @@ namespace VRCForge.Editor
                 };
                 if (preview)
                 {
-                    return new SuccessResponse($"Preview: would ensure menu control '{controlName}'.", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would ensure menu control '{controlName}'.", new { ok = true, preview = true, plan });
                 }
 
                 root = AvatarAuthoringCrudCore.EnsureRootMenuAsset(descriptor, assetDir);
@@ -392,7 +416,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(target);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
-                return new SuccessResponse($"Ensured menu control '{controlName}'.", new
+                return VRCForgeToolResult.Completed($"Ensured menu control '{controlName}'.", new
                 {
                     ok = true,
                     preview = false,
@@ -408,7 +432,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Ensure expression menu control failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Ensure expression menu control failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 
@@ -558,12 +582,26 @@ namespace VRCForge.Editor
         }
     }
 
-    [VRCForgeTool(
-        name: "vrc_ensure_animator_state",
-        Description = "Ensure an FX animator parameter, layer, state, optional generated clip, and Any-State transition condition. Supports preview."
+    [VRCForgeCommand(
+        toolId: "vrc_ensure_animator_state",
+        Summary = "Ensure an FX animator parameter, layer, state, optional generated clip, and Any-State transition condition. Supports preview."
     )]
     public static class EnsureAnimatorStateTool
     {
+        public class Parameters
+        {
+            [VRCForgeInput("Avatar hierarchy path.", IsRequired = false)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("FX Animator layer name.", IsRequired = true)] public string layerName { get; set; } = "";
+            [VRCForgeInput("Animator state name.", IsRequired = false)] public string stateName { get; set; } = "State";
+            [VRCForgeInput("Optional Animator parameter name.", IsRequired = false)] public string parameterName { get; set; } = "";
+            [VRCForgeInput("Animator parameter type.", IsRequired = false)] public string parameterType { get; set; } = "Int";
+            [VRCForgeInput("Animator condition mode.", IsRequired = false)] public string conditionMode { get; set; } = "Equals";
+            [VRCForgeInput("Animator condition threshold.", IsRequired = false)] public float? threshold { get; set; } = 0f;
+            [VRCForgeInput("Set Write Defaults on the ensured state.", IsRequired = false)] public bool? writeDefaults { get; set; } = true;
+            [VRCForgeInput("Return a non-mutating preview.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Asset directory for a newly created FX controller.", IsRequired = false)] public string assetDir { get; set; } = "";
+        }
+
         public static object HandleCommand(JObject @params)
         {
             try
@@ -579,9 +617,9 @@ namespace VRCForge.Editor
                 var writeDefaults = @params["writeDefaults"]?.Value<bool?>() ?? true;
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
                 var assetDir = AvatarAuthoringCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString() ?? "");
-                if (string.IsNullOrWhiteSpace(layerName)) return new ErrorResponse("layerName is required.");
-                if (string.IsNullOrWhiteSpace(stateName)) return new ErrorResponse("stateName is required.");
-                if (string.IsNullOrWhiteSpace(parameterName)) return new ErrorResponse("parameterName is required.");
+                if (string.IsNullOrWhiteSpace(layerName)) return VRCForgeToolResult.Failed("layerName is required.");
+                if (string.IsNullOrWhiteSpace(stateName)) return VRCForgeToolResult.Failed("stateName is required.");
+                if (string.IsNullOrWhiteSpace(parameterName)) return VRCForgeToolResult.Failed("parameterName is required.");
 
                 var descriptor = AvatarAuthoringCrudCore.ResolveAvatarDescriptor(avatarPath);
                 var controller = AvatarAuthoringCrudCore.GetFxController(descriptor);
@@ -606,7 +644,7 @@ namespace VRCForge.Editor
                 };
                 if (preview)
                 {
-                    return new SuccessResponse($"Preview: would ensure animator state '{stateName}'.", new { ok = true, preview = true, plan });
+                    return VRCForgeToolResult.Completed($"Preview: would ensure animator state '{stateName}'.", new { ok = true, preview = true, plan });
                 }
 
                 controller = AvatarAuthoringCrudCore.EnsureFxController(descriptor, assetDir);
@@ -632,7 +670,7 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(state);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
-                return new SuccessResponse($"Ensured animator state '{stateName}'.", new
+                return VRCForgeToolResult.Completed($"Ensured animator state '{stateName}'.", new
                 {
                     ok = true,
                     preview = false,
@@ -650,7 +688,7 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Ensure animator state failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Ensure animator state failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

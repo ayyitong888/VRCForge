@@ -373,14 +373,13 @@ public static class SceneObjectCopyFixtureProbe
 
     private static JObject RequireSuccess(object response)
     {
-        var success = response as SuccessResponse;
-        if (success == null)
+        var result = response as VRCForgeToolResult;
+        if (result == null || !result.IsSuccessful)
         {
-            var failure = response as ErrorResponse;
             throw new InvalidOperationException(
-                failure == null ? "unexpected tool response" : "tool failed: " + failure.Error);
+                result == null ? "unexpected tool response" : "tool failed: " + result.Message);
         }
-        return JObject.FromObject(success.Data);
+        return JObject.FromObject(result.Payload);
     }
 
     private static string ProjectRoot()

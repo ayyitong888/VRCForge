@@ -15,19 +15,19 @@ namespace VRCForge.Core.MCP
     {
         private readonly VRCForgeParameterSchema[] parameters;
 
-        internal VRCForgeToolDescriptor(Type toolType, MethodInfo handler, VRCForgeToolAttribute attribute,
+        internal VRCForgeToolDescriptor(Type toolType, MethodInfo handler, VRCForgeCommandAttribute attribute,
             IEnumerable<VRCForgeParameterSchema> parameterSchemas)
         {
             ToolType = toolType;
             Handler = handler;
-            Name = attribute.Name;
-            Description = attribute.Description ?? string.Empty;
-            Permission = attribute.Permission;
-            Group = attribute.Group ?? string.Empty;
-            StructuredOutput = attribute.StructuredOutput;
-            RequiresPolling = attribute.RequiresPolling;
-            PollAction = attribute.PollAction ?? string.Empty;
-            MaxPollSeconds = attribute.MaxPollSeconds;
+            Name = attribute.ToolId;
+            Description = attribute.Summary ?? string.Empty;
+            Permission = attribute.Access;
+            Group = attribute.Category ?? string.Empty;
+            StructuredOutput = attribute.Output == VRCForgeCommandOutput.Structured;
+            RequiresPolling = attribute.UsesContinuation;
+            PollAction = attribute.ContinuationAction ?? string.Empty;
+            MaxPollSeconds = attribute.ContinuationTimeoutSeconds;
             parameters = (parameterSchemas ?? Enumerable.Empty<VRCForgeParameterSchema>())
                 .OrderBy(item => item.Name, StringComparer.Ordinal)
                 .ToArray();
@@ -37,7 +37,7 @@ namespace VRCForge.Core.MCP
         public MethodInfo Handler { get; private set; }
         public string Name { get; private set; }
         public string Description { get; private set; }
-        public VRCForgeToolPermission Permission { get; private set; }
+        public VRCForgeCommandAccess Permission { get; private set; }
         public string Group { get; private set; }
         public bool StructuredOutput { get; private set; }
         public bool RequiresPolling { get; private set; }
@@ -128,12 +128,12 @@ namespace VRCForge.Core.MCP
                 foreach (var type in GetLoadableTypes(assembly)
                     .OrderBy(item => item.FullName ?? item.Name, StringComparer.Ordinal))
                 {
-                    var attribute = (VRCForgeToolAttribute)Attribute.GetCustomAttribute(type, typeof(VRCForgeToolAttribute), false);
-                    if (attribute == null || !attribute.AutoRegister)
+                    var attribute = (VRCForgeCommandAttribute)Attribute.GetCustomAttribute(type, typeof(VRCForgeCommandAttribute), false);
+                    if (attribute == null || !attribute.IsDiscoverable)
                     {
                         continue;
                     }
-                    if (!IsValidToolName(attribute.Name))
+                    if (!IsValidToolName(attribute.ToolId))
                     {
                         throw new InvalidOperationException("A VRCForge tool has no valid name: " + (type.FullName ?? type.Name));
                     }
@@ -252,18 +252,18 @@ namespace VRCForge.Core.MCP
             var schemas = new List<VRCForgeParameterSchema>();
             foreach (var member in selected.Members.OrderBy(item => item.Name, StringComparer.Ordinal))
             {
-                var attribute = (VRCForgeParameterAttribute)Attribute.GetCustomAttribute(member, typeof(VRCForgeParameterAttribute), true);
+                var attribute = (VRCForgeInputAttribute)Attribute.GetCustomAttribute(member, typeof(VRCForgeInputAttribute), true);
                 if (attribute == null)
                 {
                     continue;
                 }
-                var name = string.IsNullOrWhiteSpace(attribute.Name) ? member.Name : attribute.Name;
+                var name = string.IsNullOrWhiteSpace(attribute.Key) ? member.Name : attribute.Key;
                 if (!seenNames.Add(name))
                 {
                     throw new InvalidOperationException("Duplicate VRCForge parameter name: " + name);
                 }
-                schemas.Add(new VRCForgeParameterSchema(name, attribute.Description, GetSchemaType(GetMemberType(member)),
-                    attribute.Required, attribute.DefaultValue, GetEnumValues(GetMemberType(member))));
+                schemas.Add(new VRCForgeParameterSchema(name, attribute.HelpText, GetSchemaType(GetMemberType(member)),
+                    attribute.IsRequired, attribute.DefaultLiteral, GetEnumValues(GetMemberType(member))));
             }
             return schemas;
         }
@@ -272,7 +272,7 @@ namespace VRCForge.Core.MCP
         {
             var members = type.GetMembers(BindingFlags.Public | BindingFlags.Instance)
                 .Where(item => (item.MemberType == MemberTypes.Property || item.MemberType == MemberTypes.Field)
-                    && Attribute.IsDefined(item, typeof(VRCForgeParameterAttribute), true))
+                    && Attribute.IsDefined(item, typeof(VRCForgeInputAttribute), true))
                 .ToArray();
             return members.Length == 0 ? null : new ParameterCandidate(type, members);
         }

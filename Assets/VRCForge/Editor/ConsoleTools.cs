@@ -13,9 +13,9 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_create_safe_backup",
-        Description = "Create a local VRCForge backup snapshot for selected Unity assets before asset-writing actions."
+    [VRCForgeCommand(
+        toolId: "vrc_create_safe_backup",
+        Summary = "Create a local VRCForge backup snapshot for selected Unity assets before asset-writing actions."
     )]
     public static class ConsoleTools
     {
@@ -24,19 +24,19 @@ namespace VRCForge.Editor
 
         public class CreateSafeBackupParameters
         {
-            [VRCForgeParameter("Optional avatar root hierarchy path used to include the avatar prefab source when available.", Required = false)]
+            [VRCForgeInput("Optional avatar root hierarchy path used to include the avatar prefab source when available.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
 
-            [VRCForgeParameter("Asset paths to include. If empty, selected project assets plus open scenes are used.", Required = false)]
+            [VRCForgeInput("Asset paths to include. If empty, selected project assets plus open scenes are used.", IsRequired = false)]
             public List<string> assetPaths { get; set; } = new List<string>();
 
-            [VRCForgeParameter("Include loaded scene asset files in the snapshot.", Required = false)]
+            [VRCForgeInput("Include loaded scene asset files in the snapshot.", IsRequired = false)]
             public bool? includeOpenScenes { get; set; } = true;
 
-            [VRCForgeParameter("Project-relative or absolute folder for backup snapshots.", Required = false)]
+            [VRCForgeInput("Project-relative or absolute folder for backup snapshots.", IsRequired = false)]
             public string backupRoot { get; set; } = DefaultBackupRoot;
 
-            [VRCForgeParameter("Refresh the Unity AssetDatabase if the backup root is inside Assets.", Required = false)]
+            [VRCForgeInput("Refresh the Unity AssetDatabase if the backup root is inside Assets.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = false;
         }
 
@@ -55,13 +55,13 @@ namespace VRCForge.Editor
             try
             {
                 var payload = CreateBackup(parameters);
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Created safe backup with {payload.summary.fileCount} file(s): {payload.backup_id}",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"Safe backup creation failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"Safe backup creation failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

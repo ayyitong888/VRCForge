@@ -14,9 +14,9 @@ using UnityEngine;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_scan_fx_animator",
-        Description = "Scan a VRChat avatar FX AnimatorController into a read-only layer/state/transition inventory."
+    [VRCForgeCommand(
+        toolId: "vrc_scan_fx_animator",
+        Summary = "Scan a VRChat avatar FX AnimatorController into a read-only layer/state/transition inventory."
     )]
     public static class ComponentTools
     {
@@ -25,16 +25,16 @@ namespace VRCForge.Editor
 
         public class ScanFxAnimatorParameters
         {
-            [VRCForgeParameter("Optional avatar root hierarchy path. If empty, the first scene avatar descriptor is used.", Required = false)]
+            [VRCForgeInput("Optional avatar root hierarchy path. If empty, the first scene avatar descriptor is used.", IsRequired = false)]
             public string avatarPath { get; set; } = "";
 
-            [VRCForgeParameter("Optional AnimatorController asset path. If set, this overrides avatar FX lookup.", Required = false)]
+            [VRCForgeInput("Optional AnimatorController asset path. If set, this overrides avatar FX lookup.", IsRequired = false)]
             public string controllerPath { get; set; } = "";
 
-            [VRCForgeParameter("Asset-relative or absolute output path. Leave empty to skip writing JSON.", Required = false)]
+            [VRCForgeInput("Asset-relative or absolute output path. Leave empty to skip writing JSON.", IsRequired = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
-            [VRCForgeParameter("Refresh the Unity AssetDatabase after writing JSON.", Required = false)]
+            [VRCForgeInput("Refresh the Unity AssetDatabase after writing JSON.", IsRequired = false)]
             public bool? refreshAssets { get; set; } = true;
         }
 
@@ -62,13 +62,13 @@ namespace VRCForge.Editor
                     payload.absoluteOutputPath = absolutePath.Replace("\\", "/");
                 }
 
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     $"Scanned FX animator with {payload.summary.layerCount} layer(s), {payload.summary.stateCount} state(s), and {payload.summary.transitionCount} transition(s).",
                     payload);
             }
             catch (Exception ex)
             {
-                return new ErrorResponse($"FX animator scan failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed($"FX animator scan failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
 

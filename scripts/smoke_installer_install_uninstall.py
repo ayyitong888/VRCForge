@@ -5,6 +5,7 @@ import ctypes
 import hashlib
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from uuid import uuid4
 
 SCHEMA = "vrcforge.installer_install_uninstall_smoke.v1"
 SENTINEL_NAME = "installer-smoke-preservation.json"
+SMOKE_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 
 
 def main() -> int:
@@ -34,8 +36,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Smoke-test VRCForge NSIS installer install/uninstall.")
     parser.add_argument("--installer", default="dist/release/VRCForge_Offline_Installer_x64.exe")
     parser.add_argument("--upgrade-installer", default="", help="Optional older installer to install before upgrading with --installer.")
-    parser.add_argument("--install-dir", default=str(default_install_dir()), help="Defaults to %%ProgramFiles%%\\VRCForge.")
-    parser.add_argument("--user-data-root", default="", help="Override the VRCForge user data root. Defaults to %%LOCALAPPDATA%%\\VRCForge\\agentic-app.")
+    parser.add_argument("--smoke-id", default="", help="Required 32-lowercase-hex identity for an isolated smoke-flavor installer.")
+    parser.add_argument("--install-dir", default="", help="Must be %%ProgramFiles%%\\VRCForge-Smoke-<smoke-id>.")
+    parser.add_argument("--user-data-root", default="", help="Must be %%LOCALAPPDATA%%\\VRCForge\\installer-smoke\\<smoke-id>.")
     parser.add_argument("--artifacts-dir", default="", help="Directory for the JSON smoke report. Defaults to ./artifacts/installer-smoke.")
     parser.add_argument("--timeout", type=float, default=180.0)
     parser.add_argument("--backend-port", type=int, default=8791)
@@ -48,8 +51,9 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     started_at = utc_now()
     installer = Path(args.installer).expanduser().resolve()
     upgrade_installer = Path(args.upgrade_installer).expanduser().resolve() if args.upgrade_installer else None
-    install_dir = Path(args.install_dir).expanduser().resolve()
-    user_data_root = resolve_user_data_root(args.user_data_root)
+    smoke_id = str(getattr(args, "smoke_id", "")).strip()
+    install_dir = resolve_install_dir(args.install_dir, smoke_id)
+    user_data_root = resolve_user_data_root(args.user_data_root, smoke_id)
     steps: list[dict[str, Any]] = []
     phases = {
         "install": "skipped",
@@ -87,7 +91,10 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             )
             if not upgrade_installer.is_file() and not args.dry_run:
                 raise RuntimeError("Upgrade installer does not exist.")
-        steps.append(user_data_root_step(user_data_root, override_used=bool(args.user_data_root.strip())))
+        scope = smoke_scope_step(smoke_id, install_dir, user_data_root)
+        steps.append(scope)
+        if not scope["ok"]:
+            raise RuntimeError("Installer smoke requires an exact isolated smoke identity, install leaf, and user-data root.")
         if args.dry_run:
             return build_report(
                 args,
@@ -441,9 +448,11 @@ def stop_process(process: subprocess.Popen[str]) -> None:
         process.wait(timeout=10)
 
 
-def resolve_user_data_root(override: str) -> Path:
+def resolve_user_data_root(override: str, smoke_id: str = "") -> Path:
     if override.strip():
         return Path(override).expanduser().resolve()
+    if SMOKE_ID_PATTERN.fullmatch(smoke_id):
+        return default_smoke_user_data_root(smoke_id).resolve()
     return default_user_data_root().resolve()
 
 
@@ -460,6 +469,22 @@ def default_install_dir() -> Path:
         return Path(program_files).expanduser() / "VRCForge"
     system_drive = os.environ.get("SystemDrive", "").strip() or "C:"
     return Path(f"{system_drive}\\Program Files") / "VRCForge"
+
+
+def default_smoke_install_dir(smoke_id: str) -> Path:
+    return default_install_dir().parent / f"VRCForge-Smoke-{smoke_id}"
+
+
+def resolve_install_dir(override: str, smoke_id: str) -> Path:
+    if override.strip():
+        return Path(override).expanduser().resolve()
+    if SMOKE_ID_PATTERN.fullmatch(smoke_id):
+        return default_smoke_install_dir(smoke_id).resolve()
+    return default_install_dir().resolve()
+
+
+def default_smoke_user_data_root(smoke_id: str) -> Path:
+    return default_user_data_root().parent / "installer-smoke" / smoke_id
 
 
 def legacy_user_data_roots() -> dict[str, str]:
@@ -482,6 +507,23 @@ def user_data_root_step(user_data_root: Path, *, override_used: bool = False) ->
         "overrideUsed": override_used,
         "matchesTauriAndBackendDefault": user_data_root == expected,
         "legacyRoots": legacy_user_data_roots(),
+    }
+
+
+def smoke_scope_step(smoke_id: str, install_dir: Path, user_data_root: Path) -> dict[str, Any]:
+    normalized_id = smoke_id.strip()
+    valid_id = bool(SMOKE_ID_PATTERN.fullmatch(normalized_id))
+    expected_install = default_smoke_install_dir(normalized_id).resolve() if valid_id else None
+    expected_user_data = default_smoke_user_data_root(normalized_id).resolve() if valid_id else None
+    return {
+        "name": "smoke_scope.identity",
+        "ok": bool(valid_id and install_dir == expected_install and user_data_root == expected_user_data),
+        "smokeId": normalized_id,
+        "expectedInstallDir": str(expected_install) if expected_install else "",
+        "installDir": str(install_dir),
+        "expectedUserDataRoot": str(expected_user_data) if expected_user_data else "",
+        "userDataRoot": str(user_data_root),
+        "requiresExactScope": True,
     }
 
 
@@ -539,10 +581,29 @@ def build_report(
         "installerSha256": sha256_file(installer),
         "upgradeInstaller": str(upgrade_installer) if upgrade_installer else "",
         "installDir": str(install_dir),
+        "smoke": {
+            "id": str(getattr(args, "smoke_id", "")).strip(),
+            "requiredPattern": SMOKE_ID_PATTERN.pattern,
+            "expectedInstallDir": str(
+                default_smoke_install_dir(str(getattr(args, "smoke_id", "")).strip()).resolve()
+            )
+            if SMOKE_ID_PATTERN.fullmatch(str(getattr(args, "smoke_id", "")).strip())
+            else "",
+        },
         "userData": {
             "root": str(user_data_root),
             "expectedDefaultRoot": str(default_user_data_root().resolve()),
             "matchesTauriAndBackendDefault": user_data_root == default_user_data_root().resolve(),
+            "expectedSmokeRoot": str(
+                default_smoke_user_data_root(str(getattr(args, "smoke_id", "")).strip()).resolve()
+            )
+            if SMOKE_ID_PATTERN.fullmatch(str(getattr(args, "smoke_id", "")).strip())
+            else "",
+            "matchesSmokeScope": bool(
+                SMOKE_ID_PATTERN.fullmatch(str(getattr(args, "smoke_id", "")).strip())
+                and user_data_root
+                == default_smoke_user_data_root(str(getattr(args, "smoke_id", "")).strip()).resolve()
+            ),
             "sentinelPath": str(sentinel_path),
             "legacyRoots": legacy_user_data_roots(),
         },

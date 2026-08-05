@@ -14,9 +14,9 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_set_texture_import_settings",
-        Description = "Preview or update one persistent project texture importer through the supervised project-write lane."
+    [VRCForgeCommand(
+        toolId: "vrc_set_texture_import_settings",
+        Summary = "Preview or update one persistent project texture importer through the supervised project-write lane."
     )]
     public static class TextureImportSettingsTool
     {
@@ -28,6 +28,29 @@ namespace VRCForge.Editor
         private const uint NativeFileShareDelete = 0x00000004;
         private const uint NativeOpenExisting = 3;
         private const uint NativeFileAttributeNormal = 0x00000080;
+
+        public class Parameters
+        {
+            [VRCForgeInput("Persistent texture asset path under Assets.", IsRequired = true)] public string textureAssetPath { get; set; } = "";
+            [VRCForgeInput("Target importer platform.", IsRequired = true)] public string platform { get; set; } = "";
+            [VRCForgeInput("Requested maximum texture size.", IsRequired = true)] public int? maxTextureSize { get; set; }
+            [VRCForgeInput("Requested importer format.", IsRequired = true)] public string format { get; set; } = "";
+            [VRCForgeInput("Requested compression level.", IsRequired = true)] public string compression { get; set; } = "";
+            [VRCForgeInput("Enable crunch compression.", IsRequired = true)] public bool? crunch { get; set; }
+            [VRCForgeInput("Requested compression quality.", IsRequired = true)] public int? quality { get; set; }
+            [VRCForgeInput("Exact active Unity project root.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
+            [VRCForgeInput("Return a non-mutating importer preview.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Save and reimport during apply; required for apply.", IsRequired = false)] public bool? saveAndReimport { get; set; } = false;
+            [VRCForgeInput("Expected texture asset path from preview.", IsRequired = false)] public string expectedTextureAssetPath { get; set; } = "";
+            [VRCForgeInput("Expected texture asset GUID from preview.", IsRequired = false)] public string expectedTextureAssetGuid { get; set; } = "";
+            [VRCForgeInput("Expected texture source-file digest from preview.", IsRequired = false)] public string expectedSourceFileDigest { get; set; } = "";
+            [VRCForgeInput("Expected texture source-file identity digest from preview.", IsRequired = false)] public string expectedSourceFileIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Expected texture meta-file digest from preview.", IsRequired = false)] public string expectedMetaFileDigest { get; set; } = "";
+            [VRCForgeInput("Expected texture meta-file identity digest from preview.", IsRequired = false)] public string expectedMetaFileIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Expected importer type from preview.", IsRequired = false)] public string expectedImporterType { get; set; } = "";
+            [VRCForgeInput("Expected importer settings digest from preview.", IsRequired = false)] public string expectedImporterSettingsDigest { get; set; } = "";
+            [VRCForgeInput("Expected target settings digest from preview.", IsRequired = false)] public string expectedTargetSettingsDigest { get; set; } = "";
+        }
 
         private static readonly HashSet<int> AllowedMaxTextureSizes = new HashSet<int>
         {
@@ -190,15 +213,15 @@ namespace VRCForge.Editor
                 );
                 if (!MatchesCurrentProject(expectedProjectPath))
                 {
-                    return new ErrorResponse("The selected Unity project does not match the active editor instance.");
+                    return VRCForgeToolResult.Failed("The selected Unity project does not match the active editor instance.");
                 }
                 if (!preview && !saveAndReimport)
                 {
-                    return new ErrorResponse("saveAndReimport must be true for apply.");
+                    return VRCForgeToolResult.Failed("saveAndReimport must be true for apply.");
                 }
                 if (!preview && !HasApplyPreconditions(@params))
                 {
-                    return new ErrorResponse("Verified texture importer preconditions are required for apply.");
+                    return VRCForgeToolResult.Failed("Verified texture importer preconditions are required for apply.");
                 }
 
                 var platformSpec = PlatformSpec.Create(platform);
@@ -333,7 +356,7 @@ namespace VRCForge.Editor
                     );
                     if (ComputeSettingsDigest(importerType, ReadSettings(evidence.importer, platformSpec)) != beforeSettingsDigest)
                     {
-                        return new ErrorResponse("Texture importer state changed after the verified preview.");
+                        return VRCForgeToolResult.Failed("Texture importer state changed after the verified preview.");
                     }
 
                     var mutationStarted = false;
@@ -408,7 +431,7 @@ namespace VRCForge.Editor
             }
             catch (Exception)
             {
-                return new ErrorResponse("Texture importer settings operation failed.");
+                return VRCForgeToolResult.Failed("Texture importer settings operation failed.");
             }
         }
 
@@ -430,7 +453,7 @@ namespace VRCForge.Editor
             bool importerDirtyAfter
         )
         {
-            return new SuccessResponse(
+            return VRCForgeToolResult.Completed(
                 preview ? "Texture importer preview completed." : "Texture importer settings verified.",
                 new
                 {
@@ -470,7 +493,7 @@ namespace VRCForge.Editor
             var message = restored
                 ? "Texture importer settings operation failed after restoring the verified pre-state."
                 : "Texture importer settings operation failed; checkpoint restore is required.";
-            return new ErrorResponse(
+            return VRCForgeToolResult.Failed(
                 message,
                 new
                 {

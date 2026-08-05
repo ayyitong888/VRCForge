@@ -2325,7 +2325,11 @@ def build_rollback_coverage_matrix(
             "Packages manifest and package files included in checkpoint",
             project_readable,
             "Packages/manifest.json and local package edits must restore with optimizer dependency changes",
-            evidence={"pathspec": "Packages", "unityCacheCleanup": ["Library/Bee", "Library/ScriptAssemblies", "Library/PackageCache"]},
+            evidence={
+                "pathspec": "Packages",
+                "unityCacheCleanup": ["Library/Bee", "Library/ScriptAssemblies"],
+                "unityCachePreserved": ["Library/PackageCache"],
+            },
         ),
         _rollback_coverage_item(
             "checkpoint.project_settings",

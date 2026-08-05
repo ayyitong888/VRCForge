@@ -61,6 +61,33 @@ function Get-StreamSha256 {
     }
 }
 
+function Get-VersionBoundReleaseNotes {
+    param(
+        [string]$Version,
+        [string]$Target
+    )
+
+    if ($Version -notmatch "^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$") {
+        throw "Release notes require a normalized semantic version, but got '$Version'."
+    }
+    if ($Target -notmatch "^[0-9a-f]{40}$") {
+        throw "Release notes require an exact Git commit target."
+    }
+    $releaseNotesObject = "${Target}:docs/RELEASE_NOTES_$Version.md"
+    $releaseNotesLines = @(& git show $releaseNotesObject 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Missing version-bound release notes in target commit: $releaseNotesObject"
+    }
+    $releaseNotes = ($releaseNotesLines -join "`n").TrimEnd("`n")
+    if ([string]::IsNullOrWhiteSpace($releaseNotes)) {
+        throw "Version-bound release notes must not be empty in target commit: $releaseNotesObject"
+    }
+    return [PSCustomObject]@{
+        Object = $releaseNotesObject
+        Body = $releaseNotes
+    }
+}
+
 function Get-GitHubReleaseSnapshot {
     param(
         [string]$Tag = "",
@@ -307,6 +334,25 @@ try {
         throw "Release manifest uv runtime provenance must contain only uv.exe and uvx.exe digests."
     }
 
+    $webPayload = Get-RequiredProperty -InputObject $manifest -Name "webPayload" -Context "Release manifest"
+    $webPayloadDownloadUrl = [string](Get-RequiredProperty -InputObject $webPayload -Name "downloadUrl" -Context "Release manifest webPayload")
+    $webPayloadLength = [uint64](Get-RequiredProperty -InputObject $webPayload -Name "length" -Context "Release manifest webPayload")
+    $webPayloadSha256 = [string](Get-RequiredProperty -InputObject $webPayload -Name "sha256" -Context "Release manifest webPayload")
+    $webPayloadHelperSha256 = [string](Get-RequiredProperty -InputObject $webPayload -Name "helperSha256" -Context "Release manifest webPayload")
+    $expectedWebPayloadDownloadUrl = "https://github.com/ayyitong888/VRCForge/releases/download/v$Version/VRCForge_Windows_x64_$Version.zip"
+    $expectedWebPayloadHelperSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $repoRoot "installer\VRCForge_WebPayload.ps1")).Hash.ToLowerInvariant()
+    $actualPayloadLength = [uint64](Get-Item -LiteralPath $payloadZip -Force).Length
+    if (
+        $webPayloadDownloadUrl -cne $expectedWebPayloadDownloadUrl -or
+        $webPayloadLength -le 0 -or
+        $webPayloadLength -ne $actualPayloadLength -or
+        $webPayloadSha256 -notmatch "^[0-9a-fA-F]{64}$" -or
+        $webPayloadHelperSha256 -notmatch "^[0-9a-fA-F]{64}$" -or
+        $webPayloadHelperSha256.ToLowerInvariant() -cne $expectedWebPayloadHelperSha256
+    ) {
+        throw "Release manifest web payload provenance is not bound to the exact official asset and secured helper."
+    }
+
     $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vrcforge_release_publish_" + [System.Guid]::NewGuid().ToString("N"))
     New-Item -ItemType Directory -Force -Path $stagingRoot | Out-Null
     $artifacts = @()
@@ -325,6 +371,13 @@ try {
         @(Compare-Object -ReferenceObject $requiredArtifactNames -DifferenceObject $manifestArtifactNames -CaseSensitive).Count -ne 0
     ) {
         throw "Release manifest must contain exactly the four publishable artifact names."
+    }
+    $payloadManifestEntry = @($manifestArtifacts | Where-Object { [string]$_.name -ceq ([System.IO.Path]::GetFileName($payloadZip)) })
+    if (
+        $payloadManifestEntry.Count -ne 1 -or
+        ([string]$payloadManifestEntry[0].sha256).ToLowerInvariant() -cne $webPayloadSha256.ToLowerInvariant()
+    ) {
+        throw "Release manifest web payload digest must match the portable payload artifact digest."
     }
     foreach ($artifact in $artifacts) {
         $artifactName = [System.IO.Path]::GetFileName($artifact)
@@ -396,7 +449,10 @@ try {
     $tag = "v$Version"
     $expectedPrerelease = $Version -match "(?i)(alpha|beta|rc)"
     $releaseTitle = "VRCForge $Version"
-    $releaseNotes = "Windows x64 installer release for VRCForge $Version."
+    $releaseNotesRecord = Get-VersionBoundReleaseNotes -Version $Version -Target $target
+    $releaseNotes = [string]$releaseNotesRecord.Body
+    $stagedReleaseNotesPath = Join-Path $stagingRoot "release-notes.md"
+    [System.IO.File]::WriteAllText($stagedReleaseNotesPath, $releaseNotes, [System.Text.UTF8Encoding]::new($false))
     Assert-RemoteTagTarget -Tag $tag -Target $target
     $releaseExists = $false
     $existingTarget = ""
@@ -417,7 +473,7 @@ try {
             "--target", $target,
             "--verify-tag",
             "--title", $releaseTitle,
-            "--notes", $releaseNotes,
+            "--notes-file", $stagedReleaseNotesPath,
             "--draft"
         )
         if ($expectedPrerelease) {
@@ -434,45 +490,26 @@ try {
     }
 
     Assert-RemoteTagTarget -Tag $tag -Target $target
-    $draftRelease = Get-GitHubReleaseSnapshot -Tag $tag
+    $draftReleaseByTag = Get-GitHubReleaseSnapshot -Tag $tag
+    $draftReleaseId = [long]$draftReleaseByTag.id
+    $draftRelease = Get-GitHubReleaseSnapshot -ReleaseId $draftReleaseId
+    $draftTagRelease = Get-GitHubReleaseSnapshot -Tag $tag
+    if ([long]$draftTagRelease.id -ne $draftReleaseId) {
+        throw "Draft GitHub Release tag no longer resolves to the manifest-bound release id."
+    }
     Assert-GitHubReleaseSnapshot `
         -Release $draftRelease `
         -Tag $tag `
         -Target $target `
+        -ExpectedReleaseId $draftReleaseId `
         -ExpectedName $releaseTitle `
         -ExpectedBody $releaseNotes `
         -ExpectedDraft $true `
         -ExpectedPrerelease $expectedPrerelease `
         -RequiredArtifactNames $requiredArtifactNames `
         -ManifestArtifacts $manifestArtifacts
-    $draftReleaseId = [long]$draftRelease.id
 
-    # A failed upload or digest readback leaves a non-public draft. Publish only
-    # after the complete four-asset snapshot is manifest-bound, then read it back
-    # once more so a remote race cannot turn an unchecked state into success.
-    $publishOutput = @(& gh api --method PATCH "repos/{owner}/{repo}/releases/$draftReleaseId" -F draft=false 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $publishOutput.Count -eq 0) {
-        throw "GitHub Release assets were verified, but publishing the draft failed."
-    }
-    $publishedRelease = Get-GitHubReleaseSnapshot -ReleaseId $draftReleaseId
-    Assert-GitHubReleaseSnapshot `
-        -Release $publishedRelease `
-        -Tag $tag `
-        -Target $target `
-        -ExpectedReleaseId $draftReleaseId `
-        -ExpectedName $releaseTitle `
-        -ExpectedBody $releaseNotes `
-        -ExpectedDraft $false `
-        -ExpectedPrerelease $expectedPrerelease `
-        -RequiredArtifactNames $requiredArtifactNames `
-        -ManifestArtifacts $manifestArtifacts
-    $publishedTagRelease = Get-GitHubReleaseSnapshot -Tag $tag
-    if ([long]$publishedTagRelease.id -ne $draftReleaseId) {
-        throw "Published GitHub Release tag no longer resolves to the manifest-bound release id."
-    }
-    Assert-RemoteTagTarget -Tag $tag -Target $target
-
-    Write-Host "Uploaded, verified, and published Unity package, installers, and payload on GitHub Release $tag."
+    Write-Host "Created, uploaded, and verified Draft GitHub Release $tag. It remains unpublished."
 } finally {
     foreach ($guardStream in $artifactGuardStreams) {
         if ($null -ne $guardStream) {

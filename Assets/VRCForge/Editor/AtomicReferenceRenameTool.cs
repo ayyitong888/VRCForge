@@ -17,12 +17,41 @@ using UnityEngine.SceneManagement;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_atomic_reference_rename",
-        Description = "Preview or atomically migrate one fixed-schema avatar object or parameter reference set."
+    [VRCForgeCommand(
+        toolId: "vrc_atomic_reference_rename",
+        Summary = "Preview or atomically migrate one fixed-schema avatar object or parameter reference set."
     )]
     public static class AtomicReferenceRenameTool
     {
+        public enum OperationKind { game_object, parameter }
+
+        public class Parameters
+        {
+            [VRCForgeInput("Operation kind.", IsRequired = true)] public OperationKind operationKind { get; set; }
+            [VRCForgeInput("Saved scene asset path.", IsRequired = true)] public string scenePath { get; set; } = "";
+            [VRCForgeInput("Selected avatar hierarchy path.", IsRequired = true)] public string avatarPath { get; set; } = "";
+            [VRCForgeInput("Return the verified rename plan without mutation.", IsRequired = true)] public bool preview { get; set; }
+            [VRCForgeInput("Must be false for preview and true for apply.", IsRequired = true)] public bool saveScene { get; set; }
+            [VRCForgeInput("Object target path; required only for game_object.", IsRequired = false)] public string targetObjectPath { get; set; } = "";
+            [VRCForgeInput("Replacement object name; required only for game_object.", IsRequired = false)] public string newName { get; set; } = "";
+            [VRCForgeInput("Existing parameter name; required only for parameter.", IsRequired = false)] public string oldParameterName { get; set; } = "";
+            [VRCForgeInput("Replacement parameter name; required only for parameter.", IsRequired = false)] public string newParameterName { get; set; } = "";
+            [VRCForgeInput("Verified project path from preview; required for apply.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
+            [VRCForgeInput("Verified scene GUID from preview; required for apply.", IsRequired = false)] public string expectedSceneGuid { get; set; } = "";
+            [VRCForgeInput("Verified scene handle from preview; required for apply.", IsRequired = false)] public int? expectedSceneHandle { get; set; }
+            [VRCForgeInput("Verified scene file digest from preview; required for apply.", IsRequired = false)] public string expectedSceneFileDigest { get; set; } = "";
+            [VRCForgeInput("Verified scene file identity from preview; required for apply.", IsRequired = false)] public string expectedSceneFileIdentity { get; set; } = "";
+            [VRCForgeInput("Verified scene metadata digest from preview; required for apply.", IsRequired = false)] public string expectedSceneMetaDigest { get; set; } = "";
+            [VRCForgeInput("Verified scene metadata identity from preview; required for apply.", IsRequired = false)] public string expectedSceneMetaIdentity { get; set; } = "";
+            [VRCForgeInput("Verified avatar object identity from preview; required for apply.", IsRequired = false)] public string expectedAvatarObjectId { get; set; } = "";
+            [VRCForgeInput("Verified target identity digest from preview; required for apply.", IsRequired = false)] public string expectedTargetIdentityDigest { get; set; } = "";
+            [VRCForgeInput("Verified assembly-set digest from preview; required for apply.", IsRequired = false)] public string expectedAssemblySetDigest { get; set; } = "";
+            [VRCForgeInput("Verified asset-inventory digest from preview; required for apply.", IsRequired = false)] public string expectedAssetInventoryDigest { get; set; } = "";
+            [VRCForgeInput("Verified pre-mutation state digest from preview; required for apply.", IsRequired = false)] public string expectedBeforeStateDigest { get; set; } = "";
+            [VRCForgeInput("Verified target state digest from preview; required for apply.", IsRequired = false)] public string expectedTargetStateDigest { get; set; } = "";
+            [VRCForgeInput("Verified plan digest from preview; required for apply.", IsRequired = false)] public string expectedPlanDigest { get; set; } = "";
+        }
+
         internal const string ToolName = "vrc_atomic_reference_rename";
         private const string ResultSchema = "vrcforge.atomic_reference_rename.v1";
         private const string PlanSchema = "vrcforge.atomic_reference_rename_plan.v1";
@@ -116,7 +145,7 @@ namespace VRCForge.Editor
                 var snapshot = BuildPreview(request);
                 if (preview)
                 {
-                    return new SuccessResponse(
+                    return VRCForgeToolResult.Completed(
                         "Atomic reference rename preview completed.",
                         snapshot.BuildPreviewPayload());
                 }
@@ -1570,7 +1599,7 @@ namespace VRCForge.Editor
                     "atomic reference rename saved scene");
                 VerifySavedEvidence(snapshot, reverse, afterScene);
                 mutationStarted = false;
-                return new SuccessResponse(
+                return VRCForgeToolResult.Completed(
                     "Atomic reference rename completed.",
                     BuildApplyPayload(snapshot, reverse, afterScene));
             }
@@ -3542,9 +3571,9 @@ namespace VRCForge.Editor
         {
             if (!mutationStarted)
             {
-                return new ErrorResponse(SafeError(exception));
+                return VRCForgeToolResult.Failed(SafeError(exception));
             }
-            return new ErrorResponse(
+            return VRCForgeToolResult.Failed(
                 restored
                     ? "Atomic reference rename failed after restoring the verified pre-state."
                     : "Atomic reference rename failed; checkpoint restore is required.",

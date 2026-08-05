@@ -11,8 +11,10 @@ export function OnboardingOverlay({
   minimized,
   stepIndex,
   runtimeConnected,
+  selectedProjectReady,
+  unityToolsReady,
+  unityToolsCount,
   apiKeyPresent,
-  hasProjects,
   loadingRuntime,
   currentLanguage,
   onRetryRuntime,
@@ -28,8 +30,10 @@ export function OnboardingOverlay({
   minimized: boolean;
   stepIndex: number;
   runtimeConnected: boolean;
+  selectedProjectReady: boolean;
+  unityToolsReady: boolean;
+  unityToolsCount: number;
   apiKeyPresent: boolean;
-  hasProjects: boolean;
   loadingRuntime: boolean;
   currentLanguage: string;
   onRetryRuntime: () => void;
@@ -47,10 +51,26 @@ export function OnboardingOverlay({
   }
   const steps = [
     {
+      title: t("onboarding.step3Title"),
+      done: selectedProjectReady,
+      doneDesc: t("onboarding.step3DoneDesc"),
+      todoDesc: t("onboarding.step3TodoDesc"),
+      action: (
+        <Button variant="outline" onClick={onOpenProjectPicker}>
+          <FolderPlus className="mr-1 h-4 w-4" />
+          {t("onboarding.selectProject")}
+        </Button>
+      ),
+    },
+    {
       title: t("onboarding.step1Title"),
-      done: runtimeConnected,
-      doneDesc: t("onboarding.step1DoneDesc"),
-      todoDesc: t("onboarding.step1TodoDesc"),
+      done: unityToolsReady,
+      doneDesc: t("onboarding.toolsConnected", { count: unityToolsCount, total: 64 }),
+      todoDesc: !selectedProjectReady
+        ? t("onboarding.importAndSelectProject")
+        : runtimeConnected
+          ? t("onboarding.keepUnityOpen", { count: unityToolsCount, total: 64 })
+          : t("onboarding.step1TodoDesc"),
       action: (
         <Button variant="outline" disabled={loadingRuntime} onClick={onRetryRuntime}>
           <RefreshCw className="mr-1 h-4 w-4" />
@@ -67,18 +87,6 @@ export function OnboardingOverlay({
         <Button variant="outline" onClick={onOpenSettings}>
           <Settings className="mr-1 h-4 w-4" />
           {t("onboarding.goToSettings")}
-        </Button>
-      ),
-    },
-    {
-      title: t("onboarding.step3Title"),
-      done: hasProjects,
-      doneDesc: t("onboarding.step3DoneDesc"),
-      todoDesc: t("onboarding.step3TodoDesc"),
-      action: (
-        <Button variant="outline" onClick={onOpenProjectPicker}>
-          <FolderPlus className="mr-1 h-4 w-4" />
-          {t("sidebar.newProject")}
         </Button>
       ),
     },

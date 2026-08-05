@@ -23,17 +23,31 @@ https://github.com/ayyitong888/VRCForge/releases/latest
 1. Download and run `VRCForge_Web_Installer_x64.exe` (or `VRCForge_Offline_Installer_x64.exe` for offline install).
 2. Start `VRCForge.exe` from the desktop or Start Menu.
 3. Select a Unity VRChat Avatar project root in the first-run setup.
-4. The app installs the Unity plugin, starts the backend, and opens the agent workspace.
+4. The app starts its backend and opens the agent workspace. Import the bundled
+   `VRCForge.unitypackage` into each Unity project you want to connect.
 
-Program files: `%ProgramFiles%\VRCForge`. User data: `%LOCALAPPDATA%\VRCForge\agentic-app` (preserved during update/uninstall).
+`1.4.0` is a breaking install boundary and does not support overwrite install
+or Unity package import over `1.3.6`. Close VRCForge and Unity, remove the old
+VRCForge App/runtime and old project integration, then install and import
+`1.4.0` fresh. Do not delete `%LOCALAPPDATA%\VRCForge\agentic-app` or unrelated
+Unity project content: configured API keys, user-owned `AGENTS.md`, chats,
+memories, checkpoints, and unrelated assets must be preserved.
 
-Portable zip (`VRCForge_Windows_x64_1.3.6.zip`) is also available for no-install/debug use.
+Program files: `%ProgramFiles%\VRCForge`. User data:
+`%LOCALAPPDATA%\VRCForge\agentic-app` (preserved during update/uninstall).
+
+Portable zip (`VRCForge_Windows_x64_1.4.0.zip`) is also available for no-install/debug use.
 
 ## Features / 功能概览
 
 **Avatar editing / Avatar 编辑:** BlendShape scan, face tuning (natural-language and reference-image), shader/material tuning (lilToon, Poiyomi, Generic), vision review with Gesture Manager screenshots.
 
 **Safety / 安全流程:** `Scan → Plan → Preview → Approval → Checkpoint → Apply → Validate → Restore`. All writes go through approval, pre-write checkpoint, and rollback. Three permission tiers: approval (default), auto-approve, and Roslyn full-auto.
+
+Approval requests replace only the conversation composer, so prior chat remains
+visible. The primary button allows once; eligible future-category approval is
+under its chevron, and restore remains a separate approval. Actionable Windows
+notifications use the VRCForge name and icon.
 
 **Optimization / 优化:** VRAM, material, mesh, and parameter audits with conservative one-step optimization planning.
 
@@ -78,10 +92,19 @@ direct write entrypoint; approval, checkpoint, and rollback remain mandatory.
 project-scoped MCP Core, lifecycle bootstrap, and all 64 product tools under
 `Assets/VRCForge`. After import, the App discovers and connects the selected
 project directly. No separate MCP server/package, manifest edit, command, or
-token copy is required. The integration supports only protocol `2026-07-28`;
-reads are project-bound and writes still require App approval, checkpoint,
-readback, and restore. Install is idempotent and the App can perform the same
-package import as the manual fallback.
+token copy is required, and the in-Editor Core does not open a separate console
+window. The integration supports only protocol `2026-07-28`; older clients get
+an update error, while known third-party MCP packages produce a conflict warning.
+Reads are project-bound and writes still require App approval, checkpoint,
+readback, and restore. Reimporting the same `1.4.x` integration is idempotent;
+this does not provide an overwrite-upgrade path from `1.3.6`. The App can
+perform the same package import as the manual fallback.
+
+To remove the Unity integration, use `VRCForge > Uninstall VRCForge...` and
+confirm the dialog. The command stops the bundled Core, removes only the
+versioned VRCForge auto-connect EditorPrefs key, and removes the product-owned
+`Assets/VRCForge` root. If Unity cannot remove that root, it preserves the
+remaining files and reports an error for manual review.
 
 ## Privacy / 隐私
 
@@ -107,9 +130,11 @@ This path is for development only. Normal users should use the installer.
 
 ## License / 许可
 
-GPL-3.0. The Unity MCP Core and tool package are VRCForge-owned code. Binary
-releases may bundle the uv runtime (MIT OR Apache-2.0). See [LICENSE](LICENSE)
-and [NOTICE](NOTICE).
+GPL-3.0-only. The Unity MCP Core runtime, command catalogue, input schema
+metadata, and tool-result contract are VRCForge-owned implementations. Binary
+releases may also bundle the uv runtime (MIT OR Apache-2.0). See
+[LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-VRCForge 使用 GPL-3.0 发布。Unity MCP Core 与工具包是 VRCForge 自有代码；
-二进制包可能同时包含采用 MIT OR Apache-2.0 许可的 uv 运行时。
+VRCForge 以 GPL-3.0-only 发布。Unity MCP Core、命令目录、输入 Schema 元数据和
+工具结果契约均为 VRCForge 自有实现。二进制发行包也可能包含采用 MIT OR
+Apache-2.0 许可证的 uv 运行时。

@@ -371,12 +371,7 @@ def _canonical_source(value: Any) -> dict[str, Any]:
             label="source.sceneGuid",
             pattern=_GUID_PATTERN,
         ),
-        "sceneHandle": _bounded_int(
-            source.get("sceneHandle"),
-            label="source.sceneHandle",
-            minimum=1,
-            maximum=2_147_483_647,
-        ),
+        "sceneHandle": _nonzero_int32(source.get("sceneHandle"), label="source.sceneHandle"),
         "objectPath": _scene_object_path(source.get("objectPath"), label="source.objectPath"),
         "objectId": _nonzero_hex(
             source.get("objectId"),
@@ -429,12 +424,7 @@ def _canonical_duplicate_target(value: Any) -> dict[str, Any]:
             label="target.sceneGuid",
             pattern=_GUID_PATTERN,
         ),
-        "sceneHandle": _bounded_int(
-            target.get("sceneHandle"),
-            label="target.sceneHandle",
-            minimum=1,
-            maximum=2_147_483_647,
-        ),
+        "sceneHandle": _nonzero_int32(target.get("sceneHandle"), label="target.sceneHandle"),
         "parentPath": _scene_object_path(target.get("parentPath"), label="target.parentPath"),
         "parentObjectId": _nonzero_hex(
             target.get("parentObjectId"),
@@ -642,6 +632,18 @@ def _bounded_int(value: Any, *, label: str, minimum: int, maximum: int) -> int:
     if type(value) is not int or not minimum <= value <= maximum:
         raise SceneObjectCopyError(f"{label} is outside its allowed range.")
     return value
+
+
+def _nonzero_int32(value: Any, *, label: str) -> int:
+    parsed = _bounded_int(
+        value,
+        label=label,
+        minimum=-2_147_483_648,
+        maximum=2_147_483_647,
+    )
+    if parsed == 0:
+        raise SceneObjectCopyError(f"{label} must be nonzero.")
+    return parsed
 
 
 def _bounded_text(value: Any, *, label: str, max_length: int) -> str:

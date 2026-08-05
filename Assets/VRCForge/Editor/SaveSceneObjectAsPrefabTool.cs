@@ -6,13 +6,38 @@ using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
 {
-    [VRCForgeTool(
-        name: "vrc_save_scene_object_as_prefab",
-        Description = "Preview or CreateNew-save one exact saved-scene hierarchy as a generated prefab asset."
+    [VRCForgeCommand(
+        toolId: "vrc_save_scene_object_as_prefab",
+        Summary = "Preview or CreateNew-save one exact saved-scene hierarchy as a generated prefab asset."
     )]
     public static class SaveSceneObjectAsPrefabTool
     {
         public const string ToolName = "vrc_save_scene_object_as_prefab";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Saved source scene asset path.", IsRequired = true)] public string sourceScenePath { get; set; } = "";
+            [VRCForgeInput("Exact source hierarchy path.", IsRequired = true)] public string sourceObjectPath { get; set; } = "";
+            [VRCForgeInput("New prefab asset path under Assets.", IsRequired = true)] public string prefabAssetPath { get; set; } = "";
+            [VRCForgeInput("Return a non-mutating CreateNew preview.", IsRequired = false)] public bool? preview { get; set; } = false;
+            [VRCForgeInput("Save the created prefab asset during apply.", IsRequired = false)] public bool? saveAssets { get; set; } = false;
+            [VRCForgeInput("Must remain false; overwrite is unsupported.", IsRequired = false)] public bool? overwrite { get; set; } = false;
+            [VRCForgeInput("Expected active Unity project root from preview.", IsRequired = false)] public string expectedProjectPath { get; set; } = "";
+            [VRCForgeInput("Expected source scene GUID.", IsRequired = false)] public string expectedSourceSceneGuid { get; set; } = "";
+            [VRCForgeInput("Expected source scene handle.", IsRequired = false)] public int? expectedSourceSceneHandle { get; set; }
+            [VRCForgeInput("Expected source object identity.", IsRequired = false)] public string expectedSourceObjectId { get; set; } = "";
+            [VRCForgeInput("Expected source hierarchy digest.", IsRequired = false)] public string expectedSourceHierarchyDigest { get; set; } = "";
+            [VRCForgeInput("Expected source scene file digest.", IsRequired = false)] public string expectedSourceSceneFileDigest { get; set; } = "";
+            [VRCForgeInput("Expected source scene file identity.", IsRequired = false)] public string expectedSourceSceneFileIdentity { get; set; } = "";
+            [VRCForgeInput("Expected source scene meta digest.", IsRequired = false)] public string expectedSourceSceneMetaDigest { get; set; } = "";
+            [VRCForgeInput("Expected source scene meta identity.", IsRequired = false)] public string expectedSourceSceneMetaIdentity { get; set; } = "";
+            [VRCForgeInput("Expected prefab parent-folder GUID.", IsRequired = false)] public string expectedPrefabParentFolderGuid { get; set; } = "";
+            [VRCForgeInput("Expected prefab parent-folder identity.", IsRequired = false)] public string expectedPrefabParentFolderIdentity { get; set; } = "";
+            [VRCForgeInput("Expected staging-root GUID.", IsRequired = false)] public string expectedStagingRootGuid { get; set; } = "";
+            [VRCForgeInput("Expected staging-root identity.", IsRequired = false)] public string expectedStagingRootIdentity { get; set; } = "";
+            [VRCForgeInput("Expected fixed staging policy.", IsRequired = false)] public string expectedStagingPolicy { get; set; } = "";
+            [VRCForgeInput("Expected preview digest.", IsRequired = false)] public string expectedPreviewDigest { get; set; } = "";
+        }
 
         public static object HandleCommand(JObject @params)
         {
