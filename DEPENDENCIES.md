@@ -34,30 +34,33 @@ Git is optional at runtime. Git worktrees use git-backed checkpoints; non-git pr
 
 ## Unity / Unity 侧
 
-Import the single release artifact `VRCForge.unitypackage` into a normal VRChat
-Avatar project. It installs the VRCForge-owned project-scoped MCP 2.0 Core,
-lifecycle bootstrap, and all 64 Unity tools under `Assets/VRCForge`. No separate
-MCP server/package, Unity manifest edit, Python command, `uvx` command, or token
-copy is required. The App and package support only MCP 2.0 (`2026-07-28`).
+Import the `v1.4.0` release artifact `VRCForge.unitypackage` into a supported
+VRChat Avatar project. It installs the VRCForge-owned project-scoped MCP 2.0
+Core, lifecycle bootstrap, and the release's 64 Unity tools under
+`Assets/VRCForge`. This release does not require a separate MCP server/package,
+Unity manifest edit, Python/`uvx` command, MCP token copy, or manual Core
+configuration. The App and package use protocol revision `2026-07-28`.
 
 Remove the Unity integration from `VRCForge > Uninstall VRCForge...`. That
 explicit command stops the bundled Core, deletes only its versioned
 auto-connect preference, and removes the product-owned `Assets/VRCForge` root.
 
-将发布文件 `VRCForge.unitypackage` 导入普通 VRChat Avatar 工程即可。它会把
-VRCForge 自有的项目级 MCP 2.0 Core、生命周期引导程序和全部 64 个 Unity 工具安装到
-`Assets/VRCForge`。不需要额外 MCP 服务或包、Unity manifest 修改、Python/`uvx`
-命令或手工复制 token。App 与该包只支持 MCP 2.0（`2026-07-28`）。
+将 `v1.4.0` 的 `VRCForge.unitypackage` 导入受支持的 VRChat Avatar 工程后，
+它会把 VRCForge 自有的项目级 MCP 2.0 Core、生命周期引导程序和该版本的 64 个 Unity
+工具安装到 `Assets/VRCForge`。此版本不需要额外 MCP 服务或包、Unity manifest 修改、
+Python/`uvx` 命令、MCP token 复制或手工配置 Core，并使用协议版本 `2026-07-28`。
 
 | Package | How to install | Required | 用途 |
 | --- | --- | --- | --- |
 | VRChat SDK - Avatars | Install through VRChat Creator Companion | Yes | Provides Avatar Descriptor, Expression Parameters, Expression Menu, VRChat avatar APIs, and the supported project baseline |
-| Unity Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) | Already present in the supported VCC Avatar project baseline; VRCForge never fetches or edits this package | Baseline | JSON parsing inside Unity editor tools |
+| Unity Newtonsoft Json (`com.unity.nuget.newtonsoft-json`) | Already present in the supported VCC Avatar project baseline; the verified `v1.4.0` clean-import path does not fetch or edit it | Baseline | JSON parsing inside Unity editor tools |
 
-The release acceptance import is performed with network package resolution
-disabled and requires `Packages/manifest.json` plus `packages-lock.json` to stay
-byte-identical. Importing or upgrading `VRCForge.unitypackage` never adds a UPM
-package, edits a manifest, or asks the user to install a dependency manually.
+The `v1.4.0` release acceptance import was performed with network package
+resolution disabled and verified that `Packages/manifest.json` plus
+`packages-lock.json` stayed byte-identical. Reimporting that same integration
+does not add a UPM package or require a dependency install. This is not an
+overwrite-upgrade guarantee: migration from `1.3.6` follows the fresh-install
+boundary in [README.md](README.md).
 
 Before every release build, all bundled third-party components must pass
 `packaging/check_third_party_licenses.ps1`. Any new bundled dependency must be

@@ -25,8 +25,8 @@ https://github.com/ayyitong888/VRCForge/releases/latest
 2. Open the target Unity project, import all of `VRCForge.unitypackage`, and
    wait for compilation and `[VRCForge MCP] Core Ready` to finish.
 3. Start `VRCForge.exe`, select that project, and connect. The App discovers the
-   project-owned Core directly; no separate MCP install or manual configuration
-   is required.
+   project-owned Core directly; no separate MCP install, MCP token copy, or
+   manual Core configuration is required.
 
 `1.4.0` is a breaking install boundary and does not support overwrite install
 or Unity package import over `1.3.6`. Close VRCForge and Unity, remove the old
@@ -42,13 +42,14 @@ Portable zip (`VRCForge_Windows_x64_1.4.0.zip`) is also available for no-install
 
 ## Features / 功能概览
 
-**MCP 2.0 (`2026-07-28`) / MCP 2.0（`2026-07-28`）：** The self-contained,
-VRCForge-owned project Core exposes exactly 64 Unity tools and connects directly
-to the App. No third-party MCP runtime or package is bundled.
+**MCP 2.0 (`2026-07-28`) / MCP 2.0（`2026-07-28`）：** In the `v1.4.0` release
+package, the project Core advertises 64 VRCForge Unity tools over protocol
+revision `2026-07-28` and connects directly to the App. The release provenance
+scan reported no bundled third-party Unity MCP runtime or package.
 
 **Avatar editing / Avatar 编辑:** BlendShape scan, face tuning (natural-language and reference-image), shader/material tuning (lilToon, Poiyomi, Generic), vision review with Gesture Manager screenshots.
 
-**Safety / 安全流程:** `Scan → Plan → Preview → Approval → Checkpoint → Apply → Validate → Restore`. All writes go through approval, pre-write checkpoint, and rollback. Three permission tiers: approval (default), auto-approve, and Roslyn full-auto.
+**Safety / 安全流程:** `Scan → Plan → Preview → Approval → Checkpoint → Apply → Validate → Restore`. App-mediated Unity asset writes use this supervised flow by default. Auto-approve and Advanced Power Mode are optional, visibly confirmed modes with broader permissions; back up the project before using any write feature. Restore remains a separate decision.
 
 Approval requests replace only the conversation composer, so prior chat remains
 visible. The primary button allows once; eligible future-category approval is
@@ -57,9 +58,9 @@ notifications use the VRCForge name and icon.
 
 **Optimization / 优化:** VRAM, material, mesh, and parameter audits with conservative one-step optimization planning.
 
-**Wardrobe / 衣柜管理:** Int-exclusive wardrobe scan, outfit import planning (`.unitypackage`, Booth folder, loose prefab), and supervised apply.
+**Wardrobe / 衣柜管理:** Integer-parameter-based wardrobe scan, outfit import planning (`.unitypackage`, Booth folder, loose prefab), and supervised apply.
 
-**Agent gateway / Agent 接入:** Local MCP + REST gateway for external agents (Codex, Claude Code, etc.). Read/plan/request-only; writes require desktop approval. One-click connector install for Codex App, Codex CLI, Claude Code CLI, and Claude Cowork.
+**Agent gateway / Agent 接入:** Local MCP + REST gateway for external agents (Codex, Claude Code, etc.). Read/plan/request-only; writes require desktop approval. Connector templates can be installed for supported local clients detected on the machine; availability depends on the client and its configuration.
 
 **Agentic runtime / Agent 运行时:** Scheduled Goals with durable restart delivery, explicit user/project Memory controls, allowlisted `/delegate` skill dispatch, reviewed sub-agent Adopt/Dismiss handoffs, explicit-user-only Computer Use, and automatic context compaction with exact-usage gates, visible cancellation, and restart recovery.
 
@@ -94,18 +95,18 @@ direct write entrypoint; approval, checkpoint, and rollback remain mandatory.
 
 ## Unity Plugin / Unity 插件
 
-`VRCForge.unitypackage` contains the complete VRCForge Unity integration: the
-project-scoped MCP 2.0 Core (`2026-07-28`), lifecycle bootstrap, and all 64
-product tools under
+For the `v1.4.0` release, `VRCForge.unitypackage` contains the project-scoped
+MCP 2.0 Core (`2026-07-28`), lifecycle bootstrap, and the 64 product tools under
 `Assets/VRCForge`. After import, the App discovers and connects the selected
-project directly. No separate MCP server/package, manifest edit, command, or
-token copy is required, and the in-Editor Core does not open a separate console
-window. The integration supports only MCP 2.0 (`2026-07-28`); older clients get
-an update error, while known third-party MCP packages produce a conflict warning.
-Reads are project-bound and writes still require App approval, checkpoint,
-readback, and restore. Reimporting the same `1.4.x` integration is idempotent;
-this does not provide an overwrite-upgrade path from `1.3.6`. Package import is
-performed in Unity; the App connects after the project Core reports ready.
+project directly. No separate MCP server/package, manifest edit, command, MCP
+token copy, or manual Core configuration is required, and normal in-Editor Core
+startup does not open a separate console window. This release accepts protocol
+revision `2026-07-28`; older clients receive an update error, while known
+third-party MCP packages produce a conflict warning. App-mediated writes use
+the selected permission mode and the supervised checkpoint/readback/restore
+path. Reimporting the same `1.4.0` integration is supported as a repair path;
+it is not an overwrite-upgrade path from `1.3.6`. Package import is performed
+in Unity; the App connects after the project Core reports ready.
 
 To remove the Unity integration, use `VRCForge > Uninstall VRCForge...` and
 confirm the dialog. The command stops the bundled Core, removes only the
@@ -115,7 +116,11 @@ remaining files and reports an error for manual review.
 
 ## Privacy / 隐私
 
-VRCForge is local-first. API keys, gateway tokens, paid asset payloads, and private files are never copied into model context, external-agent config, or `.vsk` export output. Support bundles are redacted; review before sharing.
+VRCForge is local-first and is designed to keep API keys, gateway tokens, paid
+asset payloads, and private files local by default. Product-generated connector
+config and `.vsk` exports omit plaintext secrets; model and external-agent data
+still depends on the action and content the user selects. Support bundles apply
+redaction rules, but review them before sharing.
 
 ## Developer / 源码调试
 
@@ -138,11 +143,11 @@ This path is for development only. Normal users should use the installer.
 ## License / 许可
 
 GPL-3.0-only. The Unity MCP 2.0 Core runtime, command catalogue, input schema
-metadata, and tool-result contract are VRCForge-owned implementations. Binary
-releases bundle no third-party Unity MCP code or runtime. They may also bundle
-the uv runtime (MIT OR Apache-2.0). See
+metadata, and tool-result contract are VRCForge-owned implementations. The
+`v1.4.0` release provenance scan reported no bundled third-party Unity MCP code
+or runtime. Binary releases may also bundle the uv runtime (MIT OR Apache-2.0). See
 [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 VRCForge 以 GPL-3.0-only 发布。Unity MCP 2.0 Core、命令目录、输入 Schema 元数据和
-工具结果契约均为 VRCForge 自有实现；发行包不包含第三方 Unity MCP 代码或运行时。
-二进制发行包也可能包含采用 MIT OR Apache-2.0 许可证的 uv 运行时。
+工具结果契约均为 VRCForge 自有实现；`v1.4.0` 发行包的来源扫描未报告捆绑的第三方
+Unity MCP 代码或运行时。二进制发行包也可能包含采用 MIT OR Apache-2.0 许可证的 uv 运行时。

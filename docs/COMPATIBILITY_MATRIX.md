@@ -10,14 +10,14 @@ release work can be accepted or refreshed.
 
 | Area | Current target | Release evidence | 1.4 stable expectation |
 | --- | --- | --- | --- |
-| Windows | Windows x64 installer and portable payload | Strict x64 release build and packaged smokes passed | Install, update, uninstall, and portable launch remain boring |
+| Windows | Windows x64 installer and portable payload | Strict x64 release build and packaged smokes passed | Use the release notes for the tested installation, migration, uninstall, and portable-launch boundaries |
 | Unity | Unity 2022.3 LTS VRChat avatar projects | Golden Path Matrix and Unity-package import smokes use Unity project roots | Doctor reports Unity version and project validity clearly |
 | VRCForge MCP 2.0 Core | Self-contained Unity package, MCP 2.0 (`2026-07-28`), fixed 64-tool contract | Clean import, direct App connection, `tools/list`, approval/checkpoint/write/readback/restore/reconnect evidence | No external MCP runtime is required; older clients fail with an update instruction |
 | VRChat SDK | VRChat SDK3 Avatar package | Validation report and Build/Test readiness detect SDK state | Missing SDK is a clear blocker, not a generic scan failure |
 | Modular Avatar | Optional package, read/write only through VRCForge approval paths | MA scan and rollback coverage audit metadata exist | MA-heavy writes require checkpoint, validation, and rollback proof |
 | NDMF | Optional dependency for optimizer/plugin ecosystems | Rollback coverage audit records NDMF package baseline metadata | NDMF generated residue is detected or explicitly marked not present |
 | VRCFury | Read-only stable; risky writes experimental | Compatibility report and blocked request surfaces exist | VRCFury Parameter Compressor remains Advanced/Experimental until proof |
-| AAO | Conservative Trace And Optimize delegated apply | 0.8 proof plus 0.9 request guard evidence | Hidden body cut and PhysBone cleanup require manual/visual proof |
+| AAO | Planning and guarded apply-request surface; dedicated writer and live proof remain deferred | Planner/request-guard evidence only | Preview or manual proof is required; do not treat hidden-body-cut or PhysBone cleanup as a one-click stable write |
 | LAC | Conservative/balanced delegated apply | 0.8 proof plus packaged request guard evidence | Stable profile names remain conservative and one-step |
 | TTT | User-confirmed AtlasTexture material group | TTT rollback proof with explicit material path | No automatic material-group guessing as a stable default |
 | Meshia | Low-risk explicit renderer only | Low-risk accessory/clothing renderer proof with screenshots | Aggressive/body/face simplification stays experimental |
@@ -34,11 +34,13 @@ release work can be accepted or refreshed.
 VRCForge ships a builtin alias table that maps common base-avatar names and
 their nicknames so outfit/compatibility detection recognizes them. The builtin
 defaults are not exhaustive. To recognize an avatar that is not in the default
-list, set `VRCFORGE_AVATAR_ALIAS_PATH` to a JSON file that adds or extends
-aliases. The file may be either flat (`{ "canonicalName": ["alias", ...] }`) or
+list, developers may optionally set `VRCFORGE_AVATAR_ALIAS_PATH` to a JSON file
+that adds or extends aliases. The file may be either flat
+(`{ "canonicalName": ["alias", ...] }`) or
 wrapped (`{ "avatars": { "canonicalName": ["alias", ...] } }`). The override is
-merged on top of the builtin defaults, so it only adds coverage and never
-removes it; a missing or malformed file is ignored without error.
+not required for normal package import or App connection. It is merged on top
+of the builtin defaults and cannot remove a builtin entry; a missing or
+malformed file is ignored.
 
 ## Known Conflicts
 
@@ -50,10 +52,10 @@ removes it; a missing or malformed file is ignored without error.
 | Missing VRChat SDK performance type | Report a degraded validation source such as `missing_sdk_type` instead of hiding the reason |
 | External MCP client requests direct executor targets | Keep direct apply hidden; require named request tools and VRCForge approval |
 | Client sends a protocol older than MCP 2.0 (`2026-07-28`) | Reject it before tool dispatch with an update-client error; do not negotiate or fall back |
-| Known third-party Unity MCP package is present | Log a conflict warning at Unity startup; never remove the package automatically |
+| Known third-party Unity MCP package is present | Log a conflict warning at Unity startup; do not remove the package automatically |
 | Non-admin installer session | Record a blocked installer smoke artifact; rerun from Administrator shell or VM for full install/uninstall evidence |
 
-## Known Safe Profiles
+## Known Safe Profiles (conservative planning labels, not guarantees)
 
 | Profile | Stable meaning |
 | --- | --- |
@@ -65,6 +67,11 @@ removes it; a missing or malformed file is ignored without error.
 | Quest Upload Pass | Focus on Android download/uncompressed size and shader/material constraints |
 
 ## Privacy Boundary
+
+This table describes normal product-controlled paths. It is not a guarantee
+against content the user deliberately includes in a prompt, hands to a
+third-party client, accesses through raw Unity tooling, or exposes through an
+operating-system compromise.
 
 | Data category | Desktop UI | Support bundle | Model context | External agent | .vsk export |
 | --- | --- | --- | --- | --- | --- |

@@ -16,15 +16,26 @@ and rollback.
 
 Anti-Rip profiles:
 
+The percentages below are illustrative planning estimates, not measured
+performance guarantees for `v1.4.0`. Actual impact depends on the avatar,
+shader, Unity environment, and separately installed private addon version.
+以下百分比仅为规划估算，不是 `v1.4.0` 的实测性能保证；实际影响取决于 Avatar、
+Shader、Unity 环境和另行安装的私有模块版本。
+
 | Profile | Best for | Protection | Estimated 90Hz impact at 50k / 100k / 200k triangles |
 | --- | --- | --- | --- |
 | Lite | Low-end Windows PC | Low-overhead encryption | ~0.6% / ~1.1% / ~1.9% |
 | Standard | Most PC avatars | Recommended encryption | ~2.0% / ~3.6% / ~6.5% |
 | Paranoid | High-end PC proof builds | Highest preview mode | ~5.5% / ~9.9% / ~17.9% |
 
-All profiles are Windows PC-only. Quest/Android requests are blocked for this
-feature. Lite and Standard can create supervised private-addon requests;
-Paranoid remains preview-only pending additional proof.
+The documented connector profiles target Windows PC projects; Quest/Android
+requests are blocked for this feature. The public App can prepare supervised
+Lite or Standard connector requests for a separately installed compatible
+module. Availability and results depend on that module and the selected
+project; Paranoid remains preview-only pending additional proof.
+这些连接器档位面向 Windows PC 工程；Quest/Android 请求会被拦截。公开 App 可以为另行
+安装的兼容模块准备受监督的 Lite 或 Standard 请求，但可用性和结果取决于模块及所选工程；
+Paranoid 仍仅提供预览。
 本手册只说明公开使用流程和功能状态，不包含项目私有路径或本地配置细节。
 
 ## Feature Status / 功能状态
@@ -51,14 +62,14 @@ Paranoid remains preview-only pending additional proof.
 | Explicit Computer Use | User-started desktop turns with protected-target checks, visible activity/Stop controls, cancellation, and capture feedback | Beta, Developer Options and explicit activation required |
 | Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items appear as default-collapsed chat rows | 已可用 / Available |
 | Project memory / incremental scan | Local index shows added, modified, and deleted project files in the desktop workspace | 已可用 / Available |
-| Outfit package import planning | Inspect `.unitypackage`, Booth folders, and loose prefab/texture folders, then request a supervised import; VRCForge's fallback Unity package supports fresh-project direct import | Beta, approval/checkpoint required |
+| Outfit package import planning | Inspect `.unitypackage`, Booth folders, and loose prefab/texture folders, then request a supervised import; the release `VRCForge.unitypackage` supports fresh-project direct import | Beta, approval/checkpoint required |
 | Package/plugin install diagnostics | Read VPM/ALCOM/vrc-get status, install output, and compile-error context before planning repairs | Beta, read-only diagnostics |
 | Delegated sub-agent workers | Allowlisted read/plan skill dispatch with durable owner-chat result cards, restart recovery, and revision-checked Adopt/Dismiss review | Beta |
 | Tool Registry v1 | Standard tool metadata exposed to desktop, MCP/gateway, and CLI surfaces | Available |
 | CLI diagnostics and readiness | Packaged `vrcforge` CLI covers doctor, provider test, Unity/project/avatar scans, validation, Build/Test readiness, checkpoints, skill/tool registry, and request-based apply/rollback | Available |
 | Full Validator and Build/Test readiness | `vrcforge.validation.v1` plus Build/Test readiness gates for compile, SDK/plugin/package, expression, animator, material, performance, and generated-residue findings | Available |
 | Model Optimization Planner | Read-only optimization dashboard, baseline scan, target profiles, dependency doctor, VRAM/material/mesh/parameter audits, and step-by-step plan output | Available |
-| Optimizer proof release | LAC, AAO, TTT, MA2BT-Pro, and Meshia use named apply-request tools with approval, checkpoint, validation delta, rollback proof, and screenshot evidence; VRCFury risky writers return blocked previews until validated | Beta, approval/checkpoint required |
+| Optimizer integrations | Planning and guarded apply-request surfaces are available, while live writer and rollback-proof coverage varies by integration; AAO dedicated writers remain deferred, and unsupported VRCFury writes stay blocked until validated | Beta; inspect the integration-specific preview and proof status |
 | Before/after screenshot capture and vision review | 执行前后截图与视觉复核 | 已可用 / Available |
 | Modular Avatar and VRCFury read-only scans | Modular Avatar / VRCFury 只读扫描 | 已可用 / Available |
 | Outfit setup wrapper and VPM package status/install | Outfit 安装封装与 VPM 包状态/安装 | 已可用 / Available |
@@ -68,7 +79,7 @@ Paranoid remains preview-only pending additional proof.
 | Generic Unity CRUD tools | 通用 Unity CRUD 工具 | Beta, local tests pass |
 | Generic avatar authoring primitives | Expression parameters / menu controls / FX animator states | Beta, local tests pass; preview path covered by wardrobe workflow |
 | Modular Avatar component writer | MergeArmature / BoneProxy / MenuInstaller / MergeAnimator / Parameters | Beta, Unity live previews pass |
-| Int-exclusive wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live scan/preview smoke passed |
+| Integer-parameter wardrobe scan/create/add/manage tools | int wardrobe scan/create/add/remove/rename/reorder/default/delete | Beta, local tests pass; Unity live scan/preview smoke passed |
 | Outfit-part writer | Add an int-gated accessory toggle to one wardrobe outfit | Beta, Unity live preview and rollback smoke pass |
 | Semantic add-outfit workflow | Prefab search -> instantiate -> Setup Outfit -> scan/create wardrobe if missing -> wardrobe binding | Beta, local tests pass; candidate wardrobe auto-selection guarded |
 | Pre-write checkpoint timeline | Git or archive checkpoint before gateway and legacy REST writes, incremental preview/restore UI | Beta, Unity live write/restore smoke passed |
@@ -114,10 +125,10 @@ direct apply tools are hidden, a checkpoint was created, rollback completed,
 the temporary object is gone, and Unity compile errors stayed at zero.
 The preflight smoke does not write Unity; the live smoke does.
 
-## 1.0 Stable Workflow
+## Stable Workflow
 
-1.0.0 is organized around stable proof instead of feature promises. Use it when
-you want to verify a whole workflow and keep the evidence needed for support.
+This workflow emphasizes reviewable evidence instead of assuming that feature
+availability guarantees success for a particular project.
 
 The 1.0 stable checklist is:
 
@@ -299,7 +310,7 @@ alias key and identity map stay local and are never bundled.
 - VRChat SDK3 Avatar project
 - Windows x64 installer users do not need Python, Git, uv, or manual `pip install`
 - Source/debug users need Python, Node.js, Rust/Tauri tooling, and the package dependencies
-- `VRCForge.unitypackage`, containing the complete VRCForge-owned MCP 2.0 Core (`2026-07-28`) and 64 Unity tools
+- The `v1.4.0` `VRCForge.unitypackage`, containing its VRCForge-owned MCP 2.0 Core (`2026-07-28`) and 64 advertised Unity tools
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -320,7 +331,7 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- `VRCForge.unitypackage`，包含完整的 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 64 个 Unity 工具
+- `v1.4.0` 的 `VRCForge.unitypackage`，包含该版本的 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 64 个声明的 Unity 工具
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -372,9 +383,13 @@ If Unity discovery, project scanning, skill loading, or user-data `AGENTS.md` se
 
 ## AI Face Tuning History and Presets / AI 捏脸历史与预设
 
-Every generated AI Blendshape plan is saved to history. History records can be reviewed, reapplied, or saved as named presets. Presets store the saved after values, so applying a preset later sets the Blendshapes back to the recorded result instead of repeatedly stacking deltas.
+Generated AI Blendshape plans are normally stored in local history when the
+history write succeeds. Saved records can be reviewed, reapplied, or converted
+to named presets. Presets store the recorded target values, so applying one
+sets the Blendshapes to that saved result instead of repeatedly stacking deltas.
 
-每次 AI 生成的 Blendshape 方案都会进入历史记录。历史记录可以查看、重放，也可以保存为命名预设。预设保存的是调整后的目标值，因此之后应用预设时会回到记录的结果，而不是反复叠加变化量。
+AI 生成的 Blendshape 方案在本地历史写入成功时通常会保存。已保存的记录可以查看、重放，
+也可以转换为命名预设。预设保存记录的目标值，因此之后应用时会回到该结果，而不是反复叠加变化量。
 
 Use locks when you want to keep part of a good result. Locked Blendshapes are hidden from new AI planning and blocked during apply, so later generations only affect unlocked Blendshapes.
 

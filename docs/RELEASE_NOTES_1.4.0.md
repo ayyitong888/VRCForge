@@ -2,9 +2,9 @@
 
 ## Highlights
 
-- The Unity package is self-contained: import `VRCForge.unitypackage` into a
-  project, open that project, and connect VRCForge App directly to its
-  project-owned MCP Core.
+- The `v1.4.0` Unity package bundles the project Core and release integration
+  files under `Assets/VRCForge`; clean-project acceptance connected the App
+  directly after import and compilation.
 - The bundled Core uses only MCP 2.0 (`2026-07-28`) and exposes the 64
   VRCForge product tools provided by this release.
 - Requests from clients older than protocol `2026-07-28` fail with an explicit
@@ -30,13 +30,17 @@
   activity.
 - Unity projects can remove the integration from
   `VRCForge > Uninstall VRCForge...`; the command stops the Core, clears the
-  versioned auto-connect preference, and removes the product-owned asset root.
-- The package contains VRCForge-owned command, input, and result contracts and
-  no third-party MCP runtime, protocol asset, residual GUID, or notice. Known
-  third-party package identifiers appear only in conflict detection.
-- Release builds scan the actual packaging inputs before build and all four
-  generated assets afterward for private keys, credentials, tokens, and local
-  machine paths. A finding stops the build without printing the matched value.
+  versioned auto-connect preference, and requests removal of the product-owned
+  asset root. If Unity cannot safely remove it, the command reports the failure
+  and leaves the remaining files for manual review.
+- The `v1.4.0` provenance scan reported VRCForge-owned command, input, and
+  result contracts with no bundled third-party Unity MCP runtime, protocol
+  asset, residual GUID, or notice. Known third-party package identifiers appear
+  in conflict detection only.
+- The release build scanned its packaging inputs and four generated assets for
+  high-confidence private-key, credential, token, and local-machine-path
+  markers. No finding was reported for the published asset set; the gate is
+  designed to stop on a finding without printing the matched value.
 
 ## Before you install
 

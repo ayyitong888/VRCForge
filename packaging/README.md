@@ -67,9 +67,10 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-`1.4.0` is the latest published stable package. The Avatar Encryption /
-Anti-Rip addon remains a connector preview and is not bundled with the stable
-package. The public repo must not contain encryption
+As of 2026-08-06, `1.4.0` is the latest published stable package; check the
+GitHub Releases page before preparing a later build. The Avatar
+Encryption / Anti-Rip addon remains a connector preview and is not bundled with
+the `v1.4.0` package. The public repo must not contain encryption
 implementation files; it may only expose connector/request interfaces for a
 separately installed private addon module. Profile docs must list Lite,
 Standard, and Paranoid, with Standard as the default recommendation and
@@ -106,12 +107,14 @@ real artifact paths, sizes, SHA-256 hashes, and acceptance notes. Placeholder
 rows are allowed in docs before that handoff, but release notes must not imply
 unverified artifact/hash evidence.
 
-Do not upload artifacts built from a newer commit into an older existing tag.
-If release contents change after `v<VERSION>` was already created, bump
-`VERSION`, push that version commit, build with the matching
-`-PayloadDownloadUrl`, then publish the new tag/release. The build derives and
-enforces the exact official version-bound HTTPS asset URL; alternate hosts,
-paths, query strings, fragments, tag names, and payload filenames fail closed.
+Normally, do not replace artifacts for an existing tag; bump `VERSION`, build
+from the matching pushed commit, and publish a new tag/release. If the release
+owner explicitly authorizes a signed refresh of an existing version, rebuild
+from the authorized target, replace all affected assets together, and re-verify
+the published hashes and release evidence before closing the refresh. The build
+derives and enforces the official version-bound HTTPS asset URL; alternate
+hosts, paths, query strings, fragments, tag names, and payload filenames fail
+the release gate.
 
 Release smoke should also verify first-run resilience: optional failures in
 user-data `AGENTS.md` creation, project scanning, Unity/MCP discovery, skill
