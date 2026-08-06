@@ -300,7 +300,7 @@ Section "Install"
   !ifndef VRCFORGE_SMOKE_BUILD
     WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "DisplayName" "VRCForge"
     WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "IconBackgroundColor" "0"
-    WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "IconUri" "$INSTDIR\VRCForge.ico"
+    WriteRegStr HKCU "Software\Classes\AppUserModelId\${APP_USER_MODEL_ID}" "IconUri" "$INSTDIR\VRCForge.png"
   !endif
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"

@@ -35,19 +35,19 @@ Git is optional at runtime. Git worktrees use git-backed checkpoints; non-git pr
 ## Unity / Unity 侧
 
 Import the single release artifact `VRCForge.unitypackage` into a normal VRChat
-Avatar project. It installs the VRCForge-owned project-scoped MCP Core,
+Avatar project. It installs the VRCForge-owned project-scoped MCP 2.0 Core,
 lifecycle bootstrap, and all 64 Unity tools under `Assets/VRCForge`. No separate
 MCP server/package, Unity manifest edit, Python command, `uvx` command, or token
-copy is required. The App and package support only protocol `2026-07-28`.
+copy is required. The App and package support only MCP 2.0 (`2026-07-28`).
 
 Remove the Unity integration from `VRCForge > Uninstall VRCForge...`. That
 explicit command stops the bundled Core, deletes only its versioned
 auto-connect preference, and removes the product-owned `Assets/VRCForge` root.
 
 将发布文件 `VRCForge.unitypackage` 导入普通 VRChat Avatar 工程即可。它会把
-VRCForge 自有的项目级 MCP Core、生命周期引导程序和全部 64 个 Unity 工具安装到
+VRCForge 自有的项目级 MCP 2.0 Core、生命周期引导程序和全部 64 个 Unity 工具安装到
 `Assets/VRCForge`。不需要额外 MCP 服务或包、Unity manifest 修改、Python/`uvx`
-命令或手工复制 token。App 与该包只支持协议 `2026-07-28`。
+命令或手工复制 token。App 与该包只支持 MCP 2.0（`2026-07-28`）。
 
 | Package | How to install | Required | 用途 |
 | --- | --- | --- | --- |
@@ -88,10 +88,10 @@ powershell -ExecutionPolicy Bypass -File tools/install-unity-project.ps1 -Projec
 ## External Agent Gateway / 外部 Agent Gateway
 
 The backend includes a local MCP + REST Agent Gateway for external MCP-capable
-agent clients. It is served by the VRCForge-owned protocol `2026-07-28` router
+agent clients. It is served by the VRCForge-owned MCP 2.0 (`2026-07-28`) router
 and is disabled by default until enabled in desktop settings.
 
-外部 Agent Gateway 由 VRCForge 自有的 `2026-07-28` 协议路由提供，默认关闭。启用后，
+外部 Agent Gateway 由 VRCForge 自有的 MCP 2.0（`2026-07-28`）路由提供，默认关闭。启用后，
 外部 agent 只能通过 VRCForge 的受监督工具层读取、预览、请求写入和等待用户 approval，
 不能绕过 VRCForge 直接调用 Unity MCP。approval token 由 VRCForge 内部保存，不包含在
 复制给外部 agent 的 MCP 配置中。

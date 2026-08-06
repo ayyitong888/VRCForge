@@ -334,10 +334,11 @@ def check_versioned_public_docs(version: str, stale_versions: tuple[str, ...]) -
 
 
 def check_latest_stable_docs(target_version: str, latest_stable: str, *, allow_equal: bool = False) -> dict[str, Any]:
+    packaging_verb = "is" if allow_equal and latest_stable == target_version else "remains"
     patterns = {
         "README.md": rf"Latest published stable release:\s*`{re.escape(latest_stable)}`",
         "USER_MANUAL.md": rf"Latest published stable release:\s*`{re.escape(latest_stable)}`",
-        "packaging/README.md": rf"`{re.escape(latest_stable)}` remains the latest\s+published stable package",
+        "packaging/README.md": rf"`{re.escape(latest_stable)}` {packaging_verb} the latest\s+published stable package",
     }
     target_parts = version_parts(target_version)
     stable_parts = version_parts(latest_stable)

@@ -12,7 +12,7 @@ release work can be accepted or refreshed.
 | --- | --- | --- | --- |
 | Windows | Windows x64 installer and portable payload | Strict x64 release build and packaged smokes passed | Install, update, uninstall, and portable launch remain boring |
 | Unity | Unity 2022.3 LTS VRChat avatar projects | Golden Path Matrix and Unity-package import smokes use Unity project roots | Doctor reports Unity version and project validity clearly |
-| VRCForge MCP Core | Self-contained Unity package, protocol `2026-07-28`, fixed 64-tool contract | Clean import, direct App connection, `tools/list`, approval/checkpoint/write/readback/restore/reconnect evidence | No external MCP runtime is required; older clients fail with an update instruction |
+| VRCForge MCP 2.0 Core | Self-contained Unity package, MCP 2.0 (`2026-07-28`), fixed 64-tool contract | Clean import, direct App connection, `tools/list`, approval/checkpoint/write/readback/restore/reconnect evidence | No external MCP runtime is required; older clients fail with an update instruction |
 | VRChat SDK | VRChat SDK3 Avatar package | Validation report and Build/Test readiness detect SDK state | Missing SDK is a clear blocker, not a generic scan failure |
 | Modular Avatar | Optional package, read/write only through VRCForge approval paths | MA scan and rollback coverage audit metadata exist | MA-heavy writes require checkpoint, validation, and rollback proof |
 | NDMF | Optional dependency for optimizer/plugin ecosystems | Rollback coverage audit records NDMF package baseline metadata | NDMF generated residue is detected or explicitly marked not present |
@@ -49,7 +49,7 @@ removes it; a missing or malformed file is ignored without error.
 | Unity compile errors before apply | Block write-heavy workflows until compile status is understood |
 | Missing VRChat SDK performance type | Report a degraded validation source such as `missing_sdk_type` instead of hiding the reason |
 | External MCP client requests direct executor targets | Keep direct apply hidden; require named request tools and VRCForge approval |
-| Client sends a protocol older than `2026-07-28` | Reject it before tool dispatch with an update-client error; do not negotiate or fall back |
+| Client sends a protocol older than MCP 2.0 (`2026-07-28`) | Reject it before tool dispatch with an update-client error; do not negotiate or fall back |
 | Known third-party Unity MCP package is present | Log a conflict warning at Unity startup; never remove the package automatically |
 | Non-admin installer session | Record a blocked installer smoke artifact; rerun from Administrator shell or VM for full install/uninstall evidence |
 

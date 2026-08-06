@@ -168,7 +168,7 @@ def test_smoke_flavor_is_compile_time_scoped_and_cannot_enter_release_build() ->
         assert 'DeleteRegKey /ifempty HKCU "${INSTALLER_LANGUAGE_KEY}"' in source
         assert '!define APP_USER_MODEL_ID "app.vrcforge.agentic"' in source
         assert 'WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\${APP_USER_MODEL_ID}" "DisplayName" "VRCForge"' in source
-        assert 'WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\${APP_USER_MODEL_ID}" "IconUri" "$INSTDIR\\VRCForge.ico"' in source
+        assert 'WriteRegStr HKCU "Software\\Classes\\AppUserModelId\\${APP_USER_MODEL_ID}" "IconUri" "$INSTDIR\\VRCForge.png"' in source
         assert 'DeleteRegKey HKCU "Software\\Classes\\AppUserModelId\\${APP_USER_MODEL_ID}"' in source
 
     validator = (REPO_ROOT / "installer" / "ValidateNsisSmokeIdentity.ps1").read_text(encoding="utf-8")
@@ -290,7 +290,7 @@ def test_publish_path_requires_version_bound_release_notes_and_reads_them_back()
     assert '[System.IO.File]::WriteAllText($stagedReleaseNotesPath, $releaseNotes' in source
     assert '"--notes-file", $stagedReleaseNotesPath' in source
     assert "-ExpectedBody $releaseNotes" in source
-    assert "MCP protocol `2026-07-28`" in notes
+    assert "MCP 2.0 (`2026-07-28`)" in notes
     assert "not code-signed" in notes
 
 
@@ -351,6 +351,10 @@ def test_release_payload_bundles_public_docs_and_requires_all_license_notices() 
     payload_smoke = (
         REPO_ROOT / "scripts" / "smoke_payload_zip_unpack.py"
     ).read_text(encoding="utf-8")
+    web_payload = (REPO_ROOT / "installer" / "VRCForge_WebPayload.ps1").read_text(
+        encoding="utf-8"
+    )
+    notification_icon = (REPO_ROOT / "src-tauri" / "icons" / "icon.png").read_bytes()
 
     for document in ("README.md", "USER_MANUAL.md", "DEPENDENCIES.md"):
         assert (
@@ -362,11 +366,22 @@ def test_release_payload_bundles_public_docs_and_requires_all_license_notices() 
         'Copy-Item -LiteralPath .\\src-tauri\\icons\\icon.ico '
         '-Destination (Join-Path $payloadRoot "VRCForge.ico") -Force'
     ) in source
+    assert (
+        'Copy-Item -LiteralPath .\\src-tauri\\icons\\icon.png '
+        '-Destination (Join-Path $payloadRoot "VRCForge.png") -Force'
+    ) in source
+    assert notification_icon[:8] == b"\x89PNG\r\n\x1a\n"
+    assert int.from_bytes(notification_icon[16:20], "big") == 256
+    assert int.from_bytes(notification_icon[20:24], "big") == 256
+    assert 'relativePath = "VRCForge.png"' in source
+    assert '"notificationIcon"' in web_payload
+    assert '"VRCForge.png"' in web_payload
 
     for required_member in (
         "README.md",
         "USER_MANUAL.md",
         "DEPENDENCIES.md",
+        "VRCForge.png",
         "licenses/VRCForge-GPL-3.0.txt",
         "licenses/VRCForge-NOTICE.txt",
         "licenses/uv-LICENSE-MIT.txt",

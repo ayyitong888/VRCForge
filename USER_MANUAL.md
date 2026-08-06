@@ -6,7 +6,7 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
 Current source / target release: `1.4.0`. Latest published stable release:
-`1.3.6` (`v1.3.6`).
+`1.4.0` (`v1.4.0`).
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
@@ -299,7 +299,7 @@ alias key and identity map stay local and are never bundled.
 - VRChat SDK3 Avatar project
 - Windows x64 installer users do not need Python, Git, uv, or manual `pip install`
 - Source/debug users need Python, Node.js, Rust/Tauri tooling, and the package dependencies
-- `VRCForge.unitypackage`, containing the complete VRCForge-owned MCP Core and 64 Unity tools
+- `VRCForge.unitypackage`, containing the complete VRCForge-owned MCP 2.0 Core (`2026-07-28`) and 64 Unity tools
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -320,25 +320,27 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- `VRCForge.unitypackage`，包含完整的 VRCForge 自有 MCP Core 和 64 个 Unity 工具
+- `VRCForge.unitypackage`，包含完整的 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 64 个 Unity 工具
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 
 ## Start / 启动
 
-1. Install VRCForge from the Windows x64 installer.
-2. Start `VRCForge.exe` from the desktop or Start Menu.
-3. Complete the first-run setup: core connection, provider/model, and Unity project.
-4. Open the avatar project in Unity and let compilation finish.
-5. Select the project/chat in VRCForge, then use agent messages or slash skills.
+1. Install VRCForge from the Windows x64 installer, but leave the App closed.
+2. Open the avatar project in Unity, import all of `VRCForge.unitypackage`, and
+   wait for compilation and `[VRCForge MCP] Core Ready` to finish.
+3. Start `VRCForge.exe`, select that project, and connect directly to its
+   VRCForge-owned MCP 2.0 Core (`2026-07-28`).
+4. Complete provider/model setup, then use agent messages or slash skills.
 
 If Unity discovery, project scanning, skill loading, or user-data `AGENTS.md` setup fails on first launch, the desktop should still open as a normal agent workspace when the backend is online. Fix the shown setup action before using Unity-writing features.
 
-1. 使用 Windows x64 安装器安装 VRCForge。
-2. 从桌面或开始菜单启动 `VRCForge.exe`。
-3. 完成首次引导：核心连接、模型/provider、Unity 工程。
-4. 在 Unity 中打开 Avatar 工程并等待编译完成。
-5. 在 VRCForge 中选择项目/会话，然后使用 agent 消息或斜杠 skill。
+1. 使用 Windows x64 安装器安装 VRCForge，但先不要启动 App。
+2. 在 Unity 中打开 Avatar 工程，完整导入 `VRCForge.unitypackage`，等待编译完成并出现
+   `[VRCForge MCP] Core Ready`。
+3. 启动 `VRCForge.exe`，选择该工程，直接连接其 VRCForge 自有 MCP 2.0 Core
+   （`2026-07-28`）。
+4. 完成模型/provider 设置，然后使用 agent 消息或斜杠 skill。
 
 ## Basic Workflow / 基本流程
 

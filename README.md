@@ -1,6 +1,6 @@
 # VRCForge
 
-[![Version](https://img.shields.io/badge/source-v1.4.0-blue)](https://github.com/ayyitong888/VRCForge)
+[![Version](https://img.shields.io/badge/release-v1.4.0-blue)](https://github.com/ayyitong888/VRCForge/releases/tag/v1.4.0)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 Official repository: https://github.com/ayyitong888/VRCForge
@@ -13,18 +13,20 @@ VRCForge 是面向 VRChat Avatar 编辑的本地 AI 工作台。它连接 Tauri 
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
 Current source / target release: `1.4.0`. Latest published stable release:
-`1.3.6` (`v1.3.6`).
+`1.4.0` (`v1.4.0`).
 
 ## Install / 安装
 
 Download the latest release / 下载最新 Release:
 https://github.com/ayyitong888/VRCForge/releases/latest
 
-1. Download and run `VRCForge_Web_Installer_x64.exe` (or `VRCForge_Offline_Installer_x64.exe` for offline install).
-2. Start `VRCForge.exe` from the desktop or Start Menu.
-3. Select a Unity VRChat Avatar project root in the first-run setup.
-4. The app starts its backend and opens the agent workspace. Import the bundled
-   `VRCForge.unitypackage` into each Unity project you want to connect.
+1. Download `VRCForge.unitypackage` and run `VRCForge_Web_Installer_x64.exe`
+   (or `VRCForge_Offline_Installer_x64.exe` for offline install).
+2. Open the target Unity project, import all of `VRCForge.unitypackage`, and
+   wait for compilation and `[VRCForge MCP] Core Ready` to finish.
+3. Start `VRCForge.exe`, select that project, and connect. The App discovers the
+   project-owned Core directly; no separate MCP install or manual configuration
+   is required.
 
 `1.4.0` is a breaking install boundary and does not support overwrite install
 or Unity package import over `1.3.6`. Close VRCForge and Unity, remove the old
@@ -39,6 +41,10 @@ Program files: `%ProgramFiles%\VRCForge`. User data:
 Portable zip (`VRCForge_Windows_x64_1.4.0.zip`) is also available for no-install/debug use.
 
 ## Features / 功能概览
+
+**MCP 2.0 (`2026-07-28`) / MCP 2.0（`2026-07-28`）：** The self-contained,
+VRCForge-owned project Core exposes exactly 64 Unity tools and connects directly
+to the App. No third-party MCP runtime or package is bundled.
 
 **Avatar editing / Avatar 编辑:** BlendShape scan, face tuning (natural-language and reference-image), shader/material tuning (lilToon, Poiyomi, Generic), vision review with Gesture Manager screenshots.
 
@@ -89,16 +95,17 @@ direct write entrypoint; approval, checkpoint, and rollback remain mandatory.
 ## Unity Plugin / Unity 插件
 
 `VRCForge.unitypackage` contains the complete VRCForge Unity integration: the
-project-scoped MCP Core, lifecycle bootstrap, and all 64 product tools under
+project-scoped MCP 2.0 Core (`2026-07-28`), lifecycle bootstrap, and all 64
+product tools under
 `Assets/VRCForge`. After import, the App discovers and connects the selected
 project directly. No separate MCP server/package, manifest edit, command, or
 token copy is required, and the in-Editor Core does not open a separate console
-window. The integration supports only protocol `2026-07-28`; older clients get
+window. The integration supports only MCP 2.0 (`2026-07-28`); older clients get
 an update error, while known third-party MCP packages produce a conflict warning.
 Reads are project-bound and writes still require App approval, checkpoint,
 readback, and restore. Reimporting the same `1.4.x` integration is idempotent;
-this does not provide an overwrite-upgrade path from `1.3.6`. The App can
-perform the same package import as the manual fallback.
+this does not provide an overwrite-upgrade path from `1.3.6`. Package import is
+performed in Unity; the App connects after the project Core reports ready.
 
 To remove the Unity integration, use `VRCForge > Uninstall VRCForge...` and
 confirm the dialog. The command stops the bundled Core, removes only the
@@ -130,11 +137,12 @@ This path is for development only. Normal users should use the installer.
 
 ## License / 许可
 
-GPL-3.0-only. The Unity MCP Core runtime, command catalogue, input schema
+GPL-3.0-only. The Unity MCP 2.0 Core runtime, command catalogue, input schema
 metadata, and tool-result contract are VRCForge-owned implementations. Binary
-releases may also bundle the uv runtime (MIT OR Apache-2.0). See
+releases bundle no third-party Unity MCP code or runtime. They may also bundle
+the uv runtime (MIT OR Apache-2.0). See
 [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-VRCForge 以 GPL-3.0-only 发布。Unity MCP Core、命令目录、输入 Schema 元数据和
-工具结果契约均为 VRCForge 自有实现。二进制发行包也可能包含采用 MIT OR
-Apache-2.0 许可证的 uv 运行时。
+VRCForge 以 GPL-3.0-only 发布。Unity MCP 2.0 Core、命令目录、输入 Schema 元数据和
+工具结果契约均为 VRCForge 自有实现；发行包不包含第三方 Unity MCP 代码或运行时。
+二进制发行包也可能包含采用 MIT OR Apache-2.0 许可证的 uv 运行时。

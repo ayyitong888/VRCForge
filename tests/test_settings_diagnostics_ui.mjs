@@ -57,6 +57,10 @@ assert.ok(
 );
 assert.equal((workspace.match(/<DiagnosticsSettingsPanel/g) || []).length, 1);
 assert.ok(workspace.includes("developerOptionsEnabled={developerOptionsEnabled}"));
+assert.ok(workspace.includes("data-vrcforge-about"));
+for (const key of ["aboutTitle", "aboutProduct", "aboutMcp", "aboutSafety", "aboutLicense"]) {
+  assert.ok(workspace.includes(`t("settings.${key}")`), `About must render settings.${key}`);
+}
 assert.ok(!workspace.includes("onSetDebugLogging"));
 assert.ok(!workspace.includes("diagnosticsStatus?.logsDir"));
 assert.ok(panel.includes("data-vrcforge-diagnostics-settings"));
@@ -133,6 +137,10 @@ for (const [name, entries] of flattened) {
     const description = entries.get(`settings.logLevel${level}Desc`) || "";
     assert.ok(description.trim().length >= 20, `${name}:settings.logLevel${level}Desc must explain the level`);
   }
+  assert.match(entries.get("settings.aboutProduct") || "", /VRCForge 1\.4\.0/);
+  assert.match(entries.get("settings.aboutMcp") || "", /MCP 2\.0.*2026-07-28.*64/s);
+  assert.match(entries.get("settings.aboutSafety") || "", /(approval|审批|審批|承認).*?(checkpoint|检查点|檢查點|チェックポイント).*?(rollback|回滚|回滾|ロールバック)/is);
+  assert.match(entries.get("settings.aboutLicense") || "", /GPL-3\.0-only.*NOTICE.*DEPENDENCIES/is);
 }
 
 console.log("settings diagnostics/developer challenge contract: ok");

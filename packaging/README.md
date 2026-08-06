@@ -67,7 +67,7 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-`1.3.6` remains the latest published stable package. The Avatar Encryption /
+`1.4.0` is the latest published stable package. The Avatar Encryption /
 Anti-Rip addon remains a connector preview and is not bundled with the stable
 package. The public repo must not contain encryption
 implementation files; it may only expose connector/request interfaces for a
@@ -177,7 +177,7 @@ paste that artifact manually. The bundle must not be auto-attached to issues.
 Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
-python scripts\smoke_stable_readiness_gate.py --version 1.4.0 --latest-stable 1.3.6
+python scripts\smoke_stable_readiness_gate.py --version 1.4.0 --latest-stable 1.4.0 --stable-refresh
 ```
 
 This gate checks current target-version public docs, the public golden-path wording,

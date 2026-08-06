@@ -24,7 +24,8 @@ use windows_sys::Win32::{
 const APPROVAL_NOTIFICATION_APP_ID: &str = "app.vrcforge.agentic";
 const APPROVAL_NOTIFICATION_DISPLAY_NAME: &str = "VRCForge";
 const APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR: &str = "0";
-const APPROVAL_NOTIFICATION_ICON_FILE_NAME: &str = "VRCForge.ico";
+const APPROVAL_NOTIFICATION_ICON_FILE_NAME: &str = "VRCForge.png";
+const APPROVAL_NOTIFICATION_ICON_ALT_TEXT: &str = "VRCForge";
 const APPROVAL_NOTIFICATION_ACTION_EVENT: &str = "vrcforge-approval-notification-action";
 const MAX_APPROVAL_ID_LENGTH: usize = 128;
 const MAX_TITLE_LENGTH: usize = 120;
@@ -73,11 +74,21 @@ pub(crate) fn show_approval_notification(
         if !bind_approval_notification_identity() {
             return Err("Unable to bind the VRCForge notification identity.".to_string());
         }
+        let executable = std::env::current_exe()
+            .map_err(|_| "Unable to resolve the VRCForge notification icon.".to_string())?;
+        let icon_path = approval_notification_icon_path(&executable)
+            .filter(|path| path.is_file())
+            .ok_or_else(|| "Unable to resolve the VRCForge notification icon.".to_string())?;
         let approval_id = request.approval_id;
         let callback_app = app.clone();
         tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
             .title(&request.title)
             .text1(&request.body)
+            .icon(
+                &icon_path,
+                tauri_winrt_notification::IconCrop::Square,
+                APPROVAL_NOTIFICATION_ICON_ALT_TEXT,
+            )
             .add_button(
                 &request.approve_label,
                 &approval_notification_action("approve", &approval_id),
@@ -272,8 +283,8 @@ mod tests {
         approval_notification_action, parse_approval_notification_action,
         validate_notification_request, DesktopApprovalNotificationRequest,
         APPROVAL_NOTIFICATION_APP_ID, APPROVAL_NOTIFICATION_DISPLAY_NAME,
-        APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR, APPROVAL_NOTIFICATION_ICON_FILE_NAME,
-        MAX_ACTION_LABEL_LENGTH,
+        APPROVAL_NOTIFICATION_ICON_ALT_TEXT, APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR,
+        APPROVAL_NOTIFICATION_ICON_FILE_NAME, MAX_ACTION_LABEL_LENGTH,
     };
     #[cfg(windows)]
     use std::path::Path;
@@ -322,7 +333,8 @@ mod tests {
         assert_eq!(APPROVAL_NOTIFICATION_APP_ID, "app.vrcforge.agentic");
         assert_eq!(APPROVAL_NOTIFICATION_DISPLAY_NAME, "VRCForge");
         assert_eq!(APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR, "0");
-        assert_eq!(APPROVAL_NOTIFICATION_ICON_FILE_NAME, "VRCForge.ico");
+        assert_eq!(APPROVAL_NOTIFICATION_ICON_FILE_NAME, "VRCForge.png");
+        assert_eq!(APPROVAL_NOTIFICATION_ICON_ALT_TEXT, "VRCForge");
     }
 
     #[cfg(windows)]
@@ -330,7 +342,7 @@ mod tests {
     fn toast_identity_uses_the_packaged_icon_beside_the_desktop_executable() {
         assert_eq!(
             approval_notification_icon_path(Path::new(r"C:\\portable\\VRCForge.exe")),
-            Some(Path::new(r"C:\\portable\\VRCForge.ico").to_path_buf())
+            Some(Path::new(r"C:\\portable\\VRCForge.png").to_path_buf())
         );
     }
 

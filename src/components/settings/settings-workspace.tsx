@@ -287,6 +287,16 @@ export function SettingsWorkspace({
               />
             </section>
 
+            <section className="mt-10" data-vrcforge-about>
+              <h2 className="text-base font-semibold">{t("settings.aboutTitle")}</h2>
+              <div className="mt-4 rounded-xl border border-border bg-card p-4">
+                <div className="text-sm font-semibold">{t("settings.aboutProduct")}</div>
+                <div className="mt-2 text-sm text-muted-foreground">{t("settings.aboutMcp")}</div>
+                <div className="mt-2 text-sm text-muted-foreground">{t("settings.aboutSafety")}</div>
+                <div className="mt-2 text-xs text-muted-foreground">{t("settings.aboutLicense")}</div>
+              </div>
+            </section>
+
             <section className="mt-10 pb-6">
               <DeveloperOptionsControl
                 endpoint={endpoint}

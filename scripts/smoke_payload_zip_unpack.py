@@ -17,6 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA = "vrcforge.payload_zip_unpack.v1"
 REQUIRED_PAYLOAD_FILES = (
     "VRCForge.exe",
+    "VRCForge.png",
     "VERSION",
     "README.md",
     "USER_MANUAL.md",

@@ -102,6 +102,7 @@ def _verified_payload_entries() -> dict[str, bytes]:
     desktop = b"desktop"
     backend = b"backend"
     version = VERSION.encode("utf-8")
+    notification_icon = b"notification-icon"
     manifest = {
         "schema": "vrcforge.payload-integrity.v1",
         "version": VERSION,
@@ -109,10 +110,12 @@ def _verified_payload_entries() -> dict[str, bytes]:
             "desktop": {"relativePath": "VRCForge.exe", "sha256": hashlib.sha256(desktop).hexdigest()},
             "backend": {"relativePath": "backend/vrcforge_backend.exe", "sha256": hashlib.sha256(backend).hexdigest()},
             "version": {"relativePath": "VERSION", "sha256": hashlib.sha256(version).hexdigest()},
+            "notificationIcon": {"relativePath": "VRCForge.png", "sha256": hashlib.sha256(notification_icon).hexdigest()},
         },
     }
     return {
         "VRCForge.exe": desktop,
+        "VRCForge.png": notification_icon,
         r"backend\vrcforge_backend.exe": backend,
         "VERSION": version,
         "payload-integrity.json": json.dumps(manifest).encode("utf-8"),
@@ -362,6 +365,7 @@ def test_web_payload_helper_extracts_verified_regular_archive(tmp_path: Path) ->
 
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "ProgramFiles" / SMOKE_LEAF / "VRCForge.exe").read_bytes() == b"desktop"
+    assert (tmp_path / "ProgramFiles" / SMOKE_LEAF / "VRCForge.png").read_bytes() == b"notification-icon"
     assert (tmp_path / "ProgramFiles" / SMOKE_LEAF / "backend" / "vrcforge_backend.exe").read_bytes() == b"backend"
 
 

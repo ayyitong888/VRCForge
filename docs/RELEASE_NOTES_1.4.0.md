@@ -5,10 +5,13 @@
 - The Unity package is self-contained: import `VRCForge.unitypackage` into a
   project, open that project, and connect VRCForge App directly to its
   project-owned MCP Core.
-- The bundled Core uses only MCP protocol `2026-07-28` and exposes the 64
+- The bundled Core uses only MCP 2.0 (`2026-07-28`) and exposes the 64
   VRCForge product tools provided by this release.
 - Requests from clients older than protocol `2026-07-28` fail with an explicit
   update instruction instead of entering a compatibility path.
+- Windows approval notifications now use the VRCForge name and icon in both
+  popup banners and the Action Center application group. Settings > General
+  includes localized version, MCP, safety, and license information.
 - Unity logs a conflict warning when a known third-party MCP package is still
   declared or present in the project; VRCForge does not remove it automatically.
 - DeepSeek `deepseek-v4-flash` uses the stateless Responses adapter, and provider

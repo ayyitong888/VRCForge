@@ -266,7 +266,7 @@ def test_latest_stable_docs_require_explicit_published_version(tmp_path, monkeyp
     for item in ("README.md", "USER_MANUAL.md"):
         (tmp_path / item).write_text("Latest published stable release: `1.3.0`.", encoding="utf-8")
     (tmp_path / "packaging" / "README.md").write_text(
-        "`1.3.0` remains the latest published stable package.", encoding="utf-8"
+        "`1.3.0` is the latest published stable package.", encoding="utf-8"
     )
     assert gate.check_latest_stable_docs("1.3.0", "1.3.0")["ok"] is False
     assert gate.check_latest_stable_docs("1.3.0", "1.3.0", allow_equal=True)["ok"] is True

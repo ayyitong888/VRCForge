@@ -842,6 +842,7 @@ try {
     & .\packaging\build_backend.ps1 -OutputDir (Join-Path $payloadRoot "backend")
 
     Copy-Item -LiteralPath .\src-tauri\icons\icon.ico -Destination (Join-Path $payloadRoot "VRCForge.ico") -Force
+    Copy-Item -LiteralPath .\src-tauri\icons\icon.png -Destination (Join-Path $payloadRoot "VRCForge.png") -Force
     Copy-Item -LiteralPath .\VERSION -Destination (Join-Path $payloadRoot "VERSION") -Force
     Copy-Item -LiteralPath .\README.md -Destination (Join-Path $payloadRoot "README.md") -Force
     Copy-Item -LiteralPath .\USER_MANUAL.md -Destination (Join-Path $payloadRoot "USER_MANUAL.md") -Force
@@ -939,6 +940,10 @@ namespace VRCForge.Editor
             version = [ordered]@{
                 relativePath = "VERSION"
                 sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payloadRoot "VERSION")).Hash.ToLowerInvariant()
+            }
+            notificationIcon = [ordered]@{
+                relativePath = "VRCForge.png"
+                sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payloadRoot "VRCForge.png")).Hash.ToLowerInvariant()
             }
         }
     }

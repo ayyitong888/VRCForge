@@ -214,7 +214,7 @@ function Assert-InstalledPayload([string]$Root) {
     } else {
         $root = Assert-SafeProgramFilesDestination $Root
     }
-    foreach ($relativePath in @("VRCForge.exe", "backend\\vrcforge_backend.exe", "VERSION", "payload-integrity.json")) {
+    foreach ($relativePath in @("VRCForge.exe", "VRCForge.png", "backend\\vrcforge_backend.exe", "VERSION", "payload-integrity.json")) {
         $path = Assert-ContainedPath $root (Join-Path $root $relativePath)
         Assert-NoReparsePath $path | Out-Null
         if (-not [IO.File]::Exists($path)) { Fail "Extracted payload is missing $relativePath." }
@@ -222,7 +222,7 @@ function Assert-InstalledPayload([string]$Root) {
     $manifestPath = Join-Path $root "payload-integrity.json"
     try { $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json } catch { Fail "Extracted payload integrity manifest is invalid." }
     if ($manifest.schema -ne "vrcforge.payload-integrity.v1" -or $manifest.version -ne $Version) { Fail "Extracted payload integrity manifest is not version-bound." }
-    foreach ($entryName in @("desktop", "backend", "version")) {
+    foreach ($entryName in @("desktop", "backend", "version", "notificationIcon")) {
         $entry = $manifest.files.$entryName
         if ($null -eq $entry -or [string]::IsNullOrWhiteSpace([string]$entry.relativePath) -or [string]$entry.sha256 -notmatch "^[0-9a-fA-F]{64}$") { Fail "Extracted payload integrity entry is invalid: $entryName" }
         $path = Assert-ContainedPath $root (Join-Path $root ([string]$entry.relativePath))
