@@ -282,6 +282,7 @@ from skill_package_controller import SkillPackageController
 from skill_package_governance import SkillPackageGovernanceService
 from skill_package_projection import SkillPackageProjectionService
 from path_to_skill_controller import PathToSkillDashboardController
+from provider_model_catalog_service import ProviderModelCatalogService
 import sub_agent_delegate
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from sub_agent_tasks import SUB_AGENT_LOG_SCHEMA, SUB_AGENT_RESULT_SCHEMA, SubAgentTaskRegistry
@@ -1882,6 +1883,7 @@ _SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
 _SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 _PATH_TO_SKILL_CONTROLLER = PathToSkillDashboardController(sys.modules[__name__])
+_PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(sys.modules[__name__])
 PROJECT_SNAPSHOT_CACHE: dict[str, Any] | None = None
 PROJECT_SNAPSHOT_REFRESHING = False
 PROJECT_SNAPSHOT_UPDATED_AT = ""
@@ -17417,40 +17419,15 @@ def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfi
 
 
 def provider_config_descriptor(config: DashboardApiConfig) -> dict[str, Any]:
-    """Expose a non-secret, model-aware provider transport descriptor."""
-
-    return provider_model_descriptor(config.provider, config.model, config.api_type)
+    return _PROVIDER_MODEL_CATALOG._impl_provider_config_descriptor(config)
 
 
 def enrich_provider_model_item(config: DashboardApiConfig, item: dict[str, Any]) -> dict[str, Any]:
-    """Keep provider list metadata while adding conservative registry fields."""
-
-    enriched = dict(item)
-    model_id = str(enriched.get("id") or "").strip()
-    descriptor = provider_model_descriptor(config.provider, model_id, config.api_type)
-    enriched.update(
-        provider=config.provider,
-        apiType=descriptor["apiType"],
-        resolvedApiType=descriptor["resolvedApiType"],
-        supportedApiTypes=descriptor["supportedApiTypes"],
-        capabilities=descriptor["capabilities"],
-        capabilitySource=descriptor["capabilitySource"],
-    )
-    return enriched
+    return _PROVIDER_MODEL_CATALOG._impl_enrich_provider_model_item(config, item)
 
 
 def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    validate_provider_api_key(config.api_key)
-    if provider_requires_api_key(config.provider) and not config.api_key.strip():
-        raise RuntimeError(f"{provider_display_name(config.provider)} API key is empty. Enter an API key before loading models.")
-
-    if config.provider == "gemini":
-        return fetch_google_ai_studio_models(config)
-    if config.provider == "vertexai":
-        return fetch_vertex_ai_models(config)
-    if config.provider == "anthropic":
-        return fetch_anthropic_models(config)
-    return fetch_openai_compatible_models(config)
+    return _PROVIDER_MODEL_CATALOG._impl_fetch_provider_models(config)
 
 
 def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
@@ -17865,56 +17842,15 @@ def _run_provider_vision_analysis(
 
 
 def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    validate_provider_api_key(config.api_key)
-    if not config.base_url.strip():
-        raise RuntimeError("Base URL is empty. Enter a provider API endpoint before loading models.")
-
-    try:
-        from openai import OpenAI
-    except ImportError as exc:
-        raise RuntimeError("The openai package is not installed, so OpenAI-compatible model listing is unavailable.") from exc
-
-    client = OpenAI(api_key=config.api_key or "ollama", base_url=config.base_url, timeout=20.0)
-    try:
-        response = client.models.list()
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"{provider_display_name(config.provider)} model list request failed: {exc}") from exc
-
-    return normalize_provider_model_list(response, provider_display_name(config.provider))
+    return _PROVIDER_MODEL_CATALOG._impl_fetch_openai_compatible_models(config)
 
 
 def fetch_google_ai_studio_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    validate_provider_api_key(config.api_key)
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise RuntimeError("The google-genai package is not installed, so Google AI Studio model listing is unavailable.") from exc
-
-    client = genai.Client(api_key=config.api_key)
-    try:
-        response = client.models.list()
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Google AI Studio model list request failed: {exc}") from exc
-
-    return normalize_provider_model_list(response, "Google AI Studio")
+    return _PROVIDER_MODEL_CATALOG._impl_fetch_google_ai_studio_models(config)
 
 
 def fetch_vertex_ai_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise RuntimeError("The google-genai package is not installed, so Google Vertex AI model listing is unavailable.") from exc
-
-    project, location = resolve_vertex_project_location(config.base_url)
-    try:
-        client = genai.Client(vertexai=True, project=project, location=location)
-        response = client.models.list()
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            f"Google Vertex AI model list request failed for project '{project}' / location '{location}': {exc}"
-        ) from exc
-
-    return normalize_provider_model_list(response, "Google Vertex AI")
+    return _PROVIDER_MODEL_CATALOG._impl_fetch_vertex_ai_models(config)
 
 
 def resolve_vertex_project_location(value: str) -> tuple[str, str]:
@@ -17934,117 +17870,23 @@ def resolve_vertex_project_location(value: str) -> tuple[str, str]:
 
 
 def fetch_anthropic_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    validate_provider_api_key(config.api_key)
-    try:
-        import anthropic
-    except ImportError as exc:
-        raise RuntimeError("The anthropic package is not installed, so Anthropic model listing is unavailable.") from exc
-
-    client = anthropic.Anthropic(api_key=config.api_key)
-    models_api = getattr(client, "models", None)
-    list_models = getattr(models_api, "list", None)
-    if not callable(list_models):
-        raise RuntimeError("The installed Anthropic SDK does not expose models.list(). Use manual model input.")
-
-    try:
-        try:
-            response = list_models(limit=100)
-        except TypeError:
-            response = list_models()
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"Anthropic model list request failed: {exc}") from exc
-
-    return normalize_provider_model_list(response, "Anthropic")
+    return _PROVIDER_MODEL_CATALOG._impl_fetch_anthropic_models(config)
 
 
 def normalize_provider_model_list(response: Any, provider_label: str) -> list[dict[str, Any]]:
-    raw_items: Any = response
-    if isinstance(response, dict):
-        raw_items = response.get("data") or response.get("models") or []
-    else:
-        raw_items = getattr(response, "data", response)
-
-    try:
-        items = list(raw_items or [])
-    except TypeError:
-        items = []
-
-    models_by_id: dict[str, dict[str, Any]] = {}
-    for item in items:
-        if isinstance(item, dict):
-            model_id = item.get("id") or item.get("name")
-        else:
-            model_id = getattr(item, "id", None) or getattr(item, "name", None)
-
-        if not model_id:
-            continue
-
-        model_id = str(model_id).strip()
-        if model_id:
-            models_by_id.setdefault(model_id, build_provider_model_info(item, model_id))
-
-    models = sorted(models_by_id.values(), key=lambda model: model["id"].casefold())
-    if not models:
-        raise RuntimeError(f"{provider_label} returned no models.")
-    return models
+    return _PROVIDER_MODEL_CATALOG._impl_normalize_provider_model_list(response, provider_label)
 
 
 def read_model_attr(item: Any, *names: str) -> Any:
-    for name in names:
-        if isinstance(item, dict) and name in item:
-            return item.get(name)
-        value = getattr(item, name, None)
-        if value is not None:
-            return value
-    return None
+    return _PROVIDER_MODEL_CATALOG._impl_read_model_attr(item, *names)
 
 
 def coerce_positive_int(value: Any) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number > 0 else None
+    return _PROVIDER_MODEL_CATALOG._impl_coerce_positive_int(value)
 
 
 def build_provider_model_info(item: Any, model_id: str) -> dict[str, Any]:
-    label = str(read_model_attr(item, "label", "display_name", "displayName", "name") or model_id).strip() or model_id
-    info: dict[str, Any] = {"id": model_id, "label": label}
-    field_map = {
-        "contextWindow": (
-            "contextWindow",
-            "context_window",
-            "contextLength",
-            "context_length",
-            "maxContextTokens",
-            "max_context_tokens",
-        ),
-        "inputTokenLimit": (
-            "inputTokenLimit",
-            "input_token_limit",
-            "inputTokenCountLimit",
-            "input_token_count_limit",
-        ),
-        "maxInputTokens": (
-            "maxInputTokens",
-            "max_input_tokens",
-        ),
-        "outputTokenLimit": (
-            "outputTokenLimit",
-            "output_token_limit",
-        ),
-        "maxOutputTokens": (
-            "maxOutputTokens",
-            "max_output_tokens",
-        ),
-    }
-    for out_key, candidates in field_map.items():
-        value = coerce_positive_int(read_model_attr(item, *candidates))
-        if value is not None:
-            info[out_key] = value
-    return info
+    return _PROVIDER_MODEL_CATALOG._impl_build_provider_model_info(item, model_id)
 
 
 def save_dashboard_config_document() -> None:
