@@ -299,6 +299,10 @@ def main() -> int:
     config_file_ok = False
     restart_recovery_ok = False
     bundle_evidence: dict[str, Any] = {}
+    doctor_checked = False
+    support_bundle_checked = False
+    restart_checked = False
+    first_cleanup_attempted = False
     port = choose_port(args.port)
     base_url = f"http://127.0.0.1:{port}"
     env, user_data, config_path = build_runtime_env(packaged_root, run_dir / "runtime", token)
@@ -320,6 +324,7 @@ def main() -> int:
         )
         bootstrap_before = wait_for_bootstrap(base_url, token, process, max(1.0, float(args.timeout)))
         auth_required_ok = app_auth_rejects_missing_and_wrong_tokens(base_url)
+        bootstrap_redacted = not contains_secret(bootstrap_before, probe_secrets)
         api_response = request_json(
             base_url,
             token,
@@ -330,7 +335,7 @@ def main() -> int:
                 "api_key": api_key,
                 "base_url": "https://example.invalid/v1",
                 "model": "gpt-4.1-mini",
-                "api_type": "responses",
+                "api_type": "auto",
                 "thinking_level": "",
             },
         )
@@ -353,9 +358,8 @@ def main() -> int:
         config_file_ok = persisted_sections_match(config_path, api_key, vision_key)
         bootstrap_after = request_json(base_url, token, "GET", "/api/app/bootstrap")
         doctor = request_json(base_url, token, "GET", "/api/app/doctor")
-        bootstrap_redacted = not contains_secret(bootstrap_before, probe_secrets) and not contains_secret(
-            bootstrap_after, probe_secrets
-        )
+        doctor_checked = True
+        bootstrap_redacted = bootstrap_redacted and not contains_secret(bootstrap_after, probe_secrets)
         doctor_redacted = not contains_secret(doctor, probe_secrets)
 
         bundle_response = request_json(
@@ -390,6 +394,7 @@ def main() -> int:
             and bundle_validation.get("ok") is True
             and bundle_contents_clean
         )
+        support_bundle_checked = True
         bundle_evidence = {
             "responseOk": bundle_response.get("ok"),
             "responseSchema": bundle_response.get("schema"),
@@ -398,6 +403,7 @@ def main() -> int:
             "privacyFindings": bundle_validation.get("privacyFindings", []),
         }
 
+        first_cleanup_attempted = True
         first_cleanup = stop_process(process, port)
         process = None
         stdout_handle.close()
@@ -412,6 +418,7 @@ def main() -> int:
         )
         wait_for_bootstrap(base_url, token, process, max(1.0, float(args.timeout)))
         recovered_config = request_json(base_url, token, "GET", "/api/config")
+        restart_checked = True
         restart_recovery_ok = config_sections_match(recovered_config, api_key, vision_key)
     except Exception as exc:  # noqa: BLE001 - retain bounded, redacted failure evidence.
         assertions.append(redact_text(str(exc), probe_secrets))
@@ -429,17 +436,27 @@ def main() -> int:
         assertions.append("authenticated API+Vision save contract did not preserve both sections")
     if not config_file_ok:
         assertions.append("isolated config document did not persist both sections")
-    if not restart_recovery_ok:
+    if restart_checked and not restart_recovery_ok:
         assertions.append("packaged restart did not recover both config sections")
+    elif not restart_checked:
+        assertions.append("packaged restart config check did not complete")
     if not bootstrap_redacted:
         assertions.append("app bootstrap exposed a probe credential")
-    if not doctor_redacted:
+    if doctor_checked and not doctor_redacted:
         assertions.append("Doctor response exposed a probe credential")
-    if not support_bundle_redacted:
+    elif not doctor_checked:
+        assertions.append("Doctor redaction check did not complete")
+    if support_bundle_checked and not support_bundle_redacted:
         assertions.append("support bundle did not redact probe credentials")
+    elif not support_bundle_checked:
+        assertions.append("support bundle redaction check did not complete")
     if not logs_redacted:
         assertions.append("backend diagnostic logs exposed a probe credential")
-    if not first_cleanup.get("ok") or not final_cleanup.get("ok") or port_is_open(port):
+    if (
+        (first_cleanup_attempted and not first_cleanup.get("ok"))
+        or not final_cleanup.get("ok")
+        or port_is_open(port)
+    ):
         assertions.append("packaged backend process or loopback port was not released")
     assertions = list(dict.fromkeys(assertions))
 
