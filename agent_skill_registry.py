@@ -1,18 +1,32 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 from agent_gateway import (
     BUILTIN_SKILL_GROUPS,
     BUILTIN_SKILL_OVERRIDES,
     AgentGatewayConfig,
+    AgentGatewayError,
     AgentTool,
     AgentWriteHandler,
+    PROJECTED_SKILL_STATE_MAX_BYTES,
+    PROJECTED_SKILL_STATE_NAME,
+    PROJECTED_SKILL_STATE_SCHEMA,
+    SKILL_ID_RE,
     WRAPPER_ONLY_WRITE_TARGETS,
+    _path_is_link_like,
     ensure_string_list,
+    first_payload_value,
     normalize_bool,
     normalize_risk_level,
+    normalize_skill_id,
     normalize_skill_permission,
+    parse_skill_markdown,
+    remove_tree,
+    render_skill_markdown,
     title_from_name,
     tool_usage_description,
 )
@@ -140,3 +154,136 @@ class AgentSkillRegistryService:
         if handler:
             return self._write_handler_visible(handler, config)
         return False
+
+    def _impl_user_skills_dir(self) -> Path:
+        if self.config_path.parent.name.lower() == "config":
+            return self.config_path.parent.parent / "skills"
+        user_data_dir = os.environ.get("VRCFORGE_USER_DATA_DIR", "").strip()
+        if user_data_dir:
+            return Path(user_data_dir) / "skills"
+        return self.config_path.parent / "skills"
+
+    def _impl_load_user_skills(self) -> list[dict[str, Any]]:
+        skills_dir = self.user_skills_dir
+        if not skills_dir.exists():
+            return []
+        skills: list[dict[str, Any]] = []
+        for skill_file in sorted(skills_dir.glob("*/SKILL.md")):
+            try:
+                parsed = parse_skill_markdown(skill_file)
+                normalized = self._normalize_user_skill(parsed, existing_id=str(parsed.get("name") or skill_file.parent.name))
+                projected_state = self._load_projected_skill_state(skill_file)
+                if projected_state is not None:
+                    normalized["enabled"] = projected_state
+                    normalized["available"] = projected_state
+                normalized["storagePath"] = str(skill_file)
+                skills.append(normalized)
+            except Exception as exc:  # noqa: BLE001 - one broken user skill must not break startup.
+                fallback_name = normalize_skill_id(skill_file.parent.name)
+                skills.append({
+                    "schema": "vrcforge.skill.v1", "name": fallback_name, "title": fallback_name,
+                    "description": "User skill could not be loaded.", "category": "user", "source": "user",
+                    "skillType": "package", "enabled": False, "available": False,
+                    "permissionMode": "instruction_only", "riskLevel": "low", "whenToUse": "", "inputs": [],
+                    "outputs": [], "sideEffects": "none", "backupRestore": "not required", "tools": [],
+                    "allowedTools": [], "disallowedTools": [], "entrypointTool": "", "userInvocable": False,
+                    "disableModelInvocation": True, "argumentHint": "", "requiresEnv": [], "requiresBinaries": [],
+                    "supportedOs": [], "supportFiles": [], "testCommand": "", "instructions": "", "advanced": False,
+                    "write": False, "tags": ["user", "invalid"], "storagePath": str(skill_file), "loadError": str(exc),
+                })
+        return skills
+
+    def _impl_load_projected_skill_state(self, skill_file: Path) -> bool | None:
+        state_path = skill_file.parent / PROJECTED_SKILL_STATE_NAME
+        if not state_path.exists():
+            return None
+        if _path_is_link_like(state_path) or not state_path.is_file():
+            raise AgentGatewayError("Projected skill state must be a regular non-link file.", status_code=400)
+        metadata = state_path.stat(follow_symlinks=False)
+        if metadata.st_size > PROJECTED_SKILL_STATE_MAX_BYTES:
+            raise AgentGatewayError("Projected skill state exceeds its size limit.", status_code=400)
+        with state_path.open("rb") as stream:
+            raw = stream.read(PROJECTED_SKILL_STATE_MAX_BYTES + 1)
+        if len(raw) > PROJECTED_SKILL_STATE_MAX_BYTES:
+            raise AgentGatewayError("Projected skill state exceeds its size limit.", status_code=400)
+        try:
+            state = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgentGatewayError("Projected skill state is not valid UTF-8 JSON.", status_code=400) from exc
+        if not isinstance(state, dict) or state.get("schema") != PROJECTED_SKILL_STATE_SCHEMA or not isinstance(state.get("enabled"), bool):
+            raise AgentGatewayError("Projected skill state has an invalid schema.", status_code=400)
+        return bool(state["enabled"])
+
+    def _impl_find_user_skill(self, skill_id: str) -> dict[str, Any] | None:
+        skill_id = normalize_skill_id(skill_id)
+        for skill in self._load_user_skills():
+            if skill.get("name") == skill_id:
+                return skill
+        return None
+
+    def _impl_save_user_skills(self, skills: list[dict[str, Any]]) -> None:
+        skills_dir = self.user_skills_dir
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        existing_dirs = {path.name: path for path in skills_dir.iterdir() if path.is_dir()}
+        wanted = {str(skill.get("name") or "") for skill in skills}
+        for name, path in existing_dirs.items():
+            if name not in wanted and SKILL_ID_RE.fullmatch(name):
+                remove_tree(path)
+        for skill in skills:
+            self._save_user_skill(skill)
+
+    def _impl_save_user_skill(self, skill: dict[str, Any]) -> None:
+        skill_id = normalize_skill_id(str(skill.get("name") or ""))
+        skill_dir = self.user_skills_dir / skill_id
+        if skill_dir.exists() and _path_is_link_like(skill_dir):
+            raise AgentGatewayError(f"Refusing to write through a linked user skill directory: {skill_id}", status_code=400)
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        skill_file = skill_dir / "SKILL.md"
+        if skill_file.exists() and _path_is_link_like(skill_file):
+            raise AgentGatewayError(f"Refusing to overwrite a linked user skill file: {skill_id}", status_code=400)
+        skill_file.write_text(render_skill_markdown(skill), encoding="utf-8")
+
+    def _impl_normalize_user_skill(self, payload: dict[str, Any], existing_id: str | None = None) -> dict[str, Any]:
+        skill_id = normalize_skill_id(str(first_payload_value(payload, "name") or existing_id or ""))
+        if not SKILL_ID_RE.fullmatch(skill_id):
+            raise AgentGatewayError("Skill name must match [a-z][a-z0-9_.-]{1,80}.", status_code=400)
+        permission_mode = normalize_skill_permission(first_payload_value(payload, "permissionMode", "permission_mode", "permission-mode"))
+        tools = ensure_string_list(first_payload_value(payload, "tools", "allowedTools", "allowed_tools", "allowed-tools"))
+        allowed_tools = ensure_string_list(first_payload_value(payload, "allowedTools", "allowed_tools", "allowed-tools", default=tools))
+        disallowed_tools = ensure_string_list(first_payload_value(payload, "disallowedTools", "disallowed_tools", "disallowed-tools"))
+        title = str(first_payload_value(payload, "title", default=title_from_name(skill_id))).strip()
+        instructions = str(first_payload_value(payload, "instructions", "body", default="")).strip()
+        return {
+            "schema": "vrcforge.skill.v1", "name": skill_id, "title": title[:120],
+            "description": str(first_payload_value(payload, "description", default="")).strip()[:500],
+            "category": str(first_payload_value(payload, "category", default="user")).strip()[:80],
+            "source": "user", "skillType": "package",
+            "enabled": normalize_bool(first_payload_value(payload, "enabled", default=True), True),
+            "available": normalize_bool(first_payload_value(payload, "enabled", default=True), True),
+            "permissionMode": permission_mode,
+            "riskLevel": normalize_risk_level(first_payload_value(payload, "riskLevel", "risk_level", "risk-level")),
+            "whenToUse": str(first_payload_value(payload, "whenToUse", "when_to_use", "when-to-use", default="")).strip()[:1000],
+            "inputs": ensure_string_list(first_payload_value(payload, "inputs")),
+            "outputs": ensure_string_list(first_payload_value(payload, "outputs")),
+            "sideEffects": str(first_payload_value(payload, "sideEffects", "side_effects", "side-effects", default="none")).strip()[:500],
+            "backupRestore": str(first_payload_value(payload, "backupRestore", "backup_restore", "backup-restore", default="not required")).strip()[:500],
+            "tools": tools, "allowedTools": allowed_tools, "disallowedTools": disallowed_tools,
+            "entrypointTool": str(first_payload_value(payload, "entrypointTool", "entrypoint_tool", "entrypoint-tool", default="")).strip(),
+            "userInvocable": normalize_bool(first_payload_value(payload, "userInvocable", "user_invocable", "user-invocable", default=True), True),
+            "disableModelInvocation": normalize_bool(first_payload_value(payload, "disableModelInvocation", "disable_model_invocation", "disable-model-invocation", default=False), False),
+            "argumentHint": str(first_payload_value(payload, "argumentHint", "argument_hint", "argument-hint", default="")).strip()[:240],
+            "requiresEnv": ensure_string_list(first_payload_value(payload, "requiresEnv", "requires_env", "requires-env")),
+            "requiresBinaries": ensure_string_list(first_payload_value(payload, "requiresBinaries", "requires_binaries", "requires-binaries")),
+            "supportedOs": ensure_string_list(first_payload_value(payload, "supportedOs", "supported_os", "supported-os")),
+            "supportFiles": ensure_string_list(first_payload_value(payload, "supportFiles", "support_files", "support-files")),
+            "testCommand": str(first_payload_value(payload, "testCommand", "test_command", "test-command", default="")).strip()[:500],
+            "instructions": instructions, "advanced": permission_mode == "advanced_power_mode",
+            "write": permission_mode in {"approval_required", "advanced_power_mode"},
+            "tags": sorted({"user", *ensure_string_list(first_payload_value(payload, "tags"))}),
+        }
+
+    def _impl_ensure_user_skill_can_use_id(self, skill_id: str, skills: list[dict[str, Any]]) -> None:
+        if skill_id in self._tools or skill_id in self._write_handlers:
+            raise AgentGatewayError(f"Skill name conflicts with a builtin tool: {skill_id}", status_code=409)
+        if any(skill.get("name") == skill_id for skill in skills):
+            raise AgentGatewayError(f"User skill already exists: {skill_id}", status_code=409)
