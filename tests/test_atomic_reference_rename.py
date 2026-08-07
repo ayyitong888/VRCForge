@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -30,6 +31,14 @@ from atomic_reference_rename import (
 PROJECT_PATH = "D:/DisposableUnityProject"
 SCENE_PATH = "Assets/VRCForge/Generated/AtomicRenameProbe.unity"
 AVATAR_PATH = "Avatar"
+OUTFIT_NAMING_WORKFLOW = (
+    Path(__file__).resolve().parents[1]
+    / "examples"
+    / "skill-packages"
+    / "outfit-naming-helper"
+    / "workflows"
+    / "outfit-naming-helper.json"
+)
 
 
 def object_request() -> dict:
@@ -58,6 +67,50 @@ def wrapper(request: dict) -> dict:
         "toolName": TOOL_NAME,
         "arguments": deepcopy(request),
     }
+
+
+@pytest.mark.parametrize(
+    "rename_request",
+    [pytest.param(object_request(), id="game-object"), pytest.param(parameter_request(), id="parameter")],
+)
+def test_outfit_naming_workflow_resolves_to_exact_atomic_wrapper(rename_request: dict) -> None:
+    workflow = json.loads(OUTFIT_NAMING_WORKFLOW.read_text(encoding="utf-8"))
+    step = workflow["steps"][0]
+    request = step["request"]
+
+    assert len(workflow["steps"]) == 1
+    assert step["tool"] == "vrcforge_request_apply"
+    assert step["writes"] is True
+    assert request["targetTool"] == "vrcforge_unity_mcp_write"
+    template = deepcopy(request["argumentsByOperation"][rename_request["operationKind"]])
+    assert template["toolName"] == TOOL_NAME
+    assert template["projectPath"] == "$projectPath"
+    for key, value in template["arguments"].items():
+        if key == "operationKind":
+            assert value == rename_request[key]
+        else:
+            assert value == f"${key}"
+
+    resolved = deepcopy(template)
+    resolved["projectPath"] = PROJECT_PATH
+    resolved["arguments"] = deepcopy(rename_request)
+    assert resolved == build_wrapper_arguments({"projectPath": PROJECT_PATH, **rename_request})
+
+
+def test_outfit_naming_wrapper_rejects_an_unregistered_nested_tool() -> None:
+    workflow = json.loads(OUTFIT_NAMING_WORKFLOW.read_text(encoding="utf-8"))
+    request = workflow["steps"][0]["request"]
+    assert set(request["argumentsByOperation"]) == {"game_object", "parameter"}
+
+    result = dashboard_server.unity_mcp_write_sync(
+        {
+            "projectPath": PROJECT_PATH,
+            "toolName": "vrc_unregistered_reference_rename",
+            "arguments": object_request(),
+        }
+    )
+    assert result["ok"] is False
+    assert "static write allowlist" in result["error"]
 
 
 def preview_payload(request: dict) -> dict:
@@ -1196,6 +1249,8 @@ def test_dashboard_fastapi_preview_request_approval_and_apply_are_one_bound_chai
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    workflow = json.loads(OUTFIT_NAMING_WORKFLOW.read_text(encoding="utf-8"))
+    workflow_request = workflow["steps"][0]["request"]
     project = tmp_path / "UnityProject"
     for root in ("Assets", "Packages", "ProjectSettings"):
         (project / root).mkdir(parents=True, exist_ok=True)
@@ -1268,7 +1323,7 @@ def test_dashboard_fastapi_preview_request_approval_and_apply_are_one_bound_chai
                 json={
                     "agent_name": "atomic-contract",
                     "params": {
-                        "target_tool": "vrcforge_unity_mcp_write",
+                        "target_tool": workflow_request["targetTool"],
                         "arguments": build_wrapper_arguments(params),
                         "preview": {"spoofed": True},
                         "reason": "Verify one complete reference migration.",
@@ -1278,6 +1333,8 @@ def test_dashboard_fastapi_preview_request_approval_and_apply_are_one_bound_chai
             assert request_response.status_code == 200
             pending = request_response.json()["result"]
             assert pending["status"] == "pending"
+            assert pending["approval"]["requiresExplicitApproval"] is True
+            assert pending["approval"]["autoApprovalBlocked"] is True
             assert "spoofed" not in pending["approval"]["preview"]
             stored = gateway._approvals[pending["approval"]["id"]]
             assert stored["arguments"] == canonical

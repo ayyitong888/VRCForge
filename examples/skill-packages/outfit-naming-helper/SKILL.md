@@ -1,25 +1,35 @@
 ---
 name: outfit-naming-helper
 title: Outfit Naming Helper
-description: Propose normalized outfit names from read-only binding evidence while unsafe object and parameter renames stay blocked.
-permission-mode: read_only
-risk-level: medium
+description: Propose normalized outfit names and request one supervised atomic reference migration after preview.
+permission-mode: approval_required
+risk-level: high
 allowed-tools:
   - vrcforge_scan_animation_bindings
-entrypoint-tool: vrcforge_scan_animation_bindings
+  - vrcforge_preview_atomic_reference_rename
+  - vrcforge_request_apply
 support-files:
   - workflows/outfit-naming-helper.json
 test-command: python -m pytest tests/test_example_skill_packages.py -q
 ---
 
-Use this skill to inspect animation-binding paths and propose normalized outfit
-object and parameter names. Convert labels to stable `Outfit_<PascalCase>`
-names, preserve meaningful alphanumeric tokens, and keep proposals at most 32
-characters. Return the old name, proposed name, and every binding-path warning.
+Use this skill when the user asks to normalize one outfit object name or one
+expression parameter and the affected avatar, scene, and current binding
+evidence are known. Do not use it for bulk renames, unrelated hierarchy
+cleanup, or a request that has not identified the exact old and new names.
 
-This package is proposal-only. Do not call `vrcforge_rename_gameobject`,
-`vrcforge_request_apply`, or any other write tool. Renaming a GameObject can
-break AnimationClip binding paths and serialized component or constraint
-references; renaming an expression parameter can break menus, FX conditions,
-and animation bindings. Both writes remain blocked until VRCForge has an
-atomic reference-migration primitive with validation and rollback proof.
+First call `vrcforge_scan_animation_bindings` in a read-only turn. Convert the
+selected label to a stable `Outfit_<PascalCase>` name, preserve meaningful
+alphanumeric tokens, keep it at most 32 characters, and report every affected
+binding or reference. Then call `vrcforge_preview_atomic_reference_rename` in a
+separate preview turn with exactly one `game_object` or `parameter` operation.
+
+Only after the user chooses that exact preview, submit one
+`vrcforge_request_apply` call. Set `target_tool` to
+`vrcforge_unity_mcp_write`; set its `arguments` to the selected workflow
+wrapper containing `projectPath`, `toolName: vrc_atomic_reference_rename`, and
+the exact previewed operation arguments. Never call
+`vrcforge_unity_mcp_write`, `vrc_atomic_reference_rename`, or a raw rename tool
+directly. Never change the operation, target path, or new name after preview.
+VRCForge owns approval, checkpoint creation, validation, readback, and the
+separately approved checkpoint restore.

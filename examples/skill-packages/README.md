@@ -10,16 +10,16 @@ They intentionally do not commit generated `.vsk` archives.
   presentation-only report sections.
 - `material-preset-pack`: one approval request bound to the existing
   `vrcforge_apply_shader_tuning` write channel and bundled semantic presets.
-- `outfit-naming-helper`: a read-only binding scan that proposes normalized
-  object and parameter names; both rename writes stay blocked until all
-  animation, menu, FX, component, and constraint references can migrate
-  atomically.
+- `outfit-naming-helper`: a scan/preview helper whose final primitive requests
+  one existing atomic object-or-parameter reference migration through the
+  supervised Unity write wrapper.
 - `optimizer-report-helper`: one read-only optimizer-plan call formatted as a
   PC/Quest decision report.
 
-Every workflow remains primitive: one declared tool call per execution. The
-material write example requests approval and relies on VRCForge for checkpoint,
-apply, validation, and rollback handling.
+Every workflow remains primitive: one declared tool call per execution. Write
+examples request approval and rely on VRCForge for checkpoint, apply,
+validation, readback, and rollback handling; they never expose their underlying
+write handlers as directly callable Skill tools.
 
 ## Skill SDK quick start
 

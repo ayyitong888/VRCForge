@@ -1,29 +1,59 @@
 {
   "schema": "vrcforge.skill-package.workflow.v1",
-  "mode": "read_only",
+  "mode": "approval_required",
   "steps": [
     {
-      "name": "scan_bindings_before_naming_proposal",
-      "tool": "vrcforge_scan_animation_bindings",
-      "writes": false,
+      "name": "request_atomic_reference_rename",
+      "tool": "vrcforge_request_apply",
+      "writes": true,
       "request": {
-        "proposalOnly": true,
-        "includeObjectPaths": true,
-        "includeParameterBindings": true
+        "targetTool": "vrcforge_unity_mcp_write",
+        "scanTool": "vrcforge_scan_animation_bindings",
+        "previewTool": "vrcforge_preview_atomic_reference_rename",
+        "oneOperationPerExecution": true,
+        "argumentsByOperation": {
+          "game_object": {
+            "projectPath": "$projectPath",
+            "toolName": "vrc_atomic_reference_rename",
+            "arguments": {
+              "operationKind": "game_object",
+              "scenePath": "$scenePath",
+              "avatarPath": "$avatarPath",
+              "targetObjectPath": "$targetObjectPath",
+              "newName": "$newName"
+            }
+          },
+          "parameter": {
+            "projectPath": "$projectPath",
+            "toolName": "vrc_atomic_reference_rename",
+            "arguments": {
+              "operationKind": "parameter",
+              "scenePath": "$scenePath",
+              "avatarPath": "$avatarPath",
+              "oldParameterName": "$oldParameterName",
+              "newParameterName": "$newParameterName"
+            }
+          }
+        }
       }
     }
   ],
-  "blockedTargets": {
-    "object": "Blocked until VRCForge can atomically migrate animation, component, and constraint path references.",
-    "parameter": "Blocked until VRCForge can atomically migrate expression-menu, FX-condition, and animation references."
-  },
   "approval": {
-    "required": false
+    "required": true,
+    "reason": "The selected operation migrates Unity object or parameter references and must remain bound to the reviewed preview."
   },
   "checkpoint": {
-    "required": false
+    "required": true,
+    "scope": [
+      "Assets",
+      "Packages",
+      "ProjectSettings"
+    ]
   },
   "rollback": {
-    "required": false
+    "required": true,
+    "tool": "vrcforge_restore_checkpoint",
+    "requiresSeparateApproval": true,
+    "reason": "Restore the pre-write checkpoint only through a separate supervised approval."
   }
 }

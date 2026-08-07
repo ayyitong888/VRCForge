@@ -23,6 +23,7 @@ EXAMPLES = (
         "category": "read/debug",
         "permissions": {"read_project", "unity_run_validation", "unity_scan_scene"},
         "write": False,
+        "min_version": "1.3.0",
     },
     {
         "slug": "material-preset-pack",
@@ -32,16 +33,17 @@ EXAMPLES = (
         "target_tool": "vrcforge_apply_shader_tuning",
         "permissions": {"read_project", "unity_modify_materials"},
         "write": True,
+        "min_version": "1.3.0",
     },
     {
         "slug": "outfit-naming-helper",
         "package_id": "community.examples.outfit-naming-helper",
         "skill_name": "outfit-naming-helper",
-        "workflow_tool": "vrcforge_scan_animation_bindings",
-        "entrypoint_tool": "vrcforge_scan_animation_bindings",
-        "category": "read/debug",
-        "permissions": {"read_project", "unity_scan_scene"},
-        "write": False,
+        "workflow_tool": "vrcforge_request_apply",
+        "target_tool": "vrcforge_unity_mcp_write",
+        "permissions": {"read_project", "unity_scan_scene", "write_project_files"},
+        "write": True,
+        "min_version": "1.4.0",
     },
     {
         "slug": "optimizer-report-helper",
@@ -52,6 +54,7 @@ EXAMPLES = (
         "category": "plan/preview",
         "permissions": {"read_project", "unity_run_validation", "unity_scan_scene"},
         "write": False,
+        "min_version": "1.3.0",
     },
 )
 
@@ -86,7 +89,7 @@ def test_example_skill_package_source_is_exportable_and_primitive(
 
     assert manifest["id"] == case["package_id"]
     assert manifest["skill_name"] == case["skill_name"]
-    assert manifest["min_vrcforge_version"] == "1.3.0"
+    assert manifest["min_vrcforge_version"] == case["min_version"]
     assert set(manifest["permissions"]) == case["permissions"]
     assert manifest["entrypoints"]["skill"] == "SKILL.md"
     assert workflow["schema"] == "vrcforge.skill-package.workflow.v1"
@@ -100,7 +103,7 @@ def test_example_skill_package_source_is_exportable_and_primitive(
         value for name, value in manifest["entrypoints"].items() if name != "skill"
     }
 
-    service = SkillPackageService(tmp_path / "store", vrcforge_version="1.3.0")
+    service = SkillPackageService(tmp_path / "store", vrcforge_version="1.4.0")
     package = service.export_dev(source, tmp_path / f"{case['slug']}.vsk").package_path
     preview = service.preflight_import(package).as_dict()
 
@@ -109,7 +112,7 @@ def test_example_skill_package_source_is_exportable_and_primitive(
     assert preview["dryRun"]["willWrite"] is False
 
 
-def test_examples_keep_one_gated_material_write_and_block_unsafe_renames() -> None:
+def test_examples_keep_writes_on_existing_supervised_channels() -> None:
     material = _load_json(
         EXAMPLE_ROOT / "material-preset-pack" / "workflows" / "material-preset-pack.json"
     )
@@ -132,23 +135,56 @@ def test_examples_keep_one_gated_material_write_and_block_unsafe_renames() -> No
     naming = _load_json(
         EXAMPLE_ROOT / "outfit-naming-helper" / "workflows" / "outfit-naming-helper.json"
     )
-    naming_request = naming["steps"][0]["request"]
+    naming_step = naming["steps"][0]
+    naming_request = naming_step["request"]
     naming_manifest = _load_json(EXAMPLE_ROOT / "outfit-naming-helper" / "manifest.json")
     naming_skill = parse_skill_markdown(EXAMPLE_ROOT / "outfit-naming-helper" / "SKILL.md")
-    assert naming["steps"][0]["tool"] == "vrcforge_scan_animation_bindings"
-    assert naming["steps"][0]["writes"] is False
-    assert naming_request["proposalOnly"] is True
-    assert "object" in naming["blockedTargets"]
-    assert "parameter" in naming["blockedTargets"]
-    assert set(naming_manifest["permissions"]) == {"read_project", "unity_scan_scene"}
-    assert not set(naming_manifest["permissions"]) & {
-        "unity_modify_materials",
-        "unity_modify_prefab",
-        "unity_modify_components",
+    assert naming_step["tool"] == "vrcforge_request_apply"
+    assert naming_step["writes"] is True
+    assert naming_request["targetTool"] == "vrcforge_unity_mcp_write"
+    assert naming_request["scanTool"] == "vrcforge_scan_animation_bindings"
+    assert naming_request["previewTool"] == "vrcforge_preview_atomic_reference_rename"
+    assert naming_request["oneOperationPerExecution"] is True
+    wrappers = naming_request["argumentsByOperation"]
+    assert set(wrappers) == {"game_object", "parameter"}
+    assert set(wrappers["game_object"]["arguments"]) == {
+        "operationKind",
+        "scenePath",
+        "avatarPath",
+        "targetObjectPath",
+        "newName",
+    }
+    assert set(wrappers["parameter"]["arguments"]) == {
+        "operationKind",
+        "scenePath",
+        "avatarPath",
+        "oldParameterName",
+        "newParameterName",
+    }
+    assert all(wrapper["toolName"] == "vrc_atomic_reference_rename" for wrapper in wrappers.values())
+    assert all(set(wrapper) == {"projectPath", "toolName", "arguments"} for wrapper in wrappers.values())
+    assert naming["approval"]["required"] is True
+    assert naming["checkpoint"]["required"] is True
+    assert naming["rollback"] == {
+        "required": True,
+        "tool": "vrcforge_restore_checkpoint",
+        "requiresSeparateApproval": True,
+        "reason": "Restore the pre-write checkpoint only through a separate supervised approval.",
+    }
+    assert set(naming_manifest["permissions"]) == {
+        "read_project",
+        "unity_scan_scene",
         "write_project_files",
     }
-    assert naming_skill["allowedTools"] == ["vrcforge_scan_animation_bindings"]
-    assert "vrcforge_request_apply" not in naming_skill["allowedTools"]
+    assert naming_skill["permissionMode"] == "approval_required"
+    assert naming_skill["riskLevel"] == "high"
+    assert naming_skill["allowedTools"] == [
+        "vrcforge_scan_animation_bindings",
+        "vrcforge_preview_atomic_reference_rename",
+        "vrcforge_request_apply",
+    ]
+    assert "vrcforge_unity_mcp_write" not in naming_skill["allowedTools"]
+    assert "vrc_atomic_reference_rename" not in naming_skill["allowedTools"]
     assert "vrcforge_rename_gameobject" not in naming_skill["allowedTools"]
 
 
@@ -161,7 +197,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
     import dashboard_server
 
     source = EXAMPLE_ROOT / str(case["slug"])
-    service = SkillPackageService(tmp_path / "app" / "skill-packages", vrcforge_version="1.3.0")
+    service = SkillPackageService(tmp_path / "app" / "skill-packages", vrcforge_version="1.4.0")
     key_pair = service.generate_signing_keypair()
     package = service.export_release(
         source,
@@ -211,6 +247,21 @@ def test_example_skill_package_trust_import_execute_and_audit(
                 "high",
                 apply_example,
             )
+        skill_metadata = parse_skill_markdown(source / "SKILL.md")
+        for tool_name in skill_metadata["allowedTools"]:
+            if tool_name in {"vrcforge_request_apply", *target_names}:
+                continue
+            category = "plan/preview" if "preview" in tool_name else "read/debug"
+            gateway.register_tool(
+                tool_name,
+                f"Example handler for {tool_name}.",
+                category,
+                lambda arguments, _tool=tool_name: {
+                    "ok": True,
+                    "tool": _tool,
+                    "arguments": dict(arguments),
+                },
+            )
     else:
         entrypoint = str(case["entrypoint_tool"])
         gateway.register_tool(
@@ -245,13 +296,26 @@ def test_example_skill_package_trust_import_execute_and_audit(
         request_definition = workflow["steps"][0]["request"]
         target_tool = str(request_definition["targetTool"])
         assert target_tool == case["target_tool"]
+        request_arguments: dict[str, Any] = {
+            "projectRoot": str(project),
+            "example": str(case["slug"]),
+        }
+        if case["slug"] == "outfit-naming-helper":
+            request_arguments = {
+                "projectPath": str(project),
+                "toolName": "vrc_atomic_reference_rename",
+                "arguments": {
+                    "operationKind": "game_object",
+                    "scenePath": "Assets/Avatar.unity",
+                    "avatarPath": "/Avatar",
+                    "targetObjectPath": "/Avatar/OldOutfit",
+                    "newName": "Outfit_Casual",
+                },
+            }
         request = gateway.create_apply_request(
             {
                 "target_tool": target_tool,
-                "arguments": {
-                    "projectRoot": str(project),
-                    "example": str(case["slug"]),
-                },
+                "arguments": request_arguments,
                 "reason": "Example package gated execution test.",
             }
         )
@@ -262,6 +326,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
         assert applied["ok"] is True
         assert applied["checkpoint"]["ok"] is True
         assert [call["tool"] for call in calls] == [target_tool]
+        assert calls[0]["arguments"] == request_arguments
         assert (project / "Assets" / "example.txt").read_text(encoding="utf-8") == f"changed by {target_tool}"
         restored = gateway.restore_checkpoint(
             {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
