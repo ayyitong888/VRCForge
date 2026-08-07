@@ -279,6 +279,7 @@ from shader_adapter_registry import (
 )
 from skill_packages import SkillPackageError, SkillPackageService, _load_json_bytes
 from skill_package_controller import SkillPackageController
+from skill_package_governance import SkillPackageGovernanceService
 from skill_package_projection import SkillPackageProjectionService
 import sub_agent_delegate
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
@@ -1877,6 +1878,7 @@ UNITY_MCP_REPAIR_LOCK = Lock()
 PROJECT_SNAPSHOT_CACHE_LOCK = Lock()
 SKILL_PACKAGE_WRITE_LOCK = Lock()
 _SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
+_SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 PROJECT_SNAPSHOT_CACHE: dict[str, Any] | None = None
 PROJECT_SNAPSHOT_REFRESHING = False
@@ -5760,62 +5762,23 @@ def uninstall_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _disable_projected_skills_for_packages(service: SkillPackageService, skill_ids: list[str]) -> list[dict[str, Any]]:
-    registry = service.load_registry()
-    manifests: list[dict[str, Any]] = []
-    for skill_id in skill_ids:
-        entry = registry.get("skills", {}).get(skill_id)
-        if not isinstance(entry, dict):
-            continue
-        manifest = service._read_current_manifest(skill_id, str(entry.get("version") or ""))  # noqa: SLF001 - dashboard owns projection sync.
-        if not manifest:
-            continue
-        manifests.append(manifest)
-    return _set_projected_skills_enabled(manifests, False)
+    return _SKILL_PACKAGE_GOVERNANCE._impl_disable_projected_skills_for_packages(service, skill_ids)
 
 
 def set_skill_package_safe_mode_sync(params: dict[str, Any]) -> dict[str, Any]:
-    service = skill_package_service()
-    with SKILL_PACKAGE_WRITE_LOCK:
-        with service.state_transaction():
-            result = service.set_safe_mode(bool(params.get("enabled")), reason=params.get("reason"))
-            projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
-    return {"ok": True, "safeMode": result, "projectedSkills": projected}
+    return _SKILL_PACKAGE_GOVERNANCE._impl_set_skill_package_safe_mode_sync(params)
 
 
 def trust_skill_package_signer_sync(params: dict[str, Any]) -> dict[str, Any]:
-    service = skill_package_service()
-    with SKILL_PACKAGE_WRITE_LOCK:
-        result = service.trust_signer(
-            str(params.get("signerFingerprint") or params.get("signer_fingerprint") or ""),
-            reason=params.get("reason"),
-        )
-    return {"ok": True, "signer": result}
+    return _SKILL_PACKAGE_GOVERNANCE._impl_trust_skill_package_signer_sync(params)
 
 
 def revoke_skill_package_signer_sync(params: dict[str, Any]) -> dict[str, Any]:
-    service = skill_package_service()
-    with SKILL_PACKAGE_WRITE_LOCK:
-        with service.state_transaction():
-            result = service.revoke_signer(
-                str(params.get("signerFingerprint") or params.get("signer_fingerprint") or ""),
-                reason=params.get("reason"),
-            )
-            projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
-    return {"ok": True, "signer": result, "projectedSkills": projected}
+    return _SKILL_PACKAGE_GOVERNANCE._impl_revoke_skill_package_signer_sync(params)
 
 
 def block_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
-    service = skill_package_service()
-    with SKILL_PACKAGE_WRITE_LOCK:
-        with service.state_transaction():
-            result = service.block_package(
-                package_id=params.get("packageId") or params.get("package_id"),
-                package_sha256=params.get("packageSha256") or params.get("package_sha256"),
-                lock_sha256=params.get("lockSha256") or params.get("lock_sha256"),
-                reason=params.get("reason"),
-            )
-            projected = _disable_projected_skills_for_packages(service, list(result.get("disabledSkillIds") or []))
-    return {"ok": True, "blocklist": result, "projectedSkills": projected}
+    return _SKILL_PACKAGE_GOVERNANCE._impl_block_skill_package_sync(params)
 
 
 def _exportable_user_skill(skill_name: str) -> tuple[dict[str, Any], Path]:
