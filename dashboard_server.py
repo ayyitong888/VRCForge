@@ -284,6 +284,7 @@ from skill_package_projection import SkillPackageProjectionService
 from path_to_skill_controller import PathToSkillDashboardController
 from project_catalog_discovery import ProjectCatalogDiscovery
 from provider_model_catalog_service import ProviderModelCatalogService
+from provider_configuration_service import ProviderConfigurationService
 from provider_test_integration_service import ProviderTestIntegrationService
 import sub_agent_delegate
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
@@ -1887,6 +1888,7 @@ _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 _PATH_TO_SKILL_CONTROLLER = PathToSkillDashboardController(sys.modules[__name__])
 _PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(sys.modules[__name__])
 _PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(sys.modules[__name__])
+_PROVIDER_CONFIGURATION = ProviderConfigurationService(sys.modules[__name__])
 _PROVIDER_TEST_INTEGRATION = ProviderTestIntegrationService(sys.modules[__name__])
 PROJECT_SNAPSHOT_CACHE: dict[str, Any] | None = None
 PROJECT_SNAPSHOT_REFRESHING = False
@@ -6835,9 +6837,7 @@ def safe_approval_list(project_root: str = "") -> list[dict[str, Any]]:
 
 
 def serialize_app_api_config() -> dict[str, Any]:
-    config = serialize_api_config(include_secret=False)
-    config.pop("api_key", None)
-    return config
+    return _PROVIDER_CONFIGURATION._impl_serialize_app_api_config()
 
 
 def load_diagnostics_config() -> dict[str, Any]:
@@ -17176,123 +17176,23 @@ def persist_selected_project_path(value: Any) -> str:
 
 
 def load_initial_dashboard_api_config() -> DashboardApiConfig:
-    settings_path = RUNTIME_SETTINGS_PATH
-    settings = load_runtime_settings_safely(settings_path, loader=load_settings)
-    config_document = load_config_document()
-    raw_api_section = config_document.get("api")
-    api_section = raw_api_section if isinstance(raw_api_section, dict) else {}
-
-    def build(section: dict[str, Any]) -> DashboardApiConfig:
-        provider = normalize_provider_name(section.get("provider") or settings.llm_provider or DEFAULT_LLM_PROVIDER)
-        defaults = get_provider_defaults(provider)
-        api_key = str(section.get("api_key") or settings.llm_api_key).strip()
-        base_url = normalize_base_url(section.get("base_url"), provider, defaults["base_url"])
-        model = str(section.get("model") or settings.llm_model or defaults["model"]).strip() or defaults["model"]
-        raw_thinking_level = (
-            section.get("thinking_level")
-            if "thinking_level" in section
-            else settings.gemini_thinking_level
-        )
-        return DashboardApiConfig(
-            provider=provider,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            api_type=normalize_provider_api_type(provider, model, section.get("api_type"))[0],
-            thinking_level=normalize_reasoning_effort(raw_thinking_level),
-        )
-
-    try:
-        return build(api_section)
-    except (AttributeError, RuntimeError, TypeError, ValueError):
-        # Preserve the malformed document for Doctor; keep the backend alive
-        # with the already-safe runtime settings or provider defaults.
-        try:
-            return build({})
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            defaults = get_provider_defaults(DEFAULT_LLM_PROVIDER)
-            return DashboardApiConfig(
-                provider=DEFAULT_LLM_PROVIDER,
-                api_key="",
-                base_url=defaults["base_url"],
-                model=defaults["model"],
-            )
+    return _PROVIDER_CONFIGURATION._impl_load_initial_dashboard_api_config()
 
 
 def load_initial_dashboard_vision_config() -> DashboardVisionConfig:
-    vision_section = load_config_document().get("vision") or {}
-    if not isinstance(vision_section, dict):
-        return DashboardVisionConfig()
-    provider = str(vision_section.get("provider") or "").strip()
-    if not provider:
-        return DashboardVisionConfig()
-    try:
-        provider = normalize_provider_name(provider)
-        defaults = get_provider_defaults(provider)
-        return DashboardVisionConfig(
-            provider=provider,
-            api_key=str(vision_section.get("api_key") or "").strip(),
-            base_url=normalize_base_url(vision_section.get("base_url"), provider, defaults["base_url"]),
-            model=str(vision_section.get("model") or "").strip(),
-            enabled=bool(vision_section.get("enabled", True)),
-        )
-    except (AttributeError, RuntimeError, TypeError, ValueError):
-        return DashboardVisionConfig()
+    return _PROVIDER_CONFIGURATION._impl_load_initial_dashboard_vision_config()
 
 
 def normalize_vision_config_request(request: VisionConfigRequest) -> DashboardVisionConfig:
-    provider = str(request.provider or "").strip()
-    if not provider:
-        # 空 provider = 清除视觉档案。
-        return DashboardVisionConfig()
-    provider = normalize_provider_name(provider)
-    defaults = get_provider_defaults(provider)
-    return DashboardVisionConfig(
-        provider=provider,
-        api_key=validate_provider_api_key(request.api_key),
-        base_url=normalize_base_url(request.base_url, provider, defaults["base_url"]),
-        model=str(request.model or "").strip(),
-        enabled=bool(request.enabled),
-    )
+    return _PROVIDER_CONFIGURATION._impl_normalize_vision_config_request(request)
 
 
 def load_config_document() -> dict[str, Any]:
-    with CONFIG_DOCUMENT_LOCK:
-        if not CONFIG_PATH.exists():
-            return {}
-        try:
-            payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            return {}
-        return payload if isinstance(payload, dict) else {}
+    return _PROVIDER_CONFIGURATION._impl_load_config_document()
 
 
 def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfig:
-    provider = normalize_provider_name(request.provider)
-    defaults = get_provider_defaults(provider)
-    model = str(request.model or defaults["model"]).strip() or defaults["model"]
-    base_url = normalize_base_url(request.base_url, provider, defaults["base_url"])
-    requested_api_type, _resolved_api_type = normalize_provider_api_type(provider, model, request.api_type)
-
-    thinking_level = normalize_reasoning_effort(request.thinking_level)
-    raw_thinking_level = str(request.thinking_level or "").strip()
-    if raw_thinking_level and raw_thinking_level.lower() not in {"off", "default"}:
-        supported = reasoning_effort_variants(provider, model, request.api_type)
-        if not thinking_level or thinking_level not in supported:
-            supported_text = ", ".join(supported) if supported else "provider default only"
-            raise ValueError(
-                f"Reasoning variant '{raw_thinking_level}' is not supported by {provider}/{model}; "
-                f"supported: {supported_text}."
-            )
-
-    return DashboardApiConfig(
-        provider=provider,
-        api_key=validate_provider_api_key(request.api_key),
-        base_url=base_url,
-        model=model,
-        api_type=requested_api_type,
-        thinking_level=thinking_level,
-    )
+    return _PROVIDER_CONFIGURATION._impl_normalize_api_config_request(request)
 
 
 def provider_config_descriptor(config: DashboardApiConfig) -> dict[str, Any]:
@@ -17596,116 +17496,31 @@ def build_provider_model_info(item: Any, model_id: str) -> dict[str, Any]:
 
 
 def save_dashboard_config_document() -> None:
-    """Persist both the api and vision sections in one atomic write.
-
-    单文件双段：任何一段保存都重写整个文档，避免旧的"只写 api 段"行为把
-    vision 段冲掉。
-    """
-    with CONFIG_DOCUMENT_LOCK:
-        api = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
-        vision = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
-        api_descriptor = provider_config_descriptor(api)
-        payload: dict[str, Any] = {
-            "api": {
-                "provider": api.provider,
-                "api_key": api.api_key,
-                "base_url": api.base_url,
-                "model": api.model,
-                "api_type": api_descriptor["api_type"],
-                "thinking_level": api.thinking_level,
-            }
-        }
-        if vision.provider:
-            payload["vision"] = {
-                "provider": vision.provider,
-                "api_key": vision.api_key,
-                "base_url": vision.base_url,
-                "model": vision.model,
-                "enabled": vision.enabled,
-            }
-        if CONFIG_PATH.is_file():
-            original = CONFIG_PATH.read_bytes()
-            digest = hashlib.sha256(original).hexdigest()
-            backup = CONFIG_PATH.with_name(f"{CONFIG_PATH.name}.backup-{digest}.bak")
-            if backup.exists() or backup.is_symlink():
-                if _path_is_reparse_or_link(backup) or not backup.is_file() or backup.read_bytes() != original:
-                    raise OSError("Provider configuration backup collision or verification failure.")
-            else:
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                with backup.open("xb") as handle:
-                    handle.write(original)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                if _path_is_reparse_or_link(backup) or not backup.is_file() or backup.read_bytes() != original:
-                    raise OSError("Provider configuration backup verification failed.")
-        atomic_write_json(CONFIG_PATH, payload)
+    return _PROVIDER_CONFIGURATION._impl_save_dashboard_config_document()
 
 
 def save_dashboard_api_config(config: DashboardApiConfig) -> None:
-    global DASHBOARD_API_CONFIG
-    with CONFIG_DOCUMENT_LOCK:
-        DASHBOARD_API_CONFIG = config
-        save_dashboard_config_document()
+    return _PROVIDER_CONFIGURATION._impl_save_dashboard_api_config(config)
 
 
 def save_dashboard_vision_config(config: DashboardVisionConfig) -> None:
-    global DASHBOARD_VISION_CONFIG
-    with CONFIG_DOCUMENT_LOCK:
-        DASHBOARD_VISION_CONFIG = config
-        save_dashboard_config_document()
+    return _PROVIDER_CONFIGURATION._impl_save_dashboard_vision_config(config)
 
 
 def serialize_api_config(include_secret: bool) -> dict[str, Any]:
-    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
-    return {
-        "provider": config.provider,
-        "providerLabel": provider_display_name(config.provider),
-        "api_key": config.api_key if include_secret else mask_secret(config.api_key),
-        "apiKeyPresent": bool(config.api_key),
-        "base_url": config.base_url,
-        "model": config.model,
-        **provider_config_descriptor(config),
-        # Always present so build_llm_settings override handling sees the key.
-        "thinking_level": config.thinking_level,
-        "usesBaseUrl": config.provider not in {"anthropic", "gemini"},
-        "authHeader": provider_auth_label(config.provider),
-        "apiKeyRequired": provider_requires_api_key(config.provider),
-    }
+    return _PROVIDER_CONFIGURATION._impl_serialize_api_config(include_secret)
 
 
 def serialize_vision_config(include_secret: bool) -> dict[str, Any]:
-    config = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
-    return {
-        "provider": config.provider,
-        "providerLabel": provider_display_name(config.provider) if config.provider else "",
-        "api_key": (config.api_key if include_secret else mask_secret(config.api_key)),
-        "apiKeyPresent": bool(config.api_key),
-        "base_url": config.base_url,
-        "model": config.model,
-        "enabled": config.enabled,
-        "configured": config.configured,
-        "apiKeyRequired": provider_requires_api_key(config.provider) if config.provider else False,
-    }
+    return _PROVIDER_CONFIGURATION._impl_serialize_vision_config(include_secret)
 
 
 def serialize_app_vision_config() -> dict[str, Any]:
-    # Bootstrap/app 面永远不携带密钥（与 serialize_app_api_config 同规）。
-    config = serialize_vision_config(include_secret=False)
-    config.pop("api_key", None)
-    return config
+    return _PROVIDER_CONFIGURATION._impl_serialize_app_vision_config()
 
 
 def build_effective_model_summary() -> dict[str, Any]:
-    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
-    return {
-        "provider": config.provider,
-        "providerLabel": provider_display_name(config.provider),
-        "model": config.model,
-        "baseUrl": config.base_url,
-        **provider_config_descriptor(config),
-        "authHeader": provider_auth_label(config.provider),
-        "apiKeyRequired": provider_requires_api_key(config.provider),
-    }
+    return _PROVIDER_CONFIGURATION._impl_build_effective_model_summary()
 
 
 def provider_auth_label(provider: str) -> str:
@@ -17722,11 +17537,7 @@ def provider_auth_label(provider: str) -> str:
 
 
 def mask_secret(value: str) -> str:
-    if not value:
-        return ""
-    if len(value) <= 8:
-        return "*" * len(value)
-    return f"{value[:4]}{'*' * max(len(value) - 8, 4)}{value[-4:]}"
+    return _PROVIDER_CONFIGURATION._impl_mask_secret(value)
 
 
 def load_initial_dashboard_state() -> DashboardState:
