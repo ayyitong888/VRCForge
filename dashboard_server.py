@@ -283,6 +283,7 @@ from skill_package_governance import SkillPackageGovernanceService
 from skill_package_projection import SkillPackageProjectionService
 from path_to_skill_controller import PathToSkillDashboardController
 from project_catalog_discovery import ProjectCatalogDiscovery
+from project_snapshot_selection_service import ProjectSnapshotSelectionPorts, ProjectSnapshotSelectionService
 from provider_model_catalog_service import ProviderModelCatalogService
 from provider_configuration_service import ProviderConfigurationService
 from provider_test_integration_service import ProviderTestIntegrationService
@@ -400,9 +401,7 @@ RUNTIME_SETTINGS_PATH = resolve_runtime_path(
     "VRCFORGE_SETTINGS_PATH",
     CONFIG_DIR / "settings.json" if PORTABLE_MODE else ROOT_DIR / DEFAULT_SETTINGS_PATH,
 )
-PROJECT_SELECTION_PATH = CONFIG_DIR / "selected-project.json"
 PROJECT_SELECTION_SCHEMA = "vrcforge.selected_project.v1"
-PROJECT_SELECTION_LOCK = RLock()
 LOCAL_LOG_PATH = LOG_DIR / "dashboard.log"
 LOG_RETENTION = timedelta(days=5)
 AGENT_GATEWAY_CONFIG_PATH = CONFIG_DIR / "agent_gateway.json"
@@ -411,7 +410,6 @@ DIAGNOSTICS_CONFIG_PATH = CONFIG_DIR / "diagnostics.json"
 INTERACTION_LOG_PATH = LOG_DIR / "interactions.jsonl"
 SUPPORT_BUNDLE_DIR = DASHBOARD_ARTIFACTS_DIR / "support-bundles"
 PROJECT_MEMORY_INDEX_DIR = USER_DATA_DIR / "project-indexes"
-PROJECT_SNAPSHOT_CACHE_PATH = USER_DATA_DIR / "project-cache.json"
 SUB_AGENT_TASK_DIR = DASHBOARD_ARTIFACTS_DIR / "sub-agents"
 
 
@@ -1881,7 +1879,6 @@ LOCAL_LOG_LOCK = DIAGNOSTIC_LOGGER.lock
 ADVANCED_SETTINGS_TRANSITION_LOCK = Lock()
 TUNING_STORE_LOCK = Lock()
 UNITY_MCP_REPAIR_LOCK = Lock()
-PROJECT_SNAPSHOT_CACHE_LOCK = Lock()
 SKILL_PACKAGE_WRITE_LOCK = Lock()
 _SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
 _SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(sys.modules[__name__])
@@ -1892,17 +1889,21 @@ _PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(sys.modules[__name__])
 _PROVIDER_CONFIGURATION = ProviderConfigurationService(sys.modules[__name__])
 _PROVIDER_TEST_INTEGRATION = ProviderTestIntegrationService(sys.modules[__name__])
 _PROVIDER_VISION_INTEGRATION = ProviderVisionIntegrationService(sys.modules[__name__])
-PROJECT_SNAPSHOT_CACHE: dict[str, Any] | None = None
-PROJECT_SNAPSHOT_REFRESHING = False
-PROJECT_SNAPSHOT_UPDATED_AT = ""
-PROJECT_SNAPSHOT_STARTED_AT = ""
-PROJECT_SNAPSHOT_LAST_ERROR = ""
-PROJECT_SNAPSHOT_LAST_DURATION_MS = 0
-PROJECT_SNAPSHOT_LAST_CHANGES: dict[str, Any] = {}
-PROJECT_SNAPSHOT_CACHE_MONOTONIC = 0.0
-PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = 0.0
-PROJECT_SNAPSHOT_CACHE_LOADED = False
-PROJECT_SNAPSHOT_CACHE_TTL_SECONDS = 20.0
+_PROJECT_SNAPSHOT_SELECTION = ProjectSnapshotSelectionService(
+    ProjectSnapshotSelectionPorts(
+        build_snapshot=lambda: build_project_snapshot_payload(),
+        selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
+        unity_editor_path=lambda: DASHBOARD_STATE.unity_editor_path,
+        normalize_path=lambda value: normalize_path_string(value),
+        is_unity_project_path=lambda path: is_unity_project_path(path),
+        atomic_write_json=lambda path, payload: atomic_write_json(path, payload),
+        utc_now_iso=lambda: utc_now_iso(),
+        broadcast_projects=lambda payload: EVENT_BUS.broadcast_from_sync("projects", payload),
+    ),
+    cache_path=USER_DATA_DIR / "project-cache.json",
+    selection_path=CONFIG_DIR / "selected-project.json",
+    selection_schema=PROJECT_SELECTION_SCHEMA,
+)
 CURRENT_UNITY_STATUS: dict[str, Any] | None = None
 LAST_STATUS_FINGERPRINT = ""
 LAST_STATUS_CONNECTED: bool | None = None
@@ -16596,255 +16597,59 @@ def build_project_snapshot_payload() -> dict[str, Any]:
 
 
 def project_snapshot_list(value: Any) -> list[Any]:
-    return value if isinstance(value, list) else []
+    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_list(value)
 
 
 def project_snapshot_cache_document(payload: dict[str, Any], *, updated_at: str, duration_ms: int) -> dict[str, Any]:
-    return {
-        "schema": "vrcforge.project_snapshot_cache.v1",
-        "updatedAt": updated_at,
-        "durationMs": duration_ms,
-        "snapshot": {
-            "selectedProjectPath": str(payload.get("selectedProjectPath") or ""),
-            "unityEditorPath": str(payload.get("unityEditorPath") or ""),
-            "projects": [project for project in project_snapshot_list(payload.get("projects")) if isinstance(project, dict)],
-        },
-    }
+    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_cache_document(payload, updated_at=updated_at, duration_ms=duration_ms)
 
 
 def load_project_snapshot_cache() -> dict[str, Any] | None:
-    global PROJECT_SNAPSHOT_CACHE
-    global PROJECT_SNAPSHOT_UPDATED_AT
-    global PROJECT_SNAPSHOT_STARTED_AT
-    global PROJECT_SNAPSHOT_LAST_ERROR
-    global PROJECT_SNAPSHOT_LAST_DURATION_MS
-    global PROJECT_SNAPSHOT_LAST_CHANGES
-    global PROJECT_SNAPSHOT_CACHE_MONOTONIC
-    global PROJECT_SNAPSHOT_CACHE_LOADED
-
-    with PROJECT_SNAPSHOT_CACHE_LOCK:
-        if PROJECT_SNAPSHOT_CACHE_LOADED:
-            return copy.deepcopy(PROJECT_SNAPSHOT_CACHE) if PROJECT_SNAPSHOT_CACHE is not None else None
-        PROJECT_SNAPSHOT_CACHE_LOADED = True
-
-    try:
-        payload = json.loads(PROJECT_SNAPSHOT_CACHE_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(payload, dict) or payload.get("schema") != "vrcforge.project_snapshot_cache.v1":
-        return None
-    snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else None
-    if not isinstance(snapshot, dict):
-        return None
-    cached = {
-        "selectedProjectPath": str(snapshot.get("selectedProjectPath") or ""),
-        "unityEditorPath": str(snapshot.get("unityEditorPath") or ""),
-        "projects": [project for project in project_snapshot_list(snapshot.get("projects")) if isinstance(project, dict)],
-    }
-    with PROJECT_SNAPSHOT_CACHE_LOCK:
-        PROJECT_SNAPSHOT_CACHE = copy.deepcopy(cached)
-        PROJECT_SNAPSHOT_UPDATED_AT = str(payload.get("updatedAt") or "")
-        PROJECT_SNAPSHOT_STARTED_AT = ""
-        PROJECT_SNAPSHOT_LAST_ERROR = ""
-        PROJECT_SNAPSHOT_LAST_DURATION_MS = int(payload.get("durationMs") or 0)
-        PROJECT_SNAPSHOT_LAST_CHANGES = {"addedProjects": [], "removedProjects": [], "addedCount": 0, "removedCount": 0}
-        PROJECT_SNAPSHOT_CACHE_MONOTONIC = 0.0
-    return cached
+    return _PROJECT_SNAPSHOT_SELECTION.load_project_snapshot_cache()
 
 
 def project_snapshot_identity(project: dict[str, Any]) -> str:
-    path = normalize_path_string(str(project.get("path") or ""))
-    if path:
-        return path.casefold()
-    name = str(project.get("name") or project.get("projectName") or "").strip().casefold()
-    cli_instance = str(project.get("cliInstanceId") or project.get("sessionId") or "").strip().casefold()
-    return f"name:{name}:{cli_instance}"
+    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_identity(project)
 
 
 def project_snapshot_label(project: dict[str, Any]) -> dict[str, str]:
-    return {
-        "name": str(project.get("name") or project.get("projectName") or "Active Unity Instance"),
-        "path": normalize_path_string(str(project.get("path") or "")),
-        "source": ",".join(str(item) for item in project_snapshot_list(project.get("sources"))) or str(project.get("source") or ""),
-    }
+    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_label(project)
 
 
 def project_snapshot_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
-    previous_projects = [project for project in project_snapshot_list((previous or {}).get("projects")) if isinstance(project, dict)]
-    current_projects = [project for project in project_snapshot_list(current.get("projects")) if isinstance(project, dict)]
-    previous_by_key = {project_snapshot_identity(project): project for project in previous_projects if project_snapshot_identity(project)}
-    current_by_key = {project_snapshot_identity(project): project for project in current_projects if project_snapshot_identity(project)}
-    added_keys = sorted(set(current_by_key) - set(previous_by_key))
-    removed_keys = sorted(set(previous_by_key) - set(current_by_key))
-    return {
-        "addedProjects": [project_snapshot_label(current_by_key[key]) for key in added_keys[:20]],
-        "removedProjects": [project_snapshot_label(previous_by_key[key]) for key in removed_keys[:20]],
-        "addedCount": len(added_keys),
-        "removedCount": len(removed_keys),
-        "projectCount": len(current_projects),
-    }
+    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_changes(previous, current)
 
 
 def annotate_project_snapshot(payload: dict[str, Any], *, status: str, cached: bool, error: str = "") -> dict[str, Any]:
-    annotated = copy.deepcopy(payload)
-    annotated["scan"] = {
-        "status": status,
-        "cached": cached,
-        "refreshing": PROJECT_SNAPSHOT_REFRESHING,
-        "updatedAt": PROJECT_SNAPSHOT_UPDATED_AT,
-        "startedAt": PROJECT_SNAPSHOT_STARTED_AT,
-        "durationMs": PROJECT_SNAPSHOT_LAST_DURATION_MS,
-        "error": error or PROJECT_SNAPSHOT_LAST_ERROR,
-        **PROJECT_SNAPSHOT_LAST_CHANGES,
-    }
-    return annotated
+    return _PROJECT_SNAPSHOT_SELECTION.annotate_project_snapshot(payload, status=status, cached=cached, error=error)
 
 
 def empty_project_snapshot_payload(*, status: str = "pending") -> dict[str, Any]:
-    return {
-        "selectedProjectPath": DASHBOARD_STATE.selected_project_path,
-        "unityEditorPath": DASHBOARD_STATE.unity_editor_path,
-        "projects": [],
-        "scan": {
-            "status": status,
-            "cached": True,
-            "refreshing": PROJECT_SNAPSHOT_REFRESHING,
-            "updatedAt": PROJECT_SNAPSHOT_UPDATED_AT,
-            "startedAt": PROJECT_SNAPSHOT_STARTED_AT,
-            "durationMs": PROJECT_SNAPSHOT_LAST_DURATION_MS,
-            "error": PROJECT_SNAPSHOT_LAST_ERROR,
-            **PROJECT_SNAPSHOT_LAST_CHANGES,
-        },
-    }
+    return _PROJECT_SNAPSHOT_SELECTION.empty_project_snapshot_payload(status=status)
 
 
 def _store_project_snapshot_cache(payload: dict[str, Any], *, started_at: str, duration_ms: int) -> None:
-    global PROJECT_SNAPSHOT_CACHE
-    global PROJECT_SNAPSHOT_UPDATED_AT
-    global PROJECT_SNAPSHOT_STARTED_AT
-    global PROJECT_SNAPSHOT_LAST_ERROR
-    global PROJECT_SNAPSHOT_LAST_DURATION_MS
-    global PROJECT_SNAPSHOT_LAST_CHANGES
-    global PROJECT_SNAPSHOT_CACHE_MONOTONIC
-
-    completed_at = datetime.now(timezone.utc).isoformat()
-    with PROJECT_SNAPSHOT_CACHE_LOCK:
-        previous = copy.deepcopy(PROJECT_SNAPSHOT_CACHE) if PROJECT_SNAPSHOT_CACHE is not None else None
-        changes = project_snapshot_changes(previous, payload)
-        PROJECT_SNAPSHOT_CACHE = copy.deepcopy(payload)
-        PROJECT_SNAPSHOT_UPDATED_AT = completed_at
-        PROJECT_SNAPSHOT_STARTED_AT = started_at
-        PROJECT_SNAPSHOT_LAST_ERROR = ""
-        PROJECT_SNAPSHOT_LAST_DURATION_MS = duration_ms
-        PROJECT_SNAPSHOT_LAST_CHANGES = changes
-        PROJECT_SNAPSHOT_CACHE_MONOTONIC = time.monotonic()
-    try:
-        atomic_write_json(PROJECT_SNAPSHOT_CACHE_PATH, project_snapshot_cache_document(payload, updated_at=completed_at, duration_ms=duration_ms))
-    except OSError as exc:
-        with PROJECT_SNAPSHOT_CACHE_LOCK:
-            PROJECT_SNAPSHOT_LAST_ERROR = f"Project cache write failed: {exc}"
+    return _PROJECT_SNAPSHOT_SELECTION._store_project_snapshot_cache(payload, started_at=started_at, duration_ms=duration_ms)
 
 
 def refresh_project_snapshot_cache_sync() -> dict[str, Any]:
-    global PROJECT_SNAPSHOT_REFRESHING
-    global PROJECT_SNAPSHOT_STARTED_AT
-    global PROJECT_SNAPSHOT_LAST_ERROR
-    global PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC
-
-    started_monotonic = time.monotonic()
-    started_at = datetime.now(timezone.utc).isoformat()
-    with PROJECT_SNAPSHOT_CACHE_LOCK:
-        PROJECT_SNAPSHOT_REFRESHING = True
-        PROJECT_SNAPSHOT_STARTED_AT = started_at
-        PROJECT_SNAPSHOT_LAST_ERROR = ""
-        PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = started_monotonic
-    try:
-        payload = build_project_snapshot_payload()
-        duration_ms = round((time.monotonic() - started_monotonic) * 1000)
-        _store_project_snapshot_cache(payload, started_at=started_at, duration_ms=int(duration_ms))
-        result = annotate_project_snapshot(payload, status="ready", cached=False)
-        result["scan"]["refreshing"] = False
-        return result
-    except Exception as exc:  # noqa: BLE001 - project discovery must not take down app startup.
-        with PROJECT_SNAPSHOT_CACHE_LOCK:
-            PROJECT_SNAPSHOT_LAST_ERROR = str(exc)
-        raise
-    finally:
-        with PROJECT_SNAPSHOT_CACHE_LOCK:
-            PROJECT_SNAPSHOT_REFRESHING = False
+    return _PROJECT_SNAPSHOT_SELECTION.refresh_project_snapshot_cache_sync()
 
 
 def schedule_project_snapshot_refresh(*, force: bool = False) -> bool:
-    global PROJECT_SNAPSHOT_REFRESHING
-    global PROJECT_SNAPSHOT_STARTED_AT
-    global PROJECT_SNAPSHOT_LAST_ERROR
-    global PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC
-
-    now = time.monotonic()
-    started_at = datetime.now(timezone.utc).isoformat()
-    with PROJECT_SNAPSHOT_CACHE_LOCK:
-        if PROJECT_SNAPSHOT_REFRESHING:
-            return False
-        cache_is_fresh = PROJECT_SNAPSHOT_CACHE is not None and (now - PROJECT_SNAPSHOT_CACHE_MONOTONIC) < PROJECT_SNAPSHOT_CACHE_TTL_SECONDS
-        if cache_is_fresh and not force:
-            return False
-        recently_started = (now - PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC) < 1.0
-        if recently_started and not force:
-            return False
-        PROJECT_SNAPSHOT_REFRESHING = True
-        PROJECT_SNAPSHOT_STARTED_AT = started_at
-        PROJECT_SNAPSHOT_LAST_ERROR = ""
-        PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = now
-
-    def run_refresh() -> None:
-        global PROJECT_SNAPSHOT_REFRESHING
-        global PROJECT_SNAPSHOT_LAST_ERROR
-        result: dict[str, Any] | None = None
-        try:
-            payload = build_project_snapshot_payload()
-            duration_ms = round((time.monotonic() - now) * 1000)
-            _store_project_snapshot_cache(payload, started_at=started_at, duration_ms=int(duration_ms))
-            result = annotate_project_snapshot(payload, status="ready", cached=False)
-        except Exception as exc:  # noqa: BLE001
-            with PROJECT_SNAPSHOT_CACHE_LOCK:
-                PROJECT_SNAPSHOT_LAST_ERROR = str(exc)
-        finally:
-            with PROJECT_SNAPSHOT_CACHE_LOCK:
-                PROJECT_SNAPSHOT_REFRESHING = False
-        if result is not None:
-            result["scan"]["refreshing"] = False
-            EVENT_BUS.broadcast_from_sync("projects", result)
-
-    Thread(target=run_refresh, name="vrcforge-project-discovery", daemon=True).start()
-    return True
+    return _PROJECT_SNAPSHOT_SELECTION.schedule_project_snapshot_refresh(force=force)
 
 
 def bootstrap_project_snapshot_payload() -> dict[str, Any]:
-    return cached_project_snapshot_payload(refresh_async=True, force_refresh=True)
+    return _PROJECT_SNAPSHOT_SELECTION.bootstrap_project_snapshot_payload()
 
 
 def cached_project_snapshot_payload(*, refresh_async: bool = True, force_refresh: bool = False) -> dict[str, Any]:
-    load_project_snapshot_cache()
-    if refresh_async:
-        schedule_project_snapshot_refresh(force=force_refresh)
-    with PROJECT_SNAPSHOT_CACHE_LOCK:
-        cached = copy.deepcopy(PROJECT_SNAPSHOT_CACHE) if PROJECT_SNAPSHOT_CACHE is not None else None
-        refreshing = PROJECT_SNAPSHOT_REFRESHING
-        error = PROJECT_SNAPSHOT_LAST_ERROR
-    if cached is None:
-        return empty_project_snapshot_payload(status="refreshing" if refreshing else "pending")
-    status = "refreshing" if refreshing else ("error" if error else "ready")
-    return annotate_project_snapshot(cached, status=status, cached=True, error=error)
+    return _PROJECT_SNAPSHOT_SELECTION.cached_project_snapshot_payload(refresh_async=refresh_async, force_refresh=force_refresh)
 
 
 def project_snapshot_payload(*, use_cache: bool = False, refresh_async: bool = True) -> dict[str, Any]:
-    if use_cache:
-        return cached_project_snapshot_payload(refresh_async=refresh_async)
-    started_monotonic = time.monotonic()
-    started_at = datetime.now(timezone.utc).isoformat()
-    payload = build_project_snapshot_payload()
-    _store_project_snapshot_cache(payload, started_at=started_at, duration_ms=int(round((time.monotonic() - started_monotonic) * 1000)))
-    return annotate_project_snapshot(payload, status="ready", cached=False)
+    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=use_cache, refresh_async=refresh_async)
 
 
 def discover_projects(project_roots: list[Path], include_external: bool = False) -> list[dict[str, Any]]:
@@ -17061,58 +16866,15 @@ def normalize_path_string(value: str) -> str:
 
 
 def canonical_selected_project_path(value: Any) -> str:
-    """Return one existing Unity project root or an explicit empty selection."""
-
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    try:
-        candidate = Path(raw).expanduser().resolve(strict=True)
-    except (OSError, RuntimeError, ValueError) as exc:
-        raise ValueError("Selected Unity project does not exist.") from exc
-    if not candidate.is_dir() or not is_unity_project_path(candidate):
-        raise ValueError("Selected path is not a Unity project root.")
-    return normalize_path_string(str(candidate))
+    return _PROJECT_SNAPSHOT_SELECTION.canonical_selected_project_path(value)
 
 
 def load_persisted_selected_project_path() -> str:
-    """Load the backend-owned local selection without guessing another project.
-
-    The file is local configuration under the existing authenticated App
-    runtime. It contains no capability or secret, inherits the user-data ACL,
-    and is owned for the lifetime of this backend installation.
-    """
-
-    with PROJECT_SELECTION_LOCK:
-        try:
-            payload = json.loads(PROJECT_SELECTION_PATH.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
-            return ""
-    if not isinstance(payload, dict) or payload.get("schema") != PROJECT_SELECTION_SCHEMA:
-        return ""
-    try:
-        return canonical_selected_project_path(payload.get("selectedProjectPath"))
-    except ValueError:
-        return ""
+    return _PROJECT_SNAPSHOT_SELECTION.load_persisted_selected_project_path()
 
 
 def persist_selected_project_path(value: Any) -> str:
-    """Atomically persist an explicit App project selection or explicit clear."""
-
-    selected = canonical_selected_project_path(value)
-    payload = {
-        "schema": PROJECT_SELECTION_SCHEMA,
-        "selectedProjectPath": selected,
-        "updatedAt": utc_now_iso(),
-    }
-    with PROJECT_SELECTION_LOCK:
-        atomic_write_json(PROJECT_SELECTION_PATH, payload)
-        verified = json.loads(PROJECT_SELECTION_PATH.read_text(encoding="utf-8"))
-    if not isinstance(verified, dict) or verified.get("schema") != PROJECT_SELECTION_SCHEMA:
-        raise OSError("Selected Unity project persistence verification failed.")
-    if str(verified.get("selectedProjectPath") or "") != selected:
-        raise OSError("Selected Unity project persistence readback drifted.")
-    return selected
+    return _PROJECT_SNAPSHOT_SELECTION.persist_selected_project_path(value)
 
 
 def load_initial_dashboard_api_config() -> DashboardApiConfig:

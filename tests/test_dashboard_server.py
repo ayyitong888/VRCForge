@@ -34,6 +34,17 @@ from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
 
+def isolated_project_snapshot_service(*, cache_path: Path | None = None):
+    original = dashboard_server._PROJECT_SNAPSHOT_SELECTION
+    return dashboard_server.ProjectSnapshotSelectionService(
+        original._ports,
+        cache_path=cache_path or original.cache_path,
+        selection_path=original.selection_path,
+        selection_schema=original.selection_schema,
+        cache_ttl_seconds=original.cache_ttl_seconds,
+    )
+
+
 def make_shader_inventory() -> dict:
     return {
         "type": "material_inventory_snapshot",
@@ -1074,31 +1085,13 @@ class DashboardServerTests(unittest.TestCase):
         asyncio.run(exercise())
 
     def test_app_bootstrap_uses_cached_project_snapshot_without_waiting(self) -> None:
-        originals = {
-            "cache": dashboard_server.PROJECT_SNAPSHOT_CACHE,
-            "refreshing": dashboard_server.PROJECT_SNAPSHOT_REFRESHING,
-            "updated": dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT,
-            "started": dashboard_server.PROJECT_SNAPSHOT_STARTED_AT,
-            "error": dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR,
-            "duration": dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS,
-            "changes": dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES,
-            "cache_monotonic": dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC,
-            "started_monotonic": dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC,
-            "loaded": dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED,
-        }
-        dashboard_server.PROJECT_SNAPSHOT_CACHE = None
-        dashboard_server.PROJECT_SNAPSHOT_REFRESHING = False
-        dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = ""
-        dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = ""
-        dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = ""
-        dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = 0
-        dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = {}
-        dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = 0.0
-        dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = 0.0
-        dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = True
+        original_service = dashboard_server._PROJECT_SNAPSHOT_SELECTION
+        service = isolated_project_snapshot_service()
+        service._cache_loaded = True
+        dashboard_server._PROJECT_SNAPSHOT_SELECTION = service
         try:
             with (
-                patch("dashboard_server.schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
+                patch.object(type(service), "schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
                 patch("dashboard_server.build_project_snapshot_payload", side_effect=AssertionError("bootstrap waited for project discovery")),
                 TestClient(dashboard_server.app) as client,
             ):
@@ -1116,47 +1109,21 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(schedule_refresh.call_count, 1)
             schedule_refresh.assert_called_once_with(force=True)
         finally:
-            dashboard_server.PROJECT_SNAPSHOT_CACHE = originals["cache"]
-            dashboard_server.PROJECT_SNAPSHOT_REFRESHING = originals["refreshing"]
-            dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = originals["updated"]
-            dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = originals["started"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = originals["error"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = originals["duration"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = originals["changes"]
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = originals["cache_monotonic"]
-            dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = originals["started_monotonic"]
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = originals["loaded"]
+            dashboard_server._PROJECT_SNAPSHOT_SELECTION = original_service
 
     def test_projects_get_reads_cache_without_scheduling_refresh(self) -> None:
-        originals = {
-            "cache": dashboard_server.PROJECT_SNAPSHOT_CACHE,
-            "refreshing": dashboard_server.PROJECT_SNAPSHOT_REFRESHING,
-            "updated": dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT,
-            "started": dashboard_server.PROJECT_SNAPSHOT_STARTED_AT,
-            "error": dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR,
-            "duration": dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS,
-            "changes": dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES,
-            "cache_monotonic": dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC,
-            "started_monotonic": dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC,
-            "loaded": dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED,
-        }
-        dashboard_server.PROJECT_SNAPSHOT_CACHE = {
+        original_service = dashboard_server._PROJECT_SNAPSHOT_SELECTION
+        service = isolated_project_snapshot_service()
+        service._cache = {
             "selectedProjectPath": "",
             "unityEditorPath": "",
             "projects": [{"name": "Cached Project", "path": "", "sources": ["test"]}],
         }
-        dashboard_server.PROJECT_SNAPSHOT_REFRESHING = False
-        dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = ""
-        dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = ""
-        dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = ""
-        dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = 0
-        dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = {}
-        dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = 0.0
-        dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = 0.0
-        dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = True
+        service._cache_loaded = True
+        dashboard_server._PROJECT_SNAPSHOT_SELECTION = service
         try:
             with (
-                patch("dashboard_server.schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
+                patch.object(type(service), "schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
                 patch("dashboard_server.build_project_snapshot_payload", side_effect=AssertionError("GET /api/projects scanned project roots")),
                 TestClient(dashboard_server.app) as client,
             ):
@@ -1166,47 +1133,21 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.json()["projects"][0]["name"], "Cached Project")
             self.assertFalse(schedule_refresh.called)
         finally:
-            dashboard_server.PROJECT_SNAPSHOT_CACHE = originals["cache"]
-            dashboard_server.PROJECT_SNAPSHOT_REFRESHING = originals["refreshing"]
-            dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = originals["updated"]
-            dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = originals["started"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = originals["error"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = originals["duration"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = originals["changes"]
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = originals["cache_monotonic"]
-            dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = originals["started_monotonic"]
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = originals["loaded"]
+            dashboard_server._PROJECT_SNAPSHOT_SELECTION = original_service
 
     def test_full_health_reads_project_cache_without_scheduling_refresh(self) -> None:
-        originals = {
-            "cache": dashboard_server.PROJECT_SNAPSHOT_CACHE,
-            "refreshing": dashboard_server.PROJECT_SNAPSHOT_REFRESHING,
-            "updated": dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT,
-            "started": dashboard_server.PROJECT_SNAPSHOT_STARTED_AT,
-            "error": dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR,
-            "duration": dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS,
-            "changes": dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES,
-            "cache_monotonic": dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC,
-            "started_monotonic": dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC,
-            "loaded": dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED,
-        }
-        dashboard_server.PROJECT_SNAPSHOT_CACHE = {
+        original_service = dashboard_server._PROJECT_SNAPSHOT_SELECTION
+        service = isolated_project_snapshot_service()
+        service._cache = {
             "selectedProjectPath": "",
             "unityEditorPath": "",
             "projects": [{"name": "Cached Project", "path": "", "sources": ["test"]}],
         }
-        dashboard_server.PROJECT_SNAPSHOT_REFRESHING = False
-        dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = ""
-        dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = ""
-        dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = ""
-        dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = 0
-        dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = {}
-        dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = 0.0
-        dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = 0.0
-        dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = True
+        service._cache_loaded = True
+        dashboard_server._PROJECT_SNAPSHOT_SELECTION = service
         try:
             with (
-                patch("dashboard_server.schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
+                patch.object(type(service), "schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
                 patch("dashboard_server.build_project_snapshot_payload", side_effect=AssertionError("/api/health scanned project roots")),
                 TestClient(dashboard_server.app) as client,
             ):
@@ -1216,16 +1157,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.json()["projects"]["projects"][0]["name"], "Cached Project")
             self.assertFalse(schedule_refresh.called)
         finally:
-            dashboard_server.PROJECT_SNAPSHOT_CACHE = originals["cache"]
-            dashboard_server.PROJECT_SNAPSHOT_REFRESHING = originals["refreshing"]
-            dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = originals["updated"]
-            dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = originals["started"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = originals["error"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = originals["duration"]
-            dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = originals["changes"]
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = originals["cache_monotonic"]
-            dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = originals["started_monotonic"]
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = originals["loaded"]
+            dashboard_server._PROJECT_SNAPSHOT_SELECTION = original_service
 
     def test_root_serves_dashboard_page(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -13433,17 +13365,7 @@ namespace VRCForge.Editor
         originals = {
             "roots": list(dashboard_server.DASHBOARD_STATE.project_roots),
             "selected": dashboard_server.DASHBOARD_STATE.selected_project_path,
-            "cache": dashboard_server.PROJECT_SNAPSHOT_CACHE,
-            "refreshing": dashboard_server.PROJECT_SNAPSHOT_REFRESHING,
-            "updated": dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT,
-            "started": dashboard_server.PROJECT_SNAPSHOT_STARTED_AT,
-            "error": dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR,
-            "duration": dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS,
-            "changes": dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES,
-            "cache_monotonic": dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC,
-            "started_monotonic": dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC,
-            "loaded": dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED,
-            "cache_path": dashboard_server.PROJECT_SNAPSHOT_CACHE_PATH,
+            "service": dashboard_server._PROJECT_SNAPSHOT_SELECTION,
             "unity_status": dashboard_server.CURRENT_UNITY_STATUS,
         }
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -13459,7 +13381,8 @@ namespace VRCForge.Editor
             )
             dashboard_server.DASHBOARD_STATE.project_roots = [root]
             dashboard_server.DASHBOARD_STATE.selected_project_path = dashboard_server.normalize_path_string(str(project_dir))
-            dashboard_server.PROJECT_SNAPSHOT_CACHE = {
+            service = isolated_project_snapshot_service(cache_path=root / "project-cache.json")
+            service._cache = {
                 "selectedProjectPath": "",
                 "unityEditorPath": "",
                 "projects": [
@@ -13470,16 +13393,8 @@ namespace VRCForge.Editor
                     }
                 ],
             }
-            dashboard_server.PROJECT_SNAPSHOT_REFRESHING = False
-            dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = ""
-            dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = ""
-            dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = ""
-            dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = 0
-            dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = {}
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = 0.0
-            dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = 0.0
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = True
-            dashboard_server.PROJECT_SNAPSHOT_CACHE_PATH = root / "project-cache.json"
+            service._cache_loaded = True
+            dashboard_server._PROJECT_SNAPSHOT_SELECTION = service
             dashboard_server.CURRENT_UNITY_STATUS = {"instances": []}
             try:
                 with (
@@ -13502,21 +13417,11 @@ namespace VRCForge.Editor
                 self.assertEqual(cached["scan"]["removedCount"], 1)
                 self.assertEqual(cached["scan"]["addedProjects"][0]["name"], "Cached Project")
                 self.assertEqual(cached["scan"]["removedProjects"][0]["name"], "Removed Project")
-                self.assertTrue(dashboard_server.PROJECT_SNAPSHOT_CACHE_PATH.is_file())
+                self.assertTrue(service.cache_path.is_file())
             finally:
                 dashboard_server.DASHBOARD_STATE.project_roots = originals["roots"]
                 dashboard_server.DASHBOARD_STATE.selected_project_path = originals["selected"]
-                dashboard_server.PROJECT_SNAPSHOT_CACHE = originals["cache"]
-                dashboard_server.PROJECT_SNAPSHOT_REFRESHING = originals["refreshing"]
-                dashboard_server.PROJECT_SNAPSHOT_UPDATED_AT = originals["updated"]
-                dashboard_server.PROJECT_SNAPSHOT_STARTED_AT = originals["started"]
-                dashboard_server.PROJECT_SNAPSHOT_LAST_ERROR = originals["error"]
-                dashboard_server.PROJECT_SNAPSHOT_LAST_DURATION_MS = originals["duration"]
-                dashboard_server.PROJECT_SNAPSHOT_LAST_CHANGES = originals["changes"]
-                dashboard_server.PROJECT_SNAPSHOT_CACHE_MONOTONIC = originals["cache_monotonic"]
-                dashboard_server.PROJECT_SNAPSHOT_REFRESH_STARTED_MONOTONIC = originals["started_monotonic"]
-                dashboard_server.PROJECT_SNAPSHOT_CACHE_LOADED = originals["loaded"]
-                dashboard_server.PROJECT_SNAPSHOT_CACHE_PATH = originals["cache_path"]
+                dashboard_server._PROJECT_SNAPSHOT_SELECTION = originals["service"]
                 dashboard_server.CURRENT_UNITY_STATUS = originals["unity_status"]
 
     def test_discover_projects_merges_active_mcp_instance_by_name(self) -> None:
