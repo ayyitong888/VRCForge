@@ -1,0 +1,75 @@
+{
+  "schema": "vrcforge.dashboard_composition_contract.v1",
+  "baseline": {
+    "sourceCommit": "0ef026e",
+    "runtimeCommit": "49aa5d1"
+  },
+  "routes": {
+    "count": 246,
+    "kinds": {
+      "APIRoute": 237,
+      "APIWebSocketRoute": 1,
+      "Mount": 4,
+      "Route": 4
+    },
+    "methods": {
+      "DELETE": 6,
+      "GET": 69,
+      "HEAD": 4,
+      "POST": 163,
+      "PUT": 3
+    },
+    "tableSha256": "a17c01820be643272181d35f027efec63be736d4f237a798b4319ef752212e15"
+  },
+  "openApi": {
+    "pathCount": 212,
+    "schemaCount": 126,
+    "sha256WithoutRuntimeVersion": "72419cd29300b6874f533f8c9a3d17989e9e63184e066fcdebc5ccf597f3ac0e"
+  },
+  "events": {
+    "envelopeKeys": [
+      "payload",
+      "timestamp",
+      "type"
+    ],
+    "observedTypes": [
+      "advancedSettings",
+      "agentApprovals",
+      "agentDesktopActions",
+      "agentGoalBackground",
+      "agentGoals",
+      "agentMemory",
+      "agentMemoryReview",
+      "agentNotesUpdated",
+      "agentPermission",
+      "agentProgress",
+      "agentQuestions",
+      "agentRuntimeCancel",
+      "agentRuntimeDelta",
+      "agentRuntimeQueue",
+      "agentRuntimeRuns",
+      "agentRuntimeTurn",
+      "config",
+      "log",
+      "projects",
+      "state",
+      "subAgentTasks",
+      "unity_status"
+    ]
+  },
+  "disk": {
+    "atomicWrite": [
+      "exclusive-temp-file",
+      "flush-and-file-fsync",
+      "atomic-replace",
+      "best-effort-directory-fsync",
+      "temp-cleanup"
+    ],
+    "chatRollback": [
+      "restore-exact-original-bytes",
+      "remove-new-files",
+      "remove-new-empty-project-store-directory",
+      "report-aggregate-success"
+    ]
+  }
+}
