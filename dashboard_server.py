@@ -342,6 +342,7 @@ from unity_mcp_core_client import (
     UnityMcpCoreError,
     load_unity_mcp_core_connection,
 )
+from unity_status_service import UnityStatusPorts, UnityStatusService
 
 
 def resolve_runtime_path(env_name: str, default: Path) -> Path:
@@ -1903,6 +1904,17 @@ _PROJECT_SNAPSHOT_SELECTION = ProjectSnapshotSelectionService(
     cache_path=USER_DATA_DIR / "project-cache.json",
     selection_path=CONFIG_DIR / "selected-project.json",
     selection_schema=PROJECT_SELECTION_SCHEMA,
+)
+# STOPGAP: Migration-only owner for the three root compatibility facades below.
+# Remove it in the final 1.5 typed-composition seam-retirement gate.
+_UNITY_STATUS = UnityStatusService(
+    UnityStatusPorts(
+        load_settings=lambda: load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path))),
+        selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
+        normalize_path=lambda value: normalize_path_string(value),
+        core_installed=lambda project_root: vrcforge_mcp_core_installed(project_root),
+        required_tools=tuple(REQUIRED_VRCFORGE_UNITY_TOOLS),
+    )
 )
 CURRENT_UNITY_STATUS: dict[str, Any] | None = None
 LAST_STATUS_FINGERPRINT = ""
@@ -15515,150 +15527,18 @@ def build_unity_status_snapshot(
     settings: Settings | None = None,
     project_root: Path | None = None,
 ) -> dict[str, Any]:
-    settings = settings or load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
-    settings.unity_mcp_timeout_seconds = min(settings.unity_mcp_timeout_seconds, 10)
-    selected_project = normalize_path_string(
-        str(project_root) if project_root is not None else DASHBOARD_STATE.selected_project_path
-    )
-    selected_project_path = Path(selected_project) if selected_project else None
-    if selected_project_path is None:
-        return build_vrcforge_mcp_core_unavailable_status(
-            None,
-            "No Unity project is selected.",
-        )
-    if not vrcforge_mcp_core_installed(selected_project_path):
-        return build_vrcforge_mcp_core_unavailable_status(
-            selected_project_path,
-            "The selected project does not contain the VRCForge MCP2 unitypackage.",
-        )
-    return build_vrcforge_mcp_core_status(selected_project_path, settings)
+    return _UNITY_STATUS.build_unity_status_snapshot(settings, project_root)
 
 
 def build_vrcforge_mcp_core_unavailable_status(
     project_root: Path | None,
     error: str,
 ) -> dict[str, Any]:
-    project_path = normalize_path_string(str(project_root)) if project_root is not None else ""
-    missing = list(REQUIRED_VRCFORGE_UNITY_TOOLS)
-    return {
-        "connected": False,
-        "mcpServerReachable": False,
-        "unityInstanceRegistered": False,
-        "selectedInstanceMatched": False,
-        "host": "127.0.0.1",
-        "port": 0,
-        "instance": "project-scoped",
-        "projectPath": project_path,
-        "activeInstance": None,
-        "instances": [],
-        "activeInstanceCount": 0,
-        "tools": {
-            "ok": False,
-            "reachable": False,
-            "connected": False,
-            "totalTools": 0,
-            "vrcForgeToolsCount": 0,
-            "toolNames": [],
-            "vrcForgeToolNames": [],
-            "missingRequiredVrcForgeTools": missing,
-            "error": error,
-        },
-        "mcpHealth": {"ok": False, "protocolVersion": "2026-07-28", "transport": "vrcforge-mcp-core"},
-        "unityMcpPackageVersion": "",
-        "vrcForgeToolsRegistered": False,
-        "missingRequiredVrcForgeTools": missing,
-        "output": "",
-        "parsed": None,
-        "error": error,
-    }
+    return _UNITY_STATUS.build_vrcforge_mcp_core_unavailable_status(project_root, error)
 
 
 def build_vrcforge_mcp_core_status(project_root: Path, settings: Settings) -> dict[str, Any]:
-    try:
-        tool_items = UnityMcpCoreClient(
-            project_root,
-            timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 10), 30)),
-        ).list_tools(exposure_layer="execution")
-        names = sorted(
-            str(item.get("name") or "")
-            for item in tool_items
-            if isinstance(item, dict) and str(item.get("name") or "")
-        )
-        missing = [name for name in REQUIRED_VRCFORGE_UNITY_TOOLS if name not in set(names)]
-        tools = {
-            "ok": True,
-            "reachable": True,
-            "connected": True,
-            "host": "127.0.0.1",
-            "port": 0,
-            "instance": "project-scoped",
-            "totalTools": len(names),
-            "defaultToolsCount": 0,
-            "vrcForgeToolsCount": len(names),
-            "toolNames": names,
-            "vrcForgeToolNames": names,
-            "missingRequiredVrcForgeTools": missing,
-            "onlyDefaultTools": False,
-            "output": "",
-            "parsed": None,
-            "error": "",
-        }
-        active_instance = {
-            "projectPath": str(project_root.resolve()),
-            "transport": "vrcforge-mcp-core",
-            "cliSelectorStable": True,
-            "cliInstanceId": "project-scoped",
-        }
-        return {
-            "connected": True,
-            "mcpServerReachable": True,
-            "unityInstanceRegistered": True,
-            "selectedInstanceMatched": True,
-            "host": "127.0.0.1",
-            "port": 0,
-            "instance": "project-scoped",
-            "projectPath": normalize_path_string(str(project_root)),
-            "activeInstance": active_instance,
-            "instances": [active_instance],
-            "activeInstanceCount": 1,
-            "tools": tools,
-            "mcpHealth": {"ok": True, "protocolVersion": "2026-07-28", "transport": "vrcforge-mcp-core"},
-            "unityMcpPackageVersion": "vrcforge-core-2026-07-28",
-            "vrcForgeToolsRegistered": bool(names),
-            "missingRequiredVrcForgeTools": missing,
-            "output": "",
-            "parsed": None,
-            "error": "",
-        }
-    except UnityMcpCoreError as exc:
-        return {
-            "connected": False,
-            "mcpServerReachable": False,
-            "unityInstanceRegistered": False,
-            "selectedInstanceMatched": False,
-            "host": "127.0.0.1",
-            "port": 0,
-            "instance": "project-scoped",
-            "projectPath": normalize_path_string(str(project_root)),
-            "activeInstance": None,
-            "instances": [],
-            "activeInstanceCount": 0,
-            "tools": {
-                "ok": False,
-                "reachable": False,
-                "totalTools": 0,
-                "vrcForgeToolsCount": 0,
-                "missingRequiredVrcForgeTools": list(REQUIRED_VRCFORGE_UNITY_TOOLS),
-                "error": str(exc),
-            },
-            "mcpHealth": {"ok": False, "transport": "vrcforge-mcp-core"},
-            "unityMcpPackageVersion": "vrcforge-core-2026-07-28",
-            "vrcForgeToolsRegistered": False,
-            "missingRequiredVrcForgeTools": list(REQUIRED_VRCFORGE_UNITY_TOOLS),
-            "output": "",
-            "parsed": None,
-            "error": str(exc),
-        }
+    return _UNITY_STATUS.build_vrcforge_mcp_core_status(project_root, settings)
 
 
 def _repair_phase(phase_id: str, status: str, message: str, detail: Any = None) -> dict[str, Any]:

@@ -17,6 +17,7 @@ from unittest.mock import ANY, AsyncMock, Mock, patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
+import unity_status_service
 from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
@@ -3884,7 +3885,7 @@ class DashboardServerTests(unittest.TestCase):
             core_client.list_tools.return_value = required
             try:
                 with (
-                    patch("dashboard_server.UnityMcpCoreClient", return_value=core_client),
+                    patch("unity_status_service.UnityMcpCoreClient", return_value=core_client),
                 ):
                     status = dashboard_server.build_unity_status_snapshot(
                         SimpleNamespace(unity_mcp_timeout_seconds=10),
@@ -10605,7 +10606,7 @@ class DashboardServerTests(unittest.TestCase):
                 {"name": name} for name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
             ]
             try:
-                with patch("dashboard_server.UnityMcpCoreClient", return_value=core_client) as mock_core:
+                with patch("unity_status_service.UnityMcpCoreClient", return_value=core_client) as mock_core:
                     status = dashboard_server.build_unity_status_snapshot(
                         SimpleNamespace(unity_mcp_timeout_seconds=5), project
                     )
