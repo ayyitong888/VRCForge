@@ -8,8 +8,8 @@ from skill_package_projection import SkillPackageProjectionService
 
 
 ROOT = Path(__file__).parents[1]
-DASHBOARD_SERVER_MAX_BYTES = 1_183_300
-DASHBOARD_SERVER_MAX_LF_LINES = 26_353
+DASHBOARD_SERVER_MAX_BYTES = 1_180_817
+DASHBOARD_SERVER_MAX_LF_LINES = 26_312
 METHODS = {
     "_skill_projection_path_is_link_like", "_resolve_skill_projection_source", "_copy_projected_skill_file",
     "_write_projected_skill_state", "_capture_projected_skill_state", "_restore_projected_skill_state",

@@ -278,6 +278,7 @@ from shader_adapter_registry import (
     shader_family_label,
 )
 from skill_packages import SkillPackageError, SkillPackageService, _load_json_bytes
+from skill_package_controller import SkillPackageController
 from skill_package_projection import SkillPackageProjectionService
 import sub_agent_delegate
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
@@ -1875,6 +1876,7 @@ TUNING_STORE_LOCK = Lock()
 UNITY_MCP_REPAIR_LOCK = Lock()
 PROJECT_SNAPSHOT_CACHE_LOCK = Lock()
 SKILL_PACKAGE_WRITE_LOCK = Lock()
+_SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 PROJECT_SNAPSHOT_CACHE: dict[str, Any] | None = None
 PROJECT_SNAPSHOT_REFRESHING = False
@@ -5746,58 +5748,15 @@ def _delete_projected_skill_transaction(manifest: dict[str, Any]) -> Any:
 
 
 def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
-    service = skill_package_service()
-    if bool(params.get("dryRun") or params.get("dry_run") or False):
-        preview = service.preflight_import(
-            str(params.get("packagePath") or params.get("package_path") or ""),
-            allow_downgrade=bool(params.get("allowDowngrade") or params.get("allow_downgrade") or False),
-            dev_mode=bool(params.get("devMode") or params.get("dev_mode") or False),
-        )
-        return {"ok": True, "dryRun": True, "preview": preview.as_dict()}
-    projection = None
-    with SKILL_PACKAGE_WRITE_LOCK:
-        with service.install_transaction(
-            str(params.get("packagePath") or params.get("package_path") or ""),
-            source=str(params.get("source") or "local-import"),
-            allow_downgrade=bool(params.get("allowDowngrade") or params.get("allow_downgrade") or False),
-            dev_mode=bool(params.get("devMode") or params.get("dev_mode") or False),
-        ) as result:
-            if params.get("projectToUserSkills", params.get("project_to_user_skills", True)) is not False:
-                projection = _project_installed_skill(
-                    result.installed_path,
-                    result.preview.manifest,
-                    enabled=bool(result.registry_entry.get("enabled", True)),
-                )
-    return {"ok": True, "imported": result.as_dict(), "projectedSkill": projection}
+    return _SKILL_PACKAGE_CONTROLLER._impl_import_skill_package_sync(params)
 
 
 def set_skill_package_enabled_sync(params: dict[str, Any]) -> dict[str, Any]:
-    skill_id = str(params.get("skillPackageId") or params.get("skill_package_id") or params.get("id") or "").strip()
-    if not skill_id:
-        raise AgentGatewayError("skillPackageId is required.", status_code=400)
-    enabled = bool(params.get("enabled"))
-    service = skill_package_service()
-    with SKILL_PACKAGE_WRITE_LOCK:
-        with service.state_transaction([skill_id]):
-            result = service.set_enabled(skill_id, enabled)
-            projected = None
-            if params.get("syncProjectedSkill", params.get("sync_projected_skill", True)) is not False:
-                projected = _set_projected_skills_enabled([result.manifest], enabled)[0]
-    return {"ok": True, "state": result.as_dict(), "projectedSkill": projected}
+    return _SKILL_PACKAGE_CONTROLLER._impl_set_skill_package_enabled_sync(params)
 
 
 def uninstall_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
-    skill_id = str(params.get("skillPackageId") or params.get("skill_package_id") or params.get("id") or "").strip()
-    if not skill_id:
-        raise AgentGatewayError("skillPackageId is required.", status_code=400)
-    service = skill_package_service()
-    with SKILL_PACKAGE_WRITE_LOCK:
-        projected = None
-        with service.uninstall_transaction(skill_id) as result:
-            if params.get("removeProjectedSkill", params.get("remove_projected_skill", True)) is not False:
-                with _delete_projected_skill_transaction(result.manifest) as projected_result:
-                    projected = projected_result
-    return {"ok": True, "uninstalled": result.as_dict(), "projectedSkill": projected}
+    return _SKILL_PACKAGE_CONTROLLER._impl_uninstall_skill_package_sync(params)
 
 
 def _disable_projected_skills_for_packages(service: SkillPackageService, skill_ids: list[str]) -> list[dict[str, Any]]:
