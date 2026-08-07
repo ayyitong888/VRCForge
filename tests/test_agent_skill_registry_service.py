@@ -9,8 +9,8 @@ from agent_skill_registry import AgentSkillRegistryService
 
 
 REPO_ROOT = Path(__file__).parents[1]
-AGENT_GATEWAY_MAX_BYTES = 489_292
-AGENT_GATEWAY_MAX_LF_LINES = 10_657
+AGENT_GATEWAY_MAX_BYTES = 480_756
+AGENT_GATEWAY_MAX_LF_LINES = 10_502
 MOVED_METHODS = {
     "_builtin_skill_definitions",
     "_skill_from_builtin_group",
@@ -24,6 +24,9 @@ MOVED_METHODS = {
     "_save_user_skill",
     "_normalize_user_skill",
     "_ensure_user_skill_can_use_id",
+    "_decorate_skill_validation",
+    "_validate_skill",
+    "_load_runtime_skill_support_files",
 }
 
 
@@ -46,6 +49,7 @@ def test_skill_registry_service_keeps_host_owned_state_and_late_binding() -> Non
         assert AgentSkillRegistryService.__slots__ == ("_host",)
         assert service._tools is gateway._tools
         assert service._write_handlers is gateway._write_handlers
+        assert service.user_skill_lock is gateway.user_skill_lock
 
 
 def test_skill_registry_internal_calls_preserve_gateway_facade_monkeypatches() -> None:
@@ -59,6 +63,19 @@ def test_skill_registry_internal_calls_preserve_gateway_facade_monkeypatches() -
 
         gateway._load_user_skills = lambda: [sentinel]  # type: ignore[method-assign]
         assert gateway._find_user_skill("patched") is sentinel
+
+        validation = {"status": "warning", "reasons": ["patched"]}
+        gateway._validate_skill = lambda _skill, _config: validation  # type: ignore[method-assign]
+        assert gateway._decorate_skill_validation({"name": "patched"}, config)["validation"] is validation
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        config = gateway.ensure_config()
+        support_calls: list[dict[str, object]] = []
+        gateway._load_runtime_skill_support_files = lambda skill: support_calls.append(skill)  # type: ignore[method-assign]
+
+        assert gateway._validate_skill({"name": "patched"}, config)["status"] == "ok"
+        assert support_calls == [{"name": "patched"}]
 
 
 def test_skill_registry_facades_are_exact_delegate_only_and_keep_domain_boundary() -> None:
@@ -81,9 +98,10 @@ def test_skill_registry_facades_are_exact_delegate_only_and_keep_domain_boundary
     source = (REPO_ROOT / "agent_skill_registry.py").read_text(encoding="utf-8")
     assert "execute_runtime_skill" not in source
     assert "build_path_to_skill_source" not in source
-    assert "_decorate_skill_validation" not in source
-    assert "_validate_skill" not in source
-    assert "_load_runtime_skill_support_files" not in source
+    assert "_impl_create_user_skill" not in source
+    assert "_impl_update_user_skill" not in source
+    assert "_impl_delete_user_skill" not in source
+    assert "_match_package_skill_route" not in source
 
     for method_name, implementation in implementation_methods.items():
         facade = gateway_methods[method_name]
