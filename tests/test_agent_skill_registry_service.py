@@ -4,13 +4,16 @@ import ast
 import tempfile
 from pathlib import Path
 
-from agent_gateway import AgentGateway
+import pytest
+
+import agent_skill_registry
+from agent_gateway import AgentGateway, AgentGatewayError
 from agent_skill_registry import AgentSkillRegistryService
 
 
 REPO_ROOT = Path(__file__).parents[1]
-AGENT_GATEWAY_MAX_BYTES = 480_756
-AGENT_GATEWAY_MAX_LF_LINES = 10_502
+AGENT_GATEWAY_MAX_BYTES = 478_996
+AGENT_GATEWAY_MAX_LF_LINES = 10_474
 MOVED_METHODS = {
     "_builtin_skill_definitions",
     "_skill_from_builtin_group",
@@ -27,7 +30,11 @@ MOVED_METHODS = {
     "_decorate_skill_validation",
     "_validate_skill",
     "_load_runtime_skill_support_files",
+    "create_user_skill",
+    "update_user_skill",
+    "delete_user_skill",
 }
+PUBLIC_CRUD_METHODS = {"create_user_skill", "update_user_skill", "delete_user_skill"}
 
 
 def _gateway(root: Path) -> AgentGateway:
@@ -78,6 +85,55 @@ def test_skill_registry_internal_calls_preserve_gateway_facade_monkeypatches() -
         assert support_calls == [{"name": "patched"}]
 
 
+def test_skill_registry_crud_keeps_host_lock_and_late_bound_transaction_order() -> None:
+    class TrackingLock:
+        active = False
+
+        def __enter__(self) -> None:
+            assert not self.active
+            self.active = True
+            events.append("lock-enter")
+
+        def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+            events.append("lock-exit")
+            self.active = False
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        events: list[str] = []
+        lock = TrackingLock()
+        gateway._user_skill_lock = lock  # type: ignore[assignment]
+
+        def record(name: str, result: object = None):
+            def callback(*_args: object, **_kwargs: object) -> object:
+                assert lock.active
+                events.append(name)
+                return result
+            return callback
+
+        gateway._load_user_skills = record("load", [])  # type: ignore[method-assign]
+        gateway._normalize_user_skill = record("normalize", {"name": "patched"})  # type: ignore[method-assign]
+        gateway._ensure_user_skill_can_use_id = record("ensure")  # type: ignore[method-assign]
+        gateway._save_user_skill = record("save")  # type: ignore[method-assign]
+        gateway.append_audit = record("audit")  # type: ignore[method-assign]
+        gateway.build_skill_registry = record("registry", {"schema": "vrcforge.skills.v1"})  # type: ignore[method-assign]
+
+        assert gateway.create_user_skill({"name": "patched"})["skill"] == {"name": "patched"}
+        assert events == ["lock-enter", "load", "normalize", "ensure", "save", "audit", "registry", "lock-exit"]
+
+
+def test_skill_registry_crud_preserves_not_found_and_link_delete_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        with pytest.raises(AgentGatewayError, match="User skill was not found"):
+            gateway.update_user_skill("missing", {})
+
+        gateway._load_user_skills = lambda: [{"name": "blocked"}]  # type: ignore[method-assign]
+        monkeypatch.setattr(agent_skill_registry, "_path_is_link_like", lambda _path: True)
+        with pytest.raises(AgentGatewayError, match="Refusing to delete a linked"):
+            gateway.delete_user_skill("blocked")
+
+
 def test_skill_registry_facades_are_exact_delegate_only_and_keep_domain_boundary() -> None:
     gateway_class = _class_definition(REPO_ROOT / "agent_gateway.py", "AgentGateway")
     service_class = _class_definition(REPO_ROOT / "agent_skill_registry.py", "AgentSkillRegistryService")
@@ -87,7 +143,11 @@ def test_skill_registry_facades_are_exact_delegate_only_and_keep_domain_boundary
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     implementation_methods = {
-        f"_{node.name.removeprefix('_impl_')}": node
+        (
+            node.name.removeprefix("_impl_")
+            if node.name.removeprefix("_impl_") in PUBLIC_CRUD_METHODS
+            else f"_{node.name.removeprefix('_impl_')}"
+        ): node
         for node in service_class.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         and node.name.startswith("_impl_")
@@ -98,9 +158,8 @@ def test_skill_registry_facades_are_exact_delegate_only_and_keep_domain_boundary
     source = (REPO_ROOT / "agent_skill_registry.py").read_text(encoding="utf-8")
     assert "execute_runtime_skill" not in source
     assert "build_path_to_skill_source" not in source
-    assert "_impl_create_user_skill" not in source
-    assert "_impl_update_user_skill" not in source
-    assert "_impl_delete_user_skill" not in source
+    assert "_impl_build_skill_registry" not in source
+    assert "_impl_check_skill_registry" not in source
     assert "_match_package_skill_route" not in source
 
     for method_name, implementation in implementation_methods.items():

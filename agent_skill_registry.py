@@ -457,3 +457,40 @@ class AgentSkillRegistryService:
                 raise AgentGatewayError(f"skill support file must be UTF-8 text: {normalized}", status_code=400) from exc
             loaded.append({"path": normalized, "content": content})
         return loaded
+
+    def _impl_create_user_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._user_skill_lock:
+            skills = self._load_user_skills()
+            skill = self._normalize_user_skill(payload)
+            skill_id = str(skill["name"])
+            self._ensure_user_skill_can_use_id(skill_id, skills)
+            self._save_user_skill(skill)
+            self.append_audit({"event": "user_skill_created", "skill": skill_id})
+            return {"ok": True, "skill": skill, **self.build_skill_registry()}
+
+    def _impl_update_user_skill(self, skill_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with self._user_skill_lock:
+            skill_id = normalize_skill_id(skill_id)
+            skills = self._load_user_skills()
+            for index, existing in enumerate(skills):
+                if existing.get("name") == skill_id:
+                    next_payload = {**existing, **payload, "name": skill_id}
+                    skills[index] = self._normalize_user_skill(next_payload, existing_id=skill_id)
+                    self._save_user_skill(skills[index])
+                    self.append_audit({"event": "user_skill_updated", "skill": skill_id})
+                    return {"ok": True, "skill": skills[index], **self.build_skill_registry()}
+            raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
+
+    def _impl_delete_user_skill(self, skill_id: str) -> dict[str, Any]:
+        with self._user_skill_lock:
+            skill_id = normalize_skill_id(skill_id)
+            skills = self._load_user_skills()
+            kept = [skill for skill in skills if skill.get("name") != skill_id]
+            if len(kept) == len(skills):
+                raise AgentGatewayError(f"User skill was not found: {skill_id}", status_code=404)
+            skill_dir = self.user_skills_dir / skill_id
+            if _path_is_link_like(skill_dir):
+                raise AgentGatewayError(f"Refusing to delete a linked user skill directory: {skill_id}", status_code=400)
+            remove_tree(skill_dir)
+            self.append_audit({"event": "user_skill_deleted", "skill": skill_id})
+            return {"ok": True, "deleted": skill_id, **self.build_skill_registry()}
