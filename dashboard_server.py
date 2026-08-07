@@ -281,6 +281,7 @@ from skill_packages import SkillPackageError, SkillPackageService, _load_json_by
 from skill_package_controller import SkillPackageController
 from skill_package_governance import SkillPackageGovernanceService
 from skill_package_projection import SkillPackageProjectionService
+from path_to_skill_controller import PathToSkillDashboardController
 import sub_agent_delegate
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from sub_agent_tasks import SUB_AGENT_LOG_SCHEMA, SUB_AGENT_RESULT_SCHEMA, SubAgentTaskRegistry
@@ -1880,6 +1881,7 @@ SKILL_PACKAGE_WRITE_LOCK = Lock()
 _SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
 _SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
+_PATH_TO_SKILL_CONTROLLER = PathToSkillDashboardController(sys.modules[__name__])
 PROJECT_SNAPSHOT_CACHE: dict[str, Any] | None = None
 PROJECT_SNAPSHOT_REFRESHING = False
 PROJECT_SNAPSHOT_UPDATED_AT = ""
@@ -5947,120 +5949,19 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def _path_to_skill_kwargs(params: dict[str, Any]) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {}
-    aliases = {
-        "package_id": ("packageId", "package_id"),
-        "skill_name": ("skillName", "skill_name"),
-        "title": ("title",),
-        "version": ("version",),
-        "author": ("author",),
-        "min_vrcforge_version": ("minVrcforgeVersion", "min_vrcforge_version"),
-    }
-    for target, keys in aliases.items():
-        for key in keys:
-            value = params.get(key)
-            if value is not None and str(value).strip():
-                kwargs[target] = str(value).strip()
-                break
-    return kwargs
+    return _PATH_TO_SKILL_CONTROLLER._impl_path_to_skill_kwargs(params)
 
 
 def _path_to_skill_file_list(source_files: dict[str, str]) -> list[dict[str, Any]]:
-    return [
-        {"path": relative, "bytes": len(content.encode("utf-8"))}
-        for relative, content in sorted(source_files.items())
-    ]
+    return _PATH_TO_SKILL_CONTROLLER._impl_path_to_skill_file_list(source_files)
 
 
 def _path_to_skill_vsk_filename(manifest: dict[str, Any]) -> str:
-    raw = str(manifest.get("skill_name") or manifest.get("id") or "captured-skill")
-    name = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-._")
-    return f"{name or 'captured-skill'}.vsk"
+    return _PATH_TO_SKILL_CONTROLLER._impl_path_to_skill_vsk_filename(manifest)
 
 
 def capture_path_to_skill_sync(params: dict[str, Any], *, allow_write: bool = False) -> dict[str, Any]:
-    summary = params.get("summary")
-    if not isinstance(summary, dict) or not summary:
-        raise AgentGatewayError("summary is required and must be a JSON object.", status_code=400)
-    export_vsk = bool(params.get("exportVsk") or params.get("export_vsk") or False)
-    if allow_write and export_vsk and not bool(params.get("confirmExport") or params.get("confirm_export") or False):
-        raise AgentGatewayError("confirmExport=true is required before exporting a .vsk package.", status_code=400)
-    package_text = str(params.get("packageOutputPath") or params.get("package_output_path") or "").strip()
-    if allow_write and export_vsk and package_text:
-        requested_package_output = Path(package_text).expanduser()
-        if requested_package_output.suffix.lower() != ".vsk":
-            requested_package_output = requested_package_output.with_name(requested_package_output.name + ".vsk")
-        if os.path.lexists(requested_package_output):
-            raise AgentGatewayError(
-                "packageOutputPath already exists; Path-to-Skill export requires a new package path.",
-                status_code=400,
-            )
-
-    captured = build_path_to_skill_source(summary, **_path_to_skill_kwargs(params))
-    result: dict[str, Any] = {
-        "ok": True,
-        "schema": "vrcforge.path_to_skill.capture_result.v1",
-        "dryRun": not allow_write,
-        "manifest": captured.manifest,
-        "workflow": captured.workflow,
-        "skillMarkdown": captured.skill_markdown,
-        "sourceFiles": dict(captured.source_files),
-        "files": _path_to_skill_file_list(captured.source_files),
-    }
-    if not allow_write:
-        if any(
-            bool(params.get(key))
-            for key in ("writeSource", "write_source", "outputPath", "output_path", "exportVsk", "export_vsk")
-        ):
-            result["writeSuppressed"] = True
-        return result
-
-    write_requested = bool(
-        params.get("writeSource")
-        or params.get("write_source")
-        or params.get("outputPath")
-        or params.get("output_path")
-        or export_vsk
-    )
-    source_dir: Path | None = None
-    if write_requested:
-        output_text = str(params.get("outputPath") or params.get("output_path") or "").strip()
-        if output_text:
-            source_dir = Path(output_text).expanduser()
-        elif bool(params.get("useTempOutput", params.get("use_temp_output", True))):
-            temp_root = Path(tempfile.mkdtemp(prefix="vrcforge-path-to-skill-"))
-            source_dir = temp_root / "source"
-        else:
-            raise AgentGatewayError("outputPath is required when useTempOutput=false.", status_code=400)
-        captured.write_to(source_dir)
-        result["dryRun"] = False
-        result["writtenSource"] = {
-            "path": str(source_dir),
-            "files": _path_to_skill_file_list(captured.source_files),
-        }
-
-    if export_vsk:
-        if source_dir is None:
-            temp_root = Path(tempfile.mkdtemp(prefix="vrcforge-path-to-skill-"))
-            source_dir = temp_root / "source"
-            captured.write_to(source_dir)
-            result["dryRun"] = False
-            result["writtenSource"] = {
-                "path": str(source_dir),
-                "files": _path_to_skill_file_list(captured.source_files),
-            }
-        package_output = Path(package_text).expanduser() if package_text else source_dir.parent / _path_to_skill_vsk_filename(captured.manifest)
-        if package_output.suffix.lower() != ".vsk":
-            package_output = package_output.with_name(package_output.name + ".vsk")
-        if os.path.lexists(package_output):
-            raise AgentGatewayError(
-                "packageOutputPath already exists; Path-to-Skill export requires a new package path.",
-                status_code=400,
-            )
-        package_output.parent.mkdir(parents=True, exist_ok=True)
-        exported = skill_package_service().export_dev(source_dir, package_output, overwrite=False)
-        result["exported"] = exported.as_dict()
-    return result
+    return _PATH_TO_SKILL_CONTROLLER._impl_capture_path_to_skill_sync(params, allow_write=allow_write)
 
 
 def scan_project_index_sync(params: dict[str, Any]) -> dict[str, Any]:
