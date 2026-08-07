@@ -141,6 +141,7 @@ from diagnostic_safety import (
     permission_security_state,
 )
 from doctor_readiness_report_service import DoctorReadinessReportPorts, DoctorReadinessReportService
+from know_yourself_readiness_service import KnowYourselfReadinessPorts, KnowYourselfReadinessService
 from doctor_service import (
     DoctorRule,
     DoctorService,
@@ -226,7 +227,6 @@ from memory_review_host import (
 )
 from memory_review_provider import invoke_memory_review_provider
 from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
-from know_yourself_skill import build_know_yourself_report
 from optimization_service import (
     OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL,
     OPTIMIZATION_APPLY_REQUEST_BY_GATEWAY,
@@ -1940,6 +1940,27 @@ _DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
         doctor_sections=lambda checks: _doctor_sections(checks),
         redact_local_path=lambda value: _redact_local_path(value),
         version=lambda: app.version,
+    )
+)
+# STOPGAP: Migration-only owner for the root Know Yourself compatibility facade below.
+# Remove it in the final 1.5 typed-composition seam-retirement gate.
+_KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
+    KnowYourselfReadinessPorts(
+        load_settings_for_params=lambda params: load_dashboard_settings(build_agent_connection_request(params)),
+        build_unity_status=lambda settings: build_unity_status_snapshot(settings),
+        build_doctor_report=lambda: build_app_doctor_report(),
+        selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
+        unity_editor_path=lambda: DASHBOARD_STATE.unity_editor_path,
+        parse_editor_version=lambda version_file: parse_editor_version(version_file),
+        list_running_unity_processes_strict=lambda: list_running_unity_processes(require_discovery_evidence=True),
+        process_matches_project=lambda process, project_root: unity_process_exactly_matches_project(process, project_root),
+        read_compile_errors=lambda params: read_agent_compile_errors(params),
+        normalize_path=lambda value: normalize_path_string(value),
+        build_tool_registry=lambda: AGENT_GATEWAY.build_tool_registry(),
+        build_skill_registry=lambda: AGENT_GATEWAY.build_skill_registry(),
+        permission_state=lambda: AGENT_GATEWAY.permission_state(),
+        ensure_dict=lambda value: ensure_dict(value),
+        normalize_bool=lambda value, default: normalize_bool(value, default),
     )
 )
 CURRENT_UNITY_STATUS: dict[str, Any] | None = None
@@ -8344,94 +8365,7 @@ def build_app_doctor_report() -> dict[str, Any]:
 
 
 def know_yourself_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
-    params = ensure_dict(params or {})
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    unity_status = build_unity_status_snapshot(settings)
-    doctor_report = build_app_doctor_report()
-    selected_project = str(DASHBOARD_STATE.selected_project_path or "").strip()
-    editor_path = str(DASHBOARD_STATE.unity_editor_path or "").strip()
-    editor_version = (
-        parse_editor_version(Path(selected_project) / "ProjectSettings" / "ProjectVersion.txt")
-        if selected_project
-        else ""
-    )
-    selected_project_running: bool | None = None
-    matching_process_ids: list[int] = []
-    if selected_project:
-        try:
-            for process in list_running_unity_processes(require_discovery_evidence=True):
-                if not unity_process_exactly_matches_project(process, Path(selected_project)):
-                    continue
-                selected_project_running = True
-                try:
-                    matching_process_ids.append(
-                        int(process.get("processId") or process.get("pid") or 0)
-                    )
-                except (TypeError, ValueError):
-                    continue
-            if selected_project_running is None:
-                selected_project_running = False
-        except Exception:  # noqa: BLE001 - readiness remains useful when process discovery is unavailable.
-            selected_project_running = None
-    compile_diagnostics: dict[str, Any] = {}
-    if (
-        unity_status.get("connected") is True
-        and unity_status.get("unityInstanceRegistered") is True
-        and unity_status.get("selectedInstanceMatched") is True
-    ):
-        try:
-            compile_diagnostics = read_agent_compile_errors(
-                {**params, "maxErrors": 20, "includeConsoleFallback": True}
-            )
-        except Exception:  # noqa: BLE001 - a missing diagnostic tool is itself a bounded unavailable result.
-            compile_diagnostics = {"ok": False}
-
-    focus_scope = ""
-    if selected_project:
-        doctor_checks = doctor_report.get("checks")
-        if not isinstance(doctor_checks, list):
-            doctor_checks = []
-        dependency_checks = [
-            item
-            for item in doctor_checks
-            if str(ensure_dict(item).get("id") or "")
-            in {"unity.plugin", "package.vrchat_sdk", "unity.mcp.package"}
-        ]
-        focus_scope_material = json.dumps(
-            {
-                "selectedProject": normalize_path_string(selected_project).casefold(),
-                "editorVersion": editor_version,
-                "matchingProcessIds": sorted(pid for pid in matching_process_ids if pid > 0),
-                "selectedInstance": str(unity_status.get("instance") or ""),
-                "dependencyChecks": dependency_checks,
-            },
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        focus_scope = f"focus-{hashlib.sha256(focus_scope_material).hexdigest()[:16]}"
-    return build_know_yourself_report(
-        doctor_report=doctor_report,
-        unity_status=unity_status,
-        tool_registry=AGENT_GATEWAY.build_tool_registry(),
-        skill_registry=AGENT_GATEWAY.build_skill_registry(),
-        permission_state=AGENT_GATEWAY.permission_state(),
-        compile_diagnostics=compile_diagnostics,
-        project_context={
-            "projectSelected": bool(selected_project),
-            "editorVersion": editor_version,
-            "editorLaunchConfigured": bool(editor_path and Path(editor_path).is_file()),
-            "selectedProjectRunning": selected_project_running,
-            "editorFocusScope": focus_scope,
-        },
-        editor_focus_confirmed=normalize_bool(
-            params.get("editorFocusConfirmed") or params.get("editor_focus_confirmed"),
-            False,
-        ),
-        editor_focus_scope=str(
-            params.get("editorFocusScope") or params.get("editor_focus_scope") or ""
-        ),
-    )
+    return _KNOW_YOURSELF_READINESS.know_yourself_sync(params)
 
 
 @app.get("/api/app/doctor")
