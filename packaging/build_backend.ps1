@@ -45,6 +45,7 @@ foreach ($module in $excludeModules) {
     --clean `
     --onedir `
     --name vrcforge_backend `
+    --hidden-import agent_checkpoint_recovery `
     --hidden-import tools.vrcforge_agent_mcp_stdio `
     --hidden-import tools.vrcforge_cli `
     @excludeArgs `

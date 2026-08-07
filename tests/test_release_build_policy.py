@@ -253,6 +253,12 @@ def test_release_packaged_backend_smoke_reuses_resolved_python() -> None:
     )
 
 
+def test_backend_packaging_collects_checkpoint_recovery_service() -> None:
+    source = (REPO_ROOT / "packaging" / "build_backend.ps1").read_text(encoding="utf-8")
+
+    assert "--hidden-import agent_checkpoint_recovery" in source
+
+
 def test_publish_path_only_accepts_strict_release_policy() -> None:
     source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
 
