@@ -136,12 +136,19 @@ class ProviderConfigurationService:
             thinking_level=thinking_level,
         )
 
-    def _impl_save_dashboard_config_document(self) -> None:
+    def _impl_save_dashboard_config_document(
+        self,
+        *,
+        api_config: DashboardApiConfig | None = None,
+        vision_config: DashboardVisionConfig | None = None,
+    ) -> None:
         "Persist both the api and vision sections in one atomic write.\n\n    单文件双段：任何一段保存都重写整个文档，避免旧的\"只写 api 段\"行为把\n    vision 段冲掉。\n    "
 
         with self._host.CONFIG_DOCUMENT_LOCK:
-            api = self._host.DASHBOARD_API_CONFIG or self._host.load_initial_dashboard_api_config()
-            vision = self._host.DASHBOARD_VISION_CONFIG or self._host.load_initial_dashboard_vision_config()
+            committed_api = self._host.DASHBOARD_API_CONFIG or self._host.load_initial_dashboard_api_config()
+            committed_vision = self._host.DASHBOARD_VISION_CONFIG or self._host.load_initial_dashboard_vision_config()
+            api = api_config if api_config is not None else committed_api
+            vision = vision_config if vision_config is not None else committed_vision
             api_descriptor = self._host.provider_config_descriptor(api)
             payload: dict[str, Any] = {
                 "api": {
@@ -177,16 +184,14 @@ class ProviderConfigurationService:
                     if self._host._path_is_reparse_or_link(backup) or not backup.is_file() or backup.read_bytes() != original:
                         raise OSError("Provider configuration backup verification failed.")
             self._host.atomic_write_json(self._host.CONFIG_PATH, payload)
+            self._host.DASHBOARD_API_CONFIG = api
+            self._host.DASHBOARD_VISION_CONFIG = vision
 
     def _impl_save_dashboard_api_config(self, config: DashboardApiConfig) -> None:
-        with self._host.CONFIG_DOCUMENT_LOCK:
-            self._host.DASHBOARD_API_CONFIG = config
-            self._host.save_dashboard_config_document()
+        self._host.save_dashboard_config_document(api_config=config)
 
     def _impl_save_dashboard_vision_config(self, config: DashboardVisionConfig) -> None:
-        with self._host.CONFIG_DOCUMENT_LOCK:
-            self._host.DASHBOARD_VISION_CONFIG = config
-            self._host.save_dashboard_config_document()
+        self._host.save_dashboard_config_document(vision_config=config)
 
     def _impl_serialize_api_config(self, include_secret: bool) -> dict[str, Any]:
         config = self._host.DASHBOARD_API_CONFIG or self._host.load_initial_dashboard_api_config()

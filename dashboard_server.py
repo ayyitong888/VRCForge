@@ -9103,8 +9103,6 @@ def read_api_config() -> dict[str, Any]:
 
 @app.post("/api/config")
 async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
-    global DASHBOARD_API_CONFIG
-
     try:
         config = normalize_api_config_request(request)
     except ValueError as exc:
@@ -9124,8 +9122,7 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
         validate_provider_api_key(config.api_key)
     except ProviderCredentialError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    DASHBOARD_API_CONFIG = config
-    save_dashboard_api_config(DASHBOARD_API_CONFIG)
+    save_dashboard_api_config(config)
     payload = {
         "configPath": str(CONFIG_PATH),
         "apiConfig": serialize_api_config(include_secret=True),
@@ -9138,9 +9135,9 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
         "config",
         "Dashboard API config saved and applied.",
         {
-            "provider": DASHBOARD_API_CONFIG.provider,
-            "model": DASHBOARD_API_CONFIG.model,
-            "baseUrl": DASHBOARD_API_CONFIG.base_url or "(official endpoint)",
+            "provider": config.provider,
+            "model": config.model,
+            "baseUrl": config.base_url or "(official endpoint)",
         },
     )
     return payload
@@ -17495,8 +17492,15 @@ def build_provider_model_info(item: Any, model_id: str) -> dict[str, Any]:
     return _PROVIDER_MODEL_CATALOG._impl_build_provider_model_info(item, model_id)
 
 
-def save_dashboard_config_document() -> None:
-    return _PROVIDER_CONFIGURATION._impl_save_dashboard_config_document()
+def save_dashboard_config_document(
+    *,
+    api_config: DashboardApiConfig | None = None,
+    vision_config: DashboardVisionConfig | None = None,
+) -> None:
+    return _PROVIDER_CONFIGURATION._impl_save_dashboard_config_document(
+        api_config=api_config,
+        vision_config=vision_config,
+    )
 
 
 def save_dashboard_api_config(config: DashboardApiConfig) -> None:

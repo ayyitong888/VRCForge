@@ -32,10 +32,6 @@ PRE_EXTRACTION_AST_SHA256 = {
     "load_config_document": "14bf679d8abb476fe3336d1f8a7273ea43a19f27d8095f8af34af17ae75cfd45",
     "normalize_api_config_request": "5a6a020f52aa832c90eb10ee969fe37354d1eb34a1dc8e1f78ad3c30df910951",
     "normalize_vision_config_request": "1c760b070de61397fd3306b8fa17c8cd08b62aa80893dae8cd066549824f4855",
-    "save_dashboard_config_document": "495f5866ee183474fc9faf2b974a81dd0cb21ee13d7644c4ac6dada63bc1d96c",
-    # Root-global declarations become explicit host assignment during this temporary seam.
-    "save_dashboard_api_config": "b14e70533bf8b96c19cb3f1d098ec03eead5e07566e92bdfa05ce26d66e57ea5",
-    "save_dashboard_vision_config": "38c3f86e0dbf3994b0207cf041feef11ba8e0cff79a4888f007d163a0b6f87ee",
     "serialize_api_config": "0c51565068c91acbfecc8f7e39cab0a09e4404c5be4a08c19abd9179883edcbd",
     "serialize_vision_config": "0eb99abb87f8ab5c84c4aa86d53daa8c872161d21ee2bc8a08f7b7798161c798",
     "serialize_app_api_config": "c0faa218c67514fa3dc997b936d41437905256089ee468ca19dc9a6d136352f3",
@@ -66,12 +62,6 @@ class _HostFacadeUnwrapper(ast.NodeTransformer):
         ):
             return ast.copy_location(ast.Name(id=node.attr, ctx=node.ctx), node)
         return node
-
-    def visit_Global(self, node: ast.Global) -> None:
-        # The two old root-global declarations are represented by explicit
-        # module-host assignment while the migration facade exists.
-        return None
-
 
 def _normalized_pre_extraction_ast(node: ast.FunctionDef, name: str) -> str:
     normalized = copy.deepcopy(node)
@@ -147,9 +137,10 @@ def test_provider_configuration_preserves_pre_extraction_method_ast() -> None:
     }
 
     assert set(implementations) == METHODS
-    for name, implementation in implementations.items():
+    for name, expected_hash in PRE_EXTRACTION_AST_SHA256.items():
+        implementation = implementations[name]
         actual = _normalized_pre_extraction_ast(implementation, name)
-        assert hashlib.sha256(actual.encode("utf-8")).hexdigest() == PRE_EXTRACTION_AST_SHA256[name]
+        assert hashlib.sha256(actual.encode("utf-8")).hexdigest() == expected_hash
 
 
 def test_provider_configuration_late_binds_config_projection_and_secret_masking(monkeypatch) -> None:
