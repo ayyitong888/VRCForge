@@ -2931,7 +2931,7 @@ async function packageProjectionState(cdp) {
   const [restList, tauriList, skills, filesystem] = await Promise.all([
     appApi("/api/app/skill-packages"),
     tauriInvoke(cdp, "fetch_skill_packages", {}),
-    agentApi("/api/agent/skills"),
+    agentApi("/api/agent/skills?exposure_layer=execution"),
     packageFilesystemState(),
   ]);
   const installedIds = (payload) => (payload?.installed || [])
@@ -3128,7 +3128,7 @@ async function runPackageLifecycle(report, cdp, signed) {
   const [restList, tauriList, skills] = await Promise.all([
     appApi("/api/app/skill-packages"),
     tauriInvoke(cdp, "fetch_skill_packages", {}),
-    agentApi("/api/agent/skills"),
+    agentApi("/api/agent/skills?exposure_layer=execution"),
   ]);
   const restIds = new Set((restList?.installed || []).map((item) => String(item.id || item.manifest?.id || "")));
   const tauriIds = new Set((tauriList?.installed || []).map((item) => String(item.id || item.manifest?.id || "")));
@@ -3297,7 +3297,7 @@ async function apkSemanticInstalledState(cdp) {
   const [rest, tauri, skills, packageTree, projectedTree] = await Promise.all([
     appApi("/api/app/skill-packages"),
     tauriInvoke(cdp, "fetch_skill_packages", {}),
-    agentApi("/api/agent/skills"),
+    agentApi("/api/agent/skills?exposure_layer=execution"),
     filesystemTreeSnapshot(
       resolve(userDataRoot, "skill-packages", apkSemanticPackageId),
       "apk-semantic-package",
@@ -3522,7 +3522,7 @@ async function createPackagedExportBase(cdp, signed) {
         timeoutMs: 120000,
       },
     });
-    const skills = await agentApi("/api/agent/skills");
+    const skills = await agentApi("/api/agent/skills?exposure_layer=execution");
     sourceSeen = (skills?.skills || []).some((item) =>
       String(item?.name || "") === apkSemanticSkillName
       && String(item?.source || "") === "user");
@@ -3982,7 +3982,7 @@ async function runGovernanceLifecycle(report, cdp, records, signerFingerprint) {
     addAssertion(report, "safe mode release did not explicitly restore later governance targets");
   }
 
-  const beforeBlockSkills = await agentApi("/api/agent/skills");
+  const beforeBlockSkills = await agentApi("/api/agent/skills?exposure_layer=execution");
   const beforeBlockProjection = (beforeBlockSkills?.skills || [])
     .find((item) => item?.name === outfit.skillName);
 
@@ -3991,7 +3991,7 @@ async function runGovernanceLifecycle(report, cdp, records, signerFingerprint) {
     body: { packageId: outfit.id, reason: "packaged probe blocklist gate" },
   });
   const blockedRuntime = await assertRuntimeStatus(report, outfit.skillName, "blocked", "blocklisted package");
-  const skills = await agentApi("/api/agent/skills");
+  const skills = await agentApi("/api/agent/skills?exposure_layer=execution");
   const projected = (skills?.skills || []).find((item) => item?.name === outfit.skillName);
   report.governance.blockDisabledProjection = blocked?.ok === true
     && blockedRuntime
@@ -5709,7 +5709,7 @@ async function uninstallPackages(report, cdp, records) {
   const [restList, tauriList, skills] = await Promise.all([
     appApi("/api/app/skill-packages"),
     tauriInvoke(cdp, "fetch_skill_packages", {}),
-    agentApi("/api/agent/skills"),
+    agentApi("/api/agent/skills?exposure_layer=execution"),
   ]);
   const remainingRest = new Set((restList?.installed || []).map((item) => String(item.id || item.manifest?.id || "")));
   const remainingTauri = new Set((tauriList?.installed || []).map((item) => String(item.id || item.manifest?.id || "")));
@@ -5825,7 +5825,7 @@ async function attemptFailureApiCleanup(report, cdp) {
     }
     const [restAfter, skillsAfter] = await Promise.all([
       appApi("/api/app/skill-packages", { timeoutMs: 15000 }),
-      agentApi("/api/agent/skills", { timeoutMs: 15000 }),
+      agentApi("/api/agent/skills?exposure_layer=execution", { timeoutMs: 15000 }),
     ]);
     const remainingRest = new Set((restAfter?.installed || [])
       .map((item) => String(item.id || item.manifest?.id || "")));
