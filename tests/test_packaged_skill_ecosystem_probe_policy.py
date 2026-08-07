@@ -24,3 +24,22 @@ def test_agent_skill_route_remains_default_planning_for_product_callers() -> Non
         in source
     )
     assert "AGENT_GATEWAY.build_skill_registry(exposure_layer=exposure_layer)" in source
+
+
+def test_packaged_skill_probe_keeps_approval_packages_request_only() -> None:
+    source = (
+        ROOT / "scripts" / "diagnose_packaged_skill_ecosystem.mjs"
+    ).read_text(encoding="utf-8")
+
+    entrypoint_block = source.split(
+        "const requiredPackageEntrypoints = new Map([", 1
+    )[1].split("]);", 1)[0]
+    request_only_block = source.split(
+        "const requestOnlyPackageSlugs = new Set([", 1
+    )[1].split("]);", 1)[0]
+    assert '"outfit-naming-helper"' not in entrypoint_block
+    assert '"material-preset-pack"' in request_only_block
+    assert '"outfit-naming-helper"' in request_only_block
+    assert '"vrcforge_unity_mcp_write"' in source
+    assert '"vrc_atomic_reference_rename"' in source
+    assert '"post-safe-mode request-only outfit package"' in source

@@ -59,8 +59,15 @@ const requiredPackageSkillNames = new Map([
 ]);
 const requiredPackageEntrypoints = new Map([
   ["validation-report-extension", "vrcforge_run_validation_report"],
-  ["outfit-naming-helper", "vrcforge_scan_animation_bindings"],
   ["optimizer-report-helper", "vrcforge_optimization_plan"],
+]);
+const requestOnlyPackageSlugs = new Set([
+  "material-preset-pack",
+  "outfit-naming-helper",
+]);
+const requestOnlyDirectTargets = new Map([
+  ["material-preset-pack", new Set(["vrcforge_apply_shader_tuning"])],
+  ["outfit-naming-helper", new Set(["vrcforge_unity_mcp_write", "vrc_atomic_reference_rename"])],
 ]);
 const requiredPackageSupportFiles = new Map([
   ["validation-report-extension", ["workflows/validation-report-extension.json"]],
@@ -3029,6 +3036,31 @@ function verifyRuntimeSupportFiles(record, runtime) {
   return { verified: hashesMatch, support };
 }
 
+function verifyValidationRuntimeResult(result) {
+  const sourceCount = result?.summary?.sourceCount;
+  const failedSourceCount = result?.summary?.failedSourceCount;
+  return typeof result?.ok === "boolean"
+    && result?.schema === "vrcforge.validation.v1"
+    && result?.readOnly === true
+    && result?.autoFix === false
+    && Number.isInteger(sourceCount)
+    && sourceCount > 0
+    && Number.isInteger(failedSourceCount)
+    && failedSourceCount >= 0
+    && failedSourceCount <= sourceCount
+    && Array.isArray(result?.findings)
+    && result?.sources
+    && typeof result.sources === "object"
+    && !Array.isArray(result.sources)
+    && Object.keys(result.sources).length === sourceCount;
+}
+
+function countRequestOnlyDirectTargetCalls(events, slug) {
+  const directTargets = requestOnlyDirectTargets.get(slug) || new Set();
+  return events.filter((event) => [event?.tool, event?.targetTool, event?.target_tool]
+    .some((value) => directTargets.has(String(value || "")))).length;
+}
+
 async function runPackageLifecycle(report, cdp, signed) {
   const records = [];
   const beforePreflightState = await packageProjectionState(cdp);
@@ -3083,9 +3115,9 @@ async function runPackageLifecycle(report, cdp, signed) {
       entrypointVerified: false,
       runtimeAuditVerified: false,
       cleanupUninstalled: false,
-      requestOnly: built.slug === "material-preset-pack" ? false : undefined,
+      requestOnly: requestOnlyPackageSlugs.has(built.slug) ? false : undefined,
       supportFilesVerified: false,
-      directTargetCalls: built.slug === "material-preset-pack" ? -1 : undefined,
+      directTargetCalls: requestOnlyPackageSlugs.has(built.slug) ? -1 : undefined,
       sourceFileSha256: built.sourceFileSha256,
     });
   }
@@ -3145,71 +3177,83 @@ async function runPackageLifecycle(report, cdp, signed) {
     record.runtimeStatus = String(runtime?.status || "");
     const supportVerification = verifyRuntimeSupportFiles(record, runtime);
     record.supportFilesVerified = supportVerification.verified;
-    if (record.slug === "material-preset-pack") {
+    if (requestOnlyPackageSlugs.has(record.slug)) {
       const support = supportVerification.support;
       let workflow = {};
-      let presets = {};
       try {
-        workflow = JSON.parse(String(support.get("workflows/material-preset-pack.json") || "{}"));
+        workflow = JSON.parse(String(support.get(`workflows/${record.slug}.json`) || "{}"));
       } catch {
         workflow = {};
       }
-      try {
-        presets = JSON.parse(String(support.get("presets/material-presets.json") || "{}"));
-      } catch {
-        presets = {};
-      }
       const steps = Array.isArray(workflow?.steps) ? workflow.steps : [];
       const step = steps[0] || {};
-      const presetItems = Array.isArray(presets?.presets) ? presets.presets : [];
-      const presetIds = presetItems.map((item) => String(item?.id || "")).sort();
-      const presetsVerified = presets?.schema === "vrcforge.material-preset-pack.v1"
-        && presetItems.length === 2
-        && new Set(presetIds).size === 2
-        && presetIds[0] === "balanced-toon"
-        && presetIds[1] === "quest-conservative"
-        && presetItems.every((item) => item?.values && typeof item.values === "object");
-      record.supportFilesVerified = record.supportFilesVerified && presetsVerified;
-      record.requestOnly = runtime?.status === "loaded"
+      const commonRequestOnlyContract = runtime?.status === "loaded"
         && runtime?.result?.permissionMode === "approval_required"
         && !runtime?.result?.entrypointTool
         && record.supportFilesVerified
         && workflow?.schema === "vrcforge.skill-package.workflow.v1"
         && workflow?.mode === "approval_required"
         && steps.length === 1
-        && step?.name === "request_material_preset_apply"
         && step?.tool === "vrcforge_request_apply"
         && step?.writes === true
-        && step?.request?.targetTool === "vrcforge_apply_shader_tuning"
-        && step?.request?.presetSource === "presets/material-presets.json"
-        && step?.request?.onePresetPerExecution === true
         && workflow?.approval?.required === true
         && workflow?.checkpoint?.required === true
-        && workflow?.rollback?.required === true
-        && workflow?.rollback?.tool === "vrcforge_restore_shader_tuning";
+        && workflow?.rollback?.required === true;
+      if (record.slug === "material-preset-pack") {
+        let presets = {};
+        try {
+          presets = JSON.parse(String(support.get("presets/material-presets.json") || "{}"));
+        } catch {
+          presets = {};
+        }
+        const presetItems = Array.isArray(presets?.presets) ? presets.presets : [];
+        const presetIds = presetItems.map((item) => String(item?.id || "")).sort();
+        const presetsVerified = presets?.schema === "vrcforge.material-preset-pack.v1"
+          && presetItems.length === 2
+          && new Set(presetIds).size === 2
+          && presetIds[0] === "balanced-toon"
+          && presetIds[1] === "quest-conservative"
+          && presetItems.every((item) => item?.values && typeof item.values === "object");
+        record.supportFilesVerified = record.supportFilesVerified && presetsVerified;
+        record.requestOnly = commonRequestOnlyContract
+          && presetsVerified
+          && step?.name === "request_material_preset_apply"
+          && step?.request?.targetTool === "vrcforge_apply_shader_tuning"
+          && step?.request?.presetSource === "presets/material-presets.json"
+          && step?.request?.onePresetPerExecution === true
+          && workflow?.rollback?.tool === "vrcforge_restore_shader_tuning";
+      } else {
+        const allowedTools = Array.isArray(runtime?.result?.allowedTools)
+          ? runtime.result.allowedTools.map((item) => String(item)).sort()
+          : [];
+        const operationArguments = step?.request?.argumentsByOperation || {};
+        const gameObject = operationArguments?.game_object || {};
+        const parameter = operationArguments?.parameter || {};
+        record.requestOnly = commonRequestOnlyContract
+          && step?.name === "request_atomic_reference_rename"
+          && step?.request?.targetTool === "vrcforge_unity_mcp_write"
+          && step?.request?.scanTool === "vrcforge_scan_animation_bindings"
+          && step?.request?.previewTool === "vrcforge_preview_atomic_reference_rename"
+          && step?.request?.oneOperationPerExecution === true
+          && gameObject?.toolName === "vrc_atomic_reference_rename"
+          && gameObject?.arguments?.operationKind === "game_object"
+          && parameter?.toolName === "vrc_atomic_reference_rename"
+          && parameter?.arguments?.operationKind === "parameter"
+          && workflow?.rollback?.tool === "vrcforge_restore_checkpoint"
+          && workflow?.rollback?.requiresSeparateApproval === true
+          && JSON.stringify(allowedTools) === JSON.stringify([
+            "vrcforge_preview_atomic_reference_rename",
+            "vrcforge_request_apply",
+            "vrcforge_scan_animation_bindings",
+          ]);
+      }
       record.runtimeResultVerified = record.requestOnly;
       record.entrypointVerified = record.requestOnly;
     } else {
       const expectedEntrypoint = requiredPackageEntrypoints.get(record.slug);
       const result = runtime?.entrypoint?.result;
       if (record.slug === "validation-report-extension") {
-        record.runtimeResultVerified = result?.ok === true
-          && result?.schema === "vrcforge.validation.v1"
-          && result?.readOnly === true
-          && result?.autoFix === false
-          && Number.isInteger(result?.summary?.failedSourceCount)
-          && result.summary.failedSourceCount === 0
-          && Array.isArray(result?.findings)
-          && result?.sources
-          && typeof result.sources === "object";
-      } else if (record.slug === "outfit-naming-helper") {
-        record.runtimeResultVerified = result?.ok === true
-          && result?.fixture === "packaged-transport-only"
-          && result?.tool === "vrc_scan_animation_bindings"
-          && Array.isArray(result?.bindings)
-          && Array.isArray(result?.clips)
-          && Array.isArray(result?.errors)
-          && Array.isArray(result?.warnings);
+        record.runtimeResultVerified = verifyValidationRuntimeResult(result);
       } else if (record.slug === "optimizer-report-helper") {
         record.runtimeResultVerified = result?.ok === true
           && result?.schema === "vrcforge.optimization.v1"
@@ -3239,10 +3283,6 @@ async function runPackageLifecycle(report, cdp, signed) {
 
   const logs = await agentApi("/api/agent/logs?limit=500");
   const events = Array.isArray(logs?.logs) ? logs.logs : [];
-  const directTargetCalls = events.filter((event) =>
-    event?.tool === "vrcforge_apply_shader_tuning"
-    || event?.targetTool === "vrcforge_apply_shader_tuning"
-    || event?.target_tool === "vrcforge_apply_shader_tuning").length;
   for (const record of records) {
     const packageEvents = events.filter((event) =>
       ["runtime_skill_package_loaded", "runtime_skill_entrypoint_executed"].includes(String(event?.event || ""))
@@ -3250,17 +3290,17 @@ async function runPackageLifecycle(report, cdp, signed) {
     const loadedVerified = packageEvents.some((event) =>
       event?.event === "runtime_skill_package_loaded"
       && packageAuditEventMatches(event, record, signed.fingerprint));
-    const entrypointVerified = record.slug === "material-preset-pack"
+    const entrypointVerified = requestOnlyPackageSlugs.has(record.slug)
       || packageEvents.some((event) =>
         event?.event === "runtime_skill_entrypoint_executed"
         && event?.tool === requiredPackageEntrypoints.get(record.slug)
         && packageAuditEventMatches(event, record, signed.fingerprint));
     record.runtimeAuditVerified = loadedVerified && entrypointVerified;
     if (!record.runtimeAuditVerified) addAssertion(report, `exact package runtime audit attribution failed for ${record.id}`);
-    if (record.slug === "material-preset-pack") {
-      record.directTargetCalls = directTargetCalls;
-      if (!record.requestOnly || directTargetCalls !== 0) {
-        addAssertion(report, "material preset package was not request-only or called its direct target");
+    if (requestOnlyPackageSlugs.has(record.slug)) {
+      record.directTargetCalls = countRequestOnlyDirectTargetCalls(events, record.slug);
+      if (!record.requestOnly || record.directTargetCalls !== 0) {
+        addAssertion(report, `${record.slug} package was not request-only or called a direct write target`);
       }
     }
   }
@@ -3968,8 +4008,8 @@ async function runGovernanceLifecycle(report, cdp, records, signerFingerprint) {
   const outfitRestored = await assertRuntimeStatus(
     report,
     outfit.skillName,
-    "executed",
-    "post-safe-mode outfit package",
+    "loaded",
+    "post-safe-mode request-only outfit package",
   );
   const optimizerRestored = await assertRuntimeStatus(
     report,
@@ -5935,7 +5975,7 @@ function publicPackageReport(records) {
     preflightDryRunNoWrite: record.preflightDryRunNoWrite === true,
     preflightStateUnchanged: record.preflightStateUnchanged === true,
     cleanupUninstalled: record.cleanupUninstalled === true,
-    ...(record.slug === "material-preset-pack"
+    ...(requestOnlyPackageSlugs.has(record.slug)
       ? {
         requestOnly: record.requestOnly === true,
         directTargetCalls: Number(record.directTargetCalls || 0),
@@ -6073,14 +6113,17 @@ function validateFinalContract(report) {
     ]) {
       if (item[key] !== true) addAssertion(report, `${item.id} package gate failed: ${key}`);
     }
-    if (item.id === "community.examples.material-preset-pack") {
+    if (
+      item.id === "community.examples.material-preset-pack"
+      || item.id === "community.examples.outfit-naming-helper"
+    ) {
       if (
         item.runtimeStatus !== "loaded"
         || item.requestOnly !== true
         || item.supportFilesVerified !== true
         || item.directTargetCalls !== 0
       ) {
-        addAssertion(report, "material package final request-only contract failed");
+        addAssertion(report, `${item.id} final request-only contract failed`);
       }
     } else if (item.runtimeStatus !== "executed") {
       addAssertion(report, `${item.id} final runtime status was not executed`);
@@ -6675,6 +6718,26 @@ async function runSelfTest() {
     ],
   });
   const checks = {
+    requestOnlyPackagesHaveNoDirectEntrypoints: [...requestOnlyPackageSlugs]
+      .every((slug) => !requiredPackageEntrypoints.has(slug)),
+    validationRuntimeAcceptsReportedFindingsAndUnavailableSources: verifyValidationRuntimeResult({
+      ok: false,
+      schema: "vrcforge.validation.v1",
+      readOnly: true,
+      autoFix: false,
+      summary: { sourceCount: 1, failedSourceCount: 1 },
+      findings: [{ severity: "Error" }],
+      sources: { materials: { ok: false } },
+    }),
+    validationRuntimeRejectsInvalidSourceCounts: !verifyValidationRuntimeResult({
+      ok: true,
+      schema: "vrcforge.validation.v1",
+      readOnly: true,
+      autoFix: false,
+      summary: { sourceCount: 1, failedSourceCount: 2 },
+      findings: [],
+      sources: {},
+    }),
     strictPolicyAccepted: strictBuildPolicyFromManifest(strictPolicy).strict === true,
     semanticJsonObjectKeyOrderIgnored: exactJsonValue(
       { beta: { two: 2, one: 1 }, alpha: true },

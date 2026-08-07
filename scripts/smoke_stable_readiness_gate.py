@@ -877,7 +877,10 @@ def check_skill_ecosystem_smoke(
         item = by_id.get(package_id, {})
         runtime_status = str(item.get("runtimeStatus") or "")
         runtime_ok = runtime_status == "executed"
-        if package_id == "community.examples.material-preset-pack":
+        if package_id in {
+            "community.examples.material-preset-pack",
+            "community.examples.outfit-naming-helper",
+        }:
             direct_target_calls = exact_int(item.get("directTargetCalls"), minimum=0)
             runtime_ok = (
                 runtime_status == "loaded"

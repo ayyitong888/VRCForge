@@ -523,8 +523,18 @@ def test_skill_ecosystem_smoke_requires_full_packaged_contract(tmp_path):
                 "trusted": True,
                 "imported": True,
                 "projected": True,
-                "runtimeStatus": "loaded" if "material-preset" in package_id else "executed",
-                "requestOnly": "material-preset" in package_id,
+                "runtimeStatus": (
+                    "loaded"
+                    if package_id in {
+                        "community.examples.material-preset-pack",
+                        "community.examples.outfit-naming-helper",
+                    }
+                    else "executed"
+                ),
+                "requestOnly": package_id in {
+                    "community.examples.material-preset-pack",
+                    "community.examples.outfit-naming-helper",
+                },
                 "supportFilesVerified": True,
                 "directTargetCalls": 0,
                 "runtimeResultVerified": True,
@@ -869,7 +879,10 @@ def test_skill_ecosystem_smoke_requires_full_packaged_contract(tmp_path):
     assert_missing_or_invalid(("processBoundary", "processNamesEver"), ["VRCForge.exe"])
     assert_missing_or_invalid(("processBoundary", "samplingErrorCount"), 1)
 
-    material_package_index = package_ids.index("community.examples.material-preset-pack")
+    request_only_package_indexes = (
+        package_ids.index("community.examples.material-preset-pack"),
+        package_ids.index("community.examples.outfit-naming-helper"),
+    )
     for package_index in range(len(package_ids)):
         assert_missing_or_invalid(("packages", package_index, "supportFilesVerified"), False)
     numeric_type_cases = ("not-a-number", True, False, None)
@@ -879,7 +892,10 @@ def test_skill_ecosystem_smoke_requires_full_packaged_contract(tmp_path):
         ("processBoundary", "trackedGenerationCountEver"),
         ("processBoundary", "trackedUniquePidCountEver"),
         ("processBoundary", "descendantGenerationCountEver"),
-        ("packages", material_package_index, "directTargetCalls"),
+        *(
+            ("packages", package_index, "directTargetCalls")
+            for package_index in request_only_package_indexes
+        ),
     ):
         for invalid_value in numeric_type_cases:
             invalid = json.loads(json.dumps(baseline))
@@ -891,6 +907,10 @@ def test_skill_ecosystem_smoke_requires_full_packaged_contract(tmp_path):
             rejected = gate.check_skill_ecosystem_smoke(path, "1.3.0", payload_sha, manifest_commit)
             label = ".".join(str(part) for part in parts)
             assert rejected["ok"] is False, f"{label} invalid={invalid_value!r}"
+
+    for package_index in request_only_package_indexes:
+        assert_missing_or_invalid(("packages", package_index, "requestOnly"), False)
+        assert_missing_or_invalid(("packages", package_index, "runtimeStatus"), "executed")
 
     for invalid_value in (True, False, "0", "not-a-number"):
         invalid = json.loads(json.dumps(baseline))
