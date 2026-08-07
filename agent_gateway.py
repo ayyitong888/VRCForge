@@ -2172,66 +2172,14 @@ class AgentGateway:
         config: AgentGatewayConfig | None = None,
         exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
     ) -> dict[str, Any]:
-        exposure_layer = normalize_exposure_layer(exposure_layer)
-        config = config or self.ensure_config()
-        builtin_skills = self._builtin_skill_definitions(config)
-        user_skills = self._load_user_skills()
-        skills = [*builtin_skills, *user_skills]
-        skills = [self._decorate_skill_validation(skill, config) for skill in skills]
-        if exposure_layer == EXPOSURE_LAYER_PLANNING:
-            skills = [skill for skill in skills if not bool(skill.get("write"))]
-        available_count = sum(1 for skill in skills if skill.get("available") and skill.get("enabled", True))
-        warning_count = sum(1 for skill in skills if ensure_dict(skill.get("validation")).get("status") == "warning")
-        error_count = sum(1 for skill in skills if ensure_dict(skill.get("validation")).get("status") == "error")
-        return {
-            "ok": True,
-            "schema": "vrcforge.skills.v1",
-            "exposureLayer": exposure_layer,
-            "skills": skills,
-            "count": len(skills),
-            "availableCount": available_count,
-            "builtinCount": len(builtin_skills),
-            "userCount": len(user_skills),
-            "warningCount": warning_count,
-            "errorCount": error_count,
-            "storage": {
-                "scope": "user-data",
-                "writable": True,
-                "path": str(self.user_skills_dir),
-            },
-        }
+        return self._skill_registry._impl_build_skill_registry(config, exposure_layer)
 
     def check_skill_registry(
         self,
         config: AgentGatewayConfig | None = None,
         exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
     ) -> dict[str, Any]:
-        config = config or self.ensure_config()
-        registry = self.build_skill_registry(config, exposure_layer)
-        checks = []
-        for skill in registry["skills"]:
-            validation = ensure_dict(skill.get("validation"))
-            checks.append(
-                {
-                    "name": skill.get("name"),
-                    "title": skill.get("title"),
-                    "source": skill.get("source"),
-                    "skillType": skill.get("skillType"),
-                    "status": validation.get("status") or ("ok" if skill.get("available") else "warning"),
-                    "reasons": ensure_string_list(validation.get("reasons")),
-                    "available": bool(skill.get("available")),
-                }
-            )
-        errors = [item for item in checks if item["status"] == "error"]
-        warnings = [item for item in checks if item["status"] == "warning"]
-        return {
-            "ok": not errors,
-            "schema": "vrcforge.skills.check.v1",
-            "count": len(checks),
-            "errorCount": len(errors),
-            "warningCount": len(warnings),
-            "checks": checks,
-        }
+        return self._skill_registry._impl_check_skill_registry(config, exposure_layer)
 
     def create_user_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._skill_registry._impl_create_user_skill(payload)

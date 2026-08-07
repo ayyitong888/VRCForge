@@ -12,8 +12,8 @@ from agent_skill_registry import AgentSkillRegistryService
 
 
 REPO_ROOT = Path(__file__).parents[1]
-AGENT_GATEWAY_MAX_BYTES = 478_996
-AGENT_GATEWAY_MAX_LF_LINES = 10_474
+AGENT_GATEWAY_MAX_BYTES = 476_574
+AGENT_GATEWAY_MAX_LF_LINES = 10_422
 MOVED_METHODS = {
     "_builtin_skill_definitions",
     "_skill_from_builtin_group",
@@ -33,8 +33,16 @@ MOVED_METHODS = {
     "create_user_skill",
     "update_user_skill",
     "delete_user_skill",
+    "build_skill_registry",
+    "check_skill_registry",
 }
-PUBLIC_CRUD_METHODS = {"create_user_skill", "update_user_skill", "delete_user_skill"}
+PUBLIC_SERVICE_METHODS = {
+    "create_user_skill",
+    "update_user_skill",
+    "delete_user_skill",
+    "build_skill_registry",
+    "check_skill_registry",
+}
 
 
 def _gateway(root: Path) -> AgentGateway:
@@ -134,6 +142,69 @@ def test_skill_registry_crud_preserves_not_found_and_link_delete_refusal(monkeyp
             gateway.delete_user_skill("blocked")
 
 
+def test_skill_registry_read_model_keeps_host_facades_and_contract() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        config = gateway.ensure_config()
+        calls: list[str] = []
+        builtin = [
+            {"name": "builtin-read", "write": False, "available": True, "enabled": True},
+            {"name": "builtin-write", "write": True, "available": True, "enabled": True},
+        ]
+        user = [{"name": "user-read", "write": False, "available": True, "enabled": True}]
+
+        gateway.ensure_config = lambda: config  # type: ignore[method-assign]
+        gateway._builtin_skill_definitions = lambda received: calls.append(f"builtin:{received is config}") or builtin  # type: ignore[method-assign]
+        gateway._load_user_skills = lambda: calls.append("user") or user  # type: ignore[method-assign]
+
+        def decorate(skill: dict[str, object], received: object) -> dict[str, object]:
+            calls.append(f"decorate:{skill['name']}:{received is config}")
+            status = "error" if skill["name"] == "user-read" else "ok"
+            return {**skill, "validation": {"status": status, "reasons": []}}
+
+        gateway._decorate_skill_validation = decorate  # type: ignore[method-assign]
+        registry = gateway.build_skill_registry(exposure_layer="planning")
+
+        assert calls == [
+            "builtin:True", "user", "decorate:builtin-read:True", "decorate:builtin-write:True", "decorate:user-read:True",
+        ]
+        assert registry["schema"] == "vrcforge.skills.v1"
+        assert registry["exposureLayer"] == "planning"
+        assert [skill["name"] for skill in registry["skills"]] == ["builtin-read", "user-read"]
+        assert registry["count"] == 2
+        assert registry["builtinCount"] == 2
+        assert registry["userCount"] == 1
+        assert registry["availableCount"] == 2
+        assert registry["warningCount"] == 0
+        assert registry["errorCount"] == 1
+        assert registry["storage"] == {"scope": "user-data", "writable": True, "path": str(gateway.user_skills_dir)}
+
+
+def test_skill_registry_check_keeps_build_registry_late_bound() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        config = object()
+        calls: list[tuple[object, str]] = []
+        gateway.build_skill_registry = lambda received, exposure: calls.append((received, exposure)) or {  # type: ignore[method-assign]
+            "skills": [
+                {"name": "warning", "title": "Warning", "source": "user", "skillType": "package", "available": True,
+                 "validation": {"status": "warning", "reasons": ["missing binary"]}},
+                {"name": "error", "title": "Error", "source": "builtin", "skillType": "tool", "available": False,
+                 "validation": {"status": "error", "reasons": ["missing env"]}},
+            ]
+        }
+
+        checked = gateway.check_skill_registry(config, "planning")
+
+        assert calls == [(config, "planning")]
+        assert checked["schema"] == "vrcforge.skills.check.v1"
+        assert checked["ok"] is False
+        assert checked["count"] == 2
+        assert checked["warningCount"] == 1
+        assert checked["errorCount"] == 1
+        assert checked["checks"][0]["reasons"] == ["missing binary"]
+
+
 def test_skill_registry_facades_are_exact_delegate_only_and_keep_domain_boundary() -> None:
     gateway_class = _class_definition(REPO_ROOT / "agent_gateway.py", "AgentGateway")
     service_class = _class_definition(REPO_ROOT / "agent_skill_registry.py", "AgentSkillRegistryService")
@@ -145,7 +216,7 @@ def test_skill_registry_facades_are_exact_delegate_only_and_keep_domain_boundary
     implementation_methods = {
         (
             node.name.removeprefix("_impl_")
-            if node.name.removeprefix("_impl_") in PUBLIC_CRUD_METHODS
+            if node.name.removeprefix("_impl_") in PUBLIC_SERVICE_METHODS
             else f"_{node.name.removeprefix('_impl_')}"
         ): node
         for node in service_class.body
@@ -158,8 +229,8 @@ def test_skill_registry_facades_are_exact_delegate_only_and_keep_domain_boundary
     source = (REPO_ROOT / "agent_skill_registry.py").read_text(encoding="utf-8")
     assert "execute_runtime_skill" not in source
     assert "build_path_to_skill_source" not in source
-    assert "_impl_build_skill_registry" not in source
-    assert "_impl_check_skill_registry" not in source
+    assert "_impl_build_manifest" not in source
+    assert "_impl_build_health" not in source
     assert "_match_package_skill_route" not in source
 
     for method_name, implementation in implementation_methods.items():

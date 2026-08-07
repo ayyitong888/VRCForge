@@ -13,6 +13,8 @@ from agent_gateway import (
     AgentGatewayError,
     AgentTool,
     AgentWriteHandler,
+    EXPOSURE_LAYER_EXECUTION,
+    EXPOSURE_LAYER_PLANNING,
     PROJECTED_SKILL_STATE_MAX_BYTES,
     PROJECTED_SKILL_STATE_NAME,
     PROJECTED_SKILL_STATE_SCHEMA,
@@ -25,11 +27,13 @@ from agent_gateway import (
     _path_has_link_like_parent,
     current_os_key,
     ensure_string_list,
+    ensure_dict,
     first_payload_value,
     normalize_bool,
     normalize_risk_level,
     normalize_skill_id,
     normalize_skill_permission,
+    normalize_exposure_layer,
     parse_skill_markdown,
     remove_tree,
     render_skill_markdown,
@@ -494,3 +498,69 @@ class AgentSkillRegistryService:
             remove_tree(skill_dir)
             self.append_audit({"event": "user_skill_deleted", "skill": skill_id})
             return {"ok": True, "deleted": skill_id, **self.build_skill_registry()}
+
+    def _impl_build_skill_registry(
+        self,
+        config: AgentGatewayConfig | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> dict[str, Any]:
+        exposure_layer = normalize_exposure_layer(exposure_layer)
+        config = config or self.ensure_config()
+        builtin_skills = self._builtin_skill_definitions(config)
+        user_skills = self._load_user_skills()
+        skills = [*builtin_skills, *user_skills]
+        skills = [self._decorate_skill_validation(skill, config) for skill in skills]
+        if exposure_layer == EXPOSURE_LAYER_PLANNING:
+            skills = [skill for skill in skills if not bool(skill.get("write"))]
+        available_count = sum(1 for skill in skills if skill.get("available") and skill.get("enabled", True))
+        warning_count = sum(1 for skill in skills if ensure_dict(skill.get("validation")).get("status") == "warning")
+        error_count = sum(1 for skill in skills if ensure_dict(skill.get("validation")).get("status") == "error")
+        return {
+            "ok": True,
+            "schema": "vrcforge.skills.v1",
+            "exposureLayer": exposure_layer,
+            "skills": skills,
+            "count": len(skills),
+            "availableCount": available_count,
+            "builtinCount": len(builtin_skills),
+            "userCount": len(user_skills),
+            "warningCount": warning_count,
+            "errorCount": error_count,
+            "storage": {
+                "scope": "user-data",
+                "writable": True,
+                "path": str(self.user_skills_dir),
+            },
+        }
+
+    def _impl_check_skill_registry(
+        self,
+        config: AgentGatewayConfig | None = None,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> dict[str, Any]:
+        config = config or self.ensure_config()
+        registry = self.build_skill_registry(config, exposure_layer)
+        checks = []
+        for skill in registry["skills"]:
+            validation = ensure_dict(skill.get("validation"))
+            checks.append(
+                {
+                    "name": skill.get("name"),
+                    "title": skill.get("title"),
+                    "source": skill.get("source"),
+                    "skillType": skill.get("skillType"),
+                    "status": validation.get("status") or ("ok" if skill.get("available") else "warning"),
+                    "reasons": ensure_string_list(validation.get("reasons")),
+                    "available": bool(skill.get("available")),
+                }
+            )
+        errors = [item for item in checks if item["status"] == "error"]
+        warnings = [item for item in checks if item["status"] == "warning"]
+        return {
+            "ok": not errors,
+            "schema": "vrcforge.skills.check.v1",
+            "count": len(checks),
+            "errorCount": len(errors),
+            "warningCount": len(warnings),
+            "checks": checks,
+        }
