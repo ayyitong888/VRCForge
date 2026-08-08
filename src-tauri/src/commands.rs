@@ -825,10 +825,11 @@ pub fn record_agent_run_queued(
     )
 }
 
-pub(crate) fn approval_scope_body(request: &DesktopApprovalScopeRequest) -> serde_json::Value {
-    let expected_project_root = request
-        .expected_project_root
-        .as_deref()
+pub(crate) fn normalized_approval_scope_body(
+    expected_project_root: Option<&str>,
+    global_only: Option<bool>,
+) -> serde_json::Value {
+    let expected_project_root = expected_project_root
         .map(str::trim)
         .filter(|value| !value.is_empty());
     // A request without an exact project root is a no-project/global action.
@@ -836,17 +837,36 @@ pub(crate) fn approval_scope_body(request: &DesktopApprovalScopeRequest) -> serd
     // `globalOnly: false`, because the backend cannot bind that action to the
     // project that owns the pending approval.
     let global_only = if expected_project_root.is_some() {
-        request.global_only.unwrap_or(false)
+        global_only.unwrap_or(false)
     } else {
         true
     };
-    let mut body = serde_json::json!({
+    serde_json::json!({
         "expectedProjectRoot": expected_project_root,
         "globalOnly": global_only,
-    });
+    })
+}
+
+pub(crate) fn approval_scope_body(request: &DesktopApprovalScopeRequest) -> serde_json::Value {
+    let mut body = normalized_approval_scope_body(
+        request.expected_project_root.as_deref(),
+        request.global_only,
+    );
     if let Some(allow_future_category) = request.allow_future_category {
         body["allowFutureCategory"] = serde_json::Value::Bool(allow_future_category);
     }
+    body
+}
+
+pub(crate) fn approval_revision_body(
+    request: &DesktopApprovalRevisionRequest,
+) -> serde_json::Value {
+    let mut body = normalized_approval_scope_body(
+        request.expected_project_root.as_deref(),
+        request.global_only,
+    );
+    body["reason"] = serde_json::Value::String(request.reason.clone().unwrap_or_default());
+    body["note"] = serde_json::Value::String(request.note.clone().unwrap_or_default());
     body
 }
 
@@ -893,12 +913,7 @@ pub fn request_approval_revision(
             "/api/app/agent/approvals/{}/revision",
             percent_encode_query_component(&request.approval_id)
         ),
-        Some(serde_json::json!({
-            "reason": request.reason,
-            "note": request.note,
-            "expectedProjectRoot": request.expected_project_root,
-            "globalOnly": request.global_only,
-        })),
+        Some(approval_revision_body(&request)),
         request.timeout_ms.or(Some(60_000)),
     )
 }

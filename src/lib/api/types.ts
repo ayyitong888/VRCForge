@@ -244,12 +244,17 @@ export type SupportBundleResult = {
 export type AgentApproval = {
   id: string;
   status: string;
+  /** Present only for a background Goal delivery; interactive revision stays unavailable. */
+  goalDeliveryId?: string;
   projectRoot?: string;
   targetTool?: string;
   riskLevel?: string;
   reason?: string;
   allowFutureEligible?: boolean;
   createdAt?: string;
+  revisionRequestedAt?: string;
+  revisionReason?: string;
+  revisionNote?: string;
   arguments?: Record<string, unknown>;
   paramsSummary?: Record<string, unknown>;
   preview?: {

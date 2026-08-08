@@ -1,4 +1,4 @@
-import { ChevronDown, X } from "lucide-react";
+import { ChevronDown, Pencil, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { presentApproval } from "../../lib/approval-presentation";
 import type { AgentApproval } from "../../lib/api";
@@ -13,9 +13,10 @@ type ScopedPendingApprovalCardProps = {
   disabled: boolean;
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
+  onModifyApproval: (approval: AgentApproval) => void;
 };
 
-export function ScopedPendingApprovalCard({ approvals, actions, disabled, onApprove, onReject }: ScopedPendingApprovalCardProps) {
+export function ScopedPendingApprovalCard({ approvals, actions, disabled, onApprove, onReject, onModifyApproval }: ScopedPendingApprovalCardProps) {
   const { t } = useTranslation();
   const visibleApprovals = approvals.filter((approval) => !["approve", "reject"].includes(actions[approval.id] || ""));
 
@@ -78,6 +79,12 @@ export function ScopedPendingApprovalCard({ approvals, actions, disabled, onAppr
                   {action === "reject" ? t("approval.rejecting") : t("approval.reject")}
                 </Button>
                 <div className="ml-auto flex flex-wrap justify-end gap-2">
+                  {!approval.goalDeliveryId?.trim() ? (
+                    <Button variant="outline" disabled={busy} onClick={() => onModifyApproval(approval)}>
+                      <Pencil className="h-4 w-4" />
+                      {action === "modify" ? t("approval.modifying") : t("approval.modify")}
+                    </Button>
+                  ) : null}
                   <ApprovalAllowSplitButton
                     approvalId={approval.id}
                     allowFutureEligible={approval.allowFutureEligible === true}

@@ -299,16 +299,17 @@ fn show_main_window(app: &tauri::AppHandle) {
 mod tests {
     use super::{
         advanced_settings_update_body, app_session_challenge_signature,
-        app_session_challenge_signature_matches, app_window_title, approval_scope_body,
-        developer_options_challenge_path, diagnostics_update_body, extract_challenge_signature,
-        force_child_exit, hmac_sha256_hex, percent_encode_query_component, prepare_runtime_files,
-        primitive_live_bootstrap_requested, provider_config_body, resolve_logs_folder,
-        runtime_session_verification_error, sanitize_backend_event, sanitize_text_for_webview,
-        sanitize_webview_response, send_backend_graceful_shutdown_request_to,
-        stop_managed_backend_child, tauri_ipc_bridge_proof, try_ensure_agent_notes_file,
-        validate_local_folder_to_open, validate_primitive_live_bootstrap,
-        validate_project_folder_to_open, wait_for_child_exit, webview2_args_with_accessibility,
-        webview_error_message, BackendState, DesktopAdvancedSettingsUpdateRequest,
+        app_session_challenge_signature_matches, app_window_title, approval_revision_body,
+        approval_scope_body, developer_options_challenge_path, diagnostics_update_body,
+        extract_challenge_signature, force_child_exit, hmac_sha256_hex,
+        percent_encode_query_component, prepare_runtime_files, primitive_live_bootstrap_requested,
+        provider_config_body, resolve_logs_folder, runtime_session_verification_error,
+        sanitize_backend_event, sanitize_text_for_webview, sanitize_webview_response,
+        send_backend_graceful_shutdown_request_to, stop_managed_backend_child,
+        tauri_ipc_bridge_proof, try_ensure_agent_notes_file, validate_local_folder_to_open,
+        validate_primitive_live_bootstrap, validate_project_folder_to_open, wait_for_child_exit,
+        webview2_args_with_accessibility, webview_error_message, BackendState,
+        DesktopAdvancedSettingsUpdateRequest, DesktopApprovalRevisionRequest,
         DesktopApprovalScopeRequest, DesktopDiagnosticsUpdateRequest,
         BACKEND_GRACEFUL_SHUTDOWN_METHOD, BACKEND_GRACEFUL_SHUTDOWN_PATH,
         DESKTOP_AGENT_MESSAGE_TIMEOUT_MS, PRIMITIVE_LIVE_BOOTSTRAP_MAGIC,
@@ -866,6 +867,22 @@ mod tests {
             assert_eq!(body["globalOnly"], true);
             assert_eq!(body["expectedProjectRoot"], serde_json::Value::Null);
         }
+    }
+
+    #[test]
+    fn approval_revision_uses_the_same_normalized_scope() {
+        let request: DesktopApprovalRevisionRequest = serde_json::from_value(serde_json::json!({
+            "approvalId": "approval-id",
+            "expectedProjectRoot": "   ",
+            "globalOnly": false,
+            "reason": "change requested",
+        }))
+        .expect("revision request should deserialize");
+        let body = approval_revision_body(&request);
+        assert_eq!(body["globalOnly"], true);
+        assert_eq!(body["expectedProjectRoot"], serde_json::Value::Null);
+        assert_eq!(body["reason"], "change requested");
+        assert_eq!(body["note"], "");
     }
 
     #[test]

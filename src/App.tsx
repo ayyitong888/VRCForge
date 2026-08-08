@@ -1003,7 +1003,6 @@ export default function App() {
     setAttachments,
     setRuntimeNotice,
     setError,
-    formatPayload,
     appendToChat,
     refresh,
     refreshRuntimeRuns,

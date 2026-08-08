@@ -218,6 +218,9 @@ export function conversationItemText(item: ConversationItem, t: TFunction): stri
   if (item.type === "result") {
     return [item.result ? formatPayload(item.result) : "", item.error || ""].filter(Boolean).join("\n\n");
   }
+  if (item.type === "approval_revision") {
+    return [item.approvalId, item.targetTool, item.reason, item.note].filter(Boolean).join("\n");
+  }
   if (item.type === "error") {
     return item.text;
   }

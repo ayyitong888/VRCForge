@@ -47,6 +47,7 @@ export function ConversationCard({
   onRetryItem,
   onEditItem,
   onFeedbackItem,
+  onModifyApproval,
   onImportAttachment,
   onOpenSettings,
   onOpenDoctor,
@@ -167,6 +168,19 @@ export function ConversationCard({
             onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           />
+        </div>
+      </div>
+    );
+  }
+
+  if (item.type === "approval_revision") {
+    return (
+      <div className="group flex justify-start" data-approval-revision={item.approvalId}>
+        <div className="relative w-full max-w-[85%] rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+          <div className="font-medium text-foreground">{t("approval.revisionRequestedTitle")}</div>
+          <p className="mt-1">{t("approval.revisionRequestedDescription", { target: item.targetTool || t("approval.thisApproval") })}</p>
+          <p className="mt-1">{t("approval.revisionAwaitingUserInput")}</p>
+          <MessageActions createdAt={item.createdAt || item.id} onCopy={() => onCopyItem?.(item)} />
         </div>
       </div>
     );
@@ -391,7 +405,7 @@ export function ConversationCard({
 
         {approval && approvalAction !== "approve" && approvalAction !== "reject" ? (
           <div style={{ order: timelineOrder.approval }}>
-            <InlineApprovalCard approval={approval} />
+            <InlineApprovalCard approval={approval} action={approvalAction} onModify={onModifyApproval} />
           </div>
         ) : awaitingApproval ? (
           <div className="flex items-center gap-2 px-1 py-1 text-xs text-amber-700" style={{ order: timelineOrder.approval }}>
@@ -801,18 +815,28 @@ function RunRow({
 
 function InlineApprovalCard({
   approval,
+  action,
+  onModify,
 }: {
   approval: AgentApproval;
+  action?: ApprovalActionState;
+  onModify?: (approval: AgentApproval) => void;
 }) {
   const { t } = useTranslation();
   const presentation = presentApproval(approval, t);
   return (
     <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
-      <span className="min-w-0 text-muted-foreground">
+      <div className="min-w-0 flex-1 text-muted-foreground">
         <span className="font-medium text-foreground">{presentation.title}</span>
         {` — ${t("approval.awaitingInline")}`}
-      </span>
+      </div>
+      {!approval.goalDeliveryId?.trim() ? (
+        <Button type="button" variant="outline" className="h-7 shrink-0 px-2 text-xs" disabled={Boolean(action)} onClick={() => onModify?.(approval)}>
+          <Pencil className="h-3.5 w-3.5" />
+          {action === "modify" ? t("approval.modifying") : t("approval.modify")}
+        </Button>
+      ) : null}
     </div>
   );
 }

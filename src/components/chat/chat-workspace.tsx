@@ -173,6 +173,7 @@ export function ChatWorkspace({
       disabled={sending}
       onApprove={onApprove}
       onReject={onReject}
+      onModifyApproval={onModifyApproval}
     />
   ) : null;
 

@@ -23,7 +23,6 @@ type UseApprovalExecutionParams = {
   setAttachments: Dispatch<SetStateAction<ChatAttachment[]>>;
   setRuntimeNotice: (message: string) => void;
   setError: (message: string) => void;
-  formatPayload: (value: unknown) => string;
   appendToChat: (chatId: string, item: ConversationItem) => void;
   refresh: (target?: string) => Promise<void>;
   refreshRuntimeRuns: (includeEvents?: boolean, target?: string) => Promise<void>;
@@ -42,7 +41,6 @@ export function useApprovalExecution({
   setAttachments,
   setRuntimeNotice,
   setError,
-  formatPayload,
   appendToChat,
   refresh,
   refreshRuntimeRuns,
@@ -68,34 +66,56 @@ export function useApprovalExecution({
   }
 
   async function modifyApprovalInComposer(approval: AgentApproval) {
-    const target = approval.targetTool || approval.preview?.command || t("approval.thisApproval");
-    const detail = approval.paramsSummary || approval.arguments || approval.preview || {};
-    const approvalContext = [
-      `${t("approval.contextPending")}: ${approval.id}`,
-      `${t("approval.contextTarget")}: ${target}`,
-      approval.reason ? `${t("approval.contextReason")}: ${approval.reason}` : "",
-      `${t("approval.contextDetails")}:\n${formatPayload(detail)}`,
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    setInput((current) => {
-      const prefix = current.trim() ? `${current.trimEnd()}\n\n` : "";
-      return `${prefix}${t("approval.modifyPrompt", { id: approval.id, target })}\n`;
-    });
-    setAttachments((current) => [
-      ...current,
-      textContextAttachment(t("approval.pendingContextTitle"), approvalContext),
-    ].slice(0, maxAttachmentsPerTurn));
-    setRuntimeNotice(t("approval.modifyNotice"));
+    // Goal-linked approvals have durable terminal semantics. They cannot be
+    // converted into an interactive revision turn from the chat UI.
+    if (approval.goalDeliveryId?.trim()) {
+      return;
+    }
+    const target = approval.targetTool || t("approval.thisApproval");
+    const reason = t("approval.revisionReason");
+    const note = t("approval.revisionNote", { id: approval.id, target });
     setApprovalActions((current) => ({ ...current, [approval.id]: "modify" }));
     setError("");
     const approvalScope = scopeForApproval(approval.id);
     try {
-      await requestApprovalRevision(endpoint, approval.id, {
-        reason: t("approval.revisionReason"),
-        note: t("approval.revisionNote", { id: approval.id, target }),
+      const payload = await requestApprovalRevision(endpoint, approval.id, {
+        reason,
+        note,
         ...approvalScope,
       });
+      if (!payload.ok) {
+        throw new Error(payload.message || t("approval.notificationFailed"));
+      }
+      const revisedApproval = payload.approval || approval;
+      const safeTarget = revisedApproval.targetTool || approval.targetTool || "";
+      const requestedAt = revisedApproval.revisionRequestedAt || new Date().toISOString();
+      const approvalContext = [
+        `${t("approval.contextPending")}: ${approval.id}`,
+        `${t("approval.contextTarget")}: ${safeTarget || t("approval.thisApproval")}`,
+        t("approval.revisionAwaitingUserInput"),
+      ].join("\n");
+      if (activeChatId) {
+        appendToChat(activeChatId, {
+          id: `approval-revision-${approval.id}-${Date.now()}`,
+          type: "approval_revision",
+          approvalId: approval.id,
+          targetTool: safeTarget,
+          requestedAt,
+          reason,
+          note,
+          status: "awaiting_user_input",
+          createdAt: requestedAt,
+        });
+      }
+      setInput((current) => {
+        const prefix = current.trim() ? `${current.trimEnd()}\n\n` : "";
+        return `${prefix}${t("approval.modifyPrompt", { id: approval.id, target: safeTarget || target })}\n`;
+      });
+      setAttachments((current) => [
+        ...current,
+        textContextAttachment(t("approval.pendingContextTitle"), approvalContext),
+      ].slice(0, maxAttachmentsPerTurn));
+      setRuntimeNotice(t("approval.modifyNotice"));
       await refresh();
       await refreshRuntimeRuns(false);
     } catch (cause) {

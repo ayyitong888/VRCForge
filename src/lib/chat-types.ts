@@ -120,6 +120,17 @@ export type ConversationItem =
   | { id: string; type: "streaming"; clientTurnId: string; text: string; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
+  | {
+      id: string;
+      type: "approval_revision";
+      approvalId: string;
+      targetTool: string;
+      requestedAt: string;
+      reason: string;
+      note: string;
+      status: "awaiting_user_input";
+      createdAt?: string;
+    }
   | { id: string; type: "error"; text: string; createdAt?: string }
   | { id: string; type: "compact"; text: string; detail?: string; status?: "running" | "completed"; entryCount?: number; beforeTokens?: number; afterTokens?: number; contextLimit?: number; createdAt?: string }
   | { id: string; type: "subagent"; task: SubAgentTask };
