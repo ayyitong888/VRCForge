@@ -8,12 +8,23 @@ from types import SimpleNamespace
 
 import pytest
 
-import dashboard_server
-from model_provider_adapters import ProviderCredentialError
+from model_provider_adapters import (
+    ProviderCredentialError,
+    provider_model_descriptor,
+    validate_provider_api_key,
+)
+from provider_configuration_service import ProviderApiConfig
+from provider_model_catalog_service import (
+    ProviderModelCatalogPolicyPorts,
+    ProviderModelCatalogService,
+    default_provider_model_catalog_sdk_ports,
+)
 from provider_runtime_adapters import DeepSeekResponsesAdapter, ProviderRuntimeRequest
 from vrchat_blendshape_agent import (
     Settings,
     build_openai_compatible_request_payload,
+    provider_display_name,
+    provider_requires_api_key,
     request_deepseek_responses_plan_with_metadata,
     request_llm_plan_with_metadata,
 )
@@ -242,9 +253,21 @@ def test_installed_openai_sdk_lists_models_at_configured_base_url_with_bearer_an
 
     pytest.importorskip("openai")
     records: list[dict] = []
+    catalog = ProviderModelCatalogService(
+        ProviderModelCatalogPolicyPorts(
+            validate_provider_api_key=validate_provider_api_key,
+            provider_requires_api_key=provider_requires_api_key,
+            provider_display_name=provider_display_name,
+            provider_model_descriptor=provider_model_descriptor,
+            resolve_vertex_project_location=lambda _value: pytest.fail(
+                "unexpected Vertex resolution"
+            ),
+        ),
+        default_provider_model_catalog_sdk_ports(),
+    )
     with _loopback_models_server(records) as base_url:
-        models = dashboard_server.fetch_openai_compatible_models(
-            dashboard_server.DashboardApiConfig(
+        models = catalog.fetch_openai_compatible_models(
+            ProviderApiConfig(
                 provider="deepseek",
                 api_key="test-models-key",
                 base_url=base_url,

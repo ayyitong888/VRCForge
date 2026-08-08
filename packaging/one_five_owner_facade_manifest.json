@@ -166,77 +166,13 @@
       "hostProxy": {"source": "project_catalog_discovery.py", "class": "ProjectCatalogDiscovery"}
     },
     {
-      "id": "dashboard.provider-configuration-host-proxy",
+      "id": "dashboard.provider-typed-root-owners",
       "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "_PROVIDER_CONFIGURATION"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "serialize_app_api_config",
-            "load_initial_dashboard_api_config",
-            "load_initial_dashboard_vision_config",
-            "normalize_vision_config_request",
-            "load_config_document",
-            "normalize_api_config_request",
-            "save_dashboard_config_document",
-            "save_dashboard_api_config",
-            "save_dashboard_vision_config",
-            "serialize_api_config",
-            "serialize_vision_config",
-            "serialize_app_vision_config",
-            "build_effective_model_summary",
-            "mask_secret"
-          ]
-        }
-      ],
-      "hostProxy": {"source": "provider_configuration_service.py", "class": "ProviderConfigurationService"}
-    },
-    {
-      "id": "dashboard.provider-model-catalog-host-proxy",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "_PROVIDER_MODEL_CATALOG"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "provider_config_descriptor",
-            "enrich_provider_model_item",
-            "fetch_provider_models",
-            "fetch_openai_compatible_models",
-            "fetch_google_ai_studio_models",
-            "fetch_vertex_ai_models",
-            "fetch_anthropic_models",
-            "normalize_provider_model_list",
-            "read_model_attr",
-            "coerce_positive_int",
-            "build_provider_model_info"
-          ]
-        }
-      ],
-      "hostProxy": {"source": "provider_model_catalog_service.py", "class": "ProviderModelCatalogService"}
-    },
-    {
-      "id": "dashboard.provider-test-host-proxy",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "_PROVIDER_TEST_INTEGRATION"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "run_provider_test_sync",
-            "_run_provider_text_probe",
-            "_provider_probe_settings"
-          ]
-        }
-      ],
-      "hostProxy": {"source": "provider_test_integration_service.py", "class": "ProviderTestIntegrationService"}
+        {"source": "dashboard_server.py", "scope": "module", "name": "PROVIDER_MODEL_CATALOG"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "PROVIDER_CONFIGURATION"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "PROVIDER_TEXT_PROBE"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "PROVIDER_TESTS"}
+      ]
     },
     {
       "id": "dashboard.provider-vision-host-proxy",

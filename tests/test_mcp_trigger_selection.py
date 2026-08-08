@@ -5,12 +5,48 @@ from dataclasses import dataclass
 import pytest
 from fastapi.testclient import TestClient
 
+import dashboard_server
 from mcp_trigger_selection import SelectionReceiptAuthority, plan_mcp_tool_selection, tools_for_exposure_layer
+from provider_configuration_service import ProviderApiConfig
+from provider_test_integration_service import ProviderTestIntegrationService, ProviderTestServicePorts
 
 
 @dataclass
 class Response:
     text: str
+
+
+class FakeSelectionProbe:
+    def __init__(self, response: str) -> None:
+        self.response = response
+        self.calls: list[tuple[ProviderApiConfig, str, bool]] = []
+
+    def probe(
+        self,
+        config: ProviderApiConfig,
+        prompt: str,
+        *,
+        structured: bool = False,
+    ) -> str:
+        self.calls.append((config, prompt, structured))
+        return self.response
+
+
+def selection_service(probe: FakeSelectionProbe) -> ProviderTestIntegrationService:
+    return ProviderTestIntegrationService(
+        ProviderTestServicePorts(
+            resolve_api_request=lambda request: request,
+            normalize_provider_name=lambda provider: provider,
+            provider_display_name=lambda provider: provider,
+            provider_config_descriptor=lambda _config: {
+                "apiType": "responses",
+                "resolvedApiType": "responses",
+            },
+            provider_requires_api_key=lambda _provider: True,
+            extract_json_block=lambda text: text,
+        ),
+        probe,
+    )
 
 
 TOOLS = [{
@@ -149,82 +185,111 @@ def test_exposure_layer_filters_writes_and_is_bound_into_receipts() -> None:
     ) is True
 
 
-def test_dashboard_wrapper_uses_saved_config_tool_free_structured_probe_and_receipt(monkeypatch) -> None:
-    import dashboard_server
-
-    config = dashboard_server.DashboardApiConfig(
+def test_typed_selection_composition_uses_tool_free_structured_probe_and_receipt() -> None:
+    config = ProviderApiConfig(
         provider="deepseek",
         api_key="test-key",
         base_url="https://api.deepseek.com",
         model="deepseek-v4-flash",
         api_type="responses",
     )
-    observed: dict[str, object] = {}
+    probe = FakeSelectionProbe('{"toolCalls":["vrc_get_gameobject"]}')
+    service = selection_service(probe)
+    authority = SelectionReceiptAuthority()
+    binding = dashboard_server.mcp_trigger_selection_config_binding(config)
+    result = plan_mcp_tool_selection(
+        "Read Main Camera",
+        TOOLS,
+        provider=config.provider,
+        model=config.model,
+        request_text=lambda prompt: service.probe_text(config, prompt, structured=True),
+    )
+    result["providerEvidence"] = authority.issue(
+        "Read Main Camera",
+        TOOLS,
+        result,
+        provider=binding[0],
+        model=binding[1],
+        config_digest=binding[2],
+        resolved_api_type=binding[3],
+    )
 
-    def probe(actual_config, prompt: str, *, structured: bool = False) -> str:
-        observed.update(config=actual_config, prompt=prompt, structured=structured)
-        return '{"toolCalls":["vrc_get_gameobject"]}'
-
-    monkeypatch.setattr(dashboard_server, "DASHBOARD_API_CONFIG", config)
-    monkeypatch.setattr(dashboard_server, "_run_provider_text_probe", probe)
-    monkeypatch.setattr(dashboard_server, "MCP_TRIGGER_SELECTION_RECEIPTS", SelectionReceiptAuthority())
-
-    result = dashboard_server.mcp_trigger_selection_planner("Read Main Camera", TOOLS)
-
-    assert observed["config"] is config
-    assert observed["structured"] is True
-    assert "Frozen MCP tools" in str(observed["prompt"])
+    assert probe.calls[0][0] is config
+    assert probe.calls[0][2] is True
+    assert "Frozen MCP tools" in probe.calls[0][1]
     assert result["providerEvidence"]["source"] == "dashboard-selection-receipt"
-    assert dashboard_server.verify_mcp_trigger_selection_receipt("Read Main Camera", TOOLS, result) is True
-    assert dashboard_server.verify_mcp_trigger_selection_receipt("Read Main Camera", TOOLS, result) is False
+    binding_kwargs = {
+        "provider": binding[0],
+        "model": binding[1],
+        "config_digest": binding[2],
+        "resolved_api_type": binding[3],
+    }
+    assert authority.verify_and_consume("Read Main Camera", TOOLS, result, **binding_kwargs) is True
+    assert authority.verify_and_consume("Read Main Camera", TOOLS, result, **binding_kwargs) is False
 
 
-def test_dashboard_wrapper_rejects_receipt_after_saved_config_changes(monkeypatch) -> None:
-    import dashboard_server
-
-    original = dashboard_server.DashboardApiConfig(
+def test_typed_selection_receipt_rejects_changed_provider_configuration() -> None:
+    original = ProviderApiConfig(
         provider="deepseek",
         api_key="test-key",
         base_url="https://api.deepseek.com",
         model="deepseek-v4-flash",
         api_type="responses",
     )
-    changed = dashboard_server.DashboardApiConfig(
+    changed = ProviderApiConfig(
         provider="deepseek",
         api_key="test-key",
         base_url="https://api.deepseek.com/v2",
         model="deepseek-v4-flash",
         api_type="responses",
     )
-    monkeypatch.setattr(dashboard_server, "DASHBOARD_API_CONFIG", original)
-    monkeypatch.setattr(
-        dashboard_server,
-        "_run_provider_text_probe",
-        lambda *_args, **_kwargs: '{"toolCalls":["vrc_get_gameobject"]}',
+    probe = FakeSelectionProbe('{"toolCalls":["vrc_get_gameobject"]}')
+    service = selection_service(probe)
+    authority = SelectionReceiptAuthority()
+    original_binding = dashboard_server.mcp_trigger_selection_config_binding(original)
+    changed_binding = dashboard_server.mcp_trigger_selection_config_binding(changed)
+    result = plan_mcp_tool_selection(
+        "Read Main Camera",
+        TOOLS,
+        provider=original.provider,
+        model=original.model,
+        request_text=lambda prompt: service.probe_text(original, prompt, structured=True),
     )
-    monkeypatch.setattr(dashboard_server, "MCP_TRIGGER_SELECTION_RECEIPTS", SelectionReceiptAuthority())
-    result = dashboard_server.mcp_trigger_selection_planner("Read Main Camera", TOOLS)
-    monkeypatch.setattr(dashboard_server, "DASHBOARD_API_CONFIG", changed)
-    assert dashboard_server.verify_mcp_trigger_selection_receipt("Read Main Camera", TOOLS, result) is False
+    result["providerEvidence"] = authority.issue(
+        "Read Main Camera",
+        TOOLS,
+        result,
+        provider=original_binding[0],
+        model=original_binding[1],
+        config_digest=original_binding[2],
+        resolved_api_type=original_binding[3],
+    )
+    assert authority.verify_and_consume(
+        "Read Main Camera",
+        TOOLS,
+        result,
+        provider=changed_binding[0],
+        model=changed_binding[1],
+        config_digest=changed_binding[2],
+        resolved_api_type=changed_binding[3],
+    ) is False
 
 
-def test_app_selection_routes_require_app_session_and_consume_receipt(monkeypatch) -> None:
-    import dashboard_server
-
-    config = dashboard_server.DashboardApiConfig(
-        provider="deepseek",
-        api_key="test-key",
-        base_url="https://api.deepseek.com",
-        model="deepseek-v4-flash",
-        api_type="responses",
+def test_app_selection_routes_require_app_session_and_consume_typed_receipt(monkeypatch) -> None:
+    config = dashboard_server.PROVIDER_CONFIGURATION.current_api_config()
+    binding = dashboard_server.mcp_trigger_selection_config_binding(config)
+    authority = SelectionReceiptAuthority()
+    result = {"toolCalls": ["vrc_get_gameobject"]}
+    result["providerEvidence"] = authority.issue(
+        "Read Main Camera",
+        TOOLS,
+        result,
+        provider=binding[0],
+        model=binding[1],
+        config_digest=binding[2],
+        resolved_api_type=binding[3],
     )
-    monkeypatch.setattr(dashboard_server, "DASHBOARD_API_CONFIG", config)
-    monkeypatch.setattr(
-        dashboard_server,
-        "_run_provider_text_probe",
-        lambda *_args, **_kwargs: '{"toolCalls":["vrc_get_gameobject"]}',
-    )
-    monkeypatch.setattr(dashboard_server, "MCP_TRIGGER_SELECTION_RECEIPTS", SelectionReceiptAuthority())
+    monkeypatch.setattr(dashboard_server, "MCP_TRIGGER_SELECTION_RECEIPTS", authority)
     monkeypatch.setattr(dashboard_server, "APP_AUTH_REQUIRED", True)
     monkeypatch.setattr(dashboard_server, "APP_SESSION_TOKEN", "selection-route-test-token")
     client = TestClient(dashboard_server.app)
@@ -232,9 +297,7 @@ def test_app_selection_routes_require_app_session_and_consume_receipt(monkeypatc
 
     assert client.post("/api/app/provider/mcp-selection", json=payload).status_code == 401
     headers = {"Authorization": "Bearer selection-route-test-token"}
-    issue = client.post("/api/app/provider/mcp-selection", json=payload, headers=headers)
-    assert issue.status_code == 200
-    verify_payload = {**payload, "result": issue.json()}
+    verify_payload = {**payload, "result": result}
     verified = client.post(
         "/api/app/provider/mcp-selection/verify",
         json=verify_payload,

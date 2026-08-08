@@ -175,7 +175,7 @@ from model_provider_adapters import (
     provider_model_descriptor,
     validate_provider_api_key,
 )
-from provider_runtime_adapters import DeepSeekResponsesAdapter, ProviderRuntimeRequest
+from provider_runtime_adapters import ProviderRuntimeRequest
 from prepared_unity_execution import (
     PREPARED_UNITY_EXECUTION_ARGUMENT_KEY,
     build_prepared_execution_plan,
@@ -344,9 +344,22 @@ from skill_package_projection import SkillPackageProjectionService
 from path_to_skill_controller import PathToSkillDashboardController
 from project_catalog_discovery import ProjectCatalogDiscovery
 from project_snapshot_selection_service import ProjectSnapshotSelectionPorts, ProjectSnapshotSelectionService
-from provider_model_catalog_service import ProviderModelCatalogService
-from provider_configuration_service import ProviderConfigurationService
-from provider_test_integration_service import ProviderTestIntegrationService
+from provider_model_catalog_service import (
+    ProviderModelCatalogPolicyPorts,
+    ProviderModelCatalogService,
+)
+from provider_configuration_service import (
+    ProviderApiConfig,
+    ProviderConfigurationPersistencePorts,
+    ProviderConfigurationPolicyPorts,
+    ProviderConfigurationService,
+)
+from provider_test_integration_service import (
+    ProviderProbePolicyPorts,
+    ProviderTestIntegrationService,
+    ProviderTestServicePorts,
+    ProviderTextProbeRunner,
+)
 from provider_vision_service import (
     ProviderVisionPolicyPorts,
     ProviderVisionSdkRunner,
@@ -1802,35 +1815,8 @@ class AgentCompactRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-@dataclass
-class DashboardApiConfig:
-    provider: str
-    api_key: str
-    base_url: str
-    model: str
-    # Requested API transport. Normalized requests persist an explicit value;
-    # legacy exact DeepSeek Flash records are migrated to auto/Responses.
-    api_type: str | None = None
-    # Normalized model-aware reasoning variant. The vision lane constructs
-    # configs without it on purpose, so vision requests never inherit it.
-    thinking_level: str = ""
-
-
-@dataclass
-class DashboardVisionConfig:
-    provider: str = ""
-    api_key: str = ""
-    base_url: str = ""
-    model: str = ""
-    enabled: bool = False
-
-    @property
-    def configured(self) -> bool:
-        return bool(self.provider and self.model)
-
-
 def _current_provider_vision_main_config() -> VisionModelConfig:
-    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    config = PROVIDER_CONFIGURATION.current_api_config()
     return VisionModelConfig(
         provider=config.provider,
         api_key=config.api_key,
@@ -1840,7 +1826,7 @@ def _current_provider_vision_main_config() -> VisionModelConfig:
 
 
 def _current_provider_vision_profile_config() -> VisionProfileConfig:
-    config = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
+    config = PROVIDER_CONFIGURATION.current_vision_config()
     return VisionProfileConfig(
         provider=config.provider,
         api_key=config.api_key,
@@ -1973,9 +1959,71 @@ _SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 _PATH_TO_SKILL_CONTROLLER = PathToSkillDashboardController(sys.modules[__name__])
 _PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(sys.modules[__name__])
-_PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(sys.modules[__name__])
-_PROVIDER_CONFIGURATION = ProviderConfigurationService(sys.modules[__name__])
-_PROVIDER_TEST_INTEGRATION = ProviderTestIntegrationService(sys.modules[__name__])
+PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(
+    ProviderModelCatalogPolicyPorts(
+        validate_provider_api_key=validate_provider_api_key,
+        provider_requires_api_key=provider_requires_api_key,
+        provider_display_name=provider_display_name,
+        provider_model_descriptor=provider_model_descriptor,
+        resolve_vertex_project_location=lambda value: resolve_vertex_project_location(
+            value
+        ),
+    )
+)
+PROVIDER_CONFIGURATION = ProviderConfigurationService(
+    ProviderConfigurationPersistencePorts(
+        config_path=CONFIG_PATH,
+        load_runtime_settings=lambda: load_runtime_settings_safely(
+            RUNTIME_SETTINGS_PATH,
+            loader=load_settings,
+        ),
+        atomic_write_json=lambda path, payload: atomic_write_json(path, payload),
+        path_is_reparse_or_link=lambda path: _path_is_reparse_or_link(path),
+    ),
+    ProviderConfigurationPolicyPorts(
+        default_provider=DEFAULT_LLM_PROVIDER,
+        normalize_provider_name=normalize_provider_name,
+        get_provider_defaults=get_provider_defaults,
+        normalize_base_url=normalize_base_url,
+        normalize_provider_api_type=normalize_provider_api_type,
+        normalize_reasoning_effort=normalize_reasoning_effort,
+        reasoning_effort_variants=reasoning_effort_variants,
+        validate_provider_api_key=validate_provider_api_key,
+        provider_display_name=provider_display_name,
+        provider_auth_label=lambda provider: provider_auth_label(provider),
+        provider_requires_api_key=provider_requires_api_key,
+        provider_config_descriptor=PROVIDER_MODEL_CATALOG.provider_config_descriptor,
+    ),
+    CONFIG_DOCUMENT_LOCK,
+)
+PROVIDER_TEXT_PROBE = ProviderTextProbeRunner(
+    ProviderProbePolicyPorts(
+        validate_provider_api_key=validate_provider_api_key,
+        normalize_provider_api_type=normalize_provider_api_type,
+        resolve_vertex_project_location=lambda value: resolve_vertex_project_location(
+            value
+        ),
+        build_gemini_generate_config=build_gemini_generate_config,
+        build_anthropic_request_payload=build_anthropic_request_payload,
+        build_openai_compatible_request_payload=(
+            build_openai_compatible_request_payload
+        ),
+        model_rejects_fixed_temperature=model_rejects_fixed_temperature,
+        settings_factory=Settings,
+        runtime_request_factory=ProviderRuntimeRequest,
+    )
+)
+PROVIDER_TESTS = ProviderTestIntegrationService(
+    ProviderTestServicePorts(
+        resolve_api_request=PROVIDER_CONFIGURATION.resolve_api_request,
+        normalize_provider_name=normalize_provider_name,
+        provider_display_name=provider_display_name,
+        provider_config_descriptor=PROVIDER_MODEL_CATALOG.provider_config_descriptor,
+        provider_requires_api_key=provider_requires_api_key,
+        extract_json_block=extract_json_block,
+    ),
+    PROVIDER_TEXT_PROBE,
+)
 PROVIDER_VISION_POLICY = ProviderVisionPolicyPorts(
     normalize_provider_name=normalize_provider_name,
     provider_requires_api_key=provider_requires_api_key,
@@ -2023,7 +2071,7 @@ _UNITY_STATUS = UnityStatusService(
 _DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
     DoctorReadinessReportPorts(
         build_health=lambda: build_agentic_app_health(),
-        serialize_api_config=lambda: serialize_app_api_config(),
+        serialize_api_config=PROVIDER_CONFIGURATION.serialize_app_api_config,
         safe_agent_health=lambda: safe_agent_health(),
         safe_agent_manifest=lambda: safe_agent_manifest(),
         safe_permission_state=lambda: safe_permission_state(),
@@ -2072,8 +2120,6 @@ BACKGROUND_GOAL_MONITOR_TASK: asyncio.Task[None] | None = None
 BACKGROUND_GOAL_WAKE_DRAIN_TASKS: set[asyncio.Task[None]] = set()
 AGENT_MCP_INIT_TASK: asyncio.Task[None] | None = None
 DASHBOARD_STATE: DashboardState | None = None
-DASHBOARD_API_CONFIG: DashboardApiConfig | None = None
-DASHBOARD_VISION_CONFIG: DashboardVisionConfig | None = None
 DASHBOARD_RUNTIME = DashboardRuntimeState()
 AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
@@ -2346,8 +2392,10 @@ async def on_startup() -> None:
             emit_log("warn", "desktop", "Embedded desktop executor failed to start.", {"error": str(exc)})
     if AGENT_MCP_INIT_TASK is None or AGENT_MCP_INIT_TASK.done():
         AGENT_MCP_INIT_TASK = asyncio.create_task(initialize_agent_mcp_mount())
-    if not CONFIG_PATH.exists():
-        save_dashboard_api_config(DASHBOARD_API_CONFIG)
+    if not PROVIDER_CONFIGURATION.config_path.exists():
+        PROVIDER_CONFIGURATION.save_api_config(
+            PROVIDER_CONFIGURATION.current_api_config()
+        )
     if STATUS_MONITOR_TASK is None or STATUS_MONITOR_TASK.done():
         STATUS_MONITOR_TASK = asyncio.create_task(status_monitor_loop())
     if BACKGROUND_GOAL_MONITOR_TASK is None or BACKGROUND_GOAL_MONITOR_TASK.done():
@@ -2360,8 +2408,8 @@ async def on_startup() -> None:
         {
             "projectRoots": [str(path) for path in DASHBOARD_STATE.project_roots],
             "unityEditorPath": DASHBOARD_STATE.unity_editor_path,
-            "provider": DASHBOARD_API_CONFIG.provider,
-            "model": DASHBOARD_API_CONFIG.model,
+            "provider": PROVIDER_CONFIGURATION.current_api_config().provider,
+            "model": PROVIDER_CONFIGURATION.current_api_config().model,
         },
     )
 
@@ -2497,7 +2545,7 @@ def health_request_has_app_auth(request: Request) -> bool:
 def build_full_health_payload() -> dict[str, Any]:
     settings = load_runtime_settings_safely(
         RUNTIME_SETTINGS_PATH,
-        llm_override=serialize_api_config(include_secret=True),
+        llm_override=PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
         loader=load_settings,
     )
     components = build_health_components(settings)
@@ -2531,7 +2579,7 @@ def build_full_health_payload() -> dict[str, Any]:
             "unityInstance": DASHBOARD_STATE.unity_instance,
         },
         "state": serialize_dashboard_state(),
-        "apiConfig": serialize_api_config(include_secret=False),
+        "apiConfig": PROVIDER_CONFIGURATION.serialize_api_config(include_secret=False),
         "projects": project_snapshot_payload(use_cache=True, refresh_async=False),
         "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
         "unityStatus": CURRENT_UNITY_STATUS,
@@ -2607,8 +2655,8 @@ def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> di
             "legacyDashboardDebugOnly": True,
         },
         "health": build_bootstrap_app_health(refresh_projects=refresh_projects),
-        "apiConfig": serialize_app_api_config(),
-        "visionConfig": serialize_app_vision_config(),
+        "apiConfig": PROVIDER_CONFIGURATION.serialize_app_api_config(),
+        "visionConfig": PROVIDER_CONFIGURATION.serialize_app_vision_config(),
         "agentManifest": safe_agent_manifest(),
         "agentHealth": safe_agent_health(),
         "permission": safe_permission_state(),
@@ -3082,7 +3130,7 @@ def probe_background_goal_provider(provider: str, base_url: str) -> bool:
 
 
 def background_goal_provider_endpoint(runtime_request: AgentRuntimeMessageRequest) -> tuple[str, str]:
-    configured = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    configured = PROVIDER_CONFIGURATION.current_api_config()
     requested_provider = normalize_provider_name(runtime_request.provider or configured.provider)
     if requested_provider != normalize_provider_name(configured.provider):
         return requested_provider, ""
@@ -6824,7 +6872,7 @@ def build_agentic_app_health() -> dict[str, Any]:
 
 
 def build_bootstrap_app_health(*, refresh_projects: bool = False) -> dict[str, Any]:
-    api_config = serialize_app_api_config()
+    api_config = PROVIDER_CONFIGURATION.serialize_app_api_config()
     agent_health = safe_agent_health()
     unity_status = CURRENT_UNITY_STATUS
     projects = bootstrap_project_snapshot_payload() if refresh_projects else project_snapshot_payload(use_cache=True, refresh_async=False)
@@ -6988,10 +7036,6 @@ def safe_approval_list(project_root: str = "") -> list[dict[str, Any]]:
         return AGENT_GATEWAY.list_approvals(include_expired=False, project_root=project_root)
     except Exception:  # noqa: BLE001
         return []
-
-
-def serialize_app_api_config() -> dict[str, Any]:
-    return _PROVIDER_CONFIGURATION._impl_serialize_app_api_config()
 
 
 def load_diagnostics_config() -> dict[str, Any]:
@@ -8542,8 +8586,6 @@ async def fix_agentic_app_doctor_check(check_id: str, request: DoctorFixRequest)
     )
     try:
         def run_fix() -> dict[str, Any]:
-            global DASHBOARD_API_CONFIG
-            global DASHBOARD_VISION_CONFIG
             project_override = request.project_path.strip()
             fix_args: tuple[Any, ...] = (
                 (check_id, request.mode, {"selected_project_path": project_override})
@@ -8554,8 +8596,7 @@ async def fix_agentic_app_doctor_check(check_id: str, request: DoctorFixRequest)
                 with CONFIG_DOCUMENT_LOCK:
                     result = app_doctor_service().fix(*fix_args)
                     if result.get("status") == "repaired":
-                        DASHBOARD_API_CONFIG = load_initial_dashboard_api_config()
-                        DASHBOARD_VISION_CONFIG = load_initial_dashboard_vision_config()
+                        PROVIDER_CONFIGURATION.reload_from_disk()
                     return result
             return app_doctor_service().fix(*fix_args)
 
@@ -8867,39 +8908,24 @@ async def update_state(request: DashboardStateRequest) -> dict[str, Any]:
 def read_api_config() -> dict[str, Any]:
     return {
         "configPath": str(CONFIG_PATH),
-        "apiConfig": serialize_api_config(include_secret=True),
-        "visionConfig": serialize_vision_config(include_secret=True),
-        "effective": build_effective_model_summary(),
+        "apiConfig": PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
+        "visionConfig": PROVIDER_CONFIGURATION.serialize_vision_config(include_secret=True),
+        "effective": PROVIDER_CONFIGURATION.build_effective_model_summary(),
     }
 
 
 @app.post("/api/config")
 async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
     try:
-        config = normalize_api_config_request(request)
+        config = PROVIDER_CONFIGURATION.resolve_api_request(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not config.api_key.strip():
-        saved = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
-        if saved and saved.provider == config.provider and saved.api_key.strip():
-            config = DashboardApiConfig(
-                provider=config.provider,
-                api_key=saved.api_key,
-                base_url=config.base_url,
-                model=config.model,
-                api_type=config.api_type,
-                thinking_level=config.thinking_level,
-            )
-    try:
-        validate_provider_api_key(config.api_key)
-    except ProviderCredentialError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    save_dashboard_api_config(config)
+    PROVIDER_CONFIGURATION.save_api_config(config)
     payload = {
         "configPath": str(CONFIG_PATH),
-        "apiConfig": serialize_api_config(include_secret=True),
-        "visionConfig": serialize_vision_config(include_secret=True),
-        "effective": build_effective_model_summary(),
+        "apiConfig": PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
+        "visionConfig": PROVIDER_CONFIGURATION.serialize_vision_config(include_secret=True),
+        "effective": PROVIDER_CONFIGURATION.build_effective_model_summary(),
     }
     await EVENT_BUS.broadcast("config", payload)
     await emit_log_async(
@@ -8918,30 +8944,15 @@ async def update_api_config(request: ApiConfigRequest) -> dict[str, Any]:
 @app.post("/api/config/vision")
 async def update_vision_config(request: VisionConfigRequest) -> dict[str, Any]:
     try:
-        config = normalize_vision_config_request(request)
+        config = PROVIDER_CONFIGURATION.resolve_vision_request(request)
     except ProviderCredentialError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if config.provider and not config.api_key.strip():
-        # 与 /api/config 相同的"留空即沿用已存密钥"约定。
-        saved = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
-        if saved and saved.provider == config.provider and saved.api_key.strip():
-            config = DashboardVisionConfig(
-                provider=config.provider,
-                api_key=saved.api_key,
-                base_url=config.base_url,
-                model=config.model,
-                enabled=config.enabled,
-            )
-    try:
-        validate_provider_api_key(config.api_key)
-    except ProviderCredentialError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    save_dashboard_vision_config(config)
+    PROVIDER_CONFIGURATION.save_vision_config(config)
     payload = {
         "configPath": str(CONFIG_PATH),
-        "apiConfig": serialize_api_config(include_secret=True),
-        "visionConfig": serialize_vision_config(include_secret=True),
-        "effective": build_effective_model_summary(),
+        "apiConfig": PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
+        "visionConfig": PROVIDER_CONFIGURATION.serialize_vision_config(include_secret=True),
+        "effective": PROVIDER_CONFIGURATION.build_effective_model_summary(),
     }
     await EVENT_BUS.broadcast("config", payload)
     await emit_log_async(
@@ -8960,28 +8971,13 @@ async def update_vision_config(request: VisionConfigRequest) -> dict[str, Any]:
 @app.post("/api/models")
 async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
     try:
-        config = normalize_api_config_request(request)
+        config = PROVIDER_CONFIGURATION.resolve_api_request(request)
     except (ProviderCredentialError, ProviderApiTypeError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not config.api_key.strip():
-        saved = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
-        if saved and saved.provider == config.provider and saved.api_key.strip():
-            config = DashboardApiConfig(
-                provider=config.provider,
-                api_key=saved.api_key,
-                base_url=config.base_url,
-                model=config.model,
-                api_type=config.api_type,
-                thinking_level=config.thinking_level,
-            )
-    try:
-        validate_provider_api_key(config.api_key)
-    except ProviderCredentialError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     provider_label = provider_display_name(config.provider)
 
     try:
-        models = await asyncio.to_thread(fetch_provider_models, config)
+        models = await asyncio.to_thread(PROVIDER_MODEL_CATALOG.fetch_provider_models, config)
     except Exception as exc:  # noqa: BLE001
         await emit_log_async(
             "error",
@@ -8999,10 +8995,10 @@ async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
         "provider": config.provider,
         "providerLabel": provider_label,
         "baseUrl": config.base_url,
-        "models": [enrich_provider_model_item(config, item) for item in models],
+        "models": [PROVIDER_MODEL_CATALOG.enrich_provider_model_item(config, item) for item in models],
         "modelCount": len(models),
         "selectedModel": config.model,
-        **provider_config_descriptor(config),
+        **PROVIDER_MODEL_CATALOG.provider_config_descriptor(config),
     }
     await emit_log_async(
         "success",
@@ -9015,19 +9011,7 @@ async def read_api_models(request: ApiModelListRequest) -> dict[str, Any]:
 
 @app.post("/api/app/provider/test")
 async def test_api_provider(request: ProviderTestRequest) -> dict[str, Any]:
-    if not request.api_key.strip():
-        saved = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
-        if saved and saved.provider == normalize_provider_name(request.provider) and saved.api_key.strip():
-            request = ProviderTestRequest(
-                provider=request.provider,
-                api_key=saved.api_key,
-                base_url=request.base_url,
-                model=request.model,
-                api_type=request.api_type,
-                thinking_level=request.thinking_level,
-                capability=request.capability,
-            )
-    return await asyncio.to_thread(run_provider_test_sync, request)
+    return await asyncio.to_thread(PROVIDER_TESTS.run, request)
 
 
 @app.post("/api/app/provider/reasoning-variants")
@@ -12574,7 +12558,7 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
         if not image_file.exists():
             raise RuntimeError(f"Screenshot file does not exist: {image_file}")
 
-        api_config = serialize_api_config(include_secret=True)
+        api_config = PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True)
         if api_config.get("provider") != "gemini":
             raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
 
@@ -12802,7 +12786,7 @@ def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict
         if not image_paths:
             raise RuntimeError("No image paths provided for multi-image audit.")
 
-        api_config = serialize_api_config(include_secret=True)
+        api_config = PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True)
         if api_config.get("provider") != "gemini":
             raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
 
@@ -13165,7 +13149,7 @@ def load_dashboard_settings(request: DashboardRequest | ConnectionRequest) -> Se
     settings = load_runtime_settings_safely(
         settings_path,
         getattr(request, "model", None),
-        llm_override=serialize_api_config(include_secret=True),
+        llm_override=PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
         loader=load_settings,
     )
 
@@ -13304,7 +13288,7 @@ def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
 AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan
 
 
-def mcp_trigger_selection_config_binding(config: DashboardApiConfig) -> tuple[str, str, str, str]:
+def mcp_trigger_selection_config_binding(config: ProviderApiConfig) -> tuple[str, str, str, str]:
     """Freeze the nonsecret provider identity used by one acceptance receipt."""
 
     _requested_api_type, resolved_api_type = normalize_provider_api_type(
@@ -13335,7 +13319,7 @@ def mcp_trigger_selection_planner(
 ) -> dict[str, Any]:
     """Call the configured provider once without entering the runtime execution loop."""
 
-    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    config = PROVIDER_CONFIGURATION.current_api_config()
     if provider_requires_api_key(config.provider) and not config.api_key:
         raise RuntimeError("LLM API key is not configured for selection acceptance.")
     provider, model, config_digest, resolved_api_type = mcp_trigger_selection_config_binding(config)
@@ -13344,7 +13328,7 @@ def mcp_trigger_selection_planner(
         visible_tools,
         provider=provider,
         model=model,
-        request_text=lambda prompt: _run_provider_text_probe(config, prompt, structured=True),
+        request_text=lambda prompt: PROVIDER_TESTS.probe_text(config, prompt, structured=True),
     )
     result["providerEvidence"] = MCP_TRIGGER_SELECTION_RECEIPTS.issue(
         message,
@@ -13365,7 +13349,7 @@ def verify_mcp_trigger_selection_receipt(
     result: dict[str, Any],
     exposure_layer: str = "planning",
 ) -> bool:
-    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    config = PROVIDER_CONFIGURATION.current_api_config()
     provider, model, config_digest, resolved_api_type = mcp_trigger_selection_config_binding(config)
     return MCP_TRIGGER_SELECTION_RECEIPTS.verify_and_consume(
         message,
@@ -15628,7 +15612,7 @@ def build_dashboard_socket_payload(include_secret: bool = False) -> dict[str, An
     else:
         status = CURRENT_UNITY_STATUS
     health = build_full_health_payload()
-    api_config = serialize_api_config(include_secret=include_secret)
+    api_config = PROVIDER_CONFIGURATION.serialize_api_config(include_secret=include_secret)
     if not include_secret:
         health_api_config = health.get("apiConfig")
         if isinstance(health_api_config, dict):
@@ -15641,7 +15625,7 @@ def build_dashboard_socket_payload(include_secret: bool = False) -> dict[str, An
         "config": {
             "configPath": str(CONFIG_PATH),
             "apiConfig": api_config,
-            "effective": build_effective_model_summary(),
+            "effective": PROVIDER_CONFIGURATION.build_effective_model_summary(),
         },
         "projects": project_snapshot_payload(use_cache=True, refresh_async=False),
         "unityStatus": status,
@@ -15954,69 +15938,13 @@ def persist_selected_project_path(value: Any) -> str:
     return _PROJECT_SNAPSHOT_SELECTION.persist_selected_project_path(value)
 
 
-def load_initial_dashboard_api_config() -> DashboardApiConfig:
-    return _PROVIDER_CONFIGURATION._impl_load_initial_dashboard_api_config()
-
-
-def load_initial_dashboard_vision_config() -> DashboardVisionConfig:
-    return _PROVIDER_CONFIGURATION._impl_load_initial_dashboard_vision_config()
-
-
-def normalize_vision_config_request(request: VisionConfigRequest) -> DashboardVisionConfig:
-    return _PROVIDER_CONFIGURATION._impl_normalize_vision_config_request(request)
-
-
-def load_config_document() -> dict[str, Any]:
-    return _PROVIDER_CONFIGURATION._impl_load_config_document()
-
-
-def normalize_api_config_request(request: ApiConfigRequest) -> DashboardApiConfig:
-    return _PROVIDER_CONFIGURATION._impl_normalize_api_config_request(request)
-
-
-def provider_config_descriptor(config: DashboardApiConfig) -> dict[str, Any]:
-    return _PROVIDER_MODEL_CATALOG._impl_provider_config_descriptor(config)
-
-
-def enrich_provider_model_item(config: DashboardApiConfig, item: dict[str, Any]) -> dict[str, Any]:
-    return _PROVIDER_MODEL_CATALOG._impl_enrich_provider_model_item(config, item)
-
-
-def fetch_provider_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    return _PROVIDER_MODEL_CATALOG._impl_fetch_provider_models(config)
-
-
-def run_provider_test_sync(request: ProviderTestRequest) -> dict[str, Any]:
-    return _PROVIDER_TEST_INTEGRATION._impl_run_provider_test_sync(request)
-
-
-def _run_provider_text_probe(config: DashboardApiConfig, prompt: str, structured: bool = False) -> str:
-    return _PROVIDER_TEST_INTEGRATION._impl__run_provider_text_probe(config, prompt, structured)
-
-
 def _review_saved_project_category_approval(approval: dict[str, Any]) -> str:
-    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    config = PROVIDER_CONFIGURATION.current_api_config()
     return review_saved_project_category_approval(
         approval,
         model=config.model,
-        request_text=lambda prompt: _run_provider_text_probe(config, prompt, structured=True),
+        request_text=lambda prompt: PROVIDER_TESTS.probe_text(config, prompt, structured=True),
     )
-
-
-def _provider_probe_settings(config: DashboardApiConfig) -> Settings:
-    return _PROVIDER_TEST_INTEGRATION._impl__provider_probe_settings(config)
-
-
-def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    return _PROVIDER_MODEL_CATALOG._impl_fetch_openai_compatible_models(config)
-
-
-def fetch_google_ai_studio_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    return _PROVIDER_MODEL_CATALOG._impl_fetch_google_ai_studio_models(config)
-
-
-def fetch_vertex_ai_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    return _PROVIDER_MODEL_CATALOG._impl_fetch_vertex_ai_models(config)
 
 
 def resolve_vertex_project_location(value: str) -> tuple[str, str]:
@@ -16035,61 +15963,6 @@ def resolve_vertex_project_location(value: str) -> tuple[str, str]:
     return resolve_vertex_ai_project_location(settings.llm_base_url)
 
 
-def fetch_anthropic_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
-    return _PROVIDER_MODEL_CATALOG._impl_fetch_anthropic_models(config)
-
-
-def normalize_provider_model_list(response: Any, provider_label: str) -> list[dict[str, Any]]:
-    return _PROVIDER_MODEL_CATALOG._impl_normalize_provider_model_list(response, provider_label)
-
-
-def read_model_attr(item: Any, *names: str) -> Any:
-    return _PROVIDER_MODEL_CATALOG._impl_read_model_attr(item, *names)
-
-
-def coerce_positive_int(value: Any) -> int | None:
-    return _PROVIDER_MODEL_CATALOG._impl_coerce_positive_int(value)
-
-
-def build_provider_model_info(item: Any, model_id: str) -> dict[str, Any]:
-    return _PROVIDER_MODEL_CATALOG._impl_build_provider_model_info(item, model_id)
-
-
-def save_dashboard_config_document(
-    *,
-    api_config: DashboardApiConfig | None = None,
-    vision_config: DashboardVisionConfig | None = None,
-) -> None:
-    return _PROVIDER_CONFIGURATION._impl_save_dashboard_config_document(
-        api_config=api_config,
-        vision_config=vision_config,
-    )
-
-
-def save_dashboard_api_config(config: DashboardApiConfig) -> None:
-    return _PROVIDER_CONFIGURATION._impl_save_dashboard_api_config(config)
-
-
-def save_dashboard_vision_config(config: DashboardVisionConfig) -> None:
-    return _PROVIDER_CONFIGURATION._impl_save_dashboard_vision_config(config)
-
-
-def serialize_api_config(include_secret: bool) -> dict[str, Any]:
-    return _PROVIDER_CONFIGURATION._impl_serialize_api_config(include_secret)
-
-
-def serialize_vision_config(include_secret: bool) -> dict[str, Any]:
-    return _PROVIDER_CONFIGURATION._impl_serialize_vision_config(include_secret)
-
-
-def serialize_app_vision_config() -> dict[str, Any]:
-    return _PROVIDER_CONFIGURATION._impl_serialize_app_vision_config()
-
-
-def build_effective_model_summary() -> dict[str, Any]:
-    return _PROVIDER_CONFIGURATION._impl_build_effective_model_summary()
-
-
 def provider_auth_label(provider: str) -> str:
     provider = normalize_provider_name(provider)
     if provider == "anthropic":
@@ -16103,15 +15976,11 @@ def provider_auth_label(provider: str) -> str:
     return "Authorization: Bearer"
 
 
-def mask_secret(value: str) -> str:
-    return _PROVIDER_CONFIGURATION._impl_mask_secret(value)
-
-
 def load_initial_dashboard_state() -> DashboardState:
     settings_path = RUNTIME_SETTINGS_PATH
     settings = load_runtime_settings_safely(
         settings_path,
-        llm_override=serialize_api_config(include_secret=True) if DASHBOARD_API_CONFIG is not None else None,
+        llm_override=PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True),
         loader=load_settings,
     )
     raw = read_runtime_settings_document_safely(settings_path)
@@ -21836,8 +21705,7 @@ def register_agent_gateway_tools() -> None:
         )
 
 
-if DASHBOARD_API_CONFIG is None:
-    DASHBOARD_API_CONFIG = load_initial_dashboard_api_config()
+PROVIDER_CONFIGURATION.current_api_config()
 
 
 if DASHBOARD_STATE is None:

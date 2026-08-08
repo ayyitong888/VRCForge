@@ -5,20 +5,34 @@ nothing, Anthropic response-budget adjustment, Gemini thinking_config reuse,
 temperature exemption matrix, and dashboard config plumbing.
 """
 
+import json
 from pathlib import Path
+from threading import RLock
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_server
-from dashboard_server import (
-    ApiConfigRequest,
-    DashboardApiConfig,
-    ProviderTestRequest,
-    normalize_api_config_request,
-    serialize_api_config,
+from dashboard_server import ApiConfigRequest, ProviderTestRequest
+from model_provider_adapters import (
+    normalize_provider_api_type,
+    provider_model_descriptor,
+    validate_provider_api_key,
+)
+from provider_configuration_service import (
+    ProviderApiConfig,
+    ProviderConfigurationPersistencePorts,
+    ProviderConfigurationPolicyPorts,
+    ProviderConfigurationService,
+)
+from provider_runtime_adapters import ProviderRuntimeRequest
+from provider_test_integration_service import (
+    ProviderProbePolicyPorts,
+    ProviderProbeSdkPorts,
+    ProviderTestIntegrationService,
+    ProviderTestServicePorts,
+    ProviderTextProbeRunner,
 )
 from vrchat_blendshape_agent import (
     ANTHROPIC_RESPONSE_BASE_MAX_TOKENS,
@@ -29,6 +43,12 @@ from vrchat_blendshape_agent import (
     build_gemini_generate_config,
     build_llm_settings,
     build_openai_compatible_request_payload,
+    extract_json_block,
+    get_provider_defaults,
+    normalize_base_url,
+    normalize_provider_name,
+    provider_display_name,
+    provider_requires_api_key,
     anthropic_model_supports_adaptive_thinking,
     anthropic_model_supports_manual_thinking,
     anthropic_model_supports_output_effort,
@@ -60,6 +80,86 @@ def make_settings(provider: str, model: str = "test-model", thinking_level: str 
         execute_tool_name="vrc_apply_blendshapes",
         export_path=Path("Assets/VRCForge/blendshapes_export.json"),
         min_confidence=0.65,
+    )
+
+
+def make_configuration_owner(
+    tmp_path: Path,
+    *,
+    document: dict | None = None,
+    runtime_settings: Settings | None = None,
+) -> ProviderConfigurationService:
+    config_path = tmp_path / "provider-config.json"
+    if document is not None:
+        config_path.write_text(json.dumps(document), encoding="utf-8")
+    settings = runtime_settings or make_settings("openai", model="gpt-4o")
+
+    def write(path: Path, payload: dict) -> None:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    return ProviderConfigurationService(
+        ProviderConfigurationPersistencePorts(
+            config_path=config_path,
+            load_runtime_settings=lambda: settings,
+            atomic_write_json=write,
+            path_is_reparse_or_link=lambda _path: False,
+        ),
+        ProviderConfigurationPolicyPorts(
+            default_provider="openai",
+            normalize_provider_name=normalize_provider_name,
+            get_provider_defaults=get_provider_defaults,
+            normalize_base_url=normalize_base_url,
+            normalize_provider_api_type=normalize_provider_api_type,
+            normalize_reasoning_effort=normalize_reasoning_effort,
+            reasoning_effort_variants=reasoning_effort_variants,
+            validate_provider_api_key=validate_provider_api_key,
+            provider_display_name=provider_display_name,
+            provider_auth_label=lambda _provider: "Authorization: Bearer",
+            provider_requires_api_key=provider_requires_api_key,
+            provider_config_descriptor=lambda config: provider_model_descriptor(
+                config.provider,
+                config.model,
+                config.api_type,
+            ),
+        ),
+        RLock(),
+    )
+
+
+class FakeProbe:
+    def __init__(self, response: str = "VRCForge provider test OK") -> None:
+        self.response = response
+        self.calls: list[tuple[ProviderApiConfig, str, bool]] = []
+
+    def probe(
+        self,
+        config: ProviderApiConfig,
+        prompt: str,
+        *,
+        structured: bool = False,
+    ) -> str:
+        self.calls.append((config, prompt, structured))
+        return self.response
+
+
+def make_provider_test_service(
+    owner: ProviderConfigurationService,
+    probe: object,
+) -> ProviderTestIntegrationService:
+    return ProviderTestIntegrationService(
+        ProviderTestServicePorts(
+            resolve_api_request=owner.resolve_api_request,
+            normalize_provider_name=normalize_provider_name,
+            provider_display_name=provider_display_name,
+            provider_config_descriptor=lambda config: provider_model_descriptor(
+                config.provider,
+                config.model,
+                config.api_type,
+            ),
+            provider_requires_api_key=provider_requires_api_key,
+            extract_json_block=extract_json_block,
+        ),
+        probe,
     )
 
 
@@ -349,17 +449,19 @@ def test_build_llm_settings_override_key_wins_even_when_empty():
 # --- dashboard config plumbing -----------------------------------------------
 
 
-def test_normalize_api_config_request_normalizes_thinking_level():
+def test_normalize_api_config_request_normalizes_thinking_level(tmp_path: Path):
+    owner = make_configuration_owner(tmp_path)
     request = ApiConfigRequest(provider="openai", api_key="k", model="o3", thinking_level="High")
-    assert normalize_api_config_request(request).thinking_level == "high"
+    assert owner.normalize_api_request(request).thinking_level == "high"
     request = ApiConfigRequest(provider="openai", api_key="k", model="o3", thinking_level="OFF")
-    assert normalize_api_config_request(request).thinking_level == ""
+    assert owner.normalize_api_request(request).thinking_level == ""
 
 
-def test_normalize_api_config_rejects_unsupported_variant_instead_of_clamping():
+def test_normalize_api_config_rejects_unsupported_variant_instead_of_clamping(tmp_path: Path):
+    owner = make_configuration_owner(tmp_path)
     request = ApiConfigRequest(provider="openai", api_key="k", model="gpt-4o", thinking_level="high")
     with pytest.raises(ValueError, match="not supported"):
-        normalize_api_config_request(request)
+        owner.normalize_api_request(request)
 
 
 def test_reasoning_variants_api_is_backend_owned_and_secret_free():
@@ -374,7 +476,10 @@ def test_reasoning_variants_api_is_backend_owned_and_secret_free():
     assert "api_key" not in payload
 
 
-def test_provider_connection_test_reuses_production_reasoning_resolver():
+def test_provider_connection_test_reuses_production_reasoning_resolver(tmp_path: Path):
+    owner = make_configuration_owner(tmp_path)
+    probe = FakeProbe()
+    service = make_provider_test_service(owner, probe)
     request = ProviderTestRequest(
         provider="openai",
         api_key="k",
@@ -382,10 +487,9 @@ def test_provider_connection_test_reuses_production_reasoning_resolver():
         thinking_level="high",
         capability="text",
     )
-    with patch.object(dashboard_server, "_run_provider_text_probe", return_value="VRCForge provider test OK") as probe:
-        result = dashboard_server.run_provider_test_sync(request)
+    result = service.run(request)
     assert result["ok"] is True
-    config = probe.call_args.args[0]
+    config = probe.calls[0][0]
     assert config.thinking_level == "high"
 
 
@@ -393,33 +497,59 @@ def test_provider_connection_test_reuses_production_reasoning_resolver():
     ("text", "VRCForge provider test OK", False),
     ("structured", '{"ok":true,"name":"vrcforge"}', True),
 ])
-def test_provider_test_routes_flash_responses_probe_without_chat(capability, expected_text, structured):
+def test_provider_test_service_flash_responses_probe_without_chat(
+    tmp_path: Path,
+    capability,
+    expected_text,
+    structured,
+):
     requests = []
 
     class FakeResponsesAdapter:
-        def __init__(self, **_kwargs):
-            pass
-
         def send_request(self, request):
             requests.append(request)
             return SimpleNamespace(text=expected_text, usage={}, reasoning_summary=[])
 
-    with patch.object(dashboard_server, "DeepSeekResponsesAdapter", FakeResponsesAdapter):
-        response = TestClient(dashboard_server.app).post(
-            "/api/app/provider/test",
-            json={
-                "provider": "deepseek", "api_key": "safe-key", "base_url": "https://api.deepseek.example",
-                "model": "deepseek-v4-flash", "api_type": "responses", "capability": capability,
-            },
+    runner = ProviderTextProbeRunner(
+        ProviderProbePolicyPorts(
+            validate_provider_api_key=validate_provider_api_key,
+            normalize_provider_api_type=normalize_provider_api_type,
+            resolve_vertex_project_location=lambda _value: pytest.fail("unexpected Vertex probe"),
+            build_gemini_generate_config=build_gemini_generate_config,
+            build_anthropic_request_payload=build_anthropic_request_payload,
+            build_openai_compatible_request_payload=build_openai_compatible_request_payload,
+            model_rejects_fixed_temperature=model_rejects_fixed_temperature,
+            settings_factory=Settings,
+            runtime_request_factory=ProviderRuntimeRequest,
+        ),
+        ProviderProbeSdkPorts(
+            responses_adapter=lambda _key, _url: FakeResponsesAdapter(),
+            google_client=lambda _config, _location: pytest.fail("unexpected Google SDK"),
+            google_types=lambda: pytest.fail("unexpected Google types"),
+            anthropic_client=lambda _key: pytest.fail("unexpected Anthropic SDK"),
+            openai_client=lambda _key, _url, _timeout: pytest.fail("unexpected OpenAI SDK"),
+        ),
+    )
+    owner = make_configuration_owner(tmp_path)
+    payload = make_provider_test_service(owner, runner).run(
+        ProviderTestRequest(
+            provider="deepseek",
+            api_key="safe-key",
+            base_url="https://api.deepseek.example",
+            model="deepseek-v4-flash",
+            api_type="responses",
+            capability=capability,
         )
-    assert response.status_code == 200
-    payload = response.json()
+    )
     assert payload["ok"] is True and payload["apiType"] == "responses" and payload["resolvedApiType"] == "responses"
     assert len(requests) == 1 and requests[0].mode == "probe" and requests[0].structured_output is structured
     assert requests[0].max_output_tokens == (512 if structured else 64)
 
 
-def test_provider_connection_test_reports_unsupported_variant_without_sending():
+def test_provider_connection_test_reports_unsupported_variant_without_sending(tmp_path: Path):
+    owner = make_configuration_owner(tmp_path)
+    probe = FakeProbe()
+    service = make_provider_test_service(owner, probe)
     request = ProviderTestRequest(
         provider="openai",
         api_key="k",
@@ -427,36 +557,33 @@ def test_provider_connection_test_reports_unsupported_variant_without_sending():
         thinking_level="high",
         capability="text",
     )
-    with patch.object(dashboard_server, "_run_provider_text_probe") as probe:
-        result = dashboard_server.run_provider_test_sync(request)
+    result = service.run(request)
     assert result["ok"] is False
     assert "not supported" in result["message"]
-    probe.assert_not_called()
+    assert probe.calls == []
 
 
-def test_serialize_api_config_always_emits_thinking_level():
-    config = DashboardApiConfig(
+def test_serialize_api_config_always_emits_thinking_level(tmp_path: Path):
+    owner = make_configuration_owner(tmp_path)
+    config = ProviderApiConfig(
         provider="openai",
         api_key="secret",
         base_url="https://api.openai.com/v1",
         model="gpt-4o",
         thinking_level="medium",
     )
-    with patch.object(dashboard_server, "DASHBOARD_API_CONFIG", config):
-        serialized = serialize_api_config(include_secret=False)
+    owner.save_api_config(config)
+    serialized = owner.serialize_api_config(include_secret=False)
     assert serialized["thinking_level"] == "medium"
     assert "thinking_level" in serialized
 
 
-def test_load_initial_dashboard_api_config_preserves_explicit_off():
+def test_load_initial_dashboard_api_config_preserves_explicit_off(tmp_path: Path):
     legacy = make_settings("openai", model="o3", thinking_level="high")
-    with (
-        patch.object(dashboard_server, "load_settings", return_value=legacy),
-        patch.object(
-            dashboard_server,
-            "load_config_document",
-            return_value={"api": {"provider": "openai", "model": "o3", "thinking_level": ""}},
-        ),
-    ):
-        loaded = dashboard_server.load_initial_dashboard_api_config()
+    owner = make_configuration_owner(
+        tmp_path,
+        document={"api": {"provider": "openai", "model": "o3", "thinking_level": ""}},
+        runtime_settings=legacy,
+    )
+    loaded = owner.current_api_config()
     assert loaded.thinking_level == ""

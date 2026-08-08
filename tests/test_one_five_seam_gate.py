@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import shutil
@@ -170,7 +171,16 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         for group_id, group in groups.items()
         if group_id.startswith("dashboard.") and group.get("hostProxy")
     )
-    assert dashboard_host_proxy_count == 64
+    assert dashboard_host_proxy_count == 36
+    assert {
+        item["name"]
+        for item in groups["dashboard.provider-typed-root-owners"]["rootSymbols"]
+    } == {
+        "PROVIDER_MODEL_CATALOG",
+        "PROVIDER_CONFIGURATION",
+        "PROVIDER_TEXT_PROBE",
+        "PROVIDER_TESTS",
+    }
     assert len(groups["dashboard.project-snapshot-root-facades"]["facades"][0]["methods"]) == 17
     assert len(groups["dashboard.unity-status-root-facades"]["facades"][0]["methods"]) == 3
     assert len(groups["gateway.approval-transaction-host-proxy"]["facades"][0]["methods"]) == 41
@@ -185,6 +195,61 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         "persisted-disk-schemas",
         "genuine-imported-models",
     }
+
+
+def test_dashboard_provider_typed_roots_do_not_reexport_removed_host_seams() -> None:
+    tree = ast.parse((REPO_ROOT / "dashboard_server.py").read_text(encoding="utf-8"))
+    bindings: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bindings.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bindings.update(alias.asname or alias.name.rsplit(".", 1)[-1] for alias in node.names)
+        elif isinstance(node, ast.Assign):
+            bindings.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            bindings.add(node.target.id)
+
+    removed = {
+        "_PROVIDER_CONFIGURATION",
+        "_PROVIDER_MODEL_CATALOG",
+        "_PROVIDER_TEST_INTEGRATION",
+        "DASHBOARD_API_CONFIG",
+        "DASHBOARD_VISION_CONFIG",
+        "DashboardApiConfig",
+        "DashboardVisionConfig",
+        "serialize_app_api_config",
+        "load_initial_dashboard_api_config",
+        "load_initial_dashboard_vision_config",
+        "normalize_vision_config_request",
+        "load_config_document",
+        "normalize_api_config_request",
+        "save_dashboard_config_document",
+        "save_dashboard_api_config",
+        "save_dashboard_vision_config",
+        "serialize_api_config",
+        "serialize_vision_config",
+        "serialize_app_vision_config",
+        "build_effective_model_summary",
+        "mask_secret",
+        "provider_config_descriptor",
+        "enrich_provider_model_item",
+        "fetch_provider_models",
+        "fetch_openai_compatible_models",
+        "fetch_google_ai_studio_models",
+        "fetch_vertex_ai_models",
+        "fetch_anthropic_models",
+        "normalize_provider_model_list",
+        "read_model_attr",
+        "coerce_positive_int",
+        "build_provider_model_info",
+        "run_provider_test_sync",
+        "_run_provider_text_probe",
+        "_provider_probe_settings",
+    }
+    assert bindings.isdisjoint(removed)
 
 
 def test_build_and_publish_invoke_gate_before_build_or_remote_mutation() -> None:

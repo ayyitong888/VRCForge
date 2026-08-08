@@ -54,12 +54,61 @@ from package_install_workflow_service import (
     PackageInstallWorkflowPorts,
     PackageInstallWorkflowService,
 )
+from provider_configuration_service import (
+    ProviderApiConfig,
+    ProviderConfigurationPersistencePorts,
+    ProviderConfigurationService,
+)
+from provider_model_catalog_service import (
+    ProviderModelCatalogSdkPorts,
+    ProviderModelCatalogService,
+)
+from provider_test_integration_service import (
+    ProviderTestIntegrationService,
+    ProviderTestServicePorts,
+)
 from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_collaboration_service import SubAgentCollaborationService
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
 
+def isolated_provider_configuration_service(
+    config_path: Path,
+    *,
+    settings: SimpleNamespace | None = None,
+) -> ProviderConfigurationService:
+    runtime_settings = settings or SimpleNamespace(
+        llm_provider="ollama",
+        llm_api_key="",
+        llm_model="qwen3",
+        gemini_thinking_level="",
+    )
+    return ProviderConfigurationService(
+        ProviderConfigurationPersistencePorts(
+            config_path=config_path,
+            load_runtime_settings=lambda: runtime_settings,
+            atomic_write_json=dashboard_server.atomic_write_json,
+            path_is_reparse_or_link=dashboard_server._path_is_reparse_or_link,
+        ),
+        dashboard_server.PROVIDER_CONFIGURATION._policy,
+        threading.RLock(),
+    )
+
+
+def isolated_provider_model_catalog_service(
+    models: list[dict[str, object]],
+) -> ProviderModelCatalogService:
+    client = SimpleNamespace(models=SimpleNamespace(list=lambda: list(models)))
+    return ProviderModelCatalogService(
+        dashboard_server.PROVIDER_MODEL_CATALOG._policy,
+        ProviderModelCatalogSdkPorts(
+            openai_client=lambda _key, _base_url, _timeout: client,
+            google_ai_studio_client=lambda _key: client,
+            google_vertex_client=lambda _project, _location: client,
+            anthropic_client=lambda _key: client,
+        ),
+    )
 def isolated_project_snapshot_service(*, cache_path: Path | None = None):
     original = dashboard_server._PROJECT_SNAPSHOT_SELECTION
     return dashboard_server.ProjectSnapshotSelectionService(
@@ -3294,8 +3343,6 @@ class DashboardServerTests(unittest.TestCase):
                     snapshot = dashboard_server.read_app_runtime_snapshot(projectRoot=str(project_a))
                 with (
                     patch("dashboard_server.build_bootstrap_app_health", return_value={}),
-                    patch("dashboard_server.serialize_app_api_config", return_value={}),
-                    patch("dashboard_server.serialize_app_vision_config", return_value={}),
                     patch("dashboard_server.safe_agent_manifest", return_value={}),
                     patch("dashboard_server.safe_agent_health", return_value={}),
                     patch("dashboard_server.safe_permission_state", return_value={}),
@@ -4801,19 +4848,46 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("no Unity screenshot", payload["message"])
         self.assertNotIn("api_key", json.dumps(payload).lower())
 
-    def test_provider_test_structured_uses_probe_without_secret_leak(self) -> None:
-        with patch("dashboard_server._run_provider_text_probe", return_value='{"ok":true,"name":"vrcforge"}') as probe:
-            with TestClient(dashboard_server.app) as client:
-                response = client.post(
-                    "/api/app/provider/test",
-                    json={"provider": "openai", "api_key": "provider-secret", "base_url": "", "model": "gpt-4.1-mini", "capability": "structured"},
-                )
+    def test_provider_test_structured_uses_local_typed_probe_without_secret_leak(self) -> None:
+        probe_calls: list[tuple[ProviderApiConfig, str, bool]] = []
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
+        class FakeProbe:
+            def probe(self, config, prompt, *, structured=False):
+                probe_calls.append((config, prompt, structured))
+                return '{"ok":true,"name":"vrcforge"}'
+
+        owner = ProviderTestIntegrationService(
+            ProviderTestServicePorts(
+                resolve_api_request=lambda request: ProviderApiConfig(
+                    provider=request.provider,
+                    api_key=request.api_key,
+                    base_url=request.base_url or "https://api.openai.com/v1",
+                    model=request.model or "gpt-4.1-mini",
+                    api_type=request.api_type,
+                    thinking_level=request.thinking_level,
+                ),
+                normalize_provider_name=dashboard_server.normalize_provider_name,
+                provider_display_name=dashboard_server.provider_display_name,
+                provider_config_descriptor=dashboard_server.PROVIDER_MODEL_CATALOG.provider_config_descriptor,
+                provider_requires_api_key=dashboard_server.provider_requires_api_key,
+                extract_json_block=dashboard_server.extract_json_block,
+            ),
+            FakeProbe(),
+        )
+        payload = owner.run(
+            dashboard_server.ProviderTestRequest(
+                provider="openai",
+                api_key="provider-secret",
+                base_url="",
+                model="gpt-4.1-mini",
+                capability="structured",
+            )
+        )
+
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "ok")
-        probe.assert_called_once()
+        self.assertEqual(len(probe_calls), 1)
+        self.assertTrue(probe_calls[0][2])
         self.assertNotIn("provider-secret", json.dumps(payload))
 
     def test_read_avatars_sync_reports_execution_mode_without_name_error(self) -> None:
@@ -12041,107 +12115,67 @@ namespace VRCForge.Editor
 
     def test_api_config_endpoint_persists_and_returns_effective_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            original_config_path = dashboard_server.CONFIG_PATH
-            original_api_config = dashboard_server.DASHBOARD_API_CONFIG
-            dashboard_server.CONFIG_PATH = Path(temp_dir) / "config.json"
-            dashboard_server.DASHBOARD_API_CONFIG = dashboard_server.DashboardApiConfig(
-                provider="gemini",
-                api_key="",
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-                model="gemini-2.5-flash",
+            config_path = Path(temp_dir) / "config.json"
+            owner = isolated_provider_configuration_service(config_path)
+            config = owner.resolve_api_request(
+                dashboard_server.ApiConfigRequest(
+                    provider="anthropic",
+                    api_key="anthropic-secret",
+                    base_url="https://ignored.example.com",
+                    model="claude-opus-4-6",
+                )
             )
+            owner.save_api_config(config)
 
-            try:
-                with TestClient(dashboard_server.app) as client:
-                    response = client.post(
-                        "/api/config",
-                        json={
-                            "provider": "anthropic",
-                            "api_key": "anthropic-secret",
-                            "base_url": "https://ignored.example.com",
-                            "model": "claude-opus-4-6",
-                        },
-                    )
-                    self.assertEqual(response.status_code, 200)
-                    payload = response.json()
-                    self.assertEqual(payload["apiConfig"]["provider"], "anthropic")
-                    self.assertEqual(payload["apiConfig"]["base_url"], "")
-                    self.assertEqual(payload["effective"]["model"], "claude-opus-4-6")
-                    self.assertTrue(dashboard_server.CONFIG_PATH.exists())
-
-                    saved_payload = json.loads(dashboard_server.CONFIG_PATH.read_text(encoding="utf-8"))
-                    self.assertEqual(saved_payload["api"]["provider"], "anthropic")
-                    self.assertEqual(saved_payload["api"]["base_url"], "")
-            finally:
-                dashboard_server.CONFIG_PATH = original_config_path
-                dashboard_server.DASHBOARD_API_CONFIG = original_api_config
+            payload = {
+                "apiConfig": owner.serialize_api_config(include_secret=True),
+                "effective": owner.build_effective_model_summary(),
+            }
+            self.assertEqual(payload["apiConfig"]["provider"], "anthropic")
+            self.assertEqual(payload["apiConfig"]["base_url"], "")
+            self.assertEqual(payload["effective"]["model"], "claude-opus-4-6")
+            self.assertTrue(config_path.exists())
+            saved_payload = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved_payload["api"]["provider"], "anthropic")
+            self.assertEqual(saved_payload["api"]["base_url"], "")
 
     def test_provider_config_save_preserves_invalid_source_in_verified_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            original_config_path = dashboard_server.CONFIG_PATH
-            original_api_config = dashboard_server.DASHBOARD_API_CONFIG
-            original_vision_config = dashboard_server.DASHBOARD_VISION_CONFIG
             invalid = b'{"api": invalid}\xff'
             config_path = Path(temp_dir) / "config.json"
             config_path.write_bytes(invalid)
             digest = hashlib.sha256(invalid).hexdigest()
-            dashboard_server.CONFIG_PATH = config_path
-            dashboard_server.DASHBOARD_API_CONFIG = dashboard_server.DashboardApiConfig(
-                provider="ollama",
-                api_key="",
-                base_url="http://127.0.0.1:11434/v1",
-                model="qwen3",
-            )
-            dashboard_server.DASHBOARD_VISION_CONFIG = dashboard_server.DashboardVisionConfig()
-            try:
-                self.assertEqual(dashboard_server.load_config_document(), {})
-                self.assertEqual(config_path.read_bytes(), invalid)
+            owner = isolated_provider_configuration_service(config_path)
+            self.assertEqual(owner.load_config_document(), {})
+            self.assertEqual(config_path.read_bytes(), invalid)
 
-                dashboard_server.save_dashboard_config_document()
+            owner.save_config_document()
 
-                backup = config_path.with_name(f"config.json.backup-{digest}.bak")
-                self.assertEqual(backup.read_bytes(), invalid)
-                saved = json.loads(config_path.read_text(encoding="utf-8"))
-                self.assertEqual(saved["api"]["provider"], "ollama")
-            finally:
-                dashboard_server.CONFIG_PATH = original_config_path
-                dashboard_server.DASHBOARD_API_CONFIG = original_api_config
-                dashboard_server.DASHBOARD_VISION_CONFIG = original_vision_config
+            backup = config_path.with_name(f"config.json.backup-{digest}.bak")
+            self.assertEqual(backup.read_bytes(), invalid)
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["api"]["provider"], "ollama")
 
     def test_provider_config_save_rejects_corrupt_existing_backup_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            original_config_path = dashboard_server.CONFIG_PATH
-            original_api_config = dashboard_server.DASHBOARD_API_CONFIG
-            original_vision_config = dashboard_server.DASHBOARD_VISION_CONFIG
             original = b'{"api":{"provider":"ollama"}}'
             config_path = Path(temp_dir) / "config.json"
             config_path.write_bytes(original)
             digest = hashlib.sha256(original).hexdigest()
             backup = config_path.with_name(f"config.json.backup-{digest}.bak")
             backup.write_bytes(b"wrong-backup-bytes")
-            dashboard_server.CONFIG_PATH = config_path
-            dashboard_server.DASHBOARD_API_CONFIG = dashboard_server.DashboardApiConfig(
-                provider="openai",
-                api_key="",
-                base_url="",
-                model="gpt-5",
-            )
-            dashboard_server.DASHBOARD_VISION_CONFIG = dashboard_server.DashboardVisionConfig()
-            try:
-                with self.assertRaises(OSError):
-                    dashboard_server.save_dashboard_config_document()
-                self.assertEqual(config_path.read_bytes(), original)
-                self.assertEqual(backup.read_bytes(), b"wrong-backup-bytes")
-            finally:
-                dashboard_server.CONFIG_PATH = original_config_path
-                dashboard_server.DASHBOARD_API_CONFIG = original_api_config
-                dashboard_server.DASHBOARD_VISION_CONFIG = original_vision_config
+            owner = isolated_provider_configuration_service(config_path)
+            with self.assertRaises(OSError):
+                owner.save_config_document(
+                    api_config=ProviderApiConfig(
+                        provider="openai", api_key="", base_url="", model="gpt-5"
+                    )
+                )
+            self.assertEqual(config_path.read_bytes(), original)
+            self.assertEqual(backup.read_bytes(), b"wrong-backup-bytes")
 
     def test_provider_config_save_rejects_symlink_backup_before_write(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            original_config_path = dashboard_server.CONFIG_PATH
-            original_api_config = dashboard_server.DASHBOARD_API_CONFIG
-            original_vision_config = dashboard_server.DASHBOARD_VISION_CONFIG
             original = b'{"api":{"provider":"ollama"}}'
             config_path = Path(temp_dir) / "config.json"
             config_path.write_bytes(original)
@@ -12151,82 +12185,77 @@ namespace VRCForge.Editor
                 backup.symlink_to(config_path)
             except OSError as exc:
                 self.skipTest(f"File symlinks are unavailable: {exc}")
-            dashboard_server.CONFIG_PATH = config_path
-            dashboard_server.DASHBOARD_API_CONFIG = dashboard_server.DashboardApiConfig(
-                provider="openai", api_key="", base_url="", model="gpt-5"
-            )
-            dashboard_server.DASHBOARD_VISION_CONFIG = dashboard_server.DashboardVisionConfig()
-            try:
-                with self.assertRaises(OSError):
-                    dashboard_server.save_dashboard_config_document()
-                self.assertEqual(config_path.read_bytes(), original)
-                self.assertTrue(backup.is_symlink())
-            finally:
-                dashboard_server.CONFIG_PATH = original_config_path
-                dashboard_server.DASHBOARD_API_CONFIG = original_api_config
-                dashboard_server.DASHBOARD_VISION_CONFIG = original_vision_config
+            owner = isolated_provider_configuration_service(config_path)
+            with self.assertRaises(OSError):
+                owner.save_config_document(
+                    api_config=ProviderApiConfig(
+                        provider="openai", api_key="", base_url="", model="gpt-5"
+                    )
+                )
+            self.assertEqual(config_path.read_bytes(), original)
+            self.assertTrue(backup.is_symlink())
 
-    @patch("dashboard_server.fetch_provider_models")
-    def test_api_models_endpoint_reads_models_from_draft_config(self, mock_fetch_provider_models) -> None:
-        mock_fetch_provider_models.return_value = [
+    def test_provider_catalog_reads_models_from_draft_config_with_local_fake(self) -> None:
+        catalog = isolated_provider_model_catalog_service([
             {"id": "gemini-2.5-flash", "label": "gemini-2.5-flash"},
             {"id": "gemini-2.5-pro", "label": "gemini-2.5-pro"},
-        ]
-
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/models",
-                json={
-                    "provider": "gemini",
-                    "api_key": "draft-secret",
-                    "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-                    "model": "gemini-2.5-pro",
-                },
+        ])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configuration = isolated_provider_configuration_service(
+                Path(temp_dir) / "config.json"
             )
-            self.assertEqual(response.status_code, 200)
-
-            payload = response.json()
-            self.assertEqual(payload["provider"], "gemini")
-            self.assertEqual(payload["modelCount"], 2)
-            self.assertEqual(payload["selectedModel"], "gemini-2.5-pro")
-            self.assertEqual(payload["models"][1]["id"], "gemini-2.5-pro")
-
-            config = mock_fetch_provider_models.call_args.args[0]
-            self.assertEqual(config.api_key, "draft-secret")
-            self.assertEqual(config.model, "gemini-2.5-pro")
-
-    def test_api_models_endpoint_requires_api_key(self) -> None:
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/models",
-                json={
-                    "provider": "openai",
-                    "api_key": "",
-                    "base_url": "https://api.openai.com/v1",
-                    "model": "gpt-4.1-mini",
-                },
+            config = configuration.resolve_api_request(
+                dashboard_server.ApiConfigRequest(
+                    provider="gemini",
+                    api_key="draft-secret",
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                    model="gemini-2.5-pro",
+                )
             )
-            self.assertEqual(response.status_code, 400)
-            self.assertIn("API key is empty", response.json()["detail"])
+            models = catalog.fetch_provider_models(config)
 
-    @patch("dashboard_server.fetch_openai_compatible_models")
-    def test_api_models_endpoint_allows_ollama_without_api_key(self, mock_fetch_openai_compatible_models) -> None:
-        mock_fetch_openai_compatible_models.return_value = [{"id": "llama3.2", "label": "llama3.2"}]
+        self.assertEqual(len(models), 2)
+        self.assertEqual(models[1]["id"], "gemini-2.5-pro")
+        self.assertEqual(config.api_key, "draft-secret")
+        self.assertEqual(config.model, "gemini-2.5-pro")
 
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/models",
-                json={
-                    "provider": "ollama",
-                    "api_key": "",
-                    "base_url": "http://127.0.0.1:11434/v1",
-                    "model": "llama3.2",
-                },
+    def test_provider_catalog_requires_api_key_before_local_fake_sdk(self) -> None:
+        catalog = isolated_provider_model_catalog_service([])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configuration = isolated_provider_configuration_service(
+                Path(temp_dir) / "config.json"
             )
+            config = configuration.resolve_api_request(
+                dashboard_server.ApiConfigRequest(
+                    provider="openai",
+                    api_key="",
+                    base_url="https://api.openai.com/v1",
+                    model="gpt-4.1-mini",
+                )
+            )
+            with self.assertRaisesRegex(RuntimeError, "API key is empty"):
+                catalog.fetch_provider_models(config)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "ollama")
-        self.assertEqual(response.json()["models"][0]["id"], "llama3.2")
+    def test_provider_catalog_allows_ollama_without_api_key_with_local_fake(self) -> None:
+        catalog = isolated_provider_model_catalog_service(
+            [{"id": "llama3.2", "label": "llama3.2"}]
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            configuration = isolated_provider_configuration_service(
+                Path(temp_dir) / "config.json"
+            )
+            config = configuration.resolve_api_request(
+                dashboard_server.ApiConfigRequest(
+                    provider="ollama",
+                    api_key="",
+                    base_url="http://127.0.0.1:11434/v1",
+                    model="llama3.2",
+                )
+            )
+            models = catalog.fetch_provider_models(config)
+
+        self.assertEqual(config.provider, "ollama")
+        self.assertEqual(models[0]["id"], "llama3.2")
 
     @patch("dashboard_server.export_blendshapes")
     @patch("dashboard_server.load_dashboard_settings")
