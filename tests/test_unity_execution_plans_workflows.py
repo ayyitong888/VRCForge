@@ -9,8 +9,132 @@ from wardrobe_outfit_workflow_service import (
     build_add_modular_avatar_component_request,
     build_add_outfit_part_request,
     build_add_wardrobe_outfit_request,
+    build_manage_wardrobe_request,
     build_setup_outfit_request,
 )
+
+
+def _legacy_manage_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _legacy_manage_int_list(
+    params: dict[str, object],
+    *keys: str,
+) -> list[int]:
+    result: list[int] = []
+    for key in keys:
+        raw = params.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                try:
+                    value = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if value not in result:
+                    result.append(value)
+            continue
+        for part in str(raw).replace(";", ",").replace(" ", ",").split(","):
+            if not part.strip():
+                continue
+            try:
+                value = int(part.strip())
+            except ValueError:
+                continue
+            if value not in result:
+                result.append(value)
+    return result
+
+
+def _legacy_manage_wardrobe_request(
+    params: dict[str, object],
+    preview: bool,
+) -> dict[str, object]:
+    request: dict[str, object] = {
+        "action": str(params.get("action") or "").strip(),
+        "avatarPath": str(
+            params.get("avatar_path") or params.get("avatarPath") or ""
+        ).strip(),
+        "parameterName": str(
+            params.get("parameter_name")
+            or params.get("parameterName")
+            or params.get("wardrobe_parameter")
+            or params.get("wardrobeParameter")
+            or ""
+        ).strip(),
+        "preview": preview,
+    }
+    for source_key, target_key in (
+        ("outfit_name", "outfitName"),
+        ("outfitName", "outfitName"),
+        ("target_name", "targetName"),
+        ("targetName", "targetName"),
+        ("state_name", "stateName"),
+        ("stateName", "stateName"),
+        ("control_name", "controlName"),
+        ("controlName", "controlName"),
+        ("new_name", "newName"),
+        ("newName", "newName"),
+        ("new_outfit_name", "newOutfitName"),
+        ("newOutfitName", "newOutfitName"),
+        ("asset_dir", "assetDir"),
+        ("assetDir", "assetDir"),
+        ("clip_output_dir", "clipOutputDir"),
+        ("clipOutputDir", "clipOutputDir"),
+    ):
+        value = str(params.get(source_key) or "").strip()
+        if value:
+            request[target_key] = value
+    for source_key, target_key in (
+        ("target_value", "targetValue"),
+        ("targetValue", "targetValue"),
+        ("outfit_value", "outfitValue"),
+        ("outfitValue", "outfitValue"),
+        ("value", "value"),
+    ):
+        if params.get(source_key) is not None:
+            request[target_key] = int(params[source_key])
+            break
+    order_values = _legacy_manage_int_list(params, "order_values", "orderValues")
+    if order_values:
+        request["orderValues"] = order_values
+    target_values = _legacy_manage_int_list(
+        params,
+        "target_values",
+        "targetValues",
+        "values",
+    )
+    if target_values:
+        request["targetValues"] = target_values
+    for source_key, target_key, default in (
+        ("delete_objects", "deleteObjects", False),
+        ("deleteObjects", "deleteObjects", False),
+        ("deactivate_objects", "deactivateObjects", True),
+        ("deactivateObjects", "deactivateObjects", True),
+        ("delete_generated_assets", "deleteGeneratedAssets", False),
+        ("deleteGeneratedAssets", "deleteGeneratedAssets", False),
+        ("confirm_delete_wardrobe", "confirmDeleteWardrobe", False),
+        ("confirmDeleteWardrobe", "confirmDeleteWardrobe", False),
+    ):
+        if params.get(source_key) is not None:
+            request[target_key] = _legacy_manage_bool(
+                params[source_key],
+                default,
+            )
+    return request
 
 
 def test_create_wardrobe_freezes_the_three_exact_core_calls() -> None:
@@ -67,8 +191,162 @@ def test_manage_wardrobe_plan_has_shared_builder_parity_for_aliases_lists_and_de
         "targetValue": "2", "orderValues": "3; 2,3", "targetValues": [2, "4"],
         "deactivateObjects": "not-a-bool", "deleteObjects": "yes", "newOutfitName": "Renamed",
     }
-    expected = dashboard.build_manage_wardrobe_request(params, False)
+    expected = build_manage_wardrobe_request(params, False)
     assert build_workflow_execution_plan("vrcforge_manage_wardrobe", params) == [("vrc_manage_wardrobe", expected)]
+
+
+def test_manage_wardrobe_canonical_builder_preserves_falsey_and_late_alias_overwrite() -> None:
+    params = {
+        "action": "rename_outfit",
+        "wardrobeParameter": False,
+        "control_name": 0,
+        "new_name": ["Legacy"],
+        "newName": "Coat",
+        "delete_objects": True,
+        "deleteObjects": False,
+        "deactivate_objects": False,
+        "deactivateObjects": "unknown",
+        "target_value": None,
+        "targetValue": 3,
+        "order_values": "3; 2 3 bad",
+        "orderValues": (4, "2"),
+        "target_values": [3, "bad", 3],
+        "targetValues": "4, 5",
+    }
+
+    expected = _legacy_manage_wardrobe_request(params, False)
+    actual = build_manage_wardrobe_request(params, False)
+    plan = build_workflow_execution_plan("vrcforge_manage_wardrobe", params)
+
+    assert actual == expected
+    assert plan == [("vrc_manage_wardrobe", expected)]
+    assert len(plan) == 1
+    assert actual["parameterName"] == ""
+    assert "controlName" not in actual
+    assert actual["newName"] == "Coat"
+    assert actual["deleteObjects"] is False
+    assert actual["deactivateObjects"] is True
+    assert actual["targetValue"] == 3
+    assert actual["orderValues"] == [3, 2, 4]
+    assert actual["targetValues"] == [3, 4, 5]
+
+
+def test_manage_wardrobe_randomized_legacy_builder_and_plan_parity() -> None:
+    rng = random.Random(0xC6)
+    text_values: list[object] = [
+        None,
+        "",
+        False,
+        0,
+        " Clothes ",
+        ["Legacy"],
+    ]
+    int_values: list[object] = [None, 0, 1, -2, "3", "bad", [], {}]
+    bool_values: list[object] = [
+        None,
+        True,
+        False,
+        0,
+        1,
+        0.5,
+        "yes",
+        "false",
+        "unknown",
+    ]
+    int_list_values: list[object] = [
+        None,
+        [],
+        [1, "2", "bad", 1],
+        (3, "4", 3),
+        "5; 6 5 bad",
+        7,
+    ]
+    text_keys = (
+        "action",
+        "avatar_path",
+        "avatarPath",
+        "parameter_name",
+        "parameterName",
+        "wardrobe_parameter",
+        "wardrobeParameter",
+        "outfit_name",
+        "outfitName",
+        "target_name",
+        "targetName",
+        "state_name",
+        "stateName",
+        "control_name",
+        "controlName",
+        "new_name",
+        "newName",
+        "new_outfit_name",
+        "newOutfitName",
+        "asset_dir",
+        "assetDir",
+        "clip_output_dir",
+        "clipOutputDir",
+    )
+    int_keys = (
+        "target_value",
+        "targetValue",
+        "outfit_value",
+        "outfitValue",
+        "value",
+    )
+    bool_keys = (
+        "delete_objects",
+        "deleteObjects",
+        "deactivate_objects",
+        "deactivateObjects",
+        "delete_generated_assets",
+        "deleteGeneratedAssets",
+        "confirm_delete_wardrobe",
+        "confirmDeleteWardrobe",
+    )
+    int_list_keys = (
+        "order_values",
+        "orderValues",
+        "target_values",
+        "targetValues",
+        "values",
+    )
+
+    for _ in range(1000):
+        params: dict[str, object] = {}
+        for key in text_keys:
+            if rng.choice((True, False)):
+                params[key] = rng.choice(text_values)
+        for key in int_keys:
+            if rng.choice((True, False)):
+                params[key] = rng.choice(int_values)
+        for key in bool_keys:
+            if rng.choice((True, False)):
+                params[key] = rng.choice(bool_values)
+        for key in int_list_keys:
+            if rng.choice((True, False)):
+                params[key] = rng.choice(int_list_values)
+
+        def capture(call):
+            try:
+                return ("ok", call())
+            except (TypeError, ValueError) as exc:
+                return ("error", type(exc), str(exc))
+
+        expected = capture(lambda: _legacy_manage_wardrobe_request(params, False))
+        actual = capture(lambda: build_manage_wardrobe_request(params, False))
+        plan = capture(
+            lambda: build_workflow_execution_plan("vrcforge_manage_wardrobe", params)
+        )
+
+        assert actual == expected
+        if expected[0] == "error":
+            assert plan == expected
+        else:
+            assert plan == (
+                "ok",
+                [("vrc_manage_wardrobe", expected[1])],
+            )
+            assert len(plan[1]) == 1
 
 
 def test_create_wardrobe_plan_has_shared_builder_parity_and_passes_preview_false_to_all_three_calls() -> None:

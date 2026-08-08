@@ -307,6 +307,10 @@ from wardrobe_outfit_workflow_service import (
     AddWardrobeOutfitPreviewService,
     ClothingFxReadPorts,
     ClothingFxReadService,
+    ManageWardrobeApprovedWritePorts,
+    ManageWardrobeApprovedWriteService,
+    ManageWardrobePreviewPorts,
+    ManageWardrobePreviewService,
     SetupOutfitApprovedWritePorts,
     SetupOutfitApprovedWriteService,
     SetupOutfitPreviewPorts,
@@ -320,6 +324,7 @@ from wardrobe_outfit_workflow_service import (
     build_add_outfit_part_request as build_owned_add_outfit_part_request,
     build_add_modular_avatar_component_request as build_owned_add_modular_avatar_component_request,
     build_add_wardrobe_outfit_request as build_owned_add_wardrobe_outfit_request,
+    build_manage_wardrobe_request as build_owned_manage_wardrobe_request,
     validate_add_modular_avatar_component_request as validate_owned_add_modular_avatar_component_request,
 )
 from outfit_import_planner import (
@@ -17431,149 +17436,6 @@ def create_primitive_basis_restore_request_sync(checkpoint_id: str) -> dict[str,
     )
 
 
-def _coerce_int_list(params: dict[str, Any], *keys: str) -> list[int]:
-    result: list[int] = []
-    for key in keys:
-        raw = params.get(key)
-        if raw is None:
-            continue
-        if isinstance(raw, (list, tuple)):
-            for item in raw:
-                try:
-                    value = int(item)
-                except (TypeError, ValueError):
-                    continue
-                if value not in result:
-                    result.append(value)
-            continue
-        for part in str(raw).replace(";", ",").replace(" ", ",").split(","):
-            if not part.strip():
-                continue
-            try:
-                value = int(part.strip())
-            except ValueError:
-                continue
-            if value not in result:
-                result.append(value)
-    return result
-
-
-def build_manage_wardrobe_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "action": str(params.get("action") or "").strip(),
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-        "parameterName": str(
-            params.get("parameter_name")
-            or params.get("parameterName")
-            or params.get("wardrobe_parameter")
-            or params.get("wardrobeParameter")
-            or ""
-        ).strip(),
-        "preview": preview,
-    }
-    for source_key, target_key in (
-        ("outfit_name", "outfitName"),
-        ("outfitName", "outfitName"),
-        ("target_name", "targetName"),
-        ("targetName", "targetName"),
-        ("state_name", "stateName"),
-        ("stateName", "stateName"),
-        ("control_name", "controlName"),
-        ("controlName", "controlName"),
-        ("new_name", "newName"),
-        ("newName", "newName"),
-        ("new_outfit_name", "newOutfitName"),
-        ("newOutfitName", "newOutfitName"),
-        ("asset_dir", "assetDir"),
-        ("assetDir", "assetDir"),
-        ("clip_output_dir", "clipOutputDir"),
-        ("clipOutputDir", "clipOutputDir"),
-    ):
-        value = str(params.get(source_key) or "").strip()
-        if value:
-            request[target_key] = value
-    for source_key, target_key in (
-        ("target_value", "targetValue"),
-        ("targetValue", "targetValue"),
-        ("outfit_value", "outfitValue"),
-        ("outfitValue", "outfitValue"),
-        ("value", "value"),
-    ):
-        if params.get(source_key) is not None:
-            request[target_key] = int(params.get(source_key))
-            break
-    order_values = _coerce_int_list(params, "order_values", "orderValues")
-    if order_values:
-        request["orderValues"] = order_values
-    target_values = _coerce_int_list(params, "target_values", "targetValues", "values")
-    if target_values:
-        request["targetValues"] = target_values
-    for source_key, target_key, default in (
-        ("delete_objects", "deleteObjects", False),
-        ("deleteObjects", "deleteObjects", False),
-        ("deactivate_objects", "deactivateObjects", True),
-        ("deactivateObjects", "deactivateObjects", True),
-        ("delete_generated_assets", "deleteGeneratedAssets", False),
-        ("deleteGeneratedAssets", "deleteGeneratedAssets", False),
-        ("confirm_delete_wardrobe", "confirmDeleteWardrobe", False),
-        ("confirmDeleteWardrobe", "confirmDeleteWardrobe", False),
-    ):
-        if params.get(source_key) is not None:
-            request[target_key] = _coerce_gateway_bool(params.get(source_key), default)
-    return request
-
-
-def _validate_manage_wardrobe_request(request: dict[str, Any]) -> dict[str, Any] | None:
-    if not request["action"]:
-        return {"ok": False, "error": "action is required for wardrobe management."}
-    if not request["parameterName"]:
-        return {"ok": False, "error": "parameterName is required for wardrobe management."}
-    return None
-
-
-def preview_manage_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    request = build_manage_wardrobe_request(params, True)
-    invalid = _validate_manage_wardrobe_request(request)
-    if invalid is not None:
-        return invalid
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = ensure_dict_payload(
-        extract_tool_result_payload(
-            invoke_unity_mcp(
-                settings,
-                "vrc_manage_wardrobe",
-                request,
-                execution_context={"lane": "app_preview"},
-            )
-        ),
-        "manage wardrobe preview",
-    )
-    payload.setdefault("ok", True)
-    return payload
-
-
-def manage_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    request = build_manage_wardrobe_request(params, False)
-    invalid = _validate_manage_wardrobe_request(request)
-    if invalid is not None:
-        return invalid
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_manage_wardrobe", request)),
-        "manage wardrobe",
-    )
-    payload.setdefault("ok", True)
-    emit_log(
-        "info",
-        "wardrobe",
-        "Wardrobe management action executed.",
-        {"parameterName": request["parameterName"], "action": request["action"]},
-    )
-    return payload
-
-
 def scan_avatar_performance_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     return run_unity_artifact_scan_sync(
@@ -21262,6 +21124,40 @@ ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE = (
         )
     )
 )
+MANAGE_WARDROBE_PREVIEW = ManageWardrobePreviewService(
+    ManageWardrobePreviewPorts(
+        build_request=build_owned_manage_wardrobe_request,
+        load_settings=lambda params: load_dashboard_settings(
+            build_agent_connection_request(params)
+        ),
+        invoke_preview=lambda settings, request: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(
+                    settings,
+                    "vrc_manage_wardrobe",
+                    request,
+                    execution_context={"lane": "app_preview"},
+                )
+            ),
+            "manage wardrobe preview",
+        ),
+    )
+)
+MANAGE_WARDROBE_APPROVED_WRITE = ManageWardrobeApprovedWriteService(
+    ManageWardrobeApprovedWritePorts(
+        build_request=build_owned_manage_wardrobe_request,
+        load_settings=lambda params: load_dashboard_settings(
+            build_agent_connection_request(params)
+        ),
+        invoke_approved=lambda settings, request: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(settings, "vrc_manage_wardrobe", request)
+            ),
+            "manage wardrobe",
+        ),
+        log=emit_log,
+    )
+)
 CLOTHING_FX_READ = ClothingFxReadService(
     ClothingFxReadPorts(
         load_settings=lambda request: load_dashboard_settings(request),
@@ -21292,7 +21188,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         preview_add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_PREVIEW.preview,
         preview_add_outfit_part=ADD_OUTFIT_PART_PREVIEW.preview,
         preview_add_modular_avatar_component=ADD_MODULAR_AVATAR_COMPONENT_PREVIEW.preview,
-        preview_manage_wardrobe=preview_manage_wardrobe_sync,
+        preview_manage_wardrobe=MANAGE_WARDROBE_PREVIEW.preview,
         preview_create_wardrobe=preview_create_wardrobe_sync,
         preview_add_outfit=preview_add_outfit_workflow_sync,
     )
@@ -21303,7 +21199,7 @@ WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
     add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_APPROVED_WRITE.execute,
     add_outfit_part=ADD_OUTFIT_PART_APPROVED_WRITE.execute,
     add_modular_avatar_component=ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE.execute,
-    manage_wardrobe=manage_wardrobe_sync,
+    manage_wardrobe=MANAGE_WARDROBE_APPROVED_WRITE.execute,
     create_wardrobe=create_wardrobe_sync,
     prepare_add_outfit=prepare_add_outfit_request,
     add_outfit=add_outfit_workflow_approved_sync,

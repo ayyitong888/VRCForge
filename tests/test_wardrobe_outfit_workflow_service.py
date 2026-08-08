@@ -22,6 +22,10 @@ from wardrobe_outfit_workflow_service import (
     AddWardrobeOutfitPreviewService,
     ClothingFxReadPorts,
     ClothingFxReadService,
+    ManageWardrobeApprovedWritePorts,
+    ManageWardrobeApprovedWriteService,
+    ManageWardrobePreviewPorts,
+    ManageWardrobePreviewService,
     SetupOutfitApprovedWritePorts,
     SetupOutfitApprovedWriteService,
     SetupOutfitPreviewPorts,
@@ -35,6 +39,7 @@ from wardrobe_outfit_workflow_service import (
     build_add_wardrobe_outfit_request,
     build_add_outfit_part_request,
     build_add_modular_avatar_component_request,
+    build_manage_wardrobe_request,
     coerce_setup_outfit_float_param,
 )
 
@@ -352,6 +357,11 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "add_modular_avatar_component_sync" not in bindings
     assert "build_add_modular_avatar_component_request" not in bindings
     assert "_validate_add_modular_avatar_component_request" not in bindings
+    assert "preview_manage_wardrobe_sync" not in bindings
+    assert "manage_wardrobe_sync" not in bindings
+    assert "build_manage_wardrobe_request" not in bindings
+    assert "_validate_manage_wardrobe_request" not in bindings
+    assert "_coerce_int_list" not in bindings
     assert "scan_avatar_items_sync" not in bindings
     assert "scan_avatar_controls_sync" not in bindings
     assert "scan_wardrobe_sync" not in bindings
@@ -393,6 +403,9 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
         )
         == 2
     )
+    assert "preview_manage_wardrobe=MANAGE_WARDROBE_PREVIEW.preview" in source
+    assert "manage_wardrobe=MANAGE_WARDROBE_APPROVED_WRITE.execute" in source
+    assert source.count("build_request=build_owned_manage_wardrobe_request") == 2
     flattened_source = " ".join(source.split())
     assert "primitive_live_guard_fields=lambda params:" in flattened_source
     assert "_primitive_live_guard_fields(" in flattened_source
@@ -400,6 +413,15 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
         isinstance(node, ast.ImportFrom)
         and any(
             alias.name == "build_add_wardrobe_outfit_request"
+            and alias.asname is None
+            for alias in node.names
+        )
+        for node in tree.body
+    )
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and any(
+            alias.name == "build_manage_wardrobe_request"
             and alias.asname is None
             for alias in node.names
         )
@@ -1022,6 +1044,109 @@ def test_modular_avatar_component_validation_has_no_unity_side_effects(
                 calls.append("live-check") or {}
             ),
             build_request=build_add_modular_avatar_component_request,
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_approved=lambda _settings, _request: calls.append("approved"),
+            log=lambda *_args, **_kwargs: calls.append("log"),
+        )
+    )
+
+    expected = {"ok": False, "error": error}
+    assert preview_service.preview(params) == expected
+    assert approved_service.execute(params) == expected
+    assert calls == []
+
+
+def test_manage_wardrobe_owners_separate_preview_and_approved_capabilities() -> None:
+    calls: list[tuple[Any, ...]] = []
+    settings = object()
+
+    def load_settings(params: dict[str, Any]) -> Any:
+        calls.append(("settings", params))
+        return settings
+
+    preview_service = ManageWardrobePreviewService(
+        ManageWardrobePreviewPorts(
+            build_request=build_manage_wardrobe_request,
+            load_settings=load_settings,
+            invoke_preview=lambda actual_settings, request: (
+                calls.append(("preview", actual_settings, request))
+                or {"plan": {"action": "rename_outfit"}}
+            ),
+        )
+    )
+    approved_service = ManageWardrobeApprovedWriteService(
+        ManageWardrobeApprovedWritePorts(
+            build_request=build_manage_wardrobe_request,
+            load_settings=load_settings,
+            invoke_approved=lambda actual_settings, request: (
+                calls.append(("approved", actual_settings, request))
+                or {"action": "rename_outfit"}
+            ),
+            log=lambda level, scope, message, data=None: calls.append(
+                ("log", level, scope, message, data)
+            ),
+        )
+    )
+    params = {
+        "avatarPath": "Scene/Avatar",
+        "parameterName": "Clothes",
+        "action": "rename_outfit",
+        "value": 3,
+        "newName": "Coat",
+    }
+
+    assert preview_service.preview(params) == {
+        "plan": {"action": "rename_outfit"},
+        "ok": True,
+    }
+    assert approved_service.execute(params) == {
+        "action": "rename_outfit",
+        "ok": True,
+    }
+    assert set(ManageWardrobePreviewPorts.__dataclass_fields__) == {
+        "build_request",
+        "load_settings",
+        "invoke_preview",
+    }
+    assert next(call for call in calls if call[0] == "preview")[2]["preview"] is True
+    assert next(call for call in calls if call[0] == "approved")[2]["preview"] is False
+    assert (
+        "log",
+        "info",
+        "wardrobe",
+        "Wardrobe management action executed.",
+        {"parameterName": "Clothes", "action": "rename_outfit"},
+    ) in calls
+
+
+@pytest.mark.parametrize(
+    ("params", "error"),
+    [
+        (
+            {"parameterName": "Clothes"},
+            "action is required for wardrobe management.",
+        ),
+        (
+            {"action": "remove_outfit", "targetValue": 3},
+            "parameterName is required for wardrobe management.",
+        ),
+    ],
+)
+def test_manage_wardrobe_validation_has_no_settings_or_unity_side_effects(
+    params: dict[str, Any],
+    error: str,
+) -> None:
+    calls: list[str] = []
+    preview_service = ManageWardrobePreviewService(
+        ManageWardrobePreviewPorts(
+            build_request=build_manage_wardrobe_request,
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_preview=lambda _settings, _request: calls.append("preview"),
+        )
+    )
+    approved_service = ManageWardrobeApprovedWriteService(
+        ManageWardrobeApprovedWritePorts(
+            build_request=build_manage_wardrobe_request,
             load_settings=lambda _params: calls.append("settings"),
             invoke_approved=lambda _settings, _request: calls.append("approved"),
             log=lambda *_args, **_kwargs: calls.append("log"),

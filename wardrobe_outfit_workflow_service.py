@@ -545,6 +545,133 @@ def build_add_modular_avatar_component_request(
     return request
 
 
+def _coerce_wardrobe_gateway_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _coerce_wardrobe_int_list(
+    params: dict[str, Any],
+    *keys: str,
+) -> list[int]:
+    result: list[int] = []
+    for key in keys:
+        raw = params.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                try:
+                    value = int(item)
+                except (TypeError, ValueError):
+                    continue
+                if value not in result:
+                    result.append(value)
+            continue
+        for part in str(raw).replace(";", ",").replace(" ", ",").split(","):
+            if not part.strip():
+                continue
+            try:
+                value = int(part.strip())
+            except ValueError:
+                continue
+            if value not in result:
+                result.append(value)
+    return result
+
+
+def build_manage_wardrobe_request(
+    params: dict[str, Any],
+    preview: bool,
+) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "action": str(params.get("action") or "").strip(),
+        "avatarPath": str(
+            params.get("avatar_path") or params.get("avatarPath") or ""
+        ).strip(),
+        "parameterName": str(
+            params.get("parameter_name")
+            or params.get("parameterName")
+            or params.get("wardrobe_parameter")
+            or params.get("wardrobeParameter")
+            or ""
+        ).strip(),
+        "preview": preview,
+    }
+    for source_key, target_key in (
+        ("outfit_name", "outfitName"),
+        ("outfitName", "outfitName"),
+        ("target_name", "targetName"),
+        ("targetName", "targetName"),
+        ("state_name", "stateName"),
+        ("stateName", "stateName"),
+        ("control_name", "controlName"),
+        ("controlName", "controlName"),
+        ("new_name", "newName"),
+        ("newName", "newName"),
+        ("new_outfit_name", "newOutfitName"),
+        ("newOutfitName", "newOutfitName"),
+        ("asset_dir", "assetDir"),
+        ("assetDir", "assetDir"),
+        ("clip_output_dir", "clipOutputDir"),
+        ("clipOutputDir", "clipOutputDir"),
+    ):
+        value = str(params.get(source_key) or "").strip()
+        if value:
+            request[target_key] = value
+    for source_key, target_key in (
+        ("target_value", "targetValue"),
+        ("targetValue", "targetValue"),
+        ("outfit_value", "outfitValue"),
+        ("outfitValue", "outfitValue"),
+        ("value", "value"),
+    ):
+        if params.get(source_key) is not None:
+            request[target_key] = int(params.get(source_key))
+            break
+    order_values = _coerce_wardrobe_int_list(
+        params,
+        "order_values",
+        "orderValues",
+    )
+    if order_values:
+        request["orderValues"] = order_values
+    target_values = _coerce_wardrobe_int_list(
+        params,
+        "target_values",
+        "targetValues",
+        "values",
+    )
+    if target_values:
+        request["targetValues"] = target_values
+    for source_key, target_key, default in (
+        ("delete_objects", "deleteObjects", False),
+        ("deleteObjects", "deleteObjects", False),
+        ("deactivate_objects", "deactivateObjects", True),
+        ("deactivateObjects", "deactivateObjects", True),
+        ("delete_generated_assets", "deleteGeneratedAssets", False),
+        ("deleteGeneratedAssets", "deleteGeneratedAssets", False),
+        ("confirm_delete_wardrobe", "confirmDeleteWardrobe", False),
+        ("confirmDeleteWardrobe", "confirmDeleteWardrobe", False),
+    ):
+        if params.get(source_key) is not None:
+            request[target_key] = _coerce_wardrobe_gateway_bool(
+                params.get(source_key),
+                default,
+            )
+    return request
+
+
 AddWardrobeOutfitRequestBuilder = Callable[
     [dict[str, Any], bool],
     dict[str, Any],
@@ -834,6 +961,92 @@ def validate_add_modular_avatar_component_request(
                 "componentType is required (e.g. MergeArmature, BoneProxy, "
                 "MenuInstaller, MergeAnimator, Parameters)."
             ),
+        }
+    return None
+
+
+ManageWardrobeRequestBuilder = Callable[
+    [dict[str, Any], bool],
+    dict[str, Any],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ManageWardrobePreviewPorts:
+    """Fixed preview capability with no approved/live Unity port."""
+
+    build_request: ManageWardrobeRequestBuilder
+    load_settings: Callable[[dict[str, Any]], Any]
+    invoke_preview: Callable[[Any, dict[str, Any]], dict[str, Any]]
+
+
+class ManageWardrobePreviewService:
+    """Own only the read/preview Manage Wardrobe path."""
+
+    def __init__(self, ports: ManageWardrobePreviewPorts) -> None:
+        self._ports = ports
+
+    def preview(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = self._ports.build_request(normalized, True)
+        invalid = validate_manage_wardrobe_request(request)
+        if invalid is not None:
+            return invalid
+        settings = self._ports.load_settings(normalized)
+        payload = self._ports.invoke_preview(settings, request)
+        payload.setdefault("ok", True)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class ManageWardrobeApprovedWritePorts:
+    """Registry-only fixed live Manage Wardrobe capability."""
+
+    build_request: ManageWardrobeRequestBuilder
+    load_settings: Callable[[dict[str, Any]], Any]
+    invoke_approved: Callable[[Any, dict[str, Any]], dict[str, Any]]
+    log: ClothingFxLogPort
+
+
+class ManageWardrobeApprovedWriteService:
+    """Own the approved Manage Wardrobe execution endpoint."""
+
+    def __init__(self, ports: ManageWardrobeApprovedWritePorts) -> None:
+        self._ports = ports
+
+    def execute(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = self._ports.build_request(normalized, False)
+        invalid = validate_manage_wardrobe_request(request)
+        if invalid is not None:
+            return invalid
+        settings = self._ports.load_settings(normalized)
+        payload = self._ports.invoke_approved(settings, request)
+        payload.setdefault("ok", True)
+        self._ports.log(
+            "info",
+            "wardrobe",
+            "Wardrobe management action executed.",
+            {
+                "parameterName": request["parameterName"],
+                "action": request["action"],
+            },
+        )
+        return payload
+
+
+def validate_manage_wardrobe_request(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not request["action"]:
+        return {
+            "ok": False,
+            "error": "action is required for wardrobe management.",
+        }
+    if not request["parameterName"]:
+        return {
+            "ok": False,
+            "error": "parameterName is required for wardrobe management.",
         }
     return None
 

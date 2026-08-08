@@ -16,6 +16,7 @@ from wardrobe_outfit_workflow_service import (
     build_add_modular_avatar_component_request,
     build_add_outfit_part_request,
     build_add_wardrobe_outfit_request,
+    build_manage_wardrobe_request,
 )
 
 
@@ -155,29 +156,12 @@ def _add_modular_avatar_component(params: dict[str, Any]) -> WorkflowPlan:
 
 
 def _manage_wardrobe(params: dict[str, Any]) -> WorkflowPlan:
-    request: dict[str, Any] = {
-        "action": _text(params, "action"),
-        "avatarPath": _text(params, "avatar_path", "avatarPath"),
-        "parameterName": _text(params, "parameter_name", "parameterName", "wardrobe_parameter", "wardrobeParameter"),
-        "preview": False,
-    }
-    for destination, *sources in (("outfitName", "outfit_name", "outfitName"), ("targetName", "target_name", "targetName"), ("stateName", "state_name", "stateName"), ("controlName", "control_name", "controlName"), ("newName", "new_name", "newName"), ("newOutfitName", "new_outfit_name", "newOutfitName"), ("assetDir", "asset_dir", "assetDir"), ("clipOutputDir", "clip_output_dir", "clipOutputDir")):
-        _optional_text(request, params, destination, *sources)
-    for source, target in (("target_value", "targetValue"), ("targetValue", "targetValue"), ("outfit_value", "outfitValue"), ("outfitValue", "outfitValue"), ("value", "value")):
-        if params.get(source) is not None:
-            request[target] = int(params[source])
-            break
-    order_values = _int_list(params, "order_values", "orderValues")
-    if order_values:
-        request["orderValues"] = order_values
-    target_values = _int_list(params, "target_values", "targetValues", "values")
-    if target_values:
-        request["targetValues"] = target_values
-    _optional_bool(request, params, "deleteObjects", "delete_objects", "deleteObjects", default=False)
-    _optional_bool(request, params, "deactivateObjects", "deactivate_objects", "deactivateObjects", default=True)
-    _optional_bool(request, params, "deleteGeneratedAssets", "delete_generated_assets", "deleteGeneratedAssets", default=False)
-    _optional_bool(request, params, "confirmDeleteWardrobe", "confirm_delete_wardrobe", "confirmDeleteWardrobe", default=False)
-    return [("vrc_manage_wardrobe", request)]
+    return [
+        (
+            "vrc_manage_wardrobe",
+            build_manage_wardrobe_request(params, False),
+        )
+    ]
 
 
 def _create_wardrobe(params: dict[str, Any]) -> WorkflowPlan:

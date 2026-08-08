@@ -37,6 +37,7 @@ from agent_shell_service import (
     native_shell_argv,
     resolve_powershell_executable,
 )
+from wardrobe_outfit_workflow_service import build_manage_wardrobe_request
 from agent_question_service import (
     AgentQuestionPersistence,
     AgentQuestionPersistencePorts,
@@ -8595,7 +8596,7 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(mock_invoke.call_args.kwargs.get("execution_context"), {"lane": "app_preview"})
 
     def test_manage_wardrobe_request_parses_actions_values_and_flags(self) -> None:
-        request = dashboard_server.build_manage_wardrobe_request(
+        request = build_manage_wardrobe_request(
             {
                 "action": "reorder_outfits",
                 "avatarPath": "Scene/HeroAvatar",
@@ -8626,7 +8627,7 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"data": {"preview": True, "plan": {"action": "remove_outfit", "targetValues": [3]}}},
         )
-        result = dashboard_server.preview_manage_wardrobe_sync({
+        result = dashboard_server.WARDROBE_OUTFIT_WORKFLOWS.preview_manage_wardrobe({
             "avatar_path": "Scene/HeroAvatar",
             "parameter_name": "Clothes",
             "action": "remove_outfit",
@@ -8652,7 +8653,7 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"data": {"ok": True, "action": "rename_outfit", "targetValues": [3], "newName": "Coat"}},
         )
-        result = dashboard_server.manage_wardrobe_sync({
+        result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.manage_wardrobe({
             "avatarPath": "Scene/HeroAvatar",
             "parameterName": "Clothes",
             "action": "rename_outfit",
@@ -8668,10 +8669,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["newName"], "Coat")
 
     def test_manage_wardrobe_requires_action_and_parameter(self) -> None:
-        missing_action = dashboard_server.manage_wardrobe_sync({"parameterName": "Clothes"})
+        missing_action = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.manage_wardrobe({"parameterName": "Clothes"})
         self.assertFalse(missing_action["ok"])
-        missing_parameter = dashboard_server.manage_wardrobe_sync({"action": "remove_outfit", "targetValue": 3})
+        missing_parameter = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.manage_wardrobe({"action": "remove_outfit", "targetValue": 3})
         self.assertFalse(missing_parameter["ok"])
+
+    def test_manage_wardrobe_registry_keeps_handler_checkpoint_and_plan_identity(self) -> None:
+        target = "vrcforge_manage_wardrobe"
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[target]
+        params = {
+            "action": "rename_outfit",
+            "parameterName": "Clothes",
+            "targetValue": 3,
+            "newName": "Coat",
+        }
+
+        self.assertIs(
+            handler.handler,
+            dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.manage_wardrobe,
+        )
+        self.assertIn(
+            target,
+            dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS,
+        )
+        self.assertIsNotNone(handler.approved_execution_plan_builder)
+        self.assertEqual(
+            handler.approved_execution_plan_builder(params),
+            [
+                (
+                    "vrc_manage_wardrobe",
+                    build_manage_wardrobe_request(params, False),
+                )
+            ],
+        )
 
     def test_checkpoint_timeline_wraps_approved_write_and_restores(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
