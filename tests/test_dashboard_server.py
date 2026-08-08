@@ -27,8 +27,18 @@ from agent_gateway import (
     SHELL_RUNNER_POWERSHELL,
     kill_process_tree,
     native_shell_argv,
+    normalize_filesystem_path,
     redact_background_goal_persistence,
+    redact_sensitive,
     resolve_powershell_executable,
+    summarize_text,
+)
+from agent_question_service import (
+    AgentQuestionPersistence,
+    AgentQuestionPersistencePorts,
+    AgentQuestionScopePorts,
+    AgentQuestionService,
+    GoalQuestionResolutionPort,
 )
 from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_collaboration_service import SubAgentCollaborationService
@@ -44,6 +54,36 @@ def isolated_project_snapshot_service(*, cache_path: Path | None = None):
         selection_path=original.selection_path,
         selection_schema=original.selection_schema,
         cache_ttl_seconds=original.cache_ttl_seconds,
+    )
+
+
+def isolated_agent_question_service(
+    gateway: AgentGateway,
+    *,
+    resolve_question=None,
+) -> AgentQuestionService:
+    resolver = resolve_question or (
+        lambda question_id, continuation_prompt: gateway.resolve_agent_goal_question(
+            question_id,
+            continuation_prompt=continuation_prompt,
+        )
+    )
+    return AgentQuestionService(
+        AgentQuestionPersistence(
+            AgentQuestionPersistencePorts(
+                log_path=lambda: gateway.audit_dir / "agent-questions.jsonl",
+                shared_state_lock=gateway._lock,
+                redact=redact_sensitive,
+            )
+        ),
+        AgentQuestionScopePorts(
+            normalize_path=normalize_filesystem_path,
+            summarize=summarize_text,
+            redact_goal_persistence=redact_background_goal_persistence,
+        ),
+        GoalQuestionResolutionPort(
+            resolve=resolver
+        ),
     )
 
 
@@ -2805,7 +2845,7 @@ class DashboardServerTests(unittest.TestCase):
                 json={"sessionId": "scope-b", "projectRoot": "ProjectB", "items": [{"id": "step-1", "title": "B"}]},
             )
             dashboard_server.AGENT_GATEWAY.create_agent_progress({"title": "legacy unscoped"})
-            dashboard_server.AGENT_GATEWAY.create_agent_question(
+            dashboard_server.AGENT_QUESTIONS.create(
                 {"question": "Unscoped?", "options": ["A", "B"]}
             )
             progress_a = client.get("/api/app/agent/progress", params={"sessionId": "scope-a", "projectRoot": "ProjectA"})
@@ -2859,7 +2899,8 @@ class DashboardServerTests(unittest.TestCase):
                 delivery_id,
                 {"clientTurnId": woken["delivery"]["clientTurnId"]},
             )
-            question = gateway.create_agent_question(
+            questions = isolated_agent_question_service(gateway)
+            question = questions.create(
                 {
                     "question": "Which bounded option should continue?",
                     "options": ["First", "Second"],
@@ -2874,15 +2915,22 @@ class DashboardServerTests(unittest.TestCase):
             )
             marker = "sk-" + "1145141919810"
             local_path = "C:\\Users\\PrivateName\\secret.txt"
-            with patch.object(gateway, "resolve_agent_goal_question", side_effect=OSError("interrupted")):
-                with self.assertRaises(OSError):
-                    gateway.answer_agent_question(
-                        question["questionId"],
-                        {"answer": f"Use {marker} from {local_path}"},
-                    )
+
+            def fail_goal_resolution(_question_id: str, _continuation_prompt: str):
+                raise OSError("interrupted")
+
+            interrupted_questions = isolated_agent_question_service(
+                gateway,
+                resolve_question=fail_goal_resolution,
+            )
+            with self.assertRaises(OSError):
+                interrupted_questions.answer(
+                    question["questionId"],
+                    {"answer": f"Use {marker} from {local_path}"},
+                )
 
             reopened = AgentGateway(root / "config.json", root / "audit")
-            resumed = reopened.answer_agent_question(question["questionId"], {})
+            resumed = isolated_agent_question_service(reopened).answer(question["questionId"], {})
             self.assertTrue(resumed["idempotent"])
             self.assertEqual(resumed["goalDelivery"]["delivery"]["status"], "interrupted")
             durable_text = (root / "audit").read_text(encoding="utf-8") if (root / "audit").is_file() else ""
@@ -5456,7 +5504,7 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config.json", root / "audit")
-            created = gateway.create_agent_question(
+            created = isolated_agent_question_service(gateway).create(
                 {
                     "question": "Which avatar should this goal use?",
                     "options": ["First avatar", "Second avatar"],

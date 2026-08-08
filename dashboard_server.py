@@ -59,8 +59,19 @@ from agent_gateway import (
     normalize_bool,
     normalize_checkpoint_archive_max_size_mb,
     normalize_exposure_layer,
+    normalize_filesystem_path,
     parse_skill_markdown,
+    redact_background_goal_persistence,
     redact_sensitive,
+    summarize_text,
+)
+from agent_question_service import (
+    AgentQuestionPersistence,
+    AgentQuestionPersistencePorts,
+    AgentQuestionScopePorts,
+    AgentQuestionService,
+    AgentQuestionServiceError,
+    GoalQuestionResolutionPort,
 )
 from approval_auto_review import review_saved_project_category_approval
 from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
@@ -1972,6 +1983,29 @@ AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
 )
+# STOPGAP(1.5): this app-lifetime owner shares the established durable state
+# lock and Goal resolver without a Gateway forwarding layer. The final typed
+# app composition must inject it into routes/tools and remove this root symbol.
+AGENT_QUESTIONS = AgentQuestionService(
+    AgentQuestionPersistence(
+        AgentQuestionPersistencePorts(
+            log_path=lambda: AGENT_GATEWAY.audit_dir / "agent-questions.jsonl",
+            shared_state_lock=AGENT_GATEWAY._lock,
+            redact=redact_sensitive,
+        )
+    ),
+    AgentQuestionScopePorts(
+        normalize_path=normalize_filesystem_path,
+        summarize=summarize_text,
+        redact_goal_persistence=redact_background_goal_persistence,
+    ),
+    GoalQuestionResolutionPort(
+        resolve=lambda question_id, continuation_prompt: AGENT_GATEWAY.resolve_agent_goal_question(
+            question_id,
+            continuation_prompt=continuation_prompt,
+        )
+    ),
+)
 # 1.5 strangler seam: keep the existing facade globals authoritative until
 # each consumer migrates. Late-bound providers preserve test/host monkeypatches
 # and prevent an extracted domain from accidentally creating a second runtime.
@@ -2615,7 +2649,7 @@ def read_app_runtime_snapshot(
         desktop_actions = AGENT_GATEWAY.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)
         goals = AGENT_GATEWAY.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot)
         progress = AGENT_GATEWAY.list_agent_progress(limit=12, session_id=sessionId, project_root=projectRoot)
-        questions = AGENT_GATEWAY.list_agent_questions(limit=6, session_id=sessionId, project_root=projectRoot)
+        questions = AGENT_QUESTIONS.list(limit=6, session_id=sessionId, project_root=projectRoot)
         memory = AGENT_GATEWAY.list_agent_memory(limit=8, project_root=projectRoot)
     else:
         runs = {"ok": True, "schema": "vrcforge.runtime_runs.v1", "runs": [], "events": [], "count": 0}
@@ -3390,13 +3424,13 @@ async def app_delete_agent_progress(progress_id: str, sessionId: str = "", proje
 
 @app.get("/api/app/agent/questions")
 def app_agent_questions(limit: int = 50, sessionId: str = "", projectRoot: str = "", includeAnswered: bool = False) -> dict[str, Any]:
-    return AGENT_GATEWAY.list_agent_questions(limit=limit, session_id=sessionId, project_root=projectRoot, include_answered=includeAnswered)
+    return AGENT_QUESTIONS.list(limit=limit, session_id=sessionId, project_root=projectRoot, include_answered=includeAnswered)
 
 
 @app.post("/api/app/agent/questions")
 async def app_create_agent_question(request: AgentQuestionCreateRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.create_agent_question(
+        payload = AGENT_QUESTIONS.create(
             {
                 "header": request.header,
                 "question": request.question,
@@ -3410,16 +3444,16 @@ async def app_create_agent_question(request: AgentQuestionCreateRequest) -> dict
                 "goalDeliveryId": request.goal_delivery_id,
             }
         )
-    except AgentGatewayError as exc:
+    except AgentQuestionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
+    await EVENT_BUS.broadcast("agentQuestions", AGENT_QUESTIONS.list(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
     return payload
 
 
 @app.post("/api/app/agent/questions/{question_id}/answer")
 async def app_answer_agent_question(question_id: str, request: AgentQuestionAnswerRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.answer_agent_question(
+        payload = AGENT_QUESTIONS.answer(
             question_id,
             {
                 "answer": request.answer,
@@ -3430,9 +3464,9 @@ async def app_answer_agent_question(question_id: str, request: AgentQuestionAnsw
                 "projectRoot": request.project_root,
             },
         )
-    except AgentGatewayError as exc:
+    except AgentQuestionServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
+    await EVENT_BUS.broadcast("agentQuestions", AGENT_QUESTIONS.list(limit=30, session_id=request.session_id or "", project_root=request.project_root or ""))
     if payload.get("goalDelivery") is not None:
         await broadcast_background_goal_state({})
     return payload
@@ -7724,13 +7758,13 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
         ),
         SessionStoreTarget(
             "session.agent-questions",
-            AGENT_GATEWAY.agent_question_log_path,
+            AGENT_QUESTIONS.log_path,
             "app_owned",
             "jsonl",
             ("vrcforge.agent_question.v1",),
             schema_required=True,
             required_string_fields=("id", "createdAt", "event"),
-            guard_root=AGENT_GATEWAY.agent_question_log_path.parent,
+            guard_root=AGENT_QUESTIONS.log_path.parent,
         ),
         SessionStoreTarget(
             "session.subagent-events",
@@ -8538,7 +8572,7 @@ async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentT
     if tool_name.startswith("vrcforge_progress_"):
         await EVENT_BUS.broadcast("agentProgress", AGENT_GATEWAY.list_agent_progress(limit=30, session_id=session_id, project_root=project_root))
     elif tool_name == "vrcforge_ask_user":
-        await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.list_agent_questions(limit=30, session_id=session_id, project_root=project_root))
+        await EVENT_BUS.broadcast("agentQuestions", AGENT_QUESTIONS.list(limit=30, session_id=session_id, project_root=project_root))
     elif tool_name == "vrcforge_agent_desktop_action":
         await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30, session_id=session_id, project_root=project_root))
     elif tool_name == "vrcforge_apply_approved":
@@ -23276,7 +23310,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_progress_create", "Create one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.create_agent_progress(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_progress_update", "Update one visible agent progress item title, summary, order, or status.", "plan/preview", lambda params: AGENT_GATEWAY.update_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_progress_delete", "Delete one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.delete_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_ask_user", "Ask the user a short question with selectable options while the agent task continues.", "plan/preview", lambda params: AGENT_GATEWAY.create_agent_question(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_ask_user", "Ask the user a short question with selectable options while the agent task continues.", "plan/preview", lambda params: AGENT_QUESTIONS.create(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "Classify a shell command before execution.", "read/debug", AGENT_GATEWAY.classify_shell)
     AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.execute_shell(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
     AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.execute_approved_shell, write=True)

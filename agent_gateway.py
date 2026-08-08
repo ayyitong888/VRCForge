@@ -1857,10 +1857,6 @@ class AgentGateway:
         return self.audit_dir / "agent-progress.jsonl"
 
     @property
-    def agent_question_log_path(self) -> Path:
-        return self.audit_dir / "agent-questions.jsonl"
-
-    @property
     def desktop_action_log_path(self) -> Path:
         return self.audit_dir / "desktop-actions.jsonl"
 
@@ -5342,122 +5338,6 @@ class AgentGateway:
         progress = progress[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
         return {"ok": True, "schema": "vrcforge.agent_progress.v1", "items": [redact_sensitive(item) for item in progress], "count": len(progress)}
 
-    def create_agent_question(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        params = params or {}
-        question = summarize_text(str(params.get("question") or params.get("prompt") or "").strip(), 1000)
-        if not question:
-            raise AgentGatewayError("Question is required.", status_code=400)
-        raw_options = ensure_list(params.get("options") or params.get("choices"))
-        options: list[dict[str, Any]] = []
-        for index, option in enumerate(raw_options):
-            if isinstance(option, str):
-                label = summarize_text(option, 160)
-                value = label
-                description = ""
-                option_id = f"option-{index + 1}"
-            elif isinstance(option, dict):
-                label = summarize_text(str(option.get("label") or option.get("value") or ""), 160)
-                value = summarize_text(str(option.get("value") or label), 500)
-                description = summarize_text(str(option.get("description") or ""), 500)
-                option_id = summarize_text(str(option.get("id") or f"option-{index + 1}"), 120)
-            else:
-                continue
-            if label:
-                options.append({"id": option_id, "label": label, "value": value, "description": description})
-        if len(options) < 2:
-            raise AgentGatewayError("Question choices require at least two options.", status_code=400)
-        question_id = f"question_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
-        event = {
-            "event": "question_created",
-            "status": "pending",
-            "questionId": question_id,
-            "header": summarize_text(str(params.get("header") or ""), 120),
-            "question": question,
-            "options": options,
-            "projectRoot": str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip(),
-            "sessionId": str(params.get("sessionId") or params.get("session_id") or "").strip(),
-            "owner": summarize_text(str(params.get("owner") or "agent"), 80),
-            "goalDeliveryId": str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or "").strip(),
-        }
-        self._append_jsonl(self.agent_question_log_path, "vrcforge.agent_question.v1", event)
-        return {"ok": True, "question": self._project_agent_questions(include_answered=True)[question_id]}
-
-    @staticmethod
-    def _question_continuation_prompt(question: dict[str, Any]) -> str:
-        question_text = summarize_text(str(question.get("question") or "Pending question"), 1000)
-        answer_text = summarize_text(str(question.get("answer") or ""), 1000)
-        selected_option_id = summarize_text(str(question.get("selectedOptionId") or ""), 120)
-        return (
-            "Continue the same scheduled goal after the user answered a pending question.\n"
-            f"Question: {question_text}\n"
-            f"User answer: {answer_text or selected_option_id or 'No text provided.'}\n"
-            "Resume the unfinished work under the existing constraints and do not repeat completed steps."
-        )
-
-    def answer_agent_question(self, question_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        params = params or {}
-        question_id = str(question_id or "").strip()
-        if not question_id:
-            raise AgentGatewayError("questionId is required.", status_code=400)
-        current = self._project_agent_questions(include_answered=True)
-        if question_id not in current:
-            raise AgentGatewayError(f"Question was not found: {question_id}", status_code=404)
-        existing = current[question_id]
-        self._require_agent_item_scope(existing, params, label="Question")
-        goal_delivery_id = str(existing.get("goalDeliveryId") or "").strip()
-        if str(existing.get("status") or "") == "answered":
-            payload: dict[str, Any] = {"ok": True, "question": existing, "idempotent": True}
-            if goal_delivery_id:
-                payload["goalDelivery"] = self.resolve_agent_goal_question(
-                    question_id,
-                    continuation_prompt=self._question_continuation_prompt(existing),
-                )
-            return payload
-        selected_option_id = summarize_text(
-            str(params.get("selectedOptionId") or params.get("optionId") or ""),
-            120,
-        )
-        answer_text = summarize_text(str(params.get("answer") or params.get("value") or ""), 1000)
-        if not answer_text and selected_option_id:
-            for option in ensure_list(existing.get("options")):
-                if not isinstance(option, dict) or str(option.get("id") or "") != selected_option_id:
-                    continue
-                answer_text = summarize_text(str(option.get("value") or option.get("label") or ""), 1000)
-                break
-        answer_text = str(redact_background_goal_persistence(answer_text) or "")
-        event = {
-            "event": "question_answered",
-            "status": "answered",
-            "questionId": question_id,
-            "answer": answer_text,
-            "selectedOptionId": selected_option_id,
-            "projectRoot": str(params.get("projectRoot") or existing.get("projectRoot") or ""),
-            "sessionId": str(params.get("sessionId") or existing.get("sessionId") or ""),
-        }
-        self._append_jsonl(self.agent_question_log_path, "vrcforge.agent_question.v1", event)
-        payload = {"ok": True, "question": self._project_agent_questions(include_answered=True)[question_id]}
-        if goal_delivery_id:
-            payload["goalDelivery"] = self.resolve_agent_goal_question(
-                question_id,
-                continuation_prompt=self._question_continuation_prompt(payload["question"]),
-            )
-        return payload
-
-    def list_agent_questions(self, *, limit: int = 50, project_root: str = "", session_id: str = "", include_answered: bool = False) -> dict[str, Any]:
-        questions = list(self._project_agent_questions(include_answered=include_answered).values())
-        if project_root:
-            normalized_project_root = normalize_filesystem_path(project_root)
-            questions = [
-                item
-                for item in questions
-                if normalize_filesystem_path(str(item.get("projectRoot") or "")) == normalized_project_root
-            ]
-        if session_id:
-            questions = [item for item in questions if str(item.get("sessionId") or "") == session_id]
-        questions.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
-        questions = questions[: max(1, min(limit, AGENT_GOAL_MAX_ITEMS))]
-        return {"ok": True, "schema": "vrcforge.agent_questions.v1", "questions": [redact_sensitive(item) for item in questions], "count": len(questions)}
-
     def create_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             payload = self._agent_memory_store.create_agent_memory(params)
@@ -6750,35 +6630,6 @@ class AgentGateway:
         if include_deleted:
             return progress
         return {item_key: item for item_key, item in progress.items() if item_key not in deleted and str(item.get("status") or "") != "deleted"}
-
-    def _project_agent_questions(self, *, include_answered: bool = False) -> dict[str, dict[str, Any]]:
-        questions: dict[str, dict[str, Any]] = {}
-        answered: set[str] = set()
-        for event in self._read_jsonl(self.agent_question_log_path, limit=0):
-            question_id = str(event.get("questionId") or "").strip()
-            if not question_id:
-                continue
-            if str(event.get("status") or "") in {"answered", "cancelled"} or str(event.get("event") or "") == "question_answered":
-                answered.add(question_id)
-            previous = questions.get(question_id, {})
-            merged = {
-                **previous,
-                **event,
-                "id": question_id,
-                "questionId": question_id,
-                "createdAt": previous.get("createdAt") or event.get("createdAt"),
-                "updatedAt": event.get("updatedAt") or event.get("createdAt") or previous.get("updatedAt"),
-            }
-            if not event.get("options") and previous.get("options"):
-                merged["options"] = previous.get("options")
-            if not event.get("question") and previous.get("question"):
-                merged["question"] = previous.get("question")
-            if not event.get("header") and previous.get("header"):
-                merged["header"] = previous.get("header")
-            questions[question_id] = merged
-        if include_answered:
-            return questions
-        return {question_id: item for question_id, item in questions.items() if question_id not in answered and str(item.get("status") or "") == "pending"}
 
     def _project_agent_memory(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
         return self._agent_memory_store.project(include_deleted=include_deleted)
