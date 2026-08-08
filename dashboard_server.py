@@ -329,7 +329,14 @@ from project_snapshot_selection_service import ProjectSnapshotSelectionPorts, Pr
 from provider_model_catalog_service import ProviderModelCatalogService
 from provider_configuration_service import ProviderConfigurationService
 from provider_test_integration_service import ProviderTestIntegrationService
-from provider_vision_integration_service import ProviderVisionIntegrationService
+from provider_vision_service import (
+    ProviderVisionPolicyPorts,
+    ProviderVisionSdkRunner,
+    ProviderVisionService,
+    ProviderVisionStatePorts,
+    VisionModelConfig,
+    VisionProfileConfig,
+)
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
 from vrchat_blendshape_agent import (
@@ -1804,6 +1811,27 @@ class DashboardVisionConfig:
         return bool(self.provider and self.model)
 
 
+def _current_provider_vision_main_config() -> VisionModelConfig:
+    config = DASHBOARD_API_CONFIG or load_initial_dashboard_api_config()
+    return VisionModelConfig(
+        provider=config.provider,
+        api_key=config.api_key,
+        base_url=config.base_url,
+        model=config.model,
+    )
+
+
+def _current_provider_vision_profile_config() -> VisionProfileConfig:
+    config = DASHBOARD_VISION_CONFIG or load_initial_dashboard_vision_config()
+    return VisionProfileConfig(
+        provider=config.provider,
+        api_key=config.api_key,
+        base_url=config.base_url,
+        model=config.model,
+        enabled=config.enabled,
+    )
+
+
 @dataclass
 class DashboardState:
     settings_path: Path
@@ -1930,7 +1958,22 @@ _PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(sys.modules[__name__])
 _PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(sys.modules[__name__])
 _PROVIDER_CONFIGURATION = ProviderConfigurationService(sys.modules[__name__])
 _PROVIDER_TEST_INTEGRATION = ProviderTestIntegrationService(sys.modules[__name__])
-_PROVIDER_VISION_INTEGRATION = ProviderVisionIntegrationService(sys.modules[__name__])
+PROVIDER_VISION_POLICY = ProviderVisionPolicyPorts(
+    normalize_provider_name=normalize_provider_name,
+    provider_requires_api_key=provider_requires_api_key,
+    provider_display_name=provider_display_name,
+    validate_provider_api_key=validate_provider_api_key,
+    resolve_vertex_project_location=lambda value: resolve_vertex_project_location(value),
+    model_rejects_fixed_temperature=model_rejects_fixed_temperature,
+)
+PROVIDER_VISION = ProviderVisionService(
+    ProviderVisionStatePorts(
+        main_config=_current_provider_vision_main_config,
+        profile_config=_current_provider_vision_profile_config,
+    ),
+    PROVIDER_VISION_POLICY,
+    ProviderVisionSdkRunner(PROVIDER_VISION_POLICY),
+)
 _PROJECT_SNAPSHOT_SELECTION = ProjectSnapshotSelectionService(
     ProjectSnapshotSelectionPorts(
         build_snapshot=lambda: build_project_snapshot_payload(),
@@ -13829,13 +13872,7 @@ def _agent_gateway_context_compact(
 
 
 AGENT_GATEWAY.runtime_context_compact_fn = _agent_gateway_context_compact
-
-
-def _agent_gateway_vision_analyze(message: str, images: list[dict[str, Any]]) -> dict[str, Any]:
-    return _PROVIDER_VISION_INTEGRATION._impl__agent_gateway_vision_analyze(message, images)
-
-
-AGENT_GATEWAY.vision_analyze_fn = _agent_gateway_vision_analyze
+AGENT_GATEWAY.vision_analyze_fn = PROVIDER_VISION.analyze
 
 
 def load_dashboard_export_payload(
@@ -16442,66 +16479,6 @@ def _review_saved_project_category_approval(approval: dict[str, Any]) -> str:
 
 def _provider_probe_settings(config: DashboardApiConfig) -> Settings:
     return _PROVIDER_TEST_INTEGRATION._impl__provider_probe_settings(config)
-
-
-# 主模型视觉能力判定：保守白名单——判错的代价是"该走委托的没走"（仍有诚实提示），
-# 绝不允许反向判错把图片字节发给纯文本模型。DeepSeek 官方 chat/reasoner 均为纯文本。
-VISION_CAPABLE_MODEL_MARKERS = (
-    "gpt-4o",
-    "gpt-4.1",
-    "gpt-4-turbo",
-    "gpt-5",
-    "chatgpt-4o",
-    "omni",
-    "vision",
-    "llava",
-    "gemini",
-    "claude",
-    "pixtral",
-    "internvl",
-    "minicpm-v",
-    "moondream",
-    "glm-4v",
-    "glm-4.5v",
-    "gemma-3",
-    "qwen-vl",
-    "qwen2-vl",
-    "qwen2.5-vl",
-    "qwen3-vl",
-    "kimi-vl",
-    "step-1v",
-    "yi-vision",
-    "phi-3-vision",
-    "phi-3.5-vision",
-    "llama-3.2-11b",
-    "llama-3.2-90b",
-    "llama-4",
-)
-VISION_CAPABLE_MODEL_RE = re.compile(r"(^|[-_/.])(o[134])([-_.]|$)|(^|[-_/.])vl([-_.]|$)")
-
-
-def provider_model_supports_vision(provider: str, model: str) -> bool:
-    return _PROVIDER_VISION_INTEGRATION._impl_provider_model_supports_vision(provider, model)
-
-
-def split_image_data_url(data_url: str) -> tuple[str, str]:
-    return _PROVIDER_VISION_INTEGRATION._impl_split_image_data_url(data_url)
-
-
-def build_vision_analysis_prompt(message: str, images: list[dict[str, Any]]) -> str:
-    return _PROVIDER_VISION_INTEGRATION._impl_build_vision_analysis_prompt(message, images)
-
-
-def _extract_openai_usage(response: Any) -> dict[str, Any]:
-    return _PROVIDER_VISION_INTEGRATION._impl__extract_openai_usage(response)
-
-
-def _run_provider_vision_analysis(
-    config: DashboardApiConfig,
-    prompt: str,
-    images: list[dict[str, Any]],
-) -> tuple[str, dict[str, Any]]:
-    return _PROVIDER_VISION_INTEGRATION._impl__run_provider_vision_analysis(config, prompt, images)
 
 
 def fetch_openai_compatible_models(config: DashboardApiConfig) -> list[dict[str, Any]]:
