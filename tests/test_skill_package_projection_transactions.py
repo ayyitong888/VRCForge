@@ -14,6 +14,10 @@ from agent_gateway import (
     RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES,
 )
 from skill_packages import SkillPackageError, SkillPackageService
+from skill_package_governance import (
+    SkillPackageGovernancePorts,
+    SkillPackageGovernanceService,
+)
 
 
 def _write_package_source(
@@ -256,7 +260,9 @@ def test_safe_mode_projection_failure_restores_all_registry_and_projection_state
 
     monkeypatch.setattr(dashboard_server, "_write_projected_skill_state", fail_second_state_write)
     with pytest.raises(OSError, match="injected safe-mode projection failure"):
-        dashboard_server.set_skill_package_safe_mode_sync({"enabled": True, "reason": "test rollback"})
+        dashboard_server.SKILL_PACKAGE_GOVERNANCE.set_safe_mode(
+            {"enabled": True, "reason": "test rollback"}
+        )
 
     assert service.registry_path.read_bytes() == original_registry
     assert all(path.read_bytes() == original_installed[path] for path in installed_paths)
@@ -294,11 +300,11 @@ def test_governance_projection_failure_restores_registry_and_projection_state(
     monkeypatch.setattr(dashboard_server, "_write_projected_skill_state", fail_state_write)
     with pytest.raises(OSError, match=f"injected {operation} projection failure"):
         if operation == "revoke":
-            dashboard_server.revoke_skill_package_signer_sync(
+            dashboard_server.SKILL_PACKAGE_GOVERNANCE.revoke_signer(
                 {"signerFingerprint": key_pair.fingerprint, "reason": "test rollback"}
             )
         else:
-            dashboard_server.block_skill_package_sync(
+            dashboard_server.SKILL_PACKAGE_GOVERNANCE.block_package(
                 {"packageId": package_id, "reason": "test rollback"}
             )
 
@@ -378,10 +384,17 @@ def test_trust_signer_write_runs_inside_shared_package_lock(monkeypatch: pytest.
             assert lock.active
             return {"ok": True, "fingerprint": fingerprint, "reason": reason}
 
-    monkeypatch.setattr(dashboard_server, "SKILL_PACKAGE_WRITE_LOCK", lock)
-    monkeypatch.setattr(dashboard_server, "skill_package_service", TrustService)
+    owner = SkillPackageGovernanceService(
+        SkillPackageGovernancePorts(
+            make_service=TrustService,
+            write_lock=lock,
+            disable_projected_skills=lambda _manifests: pytest.fail(
+                "trust must not update projections"
+            ),
+        )
+    )
 
-    result = dashboard_server.trust_skill_package_signer_sync(
+    result = owner.trust_signer(
         {"signerFingerprint": "a" * 64, "reason": "lock regression"}
     )
 

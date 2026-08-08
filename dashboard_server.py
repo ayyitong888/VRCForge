@@ -389,7 +389,10 @@ from shader_adapter_registry import (
 )
 from skill_packages import SkillPackageError, SkillPackageService, _load_json_bytes
 from skill_package_controller import SkillPackageController
-from skill_package_governance import SkillPackageGovernanceService
+from skill_package_governance import (
+    SkillPackageGovernancePorts,
+    SkillPackageGovernanceService,
+)
 from skill_package_projection import SkillPackageProjectionService
 from path_to_skill_controller import (
     PathToSkillControllerError,
@@ -2025,7 +2028,6 @@ TUNING_STORE_LOCK = Lock()
 UNITY_MCP_REPAIR_LOCK = Lock()
 SKILL_PACKAGE_WRITE_LOCK = Lock()
 _SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
-_SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(
     ProjectCatalogDiscoveryPorts(
@@ -6080,6 +6082,16 @@ def _delete_projected_skill_transaction(manifest: dict[str, Any]) -> Any:
     return _SKILL_PACKAGE_PROJECTION._impl_delete_projected_skill_transaction(manifest)
 
 
+SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(
+    SkillPackageGovernancePorts(
+        make_service=skill_package_service,
+        write_lock=SKILL_PACKAGE_WRITE_LOCK,
+        disable_projected_skills=lambda manifests,
+        set_enabled=_set_projected_skills_enabled: set_enabled(manifests, False),
+    )
+)
+
+
 def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return _SKILL_PACKAGE_CONTROLLER._impl_import_skill_package_sync(params)
 
@@ -6090,26 +6102,6 @@ def set_skill_package_enabled_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 def uninstall_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return _SKILL_PACKAGE_CONTROLLER._impl_uninstall_skill_package_sync(params)
-
-
-def _disable_projected_skills_for_packages(service: SkillPackageService, skill_ids: list[str]) -> list[dict[str, Any]]:
-    return _SKILL_PACKAGE_GOVERNANCE._impl_disable_projected_skills_for_packages(service, skill_ids)
-
-
-def set_skill_package_safe_mode_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _SKILL_PACKAGE_GOVERNANCE._impl_set_skill_package_safe_mode_sync(params)
-
-
-def trust_skill_package_signer_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _SKILL_PACKAGE_GOVERNANCE._impl_trust_skill_package_signer_sync(params)
-
-
-def revoke_skill_package_signer_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _SKILL_PACKAGE_GOVERNANCE._impl_revoke_skill_package_signer_sync(params)
-
-
-def block_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _SKILL_PACKAGE_GOVERNANCE._impl_block_skill_package_sync(params)
 
 
 def _exportable_user_skill(skill_name: str) -> tuple[dict[str, Any], Path]:
@@ -6563,7 +6555,7 @@ def app_import_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]
 @app.post("/api/app/skill-packages/safe-mode")
 def app_set_skill_package_safe_mode(request: SkillPackageSafeModeRequest) -> dict[str, Any]:
     try:
-        return set_skill_package_safe_mode_sync(request.model_dump(by_alias=True))
+        return SKILL_PACKAGE_GOVERNANCE.set_safe_mode(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6571,7 +6563,7 @@ def app_set_skill_package_safe_mode(request: SkillPackageSafeModeRequest) -> dic
 @app.post("/api/app/skill-packages/trust-signer")
 def app_trust_skill_package_signer(request: SkillPackageSignerRequest) -> dict[str, Any]:
     try:
-        return trust_skill_package_signer_sync(request.model_dump(by_alias=True))
+        return SKILL_PACKAGE_GOVERNANCE.trust_signer(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6579,7 +6571,7 @@ def app_trust_skill_package_signer(request: SkillPackageSignerRequest) -> dict[s
 @app.post("/api/app/skill-packages/revoke-signer")
 def app_revoke_skill_package_signer(request: SkillPackageSignerRequest) -> dict[str, Any]:
     try:
-        return revoke_skill_package_signer_sync(request.model_dump(by_alias=True))
+        return SKILL_PACKAGE_GOVERNANCE.revoke_signer(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6587,7 +6579,7 @@ def app_revoke_skill_package_signer(request: SkillPackageSignerRequest) -> dict[
 @app.post("/api/app/skill-packages/block-package")
 def app_block_skill_package(request: SkillPackageBlockRequest) -> dict[str, Any]:
     try:
-        return block_skill_package_sync(request.model_dump(by_alias=True))
+        return SKILL_PACKAGE_GOVERNANCE.block_package(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
