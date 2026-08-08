@@ -333,6 +333,9 @@ def cleanup_owned_zip_materialization(receipt: dict[str, Any]) -> str:
         raise ValueError("Materialization cleanup receipt is invalid.")
     errors: list[str] = []
     for expected in reversed(receipt.get("ownedFiles") or []):
+        if not isinstance(expected, dict):
+            errors.append("owned output cleanup receipt item is invalid")
+            continue
         path = Path(str(expected.get("path") or ""))
         try:
             identity, digest = capture_regular_file(path, label="Owned materialization output")
@@ -348,6 +351,8 @@ def cleanup_owned_zip_materialization(receipt: dict[str, Any]) -> str:
             path.unlink()
         except FileNotFoundError:
             continue
+        except (TypeError, ValueError) as exc:
+            errors.append(f"output cleanup refused an unverified node: {exc}")
         except OSError as exc:
             errors.append(f"output cleanup failed: {exc}")
     return "; ".join(errors)

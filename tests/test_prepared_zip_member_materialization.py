@@ -100,3 +100,16 @@ def test_second_member_failure_cleans_only_owned_first_output(monkeypatch, tmp_p
     with pytest.raises(OSError, match="second member read failed"):
         archive_imports.execute_zip_member_materialization(facts)
     assert not list(temp.iterdir())
+
+
+def test_cleanup_refuses_foreign_directory_without_escaping(tmp_path: Path) -> None:
+    _source, temp, facts = _facts(tmp_path)
+    receipt = archive_imports.execute_zip_member_materialization(facts)
+    foreign = temp / "queue-02.unitypackage"
+    foreign.unlink()
+    foreign.mkdir()
+
+    error = archive_imports.cleanup_owned_zip_materialization(receipt)
+
+    assert "refused an unverified node" in error
+    assert foreign.is_dir()

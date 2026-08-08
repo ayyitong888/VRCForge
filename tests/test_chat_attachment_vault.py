@@ -546,34 +546,97 @@ class ChatAttachmentEndpointTests(unittest.TestCase):
         for directory in ("Assets", "Packages", "ProjectSettings"):
             (project / directory).mkdir(parents=True, exist_ok=True)
         package_path = self.vault.root / "files" / f"{stored['payloadHash']}.unitypackage"
-        preview = {"ok": True, "plan": {"readyToApply": True, "kind": "unitypackage_import", "projectPath": str(project), "source": {"actualPackagePath": str(package_path)}, "expectedAssetPaths": []}}
-        with patch("dashboard_server.plan_outfit_import_sync", return_value=preview) as plan_mock:
-            response = self.client.post(
-                "/api/app/chat-attachments/import",
-                json={"payloadHash": stored["payloadHash"], "projectPath": str(project)},
-            )
+        response = self.client.post(
+            "/api/app/chat-attachments/import",
+            json={"payloadHash": stored["payloadHash"], "projectPath": str(project)},
+        )
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertTrue(body["ok"])
         self.assertEqual(body["approval"]["targetTool"], "vrcforge_import_chat_archive")
         self.assertEqual(body["approval"]["arguments"]["payloadHash"], stored["payloadHash"])
-        plan_args = plan_mock.call_args.args[0]
-        self.assertEqual(plan_args["packagePath"], str(self.vault.root / "files" / f"{stored['payloadHash']}.unitypackage"))
-        self.assertEqual(plan_args["payloadHash"], stored["payloadHash"])
+        self.assertEqual(
+            body["approval"]["preview"]["outfit"]["plan"]["source"]["actualPackagePath"],
+            str(package_path),
+        )
 
     def test_unitypackage_import_blocks_when_plan_not_ready(self) -> None:
-        data = make_unitypackage_bytes({"asset/model.fbx": b"mesh"})
+        data = make_unitypackage_bytes({"Assets/Materials/poiyomi_dress.mat": b"mat"})
         stored = self.vault.ingest(data=data, name="outfit.unitypackage", declared_type="application/gzip", chat_id="chat-1")
-        preview = {"ok": True, "plan": {"readyToApply": False}, "error": "unresolved conflicts"}
         project = Path(self.tmp.name) / "BlockedPackageProject"
         for directory in ("Assets", "Packages", "ProjectSettings"):
             (project / directory).mkdir(parents=True, exist_ok=True)
-        with patch("dashboard_server.plan_outfit_import_sync", return_value=preview):
-            response = self.client.post(
-                "/api/app/chat-attachments/import",
-                json={"payloadHash": stored["payloadHash"], "projectPath": str(project)},
-            )
+        response = self.client.post(
+            "/api/app/chat-attachments/import",
+            json={
+                "payloadHash": stored["payloadHash"],
+                "projectPath": str(project),
+                "selectedUnityPackage": "missing.unitypackage",
+            },
+        )
         self.assertEqual(response.status_code, 400)
+
+    def test_unitypackage_archive_executes_through_typed_import_owner(self) -> None:
+        data = make_unitypackage_bytes({"asset/model.fbx": b"mesh"})
+        stored = self.vault.ingest(
+            data=data,
+            name="outfit.unitypackage",
+            declared_type="application/gzip",
+            chat_id="chat-1",
+        )
+        project = Path(self.tmp.name) / "ArchiveExecutionProject"
+        for directory in ("Assets", "Packages", "ProjectSettings"):
+            (project / directory).mkdir(parents=True, exist_ok=True)
+        prepared, preview = dashboard_server.prepare_import_chat_archive_request(
+            {"payloadHash": stored["payloadHash"], "projectPath": str(project)},
+            None,
+        )
+        self.assertEqual(preview["branch"], "unitypackage")
+
+        def invoke(_settings, tool, arguments, **_kwargs):
+            if tool == "vrc_import_unitypackage":
+                return dashboard_server.McpResult(
+                    0,
+                    "",
+                    "",
+                    {
+                        "ok": True,
+                        "pending": False,
+                        "status": "completed",
+                        "jobId": "a" * 32,
+                        "mutationStarted": True,
+                        "committed": True,
+                        "commitState": "complete",
+                        "checkpointRecoveryRequired": False,
+                        "projectPath": arguments["projectPath"],
+                        "unityPackagePath": arguments["unityPackagePath"],
+                        "expectedSha256": arguments["expectedSha256"],
+                        "expectedSize": arguments["expectedSize"],
+                        "expectedAssetPaths": arguments["expectedAssetPaths"],
+                        "expectedAssets": [
+                            {
+                                "assetPath": path,
+                                "guid": "b" * 32,
+                                "assetType": "UnityEngine.GameObject",
+                            }
+                            for path in arguments["expectedAssetPaths"]
+                        ],
+                    },
+                )
+            return dashboard_server.McpResult(0, "", "", {"ok": True})
+
+        with (
+            patch(
+                "dashboard_server.load_dashboard_settings",
+                return_value=SimpleNamespace(unity_mcp_timeout_seconds=30),
+            ),
+            patch("dashboard_server.invoke_unity_mcp", side_effect=invoke),
+        ):
+            result = dashboard_server.import_chat_archive_approved_sync(prepared)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["payloadHash"], stored["payloadHash"])
+        self.assertGreater(result["archiveGuard"]["entryCount"], 0)
 
     def test_image_import_creates_supervised_copy_approval(self) -> None:
         data = make_png_bytes(pad=b"\x00" * 32)

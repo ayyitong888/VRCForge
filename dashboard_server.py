@@ -341,6 +341,12 @@ from prepared_add_outfit_workflow_service import (
     PreparedAddOutfitStateBuilder,
     PreparedAddOutfitStatePorts,
 )
+from prepared_outfit_import_workflow_service import (
+    PreparedOutfitImportApprovedWritePorts,
+    PreparedOutfitImportApprovedWriteService,
+    PreparedOutfitImportPreparer,
+    PreparedOutfitImportPreparerPorts,
+)
 from outfit_import_planner import (
     build_outfit_import_plan,
     build_post_import_outfit_validation,
@@ -5351,7 +5357,10 @@ async def app_request_chat_attachment_import(request: ChatAttachmentImportReques
                 Path(str(resolved["path"])),
                 str(resolved["kind"]),
             )
-            preview = await asyncio.to_thread(plan_outfit_import_sync, plan_params)
+            preview = await asyncio.to_thread(
+                WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import,
+                plan_params,
+            )
             plan_payload = preview.get("plan") if isinstance(preview.get("plan"), dict) else {}
             if not preview.get("ok") or not plan_payload.get("readyToApply"):
                 if resolved["kind"] != "zip":
@@ -5620,7 +5629,10 @@ def prepare_import_chat_archive_request(arguments: dict[str, Any], preview: Any)
 
     if kind == "unitypackage":
         nested_arguments = {**arguments, "packagePath": str(source)}
-        nested_prepared, nested_preview = prepare_outfit_import_package_request(nested_arguments, preview)
+        nested_prepared, nested_preview = PREPARED_OUTFIT_IMPORT_PREPARER.prepare(
+            nested_arguments,
+            preview,
+        )
         calls = build_prepared_execution_plan(nested_prepared)
         nested_evidence = prepared_evidence(nested_prepared)
         queue = ensure_dict(nested_evidence).get("queue")
@@ -5685,7 +5697,7 @@ def import_chat_archive_approved_sync(arguments: dict[str, Any]) -> dict[str, An
             calls = build_prepared_execution_plan(arguments)
             nested_base = {key: value for key, value in arguments.items() if key != PREPARED_UNITY_EXECUTION_ARGUMENT_KEY}
             nested_arguments = install_prepared_calls(nested_base, calls, nested_evidence)
-            result = import_outfit_package_approved_sync(nested_arguments)
+            result = PREPARED_OUTFIT_IMPORT_APPROVED_WRITE.execute(nested_arguments)
             return {**result, "payloadHash": payload_hash, "archiveGuard": evidence.get("archiveGuard")}
         if branch != "zip":
             raise RuntimeError("Prepared chat archive branch is invalid.")
@@ -18898,16 +18910,6 @@ OUTFIT_IMPORT_ALLOWED_SUFFIXES = {
 }
 OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_BYTES = 512 * 1024 * 1024
 OUTFIT_IMPORT_MAX_NESTED_UNITYPACKAGE_RATIO = 100.0
-OUTFIT_IMPORT_JOB_TIMEOUT_SECONDS = 180.0
-OUTFIT_IMPORT_JOB_POLL_SECONDS = 0.5
-
-
-def _prepared_import_path_identity(path: Path, label: str) -> dict[str, Any]:
-    try:
-        identity, digest = capture_regular_file(path.expanduser(), label=f"Prepared outfit {label}")
-    except ValueError as exc:
-        raise RuntimeError(str(exc)) from exc
-    return {**identity, "sha256": digest}
 
 
 def _prepared_import_project_identity(project_root: Path) -> dict[str, Any]:
@@ -18938,27 +18940,6 @@ def _require_prepared_import_evidence(expected: Any, actual: Any, label: str) ->
         raise RuntimeError(f"Prepared outfit import {label} drifted after approval.")
 
 
-def _prepared_outfit_expected_asset_paths(plan_payload: dict[str, Any]) -> list[str]:
-    paths: list[str] = []
-    seen: set[str] = set()
-    for raw_path in plan_payload.get("expectedAssetPaths") or []:
-        asset_path = str(raw_path or "").replace("\\", "/").strip()
-        parts = PurePosixPath(asset_path).parts
-        if (
-            len(parts) < 2
-            or parts[0] != "Assets"
-            or any(part in {"", ".", ".."} for part in parts)
-            or "//" in asset_path
-        ):
-            raise RuntimeError("Prepared outfit expected asset path is invalid.")
-        folded = asset_path.casefold()
-        if folded in seen:
-            raise RuntimeError("Prepared outfit expected asset paths contain a duplicate.")
-        seen.add(folded)
-        paths.append(asset_path)
-    return paths
-
-
 def _verify_prepared_import_project_identity(project_identity: dict[str, Any]) -> Path:
     try:
         project_root = verify_directory(project_identity["project"], label="Prepared outfit Unity project")
@@ -18972,426 +18953,11 @@ def _verify_prepared_import_project_identity(project_identity: dict[str, Any]) -
     return project_root
 
 
-def _require_prepared_import_asset_receipts(
-    payload: dict[str, Any],
-    expected_asset_paths: list[str],
-) -> list[dict[str, str]]:
-    raw_receipts = payload.get("expectedAssets")
-    if not isinstance(raw_receipts, list) or len(raw_receipts) != len(expected_asset_paths):
-        raise RuntimeError("Unity Core expected-asset receipt count did not match approval.")
-    receipts: list[dict[str, str]] = []
-    for expected_path, raw_receipt in zip(expected_asset_paths, raw_receipts, strict=True):
-        if not isinstance(raw_receipt, dict):
-            raise RuntimeError("Unity Core expected-asset receipt is invalid.")
-        asset_path = str(raw_receipt.get("assetPath") or "").replace("\\", "/")
-        guid = str(raw_receipt.get("guid") or "").strip().lower()
-        asset_type = str(raw_receipt.get("assetType") or "").strip()
-        if (
-            asset_path != expected_path
-            or len(guid) != 32
-            or any(character not in "0123456789abcdef" for character in guid)
-            or not asset_type
-        ):
-            raise RuntimeError("Unity Core expected-asset readback did not match approval.")
-        receipts.append({"assetPath": asset_path, "guid": guid, "assetType": asset_type})
-    return receipts
-
-
-def _require_prepared_import_job_receipt(
-    payload: dict[str, Any],
-    project_identity: dict[str, Any],
-    identity: dict[str, Any],
-    expected_asset_paths: list[str],
-) -> str:
-    job_id = str(payload.get("jobId") or "").strip().lower()
-    if len(job_id) != 32 or any(character not in "0123456789abcdef" for character in job_id):
-        raise RuntimeError("Unity Core import job receipt is invalid.")
-    if (
-        str(payload.get("projectPath") or "") != project_identity["projectPath"]
-        or str(payload.get("unityPackagePath") or "").replace("\\", "/")
-        != str(identity["path"]).replace("\\", "/")
-        or str(payload.get("expectedSha256") or "").lower() != str(identity["sha256"]).lower()
-        or int(payload.get("expectedSize", -1)) != int(identity["size"])
-    ):
-        raise RuntimeError("Unity Core import receipt project/path did not match the prepared call.")
-    raw_paths = payload.get("expectedAssetPaths")
-    if not isinstance(raw_paths, list) or [str(path).replace("\\", "/") for path in raw_paths] != expected_asset_paths:
-        raise RuntimeError("Unity Core import receipt asset paths did not match approval.")
-    return job_id
-
-
-def _wait_for_unitypackage_import_job(
-    settings: Any,
-    initial_payload: dict[str, Any],
-) -> dict[str, Any]:
-    job_id = str(initial_payload.get("jobId") or "").strip().lower()
-    if len(job_id) != 32 or any(character not in "0123456789abcdef" for character in job_id):
-        raise RuntimeError("Unity Core import job id is invalid.")
-    poll_settings = copy.copy(settings)
-    try:
-        poll_settings.unity_mcp_timeout_seconds = min(
-            int(getattr(settings, "unity_mcp_timeout_seconds", 30) or 30), 8
-        )
-    except Exception:  # noqa: BLE001 - tests may use a minimal settings object.
-        pass
-    deadline = time.monotonic() + OUTFIT_IMPORT_JOB_TIMEOUT_SECONDS
-    payload = initial_payload
-    while payload.get("pending") is True and time.monotonic() < deadline:
-        time.sleep(min(OUTFIT_IMPORT_JOB_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
-        if time.monotonic() >= deadline:
-            break
-        payload = ensure_dict_payload(
-            extract_tool_result_payload(
-                invoke_unity_mcp(
-                    poll_settings,
-                    "vrc_import_unitypackage",
-                    {"jobId": job_id},
-                    execution_context={"lane": "app_unitypackage_import_poll"},
-                )
-            ),
-            "prepared unitypackage import job",
-        )
-        if str(payload.get("jobId") or "").strip().lower() != job_id:
-            raise RuntimeError("Unity Core import job identity drifted while polling.")
-    if payload.get("pending") is True:
-        return {
-            "ok": False,
-            "pending": False,
-            "status": "timeout",
-            "jobId": job_id,
-            "mutationStarted": True,
-            "committed": True,
-            "commitState": "unknown",
-            "checkpointRecoveryRequired": True,
-            "error": "UnityPackage import did not reach a terminal state before timeout.",
-        }
-    return payload
-
-
-def _prepared_outfit_unitypackage_queue(plan_payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    source = ensure_dict_payload(plan_payload.get("source"), "outfit import source")
-    raw_queue = source.get("importQueue")
-    if not isinstance(raw_queue, list) or not raw_queue:
-        dependency = plan_payload.get("dependencyPreflight") if isinstance(plan_payload.get("dependencyPreflight"), dict) else {}
-        package_order = dependency.get("packageOrder") if isinstance(dependency.get("packageOrder"), dict) else {}
-        raw_queue = package_order.get("importQueue") if isinstance(package_order.get("importQueue"), list) else []
-    if not raw_queue:
-        raw_queue = [{"path": source.get("actualPackagePath") or source.get("path"), "role": "target", "order": 1}]
-    queue: list[dict[str, Any]] = []
-    materializations: list[dict[str, Any]] = []
-    temp_parent = _outfit_import_temp_dir()
-    for index, raw in enumerate(raw_queue, start=1):
-        if not isinstance(raw, dict):
-            raise RuntimeError("Prepared outfit import queue item is invalid.")
-        source_type = str(raw.get("sourceType") or "").strip().lower()
-        materialization_index: int | None = None
-        folder_root_identity: dict[str, Any] | None = None
-        if source_type == "zip":
-            source = ensure_dict_payload(plan_payload.get("source"), "outfit import source")
-            container_value = str(raw.get("containerPath") or source.get("path") or "").strip()
-            container_path = Path(os.path.abspath(Path(container_value).expanduser()))
-            entry_path = normalize_archive_name(str(raw.get("path") or ""))
-            target_name = f"prepared-{secrets.token_hex(16)}-{index:04d}.unitypackage"
-            try:
-                materialization = prepare_zip_member_materialization(
-                    source=container_path,
-                    temp_parent=temp_parent,
-                    selected_members=[{"path": entry_path, "targetName": target_name}],
-                )
-            except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
-            selected = ensure_dict_payload(materialization["selected"][0], "prepared nested UnityPackage")
-            materialization_index = len(materializations)
-            materializations.append(materialization)
-            identity = {
-                "path": str(temp_parent / target_name),
-                "sha256": selected["sha256"],
-                "size": selected["size"],
-            }
-        else:
-            raw_path = str(raw.get("actualPackagePath") or "").strip()
-            if not raw_path and source_type == "folder":
-                source = ensure_dict_payload(plan_payload.get("source"), "outfit import source")
-                source_root = Path(os.path.abspath(Path(str(source.get("path") or "")).expanduser()))
-                try:
-                    folder_root_identity = capture_directory(source_root, label="Prepared outfit source folder")
-                except ValueError as exc:
-                    raise RuntimeError(str(exc)) from exc
-                relative = PurePosixPath(normalize_archive_name(str(raw.get("path") or "")))
-                if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
-                    raise RuntimeError("Prepared outfit folder queue path is unsafe.")
-                path = source_root.joinpath(*relative.parts)
-            else:
-                raw_path = raw_path or str(raw.get("path") or "").strip()
-                path = Path(os.path.abspath(Path(raw_path).expanduser()))
-            if path.suffix.lower() != ".unitypackage":
-                raise RuntimeError(f"Prepared outfit import queue item is not a UnityPackage: {path}")
-            identity = _prepared_import_path_identity(path, "UnityPackage")
-        queue.append({
-            "order": int(raw.get("order") or index),
-            "role": str(raw.get("role") or "target"),
-            "identity": identity,
-            "materializationIndex": materialization_index,
-            "folderRootIdentity": folder_root_identity,
-        })
-    queue.sort(key=lambda item: item["order"])
-    if len({item["order"] for item in queue}) != len(queue):
-        raise RuntimeError("Prepared outfit import queue has duplicate order values.")
-    return queue, materializations
-
-
-def prepare_outfit_import_package_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], Any]:
-    if PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
-    plan = plan_outfit_import_sync(arguments)
-    plan_payload = ensure_dict_payload(plan.get("plan"), "outfit import plan")
-    if not plan_payload.get("readyToApply"):
-        raise RuntimeError("Outfit import plan is not ready to apply.")
-    kind = str(plan_payload.get("kind") or "")
-    project_root = _resolve_unity_project_root_for_import(arguments, plan_payload)
-    project_identity = _prepared_import_project_identity(project_root)
-    if kind == "loose_prefab_copy":
-        source = ensure_dict_payload(plan_payload.get("source"), "outfit import source")
-        try:
-            loose_plan = prepare_loose_outfit_import(
-                source_root=Path(str(source.get("path") or "")),
-                project_root=project_root,
-                target_folder=str(plan_payload.get("targetFolder") or "Assets/VRCForge/ImportedOutfits"),
-                allowed_suffixes=frozenset(OUTFIT_IMPORT_ALLOWED_SUFFIXES),
-            )
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from exc
-        calls = [("vrc_refresh_asset_database", {"projectPath": project_identity["projectPath"], "resolvePackages": False, "packageResolveTimeoutSeconds": 120})]
-        evidence = {
-            "kind": kind,
-            "planSha256": shader_evidence_sha256(plan_payload),
-            "plan": plan_payload,
-            "projectIdentity": project_identity,
-            "loosePlan": loose_plan,
-        }
-        return install_prepared_calls(arguments, calls, evidence), {"ok": True, "plan": plan_payload, "preparedFileCount": len(loose_plan["files"])}
-    if kind not in {"unitypackage_import", "unitypackage_import_sequence"}:
-        raise RuntimeError(f"Unsupported prepared outfit import branch: {kind or 'unknown'}")
-    queue, materializations = _prepared_outfit_unitypackage_queue(plan_payload)
-    expected_asset_paths = _prepared_outfit_expected_asset_paths(plan_payload)
-    target_indexes = [index for index, item in enumerate(queue) if item["role"] == "target"]
-    if len(target_indexes) != 1:
-        raise RuntimeError("Prepared outfit import queue must contain exactly one target package.")
-    calls = [
-        (
-            "vrc_import_unitypackage",
-            {
-                "projectPath": project_identity["projectPath"],
-                "unityPackagePath": item["identity"]["path"],
-                "expectedSha256": item["identity"]["sha256"],
-                "expectedSize": item["identity"]["size"],
-                "expectedAssetPaths": expected_asset_paths if index == target_indexes[0] else [],
-                "interactive": False,
-            },
-        )
-        for index, item in enumerate(queue)
-    ]
-    calls.append(("vrc_refresh_asset_database", {"projectPath": project_identity["projectPath"], "resolvePackages": False, "packageResolveTimeoutSeconds": 120}))
-    evidence = {
-        "kind": kind,
-        "planSha256": shader_evidence_sha256(plan_payload),
-        "plan": plan_payload,
-        "projectIdentity": project_identity,
-        "queue": queue,
-        "materializations": materializations,
-        "expectedAssetPaths": expected_asset_paths,
-        "targetIndex": target_indexes[0],
-    }
-    return install_prepared_calls(arguments, calls, evidence), {"ok": True, "plan": plan_payload, "preparedQueueCount": len(queue)}
-
-
-def import_outfit_package_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    imports: list[dict[str, Any]] = []
-    core_call_started = False
-    import_readback_pending = False
-    materialization_receipts: list[dict[str, Any]] = []
-
-    def cleanup_materializations() -> str:
-        errors: list[str] = []
-        for receipt in reversed(materialization_receipts):
-            error = cleanup_owned_zip_materialization(receipt)
-            if error:
-                errors.append(error)
-        materialization_receipts.clear()
-        return "; ".join(errors)
-
-    try:
-        evidence = prepared_evidence(arguments)
-        if not isinstance(evidence, dict):
-            raise RuntimeError("Prepared outfit import evidence is invalid.")
-        kind = str(evidence.get("kind") or "")
-        if kind not in {"unitypackage_import", "unitypackage_import_sequence", "loose_prefab_copy"}:
-            raise RuntimeError("Prepared outfit import branch is invalid.")
-        plan_payload = evidence.get("plan")
-        if not isinstance(plan_payload, dict) or shader_evidence_sha256(plan_payload) != evidence.get("planSha256"):
-            raise RuntimeError("Prepared outfit import plan evidence is invalid.")
-        project_identity = evidence.get("projectIdentity")
-        if kind == "loose_prefab_copy":
-            if not isinstance(project_identity, dict):
-                raise RuntimeError("Prepared loose outfit project identity is invalid.")
-            _verify_prepared_import_project_identity(project_identity)
-            loose_plan = evidence.get("loosePlan")
-            if not isinstance(loose_plan, dict):
-                raise RuntimeError("Prepared loose outfit plan is missing.")
-            try:
-                copied = execute_loose_outfit_import(loose_plan)
-            except RuntimeError as exc:
-                return {"ok": False, "committed": True, "commitState": "unknown", "checkpointRecoveryRequired": True, "kind": kind, "error": str(exc)}
-            _verify_prepared_import_project_identity(project_identity)
-            refresh_tool, refresh_arguments = prepared_call(arguments, 0)
-            expected_refresh = {"projectPath": project_identity["projectPath"], "resolvePackages": False, "packageResolveTimeoutSeconds": 120}
-            if refresh_tool != "vrc_refresh_asset_database":
-                raise RuntimeError("Prepared loose outfit refresh call is invalid.")
-            _require_prepared_import_evidence(expected_refresh, refresh_arguments, "refresh arguments")
-            core_call_started = True
-            settings = load_dashboard_settings(build_agent_connection_request(arguments))
-            settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 150)
-            refresh = ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(settings, refresh_tool, refresh_arguments)), "prepared loose outfit refresh")
-            if refresh.get("ok") is not True:
-                return {"ok": False, "committed": True, "commitState": "partial", "checkpointRecoveryRequired": True, "kind": kind, "copiedFiles": copied.get("copiedFiles") or [], "assetDatabaseRefresh": refresh, "error": refresh.get("error") or "Asset refresh failed after loose outfit import."}
-            core_call_started = False
-            prefab_assets = [str(path) for path in copied.get("copiedFiles") or [] if str(path).lower().endswith(".prefab")]
-            return {"ok": True, "kind": kind, **copied, "importedPrefabCandidates": prefab_assets, "assetDatabaseRefresh": refresh, "nextTool": "vrcforge_add_outfit"}
-        queue = evidence.get("queue")
-        if not isinstance(project_identity, dict) or not isinstance(queue, list) or not queue:
-            raise RuntimeError("Prepared outfit import evidence is incomplete.")
-        _verify_prepared_import_project_identity(project_identity)
-        materializations = evidence.get("materializations") or []
-        if not isinstance(materializations, list):
-            raise RuntimeError("Prepared outfit materialization evidence is invalid.")
-        for facts in materializations:
-            if not isinstance(facts, dict):
-                raise RuntimeError("Prepared outfit materialization item is invalid.")
-            materialization_receipts.append(execute_zip_member_materialization(facts))
-        settings = load_dashboard_settings(build_agent_connection_request(arguments))
-        settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 300)
-        for index, item in enumerate(queue):
-            _verify_prepared_import_project_identity(project_identity)
-            identity = item.get("identity") if isinstance(item, dict) else None
-            if not isinstance(identity, dict):
-                raise RuntimeError("Prepared outfit import queue identity is invalid.")
-            materialization_index = item.get("materializationIndex") if isinstance(item, dict) else None
-            try:
-                if materialization_index is not None:
-                    receipt = materialization_receipts[int(materialization_index)]
-                    owned = receipt.get("ownedFiles") if isinstance(receipt, dict) else None
-                    if not isinstance(owned, list) or len(owned) != 1:
-                        raise RuntimeError("Prepared nested UnityPackage receipt is invalid.")
-                    receipt_identity = ensure_dict_payload(owned[0], "prepared nested UnityPackage receipt")
-                    if (
-                        str(receipt_identity.get("path") or "") != str(identity.get("path") or "")
-                        or int(receipt_identity.get("size", -1)) != int(identity.get("size", -2))
-                        or str(receipt_identity.get("sha256") or "") != str(identity.get("sha256") or "")
-                    ):
-                        raise RuntimeError("Prepared nested UnityPackage receipt drifted from approval.")
-                    verify_regular_file(
-                        {key: value for key, value in receipt_identity.items() if key != "sha256"},
-                        str(identity.get("sha256") or ""),
-                        label="Prepared nested UnityPackage",
-                    )
-                else:
-                    folder_identity = item.get("folderRootIdentity") if isinstance(item, dict) else None
-                    if folder_identity is not None:
-                        verify_directory(folder_identity, label="Prepared outfit source folder")
-                    verify_regular_file(
-                        {key: value for key, value in identity.items() if key != "sha256"},
-                        str(identity.get("sha256") or ""),
-                        label="Prepared outfit UnityPackage",
-                    )
-            except ValueError as exc:
-                raise RuntimeError(str(exc)) from exc
-            tool_name, tool_arguments = prepared_call(arguments, index)
-            expected_asset_paths = evidence.get("expectedAssetPaths") if index == evidence.get("targetIndex") else []
-            if not isinstance(expected_asset_paths, list):
-                raise RuntimeError("Prepared outfit expected asset evidence is invalid.")
-            expected = {"projectPath": project_identity["projectPath"], "unityPackagePath": identity["path"], "expectedSha256": identity["sha256"], "expectedSize": identity["size"], "expectedAssetPaths": expected_asset_paths, "interactive": False}
-            if tool_name != "vrc_import_unitypackage":
-                raise RuntimeError("Prepared outfit import Core call is invalid.")
-            _require_prepared_import_evidence(expected, tool_arguments, "Core arguments")
-            core_call_started = True
-            payload = ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(settings, tool_name, tool_arguments)), "prepared unitypackage import")
-            import_readback_pending = payload.get("mutationStarted") is True or payload.get("pending") is True
-            if payload.get("ok") is not True:
-                cleanup_error = cleanup_materializations()
-                return {"ok": False, "committed": True, "commitState": "unknown", "checkpointRecoveryRequired": True, "kind": kind, "unityImports": imports, "temporaryCleanupError": cleanup_error or None, "error": payload.get("error") or "UnityPackage import failed after Core invocation."}
-            job_id = _require_prepared_import_job_receipt(
-                payload, project_identity, identity, expected_asset_paths
-            )
-            if payload.get("pending") is True:
-                payload = _wait_for_unitypackage_import_job(settings, payload)
-            if payload.get("ok") is not True or str(payload.get("status") or "") != "completed":
-                cleanup_error = cleanup_materializations()
-                return {
-                    "ok": False,
-                    "committed": True,
-                    "commitState": "unknown",
-                    "checkpointRecoveryRequired": True,
-                    "kind": kind,
-                    "unityImports": imports,
-                    "temporaryCleanupError": cleanup_error or None,
-                    "error": payload.get("error") or payload.get("reason") or "UnityPackage import did not complete.",
-                }
-            if str(payload.get("jobId") or "").strip().lower() != job_id:
-                raise RuntimeError("Unity Core import terminal job identity drifted.")
-            _require_prepared_import_job_receipt(
-                payload, project_identity, identity, expected_asset_paths
-            )
-            asset_receipts = _require_prepared_import_asset_receipts(payload, expected_asset_paths)
-            imports.append({"ok": True, "order": item["order"], "role": item["role"], "path": identity["path"], "expectedAssets": asset_receipts, "unityImport": payload})
-            import_readback_pending = False
-            core_call_started = False
-        _verify_prepared_import_project_identity(project_identity)
-        refresh_tool, refresh_arguments = prepared_call(arguments, len(queue))
-        expected_refresh = {"projectPath": project_identity["projectPath"], "resolvePackages": False, "packageResolveTimeoutSeconds": 120}
-        if refresh_tool != "vrc_refresh_asset_database":
-            raise RuntimeError("Prepared outfit import refresh call is invalid.")
-        _require_prepared_import_evidence(expected_refresh, refresh_arguments, "refresh arguments")
-        core_call_started = True
-        refresh = ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(settings, refresh_tool, refresh_arguments)), "prepared outfit import refresh")
-        if refresh.get("ok") is not True:
-            cleanup_error = cleanup_materializations()
-            return {"ok": False, "committed": True, "checkpointRecoveryRequired": True, "kind": kind, "unityImports": imports, "assetDatabaseRefresh": refresh, "temporaryCleanupError": cleanup_error or None, "error": refresh.get("error") or "Asset refresh failed after UnityPackage import."}
-        core_call_started = False
-        _verify_prepared_import_project_identity(project_identity)
-        cleanup_error = cleanup_materializations()
-        if cleanup_error:
-            return {"ok": False, "committed": True, "commitState": "complete", "checkpointRecoveryRequired": False, "temporaryCleanupRequired": True, "kind": kind, "unityImports": imports, "assetDatabaseRefresh": refresh, "error": cleanup_error}
-        return {"ok": True, "kind": kind, "unityImports": imports, "assetDatabaseRefresh": refresh, "importedPrefabCandidates": [path for path in evidence.get("expectedAssetPaths") or [] if str(path).lower().endswith(".prefab")], "nextTool": "vrcforge_add_outfit"}
-    except (RuntimeError, UnityMcpError, ValueError) as exc:
-        cleanup_error = cleanup_materializations()
-        emit_log("error", "outfit", "Prepared outfit import failed.", {"error": str(exc)})
-        if core_call_started or imports:
-            return {
-                "ok": False,
-                "committed": True,
-                "commitState": "unknown" if core_call_started or import_readback_pending else "partial",
-                "checkpointRecoveryRequired": True,
-                "kind": str(locals().get("kind") or ""),
-                "unityImports": imports,
-                "temporaryCleanupError": cleanup_error or None,
-                "error": str(exc),
-            }
-        if cleanup_error:
-            raise to_http_exception(RuntimeError(f"{exc}; temporary cleanup failed: {cleanup_error}")) from exc
-        raise to_http_exception(exc) from exc
-
-
 def import_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     del params
     raise RuntimeError(
         "Direct outfit import is disabled. Create and approve a vrcforge_import_outfit_package request so exact source, target, checkpoint, and Core calls are sealed."
     )
-
-
-def _outfit_import_temp_dir() -> Path:
-    path = DASHBOARD_ARTIFACTS_DIR / "outfit-imports" / "temp"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
 
 
 def _resolve_outfit_import_queue(plan_payload: dict[str, Any], temp_root: Path) -> list[dict[str, Any]]:
@@ -20647,6 +20213,96 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         preview_add_outfit=PREPARED_ADD_OUTFIT_PREVIEW.preview,
     )
 )
+PREPARED_OUTFIT_IMPORT_PREPARER = PreparedOutfitImportPreparer(
+    PreparedOutfitImportPreparerPorts(
+        plan_outfit_import=WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import,
+        plan_error_type=WardrobeOutfitWorkflowError,
+        map_plan_error=lambda exc: AgentGatewayError(
+            str(exc),
+            status_code=exc.status_code,
+        ),
+        resolve_project_root=lambda arguments, plan: (
+            _resolve_unity_project_root_for_import(arguments, plan)
+        ),
+        capture_project_identity=_prepared_import_project_identity,
+        capture_regular_file=lambda path, label: capture_regular_file(
+            path,
+            label=label,
+        ),
+        capture_directory=lambda path, label: capture_directory(
+            path,
+            label=label,
+        ),
+        prepare_loose_import=prepare_loose_outfit_import,
+        prepare_zip_member=prepare_zip_member_materialization,
+        normalize_archive_name=normalize_archive_name,
+        digest=shader_evidence_sha256,
+        ensure_dict=ensure_dict_payload,
+        nonce_hex=secrets.token_hex,
+        temp_parent=DASHBOARD_ARTIFACTS_DIR / "outfit-imports" / "temp",
+        allowed_loose_suffixes=frozenset(OUTFIT_IMPORT_ALLOWED_SUFFIXES),
+    )
+)
+PREPARED_OUTFIT_IMPORT_APPROVED_WRITE = PreparedOutfitImportApprovedWriteService(
+    PreparedOutfitImportApprovedWritePorts(
+        digest=shader_evidence_sha256,
+        verify_project_identity=_verify_prepared_import_project_identity,
+        require_evidence=_require_prepared_import_evidence,
+        execute_loose_import=execute_loose_outfit_import,
+        execute_zip_member=execute_zip_member_materialization,
+        cleanup_zip_member=cleanup_owned_zip_materialization,
+        verify_regular_file=lambda identity, digest, label: verify_regular_file(
+            identity,
+            digest,
+            label=label,
+        ),
+        verify_directory=lambda identity, label: verify_directory(
+            identity,
+            label=label,
+        ),
+        load_settings=lambda arguments: load_dashboard_settings(
+            build_agent_connection_request(arguments)
+        ),
+        start_import=lambda settings, arguments: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(
+                    settings,
+                    "vrc_import_unitypackage",
+                    arguments,
+                )
+            ),
+            "prepared unitypackage import",
+        ),
+        poll_import=lambda settings, job_id: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(
+                    settings,
+                    "vrc_import_unitypackage",
+                    {"jobId": job_id},
+                    execution_context={"lane": "app_unitypackage_import_poll"},
+                )
+            ),
+            "prepared unitypackage import job",
+        ),
+        refresh_assets=lambda settings, arguments: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(
+                    settings,
+                    "vrc_refresh_asset_database",
+                    arguments,
+                )
+            ),
+            "prepared outfit import refresh",
+        ),
+        monotonic=time.monotonic,
+        sleep=time.sleep,
+        timeout_seconds=lambda: 180.0,
+        poll_seconds=lambda: 0.5,
+        log=emit_log,
+        map_error=lambda exc: to_http_exception(exc),
+        handled_errors=(RuntimeError, UnityMcpError, ValueError),
+    )
+)
 WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
     apply_clothing_fx=apply_clothing_fx_approved_sync,
     setup_outfit=SETUP_OUTFIT_APPROVED_WRITE.execute,
@@ -20657,8 +20313,8 @@ WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
     create_wardrobe=CREATE_WARDROBE_APPROVED_WRITE.execute,
     prepare_add_outfit=PREPARED_ADD_OUTFIT_PREPARER.prepare,
     add_outfit=PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute,
-    prepare_import_package=prepare_outfit_import_package_request,
-    import_package=import_outfit_package_approved_sync,
+    prepare_import_package=PREPARED_OUTFIT_IMPORT_PREPARER.prepare,
+    import_package=PREPARED_OUTFIT_IMPORT_APPROVED_WRITE.execute,
 )
 
 PACKAGE_MANAGER_DISCOVERY = PackageManagerDiscoveryService(
