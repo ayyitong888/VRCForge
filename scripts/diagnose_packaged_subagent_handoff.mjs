@@ -195,8 +195,6 @@ function runSelfTest() {
       || env.VRCFORGE_DESKTOP_EXECUTOR !== "0"
       || env.APPDATA !== hostProfileRoot
       || env.LOCALAPPDATA !== hostProfileRoot
-      || env.USERPROFILE !== hostProfileRoot
-      || env.HOME !== hostProfileRoot
     ) {
       throw new Error("self-test: packaged runtime paths were not fully isolated.");
     }
@@ -466,7 +464,7 @@ async function waitForJson(url, timeoutMs = 45000) {
     }
     await sleep(150);
   }
-  throw lastError || new Error(`Timed out waiting for ${url}`);
+  throw new Error(`Timed out waiting for ${url}: ${String(lastError?.message || lastError || "unknown error")}`);
 }
 
 function connectCdp(webSocketDebuggerUrl) {
@@ -551,8 +549,6 @@ function isolatedLaunchEnvironment() {
     VRCFORGE_DESKTOP_EXECUTOR: "0",
     APPDATA: hostProfileRoot,
     LOCALAPPDATA: hostProfileRoot,
-    USERPROFILE: hostProfileRoot,
-    HOME: hostProfileRoot,
     WEBVIEW2_USER_DATA_FOLDER: webviewDataRoot,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
       `--remote-debugging-port=${cdpPort} --remote-allow-origins=*`,

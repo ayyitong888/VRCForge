@@ -24,6 +24,9 @@ def test_subagent_handoff_probe_has_explicit_local_acceptance_boundary() -> None
     assert '!key.toUpperCase().startsWith("VRCFORGE_")' in source
     assert 'VRCFORGE_DESKTOP_EXECUTOR: "0"' in source
     assert "APPDATA: hostProfileRoot" in source
+    assert "LOCALAPPDATA: hostProfileRoot" in source
+    assert "USERPROFILE: hostProfileRoot" not in source
+    assert "HOME: hostProfileRoot" not in source
     assert "proveLoopbackPortReleased" in source
     assert "let providerPort = 0;" in source
     assert "if (report.provider)" in source
@@ -31,6 +34,7 @@ def test_subagent_handoff_probe_has_explicit_local_acceptance_boundary() -> None
     assert "async function assertNoHostUnityProcesses()" in source
     assert "await assertNoHostUnityProcesses();" in source
     assert "environment-not-isolated" in source
+    assert "Timed out waiting for ${url}:" in source
 
 
 def test_subagent_handoff_probe_self_test_is_side_effect_free() -> None:
