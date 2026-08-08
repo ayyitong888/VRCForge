@@ -194,6 +194,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         item["name"]
         for item in groups["dashboard.wardrobe-outfit-root-owners"]["rootSymbols"]
     } == {
+        "WARDROBE_ARTIFACT_READ",
         "CLOTHING_FX_READ",
         "WARDROBE_OUTFIT_WORKFLOWS",
         "WARDROBE_OUTFIT_APPROVED_WRITES",
@@ -201,6 +202,9 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert {
         "scan_clothes_sync",
         "generate_clothing_fx_sync",
+        "scan_avatar_items_sync",
+        "scan_avatar_controls_sync",
+        "scan_wardrobe_sync",
     }.isdisjoint(
         groups["dashboard.wardrobe-outfit-root-owners"]["facades"][0]["methods"]
     )

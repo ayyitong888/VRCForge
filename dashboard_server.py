@@ -295,6 +295,8 @@ from package_install_workflow_service import (
 from wardrobe_outfit_workflow_service import (
     ClothingFxReadPorts,
     ClothingFxReadService,
+    WardrobeArtifactReadPorts,
+    WardrobeArtifactReadService,
     WardrobeOutfitApprovedWriteHandlers,
     WardrobeOutfitWorkflowError,
     WardrobeOutfitWorkflowPorts,
@@ -16662,20 +16664,6 @@ def run_unity_artifact_scan_sync(
     return payload
 
 
-def scan_avatar_items_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    return run_unity_artifact_scan_sync(
-        params,
-        "vrc_scan_avatar_items",
-        "avatar_items",
-        {
-            "maxItems": int(params.get("max_items") or params.get("maxItems") or 2000),
-            "refreshAssets": False,
-        },
-        "avatar item scan",
-    )
-
-
 def scan_fx_animator_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     return run_unity_artifact_scan_sync(
@@ -16705,26 +16693,6 @@ def scan_animation_bindings_sync(params: dict[str, Any]) -> dict[str, Any]:
             "refreshAssets": False,
         },
         "animation binding scan",
-    )
-
-
-def scan_avatar_controls_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
-    payload = scan_avatar_controls_direct(settings, avatar_path)
-    payload.setdefault("ok", True)
-    return payload
-
-
-def scan_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    return run_unity_artifact_scan_sync(
-        params,
-        "vrc_scan_wardrobe",
-        "wardrobe",
-        {},
-        "wardrobe scan",
     )
 
 
@@ -18755,7 +18723,10 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
     sources: dict[str, dict[str, Any]] = {
         "compile": _run_validation_source("compile", lambda: read_agent_compile_errors(base_params)),
         "parameters": _run_validation_source("parameters", lambda: scan_avatar_parameters_gateway_sync(base_params)),
-        "menu": _run_validation_source("menu", lambda: scan_avatar_controls_sync(base_params)),
+        "menu": _run_validation_source(
+            "menu",
+            lambda: WARDROBE_ARTIFACT_READ.scan_avatar_controls(base_params),
+        ),
         "fx": _run_validation_source("fx", lambda: scan_fx_animator_sync(base_params)),
         "animation_bindings": _run_validation_source("animation_bindings", lambda: scan_animation_bindings_sync(base_params)),
         "materials": _run_validation_source(
@@ -18764,7 +18735,10 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
                 ShaderMaterialScanRequest(**base_params)
             ),
         ),
-        "wardrobe": _run_validation_source("wardrobe", lambda: scan_wardrobe_sync(base_params)),
+        "wardrobe": _run_validation_source(
+            "wardrobe",
+            lambda: WARDROBE_ARTIFACT_READ.scan_wardrobe(base_params),
+        ),
         "performance_pc": _run_validation_source("performance_pc", lambda: scan_avatar_performance_sync({**base_params, "isMobile": False})),
     }
     if include_readiness:
@@ -18773,7 +18747,10 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
                 "dependencies": _run_validation_source("dependencies", lambda: validation_dependency_status_sync(base_params)),
                 "environment": _run_validation_source("environment", lambda: validation_environment_status_sync(base_params)),
                 "package_manager": _run_validation_source("package_manager", lambda: PACKAGE_INSTALL_WORKFLOWS.package_manager_status(base_params)),
-                "avatar_items": _run_validation_source("avatar_items", lambda: scan_avatar_items_sync(base_params)),
+                "avatar_items": _run_validation_source(
+                    "avatar_items",
+                    lambda: WARDROBE_ARTIFACT_READ.scan_avatar_items(base_params),
+                ),
                 "generated_residue": _run_validation_source("generated_residue", lambda: scan_generated_asset_residue_sync(base_params)),
             }
         )
@@ -20603,7 +20580,9 @@ def _prepare_add_outfit_state(params: dict[str, Any]) -> dict[str, Any]:
     wardrobe_fingerprint = ""
     assigned_value: int | None = None
     if manage_wardrobe:
-        wardrobe_scan = scan_wardrobe_sync({**project_params, "avatarPath": avatar["gameObjectPath"]})
+        wardrobe_scan = WARDROBE_ARTIFACT_READ.scan_wardrobe(
+            {**project_params, "avatarPath": avatar["gameObjectPath"]}
+        )
         selected_wardrobe, wardrobe_fingerprint, assigned_value = _selected_add_outfit_wardrobe(
             wardrobe_scan, parameter_name, parameter_explicit
         )
@@ -20856,7 +20835,12 @@ def add_outfit_workflow_approved_sync(arguments: dict[str, Any]) -> dict[str, An
         if instantiate_global_id and final_object["globalObjectId"] != instantiate_global_id:
             raise RuntimeError("Add Outfit final object GlobalObjectId changed after execution.")
         if evidence.get("manageWardrobe") is True:
-            scan = scan_wardrobe_sync({"projectPath": project_identity["projectPath"], "avatarPath": read_facts["avatar"]["gameObjectPath"]})
+            scan = WARDROBE_ARTIFACT_READ.scan_wardrobe(
+                {
+                    "projectPath": project_identity["projectPath"],
+                    "avatarPath": read_facts["avatar"]["gameObjectPath"],
+                }
+            )
             if str(scan.get("fingerprint") or "").strip().lower() != wardrobe_receipt_fingerprint:
                 raise RuntimeError("Add Outfit final wardrobe fingerprint did not match the Core write receipt.")
             selected = next((item for item in (scan.get("wardrobes") or []) if isinstance(item, dict) and str(item.get("parameterName") or "") == evidence.get("parameterName")), None)
@@ -21575,6 +21559,33 @@ if DASHBOARD_STATE is None:
     DASHBOARD_STATE = load_initial_dashboard_state()
 
 
+WARDROBE_ARTIFACT_READ = WardrobeArtifactReadService(
+    WardrobeArtifactReadPorts(
+        scan_avatar_items=lambda params: run_unity_artifact_scan_sync(
+            params,
+            "vrc_scan_avatar_items",
+            "avatar_items",
+            {
+                "maxItems": int(
+                    params.get("max_items") or params.get("maxItems") or 2000
+                ),
+                "refreshAssets": False,
+            },
+            "avatar item scan",
+        ),
+        scan_avatar_controls=lambda params: scan_avatar_controls_direct(
+            load_dashboard_settings(build_agent_connection_request(params)),
+            str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
+        ),
+        scan_wardrobe=lambda params: run_unity_artifact_scan_sync(
+            params,
+            "vrc_scan_wardrobe",
+            "wardrobe",
+            {},
+            "wardrobe scan",
+        ),
+    )
+)
 CLOTHING_FX_READ = ClothingFxReadService(
     ClothingFxReadPorts(
         load_settings=lambda request: load_dashboard_settings(request),
@@ -21594,9 +21605,9 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         build_import_plan=build_outfit_import_plan,
         create_apply_request=AGENT_GATEWAY.create_apply_request,
         request_supervised_write=request_supervised_unity_write,
-        scan_avatar_items=scan_avatar_items_sync,
-        scan_avatar_controls=scan_avatar_controls_sync,
-        scan_wardrobe=scan_wardrobe_sync,
+        scan_avatar_items=WARDROBE_ARTIFACT_READ.scan_avatar_items,
+        scan_avatar_controls=WARDROBE_ARTIFACT_READ.scan_avatar_controls,
+        scan_wardrobe=WARDROBE_ARTIFACT_READ.scan_wardrobe,
         scan_clothes=CLOTHING_FX_READ.scan_clothes,
         generate_clothing_fx=CLOTHING_FX_READ.generate_clothing_fx,
         preview_apply_clothing_fx=apply_clothing_fx_sync,

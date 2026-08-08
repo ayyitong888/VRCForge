@@ -4684,6 +4684,26 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_validation_report_mvp_is_read_only_and_registered(self) -> None:
         run_validation_source = dashboard_server._run_validation_source
+        wardrobe_readbacks = {
+            "vrc_scan_avatar_controls": {
+                "ok": True,
+                "missingReferences": [{"path": "Menu/Missing"}],
+            },
+            "vrc_scan_wardrobe": {"ok": True, "wardrobeCandidateCount": 1},
+            "vrc_scan_avatar_items": {"ok": True, "itemCount": 4},
+        }
+
+        def invoke_wardrobe_read(_settings, tool_name, _arguments):
+            if tool_name not in wardrobe_readbacks:
+                raise AssertionError(f"Unexpected live Unity read: {tool_name}")
+            if tool_name == "vrc_scan_avatar_controls":
+                self.assertEqual(_arguments["avatarPath"], "Scene/Avatar")
+            return dashboard_server.McpResult(
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                payload={"data": wardrobe_readbacks[tool_name]},
+            )
 
         def package_manager_observation(name, callback):
             if name == "package_manager":
@@ -4698,16 +4718,22 @@ class DashboardServerTests(unittest.TestCase):
             return run_validation_source(name, callback)
 
         with (
+            tempfile.TemporaryDirectory() as artifact_dir,
+            patch.object(
+                dashboard_server,
+                "DASHBOARD_ARTIFACTS_DIR",
+                Path(artifact_dir),
+            ),
+            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
+            patch("dashboard_server.invoke_unity_mcp", side_effect=invoke_wardrobe_read),
             patch(
                 "dashboard_server.read_agent_compile_errors",
                 return_value={"ok": True, "result": {"exitCode": 0, "stdout": "hasErrors: False\nerrorCount: 0"}},
             ),
             patch("dashboard_server.scan_avatar_parameters_gateway_sync", return_value={"ok": True, "warningCount": 1, "suggestions": [{"id": "compress"}]}),
-            patch("dashboard_server.scan_avatar_controls_sync", return_value={"ok": True, "missingReferences": [{"path": "Menu/Missing"}]}),
             patch("dashboard_server.scan_fx_animator_sync", return_value={"ok": True, "parameterTypeMismatches": []}),
             patch("dashboard_server.scan_animation_bindings_sync", return_value={"ok": True, "brokenBindings": [{"clip": "BadClip"}]}),
             patch("dashboard_server.scan_shader_materials_direct", return_value={"materials": [], "summary": {"unsupportedShaderCount": 1}}),
-            patch("dashboard_server.scan_wardrobe_sync", return_value={"ok": True, "wardrobeCandidateCount": 1}),
             patch("dashboard_server.scan_avatar_performance_sync", side_effect=[
                 {"ok": True, "rank": "Poor"},
                 {"ok": True, "rank": "Excellent"},
@@ -4742,7 +4768,6 @@ class DashboardServerTests(unittest.TestCase):
                 "dashboard_server._run_validation_source",
                 side_effect=package_manager_observation,
             ),
-            patch("dashboard_server.scan_avatar_items_sync", return_value={"ok": True, "itemCount": 4}),
             patch("dashboard_server.scan_generated_asset_residue_sync", return_value={"ok": True, "projectReadable": True, "residueCount": 0}),
         ):
             with TestClient(dashboard_server.app) as client:
@@ -4776,17 +4801,38 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("vrcforge_build_test_readiness", write_targets)
 
     def test_validation_report_records_scanner_failures_as_findings(self) -> None:
+        wardrobe_readbacks = {
+            "vrc_scan_avatar_controls": {"ok": True},
+            "vrc_scan_wardrobe": {"ok": True},
+        }
+
+        def invoke_wardrobe_read(_settings, tool_name, _arguments):
+            if tool_name not in wardrobe_readbacks:
+                raise AssertionError(f"Unexpected live Unity read: {tool_name}")
+            return dashboard_server.McpResult(
+                exit_code=0,
+                stdout="ok",
+                stderr="",
+                payload={"data": wardrobe_readbacks[tool_name]},
+            )
+
         with (
+            tempfile.TemporaryDirectory() as artifact_dir,
+            patch.object(
+                dashboard_server,
+                "DASHBOARD_ARTIFACTS_DIR",
+                Path(artifact_dir),
+            ),
+            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
+            patch("dashboard_server.invoke_unity_mcp", side_effect=invoke_wardrobe_read),
             patch(
                 "dashboard_server.read_agent_compile_errors",
                 return_value={"ok": True, "result": {"exitCode": 0, "stdout": "hasErrors: False\nerrorCount: 0"}},
             ),
             patch("dashboard_server.scan_avatar_parameters_gateway_sync", side_effect=RuntimeError("parameter scanner down")),
-            patch("dashboard_server.scan_avatar_controls_sync", return_value={"ok": True}),
             patch("dashboard_server.scan_fx_animator_sync", return_value={"ok": True}),
             patch("dashboard_server.scan_animation_bindings_sync", return_value={"ok": True}),
             patch("dashboard_server.scan_shader_materials_direct", return_value={"materials": []}),
-            patch("dashboard_server.scan_wardrobe_sync", return_value={"ok": True}),
             patch("dashboard_server.scan_avatar_performance_sync", return_value={"ok": True, "rank": "Good"}),
         ):
             with TestClient(dashboard_server.app) as client:
@@ -7774,7 +7820,9 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"data": {"wardrobeCount": 1, "wardrobes": [{"parameterName": "Clothes"}]}},
         )
-        result = dashboard_server.scan_wardrobe_sync({"avatar_path": "Scene/HeroAvatar"})
+        result = dashboard_server.WARDROBE_OUTFIT_WORKFLOWS.scan_wardrobe(
+            {"avatar_path": "Scene/HeroAvatar"}
+        )
         self.assertTrue(result["ok"])
         _settings, tool_name, params = mock_invoke.call_args.args
         self.assertEqual(tool_name, "vrc_scan_wardrobe")
@@ -7804,7 +7852,9 @@ class DashboardServerTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-                result = dashboard_server.scan_wardrobe_sync({"avatar_path": "Scene/HeroAvatar"})
+                result = dashboard_server.WARDROBE_OUTFIT_WORKFLOWS.scan_wardrobe(
+                    {"avatar_path": "Scene/HeroAvatar"}
+                )
 
                 self.assertEqual(result["wardrobeCount"], 0)
                 self.assertEqual(result["wardrobes"], [])

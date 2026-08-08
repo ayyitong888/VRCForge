@@ -94,6 +94,41 @@ class ClothingFxReadService:
             raise
 
 
+@dataclass(frozen=True, slots=True)
+class WardrobeArtifactReadPorts:
+    """Three fixed Wardrobe reads supplied at composition time.
+
+    Each port seals its Unity read tool and artifact scope. The owner receives no
+    generic Unity tool, settings, filesystem, write, approval, or checkpoint
+    capability.
+    """
+
+    scan_avatar_items: Callable[[dict[str, Any]], dict[str, Any]]
+    scan_avatar_controls: Callable[[dict[str, Any]], dict[str, Any]]
+    scan_wardrobe: Callable[[dict[str, Any]], dict[str, Any]]
+
+
+class WardrobeArtifactReadService:
+    """Own Wardrobe avatar-item, control, and wardrobe artifact reads."""
+
+    def __init__(self, ports: WardrobeArtifactReadPorts) -> None:
+        self._ports = ports
+
+    def scan_avatar_items(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        return self._ports.scan_avatar_items(normalized)
+
+    def scan_avatar_controls(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        payload = self._ports.scan_avatar_controls(normalized)
+        payload.setdefault("ok", True)
+        return payload
+
+    def scan_wardrobe(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        return self._ports.scan_wardrobe(normalized)
+
+
 class InspectOutfitPackagePort(Protocol):
     def __call__(self, package_path: str, *, max_entries: int = 5000) -> dict[str, Any]: ...
 

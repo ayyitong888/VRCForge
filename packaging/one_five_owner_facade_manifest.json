@@ -327,6 +327,7 @@
     {
       "id": "dashboard.wardrobe-outfit-root-owners",
       "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_ARTIFACT_READ"},
         {"source": "dashboard_server.py", "scope": "module", "name": "CLOTHING_FX_READ"},
         {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_OUTFIT_WORKFLOWS"},
         {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_OUTFIT_APPROVED_WRITES"}
@@ -338,9 +339,6 @@
           "methods": [
             "inspect_outfit_package",
             "build_outfit_import_plan",
-            "scan_avatar_items_sync",
-            "scan_avatar_controls_sync",
-            "scan_wardrobe_sync",
             "apply_clothing_fx_sync",
             "preview_setup_outfit_sync",
             "setup_outfit_sync",

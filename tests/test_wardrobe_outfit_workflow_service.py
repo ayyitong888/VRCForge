@@ -10,6 +10,8 @@ import pytest
 from wardrobe_outfit_workflow_service import (
     ClothingFxReadPorts,
     ClothingFxReadService,
+    WardrobeArtifactReadPorts,
+    WardrobeArtifactReadService,
     WardrobeOutfitApprovedWriteHandlers,
     WardrobeOutfitWorkflowError,
     WardrobeOutfitWorkflowPorts,
@@ -286,8 +288,76 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
 
     assert "scan_clothes_sync" not in bindings
     assert "generate_clothing_fx_sync" not in bindings
+    assert "scan_avatar_items_sync" not in bindings
+    assert "scan_avatar_controls_sync" not in bindings
+    assert "scan_wardrobe_sync" not in bindings
     assert "scan_clothes=CLOTHING_FX_READ.scan_clothes" in source
     assert "generate_clothing_fx=CLOTHING_FX_READ.generate_clothing_fx" in source
+    assert "scan_avatar_items=WARDROBE_ARTIFACT_READ.scan_avatar_items" in source
+    assert "scan_avatar_controls=WARDROBE_ARTIFACT_READ.scan_avatar_controls" in source
+    assert "scan_wardrobe=WARDROBE_ARTIFACT_READ.scan_wardrobe" in source
+    artifact_root = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "WARDROBE_ARTIFACT_READ"
+            for target in node.targets
+        )
+    )
+    artifact_composition = ast.unparse(artifact_root.value)
+    assert artifact_composition.count("run_unity_artifact_scan_sync") == 2
+    for fixed_value in (
+        "vrc_scan_avatar_items",
+        "avatar_items",
+        "avatar item scan",
+        "vrc_scan_wardrobe",
+        "wardrobe",
+        "wardrobe scan",
+        "scan_avatar_controls_direct",
+    ):
+        assert fixed_value in artifact_composition
+
+
+def test_wardrobe_artifact_read_owner_preserves_read_parameters_and_shapes() -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def scan_items(params: dict[str, Any]) -> dict[str, Any]:
+        calls.append(("items", params))
+        return {"source": "vrc_scan_avatar_items"}
+
+    def scan_controls(params: dict[str, Any]) -> dict[str, Any]:
+        calls.append(("controls", params))
+        return {"items": [{"parameterName": "Clothes"}]}
+
+    def scan_wardrobe(params: dict[str, Any]) -> dict[str, Any]:
+        calls.append(("wardrobe", params))
+        return {"source": "vrc_scan_wardrobe"}
+
+    service = WardrobeArtifactReadService(
+        WardrobeArtifactReadPorts(
+            scan_avatar_items=scan_items,
+            scan_avatar_controls=scan_controls,
+            scan_wardrobe=scan_wardrobe,
+        )
+    )
+
+    assert set(WardrobeArtifactReadPorts.__dataclass_fields__) == {
+        "scan_avatar_items",
+        "scan_avatar_controls",
+        "scan_wardrobe",
+    }
+
+    items = service.scan_avatar_items({"max_items": 42, "avatarPath": "Scene/Avatar"})
+    controls = service.scan_avatar_controls({"avatar_path": " Scene/Avatar "})
+    wardrobe = service.scan_wardrobe(None)
+
+    assert items == {"source": "vrc_scan_avatar_items"}
+    assert controls == {"items": [{"parameterName": "Clothes"}], "ok": True}
+    assert wardrobe == {"source": "vrc_scan_wardrobe"}
+    assert ("items", {"max_items": 42, "avatarPath": "Scene/Avatar"}) in calls
+    assert ("controls", {"avatar_path": " Scene/Avatar "}) in calls
+    assert ("wardrobe", {}) in calls
 
 
 def test_approved_writes_are_a_separate_least_authority_binding() -> None:
