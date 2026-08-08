@@ -1,23 +1,61 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const packagedRoot = resolve(repoRoot, "dist", "VRCForge_Windows_x64");
-const packagedRootPowerShell = packagedRoot.replaceAll("'", "''");
-const exe = resolve(packagedRoot, "VRCForge.exe");
-const port = Number(process.env.VRCFORGE_CDP_PORT || "9343");
+const allowUnpushed = process.argv.includes("--allow-unpushed");
+const selfTest = process.argv.includes("--self-test");
+const port = Number(process.env.VRCFORGE_DESKTOP_PROBE_CDP_PORT || "9343");
 const marker = `DB_PROBE_${Date.now()}`;
+const evidenceRoot = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", marker);
+const packagedRoot = resolve(evidenceRoot, "package");
+const exe = resolve(packagedRoot, "VRCForge.exe");
 const probeSessionId = `${marker}_SESSION`;
-const outPath = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", `desktop-bridge-${marker}.json`);
+const outPath = resolve(evidenceRoot, "report.json");
+const userDataRoot = resolve(evidenceRoot, "user-data");
+const configRoot = resolve(userDataRoot, "config");
+const webviewDataRoot = resolve(evidenceRoot, "webview2-user-data");
+const hostProfileRoot = resolve(evidenceRoot, "host-profile");
 const fixtureSourcePath = resolve(repoRoot, "scripts", "desktop_executor_fixture.cs");
-const fixtureExePath = resolve(repoRoot, "artifacts", "actual-app-desktop-bridge", `fixture-${marker}.exe`);
+const fixtureExePath = resolve(evidenceRoot, `fixture-${marker}.exe`);
 const fixtureTypedMarker = `${marker}_TYPED_VALUE`;
 const uiaFixtureTypedMarker = `${marker}_UIA_VALUE`;
-const appOrigin = process.env.VRCFORGE_APP_ORIGIN || "http://127.0.0.1:8757";
+const appOrigin = "http://127.0.0.1:8757";
 const appRequestOrigin = "tauri://localhost";
 let appSessionToken = "";
+const protectedSecrets = new Set();
+
+const allowedOptions = new Set(["--allow-unpushed", "--self-test", "--help", "-h"]);
+if (process.argv.slice(2).some((item) => !allowedOptions.has(item))) {
+  console.error("Unknown packaged Desktop/Computer Use probe option.");
+  process.exit(2);
+}
+
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node scripts/diagnose_packaged_desktop_bridge.mjs [--allow-unpushed] [--self-test]
+
+Runs the packaged Desktop/Computer Use bridge, UI, action, privacy, cancellation,
+and lifecycle matrix. Default mode requires strict release evidence.
+--allow-unpushed remains non-release local-preacceptance only and still requires
+a clean worktree, manifest commit == HEAD, VERSION and manifest-bound ZIP/main/
+backend hashes, plus the exact local-acceptance release-ineligible build policy.
+
+The runtime is isolated to evidence-owned user-data, config, logs, artifacts,
+AppData and WebView2 roots. Provider credentials and proxy variables are not
+inherited. The packaged process, embedded worker and external fixture processes
+have bounded probe-owned lifetimes; only tracked processes are stopped.
+
+This matrix intentionally performs real desktop input against probe-launched
+Notepad and the compiled fixture. Do not run it on an interactive desktop unless
+that foreground-input acceptance is intended. --self-test performs no package,
+process, port, window, mouse or keyboard operation.
+
+Optional environment:
+  VRCFORGE_DESKTOP_PROBE_CDP_PORT=<unused port> (default: ${port})`);
+  process.exit(0);
+}
 
 
 function sleep(ms) {
@@ -31,6 +69,54 @@ function processExists(processId) {
   } catch {
     return false;
   }
+}
+
+async function processIdentity(processId) {
+  if (!Number.isInteger(Number(processId)) || Number(processId) <= 0) return null;
+  const raw = await runPowerShell(`
+    $process = Get-Process -Id ${Number(processId)} -ErrorAction SilentlyContinue
+    if (-not $process) { '' ; exit 0 }
+    try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { $path = '' }
+    try { $started = $process.StartTime.ToUniversalTime().ToString('o') } catch { $started = '' }
+    [pscustomobject]@{ id=$process.Id; name=$process.ProcessName; path=$path; startedAt=$started } |
+      ConvertTo-Json -Compress
+  `);
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function stopTrackedExternalProcess(identity) {
+  const processId = Number(identity?.id || 0);
+  const expectedPath = String(identity?.path || "");
+  const expectedStartedAt = String(identity?.startedAt || "");
+  if (!Number.isInteger(processId) || processId <= 0 || !expectedPath || !expectedStartedAt) {
+    return { ok: false, stopped: false, reason: "missing tracked process identity" };
+  }
+  const raw = await runPowerShell(`
+    $process = Get-Process -Id ${processId} -ErrorAction SilentlyContinue
+    if (-not $process) {
+      [pscustomobject]@{ ok=$true; stopped=$false; alreadyExited=$true } | ConvertTo-Json -Compress
+      exit 0
+    }
+    try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { $path = '' }
+    try { $started = $process.StartTime.ToUniversalTime().ToString('o') } catch { $started = '' }
+    $pathMatches = $path.Equals([IO.Path]::GetFullPath('${escapePowerShellLiteral(expectedPath)}'), [StringComparison]::OrdinalIgnoreCase)
+    $startMatches = $started.Equals('${escapePowerShellLiteral(expectedStartedAt)}', [StringComparison]::Ordinal)
+    if (-not $pathMatches -or -not $startMatches) {
+      [pscustomobject]@{ ok=$false; stopped=$false; alreadyExited=$false; pathMatches=$pathMatches; startMatches=$startMatches } |
+        ConvertTo-Json -Compress
+      exit 0
+    }
+    $process | Stop-Process -Force -ErrorAction Stop
+    [pscustomobject]@{ ok=$true; stopped=$true; alreadyExited=$false; pathMatches=$true; startMatches=$true } |
+      ConvertTo-Json -Compress
+  `);
+  const result = raw ? JSON.parse(raw) : { ok: false, stopped: false, reason: "missing cleanup result" };
+  if (result.ok) {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && processExists(processId)) await sleep(100);
+    if (processExists(processId)) return { ...result, ok: false, reason: "tracked process did not exit" };
+  }
+  return result;
 }
 
 function runPowerShell(script) {
@@ -55,32 +141,305 @@ function runPowerShell(script) {
   });
 }
 
-async function waitForPortReleased(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let last = "";
-  while (Date.now() < deadline) {
-    last = await runPowerShell(`
-      $rows = Get-NetTCPConnection -LocalPort 8757 -ErrorAction SilentlyContinue |
-        Where-Object { $_.State -eq 'Listen' } |
-        Select-Object -First 5 LocalAddress,LocalPort,State,OwningProcess
-      if ($rows) { $rows | ConvertTo-Json -Compress } else { '' }
-    `);
-    if (!last) {
-      return;
-    }
-    await sleep(250);
+function escapePowerShellLiteral(value) {
+  return String(value).replaceAll("'", "''");
+}
+
+function sha256File(path) {
+  return new Promise((resolveHash, rejectHash) => {
+    const digest = createHash("sha256");
+    const input = createReadStream(path);
+    input.on("error", rejectHash);
+    input.on("data", (chunk) => digest.update(chunk));
+    input.on("end", () => resolveHash(digest.digest("hex")));
+  });
+}
+
+function normalizeBuildPolicy(manifest) {
+  const raw = manifest?.buildPolicy && typeof manifest.buildPolicy === "object"
+    ? manifest.buildPolicy
+    : {};
+  return {
+    mode: String(raw.mode || ""),
+    releaseEligible: raw.releaseEligible === true,
+    allowDirty: raw.allowDirty === true,
+    allowUnpushed: raw.allowUnpushed === true,
+    allowVersionMismatch: raw.allowVersionMismatch === true,
+  };
+}
+
+function isStrictBuildPolicy(policy) {
+  return policy.mode === "strict"
+    && policy.releaseEligible === true
+    && policy.allowDirty === false
+    && policy.allowUnpushed === false
+    && policy.allowVersionMismatch === false;
+}
+
+function isLocalAcceptanceBuildPolicy(policy) {
+  return policy.mode === "local-acceptance"
+    && policy.releaseEligible === false
+    && policy.allowDirty === false
+    && policy.allowUnpushed === true;
+}
+
+function inheritedEnvironmentIsSensitive(key) {
+  const upper = String(key).toUpperCase();
+  return ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].includes(upper)
+    || /(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|BEARER[_-]?TOKEN)$/.test(upper)
+    || /^(?:OPENAI|ANTHROPIC|GOOGLE|GEMINI|DEEPSEEK|OPENROUTER|XAI|OLLAMA|AZURE_OPENAI|AWS|VERTEX|BEDROCK)_/.test(upper)
+    || upper === "GOOGLE_APPLICATION_CREDENTIALS"
+    || upper === "LLM_API_KEY";
+}
+
+function isolatedLaunchEnvironment() {
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => (
+      !key.toUpperCase().startsWith("VRCFORGE_")
+      && !inheritedEnvironmentIsSensitive(key)
+    )),
+  );
+  return {
+    ...inherited,
+    VRCFORGE_USER_DATA_DIR: userDataRoot,
+    VRCFORGE_CONFIG_DIR: configRoot,
+    VRCFORGE_CONFIG_PATH: resolve(configRoot, "config.json"),
+    VRCFORGE_SETTINGS_PATH: resolve(configRoot, "settings.json"),
+    VRCFORGE_LOG_DIR: resolve(userDataRoot, "logs"),
+    VRCFORGE_ARTIFACTS_DIR: resolve(userDataRoot, "artifacts"),
+    VRCFORGE_DESKTOP_EXECUTOR: "1",
+    APPDATA: hostProfileRoot,
+    LOCALAPPDATA: hostProfileRoot,
+    WEBVIEW2_USER_DATA_FOLDER: webviewDataRoot,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
+      `--remote-debugging-port=${port} --remote-allow-origins=*`,
+  };
+}
+
+function runSelfTest() {
+  const strict = normalizeBuildPolicy({
+    buildPolicy: {
+      mode: "strict",
+      releaseEligible: true,
+      allowDirty: false,
+      allowUnpushed: false,
+      allowVersionMismatch: false,
+    },
+  });
+  const local = normalizeBuildPolicy({
+    buildPolicy: {
+      mode: "local-acceptance",
+      releaseEligible: false,
+      allowDirty: false,
+      allowUnpushed: true,
+      allowVersionMismatch: true,
+    },
+  });
+  if (!isStrictBuildPolicy(strict) || isLocalAcceptanceBuildPolicy(strict)) {
+    throw new Error("self-test: strict build policy classification failed.");
   }
-  throw new Error(`Port 8757 still has a listener before launch: ${last}`);
+  if (!isLocalAcceptanceBuildPolicy(local) || isStrictBuildPolicy(local)) {
+    throw new Error("self-test: local-acceptance build policy classification failed.");
+  }
+  if (
+    isLocalAcceptanceBuildPolicy({ ...local, releaseEligible: true })
+    || isLocalAcceptanceBuildPolicy({ ...local, allowDirty: true })
+    || isLocalAcceptanceBuildPolicy({ ...local, allowUnpushed: false })
+    || isLocalAcceptanceBuildPolicy({ ...local, mode: "strict" })
+  ) {
+    throw new Error("self-test: unsafe local-acceptance policy was accepted.");
+  }
+
+  const injectedKeys = [
+    "VRCFORGE_DISABLE_APP_AUTH",
+    "VRCFORGE_CONFIG_PATH",
+    "OPENAI_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "OLLAMA_HOST",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+  ];
+  const previous = new Map(injectedKeys.map((key) => [key, process.env[key]]));
+  for (const key of injectedKeys) process.env[key] = `must-not-escape-${key}`;
+  try {
+    const environment = isolatedLaunchEnvironment();
+    if (
+      Object.hasOwn(environment, "VRCFORGE_DISABLE_APP_AUTH")
+      || Object.hasOwn(environment, "OPENAI_API_KEY")
+      || Object.hasOwn(environment, "ANTHROPIC_AUTH_TOKEN")
+      || Object.hasOwn(environment, "GOOGLE_APPLICATION_CREDENTIALS")
+      || Object.hasOwn(environment, "OLLAMA_HOST")
+      || Object.hasOwn(environment, "HTTPS_PROXY")
+      || Object.hasOwn(environment, "NO_PROXY")
+      || environment.VRCFORGE_USER_DATA_DIR !== userDataRoot
+      || environment.VRCFORGE_CONFIG_DIR !== configRoot
+      || environment.VRCFORGE_CONFIG_PATH !== resolve(configRoot, "config.json")
+      || environment.VRCFORGE_SETTINGS_PATH !== resolve(configRoot, "settings.json")
+      || environment.VRCFORGE_LOG_DIR !== resolve(userDataRoot, "logs")
+      || environment.VRCFORGE_ARTIFACTS_DIR !== resolve(userDataRoot, "artifacts")
+      || environment.VRCFORGE_DESKTOP_EXECUTOR !== "1"
+      || environment.APPDATA !== hostProfileRoot
+      || environment.LOCALAPPDATA !== hostProfileRoot
+      || environment.WEBVIEW2_USER_DATA_FOLDER !== webviewDataRoot
+    ) {
+      throw new Error("self-test: packaged Desktop runtime paths or credentials were not isolated.");
+    }
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+  const selfTestSecret = "desktop-probe-self-test-secret";
+  protectedSecrets.add(selfTestSecret);
+  try {
+    const sanitized = sanitizeProbeValue({ error: `bounded ${selfTestSecret} value` });
+    if (containsProtectedSecret(sanitized) || !JSON.stringify(sanitized).includes("<redacted-probe-secret>")) {
+      throw new Error("self-test: protected secret redaction failed.");
+    }
+  } finally {
+    protectedSecrets.delete(selfTestSecret);
+  }
+  console.log("Desktop/Computer Use probe self-test passed");
+}
+
+if (selfTest) {
+  runSelfTest();
+  process.exit(0);
+}
+
+async function prepareManifestBoundPackage(sourceVersion) {
+  const manifestPath = resolve(repoRoot, "dist", "release", "release-manifest.json");
+  let manifest;
+  try {
+    manifest = JSON.parse((await readFile(manifestPath, "utf8")).replace(/^\uFEFF/, ""));
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new Error(`Packaged Desktop/Computer Use probe requires ${manifestPath}.`);
+    }
+    throw new Error(`Release manifest could not be read: ${String(error?.message || error)}`);
+  }
+  if (String(manifest?.version || "") !== sourceVersion) {
+    throw new Error(`Release manifest version ${String(manifest?.version || "<missing>")} did not match VERSION ${sourceVersion}.`);
+  }
+  const escapedRepoRoot = escapePowerShellLiteral(repoRoot);
+  const headCommit = (await runPowerShell(`git -C '${escapedRepoRoot}' rev-parse HEAD`)).trim().toLowerCase();
+  const originMainCommit = (await runPowerShell(`git -C '${escapedRepoRoot}' rev-parse origin/main`)).trim().toLowerCase();
+  const worktreeClean = (await runPowerShell(`git -C '${escapedRepoRoot}' status --porcelain=v1`)) === "";
+  const manifestCommit = String(manifest?.commit || "").trim().toLowerCase();
+  const buildPolicy = normalizeBuildPolicy(manifest);
+  const strictBuildPolicy = isStrictBuildPolicy(buildPolicy);
+  const localAcceptanceBuildPolicy = isLocalAcceptanceBuildPolicy(buildPolicy);
+  if (
+    !/^[0-9a-f]{40}$/.test(headCommit)
+    || !/^[0-9a-f]{40}$/.test(originMainCommit)
+    || manifestCommit !== headCommit
+  ) {
+    throw new Error(`Manifest binding mismatch: manifest=${manifestCommit || "<missing>"}, HEAD=${headCommit || "<missing>"}, origin/main=${originMainCommit || "<missing>"}.`);
+  }
+  if (!allowUnpushed && (headCommit !== originMainCommit || !worktreeClean || !strictBuildPolicy)) {
+    throw new Error("Strict packaged probe requires clean HEAD=origin/main and a strict release-eligible buildPolicy.");
+  }
+  if (allowUnpushed && (!worktreeClean || !localAcceptanceBuildPolicy)) {
+    throw new Error("--allow-unpushed requires a clean worktree plus buildPolicy.mode=local-acceptance, releaseEligible=false, allowDirty=false, and allowUnpushed=true.");
+  }
+
+  const portableName = `VRCForge_Windows_x64_${sourceVersion}.zip`;
+  const portable = (Array.isArray(manifest?.artifacts) ? manifest.artifacts : [])
+    .find((artifact) => artifact?.name === portableName);
+  if (!portable || !/^[0-9a-f]{64}$/i.test(String(portable.sha256 || ""))) {
+    throw new Error(`Release manifest did not contain a valid ${portableName} digest.`);
+  }
+  const portablePath = resolve(dirname(manifestPath), portableName);
+  const portableSha256 = await sha256File(portablePath);
+  if (portableSha256 !== String(portable.sha256).toLowerCase()) {
+    throw new Error(`Portable package digest did not match release-manifest.json for ${portableName}.`);
+  }
+
+  const archivePayload = JSON.parse(await runPowerShell(`
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::OpenRead('${escapePowerShellLiteral(portablePath)}')
+    try {
+      $entries = @($archive.Entries)
+      $main = @($entries | Where-Object {
+        $_.FullName.Replace('\\', '/').Equals('VRCForge.exe', [StringComparison]::OrdinalIgnoreCase)
+      })
+      $backend = @($entries | Where-Object {
+        $_.FullName.Replace('\\', '/').Equals('backend/vrcforge_backend.exe', [StringComparison]::OrdinalIgnoreCase)
+      })
+      if ($main.Count -ne 1) { throw 'Portable package did not contain exactly one VRCForge.exe entry.' }
+      if ($backend.Count -ne 1) { throw 'Portable package did not contain exactly one vrcforge_backend.exe entry.' }
+      function Get-Digest($entry) {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $stream = $entry.Open()
+        try { [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+        finally { $stream.Dispose(); $sha.Dispose() }
+      }
+      [pscustomobject]@{
+        innerExeSha256 = Get-Digest $main[0]
+        innerBackendSha256 = Get-Digest $backend[0]
+      } | ConvertTo-Json -Compress
+    } finally {
+      $archive.Dispose()
+    }
+  `));
+  const innerExeSha256 = String(archivePayload?.innerExeSha256 || "").toLowerCase();
+  const innerBackendSha256 = String(archivePayload?.innerBackendSha256 || "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(innerExeSha256) || !/^[0-9a-f]{64}$/.test(innerBackendSha256)) {
+    throw new Error("Portable package executable digests were invalid.");
+  }
+
+  await runPowerShell(`
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $destination = '${escapePowerShellLiteral(packagedRoot)}'
+    if (Test-Path -LiteralPath $destination) { throw 'Isolated package extraction root already exists.' }
+    [IO.Compression.ZipFile]::ExtractToDirectory('${escapePowerShellLiteral(portablePath)}', $destination)
+  `);
+  const embeddedVersion = (await readFile(resolve(packagedRoot, "VERSION"), "utf8")).replace(/^\uFEFF/, "").trim();
+  if (embeddedVersion !== sourceVersion) {
+    throw new Error(`Manifest-bound portable VERSION ${embeddedVersion || "<missing>"} did not match ${sourceVersion}.`);
+  }
+  const extractedExeSha256 = await sha256File(exe);
+  const extractedBackendSha256 = await sha256File(resolve(packagedRoot, "backend", "vrcforge_backend.exe"));
+  if (innerExeSha256 !== extractedExeSha256 || innerBackendSha256 !== extractedBackendSha256) {
+    throw new Error("Extracted package executables did not match their manifest-bound ZIP entries.");
+  }
+  return {
+    version: String(manifest.version),
+    manifestCommit,
+    headCommit,
+    originMainCommit,
+    worktreeClean,
+    buildPolicy,
+    strictBuildPolicy,
+    localAcceptanceBuildPolicy,
+    strictReleaseBinding: !allowUnpushed && worktreeClean && headCommit === originMainCommit && strictBuildPolicy,
+    portableName,
+    portableSha256,
+    innerExeSha256,
+    extractedExeSha256,
+    innerBackendSha256,
+    extractedBackendSha256,
+    embeddedVersion,
+  };
 }
 
 async function processSnapshot() {
   const value = await runPowerShell(`
-    $packagedRoot = '${packagedRootPowerShell}'
-    $processes = Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
-      Select-Object Id,ProcessName,Path
-    $ports = Get-NetTCPConnection -LocalPort 8757 -ErrorAction SilentlyContinue |
-      Where-Object { $_.State -eq 'Listen' } |
+    $root = [IO.Path]::GetFullPath('${escapePowerShellLiteral(packagedRoot)}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $processes = @(foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
+      $name = [string]$process.ProcessName
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { $path = '' }
+      $knownVrcForge = $name -in @('VRCForge', 'vrcforge_backend', 'vrcforge-agentic-app')
+      $insidePackage = $path -and $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+      if ($knownVrcForge -or $insidePackage) {
+        [pscustomobject]@{ Id=$process.Id; ProcessName=$name; Path=$path; PackagedRoot=$insidePackage }
+      }
+    })
+    $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+      Where-Object { $_.LocalPort -eq 8757 -or $_.LocalPort -eq ${port} } |
       Select-Object LocalAddress,LocalPort,State,OwningProcess
     [pscustomobject]@{ processes = @($processes); ports = @($ports) } | ConvertTo-Json -Depth 4 -Compress
   `);
@@ -89,10 +448,21 @@ async function processSnapshot() {
 
 async function resourceSnapshot() {
   const value = await runPowerShell(`
-    $packagedRoot = '${packagedRootPowerShell}'
-    $processes = Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
-      Select-Object Id,ProcessName,HandleCount,@{N='ThreadCount';E={$_.Threads.Count}},@{N='WorkingSetMB';E={[math]::Round($_.WorkingSet64/1MB,1)}},@{N='PrivateMB';E={[math]::Round($_.PrivateMemorySize64/1MB,1)}}
+    $root = [IO.Path]::GetFullPath('${escapePowerShellLiteral(packagedRoot)}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $processes = @(foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { continue }
+      if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        [pscustomobject]@{
+          Id=$process.Id
+          ProcessName=$process.ProcessName
+          HandleCount=$process.HandleCount
+          ThreadCount=$process.Threads.Count
+          WorkingSetMB=[math]::Round($process.WorkingSet64/1MB,1)
+          PrivateMB=[math]::Round($process.PrivateMemorySize64/1MB,1)
+        }
+      }
+    })
     $os = Get-CimInstance Win32_OperatingSystem
     [pscustomobject]@{
       processes = @($processes)
@@ -107,9 +477,15 @@ async function resourceSnapshot() {
 
 async function requestMainWindowClose(processId) {
   const value = await runPowerShell(`
+    $expected = [IO.Path]::GetFullPath('${escapePowerShellLiteral(exe)}')
     $process = Get-Process -Id ${Number(processId)} -ErrorAction SilentlyContinue
     if ($process) {
-      @([pscustomobject]@{ id = $process.Id; closeRequested = $process.CloseMainWindow() }) | ConvertTo-Json -Compress
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { $path = '' }
+      if ($path.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+        @([pscustomobject]@{ id = $process.Id; path = $path; closeRequested = $process.CloseMainWindow() }) | ConvertTo-Json -Compress
+      } else {
+        throw 'Tracked PID no longer belongs to the extracted VRCForge executable.'
+      }
     } else { '[]' }
   `);
   return value ? JSON.parse(value) : [];
@@ -126,6 +502,47 @@ async function waitForAppShutdown(timeoutMs = 15000) {
     await sleep(200);
   }
   return latest || processSnapshot();
+}
+
+async function forceCloseTrackedLaunch(processId) {
+  if (!processId) return processSnapshot();
+  await runPowerShell(`
+    $root = [IO.Path]::GetFullPath('${escapePowerShellLiteral(packagedRoot)}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $exe = [IO.Path]::GetFullPath('${escapePowerShellLiteral(exe)}')
+    $rootProcessId = [int]${Number(processId)}
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    $targets = @(foreach ($candidateId in $ids) {
+      $process = Get-Process -Id $candidateId -ErrorAction SilentlyContinue
+      if (-not $process) { continue }
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { continue }
+      $allowed = if ($candidateId -eq $rootProcessId) {
+        $path.Equals($exe, [StringComparison]::OrdinalIgnoreCase)
+      } else {
+        $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)
+      }
+      if ($allowed) { $process }
+    })
+    $targets |
+      Sort-Object @{ Expression = { if ($_.Id -eq $rootProcessId) { 1 } else { 0 } } } |
+      Stop-Process -Force -ErrorAction SilentlyContinue
+  `);
+  const finalSnapshot = await waitForAppShutdown(30000);
+  if (snapshotHasResidue(finalSnapshot)) {
+    throw new Error(`Tracked packaged launch did not clear without touching other instances: ${JSON.stringify(finalSnapshot)}`);
+  }
+  return finalSnapshot;
 }
 
 async function waitForFixtureWindow(processId, titleMarker, timeoutMs = 15000) {
@@ -254,6 +671,13 @@ function sanitizeProbeValue(value) {
   if (Array.isArray(value)) {
     return value.map(sanitizeProbeValue);
   }
+  if (typeof value === "string") {
+    let sanitized = value;
+    for (const secret of protectedSecrets) {
+      if (secret) sanitized = sanitized.split(secret).join("<redacted-probe-secret>");
+    }
+    return sanitized;
+  }
   if (!value || typeof value !== "object") {
     return value;
   }
@@ -268,12 +692,61 @@ function sanitizeProbeValue(value) {
   return sanitized;
 }
 
+function containsProtectedSecret(value) {
+  if (!protectedSecrets.size) return false;
+  const serialized = typeof value === "string" ? value : JSON.stringify(value);
+  return [...protectedSecrets].some((secret) => secret && serialized.includes(secret));
+}
+
+async function scanTreeForProtectedSecrets(root, limits = {}) {
+  const maxFiles = Number(limits.maxFiles || 5000);
+  const maxBytes = Number(limits.maxBytes || 256 * 1024 * 1024);
+  const secretBuffers = [...protectedSecrets].filter(Boolean).map((secret) => Buffer.from(secret, "utf8"));
+  const state = { root, filesScanned: 0, bytesScanned: 0, matches: [], readErrors: [], truncated: false };
+  if (!secretBuffers.length) return state;
+  const visit = async (directory) => {
+    if (state.truncated) return;
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code !== "ENOENT") state.readErrors.push({ path: directory, error: String(error?.message || error) });
+      return;
+    }
+    for (const entry of entries) {
+      if (state.truncated) break;
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (state.filesScanned >= maxFiles || state.bytesScanned >= maxBytes) {
+        state.truncated = true;
+        break;
+      }
+      try {
+        const info = await stat(path);
+        if (state.bytesScanned + info.size > maxBytes) {
+          state.truncated = true;
+          break;
+        }
+        const bytes = await readFile(path);
+        state.filesScanned += 1;
+        state.bytesScanned += bytes.length;
+        if (secretBuffers.some((secret) => bytes.indexOf(secret) >= 0)) state.matches.push(path);
+      } catch (error) {
+        state.readErrors.push({ path, error: String(error?.message || error) });
+      }
+    }
+  };
+  await visit(root);
+  return state;
+}
+
 async function appApi(path, options = {}) {
   if (!appSessionToken) {
-    const tokenPath = resolve(
-      process.env.VRCFORGE_CONFIG_DIR || resolve(process.env.LOCALAPPDATA || "", "VRCForge", "agentic-app", "config"),
-      "app-session-token",
-    );
+    const tokenPath = resolve(configRoot, "app-session-token");
     try {
       appSessionToken = (await readFile(tokenPath, "utf8")).trim();
     } catch {
@@ -281,6 +754,7 @@ async function appApi(path, options = {}) {
       const sessionPayload = await sessionResponse.json();
       appSessionToken = sessionPayload.appSessionToken || sessionPayload.app_session_token || "";
     }
+    if (appSessionToken) protectedSecrets.add(appSessionToken);
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs || 30000);
@@ -499,56 +973,126 @@ async function imageEvidence(path) {
 
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
-  const fixtureCompileOutput = await runPowerShell(`
-    $csc = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
-    $presentationFramework = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\PresentationFramework' -Recurse -Filter PresentationFramework.dll | Select-Object -First 1).FullName
-    $presentationCore = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_64\\PresentationCore' -Recurse -Filter PresentationCore.dll | Select-Object -First 1).FullName
-    $windowsBase = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\WindowsBase' -Recurse -Filter WindowsBase.dll | Select-Object -First 1).FullName
-    $systemXaml = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.Xaml' -Recurse -Filter System.Xaml.dll | Select-Object -First 1).FullName
-    & $csc /nologo /target:winexe /reference:$presentationFramework /reference:$presentationCore /reference:$windowsBase /reference:$systemXaml /out:'${fixtureExePath.replaceAll("'", "''")}' '${fixtureSourcePath.replaceAll("'", "''")}'
-    if ($LASTEXITCODE -ne 0) { throw "fixture compiler exited $LASTEXITCODE" }
-    Get-Item '${fixtureExePath.replaceAll("'", "''")}' | Select-Object FullName,Length | ConvertTo-Json -Compress
-  `);
-  await waitForPortReleased(15000);
-  const beforeLaunch = await processSnapshot();
-  if (snapshotHasResidue(beforeLaunch)) {
-    throw new Error(`Refusing to disturb an existing packaged VRCForge instance: ${JSON.stringify(beforeLaunch)}`);
-  }
-  const cdpPortBusy = await runPowerShell(`
-    $row = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($row) { $row | ConvertTo-Json -Compress } else { '' }
-  `);
-  if (cdpPortBusy) {
-    throw new Error(`CDP port ${port} is already in use: ${cdpPortBusy}`);
-  }
-  const child = spawn(exe, [], {
-    detached: false,
-    stdio: "ignore",
-    env: {
-      ...process.env,
-      VRCFORGE_DESKTOP_EXECUTOR: "1",
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-allow-origins=*`,
-    },
-  });
-
   const output = {
-    schema: "vrcforge.packaged_desktop_bridge_probe.v1",
+    schema: "vrcforge.packaged_desktop_bridge_probe.v2",
     marker,
-    beforeLaunch,
+    mode: allowUnpushed ? "local-preacceptance" : "strict-release",
+    strictReleaseBinding: false,
+    releaseEligible: false,
+    releaseEvidence: allowUnpushed
+      ? "non-release local-preacceptance only"
+      : "strict release binding pending completion",
+    cdpPort: port,
+    evidenceRoot,
+    ownership: {
+      process: "one tracked extracted VRCForge.exe PID and its extracted-package descendants",
+      worker: "the embedded Desktop worker is owned by the packaged backend lifetime and authenticated by the isolated app session",
+      externalFixtures: "only launch_app-returned Notepad and the compiled marker fixture PIDs are targeted and then stopped",
+      powershell: "each hidden PowerShell child and its pipe handles are owned until its close event",
+      ports: `loopback backend 8757 and WebView2 CDP ${port}; both must be unused before launch and released after close`,
+    },
+    isolation: {
+      userDataRoot,
+      configRoot,
+      logRoot: resolve(userDataRoot, "logs"),
+      artifactRoot: resolve(userDataRoot, "artifacts"),
+      hostProfileRoot,
+      webviewDataRoot,
+      inheritedVrcForgeControls: false,
+      inheritedProviderCredentials: false,
+      inheritedProxy: false,
+    },
+    inputBoundary: "real input is limited to probe-launched Notepad and the compiled marker fixture; self-test never enters this matrix",
     assertions: [],
     resourceSnapshots: {},
-    fixtureCompile: fixtureCompileOutput ? JSON.parse(fixtureCompileOutput) : null,
   };
+  let child = null;
   let cdp = null;
   let launchedAppPid = 0;
   let launchedFixturePid = 0;
+  let notepadProcessIdentity = null;
+  let uiaFixtureProcessIdentity = null;
   let previousPermissionMode = "";
   let permissionRestoreNeeded = false;
   let previousAdvancedSettings = null;
   let advancedSettingsRestoreNeeded = false;
   let gracefulShutdownAttempted = false;
   try {
-    const page = await waitForCdpTarget();
+    if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === 8757) {
+      throw new Error(`Invalid VRCFORGE_DESKTOP_PROBE_CDP_PORT: ${process.env.VRCFORGE_DESKTOP_PROBE_CDP_PORT || port}`);
+    }
+    output.beforePackage = await processSnapshot();
+    if (snapshotHasResidue(output.beforePackage)) {
+      throw new Error(`Preflight found an existing VRCForge process or occupied backend/CDP port; nothing was terminated: ${JSON.stringify(output.beforePackage)}`);
+    }
+    const sourceVersion = (await readFile(resolve(repoRoot, "VERSION"), "utf8")).replace(/^\uFEFF/, "").trim();
+    const binding = await prepareManifestBoundPackage(sourceVersion);
+    output.strictReleaseBinding = binding.strictReleaseBinding === true;
+    output.releaseEligible = binding.buildPolicy.releaseEligible === true;
+    output.releaseBinding = {
+      manifestCommit: binding.manifestCommit,
+      headCommit: binding.headCommit,
+      originMainCommit: binding.originMainCommit,
+      worktreeClean: binding.worktreeClean,
+      buildPolicy: binding.buildPolicy,
+      strictBuildPolicy: binding.strictBuildPolicy,
+      localAcceptanceBuildPolicy: binding.localAcceptanceBuildPolicy,
+      portableName: binding.portableName,
+      portableSha256: binding.portableSha256,
+      innerExeSha256: binding.innerExeSha256,
+      extractedExeSha256: binding.extractedExeSha256,
+      innerBackendSha256: binding.innerBackendSha256,
+      extractedBackendSha256: binding.extractedBackendSha256,
+      embeddedVersion: binding.embeddedVersion,
+    };
+    if (allowUnpushed && (output.strictReleaseBinding || output.releaseEligible)) {
+      output.assertions.push("allow-unpushed mode was incorrectly marked strict or release-eligible");
+    }
+    if (!allowUnpushed && (!output.strictReleaseBinding || !output.releaseEligible)) {
+      output.assertions.push("strict mode did not retain strict release binding and release eligibility");
+    }
+    await Promise.all([
+      mkdir(configRoot, { recursive: true }),
+      mkdir(resolve(userDataRoot, "logs"), { recursive: true }),
+      mkdir(resolve(userDataRoot, "artifacts"), { recursive: true }),
+      mkdir(webviewDataRoot, { recursive: true }),
+      mkdir(hostProfileRoot, { recursive: true }),
+    ]);
+    const fixtureCompileOutput = await runPowerShell(`
+      $csc = 'C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
+      $presentationFramework = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\PresentationFramework' -Recurse -Filter PresentationFramework.dll | Select-Object -First 1).FullName
+      $presentationCore = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_64\\PresentationCore' -Recurse -Filter PresentationCore.dll | Select-Object -First 1).FullName
+      $windowsBase = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\WindowsBase' -Recurse -Filter WindowsBase.dll | Select-Object -First 1).FullName
+      $systemXaml = (Get-ChildItem 'C:\\Windows\\Microsoft.NET\\assembly\\GAC_MSIL\\System.Xaml' -Recurse -Filter System.Xaml.dll | Select-Object -First 1).FullName
+      & $csc /nologo /target:winexe /reference:$presentationFramework /reference:$presentationCore /reference:$windowsBase /reference:$systemXaml /out:'${escapePowerShellLiteral(fixtureExePath)}' '${escapePowerShellLiteral(fixtureSourcePath)}'
+      if ($LASTEXITCODE -ne 0) { throw "fixture compiler exited $LASTEXITCODE" }
+      Get-Item '${escapePowerShellLiteral(fixtureExePath)}' | Select-Object FullName,Length | ConvertTo-Json -Compress
+    `);
+    output.fixtureCompile = fixtureCompileOutput ? JSON.parse(fixtureCompileOutput) : null;
+    output.beforeLaunch = await processSnapshot();
+    if (snapshotHasResidue(output.beforeLaunch)) {
+      throw new Error(`Launch preflight found an existing VRCForge process or occupied backend/CDP port; nothing was terminated: ${JSON.stringify(output.beforeLaunch)}`);
+    }
+
+    child = spawn(exe, [], {
+      detached: false,
+      stdio: "ignore",
+      env: isolatedLaunchEnvironment(),
+    });
+    const childTerminated = new Promise((resolveTerminated) => {
+      child.once("error", (error) => resolveTerminated({ kind: "error", error }));
+      child.once("exit", (code, signal) => resolveTerminated({ kind: "exit", code, signal }));
+    });
+    const cdpOutcome = await Promise.race([
+      waitForCdpTarget().then((page) => ({ kind: "page", page })),
+      childTerminated,
+    ]);
+    if (cdpOutcome.kind !== "page") {
+      throw new Error(cdpOutcome.kind === "error"
+        ? `Packaged app failed to start: ${String(cdpOutcome.error?.message || cdpOutcome.error)}`
+        : `Packaged app exited before WebView2 became ready: code=${cdpOutcome.code}, signal=${cdpOutcome.signal || "none"}`);
+    }
+    const page = cdpOutcome.page;
     cdp = connectCdp(page.webSocketDebuggerUrl);
     await cdp.opened;
     await cdp.send("Runtime.enable");
@@ -1084,6 +1628,7 @@ async function main() {
       output.assertions.push("packaged list_apps did not return registered apps plus the running VRCForge window");
     }
 
+    const notepadLaunchStartedAt = Date.now();
     output.launchAppRequestedAction = await appApi("/api/app/agent/desktop-actions", {
       method: "POST",
       body: {
@@ -1101,14 +1646,26 @@ async function main() {
     const notepadWindow = launchAppResult.window || (launchAppResult.windows || [])[0] || null;
     output.notepadWindow = notepadWindow;
     launchedAppPid = Number(notepadWindow?.processId || 0);
+    notepadProcessIdentity = await processIdentity(launchedAppPid);
+    output.notepadProcessIdentity = notepadProcessIdentity;
+    const notepadStartedAt = Date.parse(String(notepadProcessIdentity?.startedAt || ""));
+    const notepadTarget = {
+      id: notepadWindow?.windowHandle || 0,
+      app: notepadWindow?.app || "",
+      processId: launchedAppPid,
+    };
     if (
       output.launchAppCompletedAction?.action?.status !== "completed" ||
       launchAppResult.operation !== "launch_app" ||
       !launchAppResult.windowDetected ||
       !notepadWindow?.windowHandle ||
-      !launchedAppPid
+      !launchedAppPid ||
+      !String(notepadProcessIdentity?.path || "").toLowerCase().endsWith("\\notepad.exe") ||
+      !Number.isFinite(notepadStartedAt) ||
+      notepadStartedAt < notepadLaunchStartedAt - 5000
     ) {
       output.assertions.push("packaged launch_app did not launch and resolve a Notepad window");
+      throw new Error("Notepad ownership was not proven; no desktop input was attempted.");
     }
 
     output.inputRequestedAction = await appApi("/api/app/agent/desktop-actions", {
@@ -1120,20 +1677,21 @@ async function main() {
         clientTurnId: `${marker}-turn-input`,
         params: {
           operation: "sequence",
+          window: notepadTarget,
           steps: [
             {
               operation: "click",
-              window: { id: notepadWindow?.windowHandle || 0, app: notepadWindow?.app || "", processId: launchedAppPid },
+              window: notepadTarget,
               x: 120,
               y: 140,
               click_count: 1,
               mouse_button: "left",
             },
-            { operation: "type", text: fixtureTypedMarker },
-            { operation: "press_key", key: "Control_L+a" },
-            { operation: "type_text", text: fixtureTypedMarker },
-            { operation: "drag", from_x: 30, from_y: 140, to_x: 260, to_y: 140, duration_ms: 200 },
-            { operation: "scroll", x: 200, y: 140, scroll_x: 120, scroll_y: 240 },
+            { operation: "type", window: notepadTarget, text: fixtureTypedMarker },
+            { operation: "press_key", window: notepadTarget, key: "Control_L+a" },
+            { operation: "type_text", window: notepadTarget, text: fixtureTypedMarker },
+            { operation: "drag", window: notepadTarget, from_x: 30, from_y: 140, to_x: 260, to_y: 140, duration_ms: 200 },
+            { operation: "scroll", window: notepadTarget, x: 200, y: 140, scroll_x: 120, scroll_y: 240 },
             { operation: "wait", duration_ms: 200 },
           ],
         },
@@ -1161,6 +1719,7 @@ async function main() {
       }
     }
 
+    const fixtureLaunchStartedAt = Date.now();
     output.uiaFixtureLaunchRequestedAction = await appApi("/api/app/agent/desktop-actions", {
       method: "POST",
       body: {
@@ -1177,13 +1736,25 @@ async function main() {
     const uiaFixtureLaunchResult = output.uiaFixtureLaunchActionResult?.payload?.result || {};
     const uiaFixtureWindow = uiaFixtureLaunchResult.window || (uiaFixtureLaunchResult.windows || [])[0] || null;
     launchedFixturePid = Number(uiaFixtureWindow?.processId || 0);
+    uiaFixtureProcessIdentity = await processIdentity(launchedFixturePid);
+    output.uiaFixtureProcessIdentity = uiaFixtureProcessIdentity;
+    const fixtureStartedAt = Date.parse(String(uiaFixtureProcessIdentity?.startedAt || ""));
+    const fixtureTarget = {
+      id: uiaFixtureWindow?.windowHandle || 0,
+      app: uiaFixtureWindow?.app || "",
+      processId: launchedFixturePid,
+    };
     if (
       output.uiaFixtureLaunchCompletedAction?.action?.status !== "completed" ||
       !uiaFixtureLaunchResult.windowDetected ||
       !uiaFixtureWindow?.windowHandle ||
-      !launchedFixturePid
+      !launchedFixturePid ||
+      String(uiaFixtureProcessIdentity?.path || "").toLowerCase() !== fixtureExePath.toLowerCase() ||
+      !Number.isFinite(fixtureStartedAt) ||
+      fixtureStartedAt < fixtureLaunchStartedAt - 5000
     ) {
       output.assertions.push("packaged launch_app did not launch the native UI Automation fixture");
+      throw new Error("Native fixture ownership was not proven; no fixture input was attempted.");
     }
 
     output.occlusionFocusRequestedAction = await appApi("/api/app/agent/desktop-actions", {
@@ -1195,11 +1766,7 @@ async function main() {
         clientTurnId: `${marker}-turn-occlusion-focus`,
         params: {
           operation: "activate_window",
-          window: {
-            id: uiaFixtureWindow?.windowHandle || 0,
-            app: uiaFixtureWindow?.app || "",
-            processId: launchedFixturePid,
-          },
+          window: fixtureTarget,
         },
       },
     });
@@ -1230,7 +1797,7 @@ async function main() {
         clientTurnId: `${marker}-turn-occluded-state`,
         params: {
           operation: "get_window_state",
-          window: { id: notepadWindow?.windowHandle || 0, app: notepadWindow?.app || "", processId: launchedAppPid },
+          window: notepadTarget,
           include_screenshot: true,
           include_text: false,
         },
@@ -1273,7 +1840,7 @@ async function main() {
         clientTurnId: `${marker}-turn-protected-key`,
         params: {
           operation: "press_key",
-          window: { id: notepadWindow?.windowHandle || 0, app: notepadWindow?.app || "", processId: launchedAppPid },
+          window: notepadTarget,
           key: "Win+r",
         },
       },
@@ -1297,11 +1864,7 @@ async function main() {
         clientTurnId: `${marker}-turn-uia-inspect`,
         params: {
           operation: "get_window_state",
-          window: {
-            id: uiaFixtureWindow?.windowHandle || 0,
-            app: uiaFixtureWindow?.app || "",
-            processId: launchedFixturePid,
-          },
+          window: fixtureTarget,
           include_screenshot: false,
           include_text: true,
           limit: 200,
@@ -1349,25 +1912,24 @@ async function main() {
           clientTurnId: `${marker}-turn-uia-input`,
           params: {
             operation: "sequence",
+            window: fixtureTarget,
             steps: [
               {
                 operation: "set_value",
-                window: {
-                  id: uiaFixtureWindow?.windowHandle || 0,
-                  app: uiaFixtureWindow?.app || "",
-                  processId: launchedFixturePid,
-                },
+                window: fixtureTarget,
                 element_index: uiaInput.index,
                 value: uiaFixtureTypedMarker,
               },
               {
                 operation: "click",
+                window: fixtureTarget,
                 element_index: uiaButton.index,
                 click_count: 1,
                 mouse_button: "left",
               },
               {
                 operation: "perform_secondary_action",
+                window: fixtureTarget,
                 element_index: uiaInput.index,
                 action: "Raise",
               },
@@ -1391,7 +1953,7 @@ async function main() {
           clientTurnId: `${marker}-turn-uia-readback`,
           params: {
             operation: "get_window_state",
-            window: { id: uiaFixtureWindow?.windowHandle || 0, app: uiaFixtureWindow?.app || "", processId: launchedFixturePid },
+            window: fixtureTarget,
             include_screenshot: false,
             include_text: true,
             limit: 200,
@@ -1413,9 +1975,7 @@ async function main() {
       }
     }
     const desktopActionLedger = resolve(
-      process.env.LOCALAPPDATA || "",
-      "VRCForge",
-      "agentic-app",
+      userDataRoot,
       "artifacts",
       "dashboard",
       "agent_gateway",
@@ -1544,10 +2104,12 @@ async function main() {
     }
 
     if (launchedAppPid) {
-      try {
-        process.kill(launchedAppPid);
-      } catch {}
-      launchedAppPid = 0;
+      output.notepadCleanup = await stopTrackedExternalProcess(notepadProcessIdentity);
+      if (!output.notepadCleanup?.ok) {
+        output.assertions.push("tracked Notepad process identity changed before cleanup; no unverified process was stopped");
+      } else {
+        launchedAppPid = 0;
+      }
     }
     if (cdp) {
       cdp.close();
@@ -1558,32 +2120,38 @@ async function main() {
     output.afterWindowClose = await waitForAppShutdown(20000);
     output.resourceSnapshots.afterWindowClose = await resourceSnapshot();
     if (snapshotHasResidue(output.afterWindowClose)) {
-      output.assertions.push("closing the packaged main window left VRCForge/backend or port 8757 alive");
+      output.assertions.push("closing the packaged main window left VRCForge/backend or backend/CDP port alive");
     }
     output.launchedFixtureSurvivedAppClose = launchedFixturePid > 0 && processExists(launchedFixturePid);
     if (!output.launchedFixtureSurvivedAppClose) {
       output.assertions.push("closing VRCForge also terminated an external application launched by Computer Use");
     }
     if (launchedFixturePid) {
-      try {
-        process.kill(launchedFixturePid);
-      } catch {}
-      launchedFixturePid = 0;
+      output.fixtureCleanup = await stopTrackedExternalProcess(uiaFixtureProcessIdentity);
+      if (!output.fixtureCleanup?.ok) {
+        output.assertions.push("tracked native fixture identity changed before cleanup; no unverified process was stopped");
+      } else {
+        launchedFixturePid = 0;
+      }
     }
   } catch (error) {
     output.error = String(error && error.stack ? error.stack : error);
     output.assertions.push("probe threw before completion");
   } finally {
     if (launchedAppPid) {
-      try {
-        process.kill(launchedAppPid);
-      } catch {}
+      output.notepadCleanupFinally = await stopTrackedExternalProcess(notepadProcessIdentity)
+        .catch((error) => ({ ok: false, error: String(error) }));
+      if (!output.notepadCleanupFinally?.ok) {
+        output.assertions.push("final cleanup could not verify and stop the tracked Notepad process");
+      }
       launchedAppPid = 0;
     }
     if (launchedFixturePid) {
-      try {
-        process.kill(launchedFixturePid);
-      } catch {}
+      output.fixtureCleanupFinally = await stopTrackedExternalProcess(uiaFixtureProcessIdentity)
+        .catch((error) => ({ ok: false, error: String(error) }));
+      if (!output.fixtureCleanupFinally?.ok) {
+        output.assertions.push("final cleanup could not verify and stop the tracked native fixture process");
+      }
       launchedFixturePid = 0;
     }
     if (permissionRestoreNeeded && previousPermissionMode) {
@@ -1602,32 +2170,57 @@ async function main() {
       cdp.close();
       cdp = null;
     }
-    if (!gracefulShutdownAttempted) {
+    if (!gracefulShutdownAttempted && child?.pid) {
       gracefulShutdownAttempted = true;
       output.closeRequestFinally = await requestMainWindowClose(child.pid).catch((error) => ({ error: String(error) }));
       output.afterWindowCloseFinally = await waitForAppShutdown(20000).catch((error) => ({ error: String(error) }));
       if (snapshotHasResidue(output.afterWindowCloseFinally)) {
-        output.assertions.push("cleanup close request left VRCForge/backend or port 8757 alive");
+        output.assertions.push("cleanup close request left VRCForge/backend or backend/CDP port alive");
       }
     }
     const residueBeforeForce = await processSnapshot().catch((error) => ({ error: String(error), processes: [], ports: [] }));
-    output.forcedCleanupUsed = snapshotHasResidue(residueBeforeForce);
+    output.forcedCleanupUsed = Boolean(child?.pid && snapshotHasResidue(residueBeforeForce));
     if (output.forcedCleanupUsed) {
-      try {
-        process.kill(child.pid);
-      } catch {
-        // The launched app may already have exited; its Job Object reaps the backend.
-      }
-      await waitForPortReleased(15000).catch((error) => {
+      await forceCloseTrackedLaunch(child.pid).catch((error) => {
         output.cleanupError = String(error);
       });
     }
     output.afterCleanup = await processSnapshot().catch((error) => ({ error: String(error) }));
     output.resourceSnapshots.afterCleanup = await resourceSnapshot().catch((error) => ({ error: String(error) }));
     if (snapshotHasResidue(output.afterCleanup)) {
-      output.assertions.push("forced cleanup still left VRCForge/backend or port 8757 alive");
+      output.assertions.push("final tracked cleanup still left VRCForge/backend or backend/CDP port alive");
     }
-    await writeFile(outPath, JSON.stringify(output, null, 2), "utf8");
+    const outputContainedSecret = containsProtectedSecret(output);
+    const [logSecretScan, artifactSecretScan] = await Promise.all([
+      scanTreeForProtectedSecrets(resolve(userDataRoot, "logs")),
+      scanTreeForProtectedSecrets(resolve(userDataRoot, "artifacts")),
+    ]);
+    output.protectedSecretScan = {
+      outputContainedSecret,
+      logs: logSecretScan,
+      artifacts: artifactSecretScan,
+    };
+    if (outputContainedSecret) {
+      output.assertions.push("the in-memory probe report contained the exact app-session token before final redaction");
+    }
+    if (logSecretScan.matches.length || artifactSecretScan.matches.length) {
+      output.assertions.push("the exact app-session token leaked into isolated logs or audit artifacts");
+    }
+    if (
+      logSecretScan.truncated || artifactSecretScan.truncated ||
+      logSecretScan.readErrors.length || artifactSecretScan.readErrors.length
+    ) {
+      output.assertions.push("the bounded exact app-session-token log/audit scan was incomplete");
+    }
+    output.ok = output.assertions.length === 0;
+    output.releaseEvidence = output.ok
+      ? allowUnpushed
+        ? "non-release local-preacceptance only"
+        : "strict release-bound Desktop/Computer Use evidence"
+      : allowUnpushed
+        ? "failed non-release local-preacceptance evidence"
+        : "failed strict-release evidence";
+    await writeFile(outPath, `${JSON.stringify(sanitizeProbeValue(output), null, 2)}\n`, "utf8");
     console.log(outPath);
     if (output.assertions.length) {
       console.error(output.assertions.join("\n"));
