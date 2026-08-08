@@ -52,6 +52,10 @@ def test_golden_path_preflight_app_endpoints_and_gateway_registration(tmp_path: 
     try:
         with TestClient(dashboard_server.app) as client:
             index_response = client.post("/api/app/project-index/scan", json={"projectPath": str(project)})
+            null_index_response = client.post(
+                "/api/app/project-index/scan",
+                json={"projectPath": str(project), "maxFiles": None},
+            )
             package_response = client.post("/api/app/outfit-packages/inspect", json={"packagePath": str(package)})
             plan_response = client.post(
                 "/api/app/outfit-imports/plan",
@@ -66,6 +70,7 @@ def test_golden_path_preflight_app_endpoints_and_gateway_registration(tmp_path: 
     assert index_payload["schema"] == "vrcforge.project_memory_index.v1"
     assert index_payload["summary"]["addedFiles"] >= 3
     assert index_payload["privacy"]["binaryAssetContentsReturned"] is False
+    assert null_index_response.status_code == 422
 
     assert package_response.status_code == 200
     package_payload = package_response.json()

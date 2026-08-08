@@ -345,6 +345,18 @@ pub(crate) struct DesktopProjectIndexScanRequest {
     timeout_ms: Option<u64>,
 }
 
+pub(crate) fn project_index_scan_body(
+    request: &DesktopProjectIndexScanRequest,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "projectPath": request.project_path,
+    });
+    if let Some(max_files) = request.max_files {
+        body["maxFiles"] = serde_json::Value::from(max_files);
+    }
+    body
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAdjustmentCheckpointsRequest {
@@ -1340,16 +1352,41 @@ pub fn save_project_prefs(
 pub fn scan_project_index(
     request: DesktopProjectIndexScanRequest,
 ) -> Result<serde_json::Value, String> {
+    let body = project_index_scan_body(&request);
     backend_json_request(
         "POST",
         "/api/app/project-index/scan".to_string(),
-        Some(serde_json::json!({
-            "projectPath": request.project_path,
-            "maxFiles": request.max_files,
-        })),
+        Some(body),
         request.timeout_ms.or(Some(120_000)),
     )
     .map(sanitize_webview_response)
+}
+
+#[cfg(test)]
+mod project_index_transport_tests {
+    use super::{project_index_scan_body, DesktopProjectIndexScanRequest};
+
+    #[test]
+    fn omitted_max_files_stays_omitted_for_the_backend_default() {
+        let request: DesktopProjectIndexScanRequest = serde_json::from_value(serde_json::json!({
+            "projectPath": "D:\\Projects\\Avatar"
+        }))
+        .expect("project index request should deserialize");
+        let body = project_index_scan_body(&request);
+        assert_eq!(body["projectPath"], "D:\\Projects\\Avatar");
+        assert!(body.get("maxFiles").is_none());
+    }
+
+    #[test]
+    fn explicit_max_files_is_forwarded_as_an_integer() {
+        let request: DesktopProjectIndexScanRequest = serde_json::from_value(serde_json::json!({
+            "projectPath": "D:\\Projects\\Avatar",
+            "maxFiles": 250000
+        }))
+        .expect("project index request should deserialize");
+        let body = project_index_scan_body(&request);
+        assert_eq!(body["maxFiles"], 250000);
+    }
 }
 
 #[tauri::command]
