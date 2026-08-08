@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from agent_command_safety import is_path_within, strip_quotes, tokenize_command
+from agent_gateway import AgentGateway, AgentGatewayError
 from agent_shell_service import (
     AgentShellError,
     AgentShellPorts,
@@ -27,9 +28,12 @@ from agent_shell_service import (
 class FakeApprovals:
     mode: str = "approval"
     automatic: bool = False
+    block_create: bool = False
     approvals: dict[str, dict[str, Any]] = field(default_factory=dict)
     requests: list[ShellApprovalRequest] = field(default_factory=list)
     applied: list[str] = field(default_factory=list)
+    create_entered: threading.Event = field(default_factory=threading.Event)
+    release_create: threading.Event = field(default_factory=threading.Event)
 
     def ports(self) -> ShellApprovalPorts:
         return ShellApprovalPorts(
@@ -59,6 +63,9 @@ class FakeApprovals:
         )
 
     def create(self, request: ShellApprovalRequest) -> dict[str, Any]:
+        self.create_entered.set()
+        if self.block_create:
+            assert self.release_create.wait(timeout=2)
         self.requests.append(request)
         approval_id = f"approval-{len(self.requests)}"
         approval = {
@@ -110,8 +117,11 @@ class FakeProcess:
 @dataclass
 class FakeProcessOwner:
     blocking: bool = False
+    block_spawn: bool = False
     processes: list[FakeProcess] = field(default_factory=list)
     spawned: threading.Event = field(default_factory=threading.Event)
+    spawn_entered: threading.Event = field(default_factory=threading.Event)
+    release_spawn: threading.Event = field(default_factory=threading.Event)
 
     def ports(self) -> ShellProcessPorts:
         return ShellProcessPorts(
@@ -124,6 +134,9 @@ class FakeProcessOwner:
         )
 
     def spawn(self, *_args: Any, **_kwargs: Any) -> FakeProcess:
+        self.spawn_entered.set()
+        if self.block_spawn:
+            assert self.release_spawn.wait(timeout=2)
         process = FakeProcess(blocking=self.blocking)
         self.processes.append(process)
         self.spawned.set()
@@ -378,6 +391,136 @@ def test_shutdown_stops_admission_terminates_and_reaps_active_child(tmp_path: Pa
     assert raised.value.status_code == 503
 
 
+def test_shutdown_waits_for_admitted_high_risk_approval_before_returning(tmp_path: Path) -> None:
+    approvals = FakeApprovals(block_create=True)
+    shell, _approvals, _process_owner, _audits = service(tmp_path, approvals=approvals)
+    worker_result: dict[str, Any] = {}
+    shutdown_result: dict[str, Any] = {}
+
+    worker = threading.Thread(
+        target=lambda: worker_result.update(
+            shell.execute(
+                {
+                    "command": "Remove-Item fixture.txt",
+                    "workspace_root": str(tmp_path),
+                    "cwd": str(tmp_path),
+                }
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert approvals.create_entered.wait(timeout=1)
+
+    shutdown_worker = threading.Thread(
+        target=lambda: shutdown_result.update(report=shell.shutdown(grace_seconds=1)),
+        daemon=True,
+    )
+    shutdown_worker.start()
+    time.sleep(0.05)
+    assert shutdown_worker.is_alive()
+
+    approvals.release_create.set()
+    worker.join(timeout=1)
+    shutdown_worker.join(timeout=1)
+
+    assert worker_result["status"] == "pending_approval"
+    assert shutdown_result["report"].snapshot_count == 1
+    assert shutdown_result["report"].pending_count == 0
+
+
+def test_shutdown_waits_for_admitted_worker_blocked_before_spawn(tmp_path: Path) -> None:
+    process_owner = FakeProcessOwner(block_spawn=True)
+    shell, _approvals, process_owner, _audits = service(tmp_path, processes=process_owner)
+    worker_error: dict[str, BaseException] = {}
+    shutdown_result: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            shell.execute({"command": "Get-ChildItem", "workspace_root": str(tmp_path)})
+        except BaseException as exc:  # test captures the exact shutdown result from the worker.
+            worker_error["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    assert process_owner.spawn_entered.wait(timeout=1)
+
+    shutdown_worker = threading.Thread(
+        target=lambda: shutdown_result.update(report=shell.shutdown(grace_seconds=1)),
+        daemon=True,
+    )
+    shutdown_worker.start()
+    time.sleep(0.05)
+    assert shutdown_worker.is_alive()
+
+    process_owner.release_spawn.set()
+    worker.join(timeout=1)
+    shutdown_worker.join(timeout=1)
+
+    assert isinstance(worker_error["error"], AgentShellError)
+    assert worker_error["error"].status_code == 503
+    assert process_owner.processes[0].killed is True
+    assert shutdown_result["report"].snapshot_count == 1
+    assert shutdown_result["report"].pending_count == 0
+
+
+def test_shutdown_isolates_one_termination_failure_and_reaps_other_children(
+    tmp_path: Path,
+) -> None:
+    process_owner = FakeProcessOwner(blocking=True)
+    base_ports = process_owner.ports()
+    termination_calls: list[int] = []
+
+    def terminate(process: FakeProcess) -> None:
+        termination_calls.append(process.pid)
+        if len(termination_calls) == 1:
+            raise RuntimeError("fixture termination failure")
+        process.kill()
+
+    ports = ShellProcessPorts(
+        spawn=base_ports.spawn,
+        terminate_tree=terminate,
+        environment=base_ports.environment,
+        monotonic=base_ports.monotonic,
+        utc_now=base_ports.utc_now,
+        sleep=base_ports.sleep,
+    )
+    approvals = FakeApprovals()
+    shell = AgentShellService(
+        AgentShellPorts(
+            approvals=approvals.ports(),
+            append_audit=lambda _event: None,
+            permission_audit_context=lambda: {},
+            cancellation_requested=lambda _session, _turn, _client: False,
+            default_workspace_root=lambda: tmp_path,
+        ),
+        process_ports=ports,
+    )
+    results: list[dict[str, Any]] = []
+    workers = [
+        threading.Thread(
+            target=lambda: results.append(shell.execute_payload(approved_payload(tmp_path))),
+            daemon=True,
+        )
+        for _ in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    deadline = time.monotonic() + 1
+    while len(process_owner.processes) < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(process_owner.processes) == 2
+
+    report = shell.shutdown(grace_seconds=1)
+    for worker in workers:
+        worker.join(timeout=1)
+
+    assert len(termination_calls) == 2
+    assert all(process.killed for process in process_owner.processes)
+    assert report.pending_count == 0
+    assert len(results) == 2
+
+
 def test_service_has_no_dynamic_host_or_compatibility_facade() -> None:
     source_path = Path(__file__).resolve().parents[1] / "agent_shell_service.py"
     source = source_path.read_text(encoding="utf-8")
@@ -387,3 +530,95 @@ def test_service_has_no_dynamic_host_or_compatibility_facade() -> None:
     assert "getattr(" not in source
     assert "agent_gateway" not in source
     assert not any(isinstance(node, ast.FunctionDef) and node.name.startswith("execute_shell") for node in ast.walk(tree))
+
+
+def test_gateway_composes_shell_owner_with_fake_process_and_nonrecoverable_v14_approval(
+    tmp_path: Path,
+) -> None:
+    process_owner = FakeProcessOwner()
+    gateway = AgentGateway(
+        tmp_path / "agent_gateway.json",
+        tmp_path / "audit",
+        shell_process_ports=process_owner.ports(),
+    )
+    assert gateway.shell.active_process_count == 0
+
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.execution_mode = "auto"
+    gateway.save_config(config)
+
+    pending = gateway.shell.execute(
+        {
+            "command": "Get-Content ../outside.txt",
+            "workspace_root": str(tmp_path),
+            "cwd": str(tmp_path),
+            "session_id": "session-1",
+            "turn_id": "turn-1",
+        }
+    )
+    assert pending["status"] == "pending_approval"
+    approval = pending["approval"]
+    assert approval["requiresExplicitApproval"] is True
+    arguments = approval["arguments"]
+    assert arguments["command_hash"]
+    assert arguments["cwd_hash"]
+    assert arguments["workspace_root_hash"]
+    assert arguments["timeout_hash"]
+    assert process_owner.processes == []
+
+    approval_id = pending["approval_id"]
+    assert gateway.approve(approval_id)["ok"] is True
+    applied = gateway.shell.execute_approved({"approval_id": approval_id})
+    assert applied["ok"] is True
+    assert process_owner.processes
+
+    restarted = AgentGateway(
+        tmp_path / "agent_gateway.json",
+        tmp_path / "audit",
+        shell_process_ports=FakeProcessOwner().ports(),
+    )
+    with pytest.raises(AgentGatewayError, match="Approval was not found") as missing:
+        restarted.shell.execute_approved({"approval_id": approval_id})
+    assert missing.value.status_code == 404
+
+    report = gateway.shell.shutdown()
+    assert report.pending_count == 0
+    with pytest.raises(AgentGatewayError, match="shutting down") as stopped:
+        gateway.shell.execute({"command": "Get-ChildItem", "workspace_root": str(tmp_path)})
+    assert stopped.value.status_code == 503
+    gateway.shell.start()
+    resumed = gateway.shell.execute({"command": "Get-ChildItem", "workspace_root": str(tmp_path)})
+    assert resumed["status"] == "executed"
+
+
+def test_shell_owner_wiring_has_no_gateway_compatibility_surface() -> None:
+    import agent_gateway
+
+    root = Path(__file__).resolve().parents[1]
+    gateway_source = (root / "agent_gateway.py").read_text(encoding="utf-8")
+    dashboard_source = (root / "dashboard_server.py").read_text(encoding="utf-8")
+    approval_source = (root / "agent_approval_transactions.py").read_text(encoding="utf-8")
+
+    for method_name in (
+        "classify_shell",
+        "execute_shell",
+        "execute_approved_shell",
+        "execute_shell_payload",
+        "_run_shell_command",
+    ):
+        assert f"def {method_name}(" not in gateway_source
+    assert "AGENT_GATEWAY.shell.start()" in dashboard_source
+    assert "AGENT_GATEWAY.shell.shutdown" in dashboard_source
+    assert "AGENT_GATEWAY.shell.execute_payload" in dashboard_source
+    assert "self.shell.execute_payload" in approval_source
+    assert "self.shell.manual_approval_reason" in approval_source
+    for legacy_global in (
+        "summarize_shell_result",
+        "normalize_filesystem_path",
+        "tokenize_command",
+        "strip_quotes",
+        "is_path_within",
+        "looks_like_absolute_path",
+    ):
+        assert not hasattr(agent_gateway, legacy_global)

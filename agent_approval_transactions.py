@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
 from agent_gateway import (
     APPLY_RECOVERY_ACTIVE_STATUSES,
     APPLY_RECOVERY_EXEMPT_WRITE_TARGETS,
@@ -43,12 +44,9 @@ from agent_gateway import (
     extract_approval_id,
     extract_project_root,
     freeze_approved_unity_execution_plan,
-    is_path_within,
     iter_param_leaf_values,
-    looks_like_absolute_path,
     normalize_execution_mode,
     normalize_exposure_layer,
-    normalize_filesystem_path,
     normalize_risk_level,
     parse_iso_datetime,
     redact_sensitive,
@@ -190,7 +188,7 @@ class AgentApprovalTransactionService:
         if str(approval.get("targetTool") or "") == "vrcforge_shell_execute":
             arguments = ensure_dict(approval.get("arguments"))
             classification = ensure_dict(arguments.get("classification_snapshot") or approval.get("preview"))
-            return self._shell_auto_manual_approval_reason(classification)
+            return self.shell.manual_approval_reason(classification)
         return ""
 
     def _impl_permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
@@ -695,7 +693,7 @@ class AgentApprovalTransactionService:
                     "vrcforge_shell_execute",
                     "Execute an approved high-risk shell command.",
                     "high",
-                    self.execute_shell_payload,
+                    self.shell.execute_payload,
                 )
             else:
                 write_handler = self._write_handlers.get(target_tool)

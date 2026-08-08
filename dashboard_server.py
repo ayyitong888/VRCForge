@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from bounded_process import BoundedProcessResult, run_bounded_process
+from agent_command_safety import normalize_filesystem_path
 
 try:
     import psutil
@@ -58,7 +59,6 @@ from agent_gateway import (
     normalize_bool,
     normalize_checkpoint_archive_max_size_mb,
     normalize_exposure_layer,
-    normalize_filesystem_path,
     parse_skill_markdown,
     redact_background_goal_persistence,
     redact_sensitive,
@@ -2306,6 +2306,7 @@ async def on_startup() -> None:
     global AGENT_MCP_INIT_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    AGENT_GATEWAY.shell.start()
     BACKGROUND_GOAL_COORDINATOR.start()
     load_project_snapshot_cache()
     await asyncio.to_thread(DIAGNOSTIC_LOGGER.cleanup)
@@ -2365,6 +2366,27 @@ async def on_shutdown() -> None:
     global AGENT_MCP_CONTEXT
 
     await emit_safety_posture_snapshot("normal_shutdown")
+
+    try:
+        shell_shutdown = await asyncio.to_thread(AGENT_GATEWAY.shell.shutdown)
+        if shell_shutdown.pending_count:
+            emit_log(
+                "warn",
+                "agent",
+                "Shell process shutdown reached its bounded deadline.",
+                {
+                    "processSnapshotCount": shell_shutdown.snapshot_count,
+                    "terminatedProcessCount": shell_shutdown.terminated_count,
+                    "pendingProcessCount": shell_shutdown.pending_count,
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 - shutdown remains best-effort after stopping admission.
+        emit_log(
+            "warn",
+            "agent",
+            "Shell process shutdown had a warning.",
+            {"error": str(exc)},
+        )
 
     live_session = PRIMITIVE_BASIS_LIVE_SESSION
     if live_session is not None:
@@ -4064,7 +4086,7 @@ async def app_agent_approve_and_execute(
         if not isinstance(approval, dict) or not approved.get("ok"):
             return {}
         if approval.get("targetTool") == "vrcforge_shell_execute":
-            return AGENT_GATEWAY.execute_approved_shell({"approval_id": approval_id})
+            return AGENT_GATEWAY.shell.execute_approved({"approval_id": approval_id})
         return AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
 
     linked = await asyncio.to_thread(AGENT_GOALS.agent_goal_delivery_for_approval, approval_id)
@@ -21648,9 +21670,9 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_progress_update", "Update one visible agent progress item title, summary, order, or status.", "plan/preview", lambda params: AGENT_GATEWAY.update_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_progress_delete", "Delete one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.delete_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_ask_user", "Ask the user a short question with selectable options while the agent task continues.", "plan/preview", lambda params: AGENT_QUESTIONS.create(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "Classify a shell command before execution.", "read/debug", AGENT_GATEWAY.classify_shell)
-    AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.execute_shell(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
-    AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.execute_approved_shell, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "Classify a shell command before execution.", "read/debug", AGENT_GATEWAY.shell.classify)
+    AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.shell.execute(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.shell.execute_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda params: AGENT_GATEWAY.build_manifest(normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda params: AGENT_GATEWAY.check_skill_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", lambda params: AGENT_GATEWAY.build_tool_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
@@ -22278,7 +22300,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_shell_execute",
         "Execute an approved high-risk shell command.",
         "high",
-        AGENT_GATEWAY.execute_shell_payload,
+        AGENT_GATEWAY.shell.execute_payload,
     )
     missing_core_targets = VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS.difference(
         AGENT_GATEWAY._write_handlers

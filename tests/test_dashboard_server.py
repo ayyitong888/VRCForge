@@ -19,20 +19,23 @@ from fastapi.testclient import TestClient
 
 import dashboard_server
 import unity_status_service
+from agent_command_safety import normalize_filesystem_path
 from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
     CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
     RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS,
-    SHELL_RUNNER_NATIVE,
-    SHELL_RUNNER_POWERSHELL,
-    kill_process_tree,
-    native_shell_argv,
-    normalize_filesystem_path,
     redact_background_goal_persistence,
     redact_sensitive,
-    resolve_powershell_executable,
     summarize_text,
+)
+from agent_shell_service import (
+    SHELL_RUNNER_NATIVE,
+    SHELL_RUNNER_POWERSHELL,
+    ShellProcessPorts,
+    kill_process_tree,
+    native_shell_argv,
+    resolve_powershell_executable,
 )
 from agent_question_service import (
     AgentQuestionPersistence,
@@ -135,6 +138,55 @@ def make_shader_inventory() -> dict:
         ],
         "summary": {"materialCount": 2},
     }
+
+
+class FakeDashboardShellProcess:
+    _next_pid = 12000
+
+    def __init__(self, stdout: str) -> None:
+        type(self)._next_pid += 1
+        self.pid = type(self)._next_pid
+        self.returncode: int | None = None
+        self.stdout = stdout
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def communicate(self, *, timeout: float | None = None) -> tuple[str, str]:
+        if self.killed:
+            self.returncode = -9
+            return "", "terminated"
+        self.returncode = 0
+        return self.stdout, ""
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+
+
+def fake_dashboard_shell_process_ports(
+    *,
+    stdout: str = "fixture shell output",
+) -> tuple[ShellProcessPorts, list[FakeDashboardShellProcess]]:
+    processes: list[FakeDashboardShellProcess] = []
+
+    def spawn(*_args: object, **_kwargs: object) -> FakeDashboardShellProcess:
+        process = FakeDashboardShellProcess(stdout)
+        processes.append(process)
+        return process
+
+    return (
+        ShellProcessPorts(
+            spawn=spawn,
+            terminate_tree=lambda process: process.kill(),
+            environment=dict,
+            monotonic=time.monotonic,
+            utc_now=lambda: "2026-08-08T00:00:00+00:00",
+            sleep=lambda _seconds: None,
+        ),
+        processes,
+    )
 
 
 class DashboardServerTests(unittest.TestCase):
@@ -5056,14 +5108,19 @@ class DashboardServerTests(unittest.TestCase):
             outside.write_text("outside-ok", encoding="utf-8")
             victim = workspace / "victim.txt"
             victim.write_text("delete-me", encoding="utf-8")
-            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            shell_process_ports, shell_processes = fake_dashboard_shell_process_ports(stdout="outside-ok")
+            gateway = AgentGateway(
+                root / "config" / "agent_gateway.json",
+                root / "audit",
+                shell_process_ports=shell_process_ports,
+            )
 
             config = gateway.ensure_config()
             config.enabled = True
             config.execution_mode = "auto"
             gateway.save_config(config)
 
-            outside_read = gateway.execute_shell(
+            outside_read = gateway.shell.execute(
                 {
                     "command": f"Get-Content -LiteralPath {ps_quote(outside)}",
                     "workspace_root": str(workspace),
@@ -5075,7 +5132,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(outside_read["approval"]["requiresExplicitApproval"])
             self.assertIn("outside", outside_read["approval"]["explicitApprovalReason"].lower())
 
-            delete_request = gateway.execute_shell(
+            delete_request = gateway.shell.execute(
                 {
                     "command": f"Remove-Item -LiteralPath {ps_quote(victim)}",
                     "workspace_root": str(workspace),
@@ -5093,7 +5150,7 @@ class DashboardServerTests(unittest.TestCase):
             config.allow_roslyn_advanced = True
             gateway.save_config(config)
 
-            full_read = gateway.execute_shell(
+            full_read = gateway.shell.execute(
                 {
                     "command": f"Get-Content -LiteralPath {ps_quote(outside)}",
                     "workspace_root": str(workspace),
@@ -5103,8 +5160,9 @@ class DashboardServerTests(unittest.TestCase):
             )
             self.assertEqual(full_read["status"], "executed")
             self.assertIn("outside-ok", full_read["result"]["stdout"])
+            self.assertEqual(len(shell_processes), 1)
 
-            full_delete = gateway.execute_shell(
+            full_delete = gateway.shell.execute(
                 {
                     "command": f"Remove-Item -LiteralPath {ps_quote(victim)}",
                     "workspace_root": str(workspace),
@@ -6128,85 +6186,67 @@ class DashboardServerTests(unittest.TestCase):
     def test_shell_classifier_low_high_and_reject_cases(self) -> None:
         workspace_root = str(Path(__file__).resolve().parents[1])
 
-        low = dashboard_server.AGENT_GATEWAY.classify_shell(
+        low = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "git --no-pager status --short", "workspace_root": workspace_root}
         )
         self.assertEqual(low["risk"], "low")
 
-        rg_low = dashboard_server.AGENT_GATEWAY.classify_shell(
+        rg_low = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "rg TODO .", "workspace_root": workspace_root}
         )
         self.assertEqual(rg_low["risk"], "low")
 
-        git_show_low = dashboard_server.AGENT_GATEWAY.classify_shell(
+        git_show_low = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "git show --stat HEAD", "workspace_root": workspace_root}
         )
         self.assertEqual(git_show_low["risk"], "low")
 
-        high = dashboard_server.AGENT_GATEWAY.classify_shell(
+        high = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Set-Content test.txt hi", "workspace_root": workspace_root}
         )
         self.assertEqual(high["risk"], "high")
 
-        home_path = dashboard_server.AGENT_GATEWAY.classify_shell(
+        home_path = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-Content ~\\.codex\\auth.json", "workspace_root": workspace_root}
         )
         self.assertEqual(home_path["risk"], "high")
 
-        root_relative = dashboard_server.AGENT_GATEWAY.classify_shell(
+        root_relative = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-Content \\Windows\\win.ini", "workspace_root": workspace_root}
         )
         self.assertEqual(root_relative["risk"], "high")
 
-        rg_preprocessor = dashboard_server.AGENT_GATEWAY.classify_shell(
+        rg_preprocessor = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "rg --pre powershell TODO .", "workspace_root": workspace_root}
         )
         self.assertEqual(rg_preprocessor["risk"], "high")
 
-        git_show_output = dashboard_server.AGENT_GATEWAY.classify_shell(
+        git_show_output = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "git show --stat --output=leak.txt HEAD", "workspace_root": workspace_root}
         )
         self.assertEqual(git_show_output["risk"], "high")
 
-        redirected = dashboard_server.AGENT_GATEWAY.classify_shell(
+        redirected = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-Content a.txt > b.txt", "workspace_root": workspace_root}
         )
         self.assertEqual(redirected["risk"], "high")
 
-        chained = dashboard_server.AGENT_GATEWAY.classify_shell(
+        chained = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-ChildItem; Remove-Item test.txt", "workspace_root": workspace_root}
         )
         self.assertEqual(chained["risk"], "high")
 
-        rejected = dashboard_server.AGENT_GATEWAY.classify_shell({"command": "", "workspace_root": workspace_root})
+        rejected = dashboard_server.AGENT_GATEWAY.shell.classify({"command": "", "workspace_root": workspace_root})
         self.assertEqual(rejected["risk"], "reject")
 
-    def test_shell_command_can_be_cancelled_before_timeout(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            cancel_id = "sess-shell-cancel"
-            dashboard_server.AGENT_GATEWAY._cancelled_runtime_turns.add(cancel_id)
-            try:
-                result = dashboard_server.AGENT_GATEWAY._run_shell_command(
-                    "Start-Sleep -Seconds 30",
-                    Path(temp_dir),
-                    timeout_seconds=30,
-                    cancel_ids=[cancel_id],
-                )
-            finally:
-                dashboard_server.AGENT_GATEWAY._cancelled_runtime_turns.discard(cancel_id)
-
-        self.assertFalse(result["ok"])
-        self.assertTrue(result["cancelled"])
-        self.assertFalse(result["timedOut"])
-        self.assertLess(result["durationSeconds"], 5)
 
     def test_windows_process_tree_kill_falls_back_when_taskkill_is_rejected(self) -> None:
         process = Mock()
         process.pid = 4242
         process.poll.side_effect = [None, None]
         with (
-            patch("agent_gateway.os.name", "nt"),
-            patch("agent_gateway.subprocess.run", return_value=SimpleNamespace(returncode=1)) as taskkill,
+            patch("agent_shell_service.os.name", "nt"),
+            patch("agent_shell_service.subprocess.run", return_value=SimpleNamespace(returncode=1)) as taskkill,
         ):
             kill_process_tree(process)
 
@@ -6218,8 +6258,8 @@ class DashboardServerTests(unittest.TestCase):
         process.pid = 4242
         process.poll.side_effect = [None, None]
         with (
-            patch("agent_gateway.os.name", "nt"),
-            patch("agent_gateway.subprocess.run", side_effect=PermissionError) as taskkill,
+            patch("agent_shell_service.os.name", "nt"),
+            patch("agent_shell_service.subprocess.run", side_effect=PermissionError) as taskkill,
         ):
             kill_process_tree(process)
 
@@ -6245,26 +6285,16 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_shell_classification_reports_planned_runner(self) -> None:
         workspace_root = str(Path(__file__).resolve().parents[1])
-        native = dashboard_server.AGENT_GATEWAY.classify_shell(
+        native = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "git --no-pager status --short", "workspace_root": workspace_root}
         )
         self.assertEqual(native["plannedRunner"], SHELL_RUNNER_NATIVE)
 
-        cmdlet = dashboard_server.AGENT_GATEWAY.classify_shell(
+        cmdlet = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-ChildItem", "workspace_root": workspace_root}
         )
         self.assertEqual(cmdlet["plannedRunner"], SHELL_RUNNER_POWERSHELL)
 
-    def test_run_shell_command_uses_native_runner_for_plain_git(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            result = dashboard_server.AGENT_GATEWAY._run_shell_command(
-                "git --version",
-                Path(temp_dir),
-                timeout_seconds=30,
-            )
-        self.assertEqual(result["runner"], SHELL_RUNNER_NATIVE)
-        self.assertTrue(result["ok"])
-        self.assertIn("git version", result["stdout"].lower())
 
     def test_resolve_powershell_executable_returns_nonempty_path(self) -> None:
         resolved = resolve_powershell_executable()
@@ -6272,6 +6302,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(resolved)
 
     def test_agent_runtime_shell_direct_and_approval_execution(self) -> None:
+        shell_process_ports, shell_processes = fake_dashboard_shell_process_ports()
+        original_process_ports = dashboard_server.AGENT_GATEWAY.shell._process
+        dashboard_server.AGENT_GATEWAY.shell._process = shell_process_ports
+        self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY.shell, "_process", original_process_ports)
         with tempfile.TemporaryDirectory() as workspace:
             for directory in ("Assets", "Packages", "ProjectSettings"):
                 (Path(workspace) / directory).mkdir()
@@ -6310,8 +6344,8 @@ class DashboardServerTests(unittest.TestCase):
                 approved_payload = approved.json()
                 self.assertTrue(approved_payload["ok"])
                 self.assertEqual(approved_payload["execution"]["status"], "applied")
-                self.assertTrue(target.exists())
-                self.assertEqual(target.read_text(encoding="utf-8-sig").strip(), "hi")
+                self.assertFalse(target.exists())
+                self.assertEqual(len(shell_processes), 2)
                 self.assertTrue(
                     any(
                         call.args and getattr(call.args[0], "__name__", "") == "approve_and_execute"
@@ -6356,6 +6390,10 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertFalse(target.exists())
 
     def test_app_approval_reject_does_not_rewrite_terminal_status(self) -> None:
+        shell_process_ports, shell_processes = fake_dashboard_shell_process_ports()
+        original_process_ports = dashboard_server.AGENT_GATEWAY.shell._process
+        dashboard_server.AGENT_GATEWAY.shell._process = shell_process_ports
+        self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY.shell, "_process", original_process_ports)
         with tempfile.TemporaryDirectory() as workspace:
             for directory in ("Assets", "Packages", "ProjectSettings"):
                 (Path(workspace) / directory).mkdir()
@@ -6375,7 +6413,8 @@ class DashboardServerTests(unittest.TestCase):
                 approved = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
                 self.assertEqual(approved.status_code, 200)
                 self.assertTrue(approved.json()["ok"])
-                self.assertTrue(target.exists())
+                self.assertFalse(target.exists())
+                self.assertEqual(len(shell_processes), 1)
 
                 rejected = client.post(f"/api/app/agent/approvals/{approval_id}/reject")
                 self.assertEqual(rejected.status_code, 200)

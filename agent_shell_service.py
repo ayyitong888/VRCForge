@@ -9,7 +9,8 @@ import shutil
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -140,6 +141,10 @@ class AgentShellService:
         self._process = process_ports or default_shell_process_ports()
         self._lifecycle_lock = threading.RLock()
         self._active_processes: dict[int, ShellProcess] = {}
+        self._process_admissions: dict[int, int] = {}
+        self._admitted_workers: set[int] = set()
+        self._next_admission_id = 0
+        self._thread_admission = threading.local()
         self._accepting = True
 
     @property
@@ -158,27 +163,57 @@ class AgentShellService:
     def shutdown(self, *, grace_seconds: float = 5.0) -> ShellShutdownReport:
         with self._lifecycle_lock:
             self._accepting = False
-            snapshot = tuple(self._active_processes.values())
-        terminated = 0
-        for process in snapshot:
-            if process.poll() is not None:
-                continue
-            self._process.terminate_tree(process)
-            terminated += 1
+            snapshot_count = self._pending_owner_count_locked()
         deadline = self._process.monotonic() + max(0.0, min(float(grace_seconds), 30.0))
-        while self._process.monotonic() < deadline:
+        attempted: set[int] = set()
+        terminated = 0
+        while True:
             with self._lifecycle_lock:
-                pending = [process for process in snapshot if process.pid in self._active_processes]
-            if not pending:
+                active = tuple(self._active_processes.values())
+                pending_count = self._pending_owner_count_locked()
+            if pending_count == 0:
+                break
+            for process in active:
+                if process.pid in attempted:
+                    continue
+                attempted.add(process.pid)
+                try:
+                    if self._request_shutdown_termination(process):
+                        terminated += 1
+                except BaseException:
+                    # One malformed process port must not strand the other owned children.
+                    continue
+            with self._lifecycle_lock:
+                pending_count = self._pending_owner_count_locked()
+            if pending_count == 0 or self._process.monotonic() >= deadline:
                 break
             self._process.sleep(0.01)
-        with self._lifecycle_lock:
-            pending_count = sum(process.pid in self._active_processes for process in snapshot)
         return ShellShutdownReport(
-            snapshot_count=len(snapshot),
+            snapshot_count=snapshot_count,
             terminated_count=terminated,
             pending_count=pending_count,
         )
+
+    def _pending_owner_count_locked(self) -> int:
+        active_admissions = set(self._process_admissions.values())
+        admitted_without_process = self._admitted_workers.difference(active_admissions)
+        return len(self._active_processes) + len(admitted_without_process)
+
+    def _request_shutdown_termination(self, process: ShellProcess) -> bool:
+        try:
+            if process.poll() is not None:
+                return False
+        except BaseException:
+            pass
+        try:
+            self._process.terminate_tree(process)
+            return True
+        except BaseException:
+            try:
+                process.kill()
+                return True
+            except BaseException:
+                return False
 
     def classify(self, params: dict[str, Any] | str) -> dict[str, Any]:
         if isinstance(params, str):
@@ -250,76 +285,80 @@ class AgentShellService:
         params: dict[str, Any],
         agent_name: str = "desktop-agent",
     ) -> dict[str, Any]:
-        self._require_accepting()
-        classification = self.classify(params)
-        command = classification["command"]
-        if classification["risk"] == "reject":
+        with self._execution_admission() as admission_id:
+            classification = self.classify(params)
+            command = classification["command"]
+            if classification["risk"] == "reject":
+                self._ports.append_audit(
+                    {
+                        "event": "shell_rejected",
+                        "classification": classification,
+                        "agent": agent_name,
+                        **self._ports.permission_audit_context(),
+                    }
+                )
+                return {
+                    "ok": False,
+                    "status": "rejected",
+                    "classification": classification,
+                    "error": "; ".join(classification["reasons"]),
+                }
+            if classification["risk"] == "high":
+                approval = self._create_approval(params, classification, agent_name)
+                if self._ports.approvals.auto_enabled():
+                    auto_payload = self._ports.approvals.auto_execute(approval)
+                    if auto_payload is not None:
+                        auto_payload["classification"] = classification
+                        return auto_payload
+                return {
+                    "ok": True,
+                    "status": "pending_approval",
+                    "classification": classification,
+                    "approval": approval,
+                    "approval_id": approval["id"],
+                    "approvalId": approval["id"],
+                }
+
+            result = self._run_command(
+                command,
+                Path(classification["cwd"]),
+                admission_id=admission_id,
+                timeout_seconds=int(params.get("timeout_seconds") or 120),
+                cancel_ids=_cancel_ids(params),
+            )
             self._ports.append_audit(
                 {
-                    "event": "shell_rejected",
-                    "classification": classification,
+                    "event": "shell_executed",
                     "agent": agent_name,
+                    "classification": classification,
+                    "result": summarize_shell_result(result),
                     **self._ports.permission_audit_context(),
                 }
             )
             return {
-                "ok": False,
-                "status": "rejected",
+                "ok": result["ok"],
+                "status": "executed",
                 "classification": classification,
-                "error": "; ".join(classification["reasons"]),
+                "result": result,
             }
-        if classification["risk"] == "high":
-            approval = self._create_approval(params, classification, agent_name)
-            if self._ports.approvals.auto_enabled():
-                auto_payload = self._ports.approvals.auto_execute(approval)
-                if auto_payload is not None:
-                    auto_payload["classification"] = classification
-                    return auto_payload
-            return {
-                "ok": True,
-                "status": "pending_approval",
-                "classification": classification,
-                "approval": approval,
-                "approval_id": approval["id"],
-                "approvalId": approval["id"],
-            }
-
-        result = self._run_command(
-            command,
-            Path(classification["cwd"]),
-            timeout_seconds=int(params.get("timeout_seconds") or 120),
-            cancel_ids=_cancel_ids(params),
-        )
-        self._ports.append_audit(
-            {
-                "event": "shell_executed",
-                "agent": agent_name,
-                "classification": classification,
-                "result": summarize_shell_result(result),
-                **self._ports.permission_audit_context(),
-            }
-        )
-        return {
-            "ok": result["ok"],
-            "status": "executed",
-            "classification": classification,
-            "result": result,
-        }
 
     def execute_approved(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._require_accepting()
-        approval_id = str(params.get("approval_id") or params.get("approvalId") or "").strip()
-        if not approval_id:
-            self._raise("approval_id is required.")
-        approval = self._ports.approvals.find(approval_id)
-        if not approval:
-            self._raise(f"Approval was not found: {approval_id}", 404)
-        if approval.get("targetTool") != "vrcforge_shell_execute":
-            self._raise("Approval is not a shell execution approval.")
-        return self._ports.approvals.apply(approval_id)
+        with self._execution_admission():
+            approval_id = str(params.get("approval_id") or params.get("approvalId") or "").strip()
+            if not approval_id:
+                self._raise("approval_id is required.")
+            approval = self._ports.approvals.find(approval_id)
+            if not approval:
+                self._raise(f"Approval was not found: {approval_id}", 404)
+            if approval.get("targetTool") != "vrcforge_shell_execute":
+                self._raise("Approval is not a shell execution approval.")
+            return self._ports.approvals.apply(approval_id)
 
     def execute_payload(self, params: dict[str, Any]) -> dict[str, Any]:
-        self._require_accepting()
+        with self._execution_admission() as admission_id:
+            return self._execute_payload(params, admission_id=admission_id)
+
+    def _execute_payload(self, params: dict[str, Any], *, admission_id: int) -> dict[str, Any]:
         command = str(params.get("command") or "").strip()
         expected_hash = str(params.get("command_hash") or params.get("commandHash") or "")
         if not expected_hash:
@@ -361,6 +400,7 @@ class AgentShellService:
         result = self._run_command(
             command,
             cwd,
+            admission_id=admission_id,
             timeout_seconds=timeout_seconds,
             cancel_ids=_cancel_ids(params),
         )
@@ -380,11 +420,6 @@ class AgentShellService:
             }
         )
         return result
-
-    def _require_accepting(self) -> None:
-        with self._lifecycle_lock:
-            if not self._accepting:
-                self._raise("Shell execution is shutting down.", 503)
 
     def _raise(self, detail: str, status_code: int = 400) -> None:
         raise self._ports.error_factory(detail, status_code)
@@ -456,7 +491,7 @@ class AgentShellService:
             return bool(re.fullmatch(r"[a-zA-Z0-9_.-]+", args[0] or ""))
         return False
 
-    def _manual_approval_reason(self, classification: dict[str, Any]) -> str:
+    def manual_approval_reason(self, classification: dict[str, Any]) -> str:
         command = str(classification.get("command") or "")
         tokens = [strip_quotes(token).lower() for token in tokenize_command(command)]
         if any(token in AUTO_APPROVAL_MANUAL_SHELL_COMMANDS for token in tokens):
@@ -621,7 +656,7 @@ class AgentShellService:
         }
         manual_reason = ""
         if normalize_execution_mode(self._ports.approvals.execution_mode()) == "auto":
-            manual_reason = self._manual_approval_reason(classification)
+            manual_reason = self.manual_approval_reason(classification)
         approval = self._ports.approvals.create(
             ShellApprovalRequest(
                 agent_name=agent_name,
@@ -668,59 +703,56 @@ class AgentShellService:
         command: str,
         cwd: Path,
         *,
+        admission_id: int,
         timeout_seconds: int = 120,
         cancel_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        self._require_accepting()
-        started = self._process.monotonic()
-        started_at = self._process.utc_now()
-        env = self._process.environment()
-        env["GIT_PAGER"] = "cat"
-        env["GIT_EXTERNAL_DIFF"] = ""
-        native_argv = native_shell_argv(command)
-        if native_argv is not None:
-            runner = SHELL_RUNNER_NATIVE
-            process_args = native_argv
-        else:
-            runner = SHELL_RUNNER_POWERSHELL
-            process_args = [
-                resolve_powershell_executable(),
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-Command",
-                command,
-            ]
-        creationflags = (
-            subprocess.CREATE_NO_WINDOW
-            if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
-            else 0
-        )
-        process = self._process.spawn(
-            process_args,
-            cwd=str(cwd),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            creationflags=creationflags,
-        )
-        with self._lifecycle_lock:
-            self._active_processes[process.pid] = process
-            accepting = self._accepting
-        if not accepting:
-            cleanup_complete = self._terminate_and_reap(process)
-            with self._lifecycle_lock:
-                if cleanup_complete:
-                    self._active_processes.pop(process.pid, None)
-            self._raise("Shell execution is shutting down.", 503)
+        process: ShellProcess | None = None
         communicated = False
+        cleanup_complete = False
         try:
+            started = self._process.monotonic()
+            started_at = self._process.utc_now()
+            env = self._process.environment()
+            env["GIT_PAGER"] = "cat"
+            env["GIT_EXTERNAL_DIFF"] = ""
+            native_argv = native_shell_argv(command)
+            if native_argv is not None:
+                runner = SHELL_RUNNER_NATIVE
+                process_args = native_argv
+            else:
+                runner = SHELL_RUNNER_POWERSHELL
+                process_args = [
+                    resolve_powershell_executable(),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ]
+            creationflags = (
+                subprocess.CREATE_NO_WINDOW
+                if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
+                else 0
+            )
+            process = self._process.spawn(
+                process_args,
+                cwd=str(cwd),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+            )
+            accepting = self._register_process(admission_id, process)
+            if not accepting:
+                cleanup_complete = self._terminate_and_reap(process)
+                self._raise("Shell execution is shutting down.", 503)
             timed_out = False
             cancelled = False
             deadline = self._process.monotonic() + max(1, min(timeout_seconds, 600))
@@ -765,12 +797,69 @@ class AgentShellService:
                 "stderrTruncated": len(stderr or "") > 12000,
             }
         finally:
-            cleanup_complete = communicated and self._process_has_exited(process)
-            if not cleanup_complete:
-                cleanup_complete = self._terminate_and_reap(process)
-            with self._lifecycle_lock:
-                if cleanup_complete:
+            if process is not None:
+                cleanup_complete = cleanup_complete or (
+                    communicated and self._process_has_exited(process)
+                )
+                if not cleanup_complete:
+                    cleanup_complete = self._terminate_and_reap(process)
+            self._release_process(admission_id, process, cleanup_complete=cleanup_complete)
+
+    @contextmanager
+    def _execution_admission(self) -> Iterator[int]:
+        thread_state = vars(self._thread_admission)
+        existing_id = thread_state.get("admission_id")
+        if existing_id is not None:
+            self._thread_admission.depth += 1
+            try:
+                yield existing_id
+            finally:
+                self._thread_admission.depth -= 1
+            return
+
+        admission_id = self._admit_execution()
+        self._thread_admission.admission_id = admission_id
+        self._thread_admission.depth = 1
+        try:
+            yield admission_id
+        finally:
+            del self._thread_admission.admission_id
+            del self._thread_admission.depth
+            self._release_admission(admission_id)
+
+    def _admit_execution(self) -> int:
+        with self._lifecycle_lock:
+            if not self._accepting:
+                self._raise("Shell execution is shutting down.", 503)
+            self._next_admission_id += 1
+            admission_id = self._next_admission_id
+            self._admitted_workers.add(admission_id)
+            return admission_id
+
+    def _register_process(self, admission_id: int, process: ShellProcess) -> bool:
+        with self._lifecycle_lock:
+            if admission_id not in self._admitted_workers:
+                raise RuntimeError("Shell execution admission was released before process registration.")
+            self._active_processes[process.pid] = process
+            self._process_admissions[process.pid] = admission_id
+            return self._accepting
+
+    def _release_process(
+        self,
+        admission_id: int,
+        process: ShellProcess | None,
+        *,
+        cleanup_complete: bool,
+    ) -> None:
+        with self._lifecycle_lock:
+            if process is not None and cleanup_complete:
+                if self._active_processes.get(process.pid) is process:
                     self._active_processes.pop(process.pid, None)
+                    self._process_admissions.pop(process.pid, None)
+
+    def _release_admission(self, admission_id: int) -> None:
+        with self._lifecycle_lock:
+            self._admitted_workers.remove(admission_id)
 
     @staticmethod
     def _process_has_exited(process: ShellProcess) -> bool:

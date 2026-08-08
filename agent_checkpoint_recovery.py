@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from agent_command_safety import (
+    is_path_within,
+    looks_like_absolute_path,
+    normalize_filesystem_path,
+)
 from agent_gateway import (
     ADJUSTMENT_CHECKPOINT_TARGETS,
     APPLY_RECOVERY_SCHEMA,
@@ -38,11 +43,8 @@ from agent_gateway import (
     flush_and_fsync,
     fsync_directory_best_effort,
     fsync_file_path,
-    is_path_within,
-    looks_like_absolute_path,
     normalize_checkpoint_archive_dir,
     normalize_checkpoint_archive_max_size_mb,
-    normalize_filesystem_path,
     redact_sensitive,
     utc_now_iso,
 )
