@@ -355,7 +355,7 @@ from outfit_import_planner import build_post_import_outfit_validation, detect_ma
 from mcp_trigger_selection import SelectionReceiptAuthority, plan_mcp_tool_selection, tools_for_exposure_layer
 import outfit_package_inspector as outfit_package_inspector_domain
 from outfit_package_inspector import is_safe_archive_path, normalize_archive_name
-from path_to_skill import DEFAULT_MIN_VRCFORGE_VERSION, PathToSkillError, build_path_to_skill_source
+from path_to_skill import DEFAULT_MIN_VRCFORGE_VERSION, PathToSkillError
 from primitive_basis_live_attestation import (
     PrimitiveBasisLiveSession,
     load_packaged_live_session_from_stdin,
@@ -391,7 +391,12 @@ from skill_packages import SkillPackageError, SkillPackageService, _load_json_by
 from skill_package_controller import SkillPackageController
 from skill_package_governance import SkillPackageGovernanceService
 from skill_package_projection import SkillPackageProjectionService
-from path_to_skill_controller import PathToSkillDashboardController
+from path_to_skill_controller import (
+    PathToSkillControllerError,
+    PathToSkillPreviewService,
+    PathToSkillWritePorts,
+    PathToSkillWriteService,
+)
 from project_catalog_discovery import ProjectCatalogDiscovery, ProjectCatalogDiscoveryPorts
 from project_snapshot_selection_service import ProjectSnapshotSelectionPorts, ProjectSnapshotSelectionService
 from provider_model_catalog_service import (
@@ -2022,7 +2027,6 @@ SKILL_PACKAGE_WRITE_LOCK = Lock()
 _SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
 _SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
-_PATH_TO_SKILL_CONTROLLER = PathToSkillDashboardController(sys.modules[__name__])
 PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(
     ProjectCatalogDiscoveryPorts(
         appdata_path=lambda: Path(os.environ.get("APPDATA", "")),
@@ -5984,6 +5988,26 @@ def skill_package_service() -> SkillPackageService:
     return SkillPackageService(skill_package_store_dir(), vrcforge_version=app.version)
 
 
+PATH_TO_SKILL_PREVIEW = PathToSkillPreviewService()
+PATH_TO_SKILL_WRITE = PathToSkillWriteService(
+    PathToSkillWritePorts(
+        path_lexists=os.path.lexists,
+        make_temp_root=lambda mkdtemp=tempfile.mkdtemp: Path(
+            mkdtemp(prefix="vrcforge-path-to-skill-")
+        ),
+        write_source=lambda captured, output_dir: captured.write_to(output_dir),
+        ensure_parent=lambda path: path.mkdir(parents=True, exist_ok=True),
+        export_dev=lambda source_dir,
+        package_output,
+        export_dev=skill_package_service().export_dev: export_dev(
+            source_dir,
+            package_output,
+            overwrite=False,
+        ).as_dict(),
+    )
+)
+
+
 def skill_package_error_response(exc: Exception) -> HTTPException:
     status = 400 if isinstance(exc, SkillPackageError) else 500
     return HTTPException(status_code=status, detail=str(exc))
@@ -6251,22 +6275,6 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
         else:
             exported = service.export_dev(source, output_path)
     return {"ok": True, "exported": exported.as_dict()}
-
-
-def _path_to_skill_kwargs(params: dict[str, Any]) -> dict[str, Any]:
-    return _PATH_TO_SKILL_CONTROLLER._impl_path_to_skill_kwargs(params)
-
-
-def _path_to_skill_file_list(source_files: dict[str, str]) -> list[dict[str, Any]]:
-    return _PATH_TO_SKILL_CONTROLLER._impl_path_to_skill_file_list(source_files)
-
-
-def _path_to_skill_vsk_filename(manifest: dict[str, Any]) -> str:
-    return _PATH_TO_SKILL_CONTROLLER._impl_path_to_skill_vsk_filename(manifest)
-
-
-def capture_path_to_skill_sync(params: dict[str, Any], *, allow_write: bool = False) -> dict[str, Any]:
-    return _PATH_TO_SKILL_CONTROLLER._impl_capture_path_to_skill_sync(params, allow_write=allow_write)
 
 
 def scan_project_index_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -6597,7 +6605,9 @@ def app_export_skill_package(request: SkillPackageExportRequest) -> dict[str, An
 @app.post("/api/app/path-to-skill/preview")
 def app_preview_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, Any]:
     try:
-        return capture_path_to_skill_sync(request.model_dump(by_alias=True), allow_write=False)
+        return PATH_TO_SKILL_PREVIEW.preview(request.model_dump(by_alias=True))
+    except PathToSkillControllerError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except PathToSkillError as exc:
@@ -6609,7 +6619,9 @@ def app_preview_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, A
 @app.post("/api/app/path-to-skill/write")
 def app_write_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, Any]:
     try:
-        return capture_path_to_skill_sync(request.model_dump(by_alias=True), allow_write=True)
+        return PATH_TO_SKILL_WRITE.write(request.model_dump(by_alias=True))
+    except PathToSkillControllerError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except PathToSkillError as exc:

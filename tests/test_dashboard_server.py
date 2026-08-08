@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 import dashboard_server
 import unity_status_service
+from path_to_skill import build_path_to_skill_source
 from agent_command_safety import normalize_filesystem_path
 from agent_gateway import (
     AgentGateway,
@@ -7237,7 +7238,7 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / "roundtrip-profile"
-            captured = dashboard_server.build_path_to_skill_source(
+            captured = build_path_to_skill_source(
                 {"status": "passed", "workflow": "optimizer_conservative_profile", "steps": ["inspect"]},
                 package_id="community.path-to-skill.roundtrip-profile",
                 skill_name="roundtrip-profile",
@@ -7635,21 +7636,18 @@ class DashboardServerTests(unittest.TestCase):
                         "writeSource": True,
                     },
                 )
-                with patch(
-                    "dashboard_server.tempfile",
-                    SimpleNamespace(mkdtemp=Mock(return_value=str(temp_output_root))),
-                ):
-                    temp_exported = client.post(
-                        "/api/app/path-to-skill/write",
-                        json={
-                            "summary": summary,
-                            "packageId": "community.path-to-skill.shader-preset",
-                            "skillName": "shader-preset",
-                            "title": "Shader Preset",
-                            "exportVsk": True,
-                            "confirmExport": True,
-                        },
-                    )
+                temp_exported = client.post(
+                    "/api/app/path-to-skill/write",
+                    json={
+                        "summary": summary,
+                        "packageId": "community.path-to-skill.shader-preset",
+                        "skillName": "shader-preset",
+                        "title": "Shader Preset",
+                        "outputPath": str(temp_output_root / "source"),
+                        "exportVsk": True,
+                        "confirmExport": True,
+                    },
+                )
                 exported = client.post(
                     "/api/app/path-to-skill/write",
                     json={

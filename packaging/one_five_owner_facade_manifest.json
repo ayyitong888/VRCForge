@@ -125,23 +125,11 @@
       "hostProxy": {"source": "skill_package_governance.py", "class": "SkillPackageGovernanceService"}
     },
     {
-      "id": "dashboard.path-to-skill-host-proxy",
+      "id": "dashboard.path-to-skill-typed-root-owners",
       "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "_PATH_TO_SKILL_CONTROLLER"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "_path_to_skill_kwargs",
-            "_path_to_skill_file_list",
-            "_path_to_skill_vsk_filename",
-            "capture_path_to_skill_sync"
-          ]
-        }
-      ],
-      "hostProxy": {"source": "path_to_skill_controller.py", "class": "PathToSkillDashboardController"}
+        {"source": "dashboard_server.py", "scope": "module", "name": "PATH_TO_SKILL_PREVIEW"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "PATH_TO_SKILL_WRITE"}
+      ]
     },
     {
       "id": "dashboard.project-catalog-typed-root-owner",

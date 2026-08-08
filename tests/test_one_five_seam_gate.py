@@ -171,7 +171,11 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         for group_id, group in groups.items()
         if group_id.startswith("dashboard.") and group.get("hostProxy")
     )
-    assert dashboard_host_proxy_count == 29
+    assert dashboard_host_proxy_count == 25
+    assert {
+        item["name"]
+        for item in groups["dashboard.path-to-skill-typed-root-owners"]["rootSymbols"]
+    } == {"PATH_TO_SKILL_PREVIEW", "PATH_TO_SKILL_WRITE"}
     assert groups["dashboard.project-catalog-typed-root-owner"]["rootSymbols"] == [
         {
             "source": "dashboard_server.py",
