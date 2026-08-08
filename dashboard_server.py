@@ -307,6 +307,10 @@ from wardrobe_outfit_workflow_service import (
     AddWardrobeOutfitPreviewService,
     ClothingFxReadPorts,
     ClothingFxReadService,
+    CreateWardrobeApprovedWritePorts,
+    CreateWardrobeApprovedWriteService,
+    CreateWardrobePreviewPorts,
+    CreateWardrobePreviewService,
     ManageWardrobeApprovedWritePorts,
     ManageWardrobeApprovedWriteService,
     ManageWardrobePreviewPorts,
@@ -324,6 +328,8 @@ from wardrobe_outfit_workflow_service import (
     build_add_outfit_part_request as build_owned_add_outfit_part_request,
     build_add_modular_avatar_component_request as build_owned_add_modular_avatar_component_request,
     build_add_wardrobe_outfit_request as build_owned_add_wardrobe_outfit_request,
+    build_create_wardrobe_core_calls as build_owned_create_wardrobe_core_calls,
+    build_create_wardrobe_request as build_owned_create_wardrobe_request,
     build_manage_wardrobe_request as build_owned_manage_wardrobe_request,
     validate_add_modular_avatar_component_request as validate_owned_add_modular_avatar_component_request,
 )
@@ -16747,39 +16753,6 @@ def _coerce_gateway_bool(value: Any, default: bool) -> bool:
     return default
 
 
-def build_create_wardrobe_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-        "parameterName": str(
-            params.get("parameter_name")
-            or params.get("parameterName")
-            or params.get("wardrobe_parameter")
-            or params.get("wardrobeParameter")
-            or "Clothes"
-        ).strip(),
-        "preview": preview,
-    }
-    menu_name = str(params.get("menu_name") or params.get("menuName") or params.get("sub_menu_name") or params.get("subMenuName") or "").strip()
-    if menu_name:
-        request["menuName"] = menu_name
-    default_control_name = str(params.get("default_control_name") or params.get("defaultControlName") or "").strip()
-    if default_control_name:
-        request["defaultControlName"] = default_control_name
-    layer_name = str(params.get("layer_name") or params.get("layerName") or "").strip()
-    if layer_name:
-        request["layerName"] = layer_name
-    asset_dir = str(params.get("asset_dir") or params.get("assetDir") or params.get("clip_output_dir") or params.get("clipOutputDir") or "").strip()
-    if asset_dir:
-        request["assetDir"] = asset_dir
-    if params.get("write_defaults") is not None or params.get("writeDefaults") is not None:
-        request["writeDefaults"] = _coerce_gateway_bool(params.get("write_defaults", params.get("writeDefaults")), True)
-    if params.get("saved") is not None:
-        request["saved"] = _coerce_gateway_bool(params.get("saved"), True)
-    if params.get("network_synced") is not None or params.get("networkSynced") is not None:
-        request["networkSynced"] = _coerce_gateway_bool(params.get("network_synced", params.get("networkSynced")), True)
-    return request
-
-
 def build_ensure_expression_parameter_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
     request: dict[str, Any] = {
         "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
@@ -17133,102 +17106,6 @@ def manage_fx_animator_sync(params: dict[str, Any], preview: bool = False) -> di
     )
     payload.setdefault("ok", True)
     return payload
-
-
-def _validate_create_wardrobe_request(request: dict[str, Any]) -> dict[str, Any] | None:
-    if not request["parameterName"]:
-        return {"ok": False, "error": "parameterName is required for wardrobe creation."}
-    return None
-
-
-def _create_wardrobe_primitive_args(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    common = {
-        "avatarPath": request["avatarPath"],
-        "assetDir": request.get("assetDir", "Assets/VRCForge/Generated/Wardrobe"),
-    }
-    parameter_name = request["parameterName"]
-    menu_name = str(request.get("menuName") or request.get("subMenuName") or "Wardrobe").strip() or "Wardrobe"
-    default_control_name = str(request.get("defaultControlName") or "Default").strip() or "Default"
-    layer_name = str(request.get("layerName") or parameter_name).strip() or parameter_name
-    return (
-        {
-            **common,
-            "parameterName": parameter_name,
-            "valueType": "Int",
-            "defaultValue": 0,
-            "saved": bool(request.get("saved", True)),
-            "networkSynced": bool(request.get("networkSynced", True)),
-        },
-        {
-            **common,
-            "layerName": layer_name,
-            "stateName": default_control_name,
-            "parameterName": parameter_name,
-            "parameterType": "Int",
-            "conditionMode": "Equals",
-            "threshold": 0,
-            "writeDefaults": bool(request.get("writeDefaults", True)),
-        },
-        {
-            **common,
-            "menuPath": menu_name,
-            "controlName": default_control_name,
-            "controlType": "Toggle",
-            "parameterName": parameter_name,
-            "controlValue": 0,
-        },
-    )
-
-
-def preview_create_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    request = build_create_wardrobe_request(params, True)
-    invalid = _validate_create_wardrobe_request(request)
-    if invalid is not None:
-        return invalid
-    parameter_args, animator_args, menu_args = _create_wardrobe_primitive_args(request)
-    steps = [
-        {"tool": "vrc_ensure_expression_parameter", "result": ensure_expression_parameter_sync(parameter_args, preview=True)},
-        {"tool": "vrc_ensure_animator_state", "result": ensure_animator_state_sync(animator_args, preview=True)},
-        {"tool": "vrc_ensure_expression_menu_control", "result": ensure_expression_menu_control_sync(menu_args, preview=True)},
-    ]
-    ok = all(bool(step["result"].get("ok")) for step in steps)
-    return {
-        "ok": ok,
-        "preview": True,
-        "action": "create_wardrobe",
-        "parameterName": request["parameterName"],
-        "steps": steps,
-        "error": next((step["result"].get("error") for step in steps if not step["result"].get("ok")), None),
-    }
-
-
-def create_wardrobe_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    request = build_create_wardrobe_request(params, False)
-    invalid = _validate_create_wardrobe_request(request)
-    if invalid is not None:
-        return invalid
-    parameter_args, animator_args, menu_args = _create_wardrobe_primitive_args(request)
-    steps = [
-        {"tool": "vrc_ensure_expression_parameter", "result": ensure_expression_parameter_sync(parameter_args, preview=False)},
-    ]
-    if not steps[-1]["result"].get("ok"):
-        return {"ok": False, "action": "create_wardrobe", "parameterName": request["parameterName"], "steps": steps, "error": steps[-1]["result"].get("error")}
-    steps.append({"tool": "vrc_ensure_animator_state", "result": ensure_animator_state_sync(animator_args, preview=False)})
-    if not steps[-1]["result"].get("ok"):
-        return {"ok": False, "action": "create_wardrobe", "parameterName": request["parameterName"], "steps": steps, "error": steps[-1]["result"].get("error")}
-    steps.append({"tool": "vrc_ensure_expression_menu_control", "result": ensure_expression_menu_control_sync(menu_args, preview=False)})
-    if not steps[-1]["result"].get("ok"):
-        return {"ok": False, "action": "create_wardrobe", "parameterName": request["parameterName"], "steps": steps, "error": steps[-1]["result"].get("error")}
-    emit_log("info", "wardrobe", "Wardrobe skeleton created.", {"parameterName": request["parameterName"]})
-    return {
-        "ok": True,
-        "preview": False,
-        "action": "create_wardrobe",
-        "parameterName": request["parameterName"],
-        "steps": steps,
-    }
 
 
 def scan_avatar_parameters_gateway_sync(params: dict[str, Any]) -> dict[str, Any]:
@@ -21158,6 +21035,37 @@ MANAGE_WARDROBE_APPROVED_WRITE = ManageWardrobeApprovedWriteService(
         log=emit_log,
     )
 )
+CREATE_WARDROBE_PREVIEW = CreateWardrobePreviewService(
+    CreateWardrobePreviewPorts(
+        build_request=build_owned_create_wardrobe_request,
+        build_calls=build_owned_create_wardrobe_core_calls,
+        ensure_parameter=lambda arguments: ensure_expression_parameter_sync(
+            arguments, preview=True
+        ),
+        ensure_animator=lambda arguments: ensure_animator_state_sync(
+            arguments, preview=True
+        ),
+        ensure_menu=lambda arguments: ensure_expression_menu_control_sync(
+            arguments, preview=True
+        ),
+    )
+)
+CREATE_WARDROBE_APPROVED_WRITE = CreateWardrobeApprovedWriteService(
+    CreateWardrobeApprovedWritePorts(
+        build_request=build_owned_create_wardrobe_request,
+        build_calls=build_owned_create_wardrobe_core_calls,
+        ensure_parameter=lambda arguments: ensure_expression_parameter_sync(
+            arguments, preview=False
+        ),
+        ensure_animator=lambda arguments: ensure_animator_state_sync(
+            arguments, preview=False
+        ),
+        ensure_menu=lambda arguments: ensure_expression_menu_control_sync(
+            arguments, preview=False
+        ),
+        log=emit_log,
+    )
+)
 CLOTHING_FX_READ = ClothingFxReadService(
     ClothingFxReadPorts(
         load_settings=lambda request: load_dashboard_settings(request),
@@ -21189,7 +21097,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         preview_add_outfit_part=ADD_OUTFIT_PART_PREVIEW.preview,
         preview_add_modular_avatar_component=ADD_MODULAR_AVATAR_COMPONENT_PREVIEW.preview,
         preview_manage_wardrobe=MANAGE_WARDROBE_PREVIEW.preview,
-        preview_create_wardrobe=preview_create_wardrobe_sync,
+        preview_create_wardrobe=CREATE_WARDROBE_PREVIEW.preview,
         preview_add_outfit=preview_add_outfit_workflow_sync,
     )
 )
@@ -21200,7 +21108,7 @@ WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
     add_outfit_part=ADD_OUTFIT_PART_APPROVED_WRITE.execute,
     add_modular_avatar_component=ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE.execute,
     manage_wardrobe=MANAGE_WARDROBE_APPROVED_WRITE.execute,
-    create_wardrobe=create_wardrobe_sync,
+    create_wardrobe=CREATE_WARDROBE_APPROVED_WRITE.execute,
     prepare_add_outfit=prepare_add_outfit_request,
     add_outfit=add_outfit_workflow_approved_sync,
     prepare_import_package=prepare_outfit_import_package_request,

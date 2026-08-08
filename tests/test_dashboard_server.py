@@ -37,7 +37,10 @@ from agent_shell_service import (
     native_shell_argv,
     resolve_powershell_executable,
 )
-from wardrobe_outfit_workflow_service import build_manage_wardrobe_request
+from wardrobe_outfit_workflow_service import (
+    build_create_wardrobe_request,
+    build_manage_wardrobe_request,
+)
 from agent_question_service import (
     AgentQuestionPersistence,
     AgentQuestionPersistencePorts,
@@ -7993,7 +7996,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("vrcforge_create_wardrobe", tool_names)
 
     def test_authoring_wrappers_parse_string_booleans(self) -> None:
-        wardrobe = dashboard_server.build_create_wardrobe_request(
+        wardrobe = build_create_wardrobe_request(
             {"parameterName": "Clothes", "writeDefaults": "false", "saved": "false", "networkSynced": "false"},
             preview=False,
         )
@@ -8023,7 +8026,7 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"data": {"preview": True, "plan": {"parameterName": "Clothes"}}},
         )
-        result = dashboard_server.preview_create_wardrobe_sync({
+        result = dashboard_server.WARDROBE_OUTFIT_WORKFLOWS.preview_create_wardrobe({
             "avatar_path": "Scene/HeroAvatar",
             "parameter_name": "Clothes",
             "menu_name": "Wardrobe",
@@ -8054,7 +8057,7 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"data": {"ok": True, "parameterName": "Clothes", "fxLayerName": "Clothes"}},
         )
-        result = dashboard_server.create_wardrobe_sync({
+        result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.create_wardrobe({
             "avatarPath": "Scene/HeroAvatar",
             "parameterName": "Clothes",
         })
@@ -8065,6 +8068,28 @@ class DashboardServerTests(unittest.TestCase):
             "vrc_ensure_expression_menu_control",
         ])
         self.assertFalse(any(call.args[2]["preview"] for call in mock_invoke.call_args_list))
+
+    def test_create_wardrobe_registry_uses_typed_owner_and_canonical_plan(self) -> None:
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[  # noqa: SLF001
+            "vrcforge_create_wardrobe"
+        ]
+        self.assertEqual(
+            handler.handler,
+            dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.create_wardrobe,
+        )
+        self.assertTrue(handler.requires_approved_execution_context)
+        self.assertIs(
+            handler.checkpoint_prepare_handler,
+            dashboard_server.prepare_authoritative_unity_checkpoint_sync,
+        )
+        arguments = {"parameterName": "Clothes", "menuName": False}
+        self.assertEqual(
+            handler.approved_execution_plan_builder(arguments),
+            dashboard_server.build_workflow_execution_plan(
+                "vrcforge_create_wardrobe",
+                arguments,
+            ),
+        )
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")

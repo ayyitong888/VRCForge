@@ -672,6 +672,159 @@ def build_manage_wardrobe_request(
     return request
 
 
+def build_create_wardrobe_request(
+    params: dict[str, Any],
+    preview: bool,
+) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(
+            params.get("avatar_path") or params.get("avatarPath") or ""
+        ).strip(),
+        "parameterName": str(
+            params.get("parameter_name")
+            or params.get("parameterName")
+            or params.get("wardrobe_parameter")
+            or params.get("wardrobeParameter")
+            or "Clothes"
+        ).strip(),
+        "preview": preview,
+    }
+    menu_name = str(
+        params.get("menu_name")
+        or params.get("menuName")
+        or params.get("sub_menu_name")
+        or params.get("subMenuName")
+        or ""
+    ).strip()
+    if menu_name:
+        request["menuName"] = menu_name
+    default_control_name = str(
+        params.get("default_control_name")
+        or params.get("defaultControlName")
+        or ""
+    ).strip()
+    if default_control_name:
+        request["defaultControlName"] = default_control_name
+    layer_name = str(
+        params.get("layer_name") or params.get("layerName") or ""
+    ).strip()
+    if layer_name:
+        request["layerName"] = layer_name
+    asset_dir = str(
+        params.get("asset_dir")
+        or params.get("assetDir")
+        or params.get("clip_output_dir")
+        or params.get("clipOutputDir")
+        or ""
+    ).strip()
+    if asset_dir:
+        request["assetDir"] = asset_dir
+    if (
+        params.get("write_defaults") is not None
+        or params.get("writeDefaults") is not None
+    ):
+        request["writeDefaults"] = _coerce_wardrobe_gateway_bool(
+            params.get("write_defaults", params.get("writeDefaults")),
+            True,
+        )
+    if params.get("saved") is not None:
+        request["saved"] = _coerce_wardrobe_gateway_bool(
+            params.get("saved"),
+            True,
+        )
+    if (
+        params.get("network_synced") is not None
+        or params.get("networkSynced") is not None
+    ):
+        request["networkSynced"] = _coerce_wardrobe_gateway_bool(
+            params.get("network_synced", params.get("networkSynced")),
+            True,
+        )
+    return request
+
+
+def _build_create_wardrobe_core_calls_from_request(
+    request: dict[str, Any],
+    preview: bool,
+) -> list[tuple[str, dict[str, Any]]]:
+    avatar_path = request["avatarPath"]
+    parameter_name = request["parameterName"]
+    asset_dir = request.get("assetDir", "Assets/VRCForge/Generated/Wardrobe")
+    menu_name = (
+        str(request.get("menuName") or request.get("subMenuName") or "Wardrobe").strip()
+        or "Wardrobe"
+    )
+    default_control_name = (
+        str(request.get("defaultControlName") or "Default").strip() or "Default"
+    )
+    layer_name = (
+        str(request.get("layerName") or parameter_name).strip() or parameter_name
+    )
+    common = {"avatarPath": avatar_path, "assetDir": asset_dir}
+    return [
+        (
+            "vrc_ensure_expression_parameter",
+            {
+                **common,
+                "parameterName": parameter_name,
+                "valueType": "Int",
+                "defaultValue": 0.0,
+                "saved": bool(request.get("saved", True)),
+                "networkSynced": bool(request.get("networkSynced", True)),
+                "preview": preview,
+            },
+        ),
+        (
+            "vrc_ensure_animator_state",
+            {
+                **common,
+                "layerName": layer_name,
+                "stateName": default_control_name,
+                "parameterName": parameter_name,
+                "parameterType": "Int",
+                "conditionMode": "Equals",
+                "threshold": 0.0,
+                "writeDefaults": bool(request.get("writeDefaults", True)),
+                "preview": preview,
+            },
+        ),
+        (
+            "vrc_ensure_expression_menu_control",
+            {
+                **common,
+                "menuPath": menu_name,
+                "controlName": default_control_name,
+                "controlType": "Toggle",
+                "parameterName": parameter_name,
+                "controlValue": 0.0,
+                "preview": preview,
+            },
+        ),
+    ]
+
+
+def build_create_wardrobe_core_calls(
+    params: dict[str, Any],
+    preview: bool,
+) -> list[tuple[str, dict[str, Any]]]:
+    request = build_create_wardrobe_request(params, preview)
+    invalid = validate_create_wardrobe_request(request)
+    if invalid is not None:
+        raise ValueError(str(invalid["error"]))
+    return _build_create_wardrobe_core_calls_from_request(request, preview)
+
+
+def validate_create_wardrobe_request(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not request["parameterName"]:
+        return {
+            "ok": False,
+            "error": "parameterName is required for wardrobe creation.",
+        }
+    return None
+
+
 AddWardrobeOutfitRequestBuilder = Callable[
     [dict[str, Any], bool],
     dict[str, Any],
@@ -1049,6 +1202,125 @@ def validate_manage_wardrobe_request(
             "error": "parameterName is required for wardrobe management.",
         }
     return None
+
+
+CreateWardrobeRequestBuilder = Callable[
+    [dict[str, Any], bool],
+    dict[str, Any],
+]
+CreateWardrobeCallsBuilder = Callable[
+    [dict[str, Any], bool],
+    list[tuple[str, dict[str, Any]]],
+]
+CreateWardrobeStepPort = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class CreateWardrobePreviewPorts:
+    """Three fixed preview steps with no approved/live capability."""
+
+    build_request: CreateWardrobeRequestBuilder
+    build_calls: CreateWardrobeCallsBuilder
+    ensure_parameter: CreateWardrobeStepPort
+    ensure_animator: CreateWardrobeStepPort
+    ensure_menu: CreateWardrobeStepPort
+
+
+class CreateWardrobePreviewService:
+    """Own the complete read/preview Wardrobe creation sequence."""
+
+    def __init__(self, ports: CreateWardrobePreviewPorts) -> None:
+        self._ports = ports
+
+    def preview(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = self._ports.build_request(normalized, True)
+        invalid = validate_create_wardrobe_request(request)
+        if invalid is not None:
+            return invalid
+        calls = self._ports.build_calls(normalized, True)
+        results = (
+            self._ports.ensure_parameter(calls[0][1]),
+            self._ports.ensure_animator(calls[1][1]),
+            self._ports.ensure_menu(calls[2][1]),
+        )
+        steps = [
+            {"tool": calls[index][0], "result": result}
+            for index, result in enumerate(results)
+        ]
+        ok = all(bool(step["result"].get("ok")) for step in steps)
+        return {
+            "ok": ok,
+            "preview": True,
+            "action": "create_wardrobe",
+            "parameterName": request["parameterName"],
+            "steps": steps,
+            "error": next(
+                (
+                    step["result"].get("error")
+                    for step in steps
+                    if not step["result"].get("ok")
+                ),
+                None,
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CreateWardrobeApprovedWritePorts:
+    """Registry-only fixed Wardrobe creation sequence."""
+
+    build_request: CreateWardrobeRequestBuilder
+    build_calls: CreateWardrobeCallsBuilder
+    ensure_parameter: CreateWardrobeStepPort
+    ensure_animator: CreateWardrobeStepPort
+    ensure_menu: CreateWardrobeStepPort
+    log: ClothingFxLogPort
+
+
+class CreateWardrobeApprovedWriteService:
+    """Own the approved fail-fast Wardrobe creation endpoint."""
+
+    def __init__(self, ports: CreateWardrobeApprovedWritePorts) -> None:
+        self._ports = ports
+
+    def execute(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = self._ports.build_request(normalized, False)
+        invalid = validate_create_wardrobe_request(request)
+        if invalid is not None:
+            return invalid
+        calls = self._ports.build_calls(normalized, False)
+        step_ports = (
+            self._ports.ensure_parameter,
+            self._ports.ensure_animator,
+            self._ports.ensure_menu,
+        )
+        steps: list[dict[str, Any]] = []
+        for index, invoke in enumerate(step_ports):
+            result = invoke(calls[index][1])
+            steps.append({"tool": calls[index][0], "result": result})
+            if not result.get("ok"):
+                return {
+                    "ok": False,
+                    "action": "create_wardrobe",
+                    "parameterName": request["parameterName"],
+                    "steps": steps,
+                    "error": result.get("error"),
+                }
+        self._ports.log(
+            "info",
+            "wardrobe",
+            "Wardrobe skeleton created.",
+            {"parameterName": request["parameterName"]},
+        )
+        return {
+            "ok": True,
+            "preview": False,
+            "action": "create_wardrobe",
+            "parameterName": request["parameterName"],
+            "steps": steps,
+        }
 
 
 def normalize_setup_outfit_terminal_payload(payload: dict[str, Any]) -> dict[str, Any]:

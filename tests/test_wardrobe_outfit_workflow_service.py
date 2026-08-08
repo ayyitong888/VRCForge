@@ -22,6 +22,10 @@ from wardrobe_outfit_workflow_service import (
     AddWardrobeOutfitPreviewService,
     ClothingFxReadPorts,
     ClothingFxReadService,
+    CreateWardrobeApprovedWritePorts,
+    CreateWardrobeApprovedWriteService,
+    CreateWardrobePreviewPorts,
+    CreateWardrobePreviewService,
     ManageWardrobeApprovedWritePorts,
     ManageWardrobeApprovedWriteService,
     ManageWardrobePreviewPorts,
@@ -39,6 +43,8 @@ from wardrobe_outfit_workflow_service import (
     build_add_wardrobe_outfit_request,
     build_add_outfit_part_request,
     build_add_modular_avatar_component_request,
+    build_create_wardrobe_core_calls,
+    build_create_wardrobe_request,
     build_manage_wardrobe_request,
     coerce_setup_outfit_float_param,
 )
@@ -362,6 +368,11 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "build_manage_wardrobe_request" not in bindings
     assert "_validate_manage_wardrobe_request" not in bindings
     assert "_coerce_int_list" not in bindings
+    assert "build_create_wardrobe_request" not in bindings
+    assert "_validate_create_wardrobe_request" not in bindings
+    assert "_create_wardrobe_primitive_args" not in bindings
+    assert "preview_create_wardrobe_sync" not in bindings
+    assert "create_wardrobe_sync" not in bindings
     assert "scan_avatar_items_sync" not in bindings
     assert "scan_avatar_controls_sync" not in bindings
     assert "scan_wardrobe_sync" not in bindings
@@ -406,6 +417,45 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "preview_manage_wardrobe=MANAGE_WARDROBE_PREVIEW.preview" in source
     assert "manage_wardrobe=MANAGE_WARDROBE_APPROVED_WRITE.execute" in source
     assert source.count("build_request=build_owned_manage_wardrobe_request") == 2
+    assert "preview_create_wardrobe=CREATE_WARDROBE_PREVIEW.preview" in source
+    assert "create_wardrobe=CREATE_WARDROBE_APPROVED_WRITE.execute" in source
+    assert source.count("build_calls=build_owned_create_wardrobe_core_calls") == 2
+    assert source.count("build_request=build_owned_create_wardrobe_request") == 2
+
+    assignments = {
+        node.targets[0].id: node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+    }
+    for owner_name, expected_preview in (
+        ("CREATE_WARDROBE_PREVIEW", True),
+        ("CREATE_WARDROBE_APPROVED_WRITE", False),
+    ):
+        owner_call = assignments[owner_name]
+        assert isinstance(owner_call, ast.Call)
+        ports_call = owner_call.args[0]
+        assert isinstance(ports_call, ast.Call)
+        step_bindings = {
+            keyword.arg: keyword.value
+            for keyword in ports_call.keywords
+            if keyword.arg in {"ensure_parameter", "ensure_animator", "ensure_menu"}
+        }
+        assert set(step_bindings) == {
+            "ensure_parameter",
+            "ensure_animator",
+            "ensure_menu",
+        }
+        for binding in step_bindings.values():
+            assert isinstance(binding, ast.Lambda)
+            assert len(binding.args.args) == 1
+            assert isinstance(binding.body, ast.Call)
+            assert len(binding.body.args) == 1
+            assert [keyword.arg for keyword in binding.body.keywords] == ["preview"]
+            assert isinstance(binding.body.keywords[0].value, ast.Constant)
+            assert binding.body.keywords[0].value.value is expected_preview
+
     flattened_source = " ".join(source.split())
     assert "primitive_live_guard_fields=lambda params:" in flattened_source
     assert "_primitive_live_guard_fields(" in flattened_source
@@ -422,6 +472,15 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
         isinstance(node, ast.ImportFrom)
         and any(
             alias.name == "build_manage_wardrobe_request"
+            and alias.asname is None
+            for alias in node.names
+        )
+        for node in tree.body
+    )
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and any(
+            alias.name == "build_create_wardrobe_request"
             and alias.asname is None
             for alias in node.names
         )
@@ -1156,6 +1215,143 @@ def test_manage_wardrobe_validation_has_no_settings_or_unity_side_effects(
     expected = {"ok": False, "error": error}
     assert preview_service.preview(params) == expected
     assert approved_service.execute(params) == expected
+    assert calls == []
+
+
+def test_create_wardrobe_preview_runs_all_fixed_steps_and_approved_is_fail_fast() -> None:
+    preview_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def preview_step(name: str, ok: bool, error: str | None = None):
+        def invoke(arguments: dict[str, Any]) -> dict[str, Any]:
+            preview_calls.append((name, arguments))
+            return {"ok": ok, "error": error} if error else {"ok": ok}
+
+        return invoke
+
+    preview = CreateWardrobePreviewService(
+        CreateWardrobePreviewPorts(
+            build_request=build_create_wardrobe_request,
+            build_calls=build_create_wardrobe_core_calls,
+            ensure_parameter=preview_step("parameter", False, "parameter failed"),
+            ensure_animator=preview_step("animator", True),
+            ensure_menu=preview_step("menu", False, "menu failed"),
+        )
+    )
+    result = preview.preview({"parameterName": "Clothes"})
+
+    assert result["ok"] is False
+    assert result["preview"] is True
+    assert result["error"] == "parameter failed"
+    assert [name for name, _arguments in preview_calls] == [
+        "parameter",
+        "animator",
+        "menu",
+    ]
+    assert all(arguments["preview"] is True for _name, arguments in preview_calls)
+
+    approved_calls: list[str] = []
+    approved = CreateWardrobeApprovedWriteService(
+        CreateWardrobeApprovedWritePorts(
+            build_request=build_create_wardrobe_request,
+            build_calls=build_create_wardrobe_core_calls,
+            ensure_parameter=lambda _arguments: (
+                approved_calls.append("parameter") or {"ok": False, "error": "stop"}
+            ),
+            ensure_animator=lambda _arguments: (
+                approved_calls.append("animator") or {"ok": True}
+            ),
+            ensure_menu=lambda _arguments: (
+                approved_calls.append("menu") or {"ok": True}
+            ),
+            log=lambda *_args, **_kwargs: approved_calls.append("log"),
+        )
+    )
+
+    assert approved.execute({"parameterName": "Clothes"}) == {
+        "ok": False,
+        "action": "create_wardrobe",
+        "parameterName": "Clothes",
+        "steps": [
+            {
+                "tool": "vrc_ensure_expression_parameter",
+                "result": {"ok": False, "error": "stop"},
+            }
+        ],
+        "error": "stop",
+    }
+    assert approved_calls == ["parameter"]
+
+
+def test_create_wardrobe_approved_success_logs_after_three_fixed_steps() -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def step(name: str):
+        def invoke(arguments: dict[str, Any]) -> dict[str, Any]:
+            calls.append((name, arguments))
+            return {"ok": True, "name": name}
+
+        return invoke
+
+    service = CreateWardrobeApprovedWriteService(
+        CreateWardrobeApprovedWritePorts(
+            build_request=build_create_wardrobe_request,
+            build_calls=build_create_wardrobe_core_calls,
+            ensure_parameter=step("parameter"),
+            ensure_animator=step("animator"),
+            ensure_menu=step("menu"),
+            log=lambda level, scope, message, data=None: calls.append(
+                ("log", level, scope, message, data)
+            ),
+        )
+    )
+
+    result = service.execute({"parameterName": "Clothes", "menuName": False})
+    assert result["ok"] is True
+    assert result["preview"] is False
+    assert [call[0] for call in calls[:3]] == ["parameter", "animator", "menu"]
+    assert all(call[1]["preview"] is False for call in calls[:3])
+    assert calls[2][1]["menuPath"] == "Wardrobe"
+    assert calls[3] == (
+        "log",
+        "info",
+        "wardrobe",
+        "Wardrobe skeleton created.",
+        {"parameterName": "Clothes"},
+    )
+    assert set(CreateWardrobePreviewPorts.__dataclass_fields__) == {
+        "build_request",
+        "build_calls",
+        "ensure_parameter",
+        "ensure_animator",
+        "ensure_menu",
+    }
+    assert set(CreateWardrobeApprovedWritePorts.__dataclass_fields__) == {
+        "build_request",
+        "build_calls",
+        "ensure_parameter",
+        "ensure_animator",
+        "ensure_menu",
+        "log",
+    }
+
+
+def test_create_wardrobe_validation_precedes_all_step_capabilities() -> None:
+    calls: list[str] = []
+    service = CreateWardrobeApprovedWriteService(
+        CreateWardrobeApprovedWritePorts(
+            build_request=build_create_wardrobe_request,
+            build_calls=lambda _params, _preview: calls.append("build-calls") or [],
+            ensure_parameter=lambda _arguments: calls.append("parameter") or {},
+            ensure_animator=lambda _arguments: calls.append("animator") or {},
+            ensure_menu=lambda _arguments: calls.append("menu") or {},
+            log=lambda *_args, **_kwargs: calls.append("log"),
+        )
+    )
+
+    assert service.execute({"parameter_name": " "}) == {
+        "ok": False,
+        "error": "parameterName is required for wardrobe creation.",
+    }
     assert calls == []
 
 

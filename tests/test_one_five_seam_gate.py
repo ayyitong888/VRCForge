@@ -206,6 +206,8 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         "ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE",
         "MANAGE_WARDROBE_PREVIEW",
         "MANAGE_WARDROBE_APPROVED_WRITE",
+        "CREATE_WARDROBE_PREVIEW",
+        "CREATE_WARDROBE_APPROVED_WRITE",
         "WARDROBE_OUTFIT_WORKFLOWS",
         "WARDROBE_OUTFIT_APPROVED_WRITES",
     }
@@ -226,6 +228,8 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         "add_modular_avatar_component_sync",
         "preview_manage_wardrobe_sync",
         "manage_wardrobe_sync",
+        "preview_create_wardrobe_sync",
+        "create_wardrobe_sync",
     }.isdisjoint(
         groups["dashboard.wardrobe-outfit-root-owners"]["facades"][0]["methods"]
     )

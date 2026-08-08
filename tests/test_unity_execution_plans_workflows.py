@@ -9,6 +9,8 @@ from wardrobe_outfit_workflow_service import (
     build_add_modular_avatar_component_request,
     build_add_outfit_part_request,
     build_add_wardrobe_outfit_request,
+    build_create_wardrobe_core_calls,
+    build_create_wardrobe_request,
     build_manage_wardrobe_request,
     build_setup_outfit_request,
 )
@@ -137,6 +139,107 @@ def _legacy_manage_wardrobe_request(
     return request
 
 
+def _legacy_create_wardrobe_request(
+    params: dict[str, object],
+    preview: bool,
+) -> dict[str, object]:
+    request: dict[str, object] = {
+        "avatarPath": str(
+            params.get("avatar_path") or params.get("avatarPath") or ""
+        ).strip(),
+        "parameterName": str(
+            params.get("parameter_name")
+            or params.get("parameterName")
+            or params.get("wardrobe_parameter")
+            or params.get("wardrobeParameter")
+            or "Clothes"
+        ).strip(),
+        "preview": preview,
+    }
+    for destination, names in (
+        ("menuName", ("menu_name", "menuName", "sub_menu_name", "subMenuName")),
+        ("defaultControlName", ("default_control_name", "defaultControlName")),
+        ("layerName", ("layer_name", "layerName")),
+        ("assetDir", ("asset_dir", "assetDir", "clip_output_dir", "clipOutputDir")),
+    ):
+        value = str(next((params[name] for name in names if params.get(name)), "")).strip()
+        if value:
+            request[destination] = value
+    if (
+        params.get("write_defaults") is not None
+        or params.get("writeDefaults") is not None
+    ):
+        request["writeDefaults"] = _legacy_manage_bool(
+            params.get("write_defaults", params.get("writeDefaults")),
+            True,
+        )
+    if params.get("saved") is not None:
+        request["saved"] = _legacy_manage_bool(params.get("saved"), True)
+    if (
+        params.get("network_synced") is not None
+        or params.get("networkSynced") is not None
+    ):
+        request["networkSynced"] = _legacy_manage_bool(
+            params.get("network_synced", params.get("networkSynced")),
+            True,
+        )
+    return request
+
+
+def _legacy_create_wardrobe_calls(
+    params: dict[str, object],
+    preview: bool,
+) -> list[tuple[str, dict[str, object]]]:
+    request = _legacy_create_wardrobe_request(params, preview)
+    avatar = request["avatarPath"]
+    parameter = request["parameterName"]
+    asset_dir = request.get("assetDir", "Assets/VRCForge/Generated/Wardrobe")
+    menu = str(request.get("menuName") or "Wardrobe").strip() or "Wardrobe"
+    control = str(request.get("defaultControlName") or "Default").strip() or "Default"
+    layer = str(request.get("layerName") or parameter).strip() or str(parameter)
+    common = {"avatarPath": avatar, "assetDir": asset_dir}
+    return [
+        (
+            "vrc_ensure_expression_parameter",
+            {
+                **common,
+                "parameterName": parameter,
+                "valueType": "Int",
+                "defaultValue": 0.0,
+                "saved": bool(request.get("saved", True)),
+                "networkSynced": bool(request.get("networkSynced", True)),
+                "preview": preview,
+            },
+        ),
+        (
+            "vrc_ensure_animator_state",
+            {
+                **common,
+                "layerName": layer,
+                "stateName": control,
+                "parameterName": parameter,
+                "parameterType": "Int",
+                "conditionMode": "Equals",
+                "threshold": 0.0,
+                "writeDefaults": bool(request.get("writeDefaults", True)),
+                "preview": preview,
+            },
+        ),
+        (
+            "vrc_ensure_expression_menu_control",
+            {
+                **common,
+                "menuPath": menu,
+                "controlName": control,
+                "controlType": "Toggle",
+                "parameterName": parameter,
+                "controlValue": 0.0,
+                "preview": preview,
+            },
+        ),
+    ]
+
+
 def test_create_wardrobe_freezes_the_three_exact_core_calls() -> None:
     plan = build_workflow_execution_plan("vrcforge_create_wardrobe", {"avatarPath": "Avatar", "parameterName": "Clothes"})
     assert [name for name, _ in plan] == ["vrc_ensure_expression_parameter", "vrc_ensure_animator_state", "vrc_ensure_expression_menu_control"]
@@ -154,6 +257,121 @@ def test_create_wardrobe_is_workflow_only_not_a_generic_core_write() -> None:
         "vrc_ensure_animator_state",
         "vrc_ensure_expression_menu_control",
     ]
+
+
+@pytest.mark.parametrize(
+    ("params", "expected"),
+    [
+        ({"parameterName": "Clothes", "menuName": False}, (2, "menuPath", "Wardrobe")),
+        ({"parameterName": "Clothes", "defaultControlName": 0}, (1, "stateName", "Default")),
+        ({"parameterName": "Clothes", "layerName": False}, (1, "layerName", "Clothes")),
+        (
+            {
+                "parameterName": "Clothes",
+                "assetDir": 0,
+                "clipOutputDir": "Assets/Fallback",
+            },
+            (0, "assetDir", "Assets/Fallback"),
+        ),
+        ({"parameterName": "Clothes", "avatarPath": 0}, (0, "avatarPath", "")),
+    ],
+)
+def test_create_wardrobe_plan_uses_exact_handler_falsey_and_alias_semantics(
+    params: dict[str, object],
+    expected: tuple[int, str, object],
+) -> None:
+    legacy_request = _legacy_create_wardrobe_request(params, False)
+    legacy_calls = _legacy_create_wardrobe_calls(params, False)
+
+    assert build_create_wardrobe_request(params, False) == legacy_request
+    assert build_create_wardrobe_core_calls(params, False) == legacy_calls
+    assert build_workflow_execution_plan("vrcforge_create_wardrobe", params) == legacy_calls
+    index, key, value = expected
+    assert legacy_calls[index][1][key] == value
+
+
+def test_create_wardrobe_whitespace_parameter_fails_before_any_frozen_write() -> None:
+    params = {"parameter_name": " ", "parameterName": "Clothes"}
+    assert build_create_wardrobe_request(params, False)["parameterName"] == ""
+    with pytest.raises(
+        ValueError,
+        match="parameterName is required for wardrobe creation",
+    ):
+        build_workflow_execution_plan("vrcforge_create_wardrobe", params)
+
+
+def test_create_wardrobe_randomized_legacy_builder_and_plan_parity() -> None:
+    rng = random.Random(0xC7)
+    values: list[object] = [
+        None,
+        "",
+        " ",
+        False,
+        0,
+        True,
+        1,
+        "Clothes",
+        " Wardrobe ",
+        [],
+        {},
+    ]
+    bool_values: list[object] = [
+        None,
+        True,
+        False,
+        0,
+        1,
+        0.5,
+        "yes",
+        "false",
+        "unknown",
+    ]
+    text_keys = (
+        "avatar_path",
+        "avatarPath",
+        "parameter_name",
+        "parameterName",
+        "wardrobe_parameter",
+        "wardrobeParameter",
+        "menu_name",
+        "menuName",
+        "sub_menu_name",
+        "subMenuName",
+        "default_control_name",
+        "defaultControlName",
+        "layer_name",
+        "layerName",
+        "asset_dir",
+        "assetDir",
+        "clip_output_dir",
+        "clipOutputDir",
+    )
+    bool_keys = (
+        "write_defaults",
+        "writeDefaults",
+        "saved",
+        "network_synced",
+        "networkSynced",
+    )
+
+    for _ in range(2500):
+        params: dict[str, object] = {}
+        for key in text_keys:
+            if rng.choice((True, False)):
+                params[key] = rng.choice(values)
+        for key in bool_keys:
+            if rng.choice((True, False)):
+                params[key] = rng.choice(bool_values)
+
+        legacy_request = _legacy_create_wardrobe_request(params, False)
+        assert build_create_wardrobe_request(params, False) == legacy_request
+        if not legacy_request["parameterName"]:
+            with pytest.raises(ValueError):
+                build_workflow_execution_plan("vrcforge_create_wardrobe", params)
+            continue
+        legacy_calls = _legacy_create_wardrobe_calls(params, False)
+        assert build_create_wardrobe_core_calls(params, False) == legacy_calls
+        assert build_workflow_execution_plan("vrcforge_create_wardrobe", params) == legacy_calls
 
 
 @pytest.mark.parametrize(("target", "tool"), [
@@ -351,20 +569,16 @@ def test_manage_wardrobe_randomized_legacy_builder_and_plan_parity() -> None:
 
 def test_create_wardrobe_plan_has_shared_builder_parity_and_passes_preview_false_to_all_three_calls() -> None:
     params = {"avatarPath": "Avatar", "parameterName": "Clothes", "writeDefaults": "no"}
-    request = dashboard.build_create_wardrobe_request(params, False)
-    expected = []
-    for name, arguments in zip(
-        ("vrc_ensure_expression_parameter", "vrc_ensure_animator_state", "vrc_ensure_expression_menu_control"),
-        dashboard._create_wardrobe_primitive_args(request),
-    ):
-        if name == "vrc_ensure_expression_parameter":
-            expected_args = dashboard.build_ensure_expression_parameter_request(arguments, False)
-        elif name == "vrc_ensure_animator_state":
-            expected_args = dashboard.build_ensure_animator_state_request(arguments, False)
-        else:
-            expected_args = dashboard.build_ensure_expression_menu_control_request(arguments, False)
-        expected.append((name, expected_args))
+    expected = build_create_wardrobe_core_calls(params, False)
+    rebuilt = [
+        dashboard.build_ensure_expression_parameter_request(expected[0][1], False),
+        dashboard.build_ensure_animator_state_request(expected[1][1], False),
+        dashboard.build_ensure_expression_menu_control_request(expected[2][1], False),
+    ]
     assert build_workflow_execution_plan("vrcforge_create_wardrobe", params) == expected
+    assert len(expected) == 3
+    assert all(arguments["preview"] is False for _name, arguments in expected)
+    assert [arguments for _name, arguments in expected] == rebuilt
 
 
 @pytest.mark.parametrize(

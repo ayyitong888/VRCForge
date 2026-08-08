@@ -16,6 +16,7 @@ from wardrobe_outfit_workflow_service import (
     build_add_modular_avatar_component_request,
     build_add_outfit_part_request,
     build_add_wardrobe_outfit_request,
+    build_create_wardrobe_core_calls,
     build_manage_wardrobe_request,
 )
 
@@ -165,18 +166,7 @@ def _manage_wardrobe(params: dict[str, Any]) -> WorkflowPlan:
 
 
 def _create_wardrobe(params: dict[str, Any]) -> WorkflowPlan:
-    avatar = _text(params, "avatar_path", "avatarPath")
-    parameter = _text(params, "parameter_name", "parameterName", "wardrobe_parameter", "wardrobeParameter", default="Clothes")
-    asset_dir = _text(params, "asset_dir", "assetDir", "clip_output_dir", "clipOutputDir", default="Assets/VRCForge/Generated/Wardrobe")
-    menu_name = _text(params, "menu_name", "menuName", "sub_menu_name", "subMenuName", default="Wardrobe")
-    control = _text(params, "default_control_name", "defaultControlName", default="Default")
-    layer = _text(params, "layer_name", "layerName", default=parameter)
-    common = {"avatarPath": avatar, "assetDir": asset_dir}
-    return [
-        ("vrc_ensure_expression_parameter", {**common, "parameterName": parameter, "valueType": "Int", "defaultValue": 0.0, "saved": _bool(params, "saved", default=True), "networkSynced": _bool(params, "network_synced", "networkSynced", default=True), "preview": False}),
-        ("vrc_ensure_animator_state", {**common, "layerName": layer, "stateName": control, "parameterName": parameter, "parameterType": "Int", "conditionMode": "Equals", "threshold": 0.0, "writeDefaults": _bool(params, "write_defaults", "writeDefaults", default=True), "preview": False}),
-        ("vrc_ensure_expression_menu_control", {**common, "menuPath": menu_name, "controlName": control, "controlType": "Toggle", "parameterName": parameter, "controlValue": 0.0, "preview": False}),
-    ]
+    return build_create_wardrobe_core_calls(params, False)
 
 
 def _restore_safe_backup(params: dict[str, Any]) -> WorkflowPlan:
