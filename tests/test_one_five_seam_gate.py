@@ -181,6 +181,15 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         "PROVIDER_TEXT_PROBE",
         "PROVIDER_TESTS",
     }
+    assert groups["dashboard.shader-vision-protection-typed-root-owner"][
+        "rootSymbols"
+    ] == [
+        {
+            "source": "dashboard_server.py",
+            "scope": "module",
+            "name": "SHADER_VISION_PROTECTION",
+        }
+    ]
     assert len(groups["dashboard.project-snapshot-root-facades"]["facades"][0]["methods"]) == 17
     assert len(groups["dashboard.unity-status-root-facades"]["facades"][0]["methods"]) == 3
     assert len(groups["gateway.approval-transaction-host-proxy"]["facades"][0]["methods"]) == 41

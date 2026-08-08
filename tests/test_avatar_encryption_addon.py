@@ -12,17 +12,19 @@ import dashboard_server
 
 @pytest.fixture(autouse=True)
 def force_gateway_approval_mode():
-    config = dashboard_server.AGENT_GATEWAY.ensure_config()
-    original_mode = config.execution_mode
-    config.execution_mode = "approval"
-    dashboard_server.AGENT_GATEWAY.save_config(config)
-    dashboard_server.AGENT_GATEWAY._approvals.clear()
-    try:
-        yield
-    finally:
-        config = dashboard_server.AGENT_GATEWAY.ensure_config()
-        config.execution_mode = original_mode
-        dashboard_server.AGENT_GATEWAY.save_config(config)
+    config = agent_gateway.AgentGatewayConfig(
+        token="avatar-encryption-test-token",
+        approval_token="avatar-encryption-test-approval-token",
+        execution_mode="approval",
+        allow_write_requests=True,
+    )
+    with (
+        patch.object(dashboard_server.AGENT_GATEWAY, "ensure_config", return_value=config),
+        patch.object(dashboard_server.AGENT_GATEWAY, "save_config") as save_config_mock,
+        patch.object(dashboard_server.AGENT_GATEWAY, "append_audit"),
+    ):
+        dashboard_server.AGENT_GATEWAY._approvals.clear()
+        yield save_config_mock
         dashboard_server.AGENT_GATEWAY._approvals.clear()
 
 
@@ -685,10 +687,13 @@ def test_avatar_encryption_public_repo_contains_no_unity_or_shader_implementatio
     assert not (dashboard_server.ROOT_DIR / "scripts" / "smoke_avatar_encryption_live.py").exists()
 
 
-def test_avatar_encryption_external_mcp_can_list_and_call_split_tools() -> None:
+def test_avatar_encryption_external_mcp_can_list_and_call_split_tools(
+    force_gateway_approval_mode,
+) -> None:
     config = dashboard_server.AGENT_GATEWAY.ensure_config()
     config.enabled = True
     dashboard_server.AGENT_GATEWAY.save_config(config)
+    force_gateway_approval_mode.assert_called_once_with(config)
     dashboard_server.AGENT_GATEWAY._approvals.clear()
     headers = {
         "Authorization": f"Bearer {config.token}",

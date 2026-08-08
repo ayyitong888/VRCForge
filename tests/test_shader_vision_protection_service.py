@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -229,3 +230,153 @@ def test_shader_vision_protection_owner_has_no_direct_execution_or_migration_sea
     assert "request_multi_capture:" not in source
     assert "request_supervised_capture: SupervisedCaptureRequestPort" in source
     assert "request_supervised_multi_capture: SupervisedCaptureRequestPort" in source
+
+
+def test_dashboard_routes_and_mcp_entries_use_the_typed_controller_only() -> None:
+    source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = {
+        node.name: ast.get_source_segment(source, node) or ""
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    route_methods = {
+        "scan_shader_materials": "scan_shader_materials",
+        "generate_shader_material_plan": "generate_shader_material_plan",
+        "apply_shader_material_plan": "request_shader_material_apply",
+        "restore_shader_material_plan": "request_shader_material_restore",
+        "read_shader_tuning_history": "read_shader_tuning_history",
+        "reapply_shader_tuning_history": "request_shader_history_reapply",
+        "read_shader_tuning_presets": "read_shader_tuning_presets",
+        "create_shader_tuning_preset": "create_shader_tuning_preset",
+        "apply_shader_tuning_preset": "request_shader_preset_apply",
+        "rename_shader_tuning_preset": "rename_shader_tuning_preset",
+        "duplicate_shader_tuning_preset": "duplicate_shader_tuning_preset",
+        "delete_shader_tuning_preset": "delete_shader_tuning_preset",
+        "read_shader_tuning_locks": "read_shader_tuning_locks",
+        "update_shader_tuning_locks": "update_shader_tuning_locks",
+        "review_shader_material_vision": "review_shader_material_vision",
+        "avatar_encryption_research_report": "build_protection_research_report",
+        "avatar_encryption_scan": "scan_protection_candidates",
+        "avatar_encryption_plan": "plan_protection",
+        "avatar_encryption_preview": "preview_protection",
+        "avatar_encryption_apply_request": "request_protection_apply",
+        "avatar_encryption_remove_request": "request_protection_remove",
+        "capture_avatar_screenshot": "request_avatar_screenshot",
+        "read_vision_capture_status": "read_vision_capture_status",
+        "capture_avatar_multi_screenshot": "request_avatar_multi_screenshot",
+        "audit_avatar_screenshot": "audit_avatar_screenshot",
+        "audit_avatar_multi_screenshot": "audit_avatar_multi_screenshot",
+    }
+    for route, method in route_methods.items():
+        assert f"SHADER_VISION_PROTECTION.{method}" in functions[route]
+
+    registry = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "register_agent_gateway_tools"
+    )
+    tool_calls = [
+        node
+        for node in ast.walk(registry)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "register_tool"
+    ]
+    tool_source = "\n".join(ast.get_source_segment(source, call) or "" for call in tool_calls)
+    for method in (
+        "scan_shader_materials",
+        "generate_shader_material_plan",
+        "preview_shader_apply",
+        "preview_material_shader_assignment",
+        "read_vision_capture_status",
+        "audit_avatar_screenshot",
+        "build_protection_research_report",
+        "scan_protection_candidates",
+        "plan_protection",
+        "preview_protection",
+        "read_protection_addon_status",
+        "request_protection_apply",
+        "request_protection_remove",
+    ):
+        assert f"SHADER_VISION_PROTECTION.{method}" in tool_source
+
+
+def test_dashboard_keeps_only_approved_execution_roots_and_raw_capture_request_port() -> None:
+    source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    bindings = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    assert bindings.isdisjoint(
+        {
+            "apply_shader_material_plan_sync",
+            "restore_shader_material_plan_sync",
+            "apply_saved_shader_history_sync",
+            "apply_saved_shader_preset_sync",
+            "apply_saved_shader_payload",
+            "capture_avatar_screenshot_sync",
+            "capture_avatar_multi_screenshot_sync",
+        }
+    )
+    capture_adapter = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "request_supervised_vision_capture"
+    )
+    capture_source = ast.get_source_segment(source, capture_adapter) or ""
+    assert "AGENT_GATEWAY.create_apply_request" in capture_source
+    assert '"target_tool": target_tool' in capture_source
+    assert '"arguments": request.model_dump()' in capture_source
+    assert '"reason": reason' in capture_source
+    assert "request_supervised_unity_write" not in capture_source
+
+    registry = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "register_agent_gateway_tools"
+    )
+    tool_calls = [
+        ast.get_source_segment(source, node) or ""
+        for node in ast.walk(registry)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "register_tool"
+    ]
+    exposed = "\n".join(tool_calls)
+    for forbidden in (
+        "apply_shader_material_plan_approved_sync",
+        "restore_shader_material_plan_approved_sync",
+        "reapply_shader_tuning_history_approved_sync",
+        "apply_shader_tuning_preset_approved_sync",
+        "capture_avatar_screenshot_approved_sync",
+        "capture_avatar_multi_screenshot_approved_sync",
+        "apply_avatar_encryption_sync",
+        "remove_avatar_encryption_sync",
+        "_execute_prepared_scene_view_capture",
+        "apply_shader_material_tuning_direct",
+        "call_avatar_encryption_addon",
+    ):
+        assert forbidden not in exposed
+
+    write_calls = "\n".join(
+        ast.get_source_segment(source, node) or ""
+        for node in ast.walk(registry)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "register_write_handler"
+    )
+    for executor in (
+        "apply_shader_material_plan_approved_sync",
+        "restore_shader_material_plan_approved_sync",
+        "reapply_shader_tuning_history_approved_sync",
+        "apply_shader_tuning_preset_approved_sync",
+        "capture_avatar_screenshot_approved_sync",
+        "capture_avatar_multi_screenshot_approved_sync",
+        "apply_avatar_encryption_sync",
+        "remove_avatar_encryption_sync",
+    ):
+        assert executor in write_calls

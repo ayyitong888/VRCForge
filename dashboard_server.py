@@ -368,6 +368,12 @@ from provider_vision_service import (
     VisionModelConfig,
     VisionProfileConfig,
 )
+from shader_vision_protection_service import (
+    ProtectionWorkflowPorts,
+    ShaderVisionProtectionService,
+    ShaderWorkflowPorts,
+    VisionAuditWorkflowPorts,
+)
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
 from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
 from vrchat_blendshape_agent import (
@@ -5899,6 +5905,23 @@ def request_supervised_unity_write(
     }
 
 
+def request_supervised_vision_capture(
+    target_tool: str,
+    request: Any,
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Create a capture approval without exposing its approved execution handler."""
+
+    return AGENT_GATEWAY.create_apply_request(
+        {
+            "target_tool": target_tool,
+            "arguments": request.model_dump(),
+            "reason": reason,
+        }
+    )
+
+
 def skill_package_store_dir() -> Path:
     return AGENT_GATEWAY.user_constraints_path.parent / "skill-packages"
 
@@ -9470,179 +9493,175 @@ async def rollback_parameter_optimization(request: ParameterRollbackRequest) -> 
 
 @app.post("/api/shader/materials/scan")
 async def scan_shader_materials(request: ShaderMaterialScanRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(scan_shader_materials_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.scan_shader_materials, request)
 
 
 @app.post("/api/shader/plan")
 async def generate_shader_material_plan(request: ShaderMaterialPlanRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(generate_shader_material_plan_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.generate_shader_material_plan, request)
 
 
 @app.post("/api/shader/apply")
 async def apply_shader_material_plan(request: ShaderMaterialApplyRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_apply_shader_tuning",
+        SHADER_VISION_PROTECTION.request_shader_material_apply,
         request,
-        reason="Apply the validated shader/material tuning plan to Unity.",
     )
 
 
 @app.post("/api/shader/restore")
 async def restore_shader_material_plan(request: ShaderMaterialRestoreRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_restore_shader_tuning",
+        SHADER_VISION_PROTECTION.request_shader_material_restore,
         request,
-        reason="Restore the last approved shader/material tuning undo point.",
     )
 
 
 @app.get("/api/shader/history")
 def read_shader_tuning_history(avatar_path: str | None = None) -> dict[str, Any]:
-    store = load_shader_tuning_history_store()
-    records = list(store.get("records") or [])
-    if avatar_path:
-        records = [
-            record for record in records
-            if record.get("avatar_path") == avatar_path or record.get("avatar_name") == avatar_path
-        ]
-    return {"ok": True, "records": records, "count": len(records)}
+    return SHADER_VISION_PROTECTION.read_shader_tuning_history(avatar_path)
 
 
 @app.post("/api/shader/history/{history_id}/reapply")
 async def reapply_shader_tuning_history(history_id: str, request: ShaderMaterialPlanRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_reapply_shader_tuning_history",
+        SHADER_VISION_PROTECTION.request_shader_history_reapply,
+        history_id,
         request,
-        reason="Reapply the selected saved shader tuning history record to Unity.",
-        extra_arguments={"historyId": history_id},
     )
 
 
 @app.get("/api/shader/presets")
 def read_shader_tuning_presets(avatar_path: str | None = None) -> dict[str, Any]:
-    store = load_shader_tuning_preset_store()
-    presets = list(store.get("presets") or [])
-    if avatar_path:
-        presets = [
-            preset for preset in presets
-            if preset.get("avatar_path") == avatar_path or preset.get("avatar_name") == avatar_path
-        ]
-    return {"ok": True, "presets": presets, "count": len(presets)}
+    return SHADER_VISION_PROTECTION.read_shader_tuning_presets(avatar_path)
 
 
 @app.post("/api/shader/presets")
 async def create_shader_tuning_preset(request: ShaderTuningPresetCreateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(create_shader_tuning_preset_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.create_shader_tuning_preset, request)
 
 
 @app.post("/api/shader/presets/{preset_id}/apply")
 async def apply_shader_tuning_preset(preset_id: str, request: ShaderMaterialPlanRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_apply_shader_tuning_preset",
+        SHADER_VISION_PROTECTION.request_shader_preset_apply,
+        preset_id,
         request,
-        reason="Apply the selected saved shader tuning preset to Unity.",
-        extra_arguments={"presetId": preset_id},
     )
 
 
 @app.post("/api/shader/presets/{preset_id}/rename")
 async def rename_shader_tuning_preset(preset_id: str, request: ShaderTuningPresetRenameRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(rename_shader_tuning_preset_sync, preset_id, request)
+    return await asyncio.to_thread(
+        SHADER_VISION_PROTECTION.rename_shader_tuning_preset,
+        preset_id,
+        request,
+    )
 
 
 @app.post("/api/shader/presets/{preset_id}/duplicate")
 async def duplicate_shader_tuning_preset(preset_id: str, request: ShaderTuningPresetDuplicateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(duplicate_shader_tuning_preset_sync, preset_id, request)
+    return await asyncio.to_thread(
+        SHADER_VISION_PROTECTION.duplicate_shader_tuning_preset,
+        preset_id,
+        request,
+    )
 
 
 @app.post("/api/shader/presets/{preset_id}/delete")
 async def delete_shader_tuning_preset(preset_id: str) -> dict[str, Any]:
-    return await asyncio.to_thread(delete_shader_tuning_preset_sync, preset_id)
+    return await asyncio.to_thread(
+        SHADER_VISION_PROTECTION.delete_shader_tuning_preset,
+        preset_id,
+    )
 
 
 @app.get("/api/shader/locks")
 def read_shader_tuning_locks(avatar_path: str | None = None) -> dict[str, Any]:
-    resolved_avatar = avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-    locks = load_shader_tuning_locks(resolved_avatar)
-    return {"ok": True, "avatarPath": resolved_avatar, **locks}
+    return SHADER_VISION_PROTECTION.read_shader_tuning_locks(avatar_path)
 
 
 @app.post("/api/shader/locks")
 async def update_shader_tuning_locks(request: ShaderTuningLocksUpdateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(update_shader_tuning_locks_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.update_shader_tuning_locks, request)
 
 
 @app.post("/api/shader/vision-review")
 async def review_shader_material_vision(request: ShaderVisionReviewRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(review_shader_material_vision_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.review_shader_material_vision, request)
 
 
 @app.post("/api/avatar-encryption/research-report")
 async def avatar_encryption_research_report(request: AvatarEncryptionResearchRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(build_avatar_encryption_research_report_sync, request)
+    return await asyncio.to_thread(
+        SHADER_VISION_PROTECTION.build_protection_research_report,
+        request,
+    )
 
 
 @app.post("/api/avatar-encryption/scan")
 async def avatar_encryption_scan(request: AvatarEncryptionScanRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(scan_avatar_encryption_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.scan_protection_candidates, request)
 
 
 @app.post("/api/avatar-encryption/plan")
 async def avatar_encryption_plan(request: AvatarEncryptionPlanRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(plan_avatar_encryption_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.plan_protection, request)
 
 
 @app.post("/api/avatar-encryption/preview")
 async def avatar_encryption_preview(request: AvatarEncryptionPreviewRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(preview_avatar_encryption_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.preview_protection, request)
 
 
 @app.post("/api/avatar-encryption/apply-request")
 async def avatar_encryption_apply_request(request: AvatarEncryptionApplyRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_avatar_encryption_apply_sync,
+        SHADER_VISION_PROTECTION.request_protection_apply,
         request.model_dump(by_alias=True),
         request.target_shader_family,
-        "desktop-agent",
+        agent_name="desktop-agent",
     )
 
 
 @app.post("/api/avatar-encryption/remove-request")
 async def avatar_encryption_remove_request(request: AvatarEncryptionRemoveRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_avatar_encryption_remove_sync,
+        SHADER_VISION_PROTECTION.request_protection_remove,
         request.model_dump(by_alias=True),
-        "desktop-agent",
+        agent_name="desktop-agent",
     )
 
 
 @app.post("/api/vision/capture")
 async def capture_avatar_screenshot(request: VisionCaptureRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(capture_avatar_screenshot_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.request_avatar_screenshot, request)
 
 
 @app.post("/api/vision/capture-status")
 async def read_vision_capture_status(request: VisionCaptureStatusRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(read_vision_capture_status_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.read_vision_capture_status, request)
 
 
 @app.post("/api/vision/capture-multi")
 async def capture_avatar_multi_screenshot(request: VisionCaptureMultiRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(capture_avatar_multi_screenshot_sync, request)
+    return await asyncio.to_thread(
+        SHADER_VISION_PROTECTION.request_avatar_multi_screenshot,
+        request,
+    )
 
 
 @app.post("/api/vision/audit")
 async def audit_avatar_screenshot(request: VisionAuditRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(audit_avatar_screenshot_sync, request)
+    return await asyncio.to_thread(SHADER_VISION_PROTECTION.audit_avatar_screenshot, request)
 
 
 @app.post("/api/vision/audit-multi")
 async def audit_avatar_multi_screenshot(request: VisionAuditMultiRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(audit_avatar_multi_screenshot_sync, request)
+    return await asyncio.to_thread(
+        SHADER_VISION_PROTECTION.audit_avatar_multi_screenshot,
+        request,
+    )
 
 
 def _read_avatars_tuning_adapter(request: DashboardRequest) -> dict[str, Any]:
@@ -11633,90 +11652,6 @@ def restore_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dic
         raise to_http_exception(exc) from exc
 
 
-def apply_shader_material_plan_sync(request: ShaderMaterialApplyRequest) -> dict[str, Any]:
-    try:
-        settings = load_dashboard_settings(request)
-        avatar_path = request.avatar_path or request.avatar or DASHBOARD_RUNTIME.current_avatar_path
-        if not request.changes:
-            raise RuntimeError("No shader material changes were provided.")
-
-        inventory = copy.deepcopy(request.inventory) if request.inventory else scan_shader_materials_direct(settings, avatar_path)
-        inventory = apply_shader_category_overrides(inventory, request.category_overrides)
-        locks = load_shader_tuning_locks(avatar_path)
-        locked_materials = set(locks.get("lockedMaterials") or []) | set(request.locked_materials or [])
-        locked_properties = set(locks.get("lockedProperties") or []) | set(request.locked_properties or [])
-        validation = validate_shader_material_tuning_plan(
-            plan={"type": "material_tuning_plan", "version": "0.2", "changes": request.changes, "warnings": []},
-            inventory=inventory,
-            locked_materials=locked_materials,
-            locked_properties=locked_properties,
-        )
-        changes = validation["validatedChanges"]
-        if not changes:
-            raise RuntimeError("No valid shader material changes remained after validation.")
-
-        result = apply_shader_material_tuning_direct(settings, avatar_path, changes)
-        applied = require_shader_apply_readback(result, changes)
-        skipped = [*validation["skippedChanges"], *list(result.get("skipped") or [])]
-        backup_changes = build_shader_restore_changes(applied)
-        if backup_changes:
-            undo_stack = DASHBOARD_RUNTIME.shader_undo_stack.setdefault(avatar_path or "", [])
-            undo_stack.append(backup_changes)
-        if request.history_id:
-            mark_shader_tuning_history_applied(request.history_id)
-
-        emit_log(
-            "success",
-            "shader",
-            "Shader material tuning applied.",
-            {"avatarPath": avatar_path, "appliedCount": len(applied), "skippedCount": len(skipped)},
-        )
-        return {
-            "ok": True,
-            "avatarPath": avatar_path,
-            "result": result,
-            "appliedChanges": applied,
-            "skippedChanges": skipped,
-            "warnings": validation["warnings"],
-            "undoDepth": len(DASHBOARD_RUNTIME.shader_undo_stack.get(avatar_path or "", [])),
-        }
-    except (RuntimeError, UnityMcpError) as exc:
-        emit_log("error", "shader", "Failed to apply shader material tuning.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
-
-
-def restore_shader_material_plan_sync(request: ShaderMaterialRestoreRequest) -> dict[str, Any]:
-    try:
-        settings = load_dashboard_settings(request)
-        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        undo_stack = DASHBOARD_RUNTIME.shader_undo_stack.setdefault(avatar_path or "", [])
-        if not undo_stack:
-            raise RuntimeError("No shader material restore point is available.")
-
-        restore_changes = undo_stack[-1]
-        result = apply_shader_material_tuning_direct(settings, avatar_path, restore_changes)
-        applied = require_shader_apply_readback(result, restore_changes)
-        undo_stack.pop()
-        skipped = list(result.get("skipped") or [])
-        emit_log(
-            "success",
-            "shader",
-            "Shader material tuning restored.",
-            {"avatarPath": avatar_path, "restoredCount": len(applied), "skippedCount": len(skipped)},
-        )
-        return {
-            "ok": True,
-            "avatarPath": avatar_path,
-            "result": result,
-            "restoredChanges": applied,
-            "skippedChanges": skipped,
-            "undoDepth": len(undo_stack),
-        }
-    except (RuntimeError, UnityMcpError) as exc:
-        emit_log("error", "shader", "Failed to restore shader material tuning.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
-
-
 def build_shader_restore_changes(applied_changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     restore: list[dict[str, Any]] = []
     for change in applied_changes:
@@ -11820,26 +11755,6 @@ def mark_shader_tuning_history_applied(history_id: str) -> None:
             break
     store["records"] = records
     save_tuning_store(SHADER_TUNING_HISTORY_PATH, store)
-
-
-def apply_saved_shader_history_sync(history_id: str, request: ShaderMaterialPlanRequest) -> dict[str, Any]:
-    store = load_shader_tuning_history_store()
-    record = next((item for item in store.get("records") or [] if item.get("id") == history_id), None)
-    if not record:
-        raise to_http_exception(RuntimeError(f"Shader tuning history record was not found: {history_id}"))
-    response = apply_saved_shader_payload(record, request, source_type="history")
-    mark_shader_tuning_history_applied(history_id)
-    return response
-
-
-def apply_saved_shader_preset_sync(preset_id: str, request: ShaderMaterialPlanRequest) -> dict[str, Any]:
-    store = load_shader_tuning_preset_store()
-    preset = next((item for item in store.get("presets") or [] if item.get("id") == preset_id), None)
-    if not preset:
-        raise to_http_exception(RuntimeError(f"Shader tuning preset was not found: {preset_id}"))
-    response = apply_saved_shader_payload(preset, request, source_type="preset")
-    mark_shader_tuning_preset_applied(preset_id)
-    return response
 
 
 def _find_saved_shader_record(store: dict[str, Any], collection: str, record_id: str, label: str) -> dict[str, Any]:
@@ -12044,28 +11959,6 @@ def reapply_shader_tuning_history_approved_sync(arguments: dict[str, Any]) -> di
 
 def apply_shader_tuning_preset_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
     return _apply_saved_shader_tuning_approved_sync(arguments, "preset")
-
-
-def apply_saved_shader_payload(saved_payload: dict[str, Any], request: ShaderMaterialPlanRequest, source_type: str) -> dict[str, Any]:
-    changes = list(saved_payload.get("changes") or [])
-    replay_changes = [
-        {
-            **change,
-            "after": change.get("after"),
-            "reason": change.get("reason") or f"Reapply saved shader {source_type}.",
-        }
-        for change in changes
-        if isinstance(change, dict) and "after" in change
-    ]
-    request_data = request.model_dump()
-    request_data["avatar_path"] = request.avatar_path or saved_payload.get("avatar_path") or request.avatar
-    request_data["changes"] = replay_changes
-    request_data["history_id"] = saved_payload.get("source_history_id") if source_type == "preset" else saved_payload.get("id")
-    apply_request = ShaderMaterialApplyRequest(**request_data)
-    response = apply_shader_material_plan_sync(apply_request)
-    response["sourceType"] = source_type
-    response["sourceRecord"] = saved_payload
-    return response
 
 
 def create_shader_tuning_preset_sync(request: ShaderTuningPresetCreateRequest) -> dict[str, Any]:
@@ -12532,12 +12425,6 @@ def capture_avatar_multi_screenshot_approved_sync(arguments: dict[str, Any]) -> 
     return payload
 
 
-def capture_avatar_screenshot_sync(request: VisionCaptureRequest) -> dict[str, Any]:
-    return AGENT_GATEWAY.create_apply_request(
-        {"target_tool": "vrcforge_capture_screenshot", "arguments": request.model_dump(), "reason": "Capture one approved Unity scene-view artifact."}
-    )
-
-
 def read_vision_capture_status_sync(request: VisionCaptureStatusRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
@@ -12772,12 +12659,6 @@ _ANGLE_CAMERA_ROTATIONS: dict[str, tuple[float, float, float]] = {
     "side_right": (10.0, -90.0,  0.0),
     "back":       (10.0, 180.0,  0.0),
 }
-
-
-def capture_avatar_multi_screenshot_sync(request: VisionCaptureMultiRequest) -> dict[str, Any]:
-    return AGENT_GATEWAY.create_apply_request(
-        {"target_tool": "vrcforge_capture_multi_screenshot", "arguments": request.model_dump(), "reason": "Capture approved fixed-angle Unity scene-view artifacts."}
-    )
 
 
 def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict[str, Any]:
@@ -18900,7 +18781,12 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
         "menu": _run_validation_source("menu", lambda: scan_avatar_controls_sync(base_params)),
         "fx": _run_validation_source("fx", lambda: scan_fx_animator_sync(base_params)),
         "animation_bindings": _run_validation_source("animation_bindings", lambda: scan_animation_bindings_sync(base_params)),
-        "materials": _run_validation_source("materials", lambda: scan_shader_materials_sync(ShaderMaterialScanRequest(**base_params))),
+        "materials": _run_validation_source(
+            "materials",
+            lambda: SHADER_VISION_PROTECTION.scan_shader_materials(
+                ShaderMaterialScanRequest(**base_params)
+            ),
+        ),
         "wardrobe": _run_validation_source("wardrobe", lambda: scan_wardrobe_sync(base_params)),
         "performance_pc": _run_validation_source("performance_pc", lambda: scan_avatar_performance_sync({**base_params, "isMobile": False})),
     }
@@ -21075,7 +20961,7 @@ def register_agent_gateway_tools() -> None:
     )
     AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatars(build_agent_dashboard_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Scan face-related Blendshapes for an avatar.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**build_agent_dashboard_request(params).model_dump())))
-    AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: scan_shader_materials_sync(ShaderMaterialScanRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: SHADER_VISION_PROTECTION.scan_shader_materials(ShaderMaterialScanRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_modular_avatar", "Detect the Modular Avatar package and scan avatars for Modular Avatar components.", "read/debug", lambda params: scan_addon_framework_sync("modular_avatar", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_inspect_modular_avatar_component", "Read the exact presence, count, type, scene dirty state, and AvatarObjectReference paths for one Modular Avatar component without writing.", "read/debug", inspect_modular_avatar_component_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_primitive_basis_fixture", "Read the fixed primitive-basis fixture identity and active-scene binding without writing.", "read/debug", inspect_primitive_basis_fixture_sync)
@@ -21119,37 +21005,37 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_avatar_encryption_research_report",
         "Build the read-only Avatar Encryption / Anti-Rip addon research packet.",
         "read/debug",
-        lambda params: build_avatar_encryption_research_report_sync(AvatarEncryptionResearchRequest(**(params or {}))),
+        lambda params: SHADER_VISION_PROTECTION.build_protection_research_report(AvatarEncryptionResearchRequest(**(params or {}))),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_avatar_encryption_scan",
         "Scan shader material inventory for lilToon/Poiyomi avatar-encryption candidates and compatibility-only blockers.",
         "read/debug",
-        lambda params: scan_avatar_encryption_sync(AvatarEncryptionScanRequest(**(params or {}))),
+        lambda params: SHADER_VISION_PROTECTION.scan_protection_candidates(AvatarEncryptionScanRequest(**(params or {}))),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_avatar_encryption_plan",
         "Build a read-only Avatar Encryption / Anti-Rip addon plan without writing Unity assets.",
         "plan/preview",
-        lambda params: plan_avatar_encryption_sync(AvatarEncryptionPlanRequest(**(params or {}))),
+        lambda params: SHADER_VISION_PROTECTION.plan_protection(AvatarEncryptionPlanRequest(**(params or {}))),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_avatar_encryption_preview",
         "Preview future avatar-encryption mesh/material write targets without writing Unity assets.",
         "plan/preview",
-        lambda params: preview_avatar_encryption_sync(AvatarEncryptionPreviewRequest(**(params or {}))),
+        lambda params: SHADER_VISION_PROTECTION.preview_protection(AvatarEncryptionPreviewRequest(**(params or {}))),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_avatar_encryption_addon_status",
         "Read the private Avatar Encryption addon connector status.",
         "read/debug",
-        lambda params: avatar_encryption_addon_status_sync(),
+        lambda params: SHADER_VISION_PROTECTION.read_protection_addon_status(),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_avatar_encryption_liltoon_apply_request",
         "Request supervised lilToon Avatar Encryption apply through approval, checkpoint, generated copies, and rollback.",
         "supervised-write",
-        lambda params: request_avatar_encryption_apply_sync(
+        lambda params: SHADER_VISION_PROTECTION.request_protection_apply(
             ensure_dict(params or {}),
             "liltoon",
             agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
@@ -21160,7 +21046,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_avatar_encryption_poiyomi_apply_request",
         "Request supervised Poiyomi Avatar Encryption apply through approval, checkpoint, generated copies, and rollback.",
         "supervised-write",
-        lambda params: request_avatar_encryption_apply_sync(
+        lambda params: SHADER_VISION_PROTECTION.request_protection_apply(
             ensure_dict(params or {}),
             "poiyomi",
             agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
@@ -21171,7 +21057,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_avatar_encryption_remove_request",
         "Request supervised Avatar Encryption remove/restore through approval, checkpoint, and generated asset cleanup.",
         "supervised-write",
-        lambda params: request_avatar_encryption_remove_sync(
+        lambda params: SHADER_VISION_PROTECTION.request_protection_remove(
             ensure_dict(params or {}),
             agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
         ),
@@ -21204,8 +21090,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_list_interrupted_apply_recoveries", "List interrupted or unfinished approved writes that must be restored or resolved before new writes.", "read/debug", lambda params: AGENT_GATEWAY.list_interrupted_apply_recoveries(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_preview_interrupted_apply_recovery", "Preview the checkpoint restore path for an interrupted approved write.", "plan/preview", lambda params: AGENT_GATEWAY.preview_interrupted_apply_recovery(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_export_interrupted_apply_incident_bundle", "Export a local incident bundle for an interrupted approved write.", "read/debug", lambda params: AGENT_GATEWAY.export_interrupted_apply_incident_bundle(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: read_vision_capture_status_sync(VisionCaptureStatusRequest(**params)))
-    AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: audit_avatar_screenshot_sync(VisionAuditRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: SHADER_VISION_PROTECTION.read_vision_capture_status(VisionCaptureStatusRequest(**params)))
+    AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: SHADER_VISION_PROTECTION.audit_avatar_screenshot(VisionAuditRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_thry_avatar_performance", "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for an avatar.", "read/debug", scan_thry_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.recent_audit_logs(limit=int(params.get("limit", 80)))})
     AGENT_GATEWAY.register_tool("vrcforge_get_compile_errors", "Read C# compile errors from the last Unity compilation pass.", "read/debug", read_agent_compile_errors)
@@ -21214,14 +21100,14 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_find_assets", "Search the project for assets by query/type/folder.", "read/debug", find_assets_sync)
     AGENT_GATEWAY.register_tool("vrcforge_get_asset_info", "Describe a project asset: path, GUID, type, importer, and prefab details.", "read/debug", get_asset_info_sync)
     AGENT_GATEWAY.register_tool("vrcforge_plan_face_tuning", "Generate a face tuning plan without applying it.", "plan/preview", lambda params: AVATAR_TUNING_WORKFLOWS.plan_face_tuning(build_agent_dashboard_request(params)))
-    AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: generate_shader_material_plan_sync(build_agent_shader_request(params)))
+    AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: SHADER_VISION_PROTECTION.generate_shader_material_plan(build_agent_shader_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", AVATAR_TUNING_WORKFLOWS.preview_agent_blendshape_apply)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", preview_agent_shader_apply)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", SHADER_VISION_PROTECTION.preview_shader_apply)
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_material_shader_assignment",
         "Preview one persistent material shader assignment and its shared impact without writing project files.",
         "plan/preview",
-        preview_material_shader_assignment_sync,
+        SHADER_VISION_PROTECTION.preview_material_shader_assignment,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_scene_object_duplicate",
@@ -21942,6 +21828,41 @@ OPTIMIZATION_WORKFLOWS = OptimizationWorkflowService(
         proofs=OPTIMIZER_PROOFS,
         parameter_bit_packing_tool=PARAMETER_BIT_PACKING_TOOL,
     )
+)
+SHADER_VISION_PROTECTION = ShaderVisionProtectionService(
+    ShaderWorkflowPorts(
+        scan=scan_shader_materials_sync,
+        plan=generate_shader_material_plan_sync,
+        preview_apply=preview_agent_shader_apply,
+        preview_material_assignment=preview_material_shader_assignment_sync,
+        request_supervised_write=request_supervised_unity_write,
+        load_history_store=load_shader_tuning_history_store,
+        load_preset_store=load_shader_tuning_preset_store,
+        create_preset=create_shader_tuning_preset_sync,
+        rename_preset=rename_shader_tuning_preset_sync,
+        duplicate_preset=duplicate_shader_tuning_preset_sync,
+        delete_preset=delete_shader_tuning_preset_sync,
+        current_avatar_path=lambda: DASHBOARD_RUNTIME.current_avatar_path,
+        load_locks=load_shader_tuning_locks,
+        update_locks=update_shader_tuning_locks_sync,
+        review_vision=review_shader_material_vision_sync,
+    ),
+    VisionAuditWorkflowPorts(
+        request_supervised_capture=request_supervised_vision_capture,
+        read_capture_status=read_vision_capture_status_sync,
+        request_supervised_multi_capture=request_supervised_vision_capture,
+        audit_capture=audit_avatar_screenshot_sync,
+        audit_multi_capture=audit_avatar_multi_screenshot_sync,
+    ),
+    ProtectionWorkflowPorts(
+        research_report=build_avatar_encryption_research_report_sync,
+        scan=scan_avatar_encryption_sync,
+        plan=plan_avatar_encryption_sync,
+        preview=preview_avatar_encryption_sync,
+        addon_status=avatar_encryption_addon_status_sync,
+        request_supervised_apply=request_avatar_encryption_apply_sync,
+        request_supervised_remove=request_avatar_encryption_remove_sync,
+    ),
 )
 
 AGENT_GATEWAY.checkpoint_project_root_resolver = lambda: DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""

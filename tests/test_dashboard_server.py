@@ -4706,7 +4706,7 @@ class DashboardServerTests(unittest.TestCase):
             patch("dashboard_server.scan_avatar_controls_sync", return_value={"ok": True, "missingReferences": [{"path": "Menu/Missing"}]}),
             patch("dashboard_server.scan_fx_animator_sync", return_value={"ok": True, "parameterTypeMismatches": []}),
             patch("dashboard_server.scan_animation_bindings_sync", return_value={"ok": True, "brokenBindings": [{"clip": "BadClip"}]}),
-            patch("dashboard_server.scan_shader_materials_sync", return_value={"ok": True, "summary": {"unsupportedShaderCount": 1}}),
+            patch("dashboard_server.scan_shader_materials_direct", return_value={"materials": [], "summary": {"unsupportedShaderCount": 1}}),
             patch("dashboard_server.scan_wardrobe_sync", return_value={"ok": True, "wardrobeCandidateCount": 1}),
             patch("dashboard_server.scan_avatar_performance_sync", side_effect=[
                 {"ok": True, "rank": "Poor"},
@@ -4785,7 +4785,7 @@ class DashboardServerTests(unittest.TestCase):
             patch("dashboard_server.scan_avatar_controls_sync", return_value={"ok": True}),
             patch("dashboard_server.scan_fx_animator_sync", return_value={"ok": True}),
             patch("dashboard_server.scan_animation_bindings_sync", return_value={"ok": True}),
-            patch("dashboard_server.scan_shader_materials_sync", return_value={"ok": True}),
+            patch("dashboard_server.scan_shader_materials_direct", return_value={"materials": []}),
             patch("dashboard_server.scan_wardrobe_sync", return_value={"ok": True}),
             patch("dashboard_server.scan_avatar_performance_sync", return_value={"ok": True, "rank": "Good"}),
         ):
@@ -13287,34 +13287,6 @@ namespace VRCForge.Editor
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "pending_approval")
         self.assertEqual(response.json()["approvalId"], "approval_shader_preset")
-
-    @patch("dashboard_server.apply_shader_material_tuning_direct")
-    @patch("dashboard_server.load_dashboard_settings")
-    def test_shader_apply_rejects_missing_structured_readback(
-        self,
-        mock_load_settings,
-        mock_apply_shader_material_tuning_direct,
-    ) -> None:
-        mock_load_settings.return_value = SimpleNamespace()
-        dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack.clear()
-
-        mock_apply_shader_material_tuning_direct.return_value = {
-            "ok": True,
-            "appliedCount": 1,
-            "applied": [],
-            "skipped": [],
-        }
-
-        with self.assertRaisesRegex(dashboard_server.HTTPException, "partial shader material write"):
-            dashboard_server.apply_shader_material_plan_sync(
-                dashboard_server.ShaderMaterialApplyRequest(
-                    avatar_path="Scene/HeroAvatar",
-                    inventory=make_shader_inventory(),
-                    changes=[{"material_id": "mat_skin", "semantic_property": "smoothness", "after": 0.8}],
-                )
-            )
-
-        self.assertEqual(dashboard_server.DASHBOARD_RUNTIME.shader_undo_stack, {})
 
     def test_supervised_unity_write_queues_without_calling_live_callback(self) -> None:
         called = False
