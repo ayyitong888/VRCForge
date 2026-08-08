@@ -1368,7 +1368,11 @@ def test_developer_challenge_rest_contract_uses_no_body_delete_and_server_guard(
             patch.object(dashboard_server, "RECENT_LOGS", manager.recent_entries),
             patch.object(dashboard_server.AGENT_GATEWAY, "advanced_settings_state", side_effect=lambda: dict(state)),
             patch.object(dashboard_server.AGENT_GATEWAY, "update_advanced_settings", side_effect=update_settings),
-            patch.object(dashboard_server, "desktop_executor_enabled", return_value=False),
+            patch.object(
+                dashboard_server.AGENT_GATEWAY.desktop,
+                "embedded_worker_enabled",
+                return_value=False,
+            ),
         ):
             with TestClient(dashboard_server.app) as client:
                 created = client.post("/api/app/advanced-settings/developer-challenge")

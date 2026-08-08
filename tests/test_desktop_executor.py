@@ -282,7 +282,7 @@ class DesktopExecutorTests(unittest.TestCase):
             gateway = AgentGateway(root / "config.json", root / "audit")
             controller = FakeDesktopController(root / "captures")
             worker = EmbeddedDesktopWorker(
-                gateway,
+                gateway.desktop,
                 root / "captures",
                 controller_factory=lambda _path: controller,
                 poll_interval_seconds=0.01,
@@ -311,7 +311,7 @@ class DesktopExecutorTests(unittest.TestCase):
             root = Path(temp_dir)
             gateway = AgentGateway(root / "config.json", root / "audit")
             worker = EmbeddedDesktopWorker(
-                gateway,
+                gateway.desktop,
                 root / "captures",
                 controller_factory=FakeDesktopController,
                 poll_interval_seconds=0.01,
@@ -329,14 +329,14 @@ class DesktopExecutorTests(unittest.TestCase):
                 action_id = requested["actionId"]
                 deadline = time.monotonic() + 2
                 while time.monotonic() < deadline:
-                    row = gateway._desktop_action_rows_by_id().get(action_id)  # noqa: SLF001
+                    row = gateway.desktop._desktop_action_rows_by_id().get(action_id)  # noqa: SLF001
                     if row and row.get("status") == "claimed":
                         break
                     time.sleep(0.01)
                 gateway.request_desktop_action_cancel(action_id, {"reason": "test cancellation"})
                 deadline = time.monotonic() + 2
                 while time.monotonic() < deadline:
-                    row = gateway._desktop_action_rows_by_id().get(action_id)  # noqa: SLF001
+                    row = gateway.desktop._desktop_action_rows_by_id().get(action_id)  # noqa: SLF001
                     if row and row.get("status") == "cancelled":
                         break
                     time.sleep(0.01)
@@ -352,7 +352,7 @@ class DesktopExecutorTests(unittest.TestCase):
             root = Path(temp_dir)
             gateway = AgentGateway(root / "config.json", root / "audit")
             worker = EmbeddedDesktopWorker(
-                gateway,
+                gateway.desktop,
                 root / "captures",
                 controller_factory=FakeDesktopController,
                 poll_interval_seconds=0.01,
@@ -379,7 +379,7 @@ class DesktopExecutorTests(unittest.TestCase):
                 write=True,
             )
             worker = EmbeddedDesktopWorker(
-                gateway,
+                gateway.desktop,
                 root / "captures",
                 controller_factory=FakeDesktopController,
                 poll_interval_seconds=0.01,

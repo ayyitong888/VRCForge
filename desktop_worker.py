@@ -6,9 +6,8 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
-from agent_gateway import AgentGateway, AgentGatewayError
 from desktop_executor import (
     WINDOWS_DESKTOP_OPERATIONS,
     DesktopActionCancelled,
@@ -19,10 +18,40 @@ from desktop_executor import (
 from desktop_overlay import WindowsDesktopActivityOverlay
 
 
+class DesktopActionBrokerError(RuntimeError):
+    """Base error raised by the narrow embedded-worker broker contract."""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class DesktopActionBrokerPort(Protocol):
+    """In-process broker operations required by the app-owned worker."""
+
+    def register_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
+
+    def heartbeat_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
+
+    def unregister_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
+
+    def claim_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
+
+    def desktop_action_cancel_requested(self, action_id: str) -> bool: ...
+
+    def request_desktop_action_cancel(
+        self,
+        action_id: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def complete_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
+
+
 class EmbeddedDesktopWorker:
     def __init__(
         self,
-        gateway: AgentGateway,
+        broker: DesktopActionBrokerPort,
         capture_dir: Path,
         *,
         on_actions_changed: Callable[[], None] | None = None,
@@ -30,7 +59,7 @@ class EmbeddedDesktopWorker:
         poll_interval_seconds: float = 0.2,
         heartbeat_interval_seconds: float = 10.0,
     ) -> None:
-        self.gateway = gateway
+        self.broker = broker
         self.capture_dir = capture_dir
         self.on_actions_changed = on_actions_changed
         self._uses_default_controller = controller_factory is None
@@ -93,10 +122,10 @@ class EmbeddedDesktopWorker:
             self._activity_overlay = None
             if bridge_id and credential:
                 try:
-                    self.gateway.unregister_desktop_bridge(
+                    self.broker.unregister_desktop_bridge(
                         {"bridgeId": bridge_id, "bridgeCredential": credential}
                     )
-                except AgentGatewayError:
+                except DesktopActionBrokerError:
                     pass
             self._bridge_id = ""
             self._bridge_credential = ""
@@ -117,7 +146,7 @@ class EmbeddedDesktopWorker:
             }
 
     def _register_bridge(self) -> None:
-        registration = self.gateway.register_desktop_bridge(
+        registration = self.broker.register_desktop_bridge(
             {
                 "name": "VRCForge Windows Desktop",
                 "provider": "embedded-ctypes-win32",
@@ -139,10 +168,10 @@ class EmbeddedDesktopWorker:
             if not bridge_id or not credential:
                 continue
             try:
-                self.gateway.heartbeat_desktop_bridge(
+                self.broker.heartbeat_desktop_bridge(
                     {"bridgeId": bridge_id, "bridgeCredential": credential}
                 )
-            except AgentGatewayError as exc:
+            except DesktopActionBrokerError as exc:
                 with self._state_lock:
                     self._last_error = str(exc)
 
@@ -153,7 +182,7 @@ class EmbeddedDesktopWorker:
                 self._stop_event.wait(self.poll_interval_seconds)
                 continue
             try:
-                claim = self.gateway.claim_desktop_action(
+                claim = self.broker.claim_desktop_action(
                     {
                         "bridgeId": bridge_id,
                         "bridgeCredential": credential,
@@ -161,7 +190,7 @@ class EmbeddedDesktopWorker:
                         "claimRequestId": f"embedded-{time.monotonic_ns()}",
                     }
                 )
-            except AgentGatewayError as exc:
+            except DesktopActionBrokerError as exc:
                 with self._state_lock:
                     self._last_error = str(exc)
                 self._stop_event.wait(self.poll_interval_seconds)
@@ -199,9 +228,9 @@ class EmbeddedDesktopWorker:
                 )
             result = self._controller.execute(
                 action,
-                lambda: self._stop_event.is_set() or self.gateway.desktop_action_cancel_requested(action_id),
+                lambda: self._stop_event.is_set() or self.broker.desktop_action_cancel_requested(action_id),
             )
-            if self.gateway.desktop_action_cancel_requested(action_id):
+            if self.broker.desktop_action_cancel_requested(action_id):
                 status = "cancelled"
                 result = {}
         except DesktopActionCancelled as exc:
@@ -211,7 +240,7 @@ class EmbeddedDesktopWorker:
             status = "failed"
             error = str(exc)
         try:
-            self.gateway.complete_desktop_action(
+            self.broker.complete_desktop_action(
                 {
                     "bridgeId": bridge_id,
                     "bridgeCredential": credential,
@@ -223,7 +252,7 @@ class EmbeddedDesktopWorker:
             )
             with self._state_lock:
                 self._last_error = error if status == "failed" else ""
-        except AgentGatewayError as exc:
+        except DesktopActionBrokerError as exc:
             with self._state_lock:
                 self._last_error = str(exc)
         finally:
@@ -235,11 +264,11 @@ class EmbeddedDesktopWorker:
 
     def _cancel_from_overlay(self, action_id: str) -> None:
         try:
-            self.gateway.request_desktop_action_cancel(
+            self.broker.request_desktop_action_cancel(
                 action_id,
                 {"reason": "User pressed Ctrl+Shift+F12."},
             )
-        except AgentGatewayError:
+        except DesktopActionBrokerError:
             pass
         self._notify_changed()
 

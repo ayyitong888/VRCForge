@@ -50,7 +50,6 @@ except Exception:  # pragma: no cover - source installs may not include psutil.
 from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
-    DESKTOP_BRIDGE_ACTION_TYPES,
     PROJECTED_SKILL_STATE_MAX_BYTES,
     PROJECTED_SKILL_STATE_NAME,
     PROJECTED_SKILL_STATE_SCHEMA,
@@ -65,6 +64,7 @@ from agent_gateway import (
     redact_sensitive,
     summarize_text,
 )
+from desktop_computer_use_service import DESKTOP_BRIDGE_ACTION_TYPES
 from agent_question_service import (
     AgentQuestionPersistence,
     AgentQuestionPersistencePorts,
@@ -214,7 +214,6 @@ from unity_execution_plans_workflows import (
     WORKFLOW_EXECUTION_PLAN_TARGETS,
     build_workflow_execution_plan,
 )
-from desktop_worker import EmbeddedDesktopWorker, desktop_executor_enabled
 from external_agent_connector_installer import (
     ConnectorInstallError,
     connector_client_statuses,
@@ -1982,6 +1981,11 @@ DASHBOARD_RUNTIME = DashboardRuntimeState()
 AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
+    desktop_capture_dir=AGENT_GATEWAY_AUDIT_DIR / "desktop-captures",
+    desktop_actions_changed=lambda: EVENT_BUS.broadcast_from_sync(
+        "agentDesktopActions",
+        {"changed": True},
+    ),
 )
 # STOPGAP(1.5): this app-lifetime owner shares the established durable state
 # lock and Goal resolver without a Gateway forwarding layer. The final typed
@@ -2058,12 +2062,6 @@ def track_timed_out_goal_wake(worker: asyncio.Task[dict[str, Any]]) -> None:
     BACKGROUND_GOAL_WAKE_DRAIN_TASKS.add(drain_task)
     drain_task.add_done_callback(BACKGROUND_GOAL_WAKE_DRAIN_TASKS.discard)
 BACKEND_OWNER_LEASE = BackendOwnerLease(lambda: AGENT_GATEWAY.audit_dir / "backend-owner.lock")
-DESKTOP_CAPTURE_DIR = AGENT_GATEWAY_AUDIT_DIR / "desktop-captures"
-DESKTOP_EXECUTOR = EmbeddedDesktopWorker(
-    AGENT_GATEWAY,
-    DESKTOP_CAPTURE_DIR,
-    on_actions_changed=lambda: EVENT_BUS.broadcast_from_sync("agentDesktopActions", {"changed": True}),
-)
 # 子代理角色与执行全部由 sub_agent_delegate 域模块提供：
 # 统一经 AGENT_GATEWAY.execute_runtime_skill 的 allowlist 路径分发，
 # 组合根只负责把 gateway 绑进去。
@@ -2234,9 +2232,9 @@ async def on_startup() -> None:
             await asyncio.to_thread(MEMORY_REVIEW.service.ensure_automatic_capture_watermark)
         except Exception:  # noqa: BLE001 - review recovery remains isolated from core startup.
             emit_log("warn", "agent", "Memory Review startup reconciliation had a bounded warning.", {"failureClass": "reconcile"})
-    if desktop_executor_enabled():
+    if AGENT_GATEWAY.desktop.embedded_worker_enabled():
         try:
-            await asyncio.to_thread(DESKTOP_EXECUTOR.start)
+            await asyncio.to_thread(AGENT_GATEWAY.desktop.start_embedded_worker)
         except Exception as exc:  # noqa: BLE001 - desktop control must not block core startup.
             emit_log("warn", "desktop", "Embedded desktop executor failed to start.", {"error": str(exc)})
     if AGENT_MCP_INIT_TASK is None or AGENT_MCP_INIT_TASK.done():
@@ -2279,7 +2277,7 @@ async def on_shutdown() -> None:
             install_primitive_basis_live_runtime(None)
 
     try:
-        await asyncio.to_thread(DESKTOP_EXECUTOR.stop)
+        await asyncio.to_thread(AGENT_GATEWAY.desktop.stop_embedded_worker)
     except Exception as exc:  # noqa: BLE001 - backend shutdown must remain best-effort.
         emit_log("warn", "desktop", "Embedded desktop executor shutdown had a warning.", {"error": str(exc)})
 
@@ -3085,7 +3083,7 @@ async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[s
 def app_agent_desktop_bridge_status() -> dict[str, Any]:
     return {
         **AGENT_GATEWAY.desktop_bridge_status(),
-        "embeddedExecutor": DESKTOP_EXECUTOR.status(),
+        "embeddedExecutor": AGENT_GATEWAY.desktop.embedded_worker_status(),
     }
 
 

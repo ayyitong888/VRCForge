@@ -161,7 +161,7 @@ class DashboardServerTests(unittest.TestCase):
         config.computer_use_enabled = True
         config.computer_use_ever_enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
-        dashboard_server.AGENT_GATEWAY._desktop_bridges.clear()
+        dashboard_server.AGENT_GATEWAY.desktop._desktop_bridges.clear()  # noqa: SLF001
         self.status_snapshot_patcher = patch(
             "dashboard_server.build_unity_status_snapshot",
             return_value={
@@ -981,7 +981,11 @@ class DashboardServerTests(unittest.TestCase):
                     patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
                     patch("dashboard_server.status_monitor_loop", side_effect=slow_status_loop),
                     patch("dashboard_server.BACKEND_OWNER_LEASE", SimpleNamespace(owned=False)),
-                    patch("dashboard_server.desktop_executor_enabled", return_value=False),
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY.desktop,
+                        "embedded_worker_enabled",
+                        return_value=False,
+                    ),
                     patch("dashboard_server.load_project_snapshot_cache"),
                     patch.object(
                         dashboard_server,
@@ -1030,7 +1034,11 @@ class DashboardServerTests(unittest.TestCase):
                     patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
                     patch("dashboard_server.status_monitor_loop", side_effect=slow_status_loop),
                     patch("dashboard_server.BACKEND_OWNER_LEASE", SimpleNamespace(owned=True)),
-                    patch("dashboard_server.desktop_executor_enabled", return_value=False),
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY.desktop,
+                        "embedded_worker_enabled",
+                        return_value=False,
+                    ),
                     patch("dashboard_server.load_project_snapshot_cache"),
                     patch.object(
                         dashboard_server,
@@ -1114,7 +1122,10 @@ class DashboardServerTests(unittest.TestCase):
             try:
                 with (
                     patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
-                    patch.object(dashboard_server.DESKTOP_EXECUTOR, "stop"),
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY.desktop,
+                        "stop_embedded_worker",
+                    ),
                 ):
                     await dashboard_server.on_shutdown()
                 lease.release.assert_not_called()
@@ -1545,12 +1556,8 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_desktop_capture_root_is_the_gateway_trusted_vision_root(self) -> None:
         self.assertEqual(
-            dashboard_server.DESKTOP_EXECUTOR.capture_dir.resolve(),
-            dashboard_server.DESKTOP_CAPTURE_DIR.resolve(),
-        )
-        self.assertEqual(
-            dashboard_server.DESKTOP_CAPTURE_DIR.resolve(),
-            (dashboard_server.AGENT_GATEWAY_AUDIT_DIR / "desktop-captures").resolve(),
+            dashboard_server.AGENT_GATEWAY.desktop.capture_dir.resolve(),
+            (dashboard_server.AGENT_GATEWAY.audit_dir / "desktop-captures").resolve(),
         )
 
     def test_agent_desktop_action_is_explicit_and_audited(self) -> None:
@@ -1735,7 +1742,7 @@ class DashboardServerTests(unittest.TestCase):
             bridge_id = registration["bridge"]["bridgeId"]
             bridge_credential = registration["bridgeCredential"]
             stale_at = (datetime.now(timezone.utc) - timedelta(seconds=999)).isoformat().replace("+00:00", "Z")
-            dashboard_server.AGENT_GATEWAY._desktop_bridges[bridge_id]["lastHeartbeatAt"] = stale_at
+            dashboard_server.AGENT_GATEWAY.desktop._desktop_bridges[bridge_id]["lastHeartbeatAt"] = stale_at  # noqa: SLF001
 
             status = client.get("/api/app/agent/desktop-bridge")
             self.assertFalse(status.json()["connected"])
@@ -1929,7 +1936,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(claimed["params"]["steps"][0]["titleContains"], "Settings")
 
             stale_at = (datetime.now(timezone.utc) - timedelta(seconds=999)).isoformat().replace("+00:00", "Z")
-            dashboard_server.AGENT_GATEWAY._desktop_bridges[first_id]["lastHeartbeatAt"] = stale_at
+            dashboard_server.AGENT_GATEWAY.desktop._desktop_bridges[first_id]["lastHeartbeatAt"] = stale_at  # noqa: SLF001
             replacement_registration = client.post(
                 "/api/app/agent/desktop-bridge/register",
                 json={"name": "replacement-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]},
@@ -1969,7 +1976,7 @@ class DashboardServerTests(unittest.TestCase):
                 json={"bridgeId": first_id, "bridgeCredential": first_credential},
             )
             stale_at = (datetime.now(timezone.utc) - timedelta(seconds=999)).isoformat().replace("+00:00", "Z")
-            dashboard_server.AGENT_GATEWAY._desktop_bridges[first_id]["lastHeartbeatAt"] = stale_at
+            dashboard_server.AGENT_GATEWAY.desktop._desktop_bridges[first_id]["lastHeartbeatAt"] = stale_at  # noqa: SLF001
             replacement_registration = client.post(
                 "/api/app/agent/desktop-bridge/register",
                 json={"name": "read-replacement", "provider": "mock-provider", "capabilities": ["computer_use"]},
@@ -5452,7 +5459,7 @@ class DashboardServerTests(unittest.TestCase):
                 )
 
             with (
-                patch.object(gateway, "consume_computer_use_turn_grant"),
+                patch.object(gateway.desktop, "consume_computer_use_turn_grant"),
                 patch.object(gateway, "_plan_agent_turn", side_effect=plans),
             ):
                 payload = gateway.runtime_message(
@@ -5482,7 +5489,7 @@ class DashboardServerTests(unittest.TestCase):
                 "nextStep": "done",
             }
             with (
-                patch.object(gateway, "consume_computer_use_turn_grant"),
+                patch.object(gateway.desktop, "consume_computer_use_turn_grant"),
                 patch.object(gateway, "_plan_agent_turn", return_value=terminal),
             ):
                 first = gateway.runtime_message(
