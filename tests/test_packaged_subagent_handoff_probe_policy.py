@@ -35,6 +35,7 @@ def test_subagent_handoff_probe_has_explicit_local_acceptance_boundary() -> None
     assert "await assertNoHostUnityProcesses();" in source
     assert "environment-not-isolated" in source
     assert "Timed out waiting for ${url}:" in source
+    assert "sourceRevisions: payload.sources || []" in source
 
 
 def test_subagent_handoff_probe_self_test_is_side_effect_free() -> None:

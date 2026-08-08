@@ -1066,7 +1066,10 @@ async function persistSiblingChat(parentChatId) {
     items: [{ id: `user-${shortMarker}`, type: "user", text: siblingSeed, createdAt: timestamp }],
   };
   const chats = (payload.chats || []).filter((chat) => chat.id !== siblingId);
-  await appApi("/api/app/chats", { method: "POST", body: { chats: [...chats, sibling] } });
+  await appApi("/api/app/chats", {
+    method: "POST",
+    body: { chats: [...chats, sibling], sourceRevisions: payload.sources || [] },
+  });
   const readback = await appApi("/api/app/chats");
   const stored = findChat(readback, siblingId);
   if (!stored || JSON.stringify(stored.items || []).includes(adoptHistoryMarker) ||
