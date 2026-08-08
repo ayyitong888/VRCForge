@@ -559,6 +559,33 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "scan_clothes_sync" not in bindings
     assert "generate_clothing_fx_sync" not in bindings
     assert "apply_clothing_fx_sync" not in bindings
+
+
+def test_dashboard_has_no_outfit_read_import_or_dead_wrapper_facades() -> None:
+    source = (REPO_ROOT / "dashboard_server.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    bindings = {
+        item.name
+        for item in tree.body
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    imported_names = {
+        alias.asname or alias.name
+        for item in tree.body
+        if isinstance(item, ast.ImportFrom)
+        for alias in item.names
+    }
+
+    assert {
+        "inspect_outfit_package_sync",
+        "plan_outfit_import_sync",
+    }.isdisjoint(bindings)
+    assert {
+        "inspect_outfit_package",
+        "build_outfit_import_plan",
+    }.isdisjoint(imported_names)
+    assert "outfit_package_inspector_domain.inspect_outfit_package" in source
+    assert "outfit_import_planner_domain.build_outfit_import_plan" in source
     assert "preview_setup_outfit_sync" not in bindings
     assert "setup_outfit_sync" not in bindings
     assert "preview_add_wardrobe_outfit_sync" not in bindings

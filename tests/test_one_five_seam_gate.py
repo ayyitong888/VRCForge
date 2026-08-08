@@ -218,37 +218,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         "WARDROBE_OUTFIT_WORKFLOWS",
         "WARDROBE_OUTFIT_APPROVED_WRITES",
     }
-    assert {
-        "scan_clothes_sync",
-        "generate_clothing_fx_sync",
-        "scan_avatar_items_sync",
-        "scan_avatar_controls_sync",
-        "scan_wardrobe_sync",
-        "apply_clothing_fx_sync",
-        "preview_setup_outfit_sync",
-        "setup_outfit_sync",
-        "preview_add_wardrobe_outfit_sync",
-        "add_wardrobe_outfit_sync",
-        "preview_add_outfit_part_sync",
-        "add_outfit_part_sync",
-        "preview_add_modular_avatar_component_sync",
-        "add_modular_avatar_component_sync",
-        "preview_manage_wardrobe_sync",
-        "manage_wardrobe_sync",
-        "preview_create_wardrobe_sync",
-        "create_wardrobe_sync",
-        "_prepare_add_outfit_state",
-        "preview_add_outfit_workflow_sync",
-        "prepare_add_outfit_request",
-        "add_outfit_workflow_approved_sync",
-        "prepare_outfit_import_package_request",
-        "import_outfit_package_approved_sync",
-    }.isdisjoint(
-        groups["dashboard.wardrobe-outfit-root-owners"]["facades"][0]["methods"]
-    )
-    assert "apply_clothing_fx_approved_sync" not in groups[
-        "dashboard.wardrobe-outfit-root-owners"
-    ]["facades"][0]["methods"]
+    assert groups["dashboard.wardrobe-outfit-root-owners"]["facades"] == []
     assert len(groups["dashboard.project-snapshot-root-facades"]["facades"][0]["methods"]) == 17
     assert len(groups["dashboard.unity-status-root-facades"]["facades"][0]["methods"]) == 3
     assert len(groups["gateway.approval-transaction-host-proxy"]["facades"][0]["methods"]) == 41

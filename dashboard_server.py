@@ -350,13 +350,11 @@ from prepared_outfit_import_workflow_service import (
     PreparedOutfitImportPreparer,
     PreparedOutfitImportPreparerPorts,
 )
-from outfit_import_planner import (
-    build_outfit_import_plan,
-    build_post_import_outfit_validation,
-    detect_magenta_materials,
-)
+import outfit_import_planner as outfit_import_planner_domain
+from outfit_import_planner import build_post_import_outfit_validation, detect_magenta_materials
 from mcp_trigger_selection import SelectionReceiptAuthority, plan_mcp_tool_selection, tools_for_exposure_layer
-from outfit_package_inspector import inspect_outfit_package, is_safe_archive_path, normalize_archive_name
+import outfit_package_inspector as outfit_package_inspector_domain
+from outfit_package_inspector import is_safe_archive_path, normalize_archive_name
 from path_to_skill import DEFAULT_MIN_VRCFORGE_VERSION, PathToSkillError, build_path_to_skill_source
 from primitive_basis_live_attestation import (
     PrimitiveBasisLiveSession,
@@ -5439,7 +5437,10 @@ def inspect_chat_attachment_sync(params: dict[str, Any]) -> dict[str, Any]:
             result["summaryText"] = str(result["entry"].get("text") or "")
         else:
             max_entries = max(1, min(int(params.get("maxEntries") or params.get("max_entries") or 2000), 10000))
-            result["listing"] = inspect_outfit_package(str(path), max_entries=max_entries)
+            result["listing"] = outfit_package_inspector_domain.inspect_outfit_package(
+                str(path),
+                max_entries=max_entries,
+            )
             listing_summary = result["listing"].get("summary") if isinstance(result["listing"], dict) else {}
             if isinstance(listing_summary, dict):
                 for key, value in listing_summary.items():
@@ -6259,31 +6260,6 @@ def scan_project_index_sync(params: dict[str, Any]) -> dict[str, Any]:
     if not project_path:
         raise AgentGatewayError("projectPath is required.", status_code=400)
     return scan_project_memory(project_path, PROJECT_MEMORY_INDEX_DIR, max_files=max_files)
-
-
-def inspect_outfit_package_sync(params: dict[str, Any]) -> dict[str, Any]:
-    package_path = str(params.get("packagePath") or params.get("package_path") or "").strip()
-    max_entries = int(params.get("maxEntries") or params.get("max_entries") or 5000)
-    if not package_path:
-        raise AgentGatewayError("packagePath is required.", status_code=400)
-    return inspect_outfit_package(package_path, max_entries=max_entries)
-
-
-def plan_outfit_import_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    package_path = str(params.get("packagePath") or params.get("package_path") or "").strip()
-    if not package_path:
-        raise AgentGatewayError("packagePath is required.", status_code=400)
-    project_path = str(params.get("projectPath") or params.get("project_path") or DASHBOARD_STATE.selected_project_path or "").strip()
-    return build_outfit_import_plan(
-        package_path=package_path,
-        project_path=project_path or None,
-        target_folder=str(params.get("targetFolder") or params.get("target_folder") or "").strip() or None,
-        selected_unitypackage=str(params.get("selectedUnityPackage") or params.get("selected_unitypackage") or "").strip() or None,
-        selected_prefab=str(params.get("selectedPrefab") or params.get("selected_prefab") or "").strip() or None,
-        base_avatar_name=str(params.get("baseAvatarName") or params.get("base_avatar_name") or "").strip() or None,
-        max_entries=int(params.get("maxEntries") or params.get("max_entries") or 5000),
-    )
 
 
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -20277,8 +20253,8 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         selected_project_path=lambda: (
             DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
         ),
-        inspect_package=inspect_outfit_package,
-        build_import_plan=build_outfit_import_plan,
+        inspect_package=outfit_package_inspector_domain.inspect_outfit_package,
+        build_import_plan=outfit_import_planner_domain.build_outfit_import_plan,
         create_apply_request=AGENT_GATEWAY.create_apply_request,
         request_supervised_write=request_supervised_unity_write,
         scan_avatar_items=WARDROBE_ARTIFACT_READ.scan_avatar_items,
