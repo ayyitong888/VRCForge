@@ -234,6 +234,45 @@ def _normalize_fact_text(value: Any) -> str:
     return text
 
 
+def _matches_exact_accepted_memory(
+    memory: Mapping[str, Any],
+    candidate: Mapping[str, Any],
+    *,
+    require_foreign_owner: bool,
+) -> bool:
+    """Verify one exact active Memory identity; this is intentionally not fuzzy."""
+
+    if str(memory.get("status") or "") != "active":
+        return False
+    scope_kind = str(candidate.get("scopeKind") or "")
+    scope_key = str(candidate.get("scopeKey") or "")
+    memory_scope = str(memory.get("scope") or "").strip().casefold()
+    memory_project_root = str(memory.get("projectRoot") or "")
+    if scope_kind == "user":
+        scope_matches = scope_key == "user" and memory_scope == "user" and not memory_project_root
+    elif scope_kind == "project":
+        try:
+            scope_matches = (
+                memory_scope == "project"
+                and bool(memory_project_root)
+                and project_scope_key(memory_project_root, require_existing=False) == scope_key
+            )
+        except (OSError, RuntimeError, ValueError):
+            scope_matches = False
+    else:
+        scope_matches = False
+    if not scope_matches:
+        return False
+    if str(memory.get("kind") or "") != str(candidate.get("kind") or ""):
+        return False
+    if str(memory.get("text") or "") != str(candidate.get("acceptedText") or ""):
+        return False
+    return not require_foreign_owner or (
+        str(memory.get("candidateId") or "") != str(candidate.get("candidateId") or "")
+        and str(memory.get("promotionId") or "") != str(candidate.get("promotionId") or "")
+    )
+
+
 _INSTRUCTION_SENSITIVE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE | re.DOTALL)
     for pattern in (
@@ -1277,6 +1316,7 @@ class MemoryReviewStore:
             "promotionId",
             "promotionGeneration",
             "memoryId",
+            "acceptDisposition",
             "priorMemoryIds",
             "acceptedText",
             "readAt",
@@ -1287,6 +1327,7 @@ class MemoryReviewStore:
             "expiredAt",
             "lastUndoneMemoryId",
             "lastUndonePromotionId",
+            "lastUndoneDisposition",
             "undoMemoryId",
             "erasePreviousState",
             "runId",
@@ -1361,6 +1402,14 @@ class MemoryReviewStore:
         promotion_id = str(raw.get("promotionId") or "")
         memory_id = str(raw.get("memoryId") or "")
         accepted_text = str(raw.get("acceptedText") or "")
+        has_accept_disposition = "acceptDisposition" in raw
+        accept_disposition = str(raw.get("acceptDisposition") or "")
+        if not has_accept_disposition and state in {"promoting", "accepted", "undoing"}:
+            # Pre-deduplication candidates used the same durable promotion
+            # transaction and therefore always owned the Memory they bound.
+            accept_disposition = "promoted"
+        if accept_disposition not in {"", "promoted", "deduplicated"}:
+            raise MemoryConsolidationError("Stored candidate acceptance disposition is invalid.")
         for field, value in (("promotionId", promotion_id), ("memoryId", memory_id)):
             if value:
                 _bounded_identifier(value, field=field)
@@ -1377,6 +1426,12 @@ class MemoryReviewStore:
             raise MemoryConsolidationError("Stored candidate promotion binding is incomplete.")
         if state in {"accepted", "undoing"} and not memory_id:
             raise MemoryConsolidationError("Stored candidate Memory binding is incomplete.")
+        if state in {"accepted", "undoing"} and accept_disposition not in {"promoted", "deduplicated"}:
+            raise MemoryConsolidationError("Stored candidate acceptance disposition is incomplete.")
+        if state not in {"promoting", "accepted", "undoing", "erasing"} and accept_disposition:
+            raise MemoryConsolidationError("Stored candidate acceptance disposition is invalid for its state.")
+        if state == "promoting" and accept_disposition == "deduplicated" and not memory_id:
+            raise MemoryConsolidationError("Stored duplicate candidate binding is incomplete.")
         if state == "undoing" and str(raw.get("undoMemoryId") or "") != memory_id:
             raise MemoryConsolidationError("Stored candidate undo binding is invalid.")
         evidence_count = raw.get("evidenceCount")
@@ -1401,6 +1456,7 @@ class MemoryReviewStore:
                 "promotionGeneration": generation,
                 "promotionId": promotion_id,
                 "memoryId": memory_id,
+                "acceptDisposition": accept_disposition,
                 "acceptedText": accepted_text,
                 "priorMemoryIds": self._bounded_ids(raw.get("priorMemoryIds")),
                 "usage": self._validate_loaded_usage(raw.get("usage")),
@@ -1425,6 +1481,12 @@ class MemoryReviewStore:
             value = str(raw.get(field) or "")
             if value:
                 candidate[field] = _bounded_identifier(value, field=field)
+        last_undone_disposition = str(raw.get("lastUndoneDisposition") or "")
+        if last_undone_disposition not in {"", "promoted", "deduplicated"}:
+            raise MemoryConsolidationError("Stored candidate undo disposition is invalid.")
+        if last_undone_disposition and not str(candidate.get("lastUndoneMemoryId") or ""):
+            raise MemoryConsolidationError("Stored candidate undo disposition is incomplete.")
+        candidate["lastUndoneDisposition"] = last_undone_disposition
         if state == "erasing":
             previous_state = str(raw.get("erasePreviousState") or "")
             if previous_state not in CANDIDATE_STATES - {"erasing"}:
@@ -2058,6 +2120,7 @@ class MemoryReviewStore:
                     "conflicts": copy.deepcopy(candidate.get("conflicts") or []),
                     "supersedes": copy.deepcopy(candidate.get("supersedes") or []),
                     "unread": internal_state in {"proposed", "conflicting"} and not candidate.get("readAt"),
+                    "acceptedAsDuplicate": str(candidate.get("acceptDisposition") or "") == "deduplicated",
                 }
                 for field in ("runId", "provider", "model"):
                     if candidate.get(field):
@@ -2799,6 +2862,7 @@ class MemoryReviewStore:
         *,
         expected_revision: int,
         accepted_text: str | None = None,
+        deduplicated_memory_id: str = "",
     ) -> dict[str, Any]:
         normalized_id = _bounded_identifier(candidate_id, field="candidateId")
         with self._lock:
@@ -2819,9 +2883,20 @@ class MemoryReviewStore:
                 raise MemoryConsolidationError("Accepted Memory text contains instruction-like content.")
             generation = int(candidate.get("promotionGeneration") or 0)
             promotion_id = stable_promotion_id(normalized_id, text, generation)
+            normalized_deduplicated_memory = (
+                _bounded_identifier(deduplicated_memory_id, field="memoryId")
+                if str(deduplicated_memory_id or "").strip()
+                else ""
+            )
             if current_state in {"promoting", "accepted"}:
                 if candidate.get("promotionId") != promotion_id or candidate.get("acceptedText") != text:
                     raise CandidateStateError("Candidate promotion is already bound to different accepted text.")
+                current_disposition = str(candidate.get("acceptDisposition") or "")
+                if normalized_deduplicated_memory and (
+                    current_disposition != "deduplicated"
+                    or candidate.get("memoryId") != normalized_deduplicated_memory
+                ):
+                    raise CandidateStateError("Candidate promotion is bound to a different duplicate Memory.")
                 return {"revision": state["revision"], "candidate": copy.deepcopy(candidate)}
             if current_state not in {"proposed", "deferred"}:
                 raise CandidateStateError(f"Candidate in state {current_state} cannot be promoted.")
@@ -2829,6 +2904,9 @@ class MemoryReviewStore:
             candidate["state"] = "promoting"
             candidate["promotionId"] = promotion_id
             candidate["acceptedText"] = text
+            if normalized_deduplicated_memory:
+                candidate["acceptDisposition"] = "deduplicated"
+                candidate["memoryId"] = normalized_deduplicated_memory
             candidate["updatedAt"] = _utc_now_iso()
             state["revision"] = int(state["revision"]) + 1
             self._commit_with_audit(
@@ -2840,6 +2918,7 @@ class MemoryReviewStore:
                     "scopeKind": candidate.get("scopeKind"),
                     "scopeKey": candidate.get("scopeKey"),
                     "state": "promoting",
+                    **({"memoryId": normalized_deduplicated_memory} if normalized_deduplicated_memory else {}),
                     "contentDigest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                     "revision": state["revision"],
                 }],
@@ -2881,6 +2960,49 @@ class MemoryReviewStore:
             )
             return {"revision": state["revision"], "candidate": copy.deepcopy(candidate)}
 
+    def reopen_deduplicated_acceptance(self, candidate_id: str, *, expected_revision: int) -> dict[str, Any]:
+        """Reopen a duplicate-backed candidate without mutating its foreign Memory."""
+
+        normalized_id = _bounded_identifier(candidate_id, field="candidateId")
+        with self._lock:
+            state = self._load()
+            candidate = self._candidate_map(state).get(normalized_id)
+            if candidate is None:
+                raise CandidateStateError("Candidate was not found.")
+            if candidate.get("state") == "proposed" and candidate.get("lastUndoneDisposition") == "deduplicated":
+                return {"revision": state["revision"], "candidate": copy.deepcopy(candidate)}
+            if candidate.get("state") != "accepted" or candidate.get("acceptDisposition") != "deduplicated":
+                raise CandidateStateError("Candidate is not a duplicate-backed accepted Memory.")
+            self._assert_revision(state, expected_revision)
+            memory_id = _bounded_identifier(candidate.get("memoryId"), field="memoryId")
+            previous_promotion = str(candidate.get("promotionId") or "")
+            candidate["state"] = "proposed"
+            candidate["lastUndoneMemoryId"] = memory_id
+            candidate["lastUndonePromotionId"] = previous_promotion
+            candidate["lastUndoneDisposition"] = "deduplicated"
+            candidate["promotionGeneration"] = int(candidate.get("promotionGeneration") or 0) + 1
+            candidate["promotionId"] = ""
+            candidate["memoryId"] = ""
+            candidate["acceptedText"] = ""
+            candidate["acceptDisposition"] = ""
+            candidate.pop("acceptedAt", None)
+            candidate["updatedAt"] = _utc_now_iso()
+            state["revision"] = int(state["revision"]) + 1
+            self._commit_with_audit(
+                state,
+                [{
+                    "event": "candidate_duplicate_acceptance_reopened",
+                    "candidateId": normalized_id,
+                    "promotionId": previous_promotion,
+                    "memoryId": memory_id,
+                    "scopeKind": candidate.get("scopeKind"),
+                    "scopeKey": candidate.get("scopeKey"),
+                    "state": "proposed",
+                    "revision": state["revision"],
+                }],
+            )
+            return {"revision": state["revision"], "candidate": copy.deepcopy(candidate)}
+
     def finish_undo(self, candidate_id: str, *, memory_id: str) -> dict[str, Any]:
         normalized_id = _bounded_identifier(candidate_id, field="candidateId")
         normalized_memory = _bounded_identifier(memory_id, field="memoryId")
@@ -2894,17 +3016,20 @@ class MemoryReviewStore:
             if candidate.get("state") != "undoing" or candidate.get("undoMemoryId") != normalized_memory:
                 raise CandidateStateError("Candidate has no matching undo transaction.")
             previous_promotion = str(candidate.get("promotionId") or "")
+            previous_disposition = str(candidate.get("acceptDisposition") or "")
             prior_memory_ids = self._bounded_ids(candidate.get("priorMemoryIds"))
-            if normalized_memory not in prior_memory_ids:
+            if previous_disposition != "deduplicated" and normalized_memory not in prior_memory_ids:
                 prior_memory_ids.append(normalized_memory)
             candidate["state"] = "proposed"
             candidate["lastUndoneMemoryId"] = normalized_memory
             candidate["lastUndonePromotionId"] = previous_promotion
+            candidate["lastUndoneDisposition"] = previous_disposition
             candidate["priorMemoryIds"] = sorted(set(prior_memory_ids))
             candidate["promotionGeneration"] = int(candidate.get("promotionGeneration") or 0) + 1
             candidate["promotionId"] = ""
             candidate["memoryId"] = ""
             candidate["acceptedText"] = ""
+            candidate["acceptDisposition"] = ""
             candidate.pop("undoMemoryId", None)
             candidate.pop("acceptedAt", None)
             candidate["updatedAt"] = _utc_now_iso()
@@ -2940,17 +3065,20 @@ class MemoryReviewStore:
             if current_state == "accepted" and candidate.get("memoryId") != normalized_memory:
                 raise CandidateStateError("Candidate is bound to a different accepted Memory record.")
             previous_promotion = str(candidate.get("promotionId") or "")
+            previous_disposition = str(candidate.get("acceptDisposition") or "")
             prior_memory_ids = self._bounded_ids(candidate.get("priorMemoryIds"))
-            if normalized_memory not in prior_memory_ids:
+            if previous_disposition != "deduplicated" and normalized_memory not in prior_memory_ids:
                 prior_memory_ids.append(normalized_memory)
             candidate["state"] = "proposed"
             candidate["lastUndoneMemoryId"] = normalized_memory
             candidate["lastUndonePromotionId"] = previous_promotion
+            candidate["lastUndoneDisposition"] = previous_disposition
             candidate["priorMemoryIds"] = sorted(set(prior_memory_ids))
             candidate["promotionGeneration"] = int(candidate.get("promotionGeneration") or 0) + 1
             candidate["promotionId"] = ""
             candidate["memoryId"] = ""
             candidate["acceptedText"] = ""
+            candidate["acceptDisposition"] = ""
             candidate.pop("acceptedAt", None)
             candidate["updatedAt"] = _utc_now_iso()
             state["revision"] = int(state["revision"]) + 1
@@ -2981,23 +3109,43 @@ class MemoryReviewStore:
             raise CandidateStateError("Undo transaction is bound to a different Memory record.")
         return self.finish_undo(candidate_id, memory_id=bound_memory)
 
-    def finish_promotion(self, candidate_id: str, *, promotion_id: str, memory_id: str) -> dict[str, Any]:
+    def finish_promotion(
+        self,
+        candidate_id: str,
+        *,
+        promotion_id: str,
+        memory_id: str,
+        disposition: str = "promoted",
+    ) -> dict[str, Any]:
         normalized_id = _bounded_identifier(candidate_id, field="candidateId")
         normalized_promotion = _bounded_identifier(promotion_id, field="promotionId")
         normalized_memory = _bounded_identifier(memory_id, field="memoryId")
+        normalized_disposition = str(disposition or "").strip().casefold()
+        if normalized_disposition not in {"promoted", "deduplicated"}:
+            raise CandidateStateError("Candidate acceptance disposition is invalid.")
         with self._lock:
             state = self._load()
             candidate = self._candidate_map(state).get(normalized_id)
             if candidate is None:
                 raise CandidateStateError("Candidate was not found.")
             if candidate.get("state") == "accepted":
-                if candidate.get("promotionId") != normalized_promotion or candidate.get("memoryId") != normalized_memory:
+                if (
+                    candidate.get("promotionId") != normalized_promotion
+                    or candidate.get("memoryId") != normalized_memory
+                    or candidate.get("acceptDisposition") != normalized_disposition
+                ):
                     raise CandidateStateError("Accepted candidate is bound to a different Memory record.")
                 return {"revision": state["revision"], "candidate": copy.deepcopy(candidate)}
             if candidate.get("state") != "promoting" or candidate.get("promotionId") != normalized_promotion:
                 raise CandidateStateError("Candidate has no matching promotion transaction.")
+            existing_disposition = str(candidate.get("acceptDisposition") or "")
+            if existing_disposition not in {"", normalized_disposition}:
+                raise CandidateStateError("Candidate promotion has a different acceptance disposition.")
+            if existing_disposition == "deduplicated" and candidate.get("memoryId") != normalized_memory:
+                raise CandidateStateError("Duplicate candidate is bound to a different Memory record.")
             candidate["state"] = "accepted"
             candidate["memoryId"] = normalized_memory
+            candidate["acceptDisposition"] = normalized_disposition
             candidate["acceptedAt"] = _utc_now_iso()
             candidate["updatedAt"] = candidate["acceptedAt"]
             state["revision"] = int(state["revision"]) + 1
@@ -3890,14 +4038,56 @@ class MemoryReviewCoordinator:
             )
             if freshness.get("valid") is False:
                 return freshness
+        if str(current.get("state") or "") == "accepted":
+            return {"revision": self.review_store.snapshot(include_internal=True)["revision"], "candidate": current}
+        accepted_text = _normalize_fact_text(
+            current.get("acceptedText")
+            if edited_text is None and str(current.get("state") or "") == "promoting"
+            else (edited_text if edited_text is not None else current.get("proposedText"))
+        )
+        generation = int(current.get("promotionGeneration") or 0)
+        promotion_id = stable_promotion_id(str(current["candidateId"]), accepted_text, generation)
+        deduplicated_memory_id = ""
+        if str(current.get("state") or "") in {"proposed", "deferred"}:
+            canonical = self.accepted_store.find_active_exact_review_memory(
+                scope=str(current.get("scopeKind") or ""),
+                scope_key=str(current.get("scopeKey") or ""),
+                project_root=resolved_project,
+                kind=str(current.get("kind") or ""),
+                text=accepted_text,
+                exclude_candidate_id=str(current.get("candidateId") or ""),
+                exclude_promotion_id=promotion_id,
+            )
+            if canonical is not None:
+                deduplicated_memory_id = str(canonical["memoryId"])
         started = self.review_store.begin_promotion(
             candidate_id,
             expected_revision=expected_revision,
             accepted_text=edited_text,
+            deduplicated_memory_id=deduplicated_memory_id,
         )
         candidate = started["candidate"]
         if phase_hook is not None:
             phase_hook("after_promotion_started")
+        disposition = str(candidate.get("acceptDisposition") or "promoted")
+        if disposition == "deduplicated":
+            memory_id = _bounded_identifier(candidate.get("memoryId"), field="memoryId")
+            canonical = self.accepted_store.get(memory_id)
+            if canonical is None or not _matches_exact_accepted_memory(
+                canonical,
+                candidate,
+                require_foreign_owner=True,
+            ):
+                raise CandidateStateError("Duplicate candidate canonical Memory is no longer active.")
+            finished = self.review_store.finish_promotion(
+                str(candidate["candidateId"]),
+                promotion_id=str(candidate["promotionId"]),
+                memory_id=memory_id,
+                disposition="deduplicated",
+            )
+            if phase_hook is not None:
+                phase_hook("after_candidate_commit")
+            return finished
         memory = self.accepted_store.promote(
             promotion_id=str(candidate["promotionId"]),
             candidate_id=str(candidate["candidateId"]),
@@ -3912,6 +4102,7 @@ class MemoryReviewCoordinator:
             str(candidate["candidateId"]),
             promotion_id=str(candidate["promotionId"]),
             memory_id=str(memory["memoryId"]),
+            disposition="promoted",
         )
         if phase_hook is not None:
             phase_hook("after_candidate_commit")
@@ -3960,8 +4151,16 @@ class MemoryReviewCoordinator:
             memory_ids = {
                 str(value or "").strip()
                 for value in (
-                    candidate.get("memoryId"),
-                    candidate.get("lastUndoneMemoryId"),
+                    (
+                        candidate.get("memoryId")
+                        if candidate.get("acceptDisposition") != "deduplicated"
+                        else ""
+                    ),
+                    (
+                        candidate.get("lastUndoneMemoryId")
+                        if candidate.get("lastUndoneDisposition") != "deduplicated"
+                        else ""
+                    ),
                     *prior_values,
                 )
                 if str(value or "").strip()
@@ -4019,6 +4218,12 @@ class MemoryReviewCoordinator:
         expected_revision: int,
         phase_hook: Callable[[str], None] | None,
     ) -> dict[str, Any]:
+        current = self.review_store.get(candidate_id)
+        if current is not None and current.get("state") == "accepted" and current.get("acceptDisposition") == "deduplicated":
+            return self.review_store.reopen_deduplicated_acceptance(
+                candidate_id,
+                expected_revision=expected_revision,
+            )
         started = self.review_store.begin_undo(candidate_id, expected_revision=expected_revision)
         candidate = started["candidate"]
         if candidate.get("state") == "proposed":
@@ -4788,6 +4993,22 @@ class MemoryConsolidationService:
 
         candidate_id = _bounded_identifier(candidate.get("candidateId"), field="candidateId")
         promotion_id = _bounded_identifier(candidate.get("promotionId"), field="promotionId")
+        if candidate.get("acceptDisposition") == "deduplicated":
+            canonical_id = _bounded_identifier(candidate.get("memoryId"), field="memoryId")
+            canonical = self.accepted_store.get(canonical_id)
+            if canonical is None or not _matches_exact_accepted_memory(
+                canonical,
+                candidate,
+                require_foreign_owner=True,
+            ):
+                return False
+            self.review_store.finish_promotion(
+                candidate_id,
+                promotion_id=promotion_id,
+                memory_id=canonical_id,
+                disposition="deduplicated",
+            )
+            return True
         expected_memory_id = AgentMemoryStore.stable_memory_id(promotion_id)
         memory = self.accepted_store.get(expected_memory_id, include_deleted=True)
         if memory is None or str(memory.get("status") or "") != "active":
@@ -4833,6 +5054,7 @@ class MemoryConsolidationService:
             candidate_id,
             promotion_id=promotion_id,
             memory_id=expected_memory_id,
+            disposition="promoted",
         )
         return True
 

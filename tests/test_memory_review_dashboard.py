@@ -797,6 +797,34 @@ def test_suggest_accept_is_the_only_path_into_memory_and_runtime_prompt(
     assert candidate["proposedText"] in prompt
 
 
+def test_accept_duplicate_projects_only_a_boolean_and_reuses_foreign_user_memory(
+    memory_review_dashboard: DashboardMemoryReviewHarness,
+) -> None:
+    env = memory_review_dashboard
+    scope, _root = env.composition.resolve_scope("user", "")
+    env.sources.append(_source(scope))
+    configured = env.configure("suggest_only")
+    proposed = env.run(revision=configured["revision"]).json()
+    candidate = proposed["candidates"][0]
+    created = env.client.post(
+        "/api/app/agent/memory",
+        json={"scope": "user", "kind": candidate["kind"], "text": candidate["proposedText"]},
+    )
+    assert created.status_code == 200, created.text
+    accepted = env.client.post(
+        f"/api/app/agent/memory/review/candidates/{candidate['candidateId']}/accept",
+        json={"expectedRevision": proposed["revision"]},
+    )
+    assert accepted.status_code == 200, accepted.text
+    card = accepted.json()["candidates"][0]
+    assert card["acceptedAsDuplicate"] is True
+    assert "memoryId" not in card
+    assert "acceptedText" not in card
+    memories = env.client.get("/api/app/agent/memory", params={"scope": "user"}).json()["memories"]
+    assert len(memories) == 1
+    assert memories[0]["memoryId"] == created.json()["memory"]["memoryId"]
+
+
 @pytest.mark.parametrize("legacy_action", ["delete", "clear"])
 def test_legacy_memory_removal_immediately_reconciles_review_state(
     legacy_action: str,

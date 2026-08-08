@@ -119,6 +119,7 @@ export type MemoryReviewCandidate = {
   confidenceScore?: number;
   sourceTypeCounts?: Record<string, number>;
   unread?: boolean;
+  acceptedAsDuplicate?: boolean;
   eraseOnly?: boolean;
   runId?: string;
   provider?: string;

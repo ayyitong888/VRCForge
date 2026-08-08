@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from durable_audit_outbox import DurableMetadataAudit
+from memory_consolidation_sources import project_scope_key
 
 AGENT_MEMORY_SCHEMA = "vrcforge.agent_memory.v1"
 MEMORY_REVIEW_AUDIT_SCHEMA = "vrcforge.memory_review_audit.v1"
@@ -376,6 +377,80 @@ class AgentMemoryStore:
             values = list(self._project().values())
         values.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
         return values
+
+    def find_active_exact_review_memory(
+        self,
+        *,
+        scope: str,
+        scope_key: str,
+        project_root: str,
+        kind: str,
+        text: str,
+        exclude_candidate_id: str,
+        exclude_promotion_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the stable active Memory with an exact review acceptance identity.
+
+        This deliberately compares canonical candidate text and kind byte-for-byte.
+        It is not a semantic search and never treats user- and project-scoped
+        Memories as interchangeable.
+        """
+
+        normalized_scope = str(scope or "").strip().casefold()
+        if normalized_scope not in {"user", "project"}:
+            raise ValueError("scope must be user or project.")
+        normalized_project = self._normalized_project(project_root)
+        if normalized_scope == "project" and not normalized_project:
+            raise ValueError("Project review duplicate lookup requires projectRoot.")
+        if normalized_scope == "user" and str(project_root or "").strip():
+            raise ValueError("User review duplicate lookup cannot carry projectRoot.")
+        normalized_kind = _bounded_text(kind or "preference", field="kind", limit=80)
+        normalized_text = _bounded_text(text, field="text", limit=MAX_MEMORY_TEXT_CHARS)
+        normalized_scope_key = str(scope_key or "").strip()
+        if normalized_scope == "user":
+            if normalized_scope_key != "user":
+                raise ValueError("User review duplicate lookup requires the user scope key.")
+        else:
+            if project_scope_key(project_root, require_existing=False) != normalized_scope_key:
+                raise ValueError("Project review duplicate lookup scope does not match projectRoot.")
+        normalized_candidate = _safe_id(exclude_candidate_id, field="candidateId")
+        normalized_promotion = _safe_id(exclude_promotion_id, field="promotionId")
+
+        with self._lock:
+            matches = [
+                memory
+                for memory in self._project().values()
+                if str(memory.get("status") or "") == "active"
+                and str(memory.get("scope") or "").strip().casefold() == normalized_scope
+                and str(memory.get("kind") or "") == normalized_kind
+                and str(memory.get("text") or "") == normalized_text
+                and str(memory.get("candidateId") or "") != normalized_candidate
+                and str(memory.get("promotionId") or "") != normalized_promotion
+                and (
+                    (
+                        normalized_scope == "user"
+                        and not str(memory.get("projectRoot") or "").strip()
+                    )
+                    or (
+                        normalized_scope == "project"
+                        and bool(str(memory.get("projectRoot") or "").strip())
+                        and project_scope_key(
+                            str(memory.get("projectRoot") or ""),
+                            require_existing=False,
+                        ) == normalized_scope_key
+                        and self._normalized_project(str(memory.get("projectRoot") or "")) == normalized_project
+                    )
+                )
+            ]
+        if not matches:
+            return None
+        matches.sort(
+            key=lambda memory: (
+                str(memory.get("createdAt") or ""),
+                str(memory.get("memoryId") or ""),
+            )
+        )
+        return copy.deepcopy(matches[0])
 
     def get(self, memory_id: str, *, include_deleted: bool = False) -> dict[str, Any] | None:
         normalized_id = _safe_id(memory_id, field="memoryId")

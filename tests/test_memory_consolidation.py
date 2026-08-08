@@ -542,6 +542,202 @@ def test_promotion_reconciles_after_crash_and_writes_one_accepted_memory(tmp_pat
     assert created[0]["promotionId"] == recovered["candidate"]["promotionId"]
 
 
+def test_exact_duplicate_accept_reuses_oldest_foreign_memory_and_exposes_no_identity(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    project.mkdir()
+    review = MemoryReviewStore(tmp_path / "review.json", tmp_path / "review-audit.jsonl")
+    accepted = AgentMemoryStore(tmp_path / "agent-memory.jsonl", tmp_path / "accepted-audit.jsonl")
+    first = accepted.create(
+        {"scope": "project", "projectRoot": str(project), "kind": "preference", "text": "Prefer blue accents."}
+    )
+    accepted.create(
+        {"scope": "project", "projectRoot": str(project), "kind": "preference", "text": "Prefer blue accents."}
+    )
+    run = MemoryConsolidator(review, policy_version=POLICY_VERSION).run(
+        mode="suggest_only",
+        sources=[_project_source(project)],
+        expected_revision=0,
+        provider=_provider_candidate(),
+    )
+    candidate_id = run["candidates"][0]["candidateId"]
+    coordinator = MemoryReviewCoordinator(review, accepted)
+
+    with pytest.raises(RevisionConflictError):
+        coordinator.accept(candidate_id, expected_revision=run["revision"] - 1, project_root=str(project))
+    before_rows = (tmp_path / "agent-memory.jsonl").read_text(encoding="utf-8").splitlines()
+    completed = coordinator.accept(candidate_id, expected_revision=run["revision"], project_root=str(project))
+
+    candidate = completed["candidate"]
+    assert candidate["state"] == "accepted"
+    assert candidate["acceptDisposition"] == "deduplicated"
+    assert candidate["memoryId"] == first["memoryId"]
+    after_rows = (tmp_path / "agent-memory.jsonl").read_text(encoding="utf-8").splitlines()
+    assert after_rows == before_rows
+    public = review.snapshot()["candidates"][0]
+    assert public["acceptedAsDuplicate"] is True
+    assert "memoryId" not in public
+    assert "acceptedText" not in public
+
+
+def test_legacy_promotion_candidates_infer_promoted_disposition_but_explicit_malformed_values_fail_closed(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "Project"
+    project.mkdir()
+    review = MemoryReviewStore(tmp_path / "review.json", tmp_path / "review-audit.jsonl")
+    accepted = AgentMemoryStore(tmp_path / "agent-memory.jsonl", tmp_path / "accepted-audit.jsonl")
+    run = MemoryConsolidator(review, policy_version=POLICY_VERSION).run(
+        mode="suggest_only",
+        sources=[_project_source(project)],
+        expected_revision=0,
+        provider=_provider_candidate(),
+    )
+    candidate_id = run["candidates"][0]["candidateId"]
+    promoting = review.begin_promotion(candidate_id, expected_revision=run["revision"])
+
+    def remove_disposition() -> None:
+        stored = json.loads(review.store_path.read_text(encoding="utf-8"))
+        stored["candidates"][0].pop("acceptDisposition", None)
+        review.store_path.write_text(json.dumps(stored), encoding="utf-8")
+
+    remove_disposition()
+    legacy_promoting = MemoryReviewStore(review.store_path, tmp_path / "reloaded-audit.jsonl")
+    assert legacy_promoting.get(candidate_id)["acceptDisposition"] == "promoted"  # type: ignore[index]
+
+    memory = accepted.promote(
+        promotion_id=promoting["candidate"]["promotionId"],
+        candidate_id=candidate_id,
+        scope="project",
+        project_root=str(project),
+        kind="preference",
+        text="Prefer blue accents.",
+    )
+    accepted_state = legacy_promoting.finish_promotion(
+        candidate_id,
+        promotion_id=promoting["candidate"]["promotionId"],
+        memory_id=memory["memoryId"],
+    )
+    remove_disposition()
+    legacy_accepted = MemoryReviewStore(review.store_path, tmp_path / "reloaded-accepted-audit.jsonl")
+    assert legacy_accepted.get(candidate_id)["acceptDisposition"] == "promoted"  # type: ignore[index]
+
+    undoing = legacy_accepted.begin_undo(candidate_id, expected_revision=accepted_state["revision"])
+    assert undoing["candidate"]["state"] == "undoing"
+    remove_disposition()
+    legacy_undoing = MemoryReviewStore(review.store_path, tmp_path / "reloaded-undoing-audit.jsonl")
+    assert legacy_undoing.get(candidate_id)["acceptDisposition"] == "promoted"  # type: ignore[index]
+
+    malformed = json.loads(review.store_path.read_text(encoding="utf-8"))
+    malformed["candidates"][0]["acceptDisposition"] = "foreign"
+    review.store_path.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(StoreCorruptionError, match="unsafe record"):
+        MemoryReviewStore(review.store_path, tmp_path / "malformed-audit.jsonl").snapshot()
+
+
+def test_duplicate_accept_is_exact_scope_kind_and_text_only(tmp_path: Path) -> None:
+    project_a = tmp_path / "ProjectA"
+    project_b = tmp_path / "ProjectB"
+    project_a.mkdir()
+    project_b.mkdir()
+    accepted = AgentMemoryStore(tmp_path / "agent-memory.jsonl", tmp_path / "accepted-audit.jsonl")
+    canonical = accepted.create(
+        {"scope": "project", "projectRoot": str(project_a), "kind": "preference", "text": "Prefer blue accents."}
+    )
+    scope_a = resolve_memory_scope("project", str(project_a), authorized_project_roots=[str(project_a)])
+    scope_b = resolve_memory_scope("project", str(project_b), authorized_project_roots=[str(project_b)])
+    assert accepted.find_active_exact_review_memory(
+        scope="project",
+        scope_key=scope_a.scope_key,
+        project_root=str(project_a),
+        kind="preference",
+        text="Prefer blue accents.",
+        exclude_candidate_id="memcand_" + "a" * 32,
+        exclude_promotion_id="promotion_a",
+    )["memoryId"] == canonical["memoryId"]
+    for scope, project, kind, text in (
+        (scope_b, project_b, "preference", "Prefer blue accents."),
+        (scope_a, project_a, "fact", "Prefer blue accents."),
+        (scope_a, project_a, "preference", "prefer blue accents."),
+        (scope_a, project_a, "preference", "Prefer  blue accents."),
+    ):
+        assert accepted.find_active_exact_review_memory(
+            scope="project",
+            scope_key=scope.scope_key,
+            project_root=str(project),
+            kind=kind,
+            text=text,
+            exclude_candidate_id="memcand_" + "a" * 32,
+            exclude_promotion_id="promotion_a",
+        ) is None
+
+
+def test_duplicate_accept_recovers_after_restart_and_undo_or_erase_preserves_canonical(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    project = tmp_path / "Project"
+    project.mkdir()
+    service = MemoryConsolidationService(runtime, policy_version=POLICY_VERSION)
+    canonical = service.accepted_store.create(
+        {"scope": "project", "projectRoot": str(project), "kind": "preference", "text": "Prefer blue accents."}
+    )
+    run = service.consolidator.run(
+        mode="suggest_only",
+        sources=[_project_source(project)],
+        expected_revision=0,
+        provider=_provider_candidate(),
+    )
+    candidate_id = run["candidates"][0]["candidateId"]
+    with pytest.raises(RuntimeError, match="restart"):
+        service.coordinator.accept(
+            candidate_id,
+            expected_revision=run["revision"],
+            project_root=str(project),
+            phase_hook=lambda phase: (_ for _ in ()).throw(RuntimeError("restart"))
+            if phase == "after_promotion_started"
+            else None,
+        )
+    interrupted = service.review_store.get(candidate_id)
+    assert interrupted is not None
+    assert interrupted["state"] == "promoting"
+    assert interrupted["acceptDisposition"] == "deduplicated"
+    assert interrupted["memoryId"] == canonical["memoryId"]
+
+    restarted = MemoryConsolidationService(runtime, policy_version=POLICY_VERSION)
+    recovery = restarted.reconcile_startup([str(project)])
+    assert recovery["reconciledPromotions"] == 1
+    duplicate = restarted.review_store.get(candidate_id)
+    assert duplicate is not None and duplicate["acceptDisposition"] == "deduplicated"
+    undone = restarted.coordinator.undo(candidate_id, expected_revision=recovery["revision"])
+    assert undone["candidate"]["state"] == "proposed"
+    assert restarted.accepted_store.get(canonical["memoryId"]) is not None
+    erased = restarted.coordinator.permanent_erase(candidate_id, expected_revision=undone["revision"])
+    assert erased["memoryEraseCount"] == 0
+    assert restarted.accepted_store.get(canonical["memoryId"]) is not None
+
+
+def test_external_canonical_delete_reopens_duplicate_without_retaining_foreign_history(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    project.mkdir()
+    review = MemoryReviewStore(tmp_path / "review.json", tmp_path / "review-audit.jsonl")
+    accepted = AgentMemoryStore(tmp_path / "agent-memory.jsonl", tmp_path / "accepted-audit.jsonl")
+    canonical = accepted.create(
+        {"scope": "project", "projectRoot": str(project), "kind": "preference", "text": "Prefer blue accents."}
+    )
+    run = MemoryConsolidator(review, policy_version=POLICY_VERSION).run(
+        mode="suggest_only", sources=[_project_source(project)], expected_revision=0, provider=_provider_candidate()
+    )
+    candidate_id = run["candidates"][0]["candidateId"]
+    coordinator = MemoryReviewCoordinator(review, accepted)
+    accepted_result = coordinator.accept(candidate_id, expected_revision=run["revision"], project_root=str(project))
+    accepted.delete(canonical["memoryId"], {"reason": "user"})
+    reconciliation = coordinator.reconcile_external_memory_deletions([canonical["memoryId"]])
+    reopened = review.get(candidate_id)
+    assert reconciliation["candidateIds"] == [candidate_id]
+    assert reopened is not None and reopened["state"] == "proposed"
+    assert reopened["lastUndoneDisposition"] == "deduplicated"
+    assert canonical["memoryId"] not in reopened["priorMemoryIds"]
+    assert accepted_result["candidate"]["memoryId"] == canonical["memoryId"]
+
+
 def test_startup_finishes_durable_project_promotion_after_project_directory_is_gone(
     tmp_path: Path,
 ) -> None:
