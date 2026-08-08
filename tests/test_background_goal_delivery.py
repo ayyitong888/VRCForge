@@ -1,6 +1,8 @@
+import ast
 import asyncio
 import threading
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from background_goal_delivery import (
@@ -402,6 +404,214 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "draining" for call in gateway.calls))
         self.assertTrue(any(call[0] == "drained" for call in gateway.calls))
         self.assertEqual(states[-1]["delivery"]["status"], "failed")
+
+    def test_shutdown_stops_admission_waits_a_snapshot_and_is_idempotent(self):
+        release_worker = threading.Event()
+        gateway = FakeGoalService(block_event=release_worker)
+        coordinator, lanes, _states = self.coordinator(gateway)
+
+        async def scenario():
+            with patch("background_goal_delivery.PHASE_TIMEOUT_SECONDS", {"provider_call": 0.01}):
+                with self.assertRaises(BackgroundGoalDeliveryError):
+                    await coordinator.execute(
+                        delivery_id="delivery-shutdown",
+                        begin_params={"clientTurnId": "turn-shutdown"},
+                        runtime_params={"session_id": "session-shutdown", "clientTurnId": "turn-shutdown"},
+                        agent_name="test-agent",
+                        provider="remote",
+                        base_url="https://example.invalid",
+                    )
+
+            first = await coordinator.shutdown(grace_seconds=0.01)
+            self.assertEqual(first.snapshot_count, 1)
+            self.assertEqual(first.drained_count, 0)
+            self.assertEqual(first.pending_count, 1)
+            self.assertEqual(lanes.snapshot()["background"], 1)
+
+            for rejected in (
+                coordinator.execute(
+                    delivery_id="delivery-after-shutdown",
+                    begin_params={},
+                    runtime_params={},
+                    agent_name="test-agent",
+                    provider="remote",
+                    base_url="https://example.invalid",
+                ),
+                coordinator.execute_approved_action(
+                    delivery_id="delivery-approved-after-shutdown",
+                    approve_operation=lambda: {},
+                    execute_operation=lambda _approved: {},
+                ),
+            ):
+                with self.assertRaises(BackgroundGoalDeliveryError) as raised:
+                    await rejected
+                self.assertEqual(raised.exception.status_code, 503)
+
+            repeated = await coordinator.shutdown(grace_seconds=0)
+            self.assertEqual(repeated.pending_count, 1)
+            release_worker.set()
+            finished = await coordinator.shutdown(grace_seconds=1)
+            self.assertEqual(finished.snapshot_count, 1)
+            self.assertEqual(finished.drained_count, 1)
+            self.assertEqual(finished.pending_count, 0)
+            final = await coordinator.shutdown(grace_seconds=0)
+            self.assertEqual(final.snapshot_count, 0)
+
+        asyncio.run(scenario())
+        self.assertEqual(lanes.snapshot()["total"], 0)
+        self.assertEqual(len([call for call in gateway.calls if call[0] == "drained"]), 1)
+
+    def test_cancelling_drain_task_never_finishes_or_releases_before_worker_exit(self):
+        release_worker = threading.Event()
+        gateway = FakeGoalService(block_event=release_worker)
+        coordinator, lanes, _states = self.coordinator(gateway)
+
+        async def scenario():
+            with patch("background_goal_delivery.PHASE_TIMEOUT_SECONDS", {"provider_call": 0.01}):
+                with self.assertRaises(BackgroundGoalDeliveryError):
+                    await coordinator.execute(
+                        delivery_id="delivery-cancel-drain",
+                        begin_params={},
+                        runtime_params={"session_id": "session-cancel-drain"},
+                        agent_name="test-agent",
+                        provider="remote",
+                        base_url="https://example.invalid",
+                    )
+            drain_task = next(iter(coordinator._drain_tasks))  # noqa: SLF001 - lifecycle regression proof.
+            await asyncio.sleep(0)
+            drain_task.cancel()
+            await asyncio.sleep(0.02)
+            self.assertFalse(drain_task.done())
+            self.assertEqual(lanes.snapshot()["background"], 1)
+            self.assertFalse(any(call[0] == "drained" for call in gateway.calls))
+
+            release_worker.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await drain_task
+
+        asyncio.run(scenario())
+        self.assertEqual(lanes.snapshot()["total"], 0)
+        self.assertEqual(len([call for call in gateway.calls if call[0] == "drained"]), 1)
+
+    def test_cancelling_owned_worker_waits_for_real_thread_exit_before_finishing_drain(self):
+        release_worker = threading.Event()
+        gateway = FakeGoalService(block_event=release_worker)
+        coordinator, lanes, _states = self.coordinator(gateway)
+
+        async def scenario():
+            with patch("background_goal_delivery.PHASE_TIMEOUT_SECONDS", {"provider_call": 0.01}):
+                with self.assertRaises(BackgroundGoalDeliveryError):
+                    await coordinator.execute(
+                        delivery_id="delivery-cancel-worker",
+                        begin_params={},
+                        runtime_params={"session_id": "session-cancel-worker"},
+                        agent_name="test-agent",
+                        provider="remote",
+                        base_url="https://example.invalid",
+                    )
+            drain_task = next(iter(coordinator._drain_tasks))  # noqa: SLF001 - lifecycle regression proof.
+            worker = coordinator._drain_workers[drain_task]  # noqa: SLF001 - owned-worker proof.
+            worker.cancel()
+            await asyncio.sleep(0.02)
+
+            self.assertFalse(worker.done())
+            self.assertIn(drain_task, coordinator._drain_tasks)  # noqa: SLF001
+            self.assertEqual(lanes.snapshot()["background"], 1)
+            self.assertFalse(any(call[0] == "drained" for call in gateway.calls))
+
+            release_worker.set()
+            finished = await coordinator.shutdown(grace_seconds=1)
+            self.assertEqual(finished.pending_count, 0)
+
+        asyncio.run(scenario())
+        self.assertEqual(coordinator.drain_task_count, 0)
+        self.assertEqual(lanes.snapshot()["total"], 0)
+        self.assertEqual(len([call for call in gateway.calls if call[0] == "drained"]), 1)
+
+    def test_shutdown_and_dashboard_lifecycle_keep_exact_wait_order(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        delivery_tree = ast.parse((repo_root / "background_goal_delivery.py").read_text(encoding="utf-8"))
+        coordinator = next(
+            node
+            for node in delivery_tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "BackgroundGoalDeliveryCoordinator"
+        )
+        owned_worker_calls = [
+            node
+            for node in ast.walk(coordinator)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_start_owned_thread_worker"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
+        ]
+        self.assertEqual(len(owned_worker_calls), 5)
+        for method_name in ("execute", "execute_approved_action"):
+            method = next(
+                node
+                for node in coordinator.body
+                if isinstance(node, ast.AsyncFunctionDef) and node.name == method_name
+            )
+            self.assertFalse(
+                any(
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "to_thread"
+                    for node in ast.walk(method)
+                )
+            )
+        shutdown = next(
+            node
+            for node in coordinator.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "shutdown"
+        )
+        shutdown_calls = [
+            node
+            for node in ast.walk(shutdown)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        ]
+        self.assertTrue(
+            any(
+                call.func.attr == "wait"
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id == "asyncio"
+                for call in shutdown_calls
+            )
+        )
+        self.assertFalse(any(call.func.attr == "cancel" for call in shutdown_calls))
+
+        dashboard_tree = ast.parse((repo_root / "dashboard_server.py").read_text(encoding="utf-8"))
+        on_shutdown = next(
+            node
+            for node in dashboard_tree.body
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "on_shutdown"
+        )
+        coordinator_shutdown = next(
+            node
+            for node in ast.walk(on_shutdown)
+            if isinstance(node, ast.Await)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "shutdown"
+            and isinstance(node.value.func.value, ast.Name)
+            and node.value.func.value.id == "BACKGROUND_GOAL_COORDINATOR"
+        )
+        goal_monitor_cancel = next(
+            node
+            for node in ast.walk(on_shutdown)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "cancel"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "BACKGROUND_GOAL_MONITOR_TASK"
+        )
+        wake_drain_read = min(
+            node.lineno
+            for node in ast.walk(on_shutdown)
+            if isinstance(node, ast.Name) and node.id == "BACKGROUND_GOAL_WAKE_DRAIN_TASKS"
+        )
+        self.assertLess(coordinator_shutdown.lineno, goal_monitor_cancel.lineno)
+        self.assertLess(coordinator_shutdown.lineno, wake_drain_read)
 
     def test_project_lock_timeout_keeps_lane_until_begin_worker_exits(self):
         release_worker = threading.Event()

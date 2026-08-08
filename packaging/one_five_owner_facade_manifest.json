@@ -702,6 +702,172 @@
       "hostProxy": {"source": "agent_skill_registry.py", "class": "AgentSkillRegistryService"}
     },
     {
+      "id": "dashboard.runtime-composition-root",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "AGENT_GATEWAY"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "RUNTIME_LANE_BUDGET"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "BACKGROUND_GOAL_PREFLIGHT"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "BACKGROUND_GOAL_COORDINATOR"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "_agent_gateway_llm_plan",
+            "_agent_gateway_context_compact"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gateway.runtime-session-dispatch-owner",
+      "rootSymbols": [
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_runtime_sessions"},
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_cancelled_runtime_turns"},
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_runtime_stream_context"},
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "background_activity_started_fn"}
+      ],
+      "facades": [
+        {
+          "source": "agent_gateway.py",
+          "scope": "class",
+          "class": "AgentGateway",
+          "methods": [
+            "_signal_background_activity",
+            "_normalize_computer_use_accent",
+            "runtime_message",
+            "_runtime_message_impl",
+            "runtime_stream_context",
+            "_summarize_loop_plan",
+            "_restore_runtime_session",
+            "_runtime_desktop_bootstrap_completed",
+            "_record_runtime_desktop_bootstrap",
+            "runtime_observe",
+            "get_runtime_session",
+            "_runtime_run_from_turn",
+            "_runtime_turn_run_status",
+            "request_runtime_cancel",
+            "_runtime_cancel_requested",
+            "_consume_runtime_cancel_request",
+            "record_runtime_queue_event",
+            "list_runtime_runs",
+            "runtime_run_log_path",
+            "_append_runtime_run",
+            "_read_runtime_run_events",
+            "_find_registry_skill",
+            "execute_runtime_skill",
+            "_execute_runtime_skill",
+            "_execute_skill_package",
+            "_runtime_skill_package_audit_context",
+            "_execute_skill_entrypoint"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gateway.runtime-planner-owner",
+      "rootSymbols": [
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "llm_plan_fn"},
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "runtime_context_compact_fn"},
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "llm_planner_label"},
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "llm_reasoning_trace"},
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "llm_context_usage"}
+      ],
+      "facades": [
+        {
+          "source": "agent_gateway.py",
+          "scope": "class",
+          "class": "AgentGateway",
+          "methods": [
+            "_plan_agent_turn",
+            "_disconnected_local_plan",
+            "_local_plan_agent_turn",
+            "_plan_runtime_meta_question",
+            "_plan_write_intent",
+            "_avatars_from_loop_state",
+            "_build_avatar_write_params",
+            "_llm_plan_agent_turn",
+            "_record_llm_context_usage",
+            "_maybe_compact_runtime_history",
+            "_message_with_runtime_context",
+            "_llm_loop_step_observation",
+            "_build_llm_plan_prompt",
+            "_match_runtime_skill",
+            "_match_package_skill_route",
+            "_runtime_skill_route",
+            "_desktop_action_observation"
+          ]
+        },
+        {
+          "source": "agent_gateway.py",
+          "scope": "module",
+          "methods": [
+            "parse_llm_plan_response",
+            "normalize_llm_plan_result",
+            "usage_int",
+            "estimate_runtime_context_tokens",
+            "classify_runtime_compaction_failure",
+            "bounded_runtime_compaction_integer",
+            "runtime_compaction_audit_view",
+            "runtime_compaction_cancelled_view",
+            "_sanitize_planner_tool_observation_text",
+            "planner_safe_tool_result_fields",
+            "format_planner_tool_observation",
+            "extract_shell_command_candidate"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "gateway.shell-policy-execution-owner",
+      "rootSymbols": [
+        {"source": "agent_gateway.py", "scope": "module", "name": "SHELL_RUNNER_NATIVE"},
+        {"source": "agent_gateway.py", "scope": "module", "name": "SHELL_RUNNER_POWERSHELL"},
+        {"source": "agent_gateway.py", "scope": "module", "name": "SHELL_NATIVE_BLOCK_PATTERN"},
+        {"source": "agent_gateway.py", "scope": "module", "name": "_POWERSHELL_EXECUTABLE_CACHE"}
+      ],
+      "facades": [
+        {
+          "source": "agent_gateway.py",
+          "scope": "class",
+          "class": "AgentGateway",
+          "methods": [
+            "classify_shell",
+            "execute_shell",
+            "execute_approved_shell",
+            "execute_shell_payload",
+            "default_workspace_root",
+            "_resolve_workspace_root",
+            "_resolve_cwd",
+            "_shell_classification",
+            "_shell_command_is_read_only",
+            "_shell_auto_manual_approval_reason",
+            "_low_risk_reasons",
+            "_read_command_args_are_low_risk",
+            "_args_stay_in_workspace",
+            "_git_low_risk_reasons",
+            "_git_log_args_are_low_risk",
+            "_git_diff_args_are_low_risk",
+            "_git_show_args_are_low_risk",
+            "_create_shell_approval",
+            "_run_shell_command"
+          ]
+        },
+        {
+          "source": "agent_gateway.py",
+          "scope": "module",
+          "methods": [
+            "resolve_powershell_executable",
+            "native_shell_argv",
+            "command_hash",
+            "summarize_shell_result",
+            "kill_process_tree"
+          ]
+        }
+      ]
+    },
+    {
       "id": "gateway.desktop-computer-use-stopgap-facade",
       "facades": [
         {

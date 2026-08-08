@@ -1126,9 +1126,21 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.AGENT_MCP_CONTEXT = None
             dashboard_server.AGENT_MCP_MOUNT.app = None
             lease = Mock()
+            drain_shutdown = AsyncMock(
+                return_value=SimpleNamespace(
+                    snapshot_count=0,
+                    drained_count=0,
+                    pending_count=0,
+                )
+            )
             try:
                 with (
                     patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
+                    patch.object(
+                        dashboard_server.BACKGROUND_GOAL_COORDINATOR,
+                        "shutdown",
+                        drain_shutdown,
+                    ),
                     patch.object(
                         dashboard_server.AGENT_GATEWAY.desktop,
                         "stop_embedded_worker",
@@ -1136,6 +1148,7 @@ class DashboardServerTests(unittest.TestCase):
                 ):
                     await dashboard_server.on_shutdown()
                 lease.release.assert_not_called()
+                drain_shutdown.assert_awaited_once_with()
             finally:
                 (
                     dashboard_server.AGENT_MCP_INIT_TASK,

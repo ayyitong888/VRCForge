@@ -2254,6 +2254,7 @@ async def on_startup() -> None:
     global AGENT_MCP_INIT_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    BACKGROUND_GOAL_COORDINATOR.start()
     load_project_snapshot_cache()
     await asyncio.to_thread(DIAGNOSTIC_LOGGER.cleanup)
     await asyncio.to_thread(reconcile_diagnostic_trace_policy)
@@ -2339,6 +2340,25 @@ async def on_shutdown() -> None:
         except asyncio.CancelledError:
             pass
         STATUS_MONITOR_TASK = None
+    try:
+        goal_shutdown = await BACKGROUND_GOAL_COORDINATOR.shutdown()
+        if goal_shutdown.pending_count:
+            emit_log(
+                "warn",
+                "agent",
+                "Background goal drain shutdown reached its bounded deadline.",
+                {
+                    "drainSnapshotCount": goal_shutdown.snapshot_count,
+                    "pendingDrainCount": goal_shutdown.pending_count,
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 - shutdown remains best-effort after stopping admission.
+        emit_log(
+            "warn",
+            "agent",
+            "Background goal drain shutdown had a warning.",
+            {"error": str(exc)},
+        )
     if BACKGROUND_GOAL_MONITOR_TASK is not None:
         BACKGROUND_GOAL_MONITOR_TASK.cancel()
         try:

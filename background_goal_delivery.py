@@ -94,6 +94,15 @@ class GoalLifecyclePort:
     preflight: ProviderPreflightCache
 
 
+@dataclass(frozen=True, slots=True)
+class BackgroundGoalShutdownReport:
+    """Bounded snapshot of app-owned drain work during shutdown."""
+
+    snapshot_count: int
+    drained_count: int
+    pending_count: int
+
+
 class BackgroundGoalDeliveryCoordinator:
     """Own capacity, timeout drainage, and durable outcome classification."""
 
@@ -113,10 +122,42 @@ class BackgroundGoalDeliveryCoordinator:
         self._lane_budget = lifecycle.lane_budget
         self._preflight = lifecycle.preflight
         self._drain_tasks: set[asyncio.Task[Any]] = set()
+        self._drain_workers: dict[asyncio.Task[Any], asyncio.Task[Any]] = {}
+        self._accepting = True
 
     @property
     def drain_task_count(self) -> int:
         return len(self._drain_tasks)
+
+    def start(self) -> None:
+        """Open admission for one app lifecycle without replacing drain ownership."""
+
+        self._accepting = True
+
+    async def shutdown(self, *, grace_seconds: float = 5.0) -> BackgroundGoalShutdownReport:
+        """Stop admission and wait a bounded interval for the current drain snapshot."""
+
+        self._accepting = False
+        snapshot = tuple(self._drain_tasks)
+        if not snapshot:
+            return BackgroundGoalShutdownReport(
+                snapshot_count=0,
+                drained_count=0,
+                pending_count=0,
+            )
+        done, pending = await asyncio.wait(
+            snapshot,
+            timeout=max(0.0, float(grace_seconds)),
+        )
+        return BackgroundGoalShutdownReport(
+            snapshot_count=len(snapshot),
+            drained_count=len(done),
+            pending_count=len(pending),
+        )
+
+    def _require_accepting(self) -> None:
+        if not self._accepting:
+            raise BackgroundGoalDeliveryError("Background goal delivery is shutting down.", 503)
 
     async def execute(
         self,
@@ -128,6 +169,7 @@ class BackgroundGoalDeliveryCoordinator:
         provider: str,
         base_url: str,
     ) -> dict[str, Any]:
+        self._require_accepting()
         lease_token = f"goal:{delivery_id}"
         lease_result = self._lane_budget.acquire_result("background", lease_token)
         if lease_result == "duplicate":
@@ -216,12 +258,10 @@ class BackgroundGoalDeliveryCoordinator:
                 )
                 await self._emit_state(state)
                 raise BackgroundGoalDeliveryError("Background goal project lock exceeded its deadline.", 504)
-            worker = asyncio.create_task(
-                asyncio.to_thread(
-                    self._goal.begin_agent_goal_delivery,
-                    delivery_id,
-                    begin_params,
-                )
+            worker = self._start_owned_thread_worker(
+                self._goal.begin_agent_goal_delivery,
+                delivery_id,
+                begin_params,
             )
             try:
                 delivery_start = await asyncio.wait_for(
@@ -268,12 +308,10 @@ class BackgroundGoalDeliveryCoordinator:
                 )
                 await self._emit_state(state)
                 raise BackgroundGoalDeliveryError("Background goal provider call exceeded its deadline.", 504)
-            worker = asyncio.create_task(
-                asyncio.to_thread(
-                    self._runtime.execute,
-                    {**runtime_params, "_backgroundGoalRun": True},
-                    agent_name=agent_name,
-                )
+            worker = self._start_owned_thread_worker(
+                self._runtime.execute,
+                {**runtime_params, "_backgroundGoalRun": True},
+                agent_name=agent_name,
             )
             try:
                 payload = await asyncio.wait_for(
@@ -391,7 +429,7 @@ class BackgroundGoalDeliveryCoordinator:
                 delivery_id,
                 active_phase,
             )
-            worker = asyncio.create_task(asyncio.to_thread(persist_outcome))
+            worker = self._start_owned_thread_worker(persist_outcome)
             try:
                 state = await asyncio.wait_for(
                     asyncio.shield(worker),
@@ -492,6 +530,7 @@ class BackgroundGoalDeliveryCoordinator:
         so a late result can never turn the run green.
         """
 
+        self._require_accepting()
         lease_token = f"goal-apply:{delivery_id}"
         lease_result = self._lane_budget.acquire_result("background", lease_token)
         if lease_result == "duplicate":
@@ -510,7 +549,7 @@ class BackgroundGoalDeliveryCoordinator:
                 apply_started = True
                 if isinstance(phase_state, dict):
                     await self._emit_state(phase_state)
-            approve_worker = asyncio.create_task(asyncio.to_thread(approve_operation))
+            approve_worker = self._start_owned_thread_worker(approve_operation)
             try:
                 approved_value = await asyncio.wait_for(
                     asyncio.shield(approve_worker),
@@ -587,7 +626,7 @@ class BackgroundGoalDeliveryCoordinator:
                         "apply",
                     )
                 apply_started = True
-            worker = asyncio.create_task(asyncio.to_thread(execute_operation, approved))
+            worker = self._start_owned_thread_worker(execute_operation, approved)
             try:
                 execution = await asyncio.wait_for(
                     asyncio.shield(worker),
@@ -743,6 +782,36 @@ class BackgroundGoalDeliveryCoordinator:
         await self._emit_state(final_state)
         return True
 
+    @staticmethod
+    def _start_owned_thread_worker(
+        function: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> asyncio.Task[Any]:
+        """Start a thread worker whose outer cancellation waits for the inner task."""
+
+        async def run_owned() -> Any:
+            inner = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+            cancelled: asyncio.CancelledError | None = None
+            while True:
+                try:
+                    result = await asyncio.shield(inner)
+                except asyncio.CancelledError as exc:
+                    if inner.cancelled():
+                        raise
+                    cancelled = cancelled or exc
+                    continue
+                except BaseException:
+                    if cancelled is not None:
+                        raise cancelled
+                    raise
+                if cancelled is not None:
+                    raise cancelled
+                return result
+
+        return asyncio.create_task(run_owned())
+
     def _start_drain(
         self,
         delivery_id: str,
@@ -764,7 +833,13 @@ class BackgroundGoalDeliveryCoordinator:
             )
         )
         self._drain_tasks.add(drain_task)
-        drain_task.add_done_callback(self._drain_tasks.discard)
+        self._drain_workers[drain_task] = worker
+
+        def discard(completed: asyncio.Task[Any]) -> None:
+            self._drain_tasks.discard(completed)
+            self._drain_workers.pop(completed, None)
+
+        drain_task.add_done_callback(discard)
 
     async def _drain_worker(
         self,
@@ -776,11 +851,23 @@ class BackgroundGoalDeliveryCoordinator:
         failure_class: str,
         error: str,
     ) -> None:
+        cancelled: asyncio.CancelledError | None = None
+        worker_drained = False
         try:
-            try:
-                await worker
-            except BaseException:
-                pass
+            while True:
+                try:
+                    await asyncio.shield(worker)
+                    break
+                except asyncio.CancelledError as exc:
+                    if worker.cancelled():
+                        break
+                    cancelled = exc
+                    if worker.done():
+                        break
+                    continue
+                except BaseException:
+                    break
+            worker_drained = True
             state = await _atomic_to_thread(
                 self._goal.finish_agent_goal_delivery_drain,
                 delivery_id,
@@ -790,7 +877,10 @@ class BackgroundGoalDeliveryCoordinator:
             )
             await self._emit_state(state)
         finally:
-            self._lane_budget.release(lease_token)
+            if worker_drained:
+                self._lane_budget.release(lease_token)
+        if cancelled is not None:
+            raise cancelled
 
     async def _emit_state(self, state: dict[str, Any]) -> None:
         if self._events.state_changed is not None:
