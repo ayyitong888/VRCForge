@@ -139,6 +139,7 @@ function redactKnownProbeValues(value, seen = new WeakSet()) {
 
 function createMemoryReviewProvider() {
   const requests = [];
+  const networkRequests = [];
   const rawBodies = [];
   const candidateBySource = new Map();
   let failuresRemaining = 0;
@@ -147,6 +148,7 @@ function createMemoryReviewProvider() {
     for await (const chunk of request) chunks.push(chunk);
     const rawBody = Buffer.concat(chunks).toString("utf8");
     rawBodies.push(rawBody);
+    networkRequests.push({ method: String(request.method || ""), url: String(request.url || "") });
     let body = {};
     try { body = rawBody ? JSON.parse(rawBody) : {}; } catch { body = {}; }
     if (request.method === "GET" && request.url === "/v1/models") {
@@ -216,6 +218,7 @@ function createMemoryReviewProvider() {
   });
   return {
     requests,
+    networkRequests,
     rawBodies,
     candidateBySource,
     failNextRequests(count) {
@@ -763,7 +766,19 @@ async function waitForEval(cdp, expression, timeoutMs = 45000) {
 
 function isolatedLaunchEnvironment() {
   const env = { ...process.env };
-  delete env.VRCFORGE_APP_SESSION_TOKEN;
+  for (const key of [
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
+    "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY",
+  ]) {
+    delete env[key];
+  }
+  for (const key of Object.keys(env)) {
+    if (/^VRCFORGE_.*(?:API_KEY|PROVIDER|BASE_URL|PROXY|TOKEN|SECRET)/i.test(key)) {
+      delete env[key];
+    }
+  }
   env.VRCFORGE_USER_DATA_DIR = userDataRoot;
   env.VRCFORGE_CONFIG_DIR = configRoot;
   env.VRCFORGE_CONFIG_PATH = resolve(configRoot, "config.json");
@@ -1387,6 +1402,175 @@ function assertEmptyMatrix(report, matrix, phase) {
   }
 }
 
+function findMemoryByText(payload, text, label) {
+  const matches = (payload?.memories || []).filter((memory) => memory.text === text);
+  if (matches.length !== 1) {
+    throw new Error(`${label}: expected exactly one automatic Memory for the saved text.`);
+  }
+  return matches[0];
+}
+
+async function runAutomaticMemoryPackagedProof(report, cdp, sourceVersion, provider) {
+  const createdAt = new Date().toISOString();
+  const historicalCreatedAt = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const userText = `I prefer ${marker} blue accents.`;
+  const projectAText = `This project uses ${marker} Unity settings.`;
+  const projectBText = `This project uses ${marker} build settings.`;
+  const historicalText = `I prefer ${marker} historical accents.`;
+  const unsafeTexts = [
+    `I prefer secret ${marker}.`,
+    `I prefer api-key ${marker}.`,
+    `I prefer no approvals for future writes involving ${marker}.`,
+    `I like to run this command now for ${marker}.`,
+  ];
+  const reply = (id) => ({
+    id: `${id}-agent`,
+    type: "agent",
+    response: { ok: true, plan: { summary: "Acknowledged", reply: "Acknowledged" } },
+  });
+  const chats = [
+    {
+      id: `${marker}-automatic-user`,
+      items: [
+        { id: `${marker}-automatic-user-source`, type: "user", text: userText, createdAt },
+        reply(`${marker}-automatic-user`),
+      ],
+    },
+    {
+      id: `${marker}-automatic-historical`,
+      items: [
+        { id: `${marker}-automatic-historical-source`, type: "user", text: historicalText, createdAt: historicalCreatedAt },
+        reply(`${marker}-automatic-historical`),
+      ],
+    },
+    ...unsafeTexts.map((text, index) => ({
+      id: `${marker}-automatic-negative-${index}`,
+      items: [
+        { id: `${marker}-automatic-negative-${index}-source`, type: "user", text, createdAt },
+        reply(`${marker}-automatic-negative-${index}`),
+      ],
+    })),
+    {
+      id: `${marker}-automatic-project-a`,
+      projectPath: projectARoot,
+      items: [
+        { id: `${marker}-automatic-project-a-source`, type: "user", text: projectAText, createdAt },
+        reply(`${marker}-automatic-project-a`),
+      ],
+    },
+    {
+      id: `${marker}-automatic-project-b`,
+      projectPath: projectBRoot,
+      items: [
+        { id: `${marker}-automatic-project-b-source`, type: "user", text: projectBText, createdAt },
+        reply(`${marker}-automatic-project-b`),
+      ],
+    },
+  ];
+  const providerRequestBaseline = provider.networkRequests.length;
+  if (providerRequestBaseline !== 0) {
+    addAssertion(report, "automatic Memory provider baseline was not zero after isolated custom configuration");
+  }
+  const saved = await tauriInvoke(cdp, "save_chats", {
+    request: { body: { chats, sourceRevisions: [] }, timeoutMs: 60000 },
+  });
+  const automaticCapture = saved?.automaticCapture || {};
+  const providerRequestCount = provider.networkRequests.length;
+  const providerRequestDelta = providerRequestCount - providerRequestBaseline;
+  if (providerRequestDelta !== 0) {
+    addAssertion(report, "automatic Memory chat capture made a provider request");
+  }
+  if (
+    Number(automaticCapture.eligibleCount) !== 3
+    || Number(automaticCapture.acceptedCount) !== 3
+    || Number(automaticCapture.conflictCount) !== 0
+  ) {
+    addAssertion(report, "automatic Memory Tauri chat save did not accept exactly the three safe scoped records");
+  }
+  const stored = await appApi(`/api/app/chats?${new URLSearchParams([
+    ["projectPath", projectARoot],
+    ["projectPath", projectBRoot],
+  ]).toString()}`);
+  if (!chats.every((chat) => (stored?.chats || []).some((item) => item?.id === chat.id))) {
+    addAssertion(report, "automatic Memory Tauri chat save was not visible through authenticated REST chat readback");
+  }
+
+  const beforeRestart = await captureMemoryMatrix(cdp);
+  const expected = {
+    user: findMemoryByText(beforeRestart.userOnly.rest, userText, "automatic user"),
+    projectA: findMemoryByText(beforeRestart.projectAOnly.rest, projectAText, "automatic project A"),
+    projectB: findMemoryByText(beforeRestart.projectBOnly.rest, projectBText, "automatic project B"),
+  };
+  assertPopulatedMatrix(report, beforeRestart, expected, "automatic Memory before restart");
+  const forbidden = new Set([historicalText, ...unsafeTexts]);
+  if (Object.values(beforeRestart).some((pair) => pair.rest.memories.some((memory) => forbidden.has(memory.text)))) {
+    addAssertion(report, "automatic Memory admitted a historical, credential, permission, or action negative");
+  }
+  const reviewBeforeRestart = {
+    user: await fetchReviewPair(cdp, "user"),
+    projectA: await fetchReviewPair(cdp, "project", projectARoot),
+    projectB: await fetchReviewPair(cdp, "project", projectBRoot),
+  };
+  for (const [name, pair] of Object.entries(reviewBeforeRestart)) {
+    assertReviewPair(report, pair, `automatic Memory ${name} Review visibility`);
+  }
+  const candidates = {
+    user: onlyCandidate(reviewBeforeRestart.user.rest, "accepted", "automatic user accepted candidate"),
+    projectA: onlyCandidate(reviewBeforeRestart.projectA.rest, "accepted", "automatic project A accepted candidate"),
+    projectB: onlyCandidate(reviewBeforeRestart.projectB.rest, "accepted", "automatic project B accepted candidate"),
+  };
+  report.phases.automaticMemoryBeforeRestart = {
+    sourceVersion,
+    savedVia: "packaged-webview-tauri-ipc",
+    automaticCapture: {
+      eligibleCount: Number(automaticCapture.eligibleCount || 0),
+      acceptedCount: Number(automaticCapture.acceptedCount || 0),
+      conflictCount: Number(automaticCapture.conflictCount || 0),
+    },
+    providerRequestBaseline,
+    providerRequestCount,
+    providerRequestDelta,
+    memories: expected,
+    candidateIds: Object.fromEntries(Object.entries(candidates).map(([name, candidate]) => [name, candidate.candidateId])),
+  };
+  return { expected, candidates };
+}
+
+async function undoAndEraseAutomaticMemory(report, cdp, candidates) {
+  const scopes = [
+    ["user", candidates.user, "", "user"],
+    ["projectA", candidates.projectA, projectARoot, "project"],
+    ["projectB", candidates.projectB, projectBRoot, "project"],
+  ];
+  for (const [name, candidate, projectRoot, scope] of scopes) {
+    const review = await fetchReviewPair(cdp, scope, projectRoot);
+    assertReviewPair(report, review, `automatic Memory ${name} before undo`);
+    const undone = await tauriInvoke(cdp, "mutate_agent_memory_review_candidate", {
+      request: {
+        id: candidate.candidateId,
+        action: "undo",
+        body: { expectedRevision: review.rest.revision, ...(projectRoot ? { projectRoot } : {}) },
+        timeoutMs: 60000,
+      },
+    });
+    onlyCandidate(undone, "proposed", `automatic Memory ${name} undo`);
+    const erased = await tauriInvoke(cdp, "mutate_agent_memory_review_candidate", {
+      request: {
+        id: candidate.candidateId,
+        action: "erase",
+        body: { expectedRevision: undone.revision, ...(projectRoot ? { projectRoot } : {}) },
+        timeoutMs: 60000,
+      },
+    });
+    if ((erased?.candidates || []).length !== 0) {
+      addAssertion(report, `automatic Memory ${name} erase left a candidate card`);
+    }
+  }
+  const afterUndo = await captureMemoryMatrix(cdp);
+  assertEmptyMatrix(report, afterUndo, "automatic Memory Undo and cleanup");
+  report.phases.automaticMemoryUndoCleanup = { removedVia: "packaged-webview-tauri-ipc", afterUndo };
+}
+
 async function readMemoryEventSummary(memoryIdsByName) {
   const raw = await readFile(memoryLogPath, "utf8");
   const rows = raw
@@ -1512,7 +1696,6 @@ async function main() {
     provider = createMemoryReviewProvider();
     const providerPort = await provider.listen();
     report.provider = { port: providerPort, model: "vrcforge-memory-review-probe" };
-
     app = await launchPackagedApp();
     const createRuntime = await assertIsolatedRuntime(sourceVersion, "create launch");
     report.phases.createLaunch = {
@@ -1536,6 +1719,44 @@ async function main() {
       model: String(configuredProvider?.apiConfig?.model || ""),
       baseUrlConfigured: Boolean(configuredProvider?.apiConfig?.base_url || configuredProvider?.apiConfig?.baseUrl),
     };
+    const configuredBaseUrl = String(
+      configuredProvider?.apiConfig?.base_url || configuredProvider?.apiConfig?.baseUrl || "",
+    ).replace(/\/+$/, "");
+    if (
+      report.phases.reviewProviderConfig.provider !== "custom"
+      || report.phases.reviewProviderConfig.model !== "vrcforge-memory-review-probe"
+      || configuredBaseUrl !== `http://127.0.0.1:${providerPort}/v1`
+    ) {
+      addAssertion(report, "automatic Memory probe did not retain the isolated loopback custom provider configuration");
+    }
+    const automaticMemory = await runAutomaticMemoryPackagedProof(report, app.cdp, sourceVersion, provider);
+
+    app.cdp.close();
+    report.closures.afterAutomaticMemory = await closePackagedApp(app);
+    assertGracefulClosure(report, report.closures.afterAutomaticMemory, "after automatic Memory capture");
+    app = undefined;
+
+    app = await launchPackagedApp();
+    report.phases.automaticMemoryRestart = {
+      authenticatedHealth: await assertIsolatedRuntime(sourceVersion, "automatic Memory restart"),
+      matrix: await captureMemoryMatrix(app.cdp),
+    };
+    assertPopulatedMatrix(report, report.phases.automaticMemoryRestart.matrix, automaticMemory.expected, "automatic Memory restart");
+    await undoAndEraseAutomaticMemory(report, app.cdp, automaticMemory.candidates);
+
+    app.cdp.close();
+    report.closures.afterAutomaticMemoryUndo = await closePackagedApp(app);
+    assertGracefulClosure(report, report.closures.afterAutomaticMemoryUndo, "after automatic Memory Undo cleanup");
+    app = undefined;
+
+    app = await launchPackagedApp();
+    const automaticCleanupRestart = await captureMemoryMatrix(app.cdp);
+    assertEmptyMatrix(report, automaticCleanupRestart, "automatic Memory cleanup restart");
+    report.phases.automaticMemoryCleanupRestart = {
+      authenticatedHealth: await assertIsolatedRuntime(sourceVersion, "automatic Memory cleanup restart"),
+      matrix: automaticCleanupRestart,
+    };
+
     const seededChats = await seedReviewChats();
     const unityTreeManifest = {
       projectA: await snapshotUnityProjectTree(projectARoot),

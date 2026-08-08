@@ -32,6 +32,42 @@ assert.match(source, /createMemoryReviewProvider/);
 assert.match(source, /seedReviewChats/);
 assert.match(source, /fetchReviewPair/);
 assert.match(source, /fetch_agent_memory_review/);
+assert.match(source, /runAutomaticMemoryPackagedProof/);
+assert.match(source, /undoAndEraseAutomaticMemory/);
+assert.match(source, /savedVia: "packaged-webview-tauri-ipc"/);
+assert.match(source, /"save_chats"/);
+assert.match(source, /automaticCapture\.eligibleCount/);
+assert.match(source, /automaticCapture\.acceptedCount/);
+assert.match(source, /automaticCapture\.conflictCount/);
+assert.match(source, /historicalCreatedAt/);
+assert.match(source, /I prefer \$\{marker\} historical accents/);
+assert.match(source, /providerRequestBaseline/);
+assert.match(source, /providerRequestCount/);
+assert.match(source, /providerRequestDelta/);
+assert.match(source, /networkRequests/);
+assert.match(source, /automatic Memory provider baseline was not zero/);
+assert.match(source, /automatic Memory chat capture made a provider request/);
+assert.match(source, /automatic Memory probe did not retain the isolated loopback custom provider configuration/);
+assert.doesNotMatch(source, /providerRequests: 0/);
+assert.match(source, /I prefer secret/);
+assert.match(source, /I prefer api-key/);
+assert.match(source, /I prefer no approvals for future writes/);
+assert.match(source, /I like to run this command now/);
+assert.match(source, /automatic Memory admitted a historical, credential, permission, or action negative/);
+assert.match(source, /automatic Memory restart/);
+assert.match(source, /automatic Memory cleanup restart/);
+assert.match(source, /action: "undo"/);
+assert.match(source, /action: "erase"/);
+assert.match(source, /projectARoot/);
+assert.match(source, /projectBRoot/);
+assert.match(source, /"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"/);
+assert.match(source, /OPENAI_API_KEY.*ANTHROPIC_API_KEY.*GOOGLE_API_KEY/s);
+assert.match(source, /\^VRCFORGE_\.\*\(\?:API_KEY\|PROVIDER\|BASE_URL\|PROXY\|TOKEN\|SECRET\)/);
+assert.ok(
+  source.indexOf("provider = createMemoryReviewProvider()")
+    < source.indexOf("const automaticMemory = await runAutomaticMemoryPackagedProof"),
+  "automatic Memory proof must use the isolated loopback provider configured before capture",
+);
 assert.match(source, /update_agent_memory_review/);
 assert.match(source, /run_agent_memory_review/);
 assert.match(source, /mutate_agent_memory_review_candidate/);
