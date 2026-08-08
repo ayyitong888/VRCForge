@@ -293,6 +293,8 @@ from package_install_workflow_service import (
     resolve_project_path,
 )
 from wardrobe_outfit_workflow_service import (
+    ClothingFxReadPorts,
+    ClothingFxReadService,
     WardrobeOutfitApprovedWriteHandlers,
     WardrobeOutfitWorkflowError,
     WardrobeOutfitWorkflowPorts,
@@ -9442,7 +9444,10 @@ async def ai_select_tuning_locks(request: TuningLocksAiSelectRequest) -> dict[st
 
 @app.post("/api/clothes/scan")
 async def scan_clothes(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.scan_clothes, request)
+    try:
+        return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.scan_clothes, request)
+    except RuntimeError as exc:
+        raise to_http_exception(exc) from exc
 
 
 @app.post("/api/clothes/toggle")
@@ -9452,7 +9457,10 @@ async def toggle_clothing(request: ClothingToggleRequest) -> dict[str, Any]:
 
 @app.post("/api/clothes/generate-fx")
 async def generate_clothing_fx(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.generate_clothing_fx, request)
+    try:
+        return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.generate_clothing_fx, request)
+    except RuntimeError as exc:
+        raise to_http_exception(exc) from exc
 
 
 @app.post("/api/clothes/apply-fx")
@@ -10422,25 +10430,6 @@ def apply_saved_tuning_payload(saved_payload: dict[str, Any], request: Dashboard
 
 
 
-def scan_clothes_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
-    try:
-        settings = load_dashboard_settings(request)
-        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        payload = scan_avatar_controls_direct(settings, avatar_path)
-        clothes = ensure_list_payload(payload.get("items") or payload.get("clothes") or [], "avatar menu/parameter scan")
-        emit_log("info", "fx", "Avatar menu/parameter scan completed.", {"avatarPath": avatar_path, "count": len(clothes)})
-        return {
-            "ok": True,
-            "avatarPath": avatar_path,
-            "clothes": clothes,
-            "count": len(clothes),
-            "jsonPath": payload.get("jsonPath"),
-        }
-    except (RuntimeError, UnityMcpError) as exc:
-        emit_log("error", "fx", "Failed to scan clothing objects.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
-
-
 def toggle_clothing_sync(request: ClothingToggleRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
@@ -10455,18 +10444,6 @@ def toggle_clothing_sync(request: ClothingToggleRequest) -> dict[str, Any]:
         return {"ok": True, "result": payload}
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "fx", "Failed to toggle clothing object.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
-
-
-def generate_clothing_fx_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
-    try:
-        settings = load_dashboard_settings(request)
-        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        payload = build_clothing_fx_blueprint_from_controls(settings, avatar_path)
-        emit_log("success", "fx", "Clothing FX blueprint generated.", {"avatarPath": avatar_path, "itemCount": len(payload.get("items") or [])})
-        return {"ok": True, "avatarPath": avatar_path, "fxBlueprint": payload}
-    except (RuntimeError, UnityMcpError) as exc:
-        emit_log("error", "fx", "Failed to generate clothing FX blueprint.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
@@ -21598,6 +21575,16 @@ if DASHBOARD_STATE is None:
     DASHBOARD_STATE = load_initial_dashboard_state()
 
 
+CLOTHING_FX_READ = ClothingFxReadService(
+    ClothingFxReadPorts(
+        load_settings=lambda request: load_dashboard_settings(request),
+        current_avatar_path=lambda: DASHBOARD_RUNTIME.current_avatar_path,
+        scan_controls=scan_avatar_controls_direct,
+        build_blueprint=build_clothing_fx_blueprint_from_controls,
+        ensure_list=ensure_list_payload,
+        log=emit_log,
+    )
+)
 WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
     WardrobeOutfitWorkflowPorts(
         selected_project_path=lambda: (
@@ -21610,8 +21597,8 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         scan_avatar_items=scan_avatar_items_sync,
         scan_avatar_controls=scan_avatar_controls_sync,
         scan_wardrobe=scan_wardrobe_sync,
-        scan_clothes=scan_clothes_sync,
-        generate_clothing_fx=generate_clothing_fx_sync,
+        scan_clothes=CLOTHING_FX_READ.scan_clothes,
+        generate_clothing_fx=CLOTHING_FX_READ.generate_clothing_fx,
         preview_apply_clothing_fx=apply_clothing_fx_sync,
         preview_setup_outfit=preview_setup_outfit_sync,
         preview_add_wardrobe_outfit=preview_add_wardrobe_outfit_sync,

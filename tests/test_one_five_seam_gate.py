@@ -190,6 +190,20 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
             "name": "SHADER_VISION_PROTECTION",
         }
     ]
+    assert {
+        item["name"]
+        for item in groups["dashboard.wardrobe-outfit-root-owners"]["rootSymbols"]
+    } == {
+        "CLOTHING_FX_READ",
+        "WARDROBE_OUTFIT_WORKFLOWS",
+        "WARDROBE_OUTFIT_APPROVED_WRITES",
+    }
+    assert {
+        "scan_clothes_sync",
+        "generate_clothing_fx_sync",
+    }.isdisjoint(
+        groups["dashboard.wardrobe-outfit-root-owners"]["facades"][0]["methods"]
+    )
     assert len(groups["dashboard.project-snapshot-root-facades"]["facades"][0]["methods"]) == 17
     assert len(groups["dashboard.unity-status-root-facades"]["facades"][0]["methods"]) == 3
     assert len(groups["gateway.approval-transaction-host-proxy"]["facades"][0]["methods"]) == 41

@@ -10,6 +10,90 @@ class WardrobeOutfitWorkflowError(RuntimeError):
         self.status_code = status_code
 
 
+class ClothingFxLogPort(Protocol):
+    def __call__(
+        self,
+        level: str,
+        scope: str,
+        message: str,
+        data: dict[str, Any] | None = None,
+    ) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ClothingFxReadPorts:
+    """Read-only capabilities for clothing discovery and FX blueprint shaping."""
+
+    load_settings: Callable[[Any], Any]
+    current_avatar_path: Callable[[], str]
+    scan_controls: Callable[[Any, str | None], dict[str, Any]]
+    build_blueprint: Callable[[Any, str | None], dict[str, Any]]
+    ensure_list: Callable[[Any, str], list[Any]]
+    log: ClothingFxLogPort
+
+
+class ClothingFxReadService:
+    """Own clothing scan and FX blueprint reads without project-write authority."""
+
+    def __init__(self, ports: ClothingFxReadPorts) -> None:
+        self._ports = ports
+
+    def scan_clothes(self, request: Any) -> dict[str, Any]:
+        try:
+            settings = self._ports.load_settings(request)
+            avatar_path = request.avatar_path or self._ports.current_avatar_path()
+            payload = self._ports.scan_controls(settings, avatar_path)
+            clothes = self._ports.ensure_list(
+                payload.get("items") or payload.get("clothes") or [],
+                "avatar menu/parameter scan",
+            )
+            self._ports.log(
+                "info",
+                "fx",
+                "Avatar menu/parameter scan completed.",
+                {"avatarPath": avatar_path, "count": len(clothes)},
+            )
+            return {
+                "ok": True,
+                "avatarPath": avatar_path,
+                "clothes": clothes,
+                "count": len(clothes),
+                "jsonPath": payload.get("jsonPath"),
+            }
+        except RuntimeError as exc:
+            self._ports.log(
+                "error",
+                "fx",
+                "Failed to scan clothing objects.",
+                {"error": str(exc)},
+            )
+            raise
+
+    def generate_clothing_fx(self, request: Any) -> dict[str, Any]:
+        try:
+            settings = self._ports.load_settings(request)
+            avatar_path = request.avatar_path or self._ports.current_avatar_path()
+            payload = self._ports.build_blueprint(settings, avatar_path)
+            self._ports.log(
+                "success",
+                "fx",
+                "Clothing FX blueprint generated.",
+                {
+                    "avatarPath": avatar_path,
+                    "itemCount": len(payload.get("items") or []),
+                },
+            )
+            return {"ok": True, "avatarPath": avatar_path, "fxBlueprint": payload}
+        except RuntimeError as exc:
+            self._ports.log(
+                "error",
+                "fx",
+                "Failed to generate clothing FX blueprint.",
+                {"error": str(exc)},
+            )
+            raise
+
+
 class InspectOutfitPackagePort(Protocol):
     def __call__(self, package_path: str, *, max_entries: int = 5000) -> dict[str, Any]: ...
 

@@ -1,15 +1,67 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from wardrobe_outfit_workflow_service import (
+    ClothingFxReadPorts,
+    ClothingFxReadService,
     WardrobeOutfitApprovedWriteHandlers,
     WardrobeOutfitWorkflowError,
     WardrobeOutfitWorkflowPorts,
     WardrobeOutfitWorkflowService,
 )
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _clothing_reads(calls: list[tuple[Any, ...]]) -> ClothingFxReadService:
+    settings = object()
+
+    def load_settings(request: Any) -> Any:
+        calls.append(("settings", request))
+        return settings
+
+    def scan_controls(actual_settings: Any, avatar_path: str | None) -> dict[str, Any]:
+        calls.append(("scan", actual_settings, avatar_path))
+        return {
+            "items": [{"displayName": "Jacket", "parameterName": "Cloth_Jacket"}],
+            "jsonPath": "artifacts/avatar_controls.json",
+        }
+
+    def build_blueprint(actual_settings: Any, avatar_path: str | None) -> dict[str, Any]:
+        calls.append(("blueprint", actual_settings, avatar_path))
+        return {"items": [{"displayName": "Jacket"}], "itemCount": 1}
+
+    def ensure_list(payload: Any, scope: str) -> list[Any]:
+        calls.append(("ensure-list", payload, scope))
+        if not isinstance(payload, list):
+            raise RuntimeError("not a list")
+        return payload
+
+    def log(
+        level: str,
+        scope: str,
+        message: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        calls.append(("log", level, scope, message, data))
+
+    return ClothingFxReadService(
+        ClothingFxReadPorts(
+            load_settings=load_settings,
+            current_avatar_path=lambda: "Scene/CurrentAvatar",
+            scan_controls=scan_controls,
+            build_blueprint=build_blueprint,
+            ensure_list=ensure_list,
+            log=log,
+        )
+    )
 
 
 def _service(calls: list[tuple[Any, ...]], *, ready: bool = True) -> WardrobeOutfitWorkflowService:
@@ -163,6 +215,79 @@ def test_typed_read_and_preview_ports_are_direct_and_explicit() -> None:
     ]
     for operation, expected in operations:
         assert operation(payload)["name"] == expected
+
+
+def test_clothing_fx_read_owner_preserves_scan_and_blueprint_shapes_and_logs() -> None:
+    calls: list[tuple[Any, ...]] = []
+    service = _clothing_reads(calls)
+
+    scan_request = SimpleNamespace(avatar_path="Scene/OverrideAvatar")
+    scanned = service.scan_clothes(scan_request)
+    generated = service.generate_clothing_fx(SimpleNamespace(avatar_path=None))
+
+    assert scanned == {
+        "ok": True,
+        "avatarPath": "Scene/OverrideAvatar",
+        "clothes": [{"displayName": "Jacket", "parameterName": "Cloth_Jacket"}],
+        "count": 1,
+        "jsonPath": "artifacts/avatar_controls.json",
+    }
+    assert generated == {
+        "ok": True,
+        "avatarPath": "Scene/CurrentAvatar",
+        "fxBlueprint": {"items": [{"displayName": "Jacket"}], "itemCount": 1},
+    }
+    assert any(call[:3] == ("log", "info", "fx") for call in calls)
+    assert any(call[:3] == ("log", "success", "fx") for call in calls)
+    assert any(call[0] == "scan" and call[2] == "Scene/OverrideAvatar" for call in calls)
+    assert any(call[0] == "blueprint" and call[2] == "Scene/CurrentAvatar" for call in calls)
+
+
+def test_clothing_fx_read_owner_logs_and_preserves_runtime_errors() -> None:
+    calls: list[tuple[Any, ...]] = []
+
+    def fail_scan(_settings: Any, _avatar_path: str | None) -> dict[str, Any]:
+        raise RuntimeError("Cannot connect to Unity MCP server")
+
+    service = ClothingFxReadService(
+        ClothingFxReadPorts(
+            load_settings=lambda _request: object(),
+            current_avatar_path=lambda: "Scene/Avatar",
+            scan_controls=fail_scan,
+            build_blueprint=lambda _settings, _avatar: {},
+            ensure_list=lambda payload, _scope: payload,
+            log=lambda level, scope, message, data=None: calls.append(
+                (level, scope, message, data)
+            ),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="Cannot connect to Unity MCP server"):
+        service.scan_clothes(SimpleNamespace(avatar_path=None))
+
+    assert calls == [
+        (
+            "error",
+            "fx",
+            "Failed to scan clothing objects.",
+            {"error": "Cannot connect to Unity MCP server"},
+        )
+    ]
+
+
+def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
+    tree = ast.parse((REPO_ROOT / "dashboard_server.py").read_text(encoding="utf-8"))
+    bindings = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    source = (REPO_ROOT / "dashboard_server.py").read_text(encoding="utf-8")
+
+    assert "scan_clothes_sync" not in bindings
+    assert "generate_clothing_fx_sync" not in bindings
+    assert "scan_clothes=CLOTHING_FX_READ.scan_clothes" in source
+    assert "generate_clothing_fx=CLOTHING_FX_READ.generate_clothing_fx" in source
 
 
 def test_approved_writes_are_a_separate_least_authority_binding() -> None:
