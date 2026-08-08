@@ -15,6 +15,8 @@ import {
 } from "./lib/persistence_redaction_scan.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
+const allowUnpushed = process.argv.includes("--allow-unpushed");
+const selfTest = process.argv.includes("--self-test");
 const cdpPort = Number(process.env.VRCFORGE_MEMORY_PROBE_CDP_PORT || "9348");
 const marker = `MEMORY_RESTART_PROBE_${Date.now()}`;
 const redactionSentinels = [
@@ -56,11 +58,26 @@ const appOrigin = "http://127.0.0.1:8757";
 const appRequestOrigin = "http://tauri.localhost";
 let appSessionToken = "";
 
+const allowedOptions = new Set(["--allow-unpushed", "--self-test", "--help", "-h"]);
+if (process.argv.slice(2).some((item) => !allowedOptions.has(item))) {
+  console.error("Unknown packaged Memory restart probe option.");
+  process.exit(2);
+}
+
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log(`Usage: node scripts/diagnose_packaged_memory_restart.mjs
+  console.log(`Usage: node scripts/diagnose_packaged_memory_restart.mjs [--allow-unpushed] [--self-test]
 
 Runs the packaged Memory persistence/isolation/tombstone and review restart probe.
-Requires a strict release build whose manifest commit equals pushed origin/main.
+Default mode is strict-release evidence: release-manifest.json, VERSION, HEAD,
+origin/main, ZIP and extracted executable must bind a strict release-eligible
+build policy. --allow-unpushed is only non-release local acceptance: it still
+requires VERSION, manifest commit == HEAD, ZIP and extracted executable hashes,
+but accepts only a clean worktree plus an explicit local-acceptance,
+release-ineligible policy with allowDirty=false, and writes
+strictReleaseBinding=false to its report.
+
+--self-test validates the pure build-policy boundary without reading a package,
+reserving a port, or starting VRCForge.
 
 Optional environment:
   VRCFORGE_MEMORY_PROBE_CDP_PORT=<unused port> (default: ${cdpPort})`);
@@ -253,6 +270,76 @@ function sha256File(path) {
   });
 }
 
+function normalizeBuildPolicy(manifest) {
+  const raw = manifest?.buildPolicy && typeof manifest.buildPolicy === "object"
+    ? manifest.buildPolicy
+    : {};
+  return {
+    mode: String(raw.mode || ""),
+    releaseEligible: raw.releaseEligible === true,
+    allowDirty: raw.allowDirty === true,
+    allowUnpushed: raw.allowUnpushed === true,
+    allowVersionMismatch: raw.allowVersionMismatch === true,
+  };
+}
+
+function isStrictBuildPolicy(policy) {
+  return policy.mode === "strict"
+    && policy.releaseEligible === true
+    && policy.allowDirty === false
+    && policy.allowUnpushed === false
+    && policy.allowVersionMismatch === false;
+}
+
+function isLocalAcceptanceBuildPolicy(policy) {
+  return policy.mode === "local-acceptance"
+    && policy.releaseEligible === false
+    && policy.allowDirty === false
+    && policy.allowUnpushed === true;
+}
+
+function runSelfTest() {
+  const strict = normalizeBuildPolicy({
+    buildPolicy: {
+      mode: "strict",
+      releaseEligible: true,
+      allowDirty: false,
+      allowUnpushed: false,
+      allowVersionMismatch: false,
+    },
+  });
+  const local = normalizeBuildPolicy({
+    buildPolicy: {
+      mode: "local-acceptance",
+      releaseEligible: false,
+      allowDirty: false,
+      allowUnpushed: true,
+      allowVersionMismatch: true,
+    },
+  });
+  if (!isStrictBuildPolicy(strict) || isLocalAcceptanceBuildPolicy(strict)) {
+    throw new Error("self-test: strict build policy classification failed.");
+  }
+  if (!isLocalAcceptanceBuildPolicy(local) || isStrictBuildPolicy(local)) {
+    throw new Error("self-test: local-acceptance build policy classification failed.");
+  }
+  if (isLocalAcceptanceBuildPolicy({ ...local, releaseEligible: true })) {
+    throw new Error("self-test: release-eligible policy was accepted as local-only evidence.");
+  }
+  if (isLocalAcceptanceBuildPolicy({ ...local, allowUnpushed: false })) {
+    throw new Error("self-test: local policy without explicit allowUnpushed was accepted.");
+  }
+  if (isLocalAcceptanceBuildPolicy({ ...local, allowDirty: true })) {
+    throw new Error("self-test: dirty local policy was accepted.");
+  }
+  console.log("Memory restart probe self-test passed");
+}
+
+if (selfTest) {
+  runSelfTest();
+  process.exit(0);
+}
+
 async function snapshotUnityProjectTree(projectRoot) {
   const manifest = [];
   for (const topLevel of ["Assets", "Packages", "ProjectSettings"]) {
@@ -305,7 +392,7 @@ async function prepareManifestBoundPackage(sourceVersion) {
     manifest = JSON.parse((await readFile(manifestPath, "utf8")).replace(/^\uFEFF/, ""));
   } catch (error) {
     if (error?.code === "ENOENT") {
-      throw new Error(`Strict packaged probe requires ${manifestPath}.`);
+      throw new Error(`Packaged Memory restart probe requires ${manifestPath}.`);
     }
     throw new Error(`Release manifest could not be read: ${String(error?.message || error)}`);
   }
@@ -315,12 +402,23 @@ async function prepareManifestBoundPackage(sourceVersion) {
   const escapedRepoRoot = escapePowerShellLiteral(repoRoot);
   const headCommit = (await runPowerShell(`git -C '${escapedRepoRoot}' rev-parse HEAD`)).trim().toLowerCase();
   const originMainCommit = (await runPowerShell(`git -C '${escapedRepoRoot}' rev-parse origin/main`)).trim().toLowerCase();
+  const worktreeClean = (await runPowerShell(`git -C '${escapedRepoRoot}' status --porcelain=v1`)) === "";
   const manifestCommit = String(manifest?.commit || "").trim().toLowerCase();
-  if (!/^[0-9a-f]{40}$/.test(headCommit) || !/^[0-9a-f]{40}$/.test(originMainCommit) || headCommit !== originMainCommit) {
-    throw new Error(`Strict packaged probe requires HEAD=${headCommit || "<missing>"} to equal origin/main=${originMainCommit || "<missing>"}.`);
+  const buildPolicy = normalizeBuildPolicy(manifest);
+  const strictBuildPolicy = isStrictBuildPolicy(buildPolicy);
+  const localAcceptanceBuildPolicy = isLocalAcceptanceBuildPolicy(buildPolicy);
+  if (
+    !/^[0-9a-f]{40}$/.test(headCommit) ||
+    !/^[0-9a-f]{40}$/.test(originMainCommit) ||
+    manifestCommit !== headCommit
+  ) {
+    throw new Error(`Manifest binding mismatch: manifest=${manifestCommit || "<missing>"}, HEAD=${headCommit || "<missing>"}, origin/main=${originMainCommit || "<missing>"}.`);
   }
-  if (manifestCommit !== headCommit) {
-    throw new Error(`Release manifest commit ${manifestCommit || "<missing>"} did not match current HEAD ${headCommit}.`);
+  if (!allowUnpushed && (headCommit !== originMainCommit || !worktreeClean || !strictBuildPolicy)) {
+    throw new Error("Strict packaged probe requires clean HEAD=origin/main and a strict release-eligible buildPolicy.");
+  }
+  if (allowUnpushed && (!worktreeClean || !localAcceptanceBuildPolicy)) {
+    throw new Error("--allow-unpushed requires a clean worktree plus buildPolicy.mode=local-acceptance, releaseEligible=false, allowDirty=false, and allowUnpushed=true.");
   }
   const portableName = `VRCForge_Windows_x64_${sourceVersion}.zip`;
   const portable = (Array.isArray(manifest?.artifacts) ? manifest.artifacts : [])
@@ -372,6 +470,11 @@ async function prepareManifestBoundPackage(sourceVersion) {
     commit: manifestCommit,
     headCommit,
     originMainCommit,
+    worktreeClean,
+    buildPolicy,
+    strictBuildPolicy,
+    localAcceptanceBuildPolicy,
+    strictReleaseBinding: !allowUnpushed && worktreeClean && headCommit === originMainCommit && strictBuildPolicy,
     portableName,
     portableSha256,
     innerExeSha256,
@@ -1324,6 +1427,12 @@ async function main() {
   const report = {
     schema: "vrcforge.packaged_memory_restart_probe.v2",
     marker,
+    mode: allowUnpushed ? "local-preacceptance" : "strict-release",
+    strictReleaseBinding: false,
+    releaseEligible: false,
+    releaseEvidence: allowUnpushed
+      ? "non-release local-preacceptance only"
+      : "strict release binding pending completion",
     exe,
     cdpPort,
     evidenceRoot,
@@ -1343,6 +1452,26 @@ async function main() {
     }
     const sourceVersion = (await readFile(resolve(repoRoot, "VERSION"), "utf8")).trim();
     const releaseBinding = await prepareManifestBoundPackage(sourceVersion);
+    report.strictReleaseBinding = releaseBinding.strictReleaseBinding === true;
+    report.releaseEligible = releaseBinding.buildPolicy.releaseEligible === true;
+    report.releaseBinding = {
+      strict: report.strictReleaseBinding,
+      manifestCommit: releaseBinding.commit,
+      headCommit: releaseBinding.headCommit,
+      originMainCommit: releaseBinding.originMainCommit,
+      worktreeClean: releaseBinding.worktreeClean,
+      buildPolicy: releaseBinding.buildPolicy,
+      strictBuildPolicy: releaseBinding.strictBuildPolicy,
+      localAcceptanceBuildPolicy: releaseBinding.localAcceptanceBuildPolicy,
+      portableSha256: releaseBinding.portableSha256,
+      extractedExeSha256: releaseBinding.exeSha256,
+    };
+    if (allowUnpushed && (report.strictReleaseBinding || report.releaseEligible)) {
+      addAssertion(report, "allow-unpushed mode was incorrectly marked as strict or release-eligible evidence");
+    }
+    if (!allowUnpushed && (!report.strictReleaseBinding || !report.releaseEligible)) {
+      addAssertion(report, "strict mode did not retain strict release binding and release eligibility");
+    }
     const packageStat = await stat(exe);
     report.package = {
       sourceVersion,
