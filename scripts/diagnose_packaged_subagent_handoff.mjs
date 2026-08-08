@@ -149,6 +149,12 @@ function isLocalAcceptanceBuildPolicy(policy) {
     && policy.allowUnpushed === true;
 }
 
+function isChatStoreSnapshotChanged(error) {
+  return error?.status === 409
+    && error?.path === "/api/app/chats"
+    && error?.payload?.detail?.code === "chat_store_snapshot_changed";
+}
+
 function runSelfTest() {
   const strict = normalizeBuildPolicy({
     buildPolicy: {
@@ -182,6 +188,20 @@ function runSelfTest() {
   }
   if (isLocalAcceptanceBuildPolicy({ ...local, allowDirty: true })) {
     throw new Error("self-test: dirty local policy was accepted.");
+  }
+  if (!isChatStoreSnapshotChanged({
+    status: 409,
+    path: "/api/app/chats",
+    payload: { detail: { code: "chat_store_snapshot_changed" } },
+  })) {
+    throw new Error("self-test: chat snapshot conflict classification failed.");
+  }
+  if (isChatStoreSnapshotChanged({
+    status: 409,
+    path: "/api/app/chats",
+    payload: { detail: { code: "chat_store_recovery_required" } },
+  })) {
+    throw new Error("self-test: a non-snapshot chat conflict was accepted for retry.");
   }
   const previousDisableAuth = process.env.VRCFORGE_DISABLE_APP_AUTH;
   process.env.VRCFORGE_DISABLE_APP_AUTH = "1";
@@ -685,7 +705,11 @@ async function appApi(path, options = {}) {
       payload = { text: text.slice(0, 2000) };
     }
     if (!response.ok) {
-      throw new Error(`${response.status} ${path}: ${JSON.stringify(payload)}`);
+      const error = new Error(`${response.status} ${path}: ${JSON.stringify(payload)}`);
+      error.status = response.status;
+      error.path = path;
+      error.payload = payload;
+      throw error;
     }
     return payload;
   } finally {
@@ -1046,11 +1070,6 @@ async function injectSyntheticOrphanTask({ taskId, parentChatId, parentSessionId
 }
 
 async function persistSiblingChat(parentChatId) {
-  const payload = await appApi("/api/app/chats");
-  const parent = findChat(payload, parentChatId);
-  if (!parent) {
-    throw new Error("Parent chat was unavailable while creating the cross-chat isolation fixture.");
-  }
   const siblingId = `chat-sibling-${shortMarker}`;
   const siblingSessionId = `session-sibling-${shortMarker}`;
   const siblingTitle = `Sibling-${shortMarker}`;
@@ -1065,11 +1084,26 @@ async function persistSiblingChat(parentChatId) {
     updatedAt: timestamp,
     items: [{ id: `user-${shortMarker}`, type: "user", text: siblingSeed, createdAt: timestamp }],
   };
-  const chats = (payload.chats || []).filter((chat) => chat.id !== siblingId);
-  await appApi("/api/app/chats", {
-    method: "POST",
-    body: { chats: [...chats, sibling], sourceRevisions: payload.sources || [] },
-  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const payload = await appApi("/api/app/chats");
+    const parent = findChat(payload, parentChatId);
+    if (!parent) {
+      throw new Error("Parent chat was unavailable while creating the cross-chat isolation fixture.");
+    }
+    const chats = (payload.chats || []).filter((chat) => chat.id !== siblingId);
+    try {
+      await appApi("/api/app/chats", {
+        method: "POST",
+        body: { chats: [...chats, sibling], sourceRevisions: payload.sources || [] },
+      });
+      break;
+    } catch (error) {
+      if (attempt === 0 && isChatStoreSnapshotChanged(error)) {
+        continue;
+      }
+      throw error;
+    }
+  }
   const readback = await appApi("/api/app/chats");
   const stored = findChat(readback, siblingId);
   if (!stored || JSON.stringify(stored.items || []).includes(adoptHistoryMarker) ||

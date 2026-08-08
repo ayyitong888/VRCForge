@@ -36,6 +36,10 @@ def test_subagent_handoff_probe_has_explicit_local_acceptance_boundary() -> None
     assert "environment-not-isolated" in source
     assert "Timed out waiting for ${url}:" in source
     assert "sourceRevisions: payload.sources || []" in source
+    assert "attempt < 2" in source
+    assert "attempt === 0 && isChatStoreSnapshotChanged(error)" in source
+    assert 'error?.payload?.detail?.code === "chat_store_snapshot_changed"' in source
+    assert 'code: "chat_store_recovery_required"' in source
 
 
 def test_subagent_handoff_probe_self_test_is_side_effect_free() -> None:
