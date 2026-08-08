@@ -14,6 +14,7 @@ const packagedRoot = resolve(evidenceRoot, "package");
 const exe = resolve(packagedRoot, "VRCForge.exe");
 const userDataRoot = resolve(evidenceRoot, "user-data");
 const configRoot = resolve(userDataRoot, "config");
+const projectCachePath = resolve(userDataRoot, "project-cache.json");
 const webviewDataRoot = resolve(evidenceRoot, "webview2-user-data");
 const hostProfileRoot = resolve(evidenceRoot, "host-profile");
 const projectARoot = resolve(evidenceRoot, "projects", "project-a");
@@ -443,6 +444,16 @@ async function processSnapshot() {
   return raw ? JSON.parse(raw) : { vrcforgeProcesses: [], packagedRootProcesses: [], ports: [] };
 }
 
+async function hostUnityProcesses() {
+  const raw = await runPowerShell(`
+    @(Get-Process -Name Unity -ErrorAction SilentlyContinue |
+      Select-Object Id,ProcessName) | ConvertTo-Json -Depth 3 -Compress
+  `);
+  if (!raw) return [];
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
 function snapshotIsClear(snapshot) {
   return (snapshot.vrcforgeProcesses || []).length === 0
     && (snapshot.packagedRootProcesses || []).length === 0
@@ -652,6 +663,211 @@ async function waitForRenderer(cdp, timeoutMs = 45000) {
     await sleep(150);
   }
   throw new Error(`Timed out waiting for packaged WebView renderer; last=${JSON.stringify(last)}`);
+}
+
+async function tauriInvoke(cdp, command, args) {
+  const envelope = await evalValue(
+    cdp,
+    `(async () => {
+      try {
+        const value = await window.__TAURI_INTERNALS__.invoke(
+          ${JSON.stringify(command)},
+          ${JSON.stringify(args)},
+        );
+        return { ok: true, value };
+      } catch (error) {
+        const detail = error?.stack
+          || error?.message
+          || (typeof error === "string" ? error : JSON.stringify(error));
+        return { ok: false, error: String(detail || "unknown error") };
+      }
+    })()`,
+  );
+  if (!envelope?.ok) {
+    throw new Error(`Tauri ${command} failed: ${envelope?.error || "unknown error"}`);
+  }
+  return envelope.value;
+}
+
+async function reloadRenderer(cdp) {
+  await cdp.send("Page.reload", { ignoreCache: true }).catch((error) => {
+    if (!/Promise was collected/i.test(String(error))) throw error;
+  });
+  await waitForRenderer(cdp);
+  await sleep(500);
+}
+
+async function activatePersistedChat(cdp, title) {
+  const clicked = await waitForEval(
+    cdp,
+    `(() => {
+      const wanted = ${JSON.stringify(title)};
+      const sidebar = document.querySelector("aside");
+      const leaf = Array.from((sidebar || document).querySelectorAll("*"))
+        .find((node) => node.children.length === 0 && String(node.textContent || "").trim() === wanted);
+      const target = leaf?.closest("button, [role='button'], a, li, div");
+      if (!target) return { ok: false, reason: "saved chat was not rendered in the sidebar" };
+      target.click();
+      return { ok: true, tag: target.tagName };
+    })()`,
+  );
+  const activeHeader = await waitForEval(
+    cdp,
+    `(() => {
+      const wanted = ${JSON.stringify(title)};
+      const labels = Array.from(document.querySelectorAll("header > div:first-child > span"))
+        .map((node) => String(node.textContent || "").trim());
+      return { ok: labels.includes(wanted), labels };
+    })()`,
+  );
+  return { clicked: clicked?.ok === true, headerMatched: activeHeader?.ok === true };
+}
+
+function sameLocalPath(left, right) {
+  const normalize = (value) => String(value || "").replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
+  return Boolean(normalize(left)) && normalize(left) === normalize(right);
+}
+
+async function prepareQuestionUiProjectFixture() {
+  const projectSettings = resolve(projectARoot, "ProjectSettings");
+  await Promise.all([
+    mkdir(resolve(projectARoot, "Assets"), { recursive: true }),
+    mkdir(resolve(projectARoot, "Packages"), { recursive: true }),
+    mkdir(projectSettings, { recursive: true }),
+  ]);
+  await writeFile(
+    resolve(projectSettings, "ProjectVersion.txt"),
+    "m_EditorVersion: 2022.3.22f1\n",
+    "utf8",
+  );
+  const now = new Date().toISOString();
+  await writeFile(
+    projectCachePath,
+    `${JSON.stringify({
+      schema: "vrcforge.project_snapshot_cache.v1",
+      updatedAt: now,
+      durationMs: 1,
+      snapshot: {
+        selectedProjectPath: "",
+        unityEditorPath: "",
+        projects: [{
+          name: "project-a",
+          path: projectARoot,
+          editorVersion: "2022.3.22f1",
+          hasVrcForge: false,
+          hasUnityMcpPackage: false,
+          selected: false,
+          sources: ["configured-root"],
+          source: "configured-root",
+          activeMcp: false,
+          sessionId: "",
+          cliInstanceId: "",
+          unityVersion: "",
+          selectable: true,
+        }],
+      },
+    }, null, 2)}\n`,
+    "utf8",
+  );
+  await writeFile(
+    resolve(userDataRoot, "custom-projects.json"),
+    `${JSON.stringify({ version: 1, customPaths: [projectARoot], hiddenPaths: [] }, null, 2)}\n`,
+    "utf8",
+  );
+}
+
+async function registerQuestionUiProject(cdp) {
+  const bootstrap = await appApi("/api/app/bootstrap");
+  const projects = Array.isArray(bootstrap?.health?.projects?.projects)
+    ? bootstrap.health.projects.projects
+    : [];
+  const projectPaths = Array.from(new Set(
+    projects.map((project) => String(project?.path || "")).filter(Boolean),
+  ));
+  if (projectPaths.length !== 1 || !sameLocalPath(projectPaths[0], projectARoot)) {
+    throw new Error("Packaged Question UI project snapshot was not isolated to the fixture project.");
+  }
+  const before = await tauriInvoke(cdp, "fetch_project_prefs", {
+    request: { timeoutMs: 30000 },
+  });
+  if (
+    !Array.isArray(before?.customPaths)
+    || before.customPaths.length !== 1
+    || !sameLocalPath(before.customPaths[0], projectARoot)
+    || (before?.hiddenPaths || []).length !== 0
+  ) {
+    throw new Error("Packaged Question UI fixture project was not read from isolated project preferences.");
+  }
+  const saved = await tauriInvoke(cdp, "save_project_prefs", {
+    request: { customPaths: [projectARoot], hiddenPaths: [], timeoutMs: 30000 },
+  });
+  if (
+    !Array.isArray(saved?.customPaths)
+    || saved.customPaths.length !== 1
+    || !sameLocalPath(saved.customPaths[0], projectARoot)
+    || (saved?.hiddenPaths || []).length !== 0
+  ) {
+    throw new Error("Packaged Question UI fixture project was not registered through Tauri project preferences.");
+  }
+  return { cached: true, registered: true, hiddenCount: 0 };
+}
+
+async function seedAndActivateQuestionUiChat(cdp) {
+  const now = new Date().toISOString();
+  const chat = {
+    id: `${marker}-ui-chat`,
+    sessionId: "",
+    title: `${marker} Question UI`,
+    projectPath: projectARoot,
+    createdAt: now,
+    updatedAt: now,
+    revision: 1,
+    items: [],
+  };
+  // Discard the renderer's unsaved blank Quick Chat, then persist through the
+  // same Tauri command used by the product before hydrating and selecting it.
+  await reloadRenderer(cdp);
+  const current = await appApi("/api/app/chats");
+  const foreignProjectSources = (Array.isArray(current?.sources) ? current.sources : [])
+    .filter((source) => String(source?.scope || "") === "project")
+    .filter((source) => !sameLocalPath(source?.projectPath, projectARoot));
+  if (
+    current?.writeBlocked === true
+    || (Array.isArray(current?.recoveries) && current.recoveries.length > 0)
+    || foreignProjectSources.length > 0
+  ) {
+    throw new Error("Packaged Question UI chat store was not isolated to the fixture project; no chat write was attempted.");
+  }
+  const saved = await tauriInvoke(cdp, "save_chats", {
+    request: {
+      body: {
+        chats: [chat],
+        sourceRevisions: Array.isArray(current?.sources) ? current.sources : [],
+      },
+      timeoutMs: 60000,
+    },
+  });
+  const readback = await appApi("/api/app/chats");
+  const stored = (Array.isArray(readback?.chats) ? readback.chats : [])
+    .find((candidate) => String(candidate?.id || "") === chat.id);
+  if (
+    String(stored?.sessionId || "") !== chat.sessionId
+    || String(stored?.title || "") !== chat.title
+    || String(stored?.projectPath || "") !== projectARoot
+  ) {
+    throw new Error("Packaged Question UI seed was not durably read back with its exact app scope.");
+  }
+  await reloadRenderer(cdp);
+  const activation = await activatePersistedChat(cdp, chat.title);
+  return {
+    chatId: chat.id,
+    sessionId: chat.sessionId,
+    title: chat.title,
+    projectScoped: true,
+    saved: Boolean(saved),
+    restReadback: true,
+    activation,
+  };
 }
 
 async function launchPackagedApp() {
@@ -1068,9 +1284,14 @@ async function main() {
       mkdir(projectARoot, { recursive: true }),
       mkdir(projectBRoot, { recursive: true }),
     ]);
+    await prepareQuestionUiProjectFixture();
     report.beforeFirstLaunch = await processSnapshot();
     if (!snapshotIsClear(report.beforeFirstLaunch)) {
       throw new Error(`Launch preflight found an existing VRCForge process or occupied backend/CDP port; nothing was terminated: ${JSON.stringify(report.beforeFirstLaunch)}`);
+    }
+    report.beforeFirstLaunchUnity = await hostUnityProcesses();
+    if (report.beforeFirstLaunchUnity.length) {
+      throw new Error(`Launch preflight found a running Unity editor, so external project discovery was not isolated; nothing was terminated: ${JSON.stringify(report.beforeFirstLaunchUnity)}`);
     }
 
     app = await launchPackagedApp();
@@ -1081,6 +1302,8 @@ async function main() {
     report.phases.auth = { missingTokenStatus: missingAuth.status, wrongTokenStatus: wrongAuth.status };
     if (missingAuth.status !== 401) addAssertion(report, "missing app-session token was not rejected with HTTP 401");
     if (wrongAuth.status !== 401) addAssertion(report, "wrong app-session token was not rejected with HTTP 401");
+    report.phases.packagedUiProject = await registerQuestionUiProject(app.cdp);
+    report.phases.packagedUiSeed = await seedAndActivateQuestionUiChat(app.cdp);
     report.phases.packagedUi = await runPackagedProgressQuestionUiGate(report, app.cdp);
 
     const sessionA = `session-a-${marker}`;

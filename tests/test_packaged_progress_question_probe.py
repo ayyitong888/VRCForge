@@ -59,6 +59,41 @@ def test_question_probe_contract_covers_auth_scope_redaction_and_restart() -> No
     assert "missingAuth.status !== 401" in source
     assert "wrongAuth.status !== 401" in source
     assert "runPackagedProgressQuestionUiGate(report, app.cdp)" in source
+    assert "seedAndActivateQuestionUiChat(app.cdp)" in source
+    assert "prepareQuestionUiProjectFixture()" in source
+    assert 'schema: "vrcforge.project_snapshot_cache.v1"' in source
+    assert 'resolve(projectARoot, "Assets")' in source
+    assert 'resolve(projectARoot, "Packages")' in source
+    assert 'resolve(projectSettings, "ProjectVersion.txt")' in source
+    assert 'tauriInvoke(cdp, "fetch_project_prefs", {' in source
+    assert 'tauriInvoke(cdp, "save_project_prefs", {' in source
+    assert "projectPaths.length !== 1" in source
+    assert "Packaged Question UI project snapshot was not isolated to the fixture project." in source
+    assert 'resolve(userDataRoot, "custom-projects.json")' in source
+    assert 'customPaths: [projectARoot]' in source
+    assert 'Get-Process -Name Unity -ErrorAction SilentlyContinue' in source
+    assert "external project discovery was not isolated; nothing was terminated" in source
+    assert "Packaged Question UI fixture project was not read from isolated project preferences." in source
+    assert "Packaged Question UI fixture project was not registered through Tauri project preferences." in source
+    assert source.index("await prepareQuestionUiProjectFixture();") < source.index("app = await launchPackagedApp();")
+    assert 'tauriInvoke(cdp, "save_chats", {' in source
+    assert 'sourceRevisions: Array.isArray(current?.sources) ? current.sources : []' in source
+    assert 'String(source?.scope || "") === "project"' in source
+    assert "!sameLocalPath(source?.projectPath, projectARoot)" in source
+    assert "current?.writeBlocked === true" in source
+    assert "current.recoveries.length > 0" in source
+    assert "no chat write was attempted" in source
+    assert source.index("foreignProjectSources.length > 0") < source.index('tauriInvoke(cdp, "save_chats", {')
+    assert 'id: `${marker}-ui-chat`' in source
+    assert 'sessionId: ""' in source
+    assert 'sessionId: `${marker}-ui-session`' not in source
+    assert "projectPath: projectARoot" in source
+    assert 'const sidebar = document.querySelector("aside")' in source
+    assert "await reloadRenderer(cdp)" in source
+    assert "activatePersistedChat(cdp, chat.title)" in source
+    assert "Packaged Question UI seed was not durably read back with its exact app scope." in source
+    assert source.index("registerQuestionUiProject(app.cdp)") < source.index("seedAndActivateQuestionUiChat(app.cdp)")
+    assert source.index("seedAndActivateQuestionUiChat(app.cdp)") < source.index("runPackagedProgressQuestionUiGate(report, app.cdp)")
     assert 'appApi("/api/app/agent/progress/replace", {' in source
     assert "Array.from({ length: 8 }" in source
     assert "optionScroller.scrollHeight > optionScroller.clientHeight" in source
