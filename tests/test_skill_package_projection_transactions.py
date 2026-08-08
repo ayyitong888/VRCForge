@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ from skill_package_governance import (
     SkillPackageGovernancePorts,
     SkillPackageGovernanceService,
 )
+from skill_package_controller import SkillPackageController
 
 
 def _write_package_source(
@@ -123,7 +125,9 @@ def test_import_projection_failure_restores_registry_version_and_old_projection(
     monkeypatch.setattr(dashboard_server, "skill_package_service", lambda: service)
 
     with pytest.raises(SkillPackageError, match="must also be declared as manifest entrypoints"):
-        dashboard_server.import_skill_package_sync({"packagePath": str(package)})
+        dashboard_server.SKILL_PACKAGE_CONTROLLER.import_package(
+            {"packagePath": str(package)}
+        )
 
     assert service.list_installed() == []
     assert not (service.skill_store / "community.tests.projection-rollback").exists()
@@ -148,18 +152,20 @@ def test_package_enable_toggle_preserves_signed_projection_and_audit_identity(
     monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
     monkeypatch.setattr(dashboard_server, "skill_package_service", lambda: service)
 
-    imported = dashboard_server.import_skill_package_sync({"packagePath": str(package)})
+    imported = dashboard_server.SKILL_PACKAGE_CONTROLLER.import_package(
+        {"packagePath": str(package)}
+    )
     projected_skill = Path(imported["projectedSkill"]["path"])
     original_bytes = projected_skill.read_bytes()
     initial_context = gateway._runtime_skill_package_audit_context(  # noqa: SLF001 - regression checks attribution.
         gateway._find_registry_skill("projection-toggle")  # noqa: SLF001
     )
 
-    dashboard_server.set_skill_package_enabled_sync(
+    dashboard_server.SKILL_PACKAGE_CONTROLLER.set_enabled(
         {"skillPackageId": "community.tests.projection-toggle", "enabled": False}
     )
     assert gateway._find_registry_skill("projection-toggle")["enabled"] is False  # noqa: SLF001
-    dashboard_server.set_skill_package_enabled_sync(
+    dashboard_server.SKILL_PACKAGE_CONTROLLER.set_enabled(
         {"skillPackageId": "community.tests.projection-toggle", "enabled": True}
     )
     final_skill = gateway._find_registry_skill("projection-toggle")  # noqa: SLF001
@@ -190,7 +196,9 @@ def test_package_enable_projection_failure_restores_registry_and_projection_stat
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
     monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
     monkeypatch.setattr(dashboard_server, "skill_package_service", lambda: service)
-    imported = dashboard_server.import_skill_package_sync({"packagePath": str(package)})
+    imported = dashboard_server.SKILL_PACKAGE_CONTROLLER.import_package(
+        {"packagePath": str(package)}
+    )
     projected_skill = Path(imported["projectedSkill"]["path"])
     state_path = projected_skill.parent / PROJECTED_SKILL_STATE_NAME
     installed_path = service.skill_store / "community.tests.projection-toggle-rollback" / "installed.json"
@@ -203,7 +211,7 @@ def test_package_enable_projection_failure_restores_registry_and_projection_stat
 
     monkeypatch.setattr(dashboard_server, "_write_projected_skill_state", fail_state_write)
     with pytest.raises(OSError, match="injected projected state failure"):
-        dashboard_server.set_skill_package_enabled_sync(
+        dashboard_server.SKILL_PACKAGE_CONTROLLER.set_enabled(
             {"skillPackageId": "community.tests.projection-toggle-rollback", "enabled": False}
         )
 
@@ -240,7 +248,9 @@ def test_safe_mode_projection_failure_restores_all_registry_and_projection_state
             tmp_path / f"safe-mode-{suffix}.vsk",
             key_pair.private_key_pem,
         ).package_path
-        imported = dashboard_server.import_skill_package_sync({"packagePath": str(package)})
+        imported = dashboard_server.SKILL_PACKAGE_CONTROLLER.import_package(
+            {"packagePath": str(package)}
+        )
         projected_skill = Path(imported["projectedSkill"]["path"])
         state_paths.append(projected_skill.parent / PROJECTED_SKILL_STATE_NAME)
         installed_paths.append(service.skill_store / package_id / "installed.json")
@@ -287,7 +297,9 @@ def test_governance_projection_failure_restores_registry_and_projection_state(
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
     monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
     monkeypatch.setattr(dashboard_server, "skill_package_service", lambda: service)
-    imported = dashboard_server.import_skill_package_sync({"packagePath": str(package)})
+    imported = dashboard_server.SKILL_PACKAGE_CONTROLLER.import_package(
+        {"packagePath": str(package)}
+    )
     state_path = Path(imported["projectedSkill"]["path"]).parent / PROJECTED_SKILL_STATE_NAME
     installed_path = service.skill_store / package_id / "installed.json"
     original_registry = service.registry_path.read_bytes()
@@ -329,7 +341,9 @@ def test_uninstall_projection_failure_restores_package_tree_registry_and_project
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
     monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
     monkeypatch.setattr(dashboard_server, "skill_package_service", lambda: service)
-    imported = dashboard_server.import_skill_package_sync({"packagePath": str(package)})
+    imported = dashboard_server.SKILL_PACKAGE_CONTROLLER.import_package(
+        {"packagePath": str(package)}
+    )
     package_root = service.skill_store / package_id
     projection_root = Path(imported["projectedSkill"]["path"]).parent
 
@@ -352,13 +366,15 @@ def test_uninstall_projection_failure_restores_package_tree_registry_and_project
             raise OSError("injected uninstall projection failure")
             yield projected
 
-    monkeypatch.setattr(
-        dashboard_server,
-        "_delete_projected_skill_transaction",
-        fail_after_projection_isolated,
+    controller = SkillPackageController(
+        replace(
+            dashboard_server.SKILL_PACKAGE_CONTROLLER._ports,  # noqa: SLF001 - local typed rollback fixture.
+            make_service=lambda: service,
+            delete_projected_skill=fail_after_projection_isolated,
+        )
     )
     with pytest.raises(OSError, match="injected uninstall projection failure"):
-        dashboard_server.uninstall_skill_package_sync({"skillPackageId": package_id})
+        controller.uninstall({"skillPackageId": package_id})
 
     assert service.registry_path.read_bytes() == original_registry
     assert tree_bytes(package_root) == original_package_tree

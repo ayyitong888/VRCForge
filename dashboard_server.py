@@ -388,7 +388,10 @@ from shader_adapter_registry import (
     shader_family_label,
 )
 from skill_packages import SkillPackageError, SkillPackageService, _load_json_bytes
-from skill_package_controller import SkillPackageController
+from skill_package_controller import (
+    SkillPackageController,
+    SkillPackageControllerPorts,
+)
 from skill_package_governance import (
     SkillPackageGovernancePorts,
     SkillPackageGovernanceService,
@@ -2027,7 +2030,6 @@ ADVANCED_SETTINGS_TRANSITION_LOCK = Lock()
 TUNING_STORE_LOCK = Lock()
 UNITY_MCP_REPAIR_LOCK = Lock()
 SKILL_PACKAGE_WRITE_LOCK = Lock()
-_SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(
     ProjectCatalogDiscoveryPorts(
@@ -6082,6 +6084,31 @@ def _delete_projected_skill_transaction(manifest: dict[str, Any]) -> Any:
     return _SKILL_PACKAGE_PROJECTION._impl_delete_projected_skill_transaction(manifest)
 
 
+SKILL_PACKAGE_CONTROLLER = SkillPackageController(
+    SkillPackageControllerPorts(
+        make_service=skill_package_service,
+        write_lock=SKILL_PACKAGE_WRITE_LOCK,
+        project_installed_skill=lambda installed_path,
+        manifest,
+        enabled,
+        project=_project_installed_skill: project(
+            installed_path,
+            manifest,
+            enabled=enabled,
+        ),
+        set_projected_skill_enabled=lambda manifest,
+        enabled,
+        set_enabled=_set_projected_skills_enabled: set_enabled(
+            [manifest],
+            enabled,
+        )[0],
+        delete_projected_skill=_delete_projected_skill_transaction,
+        make_bad_request=lambda message,
+        error_type=AgentGatewayError: error_type(message, status_code=400),
+    )
+)
+
+
 SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(
     SkillPackageGovernancePorts(
         make_service=skill_package_service,
@@ -6090,18 +6117,6 @@ SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(
         set_enabled=_set_projected_skills_enabled: set_enabled(manifests, False),
     )
 )
-
-
-def import_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _SKILL_PACKAGE_CONTROLLER._impl_import_skill_package_sync(params)
-
-
-def set_skill_package_enabled_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _SKILL_PACKAGE_CONTROLLER._impl_set_skill_package_enabled_sync(params)
-
-
-def uninstall_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _SKILL_PACKAGE_CONTROLLER._impl_uninstall_skill_package_sync(params)
 
 
 def _exportable_user_skill(skill_name: str) -> tuple[dict[str, Any], Path]:
@@ -6547,7 +6562,7 @@ def app_preflight_skill_package(request: SkillPackagePathRequest) -> dict[str, A
 @app.post("/api/app/skill-packages/import")
 def app_import_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]:
     try:
-        return import_skill_package_sync(request.model_dump(by_alias=True))
+        return SKILL_PACKAGE_CONTROLLER.import_package(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6625,7 +6640,9 @@ def app_write_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, Any
 @app.put("/api/app/skill-packages/{skill_package_id}")
 def app_set_skill_package_enabled(skill_package_id: str, request: SkillPackageStateRequest) -> dict[str, Any]:
     try:
-        return set_skill_package_enabled_sync({"skillPackageId": skill_package_id, **request.model_dump(by_alias=True)})
+        return SKILL_PACKAGE_CONTROLLER.set_enabled(
+            {"skillPackageId": skill_package_id, **request.model_dump(by_alias=True)}
+        )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -6636,7 +6653,9 @@ def app_set_skill_package_enabled(skill_package_id: str, request: SkillPackageSt
 def app_uninstall_skill_package(skill_package_id: str, request: SkillPackageUninstallRequest | None = None) -> dict[str, Any]:
     try:
         payload = request.model_dump(by_alias=True) if request is not None else {}
-        return uninstall_skill_package_sync({"skillPackageId": skill_package_id, **payload})
+        return SKILL_PACKAGE_CONTROLLER.uninstall(
+            {"skillPackageId": skill_package_id, **payload}
+        )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -19455,10 +19474,10 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         preview_atomic_reference_rename_sync,
     )
-    AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", import_skill_package_sync)
+    AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", SKILL_PACKAGE_CONTROLLER.import_package)
     AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
-    AGENT_GATEWAY.register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", set_skill_package_enabled_sync)
-    AGENT_GATEWAY.register_write_handler("vrcforge_uninstall_skill_package", "Uninstall an installed .vsk skill package and optionally remove its projected user skill.", "medium", uninstall_skill_package_sync)
+    AGENT_GATEWAY.register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", SKILL_PACKAGE_CONTROLLER.set_enabled)
+    AGENT_GATEWAY.register_write_handler("vrcforge_uninstall_skill_package", "Uninstall an installed .vsk skill package and optionally remove its projected user skill.", "medium", SKILL_PACKAGE_CONTROLLER.uninstall)
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_repair_project_chat_store",
         "Repair a digest-bound project chat transcript store after explicit approval.",

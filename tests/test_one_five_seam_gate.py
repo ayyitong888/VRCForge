@@ -171,7 +171,16 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         for group_id, group in groups.items()
         if group_id.startswith("dashboard.") and group.get("hostProxy")
     )
-    assert dashboard_host_proxy_count == 20
+    assert dashboard_host_proxy_count == 17
+    assert groups["dashboard.skill-package-controller-typed-root-owner"][
+        "rootSymbols"
+    ] == [
+        {
+            "source": "dashboard_server.py",
+            "scope": "module",
+            "name": "SKILL_PACKAGE_CONTROLLER",
+        }
+    ]
     assert groups["dashboard.skill-package-governance-typed-root-owner"][
         "rootSymbols"
     ] == [

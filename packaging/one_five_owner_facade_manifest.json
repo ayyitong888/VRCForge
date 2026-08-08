@@ -87,22 +87,10 @@
       "hostProxy": {"source": "skill_package_projection.py", "class": "SkillPackageProjectionService"}
     },
     {
-      "id": "dashboard.skill-package-controller-host-proxy",
+      "id": "dashboard.skill-package-controller-typed-root-owner",
       "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "_SKILL_PACKAGE_CONTROLLER"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "import_skill_package_sync",
-            "set_skill_package_enabled_sync",
-            "uninstall_skill_package_sync"
-          ]
-        }
-      ],
-      "hostProxy": {"source": "skill_package_controller.py", "class": "SkillPackageController"}
+        {"source": "dashboard_server.py", "scope": "module", "name": "SKILL_PACKAGE_CONTROLLER"}
+      ]
     },
     {
       "id": "dashboard.skill-package-governance-typed-root-owner",
