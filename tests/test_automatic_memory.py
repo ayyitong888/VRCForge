@@ -96,6 +96,14 @@ def test_automatic_memory_recognizes_ordinary_direct_english_statements(tmp_path
         "My favorite color is blue.",
     ]
 
+    project_root = tmp_path / "ProjectEnglish"
+    project_root.mkdir()
+    assert service.capture_automatic_chat_sources(
+        _chat("This project uses Unity 2022.3.", created_at=created, project_path=str(project_root)),
+        scope=MemoryScope("project", project_scope_key(str(project_root))),
+        project_root=str(project_root),
+    )["acceptedCount"] == 1
+
 
 def test_automatic_memory_rejects_unsafe_or_nonordinary_user_text(tmp_path: Path) -> None:
     service = MemoryConsolidationService(tmp_path)

@@ -47,6 +47,7 @@ _EXPLICIT_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(
             r"^\s*(?:fact\s*:|a\s+fact\s+to\s+remember\s*:|i\s+(?:am\s+based|live)\s+in\b|"
             r"my\s+(?:name|time\s*zone|language|locale|role)\s+is\b|"
+            r"(?:this|the|our)\s+project\s+(?:uses|targets|is\s+based\s+on)\b|"
             r"事实(?:是)?[：:]?|事實(?:是)?[：:]?|"
             r"(?:这个|這個|本)?项目(?:当前|目前)?(?:使用|采用|採用)|事実[：:]?)",
             re.IGNORECASE,
