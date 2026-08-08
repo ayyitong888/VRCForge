@@ -75,6 +75,7 @@ class MemoryReviewConfigRequest(BaseModel):
         le=1_000_000.0,
     )
     retention_days: int = Field(default=30, alias="retentionDays", ge=1, le=365)
+    automatic_capture_enabled: bool | None = Field(default=None, alias="automaticCaptureEnabled")
     scope: Literal["user", "project"] = "user"
     provider: str = Field(default="", max_length=120)
     model: str = Field(default="", max_length=160)
@@ -354,6 +355,7 @@ class MemoryReviewHost:
             "inputCostPerMillionUsd": input_price,
             "outputCostPerMillionUsd": output_price,
             "retentionDays": retention_days,
+            "automaticCaptureEnabled": bool(raw.get("automaticCaptureEnabled", True)),
             "provider": configured_provider,
             "model": configured_model,
             "runStatus": run_status,
@@ -467,6 +469,11 @@ class MemoryReviewHost:
                 "inputCostPerMillionUsd": request.input_cost_per_million_usd,
                 "outputCostPerMillionUsd": request.output_cost_per_million_usd,
                 "retentionDays": request.retention_days,
+                **(
+                    {"automaticCaptureEnabled": request.automatic_capture_enabled}
+                    if request.automatic_capture_enabled is not None
+                    else {}
+                ),
                 "provider": provider,
                 "model": model,
                 "scope": scope.kind,

@@ -34,15 +34,21 @@ _EXPLICIT_SIGNAL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "preference",
         re.compile(
-            r"^\s*(?:please\s+remember\b|remember\s+(?:that\b|this\b)|i\s+prefer\b|my\s+preference\s+is\b|"
-            r"请记住|請記住|记住(?:这一点|这点)?[：:]?|記住(?:這一點|這點)?[：:]?|覚えて(?:おいて)?|好みは)",
+            r"^\s*(?:please\s+remember\b|remember\s+(?:that\b|this\b)|i\s+(?:prefer|like|love)\b|"
+            r"my\s+(?:preference|favorite|favourite)\b.{0,40}\bis\b|"
+            r"请记住|請記住|记住(?:这一点|这点)?[：:]?|記住(?:這一點|這點)?[：:]?|"
+            r"我(?:更|最)?(?:喜欢|喜歡|偏好|习惯|習慣)|我的(?:偏好|习惯|習慣)是|"
+            r"覚えて(?:おいて)?|好みは|私は.{0,80}(?:が好き|を好む))",
             re.IGNORECASE,
         ),
     ),
     (
         "fact",
         re.compile(
-            r"^\s*(?:fact\s*:|a\s+fact\s+to\s+remember\s*:|事实(?:是)?[：:]?|事實(?:是)?[：:]?|事実[：:]?)",
+            r"^\s*(?:fact\s*:|a\s+fact\s+to\s+remember\s*:|i\s+(?:am\s+based|live)\s+in\b|"
+            r"my\s+(?:name|time\s*zone|language|locale|role)\s+is\b|"
+            r"事实(?:是)?[：:]?|事實(?:是)?[：:]?|"
+            r"(?:这个|這個|本)?项目(?:当前|目前)?(?:使用|采用|採用)|事実[：:]?)",
             re.IGNORECASE,
         ),
     ),
@@ -163,6 +169,8 @@ def collect_user_chat_records(
                 "signalKind": signal_kind,
                 "text": text,
                 "observedAt": str(item.get("updatedAt") or item.get("createdAt") or "")[:80],
+                "createdAt": str(item.get("createdAt") or "")[:80],
+                "hasAttachments": bool(item.get("attachments")),
                 "originGroup": _stable_id("chat_group", chat_id),
             }
             if normalized_scope == "user":

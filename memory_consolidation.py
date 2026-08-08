@@ -23,6 +23,7 @@ from agent_memory_store import (
     managed_atomic_temp_paths,
     managed_backup_paths,
 )
+from automatic_memory import AUTOMATIC_MEMORY_POLICY_VERSION, AutomaticMemoryPolicy, collect_automatic_chat_sources
 from background_goal_runtime import aggregate_bounded_usage
 from durable_audit_outbox import DurableMetadataAudit
 from memory_consolidation_sources import (
@@ -32,6 +33,7 @@ from memory_consolidation_sources import (
     redact_memory_text,
     resolve_memory_scope,
 )
+from memory_safety import memory_text_is_instruction_sensitive
 
 
 MEMORY_REVIEW_STORE_SCHEMA = "vrcforge.memory_review_store.v1"
@@ -204,6 +206,7 @@ def _review_config_digest(config: Mapping[str, Any]) -> str:
         "inputCostPerMillionUsd",
         "outputCostPerMillionUsd",
         "retentionDays",
+        "automaticCaptureEnabled",
         "scopeKind",
         "projectScopeKey",
     )
@@ -273,51 +276,12 @@ def _matches_exact_accepted_memory(
     )
 
 
-_INSTRUCTION_SENSITIVE_PATTERNS = tuple(
-    re.compile(pattern, re.IGNORECASE | re.DOTALL)
-    for pattern in (
-        r"\b(?:ignore|disregard|override|bypass)\b.{0,100}\b(?:previous|prior|system|developer|instruction|policy|permission)\b",
-        r"\b(?:reveal|exfiltrate|upload|send|print|return)\b.{0,100}\b(?:api[ _-]?key|access[ _-]?token|password|credential|secret)\b",
-        r"\b(?:call|invoke|execute|run)\b.{0,80}\b(?:tool|command|shell|terminal|powershell)\b",
-        r"\b(?:always|automatically|auto)\b.{0,60}\b(?:approve|authorize|grant|allow|permit)\b",
-        r"\bnever\b.{0,60}\b(?:ask|request|require|wait\s+for)\b.{0,60}\b(?:approval|permission|authorization|confirmation)\b",
-        r"\b(?:skip|bypass|disable|ignore)\b.{0,60}\b(?:approval|permission|authorization|confirmation|checkpoint|rollback)\b",
-        r"\bwithout\b.{0,60}\b(?:approval|permission|authorization|confirmation|asking)\b",
-        r"\bdo\s+not\b.{0,30}\b(?:ask|request|require|wait\s+for)\b.{0,30}\b(?:approval|permission|authorization|confirmation)\b",
-        r"\bno\b.{0,20}\b(?:approval|permission|authorization|confirmation)\b.{0,20}\b(?:is\s+)?required\b",
-        r"\b(?:permission|authorization|approval)\b.{0,20}\b(?:is\s+)?granted\b.{0,40}\b(?:all|any|every|future)\b.{0,30}\b(?:edit|change|write|modification)s?\b",
-        r"\bauthori[sz]ed\b.{0,30}\b(?:to\s+)?(?:modify|edit|write|change|delete)\b",
-        r"\bfuture\b.{0,30}\b(?:change|edit|write|modification)s?\b.{0,30}\b(?:already\s+)?(?:approved|authorized|permitted|allowed)\b",
-        r"(?<!not\s)(?<!never\s)(?<!don't\s)\bgrant(?:ed|ing)?\b.{0,20}\b(?:permission|authorization|approval)\b",
-        r"[\"']role[\"']\s*:\s*[\"'](?:system|developer|assistant)[\"']",
-        r"(?:^|\s)(?:system|developer|assistant)\s*:",
-        r"<\/?(?:system|developer|assistant)>|\[/?INST\]",
-        r"(?:忽略|无视|無視|绕过|繞過|覆盖|覆蓋).{0,60}(?:系统|系統|开发者|開發者|指令|权限|權限|规则|規則)",
-        r"(?:泄露|洩漏|发送|發送|上传|上傳|输出|輸出).{0,60}(?:密钥|密鑰|令牌|權杖|密码|密碼|凭证|憑證|秘密)",
-        r"(?:调用|呼叫|执行|執行|运行|運行).{0,40}(?:工具|命令|终端|終端)",
-        r"(?:始终|始終|总是|總是|永远|永遠|自动|自動).{0,30}(?:批准|核准|授权|授權|允许|允許|同意)",
-        r"(?:不要|无需|無需|不用|永不).{0,30}(?:询问|詢問|请求|請求|要求|等待).{0,30}(?:批准|核准|权限|權限|授权|授權|确认|確認)",
-        r"(?:无需|無需|不用|不必).{0,20}(?:批准|核准|权限|權限|授权|授權|确认|確認)",
-        r"(?:跳过|跳過|绕过|繞過|关闭|關閉).{0,30}(?:批准|核准|权限|權限|授权|授權|确认|確認|检查点|檢查點|回滚|回滾)",
-        r"(?:所有|全部|任何|未来|未來|今后|今後).{0,20}(?:修改|更改|编辑|編輯|写入|寫入|变更|變更).{0,20}(?:已获|已獲|已经|已經|均已|都已)?(?:批准|核准|授权|授權|允许|允許)",
-        r"(?:权限|權限|授权|授權).{0,20}(?:已授予|已賦予|授予|賦予).{0,20}(?:所有|全部|任何).{0,20}(?:修改|更改|编辑|編輯|写入|寫入|变更|變更)",
-        r"(?:授予|賦予).{0,10}(?:权限|權限|授权|授權)",
-        r"(?:無視|上書き|回避).{0,60}(?:システム|開発者|指示|権限|規則)",
-        r"(?:漏らす|送信|アップロード|出力).{0,60}(?:キー|トークン|パスワード|認証情報|秘密)",
-        r"(?:常に|必ず|自動で).{0,30}(?:承認|許可|認可)",
-        r"(?:承認|許可|確認).{0,30}(?:求めない|不要|なしで|回避|スキップ|無効)",
-        r"(?:すべて|全て|今後|将来).{0,20}(?:編集|変更|書き込み|修正).{0,20}(?:承認済み|許可済み|認可済み)",
-        r"(?:編集|変更|修正).{0,20}(?:権限がある|許可されている|認可されている)",
-        r"(?:権限|許可|認可).{0,15}(?:付与|与える)",
-    )
-)
-
 _SOURCE_EXCLUSION_INSTRUCTION_OR_PERMISSION = "instruction_or_action_permission"
 
 
 def _fact_is_instruction_sensitive(value: Any) -> bool:
     text = _normalize_fact_text(value)
-    return any(pattern.search(text) is not None for pattern in _INSTRUCTION_SENSITIVE_PATTERNS)
+    return memory_text_is_instruction_sensitive(text)
 
 
 def _deterministic_candidate_ranking(
@@ -814,6 +778,7 @@ class MemoryReviewStore:
                 "inputCostPerMillionUsd": 0.0,
                 "outputCostPerMillionUsd": 0.0,
                 "retentionDays": 30,
+                "automaticCaptureEnabled": True,
                 "scopeKind": "user",
                 "projectScopeKey": "",
             },
@@ -890,6 +855,7 @@ class MemoryReviewStore:
             "inputCostPerMillionUsd",
             "outputCostPerMillionUsd",
             "retentionDays",
+            "automaticCaptureEnabled",
             "scopeKind",
             "projectScopeKey",
             "scope",
@@ -937,6 +903,8 @@ class MemoryReviewStore:
             "retentionDays": self._loaded_int(
                 raw_config.get("retentionDays"), defaults["retentionDays"], 1, 3650
             ),
+            "automaticCaptureEnabled": raw_config.get("automaticCaptureEnabled")
+            if isinstance(raw_config.get("automaticCaptureEnabled"), bool) else True,
             "scopeKind": (
                 str(raw_config.get("scopeKind") or raw_config.get("scope") or "user").strip().casefold()
                 if str(raw_config.get("scopeKind") or raw_config.get("scope") or "user").strip().casefold()
@@ -2205,6 +2173,9 @@ class MemoryReviewStore:
                 "retentionDays": self._bounded_int(
                     payload.get("retentionDays", current.get("retentionDays", 30)), 1, 3650
                 ),
+                "automaticCaptureEnabled": payload.get("automaticCaptureEnabled")
+                if isinstance(payload.get("automaticCaptureEnabled"), bool)
+                else bool(current.get("automaticCaptureEnabled", True)),
                 "scopeKind": requested_scope,
                 "projectScopeKey": configured_scope_key,
             }
@@ -4320,6 +4291,10 @@ class MemoryConsolidationService:
             lock=shared_lock,
         )
         self.policy_version = _bounded_identifier(policy_version, field="policyVersion", limit=120)
+        self.automatic_policy = AutomaticMemoryPolicy(
+            lambda: self.root / "automatic-memory-policy.json",
+            shared_lock,
+        )
         self.consolidator = MemoryConsolidator(self.review_store, policy_version=policy_version)
         self.coordinator = MemoryReviewCoordinator(
             self.review_store,
@@ -4524,6 +4499,7 @@ class MemoryConsolidationService:
             "inputCostPerMillionUsd": float(config.get("inputCostPerMillionUsd") or 0.0),
             "outputCostPerMillionUsd": float(config.get("outputCostPerMillionUsd") or 0.0),
             "retentionDays": int(config.get("retentionDays") or 30),
+            "automaticCaptureEnabled": bool(config.get("automaticCaptureEnabled", True)),
             "provider": str(config.get("provider") or ""),
             "model": str(config.get("model") or ""),
             "runStatus": run_status,
@@ -4549,8 +4525,88 @@ class MemoryConsolidationService:
         }
 
     def update_config(self, payload: Mapping[str, Any], expected_revision: int) -> dict[str, Any]:
-        self.review_store.update_config(payload, expected_revision=expected_revision)
+        with self._transaction_lock:
+            before = self.review_store.snapshot(include_internal=True).get("config") or {}
+            requested_enabled = payload.get("automaticCaptureEnabled")
+            if requested_enabled is True and not bool(before.get("automaticCaptureEnabled", True)):
+                # Advance the boundary before exposing enablement. If the
+                # config CAS fails, this merely skips history, never captures it.
+                self.automatic_policy.reenable()
+            self.review_store.update_config(payload, expected_revision=expected_revision)
         return self.snapshot(str(payload.get("projectRoot") or ""))
+
+    def ensure_automatic_capture_watermark(self) -> str:
+        return self.automatic_policy.ensure()
+
+    def capture_automatic_chat_sources(
+        self,
+        chats: Sequence[Mapping[str, Any]],
+        *,
+        scope: MemoryScope,
+        project_root: str = "",
+    ) -> dict[str, int]:
+        """Upsert and promote direct sources atomically, without a provider callback."""
+        with self._transaction_lock:
+            config = self.review_store.snapshot(include_internal=True).get("config") or {}
+            if not bool(config.get("automaticCaptureEnabled", True)):
+                return {"eligibleCount": 0, "acceptedCount": 0, "conflictCount": 0}
+            sources = collect_automatic_chat_sources(
+                chats,
+                scope=scope,
+                project_root=project_root,
+                enabled_at=self.automatic_policy.ensure(),
+            )
+            accepted_count = conflict_count = 0
+            for source in sources:
+                factors, score, source_types, first_seen, last_seen = _deterministic_candidate_ranking([source])
+                candidate_id = deterministic_candidate_id(
+                    scope=scope,
+                    source_references=[source.reference()],
+                    policy_version=AUTOMATIC_MEMORY_POLICY_VERSION,
+                    proposed_text=source.text,
+                )
+                snapshot = self.review_store.upsert_candidates(
+                    [{
+                        "candidateId": candidate_id,
+                        "scopeKind": scope.kind,
+                        "scopeKey": scope.scope_key,
+                        "kind": source.kind,
+                        "proposedText": source.text,
+                        "sourceReferences": [source.reference()],
+                        "firstObservedAt": first_seen,
+                        "lastObservedAt": last_seen,
+                        "confidenceFactors": factors,
+                        "confidenceScore": score,
+                        "sourceTypeCounts": source_types,
+                        "state": "proposed",
+                        "policyVersion": AUTOMATIC_MEMORY_POLICY_VERSION,
+                    }],
+                    expected_revision=int(self.review_store.snapshot(include_internal=True)["revision"]),
+                    scope_key=scope.scope_key,
+                    current_sources={(source.source_type, source.source_id): source.source_digest},
+                    source_inventory_complete=False,
+                    complete_source_types=(),
+                    accepted_memories=self.accepted_store.list_active(),
+                )
+                candidate = self.review_store.get(candidate_id)
+                if candidate is None:
+                    continue
+                if candidate.get("state") == "conflicting":
+                    conflict_count += 1
+                elif candidate.get("state") == "proposed":
+                    result = self.coordinator.accept(
+                        candidate_id,
+                        expected_revision=int(snapshot["revision"]),
+                        project_root=project_root,
+                        current_sources=[source],
+                        complete_source_types=(),
+                    )
+                    accepted_count += int((result.get("candidate") or {}).get("state") == "accepted")
+            return {
+                "eligibleCount": len(sources),
+                "acceptedCount": accepted_count,
+                "conflictCount": conflict_count,
+            }
 
     def shadow_scan(
         self,

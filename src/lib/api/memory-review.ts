@@ -144,6 +144,7 @@ export type MemoryReviewSnapshot = {
   inputCostPerMillionUsd: number;
   outputCostPerMillionUsd: number;
   retentionDays: number;
+  automaticCaptureEnabled: boolean;
   provider?: string;
   model?: string;
   runStatus: MemoryReviewRunStatus;
@@ -165,6 +166,7 @@ export type MemoryReviewConfigMutation = {
   inputCostPerMillionUsd: number;
   outputCostPerMillionUsd: number;
   retentionDays: number;
+  automaticCaptureEnabled: boolean;
   provider: string;
   model: string;
   scope: MemoryReviewScope;

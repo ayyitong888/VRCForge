@@ -217,6 +217,7 @@ from memory_review_dashboard_adapter import (
     MEMORY_REVIEW_AUDIT_SCAN_MAX_ROWS,
     MemoryReviewDashboardAdapter,
 )
+from memory_consolidation_sources import MemoryScope, project_scope_key
 from memory_review_composition import MemoryReviewComposition, MemoryReviewCompositionPorts, build_memory_review_composition
 from memory_review_host import build_memory_review_router
 from memory_review_provider import invoke_memory_review_provider
@@ -2196,6 +2197,7 @@ async def on_startup() -> None:
             emit_log("warn", "agent", "Goal delivery startup reconciliation had a warning.", {"error": str(exc)})
         try:
             await MEMORY_REVIEW.host.reconcile_startup(MEMORY_REVIEW.authorized_project_roots())
+            await asyncio.to_thread(MEMORY_REVIEW.service.ensure_automatic_capture_watermark)
         except Exception:  # noqa: BLE001 - review recovery remains isolated from core startup.
             emit_log("warn", "agent", "Memory Review startup reconciliation had a bounded warning.", {"failureClass": "reconcile"})
     if desktop_executor_enabled():
@@ -4475,7 +4477,7 @@ def read_chat_transcripts(request: Request) -> dict[str, Any]:
 
 @app.post("/api/app/chats")
 async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, Any]:
-    storage_result, chats = await asyncio.to_thread(write_chat_transcripts_storage, request)
+    storage_result, chats, automatic_groups = await asyncio.to_thread(write_chat_transcripts_storage, request)
     # Vault 引用同步：该请求总是携带全部会话，作为活引用快照驱动 LRU 清理。
     # 清理失败绝不阻断会话保存。
     vault_retention: dict[str, Any] = {}
@@ -4486,7 +4488,26 @@ async def write_chat_transcripts(request: ChatTranscriptsRequest) -> dict[str, A
         )
     except Exception:
         vault_retention = {}
-    return {**storage_result, "vaultRetention": vault_retention}
+    automatic_capture: dict[str, int] = {}
+    try:
+        automatic_capture = await asyncio.to_thread(capture_automatic_memory_after_chat_storage, automatic_groups)
+        if automatic_capture.get("acceptedCount") or automatic_capture.get("conflictCount"):
+            await MEMORY_REVIEW.notify_review_changed()
+    except Exception:
+        automatic_capture = {}
+    return {**storage_result, "vaultRetention": vault_retention, "automaticCapture": automatic_capture}
+
+
+def capture_automatic_memory_after_chat_storage(
+    groups: list[tuple[MemoryScope, str, list[dict[str, Any]]]],
+) -> dict[str, int]:
+    """The chat write has committed; failure here is deliberately non-blocking."""
+    totals = {"eligibleCount": 0, "acceptedCount": 0, "conflictCount": 0}
+    for scope, project_root, grouped_chats in groups:
+        result = MEMORY_REVIEW.service.capture_automatic_chat_sources(grouped_chats, scope=scope, project_root=project_root)
+        for key in totals:
+            totals[key] += int(result.get(key) or 0)
+    return totals
 
 
 def _chat_source_revision_map(request: ChatTranscriptsRequest) -> dict[str, dict[str, Any]]:
@@ -4588,7 +4609,9 @@ def _assert_no_current_chat_source_id_conflicts(
             admit({**chat, "projectPath": source_project_path})
 
 
-def write_chat_transcripts_storage(request: ChatTranscriptsRequest) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def write_chat_transcripts_storage(
+    request: ChatTranscriptsRequest,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[tuple[MemoryScope, str, list[dict[str, Any]]]]]:
     if len(request.chats) > CHAT_TRANSCRIPTS_MAX_CHATS:
         raise HTTPException(
             status_code=413,
@@ -4753,6 +4776,15 @@ def write_chat_transcripts_storage(request: ChatTranscriptsRequest) -> tuple[dic
             source_revisions.append(source)
 
     project_paths = [{"path": str(path), "count": count} for path, _payload, count in project_serialized]
+    automatic_groups = [(MemoryScope("user", "user"), "", app_chats)]
+    automatic_groups.extend(
+        (
+            MemoryScope("project", project_scope_key(str(group["projectPath"]))),
+            str(group["projectPath"]),
+            list(group["chats"]),
+        )
+        for group in project_groups.values()
+    )
     return (
         {
             "ok": True,
@@ -4763,6 +4795,7 @@ def write_chat_transcripts_storage(request: ChatTranscriptsRequest) -> tuple[dic
             "sourceRevisions": source_revisions,
         },
         chats,
+        automatic_groups,
     )
 
 

@@ -74,6 +74,7 @@ function draftFromSnapshot(snapshot: MemoryReviewSnapshot): MemoryReviewConfigDr
     inputCostPerMillionUsd: snapshot.inputCostPerMillionUsd,
     outputCostPerMillionUsd: snapshot.outputCostPerMillionUsd,
     retentionDays: snapshot.retentionDays,
+    automaticCaptureEnabled: snapshot.automaticCaptureEnabled,
     provider: snapshot.provider || snapshot.providerDisclosure.provider || "",
     model: snapshot.model || snapshot.providerDisclosure.model || "",
     scope: snapshot.scope,
@@ -92,6 +93,7 @@ function configFingerprint(snapshot: MemoryReviewSnapshot): string {
     draft.inputCostPerMillionUsd,
     draft.outputCostPerMillionUsd,
     draft.retentionDays,
+    draft.automaticCaptureEnabled,
     draft.provider,
     draft.model,
     draft.scope,
@@ -191,6 +193,7 @@ export function MemoryReviewSettings({
     || draft.inputCostPerMillionUsd !== snapshot.inputCostPerMillionUsd
     || draft.outputCostPerMillionUsd !== snapshot.outputCostPerMillionUsd
     || draft.retentionDays !== snapshot.retentionDays
+    || draft.automaticCaptureEnabled !== snapshot.automaticCaptureEnabled
     || draft.provider !== (snapshot.provider || snapshot.providerDisclosure.provider || "")
     || draft.model !== (snapshot.model || snapshot.providerDisclosure.model || "")
     || draft.scope !== snapshot.scope
@@ -339,6 +342,16 @@ export function MemoryReviewSettings({
           </div>
 
           <div className="grid gap-4 rounded-lg border border-border bg-card p-4 md:grid-cols-2 xl:grid-cols-3">
+            <label className="flex items-start gap-3 text-sm">
+              <input type="checkbox" checked={draft.automaticCaptureEnabled} disabled={Boolean(controller.busyKey)}
+                onChange={(event) => editDraft({ ...draft, automaticCaptureEnabled: event.target.checked })} />
+              <span>
+                <span className="block font-medium">{t("settings.automaticMemoryCapture")}</span>
+                <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
+                  {t("settings.automaticMemoryCaptureDesc")}
+                </span>
+              </span>
+            </label>
             <label className="text-sm">
               <span className="font-medium">{t("settings.memoryReviewScopeLabel")}</span>
               <select
