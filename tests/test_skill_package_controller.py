@@ -120,16 +120,18 @@ def test_controller_has_typed_ports_direct_routes_and_registry_handlers() -> Non
     assert ports.make_service is dashboard_server.skill_package_service
     assert ports.write_lock is dashboard_server.SKILL_PACKAGE_WRITE_LOCK
     assert ports.project_installed_skill.__defaults__ == (
-        dashboard_server._project_installed_skill,
+        dashboard_server.SKILL_PACKAGE_PROJECTION,
     )
     assert (
         ports.set_projected_skill_enabled.__defaults__
-        == (dashboard_server._set_projected_skills_enabled,)
+        == (dashboard_server.SKILL_PACKAGE_PROJECTION,)
     )
-    assert (
-        ports.delete_projected_skill
-        is dashboard_server._delete_projected_skill_transaction
+    assert ports.delete_projected_skill.__self__ is (
+        dashboard_server.SKILL_PACKAGE_PROJECTION
     )
+    assert ports.delete_projected_skill.__func__ is type(
+        dashboard_server.SKILL_PACKAGE_PROJECTION
+    ).delete_transaction
     assert ports.make_bad_request.__defaults__ == (AgentGatewayError,)
 
     for target, method_name in {

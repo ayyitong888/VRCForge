@@ -28,6 +28,10 @@ from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
     CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
+    PROJECTED_SKILL_STATE_MAX_BYTES,
+    PROJECTED_SKILL_STATE_NAME,
+    PROJECTED_SKILL_STATE_SCHEMA,
+    parse_skill_markdown,
     redact_background_goal_persistence,
     redact_sensitive,
     summarize_text,
@@ -85,6 +89,11 @@ from runtime_planner_service import (
     RuntimePlannerService,
 )
 from skill_packages import SkillPackageError, SkillPackageService
+from skill_package_controller import SkillPackageController
+from skill_package_projection import (
+    SkillPackageProjectionPorts,
+    SkillPackageProjectionService,
+)
 from sub_agent_collaboration_service import SubAgentCollaborationService
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
@@ -7435,7 +7444,9 @@ class DashboardServerTests(unittest.TestCase):
             for unsafe_name in ("captured.json", "workflows"):
                 with self.subTest(link_or_junction=unsafe_name):
                     output = root / f"linked-{unsafe_name}.vsk"
-                    original_link_check = dashboard_server._skill_projection_path_is_link_like
+                    original_link_check = (
+                        SkillPackageProjectionService._path_is_link_like
+                    )
 
                     def simulated_link_check(path: Path, *, target: str = unsafe_name) -> bool:
                         return path.name == target or original_link_check(path)
@@ -7447,9 +7458,10 @@ class DashboardServerTests(unittest.TestCase):
                                 *args, dir=temp_parent, **kwargs
                             ),
                         ),
-                        patch(
-                            "dashboard_server._skill_projection_path_is_link_like",
-                            side_effect=simulated_link_check,
+                        patch.object(
+                            SkillPackageProjectionService,
+                            "_path_is_link_like",
+                            staticmethod(simulated_link_check),
                         ),
                     ):
                         with self.assertRaises(SkillPackageError):
@@ -9405,42 +9417,79 @@ class DashboardServerTests(unittest.TestCase):
             SkillPackageService(root / "build-store", vrcforge_version="0.5.1").export_dev(source, package)
 
             gateway = AgentGateway(root / "app" / "config" / "agent_gateway.json", root / "audit")
-            original_gateway = dashboard_server.AGENT_GATEWAY
-            try:
-                dashboard_server.AGENT_GATEWAY = gateway
-                dashboard_server.register_agent_gateway_tools()
-                request = gateway.create_apply_request(
-                    {
-                        "target_tool": "vrcforge_import_skill_package",
-                        "arguments": {"packagePath": str(package)},
-                    }
+            service = SkillPackageService(
+                gateway.user_constraints_path.parent / "skill-packages",
+                vrcforge_version=dashboard_server.app.version,
+            )
+            projection = SkillPackageProjectionService(
+                SkillPackageProjectionPorts(
+                    user_skills_dir=lambda: gateway.user_skills_dir,
+                    user_skill_lock=gateway.user_skill_lock,
+                    find_user_skill=gateway._find_user_skill,  # noqa: SLF001 - isolated checkpoint integration fixture.
+                    parse_skill=parse_skill_markdown,
+                    parse_error_types=(AgentGatewayError,),
+                    state_name=PROJECTED_SKILL_STATE_NAME,
+                    state_schema=PROJECTED_SKILL_STATE_SCHEMA,
+                    state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
                 )
-                gateway.approve(request["approval"]["id"])
-                applied = gateway.apply_approved({"approval_id": request["approval"]["id"]})
+            )
+            controller = SkillPackageController(
+                replace(
+                    dashboard_server.SKILL_PACKAGE_CONTROLLER._ports,  # noqa: SLF001 - isolated checkpoint integration fixture.
+                    make_service=lambda: service,
+                    project_installed_skill=lambda installed,
+                    manifest,
+                    enabled: projection.project_installed(
+                        installed,
+                        manifest,
+                        enabled=enabled,
+                    ),
+                    set_projected_skill_enabled=lambda manifest,
+                    enabled: projection.set_enabled_batch(
+                        [manifest],
+                        enabled,
+                    )[0],
+                    delete_projected_skill=projection.delete_transaction,
+                )
+            )
+            production = dashboard_server.AGENT_GATEWAY._write_handlers[  # noqa: SLF001 - exact handler metadata fixture.
+                "vrcforge_import_skill_package"
+            ]
+            gateway.register_write_handler(
+                production.name,
+                production.description,
+                production.risk_level,
+                controller.import_package,
+            )
+            request = gateway.create_apply_request(
+                {
+                    "target_tool": "vrcforge_import_skill_package",
+                    "arguments": {"packagePath": str(package)},
+                }
+            )
+            gateway.approve(request["approval"]["id"])
+            applied = gateway.apply_approved({"approval_id": request["approval"]["id"]})
 
-                self.assertTrue(applied["ok"])
-                checkpoint = applied["checkpoint"]
-                self.assertEqual(checkpoint["strategy"], "local_state_archive")
-                self.assertEqual(checkpoint["pathspecs"], ["skill-packages", "skills"])
-                self.assertTrue((gateway.user_skills_dir / "avatar-review" / "SKILL.md").is_file())
-                self.assertTrue((gateway.user_constraints_path.parent / "skill-packages" / "community.avatar-review").is_dir())
-                preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
-                self.assertTrue(preview["ok"])
-                self.assertTrue(any("avatar-review" in item for item in preview["workingTreeStatus"] + preview["changedFiles"]))
+            self.assertTrue(applied["ok"])
+            checkpoint = applied["checkpoint"]
+            self.assertEqual(checkpoint["strategy"], "local_state_archive")
+            self.assertEqual(checkpoint["pathspecs"], ["skill-packages", "skills"])
+            self.assertTrue((gateway.user_skills_dir / "avatar-review" / "SKILL.md").is_file())
+            self.assertTrue((gateway.user_constraints_path.parent / "skill-packages" / "community.avatar-review").is_dir())
+            preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+            self.assertTrue(preview["ok"])
+            self.assertTrue(any("avatar-review" in item for item in preview["workingTreeStatus"] + preview["changedFiles"]))
 
-                restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+            restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
 
-                self.assertTrue(restored["ok"])
-                self.assertEqual(restored["status"], "restored")
-                self.assertFalse((gateway.user_skills_dir / "avatar-review").exists())
-                self.assertFalse((gateway.user_constraints_path.parent / "skill-packages").exists())
-                audit = restored["rollbackCoverageAudit"]
-                checks = {item["id"]: item for item in audit["checks"]}
-                self.assertEqual(checks["local_skill_package_store"]["status"], "covered")
-                self.assertEqual(checks["local_projected_user_skills"]["status"], "covered")
-            finally:
-                dashboard_server.AGENT_GATEWAY = original_gateway
-                dashboard_server.register_agent_gateway_tools()
+            self.assertTrue(restored["ok"])
+            self.assertEqual(restored["status"], "restored")
+            self.assertFalse((gateway.user_skills_dir / "avatar-review").exists())
+            self.assertFalse((gateway.user_constraints_path.parent / "skill-packages").exists())
+            audit = restored["rollbackCoverageAudit"]
+            checks = {item["id"]: item for item in audit["checks"]}
+            self.assertEqual(checks["local_skill_package_store"]["status"], "covered")
+            self.assertEqual(checks["local_projected_user_skills"]["status"], "covered")
 
     def test_failed_write_after_checkpoint_returns_checkpoint_for_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

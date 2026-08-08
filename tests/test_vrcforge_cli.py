@@ -887,11 +887,20 @@ def test_skill_lock_validate_uses_package_integrity_contract(tmp_path: Path) -> 
 
 def test_skill_init_write_exports_installs_projects_and_loads_as_request_only(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import dashboard_server
-    from agent_gateway import AgentGateway
+    from agent_gateway import (
+        AgentGateway,
+        AgentGatewayError,
+        PROJECTED_SKILL_STATE_MAX_BYTES,
+        PROJECTED_SKILL_STATE_NAME,
+        PROJECTED_SKILL_STATE_SCHEMA,
+        parse_skill_markdown,
+    )
     from skill_packages import SkillPackageService
+    from skill_package_projection import (
+        SkillPackageProjectionPorts,
+        SkillPackageProjectionService,
+    )
 
     source = tmp_path / "request-only-writer"
     vrcforge_cli.run(
@@ -942,8 +951,19 @@ def test_skill_init_write_exports_installs_projects_and_loads_as_request_only(
         "high",
         lambda arguments: target_calls.append(dict(arguments)) or {"ok": True},
     )
-    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
-    projection = dashboard_server._project_installed_skill(
+    projection_owner = SkillPackageProjectionService(
+        SkillPackageProjectionPorts(
+            user_skills_dir=lambda: gateway.user_skills_dir,
+            user_skill_lock=gateway.user_skill_lock,
+            find_user_skill=gateway._find_user_skill,  # noqa: SLF001 - isolated CLI projection fixture.
+            parse_skill=parse_skill_markdown,
+            parse_error_types=(AgentGatewayError,),
+            state_name=PROJECTED_SKILL_STATE_NAME,
+            state_schema=PROJECTED_SKILL_STATE_SCHEMA,
+            state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
+        )
+    )
+    projection = projection_owner.project_installed(
         installed.installed_path,
         installed.preview.manifest,
     )

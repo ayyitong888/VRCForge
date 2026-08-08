@@ -61,30 +61,10 @@
   },
   "seamGroups": [
     {
-      "id": "dashboard.skill-package-projection-host-proxy",
+      "id": "dashboard.skill-package-projection-typed-root-owner",
       "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "_SKILL_PACKAGE_PROJECTION"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "_skill_projection_path_is_link_like",
-            "_resolve_skill_projection_source",
-            "_copy_projected_skill_file",
-            "_write_projected_skill_state",
-            "_capture_projected_skill_state",
-            "_restore_projected_skill_state",
-            "_set_projected_skills_enabled",
-            "_project_installed_skill",
-            "_projected_skill_name",
-            "_set_projected_skill_enabled",
-            "_delete_projected_skill_transaction"
-          ]
-        }
-      ],
-      "hostProxy": {"source": "skill_package_projection.py", "class": "SkillPackageProjectionService"}
+        {"source": "dashboard_server.py", "scope": "module", "name": "SKILL_PACKAGE_PROJECTION"}
+      ]
     },
     {
       "id": "dashboard.skill-package-controller-typed-root-owner",

@@ -6,7 +6,18 @@ from typing import Any
 
 import pytest
 
-from agent_gateway import AgentGateway, parse_skill_markdown
+from agent_gateway import (
+    AgentGateway,
+    AgentGatewayError,
+    PROJECTED_SKILL_STATE_MAX_BYTES,
+    PROJECTED_SKILL_STATE_NAME,
+    PROJECTED_SKILL_STATE_SCHEMA,
+    parse_skill_markdown,
+)
+from skill_package_projection import (
+    SkillPackageProjectionPorts,
+    SkillPackageProjectionService,
+)
 from skill_packages import SkillPackageService
 
 
@@ -57,6 +68,21 @@ EXAMPLES = (
         "min_version": "1.3.0",
     },
 )
+
+
+def _projection(gateway: AgentGateway) -> SkillPackageProjectionService:
+    return SkillPackageProjectionService(
+        SkillPackageProjectionPorts(
+            user_skills_dir=lambda: gateway.user_skills_dir,
+            user_skill_lock=gateway.user_skill_lock,
+            find_user_skill=gateway._find_user_skill,  # noqa: SLF001 - isolated runtime projection fixture.
+            parse_skill=parse_skill_markdown,
+            parse_error_types=(AgentGatewayError,),
+            state_name=PROJECTED_SKILL_STATE_NAME,
+            state_schema=PROJECTED_SKILL_STATE_SCHEMA,
+            state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
+        )
+    )
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -192,10 +218,7 @@ def test_examples_keep_writes_on_existing_supervised_channels() -> None:
 def test_example_skill_package_trust_import_execute_and_audit(
     tmp_path: Path,
     case: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import dashboard_server
-
     source = EXAMPLE_ROOT / str(case["slug"])
     service = SkillPackageService(tmp_path / "app" / "skill-packages", vrcforge_version="1.4.0")
     key_pair = service.generate_signing_keypair()
@@ -222,7 +245,6 @@ def test_example_skill_package_trust_import_execute_and_audit(
     assert "skill_package_imported" in package_audit
 
     gateway = AgentGateway(tmp_path / "app" / "config" / "agent_gateway.json", tmp_path / "audit")
-    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
     project = _make_unity_project(tmp_path)
     calls: list[dict[str, Any]] = []
 
@@ -272,7 +294,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
             or {"ok": True, "tool": entrypoint},
         )
 
-    projection = dashboard_server._project_installed_skill(
+    projection = _projection(gateway).project_installed(
         installed.installed_path,
         installed.preview.manifest,
     )
@@ -354,10 +376,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
 
 def test_signed_material_package_install_projection_and_runtime_support_are_complete(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import dashboard_server
-
     gateway = AgentGateway(tmp_path / "app" / "config" / "agent_gateway.json", tmp_path / "audit")
     service = SkillPackageService(tmp_path / "app" / "skill-packages", vrcforge_version="1.3.0")
     key_pair = service.generate_signing_keypair()
@@ -382,9 +401,7 @@ def test_signed_material_package_install_projection_and_runtime_support_are_comp
         "high",
         lambda arguments: {"ok": True, "arguments": arguments},
     )
-    monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
-
-    projection = dashboard_server._project_installed_skill(
+    projection = _projection(gateway).project_installed(
         installed.installed_path,
         installed.preview.manifest,
     )

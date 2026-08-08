@@ -104,7 +104,7 @@ def test_governance_has_one_typed_owner_and_no_dashboard_facades() -> None:
     assert ports.make_service is dashboard_server.skill_package_service
     assert ports.write_lock is dashboard_server.SKILL_PACKAGE_WRITE_LOCK
     assert ports.disable_projected_skills.__defaults__ == (
-        dashboard_server._set_projected_skills_enabled,
+        dashboard_server.SKILL_PACKAGE_PROJECTION,
     )
 
 

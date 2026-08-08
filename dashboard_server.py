@@ -396,7 +396,10 @@ from skill_package_governance import (
     SkillPackageGovernancePorts,
     SkillPackageGovernanceService,
 )
-from skill_package_projection import SkillPackageProjectionService
+from skill_package_projection import (
+    SkillPackageProjectionPorts,
+    SkillPackageProjectionService,
+)
 from path_to_skill_controller import (
     PathToSkillControllerError,
     PathToSkillPreviewService,
@@ -2030,7 +2033,6 @@ ADVANCED_SETTINGS_TRANSITION_LOCK = Lock()
 TUNING_STORE_LOCK = Lock()
 UNITY_MCP_REPAIR_LOCK = Lock()
 SKILL_PACKAGE_WRITE_LOCK = Lock()
-_SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(
     ProjectCatalogDiscoveryPorts(
         appdata_path=lambda: Path(os.environ.get("APPDATA", "")),
@@ -6040,48 +6042,19 @@ def preflight_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "preview": preview.as_dict()}
 
 
-def _skill_projection_path_is_link_like(path: Path) -> bool:
-    return _SKILL_PACKAGE_PROJECTION._impl_skill_projection_path_is_link_like(path)
-
-
-def _resolve_skill_projection_source(installed_root: Path, relative: str, *, label: str) -> tuple[Path, PurePosixPath]:
-    return _SKILL_PACKAGE_PROJECTION._impl_resolve_skill_projection_source(installed_root, relative, label=label)
-
-
-def _copy_projected_skill_file(source: Path, target_dir: Path, relative: PurePosixPath) -> Path:
-    return _SKILL_PACKAGE_PROJECTION._impl_copy_projected_skill_file(source, target_dir, relative)
-
-
-def _write_projected_skill_state(target_dir: Path, enabled: bool) -> Path:
-    return _SKILL_PACKAGE_PROJECTION._impl_write_projected_skill_state(target_dir, enabled)
-
-
-def _capture_projected_skill_state(manifest: dict[str, Any]) -> tuple[Path, bytes | None]:
-    return _SKILL_PACKAGE_PROJECTION._impl_capture_projected_skill_state(manifest)
-
-
-def _restore_projected_skill_state(snapshot: tuple[Path, bytes | None]) -> None:
-    return _SKILL_PACKAGE_PROJECTION._impl_restore_projected_skill_state(snapshot)
-
-
-def _set_projected_skills_enabled(manifests: list[dict[str, Any]], enabled: bool) -> list[dict[str, Any]]:
-    return _SKILL_PACKAGE_PROJECTION._impl_set_projected_skills_enabled(manifests, enabled)
-
-
-def _project_installed_skill(installed_path: Path, manifest: dict[str, Any], *, enabled: bool = True) -> dict[str, Any] | None:
-    return _SKILL_PACKAGE_PROJECTION._impl_project_installed_skill(installed_path, manifest, enabled=enabled)
-
-
-def _projected_skill_name(manifest: dict[str, Any]) -> str:
-    return _SKILL_PACKAGE_PROJECTION._impl_projected_skill_name(manifest)
-
-
-def _set_projected_skill_enabled(manifest: dict[str, Any], enabled: bool) -> dict[str, Any]:
-    return _SKILL_PACKAGE_PROJECTION._impl_set_projected_skill_enabled(manifest, enabled)
-
-
-def _delete_projected_skill_transaction(manifest: dict[str, Any]) -> Any:
-    return _SKILL_PACKAGE_PROJECTION._impl_delete_projected_skill_transaction(manifest)
+SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(
+    SkillPackageProjectionPorts(
+        user_skills_dir=lambda gateway=AGENT_GATEWAY: gateway.user_skills_dir,
+        user_skill_lock=AGENT_GATEWAY.user_skill_lock,
+        find_user_skill=lambda name,
+        gateway=AGENT_GATEWAY: gateway._find_user_skill(name),  # noqa: SLF001 - fixed runtime read projection.
+        parse_skill=parse_skill_markdown,
+        parse_error_types=(AgentGatewayError,),
+        state_name=PROJECTED_SKILL_STATE_NAME,
+        state_schema=PROJECTED_SKILL_STATE_SCHEMA,
+        state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
+    )
+)
 
 
 SKILL_PACKAGE_CONTROLLER = SkillPackageController(
@@ -6091,18 +6064,18 @@ SKILL_PACKAGE_CONTROLLER = SkillPackageController(
         project_installed_skill=lambda installed_path,
         manifest,
         enabled,
-        project=_project_installed_skill: project(
+        projection=SKILL_PACKAGE_PROJECTION: projection.project_installed(
             installed_path,
             manifest,
             enabled=enabled,
         ),
         set_projected_skill_enabled=lambda manifest,
         enabled,
-        set_enabled=_set_projected_skills_enabled: set_enabled(
+        projection=SKILL_PACKAGE_PROJECTION: projection.set_enabled_batch(
             [manifest],
             enabled,
         )[0],
-        delete_projected_skill=_delete_projected_skill_transaction,
+        delete_projected_skill=SKILL_PACKAGE_PROJECTION.delete_transaction,
         make_bad_request=lambda message,
         error_type=AgentGatewayError: error_type(message, status_code=400),
     )
@@ -6114,7 +6087,10 @@ SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(
         make_service=skill_package_service,
         write_lock=SKILL_PACKAGE_WRITE_LOCK,
         disable_projected_skills=lambda manifests,
-        set_enabled=_set_projected_skills_enabled: set_enabled(manifests, False),
+        projection=SKILL_PACKAGE_PROJECTION: projection.set_enabled_batch(
+            manifests,
+            False,
+        ),
     )
 )
 
@@ -6136,7 +6112,11 @@ def _read_user_skill_export_file(
     *,
     label: str,
 ) -> tuple[Path, PurePosixPath, bytes]:
-    resolved, relative_path = _resolve_skill_projection_source(root, relative, label=label)
+    resolved, relative_path = SKILL_PACKAGE_PROJECTION.resolve_source(
+        root,
+        relative,
+        label=label,
+    )
     normalized = relative_path.as_posix()
     exclusion = service._source_file_exclusion_reason(resolved, normalized)  # noqa: SLF001 - selected export files use package policy.
     if exclusion:
@@ -6177,12 +6157,12 @@ def _copy_manifest_user_skill_export_source(
         raise SkillPackageError("User skill manifest must declare the loaded SKILL.md as its skill entrypoint.")
 
     loaded_relative = skill_file.relative_to(root).as_posix()
-    loaded_resolved, _loaded_path = _resolve_skill_projection_source(
+    loaded_resolved, _loaded_path = SKILL_PACKAGE_PROJECTION.resolve_source(
         root,
         loaded_relative,
         label="loaded user SKILL.md",
     )
-    manifest_skill_resolved, _manifest_skill_path = _resolve_skill_projection_source(
+    manifest_skill_resolved, _manifest_skill_path = SKILL_PACKAGE_PROJECTION.resolve_source(
         root,
         skill_relative,
         label="skill entrypoint",
@@ -6232,7 +6212,7 @@ def _copy_manifest_user_skill_export_source(
     support_collision_keys: set[str] = set()
     for raw_relative in declared_support:
         relative = str(raw_relative or "").strip()
-        _resolved, relative_path = _resolve_skill_projection_source(
+        _resolved, relative_path = SKILL_PACKAGE_PROJECTION.resolve_source(
             root,
             relative,
             label="SKILL.md support file",
