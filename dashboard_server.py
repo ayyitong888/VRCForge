@@ -266,8 +266,17 @@ from optimization_workflow_service import (
 )
 from avatar_tuning_workflow_service import (
     AvatarTuningApprovedWriteHandlers,
+    AvatarTuningError,
+    AvatarTuningLiveContext,
+    AvatarTuningPreparedPorts,
+    AvatarTuningPreparedService,
+    AvatarTuningStorePaths,
+    AvatarTuningStorePorts,
+    AvatarTuningStoreService,
+    AvatarTuningUndoStore,
     AvatarTuningWorkflowPorts,
     AvatarTuningWorkflowService,
+    PreparedFaceTuningState,
 )
 from package_install_workflow_service import (
     PackageDetectionPorts,
@@ -9345,9 +9354,28 @@ def read_tuning_presets(avatar_path: str | None = None) -> dict[str, Any]:
     return AVATAR_TUNING_WORKFLOWS.list_tuning_presets(avatar_path)
 
 
+async def _run_avatar_tuning_local_store_write(
+    handler: Callable[..., dict[str, Any]],
+    *args: Any,
+    map_all_runtime_errors: bool = False,
+) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(handler, *args)
+    except AvatarTuningError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        if map_all_runtime_errors:
+            raise to_http_exception(exc) from exc
+        raise
+
+
 @app.post("/api/tuning/presets")
 async def create_tuning_preset(request: TuningPresetCreateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.create_tuning_preset, request)
+    return await _run_avatar_tuning_local_store_write(
+        AVATAR_TUNING_WORKFLOWS.create_tuning_preset,
+        request,
+        map_all_runtime_errors=True,
+    )
 
 
 @app.post("/api/tuning/presets/{preset_id}/apply")
@@ -9361,25 +9389,30 @@ async def apply_tuning_preset(preset_id: str, request: DashboardRequest) -> dict
 
 @app.post("/api/tuning/presets/{preset_id}/rename")
 async def rename_tuning_preset(preset_id: str, request: TuningPresetRenameRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(
+    return await _run_avatar_tuning_local_store_write(
         AVATAR_TUNING_WORKFLOWS.rename_tuning_preset,
         preset_id,
         request,
+        map_all_runtime_errors=True,
     )
 
 
 @app.post("/api/tuning/presets/{preset_id}/duplicate")
 async def duplicate_tuning_preset(preset_id: str, request: TuningPresetDuplicateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(
+    return await _run_avatar_tuning_local_store_write(
         AVATAR_TUNING_WORKFLOWS.duplicate_tuning_preset,
         preset_id,
         request,
+        map_all_runtime_errors=True,
     )
 
 
 @app.post("/api/tuning/presets/{preset_id}/delete")
 async def delete_tuning_preset(preset_id: str) -> dict[str, Any]:
-    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.delete_tuning_preset, preset_id)
+    return await _run_avatar_tuning_local_store_write(
+        AVATAR_TUNING_WORKFLOWS.delete_tuning_preset,
+        preset_id,
+    )
 
 
 @app.get("/api/tuning/locks")
@@ -9389,7 +9422,10 @@ def read_tuning_locks(avatar_path: str | None = None) -> dict[str, Any]:
 
 @app.post("/api/tuning/locks")
 async def update_tuning_locks(request: TuningLocksUpdateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.update_tuning_locks, request)
+    return await _run_avatar_tuning_local_store_write(
+        AVATAR_TUNING_WORKFLOWS.update_tuning_locks,
+        request,
+    )
 
 
 @app.post("/api/tuning/locks/ai-select")
@@ -9625,7 +9661,7 @@ async def audit_avatar_multi_screenshot(request: VisionAuditMultiRequest) -> dic
     return await asyncio.to_thread(audit_avatar_multi_screenshot_sync, request)
 
 
-def read_avatars_sync(request: DashboardRequest) -> dict[str, Any]:
+def _read_avatars_tuning_adapter(request: DashboardRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
         export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
@@ -9645,7 +9681,7 @@ def read_avatars_sync(request: DashboardRequest) -> dict[str, Any]:
         raise to_http_exception(exc) from exc
 
 
-def scan_scene_avatars_sync(request: AvatarSceneScanRequest) -> dict[str, Any]:
+def _scan_scene_avatars_tuning_adapter(request: AvatarSceneScanRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
         export_payload = export_blendshapes(settings)
@@ -9671,7 +9707,7 @@ def scan_scene_avatars_sync(request: AvatarSceneScanRequest) -> dict[str, Any]:
         raise to_http_exception(exc) from exc
 
 
-def read_avatar_blendshapes_sync(request: AvatarBlendshapeListRequest) -> dict[str, Any]:
+def _read_avatar_blendshapes_tuning_adapter(request: AvatarBlendshapeListRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
         export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
@@ -9701,127 +9737,9 @@ def read_avatar_blendshapes_sync(request: AvatarBlendshapeListRequest) -> dict[s
         raise to_http_exception(exc) from exc
 
 
-def _prepare_manual_blendshape_state(request: ManualBlendshapeApplyRequest) -> dict[str, Any]:
-    """Read and validate the live facts which an approved apply must bind."""
-    if not request.adjustments:
-        raise AgentGatewayError("No blendshape adjustments were provided.", status_code=400)
-    settings = load_dashboard_settings(request)
-    export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
-    selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
-    remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
-    allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
-    locked_blendshapes = sorted(
-        load_locked_blendshapes(selected_avatar.avatar_path),
-        key=lambda item: (item.get("rendererPath", ""), item.get("blendshapeName", "")),
-    )
-    locked_targets = build_locked_blendshape_set(locked_blendshapes)
-    validated_adjustments: list[dict[str, Any]] = []
-    skipped_adjustments: list[dict[str, Any]] = []
-    undo_items: list[dict[str, Any]] = []
-    target_facts: list[dict[str, Any]] = []
-    for item in request.adjustments:
-        key = (item.renderer_path, item.blendshape_name)
-        if key not in allowed_targets:
-            skipped_adjustments.append({"rendererPath": item.renderer_path, "blendshapeName": item.blendshape_name, "reason": "missing_blendshape"})
-            continue
-        if is_blendshape_locked(item.renderer_path, item.blendshape_name, locked_targets):
-            skipped_adjustments.append({"rendererPath": item.renderer_path, "blendshapeName": item.blendshape_name, "reason": "locked"})
-            continue
-        # Never accept caller-provided previous_weight as rollback authority.
-        current_weight = float(allowed_targets[key]["currentWeight"])
-        target_weight = clamp_blendshape_weight(item.target_weight)
-        validated_adjustments.append({"rendererPath": item.renderer_path, "blendshapeName": item.blendshape_name, "targetWeight": target_weight})
-        undo_items.append({"rendererPath": item.renderer_path, "blendshapeName": item.blendshape_name, "targetWeight": current_weight})
-        target_facts.append({"rendererPath": item.renderer_path, "blendshapeName": item.blendshape_name, "currentWeight": current_weight})
-    return {
-        "settings": settings,
-        "exportSource": export_source,
-        "usingMockExecute": using_mock_execute,
-        "selectedAvatar": selected_avatar,
-        "validatedAdjustments": validated_adjustments,
-        "skippedAdjustments": skipped_adjustments,
-        "undoItems": undo_items,
-        "evidence": {
-            "avatarPath": selected_avatar.avatar_path,
-            "targetFacts": target_facts,
-            "locksSha256": blendshape_evidence_sha256(locked_blendshapes),
-        },
-    }
 
 
-def prepare_manual_blendshape_apply_request(
-    arguments: dict[str, Any], preview: Any,
-) -> tuple[dict[str, Any], Any]:
-    if PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
-    request = ManualBlendshapeApplyRequest(**arguments)
-    state = _prepare_manual_blendshape_state(request)
-    if state["usingMockExecute"]:
-        raise AgentGatewayError(
-            "Mock Blendshape execution is preview-only and cannot be approved.",
-            status_code=409,
-        )
-    adjustments = state["validatedAdjustments"]
-    if not adjustments:
-        raise AgentGatewayError(
-            "No valid Blendshape adjustments remain after target/lock validation.",
-            status_code=409,
-        )
-    selected_avatar = state["selectedAvatar"]
-    prepared = install_prepared_calls(
-        arguments,
-        [("vrc_apply_blendshapes", {"avatarPath": selected_avatar.avatar_path, "adjustments": adjustments, "saveAssets": True})],
-        {**state["evidence"], "undoItems": state["undoItems"]},
-    )
-    return prepared, {
-        "ok": True,
-        "targetTool": "vrcforge_apply_blendshapes",
-        "avatarPath": selected_avatar.avatar_path,
-        "adjustmentCount": len(adjustments),
-        "skippedAdjustments": state["skippedAdjustments"],
-    }
-
-
-def apply_manual_blendshapes_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    try:
-        request = ManualBlendshapeApplyRequest(**arguments)
-        evidence = prepared_evidence(arguments)
-        if not isinstance(evidence, dict):
-            raise RuntimeError("Prepared Blendshape evidence is invalid.")
-        state = _prepare_manual_blendshape_state(request)
-        for key in ("avatarPath", "targetFacts", "locksSha256"):
-            if key not in evidence:
-                raise RuntimeError("Prepared Blendshape evidence is incomplete.")
-        require_exact_blendshape_evidence(evidence["avatarPath"], state["evidence"]["avatarPath"], "avatar selection")
-        require_exact_blendshape_evidence(evidence["targetFacts"], state["evidence"]["targetFacts"], "target values")
-        require_exact_blendshape_evidence(evidence["locksSha256"], state["evidence"]["locksSha256"], "locks")
-        tool_name, tool_arguments = prepared_call(arguments)
-        if tool_name != "vrc_apply_blendshapes":
-            raise RuntimeError("Prepared Blendshape Core call is invalid.")
-        expected_arguments = {"avatarPath": evidence["avatarPath"], "adjustments": state["validatedAdjustments"], "saveAssets": True}
-        require_exact_blendshape_evidence(tool_arguments, expected_arguments, "Core arguments")
-        result = invoke_unity_mcp(state["settings"], tool_name, tool_arguments)
-        undo_items = evidence.get("undoItems")
-        if not isinstance(undo_items, list):
-            raise RuntimeError("Prepared Blendshape undo evidence is invalid.")
-        with BLENDSHAPE_UNDO_LOCK:
-            push_manual_undo_snapshot(str(evidence["avatarPath"]), undo_items)
-        remember_loaded_avatar(state["selectedAvatar"].avatar_name, state["selectedAvatar"].avatar_path)
-        return {
-            "ok": True,
-            "selectedAvatar": serialize_selected_avatar(state["selectedAvatar"]),
-            "executionMode": "mock" if state["usingMockExecute"] else "live-unity",
-            "result": serialize_result(result),
-            "appliedAdjustments": state["validatedAdjustments"],
-            "skippedAdjustments": state["skippedAdjustments"],
-            "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(str(evidence["avatarPath"]), [])),
-        }
-    except (RuntimeError, UnityMcpError, ValueError) as exc:
-        emit_log("error", "blendshape", "Failed to apply manual blendshape adjustments.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
-
-
-def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict[str, Any]:
+def _preview_manual_blendshapes_adapter(request: ManualBlendshapeApplyRequest) -> dict[str, Any]:
     try:
         if not request.adjustments:
             raise RuntimeError("No blendshape adjustments were provided.")
@@ -9835,7 +9753,9 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
         skipped_adjustments: list[dict[str, Any]] = []
         undo_items: list[dict[str, Any]] = []
         allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
-        locked_targets = build_locked_blendshape_set(load_locked_blendshapes(selected_avatar.avatar_path))
+        locked_targets = build_locked_blendshape_set(
+            AVATAR_TUNING_STORES.load_locked_blendshapes(selected_avatar.avatar_path)
+        )
         for item in request.adjustments:
             key = (item.renderer_path, item.blendshape_name)
             if key not in allowed_targets:
@@ -9888,7 +9808,7 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
                 "result": None,
                 "appliedAdjustments": [],
                 "skippedAdjustments": skipped_adjustments,
-                "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
+                "undoDepth": AVATAR_TUNING_UNDO.depth(selected_avatar.avatar_path),
             }
 
         if using_mock_execute:
@@ -9897,7 +9817,7 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
         else:
             result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, validated_adjustments)
 
-        push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
+        undo_depth = AVATAR_TUNING_UNDO.push(selected_avatar.avatar_path, undo_items)
         emit_log(
             "success",
             "blendshape",
@@ -9911,132 +9831,17 @@ def apply_manual_blendshapes_sync(request: ManualBlendshapeApplyRequest) -> dict
             "result": serialize_result(result),
             "appliedAdjustments": validated_adjustments,
             "skippedAdjustments": skipped_adjustments,
-            "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
+            "undoDepth": undo_depth,
         }
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "blendshape", "Failed to apply manual blendshape adjustments.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
-def prepare_manual_blendshape_undo_request(
-    arguments: dict[str, Any], preview: Any,
-) -> tuple[dict[str, Any], Any]:
-    if PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
-    request = UndoBlendshapeRequest(**arguments)
-    avatar_path = request.avatar_path.strip()
-    if not avatar_path:
-        raise RuntimeError("avatar_path is required for undo.")
-    with BLENDSHAPE_UNDO_LOCK:
-        stack = DASHBOARD_RUNTIME.manual_undo_stack.get(avatar_path) or []
-        if not stack:
-            raise RuntimeError("There is no manual blendshape action to undo for the selected avatar.")
-        undo_items = copy.deepcopy(stack[-1])
-        evidence = {
-            "avatarPath": avatar_path,
-            "undoDepth": len(stack),
-            "undoSha256": blendshape_evidence_sha256(undo_items),
-        }
-    prepared = install_prepared_calls(
-        arguments,
-        [("vrc_apply_blendshapes", {"avatarPath": avatar_path, "adjustments": undo_items, "saveAssets": True})],
-        evidence,
-    )
-    return prepared, {"ok": True, "targetTool": "vrcforge_undo_blendshapes", "avatarPath": avatar_path, "restoreCount": len(undo_items)}
 
 
-def undo_manual_blendshapes_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    try:
-        request = UndoBlendshapeRequest(**arguments)
-        evidence = prepared_evidence(arguments)
-        if not isinstance(evidence, dict):
-            raise RuntimeError("Prepared Blendshape undo evidence is invalid.")
-        avatar_path = request.avatar_path.strip()
-        if avatar_path != evidence.get("avatarPath"):
-            raise RuntimeError("Prepared Blendshape undo avatar drifted after approval.")
-        undo_items = None
-        with BLENDSHAPE_UNDO_LOCK:
-            stack = DASHBOARD_RUNTIME.manual_undo_stack.get(avatar_path) or []
-            if not stack:
-                raise RuntimeError("There is no manual blendshape action to undo for the selected avatar.")
-            if evidence.get("undoDepth") != len(stack):
-                raise RuntimeError("Prepared Blendshape undo stack depth drifted after approval.")
-            undo_items = copy.deepcopy(stack[-1])
-            if evidence.get("undoSha256") != blendshape_evidence_sha256(undo_items):
-                raise RuntimeError("Prepared Blendshape undo stack drifted after approval.")
-            tool_name, tool_arguments = prepared_call(arguments)
-            expected = {"avatarPath": avatar_path, "adjustments": undo_items, "saveAssets": True}
-            if tool_name != "vrc_apply_blendshapes":
-                raise RuntimeError("Prepared Blendshape undo Core call is invalid.")
-            require_exact_blendshape_evidence(tool_arguments, expected, "undo Core arguments")
-            settings = load_dashboard_settings(request)
-            result = apply_blendshapes_direct(settings, avatar_path, undo_items)
-            # A failed Core call leaves the undo point intact.  Only success consumes it.
-            stack.pop()
-        emit_log("success", "blendshape", "Manual blendshape undo applied.", {"avatarPath": avatar_path, "count": len(undo_items)})
-        return {"ok": True, "avatarPath": avatar_path, "result": serialize_result(result), "undoDepth": len(stack), "restoredAdjustments": undo_items}
-    except (RuntimeError, UnityMcpError, ValueError) as exc:
-        emit_log("error", "blendshape", "Failed to undo manual blendshape adjustments.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
 
 
-def undo_manual_blendshapes_sync(request: UndoBlendshapeRequest) -> dict[str, Any]:
-    try:
-        avatar_path = request.avatar_path.strip()
-        if not avatar_path:
-            raise RuntimeError("avatar_path is required for undo.")
-
-        stack = DASHBOARD_RUNTIME.manual_undo_stack.get(avatar_path) or []
-        if not stack:
-            raise RuntimeError("There is no manual blendshape action to undo for the selected avatar.")
-
-        settings = load_dashboard_settings(request)
-        undo_items = stack.pop()
-        result = apply_blendshapes_direct(settings, avatar_path, undo_items)
-        emit_log("success", "blendshape", "Manual blendshape undo applied.", {"avatarPath": avatar_path, "count": len(undo_items)})
-        return {
-            "ok": True,
-            "avatarPath": avatar_path,
-            "result": serialize_result(result),
-            "undoDepth": len(stack),
-            "restoredAdjustments": undo_items,
-        }
-    except (RuntimeError, UnityMcpError) as exc:
-        emit_log("error", "blendshape", "Failed to undo manual blendshape adjustments.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
-
-
-def load_tuning_history_store() -> dict[str, Any]:
-    return load_tuning_store(
-        TUNING_HISTORY_PATH,
-        {
-            "type": "blendshape_tuning_history",
-            "version": "0.1",
-            "records": [],
-        },
-    )
-
-
-def load_tuning_preset_store() -> dict[str, Any]:
-    return load_tuning_store(
-        TUNING_PRESETS_PATH,
-        {
-            "type": "blendshape_tuning_presets",
-            "version": "0.1",
-            "presets": [],
-        },
-    )
-
-
-def load_tuning_locks_store() -> dict[str, Any]:
-    return load_tuning_store(
-        TUNING_LOCKS_PATH,
-        {
-            "type": "blendshape_tuning_locks",
-            "version": "0.1",
-            "avatars": {},
-        },
-    )
 
 
 def load_shader_tuning_history_store() -> dict[str, Any]:
@@ -10135,30 +9940,9 @@ def normalize_locked_blendshape_list(items: list[dict[str, Any]] | list[Any]) ->
     return normalized
 
 
-def load_locked_blendshapes(avatar_path: str | None) -> list[dict[str, str]]:
-    if not avatar_path:
-        return []
-    store = load_tuning_locks_store()
-    avatars = store.get("avatars") if isinstance(store.get("avatars"), dict) else {}
-    return normalize_locked_blendshape_list(avatars.get(avatar_path) or [])
 
 
-def update_tuning_locks_sync(request: TuningLocksUpdateRequest) -> dict[str, Any]:
-    avatar_path = (request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path or "").strip()
-    if not avatar_path:
-        raise to_http_exception(RuntimeError("avatar_path is required before updating locked Blendshapes."))
-
-    locked = normalize_locked_blendshape_list(request.locked_blendshapes)
-    store = load_tuning_locks_store()
-    avatars = store.get("avatars") if isinstance(store.get("avatars"), dict) else {}
-    avatars[avatar_path] = locked
-    store["avatars"] = avatars
-    save_tuning_store(TUNING_LOCKS_PATH, store)
-    emit_log("info", "blendshape", "Locked Blendshape list updated.", {"avatarPath": avatar_path, "count": len(locked)})
-    return {"ok": True, "avatarPath": avatar_path, "lockedBlendshapes": locked, "count": len(locked)}
-
-
-def ai_select_tuning_locks_sync(request: TuningLocksAiSelectRequest) -> dict[str, Any]:
+def _ai_select_tuning_locks_adapter(request: TuningLocksAiSelectRequest) -> dict[str, Any]:
     instruction = request.selection_instruction.strip()
     if not instruction:
         raise to_http_exception(RuntimeError("selection_instruction is required for AI lock selection."))
@@ -10497,27 +10281,6 @@ def extract_tuning_thumbnail_paths(visual_proof: dict[str, Any] | None) -> dict[
     return thumbnails
 
 
-def save_tuning_history_record(record: dict[str, Any]) -> dict[str, Any]:
-    store = load_tuning_history_store()
-    records = list(store.get("records") or [])
-    records.append(record)
-    store["records"] = records[-200:]
-    save_tuning_store(TUNING_HISTORY_PATH, store)
-    return record
-
-
-def find_tuning_history_record(history_id: str) -> dict[str, Any]:
-    for record in load_tuning_history_store().get("records") or []:
-        if record.get("id") == history_id:
-            return record
-    raise RuntimeError(f"Tuning history record was not found: {history_id}")
-
-
-def find_tuning_preset(preset_id: str) -> dict[str, Any]:
-    for preset in load_tuning_preset_store().get("presets") or []:
-        if preset.get("id") == preset_id:
-            return preset
-    raise RuntimeError(f"Tuning preset was not found: {preset_id}")
 
 
 def trim_presets_for_avatar(presets: list[dict[str, Any]], max_presets: int) -> list[dict[str, Any]]:
@@ -10540,264 +10303,32 @@ def trim_presets_for_avatar(presets: list[dict[str, Any]], max_presets: int) -> 
     return trimmed
 
 
-def create_tuning_preset_sync(request: TuningPresetCreateRequest) -> dict[str, Any]:
+
+
+def _preview_saved_tuning_history_adapter(history_id: str, request: DashboardRequest) -> dict[str, Any]:
     try:
-        history = find_tuning_history_record(request.history_id)
-        name = request.name.strip()
-        if not name:
-            raise RuntimeError("Preset name is required.")
-
-        preset = {
-            "id": make_tuning_id("preset"),
-            "name": name,
-            "created_at": tuning_timestamp(),
-            "avatar_name": history.get("avatar_name", ""),
-            "avatar_path": history.get("avatar_path", ""),
-            "source_history_id": history.get("id", ""),
-            "user_prompt": history.get("user_prompt", ""),
-            "provider": history.get("provider", ""),
-            "provider_id": history.get("provider_id", ""),
-            "model": history.get("model", ""),
-            "tags": [str(tag).strip() for tag in request.tags if str(tag).strip()],
-            "description": request.description.strip(),
-            "apply_mode": "after_values",
-            "changes": list(history.get("changes") or []),
-        }
-        store = load_tuning_preset_store()
-        presets = list(store.get("presets") or [])
-        presets.append(preset)
-        presets = trim_presets_for_avatar(presets, request.max_presets)
-        store["presets"] = presets
-        save_tuning_store(TUNING_PRESETS_PATH, store)
-        emit_log("success", "preset", "Tuning preset saved.", {"presetId": preset["id"], "name": preset["name"]})
-        return {"ok": True, "preset": preset, "presets": presets}
-    except RuntimeError as exc:
-        raise to_http_exception(exc) from exc
-
-
-def rename_tuning_preset_sync(preset_id: str, request: TuningPresetRenameRequest) -> dict[str, Any]:
-    try:
-        name = request.name.strip()
-        if not name:
-            raise RuntimeError("Preset name is required.")
-        store = load_tuning_preset_store()
-        presets = list(store.get("presets") or [])
-        for preset in presets:
-            if preset.get("id") == preset_id:
-                preset["name"] = name
-                preset["updated_at"] = tuning_timestamp()
-                save_tuning_store(TUNING_PRESETS_PATH, {**store, "presets": presets})
-                return {"ok": True, "preset": preset, "presets": presets}
-        raise RuntimeError(f"Tuning preset was not found: {preset_id}")
-    except RuntimeError as exc:
-        raise to_http_exception(exc) from exc
-
-
-def duplicate_tuning_preset_sync(preset_id: str, request: TuningPresetDuplicateRequest) -> dict[str, Any]:
-    try:
-        source = find_tuning_preset(preset_id)
-        duplicate = json.loads(json.dumps(source))
-        duplicate["id"] = make_tuning_id("preset")
-        duplicate["name"] = (request.name or f"{source.get('name', 'preset')}_copy").strip()
-        duplicate["created_at"] = tuning_timestamp()
-        duplicate["source_preset_id"] = source.get("id", "")
-        store = load_tuning_preset_store()
-        presets = list(store.get("presets") or [])
-        presets.append(duplicate)
-        presets = trim_presets_for_avatar(presets, request.max_presets)
-        store["presets"] = presets
-        save_tuning_store(TUNING_PRESETS_PATH, store)
-        return {"ok": True, "preset": duplicate, "presets": presets}
-    except RuntimeError as exc:
-        raise to_http_exception(exc) from exc
-
-
-def delete_tuning_preset_sync(preset_id: str) -> dict[str, Any]:
-    store = load_tuning_preset_store()
-    presets = list(store.get("presets") or [])
-    remaining = [preset for preset in presets if preset.get("id") != preset_id]
-    if len(remaining) == len(presets):
-        raise to_http_exception(RuntimeError(f"Tuning preset was not found: {preset_id}"))
-    store["presets"] = remaining
-    save_tuning_store(TUNING_PRESETS_PATH, store)
-    return {"ok": True, "deletedPresetId": preset_id, "presets": remaining}
-
-
-def apply_saved_tuning_history_sync(history_id: str, request: DashboardRequest) -> dict[str, Any]:
-    try:
-        record = find_tuning_history_record(history_id)
+        record = AVATAR_TUNING_STORES.find_history(history_id)
         payload = apply_saved_tuning_payload(record, request, source_type="history")
-        mark_tuning_history_applied(history_id)
-        payload["historyRecord"] = find_tuning_history_record(history_id)
+        AVATAR_TUNING_STORES.mark_history_applied(history_id)
+        payload["historyRecord"] = AVATAR_TUNING_STORES.find_history(history_id)
         return payload
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "preset", "Failed to reapply tuning history.", {"historyId": history_id, "error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
-def apply_saved_tuning_preset_sync(preset_id: str, request: DashboardRequest) -> dict[str, Any]:
+def _preview_saved_tuning_preset_adapter(preset_id: str, request: DashboardRequest) -> dict[str, Any]:
     try:
-        preset = find_tuning_preset(preset_id)
+        preset = AVATAR_TUNING_STORES.find_preset(preset_id)
         payload = apply_saved_tuning_payload(preset, request, source_type="preset")
-        mark_tuning_preset_applied(preset_id)
-        payload["preset"] = find_tuning_preset(preset_id)
+        AVATAR_TUNING_STORES.mark_preset_applied(preset_id)
+        payload["preset"] = AVATAR_TUNING_STORES.find_preset(preset_id)
         return payload
     except (RuntimeError, UnityMcpError) as exc:
         emit_log("error", "preset", "Failed to apply tuning preset.", {"presetId": preset_id, "error": str(exc)})
         raise to_http_exception(exc) from exc
 
 
-def _prepare_saved_tuning_state(saved_payload: dict[str, Any], request: DashboardRequest, source_type: str) -> dict[str, Any]:
-    """Resolve a local saved record against current Unity facts before approval."""
-    settings = load_dashboard_settings(request)
-    export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
-    avatar_hint = request.avatar or saved_payload.get("avatar_path") or saved_payload.get("avatar_name")
-    selected_avatar = resolve_avatar_selection(export_payload, avatar_hint)
-    allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
-    locked_blendshapes = load_locked_blendshapes(selected_avatar.avatar_path)
-    locked_targets = build_locked_blendshape_set(locked_blendshapes)
-    adjustments: list[dict[str, Any]] = []
-    undo_items: list[dict[str, Any]] = []
-    target_facts: list[dict[str, Any]] = []
-    skipped: list[dict[str, Any]] = []
-    for change in saved_payload.get("changes") or []:
-        if not isinstance(change, dict):
-            raise RuntimeError(f"Saved {source_type} contains an invalid change.")
-        renderer_path = str(change.get("renderer_path") or change.get("rendererPath") or "")
-        blendshape_name = str(change.get("blendshape") or change.get("blendshapeName") or change.get("blendshape_name") or "")
-        key = (renderer_path, blendshape_name)
-        if key not in allowed_targets:
-            skipped.append({"rendererPath": renderer_path, "blendshapeName": blendshape_name, "reason": "missing_blendshape"})
-            continue
-        if is_blendshape_locked(renderer_path, blendshape_name, locked_targets):
-            skipped.append({"rendererPath": renderer_path, "blendshapeName": blendshape_name, "reason": "locked"})
-            continue
-        current_weight = clamp_blendshape_weight(allowed_targets[key].get("currentWeight", 0.0))
-        target_weight = clamp_blendshape_weight(change.get("after", change.get("targetWeight", current_weight)))
-        adjustments.append({"rendererPath": renderer_path, "blendshapeName": blendshape_name, "targetWeight": target_weight})
-        undo_items.append({"rendererPath": renderer_path, "blendshapeName": blendshape_name, "targetWeight": current_weight})
-        target_facts.append({"rendererPath": renderer_path, "blendshapeName": blendshape_name, "currentWeight": current_weight})
-    if not adjustments:
-        raise RuntimeError(f"No valid saved {source_type} changes remain after target/lock validation.")
-    return {
-        "settings": settings, "selectedAvatar": selected_avatar, "exportSource": export_source,
-        "usingMockExecute": using_mock_execute, "adjustments": adjustments, "undoItems": undo_items, "skipped": skipped,
-        "evidence": {
-            "avatarPath": selected_avatar.avatar_path, "targetFacts": target_facts,
-            "locksSha256": blendshape_evidence_sha256(locked_blendshapes),
-        },
-    }
-
-
-def _saved_tuning_target_id(arguments: dict[str, Any], source_type: str) -> str:
-    key = "historyId" if source_type == "history" else "presetId"
-    alternate = "history_id" if source_type == "history" else "preset_id"
-    value = str(arguments.get(key, arguments.get(alternate, "")) or "").strip()
-    if not value:
-        raise RuntimeError(f"{key} is required for saved tuning {source_type} reapply.")
-    return value
-
-
-def _prepare_saved_tuning_request(arguments: dict[str, Any], preview: Any, source_type: str) -> tuple[dict[str, Any], Any]:
-    if PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
-    request = build_agent_dashboard_request(arguments)
-    if request.mock_execute:
-        raise RuntimeError("Mock saved tuning is preview-only and cannot be approved for execution.")
-    item_id = _saved_tuning_target_id(arguments, source_type)
-    saved = find_tuning_history_record(item_id) if source_type == "history" else find_tuning_preset(item_id)
-    state = _prepare_saved_tuning_state(saved, request, source_type)
-    if state["usingMockExecute"]:
-        raise RuntimeError("Mock saved tuning is preview-only and cannot be approved for execution.")
-    id_key = "historyId" if source_type == "history" else "presetId"
-    prepared = install_prepared_calls(
-        arguments,
-        [("vrc_apply_blendshapes", {"avatarPath": state["selectedAvatar"].avatar_path, "adjustments": state["adjustments"], "saveAssets": True})],
-        {**state["evidence"], "sourceType": source_type, id_key: item_id, "savedSha256": blendshape_evidence_sha256(saved), "undoItems": state["undoItems"], "skipped": state["skipped"]},
-    )
-    return prepared, {"ok": True, "targetTool": f"vrcforge_{'reapply_tuning_history' if source_type == 'history' else 'apply_tuning_preset'}", "avatarPath": state["selectedAvatar"].avatar_path, "adjustmentCount": len(state["adjustments"]), "skippedAdjustments": state["skipped"]}
-
-
-def prepare_reapply_tuning_history_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], Any]:
-    return _prepare_saved_tuning_request(arguments, preview, "history")
-
-
-def prepare_apply_tuning_preset_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], Any]:
-    return _prepare_saved_tuning_request(arguments, preview, "preset")
-
-
-def _execute_saved_tuning_approved(arguments: dict[str, Any], source_type: str) -> dict[str, Any]:
-    try:
-        request = build_agent_dashboard_request(arguments)
-        evidence = prepared_evidence(arguments)
-        if not isinstance(evidence, dict) or evidence.get("sourceType") != source_type:
-            raise RuntimeError("Prepared saved tuning evidence is invalid.")
-        item_id = _saved_tuning_target_id(arguments, source_type)
-        id_key = "historyId" if source_type == "history" else "presetId"
-        if evidence.get(id_key) != item_id:
-            raise RuntimeError("Prepared saved tuning identity drifted after approval.")
-        saved = find_tuning_history_record(item_id) if source_type == "history" else find_tuning_preset(item_id)
-        if evidence.get("savedSha256") != blendshape_evidence_sha256(saved):
-            raise RuntimeError("Prepared saved tuning record drifted after approval.")
-        state = _prepare_saved_tuning_state(saved, request, source_type)
-        if state["usingMockExecute"]:
-            raise RuntimeError("Mock saved tuning cannot execute an approved Unity write.")
-        for key in ("avatarPath", "targetFacts", "locksSha256"):
-            require_exact_blendshape_evidence(evidence.get(key), state["evidence"].get(key), f"saved tuning {key}")
-        tool_name, tool_arguments = prepared_call(arguments)
-        expected = {"avatarPath": state["selectedAvatar"].avatar_path, "adjustments": state["adjustments"], "saveAssets": True}
-        if tool_name != "vrc_apply_blendshapes":
-            raise RuntimeError("Prepared saved tuning Core call is invalid.")
-        require_exact_blendshape_evidence(tool_arguments, expected, "saved tuning Core arguments")
-        result = invoke_unity_mcp(state["settings"], tool_name, tool_arguments)
-        undo_items = evidence.get("undoItems")
-        if not isinstance(undo_items, list):
-            raise RuntimeError("Prepared saved tuning undo evidence is invalid.")
-        with BLENDSHAPE_UNDO_LOCK:
-            push_manual_undo_snapshot(state["selectedAvatar"].avatar_path, undo_items)
-            undo_depth = len(DASHBOARD_RUNTIME.manual_undo_stack.get(state["selectedAvatar"].avatar_path, []))
-        warnings: list[str] = []
-        change_preview = [
-            {
-                "avatarPath": state["selectedAvatar"].avatar_path,
-                "rendererPath": adjustment["rendererPath"],
-                "blendshapeName": adjustment["blendshapeName"],
-                "previousWeight": fact["currentWeight"],
-                "targetWeight": adjustment["targetWeight"],
-            }
-            for adjustment, fact in zip(state["adjustments"], state["evidence"]["targetFacts"], strict=True)
-        ]
-        verified_changes = verify_live_blendshape_changes(
-            state["settings"], state["selectedAvatar"], change_preview,
-        )
-        readback_verified = bool(verified_changes) and all(bool(item.get("verified")) for item in verified_changes)
-        if not readback_verified:
-            warnings.append("Unity changes committed, but exact Blendshape readback was not fully verified.")
-        metadata = None
-        try:
-            if source_type == "history":
-                mark_tuning_history_applied(item_id)
-                metadata = find_tuning_history_record(item_id)
-            else:
-                mark_tuning_preset_applied(item_id)
-                metadata = find_tuning_preset(item_id)
-        except Exception as metadata_exc:  # Core mutation is committed; do not imply it should be retried.
-            warnings.append(f"Post-apply metadata was not saved: {metadata_exc}")
-        response = {"ok": True, "sourceType": source_type, "selectedAvatar": serialize_selected_avatar(state["selectedAvatar"]), "executionMode": "live-unity", "result": serialize_result(result), "appliedAdjustments": state["adjustments"], "skippedAdjustments": evidence.get("skipped") or [], "verifiedChanges": verified_changes, "readbackVerified": readback_verified, "undoDepth": undo_depth, "warnings": warnings, ("historyRecord" if source_type == "history" else "preset"): metadata}
-        if warnings:
-            response.update({"committed": True, "committedWithWarning": True})
-        return response
-    except (RuntimeError, UnityMcpError, ValueError) as exc:
-        emit_log("error", "preset", "Prepared saved tuning execution failed.", {"sourceType": source_type, "error": str(exc)})
-        raise to_http_exception(exc) from exc
-
-
-def reapply_tuning_history_approved_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _execute_saved_tuning_approved(params, "history")
-
-
-def apply_tuning_preset_approved_sync(params: dict[str, Any]) -> dict[str, Any]:
-    return _execute_saved_tuning_approved(params, "preset")
 
 
 def apply_saved_tuning_payload(saved_payload: dict[str, Any], request: DashboardRequest, source_type: str) -> dict[str, Any]:
@@ -10808,7 +10339,9 @@ def apply_saved_tuning_payload(saved_payload: dict[str, Any], request: Dashboard
     remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
 
     allowed_targets = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
-    locked_blendshapes = load_locked_blendshapes(selected_avatar.avatar_path)
+    locked_blendshapes = AVATAR_TUNING_STORES.load_locked_blendshapes(
+        selected_avatar.avatar_path
+    )
     locked_targets = build_locked_blendshape_set(locked_blendshapes)
     direct_adjustments: list[dict[str, Any]] = []
     undo_items: list[dict[str, Any]] = []
@@ -10862,7 +10395,7 @@ def apply_saved_tuning_payload(saved_payload: dict[str, Any], request: Dashboard
             result = mock_execute_payload(apply_payload, selected_avatar, export_source)
         else:
             result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, direct_adjustments)
-        push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
+        AVATAR_TUNING_UNDO.push(selected_avatar.avatar_path, undo_items)
 
     emit_log(
         "success" if direct_adjustments else "warning",
@@ -10880,32 +10413,10 @@ def apply_saved_tuning_payload(saved_payload: dict[str, Any], request: Dashboard
         "skippedAdjustments": skipped,
         "changePreview": change_preview,
         "lockedBlendshapes": locked_blendshapes,
-        "undoDepth": len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, [])),
+        "undoDepth": AVATAR_TUNING_UNDO.depth(selected_avatar.avatar_path),
     }
 
 
-def mark_tuning_history_applied(history_id: str) -> None:
-    store = load_tuning_history_store()
-    records = list(store.get("records") or [])
-    for record in records:
-        if record.get("id") == history_id:
-            record["applied"] = True
-            record["last_applied_at"] = tuning_timestamp()
-            break
-    store["records"] = records
-    save_tuning_store(TUNING_HISTORY_PATH, store)
-
-
-def mark_tuning_preset_applied(preset_id: str) -> None:
-    store = load_tuning_preset_store()
-    presets = list(store.get("presets") or [])
-    for preset in presets:
-        if preset.get("id") == preset_id:
-            preset["last_applied_at"] = tuning_timestamp()
-            preset["apply_count"] = int(preset.get("apply_count") or 0) + 1
-            break
-    store["presets"] = presets
-    save_tuning_store(TUNING_PRESETS_PATH, store)
 
 
 def scan_clothes_sync(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
@@ -13313,13 +12824,46 @@ def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict
         raise to_http_exception(exc) from exc
 
 
-def _prepare_face_tuning_state(request: DashboardRequest) -> dict[str, Any]:
+def _resolve_avatar_tuning_live_context(
+    arguments: dict[str, Any],
+    avatar_hint: str | None,
+) -> AvatarTuningLiveContext:
+    request = build_agent_dashboard_request(arguments)
+    settings = load_dashboard_settings(request)
+    export_payload, _export_source, using_mock_execute = load_dashboard_export_payload(
+        settings,
+        request,
+    )
+    selected_avatar = resolve_avatar_selection(
+        export_payload,
+        avatar_hint or request.avatar,
+    )
+    return AvatarTuningLiveContext(
+        settings=settings,
+        avatar_name=selected_avatar.avatar_name,
+        avatar_path=selected_avatar.avatar_path,
+        allowed_targets=build_allowed_blendshape_index(
+            export_payload,
+            selected_avatar.avatar_path,
+        ),
+        locked_blendshapes=AVATAR_TUNING_STORES.load_locked_blendshapes(
+            selected_avatar.avatar_path
+        ),
+        using_mock_execute=using_mock_execute,
+        selected_avatar=selected_avatar,
+    )
+
+
+def _prepare_face_tuning_state(arguments: dict[str, Any]) -> PreparedFaceTuningState:
     """Generate and validate a face plan before, never during, approval execution."""
+    request = build_agent_dashboard_request(arguments)
     settings = load_dashboard_settings(request)
     export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
     selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
     remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
-    locked_blendshapes = load_locked_blendshapes(selected_avatar.avatar_path)
+    locked_blendshapes = AVATAR_TUNING_STORES.load_locked_blendshapes(
+        selected_avatar.avatar_path
+    )
     planning_payload = filter_planning_payload_to_face_blendshapes(build_planning_payload(export_payload, selected_avatar))
     planning_payload = filter_planning_payload_locked_blendshapes(planning_payload, locked_blendshapes)
     if int((planning_payload.get("summary") or {}).get("blendshapeCount", 0) or 0) == 0:
@@ -13345,158 +12889,114 @@ def _prepare_face_tuning_state(request: DashboardRequest) -> dict[str, Any]:
     if not direct_adjustments:
         raise RuntimeError("The prepared face-tuning plan contains no writable Blendshape adjustments.")
     change_preview = build_plan_change_preview(plan, export_payload, selected_avatar)
-    target_facts = [
-        {"rendererPath": item["rendererPath"], "blendshapeName": item["blendshapeName"], "currentWeight": item["previousWeight"]}
-        for item in change_preview
-    ]
-    return {
-        "settings": settings,
-        "exportPayload": export_payload,
-        "exportSource": export_source,
-        "usingMockExecute": using_mock_execute,
-        "selectedAvatar": selected_avatar,
-        "lockedBlendshapes": locked_blendshapes,
-        "plan": plan,
-        "directAdjustments": direct_adjustments,
-        "changePreview": change_preview,
-        "undoItems": build_undo_items_from_change_preview(change_preview),
-        "referenceContext": reference_context,
-        "preview": render_preview(selected_avatar, plan, export_source, using_mock_execute),
-        "applyPayload": render_apply_payload_json(selected_avatar, plan),
-        "evidence": {
-            "avatarPath": selected_avatar.avatar_path,
-            "targetFacts": target_facts,
-            "locksSha256": blendshape_evidence_sha256(locked_blendshapes),
-            "planSha256": blendshape_evidence_sha256(plan.model_dump()),
-        },
-    }
-
-
-def prepare_face_tuning_execution_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], Any]:
-    if PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
-    request = build_agent_dashboard_request(arguments)
-    if request.mock_execute:
-        raise RuntimeError("Mock face tuning is preview-only and cannot be approved for execution.")
-    state = _prepare_face_tuning_state(request)
-    if state["usingMockExecute"]:
-        raise RuntimeError("Mock face tuning is preview-only and cannot be approved for execution.")
-    avatar_path = state["selectedAvatar"].avatar_path
-    prepared = install_prepared_calls(
-        arguments,
-        [("vrc_apply_blendshapes", {"avatarPath": avatar_path, "adjustments": state["directAdjustments"], "saveAssets": True})],
-        {
-            **state["evidence"],
-            "undoItems": state["undoItems"],
-            "plan": state["plan"].model_dump(),
-            "changePreview": state["changePreview"],
-            "preview": state["preview"],
-            "applyPayload": state["applyPayload"],
-            "exportSource": state["exportSource"],
-            "lockedBlendshapes": state["lockedBlendshapes"],
-            "referenceContext": state["referenceContext"],
-        },
+    return PreparedFaceTuningState(
+        context=AvatarTuningLiveContext(
+            settings=settings,
+            avatar_name=selected_avatar.avatar_name,
+            avatar_path=selected_avatar.avatar_path,
+            allowed_targets=build_allowed_blendshape_index(
+                export_payload,
+                selected_avatar.avatar_path,
+            ),
+            locked_blendshapes=locked_blendshapes,
+            using_mock_execute=using_mock_execute,
+            selected_avatar=selected_avatar,
+        ),
+        plan=plan.model_dump(),
+        direct_adjustments=direct_adjustments,
+        change_preview=change_preview,
+        undo_items=build_undo_items_from_change_preview(change_preview),
+        reference_context=reference_context,
+        preview=render_preview(selected_avatar, plan, export_source, using_mock_execute),
+        apply_payload=render_apply_payload_json(selected_avatar, plan),
+        export_source=export_source,
     )
-    return prepared, {
-        "ok": True,
-        "targetTool": "vrcforge_run_face_tuning",
-        "avatarPath": avatar_path,
-        "adjustmentCount": len(state["directAdjustments"]),
-        "preview": state["preview"],
-    }
 
 
-def _revalidate_prepared_face_tuning(request: DashboardRequest, evidence: dict[str, Any]) -> tuple[Settings, SelectedAvatar]:
-    settings = load_dashboard_settings(request)
-    export_payload, _source, using_mock_execute = load_dashboard_export_payload(settings, request)
-    if using_mock_execute:
-        raise RuntimeError("Mock face tuning cannot execute an approved Unity write.")
-    selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
-    locked_blendshapes = load_locked_blendshapes(selected_avatar.avatar_path)
-    expected_avatar = evidence.get("avatarPath")
-    if selected_avatar.avatar_path != expected_avatar:
-        raise RuntimeError("Prepared face-tuning avatar selection drifted after approval.")
-    require_exact_blendshape_evidence(evidence.get("locksSha256"), blendshape_evidence_sha256(locked_blendshapes), "face-tuning locks")
-    allowed = build_allowed_blendshape_index(export_payload, selected_avatar.avatar_path)
-    fresh_facts: list[dict[str, Any]] = []
-    for expected in evidence.get("targetFacts") or []:
-        if not isinstance(expected, dict):
-            raise RuntimeError("Prepared face-tuning target evidence is invalid.")
-        key = (str(expected.get("rendererPath") or ""), str(expected.get("blendshapeName") or ""))
-        live = allowed.get(key)
-        if live is None:
-            raise RuntimeError("Prepared face-tuning target disappeared after approval.")
-        fresh_facts.append({"rendererPath": key[0], "blendshapeName": key[1], "currentWeight": float(live.get("currentWeight", 0.0))})
-    require_exact_blendshape_evidence(evidence.get("targetFacts"), fresh_facts, "face-tuning target values")
-    return settings, selected_avatar
+def _avatar_tuning_face_adjustments(
+    plan_payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    plan = BlendshapePlan(**plan_payload)
+    return plan.model_dump(), build_direct_blendshape_adjustments_from_plan(plan)
 
 
-def run_face_tuning_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    try:
-        request = build_agent_dashboard_request(arguments)
-        evidence = prepared_evidence(arguments)
-        if not isinstance(evidence, dict) or not isinstance(evidence.get("plan"), dict):
-            raise RuntimeError("Prepared face-tuning evidence is invalid.")
-        settings, selected_avatar = _revalidate_prepared_face_tuning(request, evidence)
-        plan = BlendshapePlan(**evidence["plan"])
-        if evidence.get("planSha256") != blendshape_evidence_sha256(plan.model_dump()):
-            raise RuntimeError("Prepared face-tuning plan evidence drifted after approval.")
-        tool_name, tool_arguments = prepared_call(arguments)
-        expected_arguments = {
-            "avatarPath": selected_avatar.avatar_path,
-            "adjustments": build_direct_blendshape_adjustments_from_plan(plan),
-            "saveAssets": True,
-        }
-        if tool_name != "vrc_apply_blendshapes" or not isinstance(tool_arguments.get("adjustments"), list):
-            raise RuntimeError("Prepared face-tuning Core call is invalid.")
-        require_exact_blendshape_evidence(tool_arguments, expected_arguments, "face-tuning Core arguments")
-        result = invoke_unity_mcp(settings, tool_name, tool_arguments)
-        undo_items = evidence.get("undoItems")
-        if not isinstance(undo_items, list):
-            raise RuntimeError("Prepared face-tuning undo evidence is invalid.")
-        with BLENDSHAPE_UNDO_LOCK:
-            push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
-            undo_depth = len(DASHBOARD_RUNTIME.manual_undo_stack.get(selected_avatar.avatar_path, []))
-        warnings: list[str] = []
-        verified_changes = verify_live_blendshape_changes(settings, selected_avatar, list(evidence.get("changePreview") or []))
-        verification_ok = bool(verified_changes) and all(bool(item.get("verified")) for item in verified_changes)
-        if not verification_ok:
-            warnings.append("Unity changes committed, but exact Blendshape readback was not fully verified.")
-        summary = render_summary(selected_avatar, plan, result, False)
-        artifacts = None
-        history_record = None
-        try:
-            if request.save_artifacts:
-                artifacts = save_dashboard_artifacts(plan, str(evidence.get("applyPayload") or ""), evidence.get("preview") or {}, result, summary)
-            history_record = save_tuning_history_record(build_tuning_history_record(
-                request=request, settings=settings, selected_avatar=selected_avatar, plan=plan,
-                change_preview=list(evidence.get("changePreview") or []), reference_context=evidence.get("referenceContext"),
-                locked_blendshapes=list(evidence.get("lockedBlendshapes") or []), applied=True,
-                visual_proof={"status": "unavailable", "reason": "Capture is deferred to a separately approved screenshot write."}, artifacts=artifacts,
-            ))
-        except Exception as metadata_exc:  # The Unity mutation already succeeded; never suggest a retry.
-            warnings.append(f"Post-apply metadata was not saved: {metadata_exc}")
-        return {
-            "ok": True, "executionMode": "live-unity", "selectedAvatar": serialize_selected_avatar(selected_avatar),
-            "plan": evidence["plan"], "changePreview": evidence.get("changePreview") or [], "verifiedChanges": verified_changes,
-            "visualProof": {"status": "unavailable", "reason": "Capture is deferred to a separately approved screenshot write."},
-            "preview": evidence.get("preview") or {}, "applyPayload": evidence.get("applyPayload") or "",
-            "result": serialize_result(result), "summary": summary, "artifacts": artifacts, "historyRecord": history_record,
-            "lockedBlendshapes": evidence.get("lockedBlendshapes") or [],
-            "undoDepth": undo_depth, "readbackVerified": verification_ok, "warnings": warnings,
-        }
-    except (RuntimeError, UnityMcpError, ValueError) as exc:
-        emit_log("error", "pipeline", "Prepared face-tuning execution failed.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
+def _render_avatar_tuning_face_summary(
+    _arguments: dict[str, Any],
+    context: AvatarTuningLiveContext,
+    _evidence: dict[str, Any],
+    result: Any,
+    normalized_plan: dict[str, Any],
+) -> Any:
+    return render_summary(
+        context.selected_avatar,
+        BlendshapePlan(**normalized_plan),
+        result,
+        False,
+    )
 
 
-def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dict[str, Any]:
+def _save_avatar_tuning_face_artifacts(
+    arguments: dict[str, Any],
+    _context: AvatarTuningLiveContext,
+    evidence: dict[str, Any],
+    result: Any,
+    normalized_plan: dict[str, Any],
+    summary: Any,
+) -> Any:
+    request = build_agent_dashboard_request(arguments)
+    if not request.save_artifacts:
+        return None
+    return save_dashboard_artifacts(
+        BlendshapePlan(**normalized_plan),
+        str(evidence.get("applyPayload") or ""),
+        evidence.get("preview") or {},
+        result,
+        summary,
+    )
+
+
+def _save_avatar_tuning_face_history(
+    arguments: dict[str, Any],
+    context: AvatarTuningLiveContext,
+    evidence: dict[str, Any],
+    _result: Any,
+    normalized_plan: dict[str, Any],
+    _summary: Any,
+    artifacts: Any,
+) -> Any:
+    request = build_agent_dashboard_request(arguments)
+    return AVATAR_TUNING_STORES.save_history_record(
+        build_tuning_history_record(
+            request=request,
+            settings=context.settings,
+            selected_avatar=context.selected_avatar,
+            plan=BlendshapePlan(**normalized_plan),
+            change_preview=list(evidence.get("changePreview") or []),
+            reference_context=evidence.get("referenceContext"),
+            locked_blendshapes=list(evidence.get("lockedBlendshapes") or []),
+            applied=True,
+            visual_proof={
+                "status": "unavailable",
+                "reason": (
+                    "Capture is deferred to a separately approved screenshot write."
+                ),
+            },
+            artifacts=artifacts,
+        )
+    )
+
+
+
+
+def _run_face_tuning_adapter(request: DashboardRequest, execute: bool) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
         export_payload, export_source, using_mock_execute = load_dashboard_export_payload(settings, request)
         selected_avatar = resolve_avatar_selection(export_payload, request.avatar)
         remember_loaded_avatar(selected_avatar.avatar_name, selected_avatar.avatar_path)
-        locked_blendshapes = load_locked_blendshapes(selected_avatar.avatar_path)
+        locked_blendshapes = AVATAR_TUNING_STORES.load_locked_blendshapes(
+            selected_avatar.avatar_path
+        )
         planning_payload = filter_planning_payload_to_face_blendshapes(
             build_planning_payload(export_payload, selected_avatar)
         )
@@ -13595,7 +13095,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
                 direct_adjustments = build_direct_blendshape_adjustments_from_plan(plan)
                 undo_items = build_undo_items_from_change_preview(change_preview)
                 result = apply_blendshapes_direct(settings, selected_avatar.avatar_path, direct_adjustments)
-                push_manual_undo_snapshot(selected_avatar.avatar_path, undo_items)
+                AVATAR_TUNING_UNDO.push(selected_avatar.avatar_path, undo_items)
                 time.sleep(0.15)
                 verified_changes = verify_live_blendshape_changes(
                     settings=settings,
@@ -13621,7 +13121,7 @@ def run_dashboard_pipeline_sync(request: DashboardRequest, execute: bool) -> dic
             artifacts = save_dashboard_artifacts(plan, apply_payload_json, preview, result, summary)
             emit_log("info", "artifact", "Dashboard artifacts saved.", {"runDirectory": artifacts["runDirectory"]})
 
-        history_record = save_tuning_history_record(
+        history_record = AVATAR_TUNING_STORES.save_history_record(
             build_tuning_history_record(
                 request=request,
                 settings=settings,
@@ -14432,11 +13932,6 @@ def build_undo_items_from_change_preview(changes: list[dict[str, Any]]) -> list[
     ]
 
 
-def push_manual_undo_snapshot(avatar_path: str, adjustments: list[dict[str, Any]]) -> None:
-    stack = DASHBOARD_RUNTIME.manual_undo_stack.setdefault(avatar_path, [])
-    stack.append(adjustments)
-    if len(stack) > 12:
-        del stack[0]
 
 
 def sanitize_artifact_name(value: str, fallback: str = "avatar") -> str:
@@ -16830,7 +16325,7 @@ def build_agent_shader_request(params: dict[str, Any]) -> ShaderMaterialPlanRequ
     return ShaderMaterialPlanRequest(**data)
 
 
-def preview_agent_blendshape_apply(params: dict[str, Any]) -> dict[str, Any]:
+def _preview_agent_blendshape_adapter(params: dict[str, Any]) -> dict[str, Any]:
     avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or params.get("avatar") or "").strip()
     adjustments = params.get("adjustments") or []
     if not avatar_path:
@@ -22441,42 +21936,97 @@ PACKAGE_INSTALL_APPROVED_WRITE = PackageInstallApprovedWriteHandler(
     execute=VPM_PACKAGE_INSTALL_EXECUTOR.execute,
 )
 
-AVATAR_TUNING_WORKFLOWS = AvatarTuningWorkflowService(
-    AvatarTuningWorkflowPorts(
-        scan_scene_avatars=scan_scene_avatars_sync,
-        read_avatars=read_avatars_sync,
-        read_avatar_blendshapes=read_avatar_blendshapes_sync,
-        run_face_tuning=run_dashboard_pipeline_sync,
-        preview_manual_blendshapes=apply_manual_blendshapes_sync,
-        preview_agent_blendshape_apply=preview_agent_blendshape_apply,
-        request_supervised_write=request_supervised_unity_write,
-        load_history=load_tuning_history_store,
-        load_presets=load_tuning_preset_store,
-        load_locked_blendshapes=load_locked_blendshapes,
+AVATAR_TUNING_STORES = AvatarTuningStoreService(
+    AvatarTuningStorePorts(
+        paths=lambda: AvatarTuningStorePaths(
+            history=TUNING_HISTORY_PATH,
+            presets=TUNING_PRESETS_PATH,
+            locks=TUNING_LOCKS_PATH,
+        ),
+        lock=TUNING_STORE_LOCK,
         current_avatar_path=lambda: (
             DASHBOARD_RUNTIME.current_avatar_path if DASHBOARD_RUNTIME else ""
         ),
-        create_preset=create_tuning_preset_sync,
-        rename_preset=rename_tuning_preset_sync,
-        duplicate_preset=duplicate_tuning_preset_sync,
-        delete_preset=delete_tuning_preset_sync,
-        update_locks=update_tuning_locks_sync,
-        ai_select_locks=ai_select_tuning_locks_sync,
-        preview_saved_history=apply_saved_tuning_history_sync,
-        preview_saved_preset=apply_saved_tuning_preset_sync,
+        now_utc=lambda: datetime.now(timezone.utc),
+        emit_log=emit_log,
+    )
+)
+AVATAR_TUNING_UNDO = AvatarTuningUndoStore(
+    DASHBOARD_RUNTIME.manual_undo_stack,
+    BLENDSHAPE_UNDO_LOCK,
+)
+AVATAR_TUNING_PREPARED = AvatarTuningPreparedService(
+    stores=AVATAR_TUNING_STORES,
+    undo=AVATAR_TUNING_UNDO,
+    ports=AvatarTuningPreparedPorts(
+        parse_manual_arguments=lambda arguments: ManualBlendshapeApplyRequest(
+            **arguments
+        ).model_dump(),
+        parse_mock_execute=lambda arguments: build_agent_dashboard_request(
+            arguments
+        ).mock_execute,
+        make_prepare_error=lambda detail, status_code: AgentGatewayError(
+            detail,
+            status_code=status_code,
+        ),
+        resolve_write_settings=lambda arguments: load_dashboard_settings(
+            UndoBlendshapeRequest(**arguments)
+        ),
+        resolve_live_context=_resolve_avatar_tuning_live_context,
+        invoke_unity=invoke_unity_mcp,
+        serialize_result=serialize_result,
+        serialize_avatar=lambda context: serialize_selected_avatar(
+            context.selected_avatar
+        ),
+        verify_live_changes=lambda context, changes: verify_live_blendshape_changes(
+            context.settings,
+            context.selected_avatar,
+            changes,
+        ),
+        remember_avatar=remember_loaded_avatar,
+        prepare_face_state=_prepare_face_tuning_state,
+        face_adjustments_from_plan=_avatar_tuning_face_adjustments,
+        render_face_summary=_render_avatar_tuning_face_summary,
+        save_face_artifacts=_save_avatar_tuning_face_artifacts,
+        save_face_history=_save_avatar_tuning_face_history,
+    ),
+)
+AVATAR_TUNING_WORKFLOWS = AvatarTuningWorkflowService(
+    AvatarTuningWorkflowPorts(
+        scan_scene_avatars=_scan_scene_avatars_tuning_adapter,
+        read_avatars=_read_avatars_tuning_adapter,
+        read_avatar_blendshapes=_read_avatar_blendshapes_tuning_adapter,
+        run_face_tuning=_run_face_tuning_adapter,
+        preview_manual_blendshapes=_preview_manual_blendshapes_adapter,
+        preview_agent_blendshape_apply=_preview_agent_blendshape_adapter,
+        request_supervised_write=request_supervised_unity_write,
+        load_history=AVATAR_TUNING_STORES.load_history,
+        load_presets=AVATAR_TUNING_STORES.load_presets,
+        load_locked_blendshapes=AVATAR_TUNING_STORES.load_locked_blendshapes,
+        current_avatar_path=lambda: (
+            DASHBOARD_RUNTIME.current_avatar_path if DASHBOARD_RUNTIME else ""
+        ),
+        create_preset=AVATAR_TUNING_STORES.create_preset,
+        rename_preset=AVATAR_TUNING_STORES.rename_preset,
+        duplicate_preset=AVATAR_TUNING_STORES.duplicate_preset,
+        delete_preset=AVATAR_TUNING_STORES.delete_preset,
+        update_locks=AVATAR_TUNING_STORES.update_locks,
+        ai_select_locks=_ai_select_tuning_locks_adapter,
+        preview_saved_history=_preview_saved_tuning_history_adapter,
+        preview_saved_preset=_preview_saved_tuning_preset_adapter,
     )
 )
 AVATAR_TUNING_APPROVED_WRITES = AvatarTuningApprovedWriteHandlers(
-    prepare_manual_apply=prepare_manual_blendshape_apply_request,
-    execute_manual_apply=apply_manual_blendshapes_approved_sync,
-    prepare_manual_undo=prepare_manual_blendshape_undo_request,
-    execute_manual_undo=undo_manual_blendshapes_approved_sync,
-    prepare_face_tuning=prepare_face_tuning_execution_request,
-    execute_face_tuning=run_face_tuning_approved_sync,
-    prepare_reapply_history=prepare_reapply_tuning_history_request,
-    execute_reapply_history=reapply_tuning_history_approved_sync,
-    prepare_apply_preset=prepare_apply_tuning_preset_request,
-    execute_apply_preset=apply_tuning_preset_approved_sync,
+    prepare_manual_apply=AVATAR_TUNING_PREPARED.prepare_manual_apply,
+    execute_manual_apply=AVATAR_TUNING_PREPARED.execute_manual_apply,
+    prepare_manual_undo=AVATAR_TUNING_PREPARED.prepare_manual_undo,
+    execute_manual_undo=AVATAR_TUNING_PREPARED.execute_manual_undo,
+    prepare_face_tuning=AVATAR_TUNING_PREPARED.prepare_face_tuning,
+    execute_face_tuning=AVATAR_TUNING_PREPARED.execute_face_tuning,
+    prepare_reapply_history=AVATAR_TUNING_PREPARED.prepare_reapply_history,
+    execute_reapply_history=AVATAR_TUNING_PREPARED.execute_reapply_history,
+    prepare_apply_preset=AVATAR_TUNING_PREPARED.prepare_apply_preset,
+    execute_apply_preset=AVATAR_TUNING_PREPARED.execute_apply_preset,
 )
 
 

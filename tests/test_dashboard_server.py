@@ -4823,7 +4823,9 @@ class DashboardServerTests(unittest.TestCase):
             patch("dashboard_server.load_dashboard_export_payload", return_value=(export_payload, "unit-test", False)),
             patch("dashboard_server.serialize_avatar_list", return_value=[{"name": "Avatar", "path": "Scene/Avatar"}]),
         ):
-            payload = dashboard_server.read_avatars_sync(dashboard_server.DashboardRequest())
+            payload = dashboard_server.AVATAR_TUNING_WORKFLOWS.read_avatars(
+                dashboard_server.DashboardRequest()
+            )
 
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["executed"])
@@ -4885,7 +4887,9 @@ class DashboardServerTests(unittest.TestCase):
             patch("dashboard_server.serialize_selected_avatar", return_value={"avatarName": "Avatar", "avatarPath": "Scene/Avatar"}),
             patch("dashboard_server.serialize_blendshape_details", return_value=[]),
         ):
-            payload = dashboard_server.read_avatar_blendshapes_sync(dashboard_server.AvatarBlendshapeListRequest())
+            payload = dashboard_server.AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(
+                dashboard_server.AvatarBlendshapeListRequest()
+            )
 
         self.assertEqual(payload["generatedAtUtc"], export_payload["generatedAtUtc"])
         self.assertEqual(payload["summary"], export_payload["summary"])
@@ -12514,7 +12518,7 @@ namespace VRCForge.Editor
         self.assertFalse(payload["historyRecord"]["applied"])
         self.assertEqual(payload["historyRecord"]["changes"][0]["blendshape"], "eye_morph_narrow")
 
-        history = dashboard_server.load_tuning_history_store()
+        history = dashboard_server.AVATAR_TUNING_STORES.load_history()
         self.assertEqual(len(history["records"]), 1)
         self.assertEqual(history["records"][0]["locked_blendshapes"][0]["blendshapeName"], "Smile")
 
@@ -12599,6 +12603,73 @@ namespace VRCForge.Editor
         self.assertEqual(payload["changePreview"][0]["previousWeight"], 30.0)
         self.assertEqual(payload["changePreview"][0]["delta"], 25.0)
         self.assertEqual(payload["undoDepth"], 1)
+
+    def test_avatar_tuning_local_store_routes_preserve_exact_error_mapping(self) -> None:
+        prepare_error = (
+            dashboard_server.AVATAR_TUNING_PREPARED._ports.make_prepare_error(
+                "cannot approve",
+                409,
+            )
+        )
+        self.assertIsInstance(prepare_error, AgentGatewayError)
+        self.assertEqual(prepare_error.status_code, 409)
+
+        broad_400_cases = (
+            (
+                "post",
+                "/api/tuning/presets",
+                {"history_id": "missing", "name": "preset"},
+            ),
+            (
+                "post",
+                "/api/tuning/presets/missing/rename",
+                {"name": "renamed"},
+            ),
+            (
+                "post",
+                "/api/tuning/presets/missing/duplicate",
+                {},
+            ),
+        )
+        validation_400_cases = (
+            (
+                "post",
+                "/api/tuning/presets/missing/delete",
+                None,
+            ),
+            (
+                "post",
+                "/api/tuning/locks",
+                {"locked_blendshapes": []},
+            ),
+        )
+        with TestClient(
+            dashboard_server.app,
+            raise_server_exceptions=False,
+        ) as client:
+            for http_method, path, payload in broad_400_cases + validation_400_cases:
+                with self.subTest(path=path):
+                    response = getattr(client, http_method)(path, json=payload)
+                    self.assertEqual(response.status_code, 400)
+
+            dashboard_server.TUNING_PRESETS_PATH.write_text(
+                "not-json",
+                encoding="utf-8",
+            )
+            corrupt_preset_response = client.post(
+                "/api/tuning/presets/missing/delete"
+            )
+            self.assertEqual(corrupt_preset_response.status_code, 500)
+
+            dashboard_server.TUNING_LOCKS_PATH.write_text(
+                "not-json",
+                encoding="utf-8",
+            )
+            corrupt_locks_response = client.post(
+                "/api/tuning/locks",
+                json={"avatar_path": "Avatar/Current", "locked_blendshapes": []},
+            )
+            self.assertEqual(corrupt_locks_response.status_code, 500)
 
     @patch("dashboard_server.load_dashboard_settings")
     @patch("dashboard_server.load_dashboard_export_payload")

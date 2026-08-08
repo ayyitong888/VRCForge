@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 import pytest
 
 from avatar_tuning_workflow_service import (
+    AvatarTuningError,
     AvatarTuningLiveContext,
     AvatarTuningPreparedPorts,
     AvatarTuningPreparedService,
@@ -19,6 +21,43 @@ from avatar_tuning_workflow_service import (
     PreparedFaceTuningState,
 )
 from prepared_unity_execution import prepared_call, prepared_evidence
+
+
+LEGACY_DASHBOARD_AVATAR_ROOTS = {
+    "scan_scene_avatars_sync",
+    "read_avatars_sync",
+    "read_avatar_blendshapes_sync",
+    "run_dashboard_pipeline_sync",
+    "apply_manual_blendshapes_sync",
+    "preview_agent_blendshape_apply",
+    "load_tuning_history_store",
+    "load_tuning_preset_store",
+    "load_locked_blendshapes",
+    "create_tuning_preset_sync",
+    "rename_tuning_preset_sync",
+    "duplicate_tuning_preset_sync",
+    "delete_tuning_preset_sync",
+    "update_tuning_locks_sync",
+    "ai_select_tuning_locks_sync",
+    "apply_saved_tuning_history_sync",
+    "apply_saved_tuning_preset_sync",
+    "prepare_manual_blendshape_apply_request",
+    "apply_manual_blendshapes_approved_sync",
+    "prepare_manual_blendshape_undo_request",
+    "undo_manual_blendshapes_approved_sync",
+    "prepare_face_tuning_execution_request",
+    "run_face_tuning_approved_sync",
+    "prepare_reapply_tuning_history_request",
+    "reapply_tuning_history_approved_sync",
+    "prepare_apply_tuning_preset_request",
+    "apply_tuning_preset_approved_sync",
+    "_prepare_manual_blendshape_state",
+    "load_tuning_locks_store",
+    "_prepare_saved_tuning_state",
+    "_saved_tuning_target_id",
+    "_prepare_saved_tuning_request",
+    "_execute_saved_tuning_approved",
+}
 
 
 class _Clock:
@@ -35,7 +74,7 @@ def _stores(tmp_path: Path) -> tuple[AvatarTuningStoreService, list[tuple[Any, .
     logs: list[tuple[Any, ...]] = []
     service = AvatarTuningStoreService(
         AvatarTuningStorePorts(
-            paths=AvatarTuningStorePaths(
+            paths=lambda: AvatarTuningStorePaths(
                 history=tmp_path / "state" / "tuning_history.json",
                 presets=tmp_path / "state" / "tuning_presets.json",
                 locks=tmp_path / "state" / "tuning_locks.json",
@@ -100,6 +139,40 @@ def test_store_defaults_atomic_write_and_lock_schema_are_preserved(
     )
     with pytest.raises(RuntimeError, match="not valid JSON"):
         stores.load_history()
+
+
+def test_store_paths_are_resolved_for_each_reconfigured_storage_target(
+    tmp_path: Path,
+) -> None:
+    active_root = [tmp_path / "first"]
+    stores = AvatarTuningStoreService(
+        AvatarTuningStorePorts(
+            paths=lambda: AvatarTuningStorePaths(
+                history=active_root[0] / "tuning_history.json",
+                presets=active_root[0] / "tuning_presets.json",
+                locks=active_root[0] / "tuning_locks.json",
+            ),
+            lock=Lock(),
+            current_avatar_path=lambda: "Avatar/Current",
+            now_utc=_Clock(),
+            emit_log=lambda *_args: None,
+        )
+    )
+    stores.update_locks(
+        {
+            "avatar_path": "Avatar/Current",
+            "locked_blendshapes": [
+                {"renderer_path": "Face", "blendshape_name": "Smile"}
+            ],
+        }
+    )
+    assert stores.load_locked_blendshapes("Avatar/Current") == [
+        {"rendererPath": "Face", "blendshapeName": "Smile"}
+    ]
+
+    active_root[0] = tmp_path / "second"
+    assert stores.load_locked_blendshapes("Avatar/Current") == []
+    assert not (active_root[0] / "tuning_locks.json").exists()
 
 
 def test_history_cap_and_preset_crud_keep_disk_fields_and_per_avatar_limit(
@@ -192,18 +265,27 @@ def _prepared_service(
         "finalize": [],
         "history_error": None,
         "history_artifacts": None,
+        "context_calls": 0,
+        "unity_error": None,
+        "omit_current_weight": False,
+        "remember_calls": [],
     }
 
     def context(
         _arguments: dict[str, Any],
         _avatar_hint: str | None,
     ) -> AvatarTuningLiveContext:
+        live["context_calls"] += 1
         return AvatarTuningLiveContext(
             settings={"connection": "fake"},
             avatar_name="Avatar",
             avatar_path="Avatar/Path",
             allowed_targets={
-                ("Face", "Smile"): {"currentWeight": live["weight"]},
+                ("Face", "Smile"): (
+                    {}
+                    if live["omit_current_weight"]
+                    else {"currentWeight": live["weight"]}
+                ),
                 ("Face", "Blink"): {"currentWeight": 20.0},
             },
             locked_blendshapes=list(live["locks"]),
@@ -216,7 +298,33 @@ def _prepared_service(
         arguments: dict[str, Any],
     ) -> dict[str, Any]:
         live["unity_calls"].append((settings, tool_name, arguments))
+        if live["unity_error"]:
+            raise RuntimeError(str(live["unity_error"]))
         return {"status": "ok"}
+
+    def parse_manual_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+        parsed = dict(arguments)
+        adjustments = parsed.get("adjustments", [])
+        if not isinstance(adjustments, list):
+            raise RuntimeError("Blendshape adjustments must be a list.")
+        parsed["adjustments"] = list(adjustments)
+        return parsed
+
+    def parse_mock_execute(arguments: dict[str, Any]) -> bool:
+        value = arguments.get("mock_execute", False)
+        if isinstance(value, bool):
+            return value
+        if value in (0, "0"):
+            return False
+        if value in (1, "1"):
+            return True
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"false", "off", "no", "n"}:
+                return False
+            if normalized in {"true", "on", "yes", "y"}:
+                return True
+        raise RuntimeError("mock_execute is invalid.")
 
     face_plan = {
         "summary": "face plan",
@@ -272,6 +380,13 @@ def _prepared_service(
         stores=stores,
         undo=undo,
         ports=AvatarTuningPreparedPorts(
+            parse_manual_arguments=parse_manual_arguments,
+            parse_mock_execute=parse_mock_execute,
+            make_prepare_error=lambda detail, status_code: AvatarTuningError(
+                detail,
+                status_code=status_code,
+            ),
+            resolve_write_settings=lambda _arguments: {"connection": "fake"},
             resolve_live_context=context,
             invoke_unity=invoke,
             serialize_result=lambda value: value,
@@ -283,7 +398,9 @@ def _prepared_service(
                 {**change, "verified": bool(live["verified"])}
                 for change in changes
             ],
-            remember_avatar=lambda _name, _path: None,
+            remember_avatar=lambda name, path: live["remember_calls"].append(
+                (name, path)
+            ),
             prepare_face_state=face_state,
             face_adjustments_from_plan=lambda plan: (
                 dict(plan),
@@ -368,9 +485,50 @@ def test_manual_apply_drift_and_undo_cas_fail_before_fake_unity(tmp_path: Path) 
         ],
     )
     call_count = len(live["unity_calls"])
+    context_calls = live["context_calls"]
     with pytest.raises(RuntimeError, match="depth drifted"):
         service.execute_manual_undo(undo_prepared)
     assert len(live["unity_calls"]) == call_count
+    assert live["context_calls"] == context_calls
+
+    fresh_undo, _preview = service.prepare_manual_undo(
+        {"avatar_path": "Avatar/Path"},
+        None,
+    )
+    service.execute_manual_undo(fresh_undo)
+    assert live["context_calls"] == context_calls
+    assert len(live["unity_calls"]) == call_count + 1
+
+    for empty_arguments in ({}, {"adjustments": []}):
+        with pytest.raises(AvatarTuningError) as empty_exc_info:
+            service.prepare_manual_apply(empty_arguments, None)
+        assert empty_exc_info.value.status_code == 400
+    assert live["context_calls"] == context_calls
+
+    for malformed_adjustments in (None, "not-a-list"):
+        with pytest.raises(RuntimeError, match="must be a list") as malformed_exc_info:
+            service.prepare_manual_apply(
+                {"adjustments": malformed_adjustments},
+                None,
+            )
+        assert type(malformed_exc_info.value) is RuntimeError
+    assert live["context_calls"] == context_calls
+
+    live["mock"] = True
+    with pytest.raises(AvatarTuningError) as exc_info:
+        service.prepare_manual_apply(
+            {
+                "adjustments": [
+                    {
+                        "renderer_path": "Face",
+                        "blendshape_name": "Smile",
+                        "target_weight": 50,
+                    }
+                ]
+            },
+            None,
+        )
+    assert exc_info.value.status_code == 409
 
     with pytest.raises(RuntimeError, match="target_weight is invalid"):
         service.prepare_manual_apply(
@@ -385,7 +543,89 @@ def test_manual_apply_drift_and_undo_cas_fail_before_fake_unity(tmp_path: Path) 
             },
             None,
         )
-    assert len(live["unity_calls"]) == call_count
+    assert len(live["unity_calls"]) == call_count + 1
+
+
+def test_manual_prepare_fails_closed_when_live_weight_is_missing(
+    tmp_path: Path,
+) -> None:
+    service, _stores_service, _undo, live = _prepared_service(tmp_path)
+    live["omit_current_weight"] = True
+
+    with pytest.raises(KeyError, match="currentWeight"):
+        service.prepare_manual_apply(
+            {
+                "adjustments": [
+                    {
+                        "renderer_path": "Face",
+                        "blendshape_name": "Smile",
+                        "target_weight": 50,
+                    }
+                ]
+            },
+            None,
+        )
+
+    assert live["unity_calls"] == []
+
+
+@pytest.mark.parametrize(
+    "invalid_adjustment",
+    [
+        {
+            "renderer_path": None,
+            "blendshape_name": "Smile",
+            "target_weight": 50,
+        },
+        {
+            "renderer_path": "Face",
+            "blendshape_name": "Smile",
+            "target_weight": 50,
+            "previous_weight": "not-a-number",
+        },
+    ],
+)
+def test_manual_prepare_validates_every_item_before_live_side_effects(
+    tmp_path: Path,
+    invalid_adjustment: dict[str, Any],
+) -> None:
+    service, _stores_service, _undo, live = _prepared_service(tmp_path)
+
+    with pytest.raises(RuntimeError):
+        service.prepare_manual_apply(
+            {
+                "adjustments": [
+                    {
+                        "renderer_path": "Face",
+                        "blendshape_name": "Smile",
+                        "target_weight": 50,
+                    },
+                    invalid_adjustment,
+                ]
+            },
+            None,
+        )
+
+    assert live["context_calls"] == 0
+    assert live["remember_calls"] == []
+    assert live["unity_calls"] == []
+
+    live["omit_current_weight"] = False
+    live["weight"] = "not-a-number"
+    with pytest.raises(ValueError):
+        service.prepare_manual_apply(
+            {
+                "adjustments": [
+                    {
+                        "renderer_path": "Face",
+                        "blendshape_name": "Smile",
+                        "target_weight": 50,
+                    }
+                ]
+            },
+            None,
+        )
+    assert live["unity_calls"] == []
 
 
 def test_saved_history_record_and_lock_drift_block_before_fake_unity(
@@ -511,3 +751,39 @@ def test_face_history_failure_keeps_successful_artifacts_and_warns(
     assert [item[0] for item in live["finalize"]] == ["artifacts", "history"]
     assert live["history_artifacts"] == {"json": "artifact.json"}
     assert len(live["unity_calls"]) == 1
+
+
+def test_dashboard_avatar_wiring_has_no_legacy_roots_or_monkeypatch_tests() -> None:
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "dashboard_server.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    module_functions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert LEGACY_DASHBOARD_AVATAR_ROOTS.isdisjoint(module_functions)
+    assert "AVATAR_TUNING_STORES = AvatarTuningStoreService(" in source
+    assert "AVATAR_TUNING_UNDO = AvatarTuningUndoStore(" in source
+    assert "AVATAR_TUNING_PREPARED = AvatarTuningPreparedService(" in source
+    assert (
+        "parse_manual_arguments=lambda arguments: ManualBlendshapeApplyRequest("
+        in source
+    )
+    assert (
+        "parse_mock_execute=lambda arguments: build_agent_dashboard_request("
+        in source
+    )
+    assert "make_prepare_error=lambda detail, status_code: AgentGatewayError(" in source
+    assert (
+        "prepare_manual_apply=AVATAR_TUNING_PREPARED.prepare_manual_apply"
+        in source
+    )
+    for test_name in (
+        "test_prepared_blendshape_writes.py",
+        "test_prepared_face_tuning.py",
+        "test_prepared_saved_tuning.py",
+    ):
+        assert "monkeypatch" not in (root / "tests" / test_name).read_text(
+            encoding="utf-8"
+        )

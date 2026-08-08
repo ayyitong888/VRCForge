@@ -499,6 +499,14 @@
       ]
     },
     {
+      "id": "dashboard.avatar-tuning-typed-root-owner",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_STORES"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_UNDO"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_PREPARED"}
+      ]
+    },
+    {
       "id": "dashboard.memory-review-root-graph",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "MEMORY_REVIEW"}

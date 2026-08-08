@@ -21,6 +21,12 @@ from prepared_unity_execution import (
 )
 
 
+class AvatarTuningError(RuntimeError):
+    def __init__(self, detail: str, *, status_code: int = 400) -> None:
+        super().__init__(detail)
+        self.status_code = status_code
+
+
 class RequestSupervisedUnityWritePort(Protocol):
     def __call__(
         self,
@@ -225,7 +231,7 @@ class AvatarTuningStorePaths:
 
 @dataclass(frozen=True, slots=True)
 class AvatarTuningStorePorts:
-    paths: AvatarTuningStorePaths
+    paths: Callable[[], AvatarTuningStorePaths]
     lock: Any
     current_avatar_path: Callable[[], str]
     now_utc: Callable[[], datetime]
@@ -300,13 +306,13 @@ class AvatarTuningStoreService:
         return f"{prefix}_{self._ports.now_utc().strftime('%Y%m%d_%H%M%S_%f')}"
 
     def load_history(self) -> dict[str, Any]:
-        return self._load(self._ports.paths.history, self.HISTORY_DEFAULT)
+        return self._load(self._ports.paths().history, self.HISTORY_DEFAULT)
 
     def load_presets(self) -> dict[str, Any]:
-        return self._load(self._ports.paths.presets, self.PRESETS_DEFAULT)
+        return self._load(self._ports.paths().presets, self.PRESETS_DEFAULT)
 
     def load_locks(self) -> dict[str, Any]:
-        return self._load(self._ports.paths.locks, self.LOCKS_DEFAULT)
+        return self._load(self._ports.paths().locks, self.LOCKS_DEFAULT)
 
     @staticmethod
     def normalize_locked_item(item: Any) -> dict[str, str] | None:
@@ -363,7 +369,7 @@ class AvatarTuningStoreService:
             or ""
         ).strip()
         if not avatar_path:
-            raise RuntimeError(
+            raise AvatarTuningError(
                 "avatar_path is required before updating locked Blendshapes."
             )
         locked = self.normalize_locked_list(
@@ -373,7 +379,7 @@ class AvatarTuningStoreService:
         avatars = store.get("avatars") if isinstance(store.get("avatars"), dict) else {}
         avatars[avatar_path] = locked
         store["avatars"] = avatars
-        self._save(self._ports.paths.locks, store)
+        self._save(self._ports.paths().locks, store)
         self._ports.emit_log(
             "info",
             "blendshape",
@@ -392,7 +398,7 @@ class AvatarTuningStoreService:
         records = list(store.get("records") or [])
         records.append(record)
         store["records"] = records[-200:]
-        self._save(self._ports.paths.history, store)
+        self._save(self._ports.paths().history, store)
         return record
 
     def find_history(self, history_id: str) -> dict[str, Any]:
@@ -468,7 +474,7 @@ class AvatarTuningStoreService:
             int(_request_value(request, "max_presets", 10) or 10),
         )
         store["presets"] = presets
-        self._save(self._ports.paths.presets, store)
+        self._save(self._ports.paths().presets, store)
         self._ports.emit_log(
             "success",
             "preset",
@@ -488,7 +494,7 @@ class AvatarTuningStoreService:
                 preset["name"] = name
                 preset["updated_at"] = self.timestamp()
                 self._save(
-                    self._ports.paths.presets,
+                    self._ports.paths().presets,
                     {**store, "presets": presets},
                 )
                 return {"ok": True, "preset": preset, "presets": presets}
@@ -512,7 +518,7 @@ class AvatarTuningStoreService:
             int(_request_value(request, "max_presets", 10) or 10),
         )
         store["presets"] = presets
-        self._save(self._ports.paths.presets, store)
+        self._save(self._ports.paths().presets, store)
         return {"ok": True, "preset": duplicate, "presets": presets}
 
     def delete_preset(self, preset_id: str) -> dict[str, Any]:
@@ -520,9 +526,9 @@ class AvatarTuningStoreService:
         presets = list(store.get("presets") or [])
         remaining = [preset for preset in presets if preset.get("id") != preset_id]
         if len(remaining) == len(presets):
-            raise RuntimeError(f"Tuning preset was not found: {preset_id}")
+            raise AvatarTuningError(f"Tuning preset was not found: {preset_id}")
         store["presets"] = remaining
-        self._save(self._ports.paths.presets, store)
+        self._save(self._ports.paths().presets, store)
         return {
             "ok": True,
             "deletedPresetId": preset_id,
@@ -538,7 +544,7 @@ class AvatarTuningStoreService:
                 record["last_applied_at"] = self.timestamp()
                 break
         store["records"] = records
-        self._save(self._ports.paths.history, store)
+        self._save(self._ports.paths().history, store)
 
     def mark_preset_applied(self, preset_id: str) -> None:
         store = self.load_presets()
@@ -549,7 +555,7 @@ class AvatarTuningStoreService:
                 preset["apply_count"] = int(preset.get("apply_count") or 0) + 1
                 break
         store["presets"] = presets
-        self._save(self._ports.paths.presets, store)
+        self._save(self._ports.paths().presets, store)
 
 
 @dataclass(frozen=True, slots=True)
@@ -578,6 +584,10 @@ class PreparedFaceTuningState:
 
 @dataclass(frozen=True, slots=True)
 class AvatarTuningPreparedPorts:
+    parse_manual_arguments: Callable[[dict[str, Any]], dict[str, Any]]
+    parse_mock_execute: Callable[[dict[str, Any]], bool]
+    make_prepare_error: Callable[[str, int], Exception]
+    resolve_write_settings: Callable[[dict[str, Any]], Any]
     resolve_live_context: Callable[
         [dict[str, Any], str | None],
         AvatarTuningLiveContext,
@@ -768,12 +778,22 @@ class AvatarTuningPreparedService:
         self._ports = ports
 
     def _manual_state(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        raw_adjustments = arguments.get("adjustments")
-        if not isinstance(raw_adjustments, list) or not raw_adjustments:
-            raise RuntimeError("No blendshape adjustments were provided.")
+        parsed_arguments = self._ports.parse_manual_arguments(dict(arguments))
+        raw_adjustments = parsed_arguments.get("adjustments")
+        if not raw_adjustments:
+            raise self._ports.make_prepare_error(
+                "No blendshape adjustments were provided.",
+                400,
+            )
+        if not isinstance(raw_adjustments, list):
+            raise RuntimeError("Blendshape adjustments must be a list.")
+        parsed_adjustments = [
+            _manual_adjustment(item)
+            for item in raw_adjustments
+        ]
         context = self._ports.resolve_live_context(
-            arguments,
-            str(arguments.get("avatar") or "") or None,
+            parsed_arguments,
+            str(parsed_arguments.get("avatar") or "") or None,
         )
         self._ports.remember_avatar(context.avatar_name, context.avatar_path)
         locked = sorted(
@@ -788,8 +808,7 @@ class AvatarTuningPreparedService:
         skipped: list[dict[str, Any]] = []
         undo_items: list[dict[str, Any]] = []
         target_facts: list[dict[str, Any]] = []
-        for item in raw_adjustments:
-            renderer_path, blendshape_name, target_weight = _manual_adjustment(item)
+        for renderer_path, blendshape_name, target_weight in parsed_adjustments:
             key = (renderer_path, blendshape_name)
             if key not in context.allowed_targets:
                 skipped.append(
@@ -810,7 +829,7 @@ class AvatarTuningPreparedService:
                 )
                 continue
             current_weight = float(
-                context.allowed_targets[key].get("currentWeight", 0.0)
+                context.allowed_targets[key]["currentWeight"]
             )
             validated.append(
                 {
@@ -855,13 +874,15 @@ class AvatarTuningPreparedService:
         state = self._manual_state(arguments)
         context = state["context"]
         if context.using_mock_execute:
-            raise RuntimeError(
-                "Mock Blendshape execution is preview-only and cannot be approved."
+            raise self._ports.make_prepare_error(
+                "Mock Blendshape execution is preview-only and cannot be approved.",
+                409,
             )
         adjustments = state["validatedAdjustments"]
         if not adjustments:
-            raise RuntimeError(
-                "No valid Blendshape adjustments remain after target/lock validation."
+            raise self._ports.make_prepare_error(
+                "No valid Blendshape adjustments remain after target/lock validation.",
+                409,
             )
         prepared = install_prepared_calls(
             arguments,
@@ -998,9 +1019,8 @@ class AvatarTuningPreparedService:
                 expected,
                 "undo Core arguments",
             )
-            context = self._ports.resolve_live_context(arguments, avatar_path)
             return self._ports.invoke_unity(
-                context.settings,
+                self._ports.resolve_write_settings(arguments),
                 tool_name,
                 tool_arguments,
             )
@@ -1140,7 +1160,7 @@ class AvatarTuningPreparedService:
         source_type: str,
     ) -> tuple[dict[str, Any], Any]:
         self._reject_reserved(arguments)
-        if arguments.get("mock_execute"):
+        if self._ports.parse_mock_execute(dict(arguments)):
             raise RuntimeError(
                 "Mock saved tuning is preview-only and cannot be approved for "
                 "execution."
@@ -1327,7 +1347,7 @@ class AvatarTuningPreparedService:
     ) -> tuple[dict[str, Any], Any]:
         del preview
         self._reject_reserved(arguments)
-        if arguments.get("mock_execute"):
+        if self._ports.parse_mock_execute(dict(arguments)):
             raise RuntimeError(
                 "Mock face tuning is preview-only and cannot be approved for "
                 "execution."
