@@ -4,7 +4,7 @@ import ast
 import tempfile
 from pathlib import Path
 
-from agent_approval_transactions import AgentApprovalTransactionService
+from agent_approval_transactions import AgentApprovalTransactionService, ApprovalGoalPorts
 from agent_gateway import AgentGateway
 
 
@@ -33,7 +33,12 @@ def test_approval_transaction_service_owns_no_second_state_or_runtime_resource()
 
         assert isinstance(service, AgentApprovalTransactionService)
         assert service._host is gateway
-        assert AgentApprovalTransactionService.__slots__ == ("_host",)
+        assert AgentApprovalTransactionService.__slots__ == ("_goal", "_host")
+        assert isinstance(service._goal, ApprovalGoalPorts)
+        assert service._goal.deny_approval.__self__ is gateway.goal
+        assert service._goal.attach_terminal_resolution.__self__ is gateway.goal
+        assert service._goal.delivery_for_approval.__self__ is gateway.goal
+        assert service._goal.reconcile_missing_approvals.__self__ is gateway.goal
         assert service._approvals is gateway._approvals
         assert service._write_handlers is gateway._write_handlers
         assert service._in_flight_apply_writes is gateway._in_flight_apply_writes

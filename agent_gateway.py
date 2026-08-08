@@ -23,6 +23,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator, Sequence
 
 from agent_memory_store import AgentMemoryStore
+from agent_goal_service import (
+    AgentGoalService,
+    GoalApprovalStatePorts,
+    GoalEventPorts,
+    GoalStorePorts,
+)
 from desktop_computer_use_service import DesktopComputerUsePorts, DesktopComputerUseService
 from desktop_worker import DesktopActionBrokerError
 from optimization_service import (
@@ -30,7 +36,6 @@ from optimization_service import (
     OPTIMIZATION_TOOL_DEFINITIONS,
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
-from agent_goal_store import AgentGoalStore, AgentGoalStoreError
 from background_goal_runtime import (
     RepeatedFailureGuard,
     classify_runtime_plan_outcome,
@@ -391,8 +396,6 @@ AGENT_MEMORY_MAX_ITEMS = 120
 AGENT_GOAL_MAX_ITEMS = 60
 # Goal 唤醒调度的护栏：重复间隔必须落在 [5 分钟, 7 天]，
 # 防止误配置把网关变成高频自动执行器。
-AGENT_GOAL_WAKE_MIN_INTERVAL_MINUTES = 5
-AGENT_GOAL_WAKE_MAX_INTERVAL_MINUTES = 7 * 24 * 60
 BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     "vrcforge_skill_manifest": {
         "title": "Skill Registry",
@@ -1689,13 +1692,26 @@ class AgentGateway:
             lambda: self.audit_dir / "memory-review" / "accepted-audit.jsonl",
             lock=self._lock,
         )
-        self._goal_store = AgentGoalStore(
-            log_path=lambda: self.agent_goal_log_path,
-            result_dir=lambda: self.agent_goal_result_dir,
-            append_event=self._append_jsonl,
-            read_events=lambda path: self._read_jsonl(path, limit=0),
-            lock=self._lock,
-            normalize_path=normalize_filesystem_path,
+        self._goal = AgentGoalService(
+            GoalStorePorts(
+                log_path=lambda: self.audit_dir / "agent-goals.jsonl",
+                result_dir=lambda: self.audit_dir / "agent-goal-results",
+                run_dir=lambda: self.audit_dir / "agent-goal-runs",
+                append_event=self._append_jsonl,
+                read_events=lambda path: self._read_jsonl(path, limit=0),
+                shared_state_lock=self._lock,
+                normalize_path=normalize_filesystem_path,
+            ),
+            GoalApprovalStatePorts(
+                get=lambda approval_id: self._approvals.get(approval_id),
+                items=lambda: list(self._approvals.items()),
+                ids=lambda: set(self._approvals),
+            ),
+            GoalEventPorts(
+                redact=redact_sensitive,
+                redact_persistence=redact_background_goal_persistence,
+                summarize=summarize_text,
+            ),
         )
         # In-progress approved writes, keyed by approval id. This is a global,
         # deliberately conservative lane: even writes for different projects
@@ -1760,9 +1776,17 @@ class AgentGateway:
         # Approval/write transactions likewise resolve the authoritative host
         # registries, locks, hooks, and persistence paths late. The service
         # creates no second approval state or lifecycle resource.
-        from agent_approval_transactions import AgentApprovalTransactionService
+        from agent_approval_transactions import AgentApprovalTransactionService, ApprovalGoalPorts
 
-        self._approval_transactions = AgentApprovalTransactionService(self)
+        self._approval_transactions = AgentApprovalTransactionService(
+            self,
+            ApprovalGoalPorts(
+                deny_approval=self._goal.deny_agent_goal_approval,
+                attach_terminal_resolution=self._goal.attach_linked_goal_resolution,
+                delivery_for_approval=self._goal.raw_delivery_for_approval,
+                reconcile_missing_approvals=self._goal.reconcile_missing_approvals,
+            ),
+        )
         from agent_skill_registry import AgentSkillRegistryService
 
         self._skill_registry = AgentSkillRegistryService(self)
@@ -1800,6 +1824,10 @@ class AgentGateway:
     @property
     def desktop(self) -> DesktopComputerUseService:
         return self._desktop
+
+    @property
+    def goal(self) -> AgentGoalService:
+        return self._goal
 
     def configure_paths(self, config_path: Path, audit_dir: Path) -> None:
         with self._lock:
@@ -1852,14 +1880,6 @@ class AgentGateway:
     @property
     def agent_memory_store(self) -> AgentMemoryStore:
         return self._agent_memory_store
-
-    @property
-    def agent_goal_log_path(self) -> Path:
-        return self.audit_dir / "agent-goals.jsonl"
-
-    @property
-    def agent_goal_result_dir(self) -> Path:
-        return self.audit_dir / "agent-goal-results"
 
     @property
     def agent_progress_log_path(self) -> Path:
@@ -3230,7 +3250,7 @@ class AgentGateway:
         ]
         goals = [
             goal
-            for goal in self.list_agent_goals(
+            for goal in self._goal.list_agent_goals(
                 limit=8,
                 session_id=session_id or "",
                 project_root=project_root,
@@ -3803,551 +3823,6 @@ class AgentGateway:
 
     def complete_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._desktop_gateway_call(lambda: self._desktop.complete_desktop_action(params))
-
-    @staticmethod
-    def _parse_goal_wake_timestamp(value: Any) -> datetime | None:
-        """Parse a stored/user-supplied wake timestamp into an aware UTC datetime."""
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
-        except (OverflowError, ValueError):
-            return None
-
-    def _parse_goal_wake_fields(self, params: dict[str, Any], *, now: datetime) -> dict[str, Any]:
-        """Validate optional wakeAt / wakeEveryMinutes inputs.
-
-        Returns only the keys that were explicitly provided, normalized:
-        wakeAt becomes a UTC ISO string ("" clears the schedule), and
-        wakeEveryMinutes becomes a bounded int (0 clears the interval).
-        """
-        fields: dict[str, Any] = {}
-        if "wakeEveryMinutes" in params or "wake_every_minutes" in params:
-            raw_interval = params.get("wakeEveryMinutes", params.get("wake_every_minutes"))
-            if raw_interval in (None, "", 0, "0"):
-                fields["wakeEveryMinutes"] = 0
-            else:
-                try:
-                    interval = int(raw_interval)
-                except (TypeError, ValueError):
-                    raise AgentGatewayError("wakeEveryMinutes must be an integer number of minutes.", status_code=400)
-                if not (AGENT_GOAL_WAKE_MIN_INTERVAL_MINUTES <= interval <= AGENT_GOAL_WAKE_MAX_INTERVAL_MINUTES):
-                    raise AgentGatewayError(
-                        "wakeEveryMinutes must be between "
-                        f"{AGENT_GOAL_WAKE_MIN_INTERVAL_MINUTES} and {AGENT_GOAL_WAKE_MAX_INTERVAL_MINUTES}.",
-                        status_code=400,
-                    )
-                fields["wakeEveryMinutes"] = interval
-        if "wakeAt" in params or "wake_at" in params:
-            raw_wake_at = params.get("wakeAt", params.get("wake_at"))
-            if raw_wake_at in (None, ""):
-                fields["wakeAt"] = ""
-            else:
-                parsed = self._parse_goal_wake_timestamp(raw_wake_at)
-                if parsed is None:
-                    raise AgentGatewayError("wakeAt must be an ISO-8601 timestamp.", status_code=400)
-                fields["wakeAt"] = parsed.isoformat()
-        elif fields.get("wakeEveryMinutes"):
-            # Recurring schedule without an explicit first wake: start one interval from now.
-            fields["wakeAt"] = (now + timedelta(minutes=fields["wakeEveryMinutes"])).isoformat()
-        return fields
-
-    def create_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            goal = self._goal_store.create(params or {})
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": redact_sensitive(goal)}
-
-    def update_agent_goal(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            goal = self._goal_store.update(goal_id, params or {})
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": redact_sensitive(goal)}
-
-    def bind_agent_goal_owner(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            goal = self._goal_store.bind_owner(goal_id, params or {})
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": redact_sensitive(goal)}
-
-    def list_agent_goals(self, *, limit: int = 50, project_root: str = "", session_id: str = "") -> dict[str, Any]:
-        goals = self._goal_store.list(limit=limit, project_root=project_root, session_id=session_id)
-        return {"ok": True, "schema": "vrcforge.agent_goals.v2", "goals": [redact_sensitive(goal) for goal in goals], "count": len(goals)}
-
-    def _goal_is_due(self, goal: dict[str, Any], *, now: datetime) -> bool:
-        return self._goal_store.is_due(goal, now=now)
-
-    def list_due_agent_goals(
-        self, *, limit: int = 20, project_root: str = "", session_id: str = "", now: datetime | None = None
-    ) -> dict[str, Any]:
-        now = now or datetime.now(timezone.utc)
-        due = [redact_sensitive(goal) for goal in self._goal_store.list_due(limit=limit, project_root=project_root, session_id=session_id, now=now)]
-        return {
-            "ok": True,
-            "schema": "vrcforge.agent_goals_due.v2",
-            "now": now.isoformat(),
-            "goals": due,
-            "count": len(due),
-        }
-
-    def reconcile_stale_agent_goal_deliveries(self) -> dict[str, Any]:
-        deliveries = self._goal_store.reconcile_stale_running_deliveries()
-        return {
-            "ok": True,
-            "schema": "vrcforge.agent_goal_deliveries_reconciled.v1",
-            "deliveries": [redact_sensitive(delivery) for delivery in deliveries],
-            "count": len(deliveries),
-        }
-
-    def wake_agent_goal(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            goal, delivery = self._goal_store.wake(goal_id, params or {})
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {
-            "ok": True,
-            "schema": "vrcforge.agent_goal_delivery.v1",
-            "goal": redact_sensitive(goal),
-            "delivery": redact_sensitive(delivery),
-            "resumePrompt": str(delivery.get("resumePrompt") or ""),
-        }
-
-    def begin_agent_goal_delivery(self, delivery_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            payload = self._goal_store.begin_delivery(delivery_id, params or {})
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", **payload}
-
-    def record_agent_goal_delivery_phase(self, delivery_id: str, phase: str) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.mark_delivery_phase(delivery_id, phase)
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def complete_agent_goal_delivery(
-        self,
-        delivery_id: str,
-        response: dict[str, Any],
-        *,
-        context_usage: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.complete_delivery(
-                delivery_id,
-                ensure_dict(redact_background_goal_persistence(response)),
-                context_usage=context_usage,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def fail_agent_goal_delivery(
-        self,
-        delivery_id: str,
-        error: Any,
-        *,
-        failure_class: str = "",
-        failure_label: str = "",
-        retryable: bool | None = None,
-        context_usage: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.fail_delivery(
-                delivery_id,
-                error,
-                failure_class=failure_class,
-                failure_label=failure_label,
-                retryable=retryable,
-                context_usage=context_usage,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def skip_unreachable_agent_goal_provider(
-        self,
-        delivery_id: str,
-        *,
-        provider: str = "",
-        base_url: str = "",
-    ) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.skip_provider_unreachable(
-                delivery_id,
-                provider=provider,
-                base_url=base_url,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def defer_agent_goal_delivery_capacity(self, delivery_id: str) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.defer_delivery_capacity(delivery_id)
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def defer_agent_goal_delivery_wake_timeout(self, delivery_id: str) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.defer_delivery_capacity(
-                delivery_id,
-                rearm_seconds=5,
-                failure_class="timeout",
-                failure_label="watchdog_wake_timeout",
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def defer_agent_goal_delivery_handoff(
-        self,
-        delivery_id: str,
-        *,
-        expected_revision: int | None = None,
-    ) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.defer_delivery_capacity(
-                delivery_id,
-                rearm_seconds=5,
-                failure_class="handoff",
-                failure_label="client_handoff_deferred",
-                expected_revision=expected_revision,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def park_agent_goal_delivery(
-        self,
-        delivery_id: str,
-        *,
-        reason: str,
-        failure_class: str,
-        context_usage: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.park_delivery(
-                delivery_id,
-                reason=reason,
-                failure_class=failure_class,
-                context_usage=context_usage,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def drain_agent_goal_delivery(
-        self,
-        delivery_id: str,
-        *,
-        phase: str,
-        failure_label: str,
-        error: str,
-    ) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.mark_delivery_draining(
-                delivery_id,
-                phase,
-                failure_label,
-                error,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def finish_agent_goal_delivery_drain(
-        self,
-        delivery_id: str,
-        *,
-        retryable: bool,
-        failure_class: str,
-        error: str,
-    ) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.finish_delivery_drain(
-                delivery_id,
-                retryable,
-                failure_class,
-                error,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def block_agent_goal_delivery(
-        self,
-        delivery_id: str,
-        *,
-        kind: str,
-        reference: str,
-        response: dict[str, Any],
-        context_usage: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        try:
-            if kind == "approval":
-                delivery = self._goal_store.block_delivery_for_approval(
-                    delivery_id,
-                    reference,
-                    response=ensure_dict(redact_background_goal_persistence(response)),
-                    context_usage=context_usage,
-                )
-            elif kind == "question":
-                delivery = self._goal_store.block_delivery_for_question(
-                    delivery_id,
-                    reference,
-                    response=ensure_dict(redact_background_goal_persistence(response)),
-                    context_usage=context_usage,
-                )
-            else:
-                raise AgentGatewayError("Goal delivery block kind is invalid.")
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def mark_agent_goal_approval_phase(self, approval_id: str, phase: str) -> dict[str, Any] | None:
-        try:
-            delivery = self._goal_store.mark_by_approval_phase(approval_id, phase)
-        except AgentGoalStoreError as exc:
-            if exc.status_code == 404:
-                return None
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def restore_agent_goal_approval_wait(self, approval_id: str) -> dict[str, Any] | None:
-        """Reconcile a failed approval transition without leaving an apply lease behind."""
-
-        with self._lock:
-            approval = self._approvals.get(str(approval_id or "").strip())
-            if not approval or not str(approval.get("goalDeliveryId") or "").strip():
-                return None
-            status = str(approval.get("status") or "").strip().lower()
-            if status in {"rejected", "expired", "revision_requested", "applied", "failed"}:
-                return self.reconcile_linked_agent_goal_approval(approval_id)
-            try:
-                delivery = self._goal_store.restore_approval_wait(approval_id)
-            except AgentGoalStoreError as exc:
-                if exc.status_code == 404:
-                    return None
-                raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-            return {
-                "ok": True,
-                "schema": "vrcforge.agent_goal_delivery.v1",
-                "delivery": redact_sensitive(delivery),
-            }
-
-    def agent_goal_delivery_for_approval(self, approval_id: str) -> dict[str, Any] | None:
-        delivery = self._goal_store.delivery_for_approval(approval_id)
-        if delivery is None:
-            return None
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def resolve_agent_goal_approval(self, approval_id: str, execution: dict[str, Any]) -> dict[str, Any] | None:
-        try:
-            delivery = self._goal_store.resolve_delivery_approval(
-                approval_id,
-                ensure_dict(redact_background_goal_persistence(execution)),
-            )
-        except AgentGoalStoreError as exc:
-            if exc.status_code == 404:
-                return None
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def deny_agent_goal_delivery(
-        self,
-        delivery_id: str,
-        *,
-        reason: str = "",
-        approval_reference: str = "",
-    ) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.deny_delivery(
-                delivery_id,
-                reason=reason,
-                approval_reference=approval_reference,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def deny_agent_goal_approval(self, approval_id: str, *, reason: str = "") -> dict[str, Any] | None:
-        try:
-            delivery = self._goal_store.deny_by_approval(approval_id, reason=reason)
-        except AgentGoalStoreError as exc:
-            if exc.status_code == 404:
-                return None
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def reconcile_linked_agent_goal_approval(self, approval_id: str) -> dict[str, Any] | None:
-        """Project a terminal approval state into its linked durable delivery."""
-
-        with self._lock:
-            approval = self._approvals.get(str(approval_id or "").strip())
-            if not approval or not str(approval.get("goalDeliveryId") or "").strip():
-                return None
-            status = str(approval.get("status") or "").strip().lower()
-            if status in {"rejected", "expired", "revision_requested"}:
-                return self.deny_agent_goal_approval(
-                    str(approval.get("id") or approval_id),
-                    reason="approval_denied" if status == "rejected" else "approval_recovery_required",
-                )
-            if status not in {"applied", "failed"}:
-                return self.agent_goal_delivery_for_approval(str(approval.get("id") or approval_id))
-            execution: dict[str, Any] = {
-                "ok": status == "applied",
-                "status": status,
-                "approvalId": str(approval.get("id") or approval_id),
-            }
-            if status == "applied":
-                execution["summary"] = summarize_text(str(approval.get("resultSummary") or ""), 500)
-                checkpoint_id = str(ensure_dict(approval.get("checkpoint")).get("id") or "")
-                if checkpoint_id:
-                    execution["checkpointId"] = checkpoint_id
-            else:
-                execution["error"] = "Approved action did not complete successfully."
-            return self.resolve_agent_goal_approval(str(approval.get("id") or approval_id), execution)
-
-    def _attach_linked_goal_resolution(
-        self,
-        payload: dict[str, Any],
-        approval: dict[str, Any],
-    ) -> dict[str, Any]:
-        if not str(approval.get("goalDeliveryId") or "").strip():
-            return payload
-        try:
-            resolved = self.reconcile_linked_agent_goal_approval(str(approval.get("id") or ""))
-        except Exception:  # noqa: BLE001 - a later reconciliation must remain fail closed.
-            payload["goalDeliveryResolutionPending"] = True
-            return payload
-        if resolved is not None:
-            payload["goalDelivery"] = resolved
-        return payload
-
-    def resolve_agent_goal_question(
-        self,
-        question_id: str,
-        *,
-        continuation_prompt: str = "",
-    ) -> dict[str, Any] | None:
-        try:
-            safe_continuation_prompt = str(
-                redact_background_goal_persistence(continuation_prompt) or ""
-            )
-            delivery = self._goal_store.resolve_delivery_question(
-                question_id,
-                continuation_prompt=safe_continuation_prompt,
-            )
-        except AgentGoalStoreError as exc:
-            if exc.status_code == 404:
-                return None
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
-
-    def reconcile_agent_goal_watchdogs(self, *, finalize_orphans: bool = False) -> dict[str, Any]:
-        draining = self._goal_store.reconcile_phase_watchdogs()
-        deliveries: list[dict[str, Any]] = list(draining)
-        if finalize_orphans:
-            deliveries = []
-            for delivery in draining:
-                phase = str(delivery.get("phase") or "")
-                deliveries.append(
-                    self._goal_store.finish_delivery_drain(
-                        str(delivery.get("deliveryId") or ""),
-                        phase != "apply",
-                        "timeout",
-                        f"Abandoned {phase or 'runtime'} phase was closed during startup recovery.",
-                    )
-                )
-        approval_deliveries: list[dict[str, Any]] = []
-        for approval_id, approval in list(self._approvals.items()):
-            if str(approval.get("status") or "").strip().lower() not in {
-                "rejected",
-                "expired",
-                "revision_requested",
-                "applied",
-                "failed",
-            }:
-                continue
-            previous = self.agent_goal_delivery_for_approval(approval_id)
-            previous_delivery = ensure_dict(ensure_dict(previous).get("delivery"))
-            resolved = self.reconcile_linked_agent_goal_approval(approval_id)
-            resolved_delivery = ensure_dict(ensure_dict(resolved).get("delivery"))
-            if resolved_delivery and (
-                not previous_delivery
-                or int(resolved_delivery.get("revision") or 0)
-                != int(previous_delivery.get("revision") or 0)
-            ):
-                approval_deliveries.append(resolved_delivery)
-        missing_approvals = self._goal_store.reconcile_missing_approvals(set(self._approvals))
-        reminders = self._goal_store.emit_due_question_reminders()
-        return {
-            "ok": True,
-            "schema": "vrcforge.agent_goal_watchdogs.v1",
-            "deliveries": [
-                redact_sensitive(delivery)
-                for delivery in [*deliveries, *approval_deliveries, *missing_approvals]
-            ],
-            "reminders": [redact_sensitive(delivery) for delivery in reminders],
-        }
-
-    def tick_agent_goal_question_reminders(self) -> dict[str, Any]:
-        reminders = self._goal_store.emit_due_question_reminders()
-        return {
-            "ok": True,
-            "schema": "vrcforge.agent_goal_question_reminders.v1",
-            "reminders": [redact_sensitive(delivery) for delivery in reminders],
-            "count": len(reminders),
-        }
-
-    def agent_goal_background_state(self, *, chat_id: str = "") -> dict[str, Any]:
-        return {
-            "ok": True,
-            **redact_sensitive(self._goal_store.background_state(chat_id)),
-        }
-
-    def acknowledge_agent_goal_background_state(
-        self,
-        *,
-        chat_id: str,
-        delivery_ids: list[Any] | None = None,
-        kind: str = "recap",
-    ) -> dict[str, Any]:
-        try:
-            state = self._goal_store.acknowledge_background_notifications(
-                chat_id,
-                delivery_ids,
-                kind=kind,
-            )
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, **redact_sensitive(state)}
-
-    def list_recoverable_agent_goal_deliveries(self, *, limit: int = 20, chat_id: str = "") -> dict[str, Any]:
-        deliveries = self._goal_store.list_recoverable(limit=limit, chat_id=chat_id)
-        return {
-            "ok": True,
-            "schema": "vrcforge.agent_goal_deliveries.v1",
-            "deliveries": [redact_sensitive(delivery) for delivery in deliveries],
-            "count": len(deliveries),
-        }
-
-    def materialize_agent_goal_delivery(self, delivery_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        try:
-            delivery = self._goal_store.mark_materialized(delivery_id, params or {})
-        except AgentGoalStoreError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-        return {"ok": True, "schema": "vrcforge.agent_goal_delivery.v1", "delivery": redact_sensitive(delivery)}
 
     def replace_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -5701,9 +5176,6 @@ class AgentGateway:
             if isinstance(payload, dict):
                 events.append(payload)
         return events
-
-    def _project_agent_goals(self) -> dict[str, dict[str, Any]]:
-        return self._goal_store.project_goals()
 
     def _project_agent_progress(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
         progress: dict[str, dict[str, Any]] = {}

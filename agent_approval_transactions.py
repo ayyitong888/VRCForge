@@ -4,9 +4,10 @@ import hmac
 import json
 import secrets
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from agent_gateway import (
     APPLY_RECOVERY_ACTIVE_STATUSES,
@@ -60,6 +61,16 @@ from agent_gateway import (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalGoalPorts:
+    """Goal resolution capabilities used by approval transactions."""
+
+    deny_approval: Callable[..., dict[str, Any] | None]
+    attach_terminal_resolution: Callable[[dict[str, Any], Mapping[str, Any]], dict[str, Any]]
+    delivery_for_approval: Callable[[str], dict[str, Any] | None]
+    reconcile_missing_approvals: Callable[[set[str]], list[dict[str, Any]]]
+
+
 class AgentApprovalTransactionService:
     """Own supervised write requests, approvals, apply, and recovery handoff.
 
@@ -70,10 +81,11 @@ class AgentApprovalTransactionService:
     lock, file handle, authorization identity, or communication endpoint.
     """
 
-    __slots__ = ("_host",)
+    __slots__ = ("_goal", "_host")
 
-    def __init__(self, host: Any) -> None:
+    def __init__(self, host: Any, goal: ApprovalGoalPorts) -> None:
         self._host = host
+        self._goal = goal
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._host, name)
@@ -956,7 +968,7 @@ class AgentApprovalTransactionService:
                 payload["requestTrace"] = request_trace
             if checkpoint:
                 payload["checkpoint"] = checkpoint
-            return self._attach_linked_goal_resolution(payload, approval)
+            return self._goal.attach_terminal_resolution(payload, approval)
         except Exception as exc:  # noqa: BLE001
             if core_call_audits and request_trace is None:
                 request_trace = {
@@ -1002,7 +1014,7 @@ class AgentApprovalTransactionService:
                 payload["requestTrace"] = request_trace
             if checkpoint:
                 payload["checkpoint"] = checkpoint
-            return self._attach_linked_goal_resolution(payload, approval)
+            return self._goal.attach_terminal_resolution(payload, approval)
         finally:
             with self._lock:
                 self._in_flight_apply_writes.pop(approval_id, None)
@@ -1827,7 +1839,7 @@ class AgentApprovalTransactionService:
             )
             payload: dict[str, Any] = {"ok": True, "approval": redact_sensitive(dict(approval))}
             if status == "rejected" and str(approval.get("goalDeliveryId") or "").strip():
-                denied = self.deny_agent_goal_approval(approval_id, reason="approval_denied")
+                denied = self._goal.deny_approval(approval_id, reason="approval_denied")
                 if denied is not None:
                     payload["goalDelivery"] = denied
             return payload
@@ -1877,7 +1889,7 @@ class AgentApprovalTransactionService:
             )
             payload: dict[str, Any] = {"ok": True, "approval": redact_sensitive(dict(approval))}
             if str(approval.get("goalDeliveryId") or "").strip():
-                denied = self.deny_agent_goal_approval(approval_id, reason="approval_recovery_required")
+                denied = self._goal.deny_approval(approval_id, reason="approval_recovery_required")
                 if denied is not None:
                     payload["goalDelivery"] = denied
             return payload
@@ -1895,8 +1907,8 @@ class AgentApprovalTransactionService:
         return None
 
     def _impl__reconcile_unrecoverable_linked_approval(self, approval_id: str) -> bool:
-        linked = self._goal_store.delivery_for_approval(approval_id)
+        linked = self._goal.delivery_for_approval(approval_id)
         if linked is None:
             return False
-        self._goal_store.reconcile_missing_approvals(set(self._approvals))
+        self._goal.reconcile_missing_approvals(set(self._approvals))
         return True

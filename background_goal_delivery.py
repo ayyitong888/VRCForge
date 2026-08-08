@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from background_goal_runtime import (
     PHASE_TIMEOUT_SECONDS,
@@ -24,21 +25,93 @@ class BackgroundGoalDeliveryError(RuntimeError):
         self.status_code = status_code
 
 
+class GoalDeliveryPort(Protocol):
+    """Durable delivery mutations supplied by the app-owned Goal service."""
+
+    def defer_agent_goal_delivery_capacity(self, delivery_id: str) -> dict[str, Any]: ...
+
+    def skip_unreachable_agent_goal_provider(self, delivery_id: str, **kwargs: Any) -> dict[str, Any]: ...
+
+    def record_agent_goal_delivery_phase(self, delivery_id: str, phase: str) -> dict[str, Any]: ...
+
+    def begin_agent_goal_delivery(self, delivery_id: str, params: dict[str, Any]) -> dict[str, Any]: ...
+
+    def complete_agent_goal_delivery(
+        self,
+        delivery_id: str,
+        response: dict[str, Any],
+        *,
+        context_usage: dict[str, Any] | None = None,
+    ) -> dict[str, Any]: ...
+
+    def fail_agent_goal_delivery(self, delivery_id: str, error: Any, **kwargs: Any) -> dict[str, Any]: ...
+
+    def block_agent_goal_delivery(self, delivery_id: str, **kwargs: Any) -> dict[str, Any]: ...
+
+    def deny_agent_goal_delivery(self, delivery_id: str, **kwargs: Any) -> dict[str, Any]: ...
+
+    def park_agent_goal_delivery(self, delivery_id: str, **kwargs: Any) -> dict[str, Any]: ...
+
+    def drain_agent_goal_delivery(self, delivery_id: str, **kwargs: Any) -> dict[str, Any]: ...
+
+    def finish_agent_goal_delivery_drain(self, delivery_id: str, **kwargs: Any) -> dict[str, Any]: ...
+
+
+class ApprovalGoalPort(Protocol):
+    """Approval-to-Goal transitions, separate from approval execution itself."""
+
+    def mark_agent_goal_approval_phase(self, approval_id: str, phase: str) -> dict[str, Any] | None: ...
+
+    def restore_agent_goal_approval_wait(self, approval_id: str) -> dict[str, Any] | None: ...
+
+    def reconcile_linked_agent_goal_approval(self, approval_id: str) -> dict[str, Any] | None: ...
+
+    def resolve_agent_goal_approval(
+        self,
+        approval_id: str,
+        execution: dict[str, Any],
+    ) -> dict[str, Any] | None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeExecutionPort:
+    """The runtime lane used by a Goal; it owns no Goal persistence."""
+
+    execute: Callable[..., dict[str, Any]]
+    request_cancel: Callable[[dict[str, Any]], dict[str, Any]]
+
+
+@dataclass(frozen=True, slots=True)
+class GoalEventPort:
+    state_changed: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GoalLifecyclePort:
+    """One app-owned lane budget and provider preflight cache."""
+
+    lane_budget: RuntimeLaneBudget
+    preflight: ProviderPreflightCache
+
+
 class BackgroundGoalDeliveryCoordinator:
     """Own capacity, timeout drainage, and durable outcome classification."""
 
     def __init__(
         self,
         *,
-        gateway: Any,
-        lane_budget: RuntimeLaneBudget,
-        preflight: ProviderPreflightCache,
-        on_state_change: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        goal: GoalDeliveryPort,
+        runtime: RuntimeExecutionPort,
+        approval: ApprovalGoalPort,
+        events: GoalEventPort,
+        lifecycle: GoalLifecyclePort,
     ) -> None:
-        self._gateway = gateway
-        self._lane_budget = lane_budget
-        self._preflight = preflight
-        self._on_state_change = on_state_change
+        self._goal = goal
+        self._runtime = runtime
+        self._approval = approval
+        self._events = events
+        self._lane_budget = lifecycle.lane_budget
+        self._preflight = lifecycle.preflight
         self._drain_tasks: set[asyncio.Task[Any]] = set()
 
     @property
@@ -61,7 +134,7 @@ class BackgroundGoalDeliveryCoordinator:
             raise BackgroundGoalDeliveryError("Background goal delivery is already running.", 409)
         if lease_result != "acquired":
             state = await _atomic_to_thread(
-                self._gateway.defer_agent_goal_delivery_capacity,
+                self._goal.defer_agent_goal_delivery_capacity,
                 delivery_id,
             )
             await self._emit_state(state)
@@ -93,7 +166,7 @@ class BackgroundGoalDeliveryCoordinator:
             preflight = await _atomic_to_thread(self._preflight.check, provider, base_url)
             if preflight.required and not preflight.reachable:
                 state = await _atomic_to_thread(
-                    self._gateway.skip_unreachable_agent_goal_provider,
+                    self._goal.skip_unreachable_agent_goal_provider,
                     delivery_id,
                     provider=preflight.provider,
                     base_url=preflight.base_url,
@@ -128,14 +201,14 @@ class BackgroundGoalDeliveryCoordinator:
 
             active_phase = "project_lock"
             phase_state = await _atomic_to_thread(
-                self._gateway.record_agent_goal_delivery_phase,
+                self._goal.record_agent_goal_delivery_phase,
                 delivery_id,
                 active_phase,
             )
             projected = phase_state.get("delivery") if isinstance(phase_state, dict) else None
             if isinstance(projected, dict) and str(projected.get("status") or "") == "draining":
                 state = await _atomic_to_thread(
-                    self._gateway.finish_agent_goal_delivery_drain,
+                    self._goal.finish_agent_goal_delivery_drain,
                     delivery_id,
                     retryable=True,
                     failure_class="timeout",
@@ -145,7 +218,7 @@ class BackgroundGoalDeliveryCoordinator:
                 raise BackgroundGoalDeliveryError("Background goal project lock exceeded its deadline.", 504)
             worker = asyncio.create_task(
                 asyncio.to_thread(
-                    self._gateway.begin_agent_goal_delivery,
+                    self._goal.begin_agent_goal_delivery,
                     delivery_id,
                     begin_params,
                 )
@@ -157,7 +230,7 @@ class BackgroundGoalDeliveryCoordinator:
                 )
             except TimeoutError as exc:
                 state = await _atomic_to_thread(
-                    self._gateway.drain_agent_goal_delivery,
+                    self._goal.drain_agent_goal_delivery,
                     delivery_id,
                     phase=active_phase,
                     failure_label="watchdog_project_lock_timeout",
@@ -180,14 +253,14 @@ class BackgroundGoalDeliveryCoordinator:
                 return {**cached_response, "goalDeliveryId": delivery_id}
             active_phase = "provider_call"
             phase_state = await _atomic_to_thread(
-                self._gateway.record_agent_goal_delivery_phase,
+                self._goal.record_agent_goal_delivery_phase,
                 delivery_id,
                 active_phase,
             )
             projected = phase_state.get("delivery") if isinstance(phase_state, dict) else None
             if isinstance(projected, dict) and str(projected.get("status") or "") == "draining":
                 state = await _atomic_to_thread(
-                    self._gateway.finish_agent_goal_delivery_drain,
+                    self._goal.finish_agent_goal_delivery_drain,
                     delivery_id,
                     retryable=True,
                     failure_class="timeout",
@@ -197,7 +270,7 @@ class BackgroundGoalDeliveryCoordinator:
                 raise BackgroundGoalDeliveryError("Background goal provider call exceeded its deadline.", 504)
             worker = asyncio.create_task(
                 asyncio.to_thread(
-                    self._gateway.runtime_message,
+                    self._runtime.execute,
                     {**runtime_params, "_backgroundGoalRun": True},
                     agent_name=agent_name,
                 )
@@ -209,7 +282,7 @@ class BackgroundGoalDeliveryCoordinator:
                 )
             except TimeoutError as exc:
                 await _atomic_to_thread(
-                    self._gateway.request_runtime_cancel,
+                    self._runtime.request_cancel,
                     {
                         "sessionId": runtime_params.get("session_id") or runtime_params.get("sessionId") or "",
                         "clientTurnId": runtime_params.get("clientTurnId") or "",
@@ -217,7 +290,7 @@ class BackgroundGoalDeliveryCoordinator:
                     },
                 )
                 state = await _atomic_to_thread(
-                    self._gateway.drain_agent_goal_delivery,
+                    self._goal.drain_agent_goal_delivery,
                     delivery_id,
                     phase=active_phase,
                     failure_label="watchdog_provider_call_timeout",
@@ -250,18 +323,17 @@ class BackgroundGoalDeliveryCoordinator:
 
             def persist_outcome() -> dict[str, Any]:
                 if approval_id:
-                    blocked = self._gateway.block_agent_goal_delivery(
+                    blocked = self._goal.block_agent_goal_delivery(
                         delivery_id,
                         kind="approval",
                         reference=approval_id,
                         response=persisted,
                         context_usage=usage,
                     )
-                    reconcile = getattr(self._gateway, "reconcile_linked_agent_goal_approval", None)
-                    reconciled = reconcile(approval_id) if callable(reconcile) else None
+                    reconciled = self._approval.reconcile_linked_agent_goal_approval(approval_id)
                     return reconciled or blocked
                 if question_id:
-                    return self._gateway.block_agent_goal_delivery(
+                    return self._goal.block_agent_goal_delivery(
                         delivery_id,
                         kind="question",
                         reference=question_id,
@@ -269,7 +341,7 @@ class BackgroundGoalDeliveryCoordinator:
                         context_usage=usage,
                     )
                 if next_step == "loop_suppressed":
-                    return self._gateway.fail_agent_goal_delivery(
+                    return self._goal.fail_agent_goal_delivery(
                         delivery_id,
                         "Repeated background tool failure was suppressed.",
                         failure_class="loop_suppressed",
@@ -278,7 +350,7 @@ class BackgroundGoalDeliveryCoordinator:
                         context_usage=usage,
                     )
                 if next_step == "cancelled":
-                    return self._gateway.fail_agent_goal_delivery(
+                    return self._goal.fail_agent_goal_delivery(
                         delivery_id,
                         "Background goal run was cancelled.",
                         failure_class="cancelled",
@@ -287,12 +359,12 @@ class BackgroundGoalDeliveryCoordinator:
                         context_usage=usage,
                     )
                 if outcome == "denied":
-                    return self._gateway.deny_agent_goal_delivery(
+                    return self._goal.deny_agent_goal_delivery(
                         delivery_id,
                         reason=outcome_label,
                     )
                 if outcome == "failed":
-                    return self._gateway.fail_agent_goal_delivery(
+                    return self._goal.fail_agent_goal_delivery(
                         delivery_id,
                         "Background goal tool outcome was not successful.",
                         failure_class="tool_failed",
@@ -301,13 +373,13 @@ class BackgroundGoalDeliveryCoordinator:
                         context_usage=usage,
                     )
                 if plan_outcome == "parked":
-                    return self._gateway.park_agent_goal_delivery(
+                    return self._goal.park_agent_goal_delivery(
                         delivery_id,
                         reason=plan_label,
                         failure_class=plan_label,
                         context_usage=usage,
                     )
-                return self._gateway.complete_agent_goal_delivery(
+                return self._goal.complete_agent_goal_delivery(
                     delivery_id,
                     persisted,
                     context_usage=usage,
@@ -315,7 +387,7 @@ class BackgroundGoalDeliveryCoordinator:
 
             active_phase = "deliver"
             await _atomic_to_thread(
-                self._gateway.record_agent_goal_delivery_phase,
+                self._goal.record_agent_goal_delivery_phase,
                 delivery_id,
                 active_phase,
             )
@@ -327,7 +399,7 @@ class BackgroundGoalDeliveryCoordinator:
                 )
             except TimeoutError as exc:
                 state = await _atomic_to_thread(
-                    self._gateway.drain_agent_goal_delivery,
+                    self._goal.drain_agent_goal_delivery,
                     delivery_id,
                     phase=active_phase,
                     failure_label="watchdog_deliver_timeout",
@@ -347,7 +419,7 @@ class BackgroundGoalDeliveryCoordinator:
             projected = state.get("delivery") if isinstance(state, dict) else None
             if isinstance(projected, dict) and str(projected.get("status") or "") == "draining":
                 state = await _atomic_to_thread(
-                    self._gateway.finish_agent_goal_delivery_drain,
+                    self._goal.finish_agent_goal_delivery_drain,
                     delivery_id,
                     retryable=True,
                     failure_class="timeout",
@@ -362,7 +434,7 @@ class BackgroundGoalDeliveryCoordinator:
                 if worker is not None and active_phase == "provider_call":
                     try:
                         await _atomic_to_thread(
-                            self._gateway.request_runtime_cancel,
+                            self._runtime.request_cancel,
                             {
                                 "sessionId": runtime_params.get("session_id") or runtime_params.get("sessionId") or "",
                                 "clientTurnId": runtime_params.get("clientTurnId") or "",
@@ -386,7 +458,7 @@ class BackgroundGoalDeliveryCoordinator:
             decision = classify_provider_failure(exc, getattr(exc, "status_code", None))
             if begin_attempted:
                 state = await _atomic_to_thread(
-                    self._gateway.fail_agent_goal_delivery,
+                    self._goal.fail_agent_goal_delivery,
                     delivery_id,
                     f"Background goal provider failure: {decision.failure_class}.",
                     failure_class=decision.failure_class,
@@ -432,8 +504,8 @@ class BackgroundGoalDeliveryCoordinator:
         approved: dict[str, Any] = {}
         apply_started = False
         try:
-            mark_approval_phase = getattr(self._gateway, "mark_agent_goal_approval_phase", None)
-            if approval_id and callable(mark_approval_phase):
+            mark_approval_phase = self._approval.mark_agent_goal_approval_phase
+            if approval_id:
                 phase_state = await _atomic_to_thread(mark_approval_phase, approval_id, "apply")
                 apply_started = True
                 if isinstance(phase_state, dict):
@@ -446,7 +518,7 @@ class BackgroundGoalDeliveryCoordinator:
                 )
             except TimeoutError as exc:
                 state = await _atomic_to_thread(
-                    self._gateway.drain_agent_goal_delivery,
+                    self._goal.drain_agent_goal_delivery,
                     delivery_id,
                     phase="apply",
                     failure_label="watchdog_approval_transition_timeout",
@@ -464,16 +536,18 @@ class BackgroundGoalDeliveryCoordinator:
                 await self._emit_state(state)
                 raise BackgroundGoalDeliveryError("Background approval transition timed out.", 504) from exc
             except Exception:
-                restore_wait = getattr(self._gateway, "restore_agent_goal_approval_wait", None)
                 try:
                     state = (
-                        await _atomic_to_thread(restore_wait, approval_id)
-                        if approval_id and callable(restore_wait)
+                        await _atomic_to_thread(
+                            self._approval.restore_agent_goal_approval_wait,
+                            approval_id,
+                        )
+                        if approval_id
                         else None
                     )
                 except Exception:
                     state = await _atomic_to_thread(
-                        self._gateway.fail_agent_goal_delivery,
+                        self._goal.fail_agent_goal_delivery,
                         delivery_id,
                         "Background approval transition could not be recovered.",
                         failure_class="approval_transition_failed",
@@ -488,10 +562,9 @@ class BackgroundGoalDeliveryCoordinator:
                 resolved_approval_id = str(
                     (approved.get("approval") or {}).get("id") or approval_id
                 )
-                restore_wait = getattr(self._gateway, "restore_agent_goal_approval_wait", None)
-                if resolved_approval_id and callable(restore_wait):
+                if resolved_approval_id:
                     state = await _atomic_to_thread(
-                        restore_wait,
+                        self._approval.restore_agent_goal_approval_wait,
                         resolved_approval_id,
                     )
                     if isinstance(state, dict):
@@ -499,7 +572,7 @@ class BackgroundGoalDeliveryCoordinator:
                 return approved, None
             if not apply_started:
                 resolved_approval_id = str((approved.get("approval") or {}).get("id") or approval_id)
-                if resolved_approval_id and callable(mark_approval_phase):
+                if resolved_approval_id:
                     phase_state = await _atomic_to_thread(
                         mark_approval_phase,
                         resolved_approval_id,
@@ -509,7 +582,7 @@ class BackgroundGoalDeliveryCoordinator:
                         await self._emit_state(phase_state)
                 else:
                     await _atomic_to_thread(
-                        self._gateway.record_agent_goal_delivery_phase,
+                        self._goal.record_agent_goal_delivery_phase,
                         delivery_id,
                         "apply",
                     )
@@ -528,7 +601,7 @@ class BackgroundGoalDeliveryCoordinator:
                         for _attempt in range(2):
                             try:
                                 resolution = await _atomic_to_thread(
-                                    self._gateway.reconcile_linked_agent_goal_approval,
+                                    self._approval.reconcile_linked_agent_goal_approval,
                                     approval_id,
                                 )
                                 resolution_error = None
@@ -537,7 +610,7 @@ class BackgroundGoalDeliveryCoordinator:
                                 resolution_error = exc
                         if resolution is None and resolution_error is not None:
                             resolution = await _atomic_to_thread(
-                                self._gateway.fail_agent_goal_delivery,
+                                self._goal.fail_agent_goal_delivery,
                                 delivery_id,
                                 "Approved action finished, but its goal result could not be persisted.",
                                 failure_class="deliver_failed",
@@ -553,7 +626,7 @@ class BackgroundGoalDeliveryCoordinator:
                 linked_delivery = linked.get("delivery") if isinstance(linked, dict) else None
                 if isinstance(linked_delivery, dict) and str(linked_delivery.get("status") or "") == "draining":
                     state = await _atomic_to_thread(
-                        self._gateway.finish_agent_goal_delivery_drain,
+                        self._goal.finish_agent_goal_delivery_drain,
                         delivery_id,
                         retryable=False,
                         failure_class="apply_failed",
@@ -564,7 +637,7 @@ class BackgroundGoalDeliveryCoordinator:
                 return approved, execution
             except TimeoutError as exc:
                 state = await _atomic_to_thread(
-                    self._gateway.drain_agent_goal_delivery,
+                    self._goal.drain_agent_goal_delivery,
                     delivery_id,
                     phase="apply",
                     failure_label="watchdog_apply_timeout",
@@ -587,7 +660,7 @@ class BackgroundGoalDeliveryCoordinator:
                 approval_id = str((approved.get("approval") or {}).get("id") or "")
                 if approval_id:
                     state = await _atomic_to_thread(
-                        self._gateway.resolve_agent_goal_approval,
+                        self._approval.resolve_agent_goal_approval,
                         approval_id,
                         {
                             "ok": False,
@@ -627,7 +700,7 @@ class BackgroundGoalDeliveryCoordinator:
     ) -> bool:
         try:
             state = await _atomic_to_thread(
-                self._gateway.drain_agent_goal_delivery,
+                self._goal.drain_agent_goal_delivery,
                 delivery_id,
                 phase=phase,
                 failure_label=failure_label,
@@ -661,7 +734,7 @@ class BackgroundGoalDeliveryCoordinator:
             await self._emit_state(state)
             return False
         final_state = await _atomic_to_thread(
-            self._gateway.finish_agent_goal_delivery_drain,
+            self._goal.finish_agent_goal_delivery_drain,
             delivery_id,
             retryable=False,
             failure_class="cancelled",
@@ -709,7 +782,7 @@ class BackgroundGoalDeliveryCoordinator:
             except BaseException:
                 pass
             state = await _atomic_to_thread(
-                self._gateway.finish_agent_goal_delivery_drain,
+                self._goal.finish_agent_goal_delivery_drain,
                 delivery_id,
                 retryable=retryable,
                 failure_class=failure_class,
@@ -720,8 +793,8 @@ class BackgroundGoalDeliveryCoordinator:
             self._lane_budget.release(lease_token)
 
     async def _emit_state(self, state: dict[str, Any]) -> None:
-        if self._on_state_change is not None:
-            await self._on_state_change(state)
+        if self._events.state_changed is not None:
+            await self._events.state_changed(state)
 
 
 async def _atomic_to_thread(function: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
@@ -819,4 +892,12 @@ def _runtime_failure_outcome(value: Any, *, depth: int = 0) -> tuple[str, str]:
     return "", ""
 
 
-__all__ = ["BackgroundGoalDeliveryCoordinator", "BackgroundGoalDeliveryError"]
+__all__ = [
+    "ApprovalGoalPort",
+    "BackgroundGoalDeliveryCoordinator",
+    "BackgroundGoalDeliveryError",
+    "GoalDeliveryPort",
+    "GoalEventPort",
+    "GoalLifecyclePort",
+    "RuntimeExecutionPort",
+]

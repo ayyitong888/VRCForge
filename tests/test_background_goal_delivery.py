@@ -3,11 +3,17 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from background_goal_delivery import BackgroundGoalDeliveryCoordinator, BackgroundGoalDeliveryError
+from background_goal_delivery import (
+    BackgroundGoalDeliveryCoordinator,
+    BackgroundGoalDeliveryError,
+    GoalEventPort,
+    GoalLifecyclePort,
+    RuntimeExecutionPort,
+)
 from background_goal_runtime import ProviderPreflightCache, RuntimeLaneBudget
 
 
-class FakeGateway:
+class FakeGoalService:
     def __init__(
         self,
         runtime_result=None,
@@ -91,6 +97,14 @@ class FakeGateway:
         self.calls.append(("approval_wait_restored", approval_id))
         return {"delivery": {"approvalId": approval_id, "status": "blocked"}}
 
+    def reconcile_linked_agent_goal_approval(self, approval_id):
+        self.calls.append(("approval_reconciled", approval_id))
+        return None
+
+    def resolve_agent_goal_approval(self, approval_id, execution):
+        self.calls.append(("approval_resolved", approval_id, execution))
+        return {"delivery": {"approvalId": approval_id, "status": "failed"}}
+
 
 def execute(coordinator, **overrides):
     params = {
@@ -114,15 +128,22 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
 
         lanes = RuntimeLaneBudget()
         coordinator = BackgroundGoalDeliveryCoordinator(
-            gateway=gateway,
-            lane_budget=lanes,
-            preflight=ProviderPreflightCache(probe),
-            on_state_change=state_change,
+            goal=gateway,
+            approval=gateway,
+            runtime=RuntimeExecutionPort(
+                execute=gateway.runtime_message,
+                request_cancel=gateway.request_runtime_cancel,
+            ),
+            events=GoalEventPort(state_changed=state_change),
+            lifecycle=GoalLifecyclePort(
+                lane_budget=lanes,
+                preflight=ProviderPreflightCache(probe),
+            ),
         )
         return coordinator, lanes, states
 
     def test_success_records_phases_usage_and_releases_lane(self):
-        gateway = FakeGateway(
+        gateway = FakeGoalService(
             runtime_result={
                 "ok": True,
                 "plan": {"nextStep": "done"},
@@ -144,7 +165,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertEqual(states[-1]["delivery"]["status"], "completed")
 
     def test_unreachable_local_provider_skips_without_starting(self):
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, _states = self.coordinator(gateway, probe=lambda _provider, _url: False)
 
         payload = execute(coordinator, provider="local", base_url="http://127.0.0.1:11434")
@@ -157,7 +178,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertEqual(lanes.snapshot()["total"], 0)
 
     def test_full_background_lane_defers_without_consuming_the_delivery(self):
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
         self.assertTrue(lanes.acquire("background", "occupied-1"))
         self.assertTrue(lanes.acquire("background", "occupied-2"))
@@ -179,7 +200,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
     def test_duplicate_delivery_is_rejected_without_deferring_the_running_owner(self):
         entered_worker = threading.Event()
         release_worker = threading.Event()
-        gateway = FakeGateway(block_event=release_worker)
+        gateway = FakeGoalService(block_event=release_worker)
         original_runtime = gateway.runtime_message
 
         def runtime(params, *, agent_name):
@@ -224,7 +245,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertEqual(lanes.snapshot()["total"], 0)
 
     def test_provider_network_error_is_retryable_and_not_green(self):
-        gateway = FakeGateway(runtime_error=ConnectionError("offline"))
+        gateway = FakeGoalService(runtime_error=ConnectionError("offline"))
         coordinator, lanes, states = self.coordinator(gateway)
 
         with self.assertRaises(BackgroundGoalDeliveryError):
@@ -244,7 +265,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
             ("paused", "paused"),
         ):
             with self.subTest(next_step=next_step):
-                gateway = FakeGateway(runtime_result={"ok": True, "plan": {"nextStep": next_step}})
+                gateway = FakeGoalService(runtime_result={"ok": True, "plan": {"nextStep": next_step}})
                 coordinator, lanes, states = self.coordinator(gateway)
                 execute(coordinator)
                 parked = next(call for call in gateway.calls if call[0] == "park")
@@ -253,7 +274,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
                 self.assertEqual(states[-1]["delivery"]["status"], "parked")
                 self.assertEqual(lanes.snapshot()["total"], 0)
 
-        completed_gateway = FakeGateway(runtime_result={"ok": True, "plan": {"nextStep": "done"}})
+        completed_gateway = FakeGoalService(runtime_result={"ok": True, "plan": {"nextStep": "done"}})
         completed_coordinator, _lanes, _states = self.coordinator(completed_gateway)
         execute(completed_coordinator)
         self.assertTrue(any(call[0] == "complete" for call in completed_gateway.calls))
@@ -282,7 +303,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
             ),
         ):
             with self.subTest(kind=kind):
-                gateway = FakeGateway(runtime_result=result)
+                gateway = FakeGoalService(runtime_result=result)
                 coordinator, lanes, _states = self.coordinator(gateway)
                 execute(coordinator)
                 blocked = next(call for call in gateway.calls if call[0] == "block")
@@ -322,7 +343,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
             ),
         ):
             with self.subTest(label=expected_label):
-                gateway = FakeGateway(runtime_result=result)
+                gateway = FakeGoalService(runtime_result=result)
                 coordinator, lanes, states = self.coordinator(gateway)
                 execute(coordinator)
                 terminal = next(call for call in gateway.calls if call[0] == expected_call)
@@ -340,7 +361,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
             ({"ok": True, "steps": [{"result": {"ok": False}}], "plan": {}}, "runtime_ok_false"),
         ):
             with self.subTest(label=expected_label):
-                gateway = FakeGateway(runtime_result=result)
+                gateway = FakeGoalService(runtime_result=result)
                 coordinator, lanes, states = self.coordinator(gateway)
                 execute(coordinator)
                 failure = next(call for call in gateway.calls if call[0] == "fail")
@@ -352,7 +373,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
 
     def test_timeout_keeps_lane_until_worker_has_drained(self):
         release_worker = threading.Event()
-        gateway = FakeGateway(block_event=release_worker)
+        gateway = FakeGoalService(block_event=release_worker)
         coordinator, lanes, states = self.coordinator(gateway)
 
         async def scenario():
@@ -384,7 +405,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
 
     def test_project_lock_timeout_keeps_lane_until_begin_worker_exits(self):
         release_worker = threading.Event()
-        gateway = FakeGateway(begin_block_event=release_worker)
+        gateway = FakeGoalService(begin_block_event=release_worker)
         coordinator, lanes, _states = self.coordinator(gateway)
 
         async def scenario():
@@ -412,7 +433,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
 
     def test_deliver_timeout_keeps_lane_until_persistence_worker_exits(self):
         release_worker = threading.Event()
-        gateway = FakeGateway(complete_block_event=release_worker)
+        gateway = FakeGoalService(complete_block_event=release_worker)
         coordinator, lanes, _states = self.coordinator(gateway)
 
         async def scenario():
@@ -440,7 +461,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
 
     def test_request_cancellation_keeps_lane_until_provider_worker_has_drained(self):
         release_worker = threading.Event()
-        gateway = FakeGateway(block_event=release_worker)
+        gateway = FakeGoalService(block_event=release_worker)
         coordinator, lanes, states = self.coordinator(gateway)
 
         async def scenario():
@@ -486,7 +507,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
             release_probe.wait(timeout=2)
             return True
 
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway, probe=probe)
 
         async def scenario():
@@ -517,7 +538,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
 
     def test_approved_action_timeout_keeps_lane_until_worker_has_drained(self):
         release_worker = threading.Event()
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
 
         def execute_approved(_approved):
@@ -551,7 +572,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
     def test_approval_transition_timeout_keeps_lane_until_worker_has_drained(self):
         release_worker = threading.Event()
         entered_worker = threading.Event()
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
 
         def approve():
@@ -586,7 +607,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertEqual(states[-1]["delivery"]["status"], "failed")
 
     def test_approval_transition_exception_restores_wait_and_releases_lane(self):
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
 
         async def scenario():
@@ -604,7 +625,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertEqual(states[-1]["delivery"]["status"], "blocked")
 
     def test_non_success_approval_transition_restores_wait_and_releases_lane(self):
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
 
         async def scenario():
@@ -628,7 +649,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
     def test_approval_transition_cancellation_does_not_wait_for_worker_exit(self):
         release_worker = threading.Event()
         entered_worker = threading.Event()
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
 
         def approve():
@@ -668,7 +689,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
         self.assertEqual(states[-1]["delivery"]["status"], "failed")
 
     def test_apply_late_success_after_live_watchdog_finishes_as_failure(self):
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
 
         async def scenario():
@@ -694,7 +715,7 @@ class BackgroundGoalDeliveryCoordinatorTests(unittest.TestCase):
     def test_approved_action_cancellation_keeps_lane_until_worker_has_drained(self):
         release_worker = threading.Event()
         entered_worker = threading.Event()
-        gateway = FakeGateway()
+        gateway = FakeGoalService()
         coordinator, lanes, states = self.coordinator(gateway)
 
         def execute_approved(_approved):
