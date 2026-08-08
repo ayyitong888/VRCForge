@@ -8281,7 +8281,7 @@ class DashboardServerTests(unittest.TestCase):
             payload={"data": {"ok": True, "preview": True}},
         )
 
-        result = dashboard_server.preview_add_modular_avatar_component_sync(
+        result = dashboard_server.WARDROBE_OUTFIT_WORKFLOWS.preview_add_modular_avatar_component(
             {
                 "avatarPath": "Scene/HeroAvatar",
                 "gameObjectPath": "Scene/HeroAvatar/Outfit",
@@ -8341,7 +8341,7 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"data": {"ok": True, "addedComponent": True}},
         )
-        result = dashboard_server.add_modular_avatar_component_sync({
+        result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component({
             "game_object_path": "HeroAvatar/Outfits/Hoodie",
             "component_type": "MergeArmature",
             "avatar_path": "Scene/HeroAvatar",
@@ -8368,7 +8368,7 @@ class DashboardServerTests(unittest.TestCase):
             payload={"data": {"ok": True, "addedComponent": True, "sceneSaved": True}},
         )
 
-        result = dashboard_server.add_modular_avatar_component_sync({
+        result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component({
             "gameObjectPath": "HeroAvatar/Outfits/Hoodie",
             "componentType": "MergeArmature",
             "saveScene": True,
@@ -8378,6 +8378,35 @@ class DashboardServerTests(unittest.TestCase):
         _settings, tool_name, params = mock_invoke.call_args.args
         self.assertEqual(tool_name, "vrc_add_modular_avatar_component")
         self.assertTrue(params["saveScene"])
+
+    @patch("dashboard_server.emit_log")
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_add_modular_avatar_component_live_guard_uses_only_bound_connection(
+        self,
+        mock_load_settings,
+        mock_invoke,
+        mock_log,
+    ) -> None:
+        params = {"expectedRunIdDigest": "3" * 64}
+        connection = Mock()
+        connection.apply_component.return_value = {"ok": True, "live": True}
+
+        with patch.object(
+            dashboard_server,
+            "PRIMITIVE_BASIS_LIVE_CONNECTION",
+            connection,
+        ):
+            result = (
+                dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES
+                .add_modular_avatar_component(params)
+            )
+
+        self.assertEqual(result, {"ok": True, "live": True})
+        connection.apply_component.assert_called_once_with(params)
+        mock_load_settings.assert_not_called()
+        mock_invoke.assert_not_called()
+        mock_log.assert_not_called()
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -8426,11 +8455,11 @@ class DashboardServerTests(unittest.TestCase):
         )
 
     def test_add_modular_avatar_component_requires_target_and_type(self) -> None:
-        missing_type = dashboard_server.add_modular_avatar_component_sync({
+        missing_type = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component({
             "game_object_path": "HeroAvatar/Outfits/Hoodie",
         })
         self.assertFalse(missing_type["ok"])
-        missing_target = dashboard_server.add_modular_avatar_component_sync({
+        missing_target = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component({
             "component_type": "MergeArmature",
         })
         self.assertFalse(missing_target["ok"])

@@ -293,6 +293,10 @@ from package_install_workflow_service import (
     resolve_project_path,
 )
 from wardrobe_outfit_workflow_service import (
+    AddModularAvatarComponentApprovedWritePorts,
+    AddModularAvatarComponentApprovedWriteService,
+    AddModularAvatarComponentPreviewPorts,
+    AddModularAvatarComponentPreviewService,
     AddOutfitPartApprovedWritePorts,
     AddOutfitPartApprovedWriteService,
     AddOutfitPartPreviewPorts,
@@ -314,7 +318,9 @@ from wardrobe_outfit_workflow_service import (
     WardrobeOutfitWorkflowPorts,
     WardrobeOutfitWorkflowService,
     build_add_outfit_part_request as build_owned_add_outfit_part_request,
+    build_add_modular_avatar_component_request as build_owned_add_modular_avatar_component_request,
     build_add_wardrobe_outfit_request as build_owned_add_wardrobe_outfit_request,
+    validate_add_modular_avatar_component_request as validate_owned_add_modular_avatar_component_request,
 )
 from outfit_import_planner import (
     build_outfit_import_plan,
@@ -17344,87 +17350,6 @@ def _coerce_path_list(params: dict[str, Any], *keys: str) -> list[str]:
     return result
 
 
-def build_add_modular_avatar_component_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "gameObjectPath": str(
-            params.get("game_object_path")
-            or params.get("gameObjectPath")
-            or params.get("target_path")
-            or params.get("targetPath")
-            or ""
-        ).strip(),
-        "componentType": str(params.get("component_type") or params.get("componentType") or "").strip(),
-        "preview": preview,
-        "saveScene": normalize_bool(params.get("save_scene", params.get("saveScene")), False),
-    }
-    avatar_path = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
-    if avatar_path:
-        request["avatarPath"] = avatar_path
-    if params.get("allow_duplicate") is not None or params.get("allowDuplicate") is not None:
-        request["allowDuplicate"] = bool(params.get("allow_duplicate", params.get("allowDuplicate")))
-    references = params.get("references")
-    if isinstance(references, dict) and references:
-        request["references"] = references
-    fields = params.get("fields")
-    if isinstance(fields, dict) and fields:
-        request["fields"] = fields
-    return request
-
-
-def _validate_add_modular_avatar_component_request(request: dict[str, Any]) -> dict[str, Any] | None:
-    if not request["gameObjectPath"]:
-        return {"ok": False, "error": "gameObjectPath is required (the scene object to add the Modular Avatar component to)."}
-    if not request["componentType"]:
-        return {"ok": False, "error": "componentType is required (e.g. MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters)."}
-    return None
-
-
-def preview_add_modular_avatar_component_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    request = build_add_modular_avatar_component_request(params, True)
-    invalid = _validate_add_modular_avatar_component_request(request)
-    if invalid is not None:
-        return invalid
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = ensure_dict_payload(
-        extract_tool_result_payload(
-            invoke_unity_mcp(
-                settings,
-                "vrc_add_modular_avatar_component",
-                request,
-                execution_context={"lane": "app_preview"},
-            )
-        ),
-        "add modular avatar component preview",
-    )
-    payload.setdefault("ok", True)
-    return payload
-
-
-def add_modular_avatar_component_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    live_connection = globals().get("PRIMITIVE_BASIS_LIVE_CONNECTION")
-    if live_connection is not None and _primitive_live_guard_fields(params):
-        return live_connection.apply_component(params)
-    request = build_add_modular_avatar_component_request(params, False)
-    invalid = _validate_add_modular_avatar_component_request(request)
-    if invalid is not None:
-        return invalid
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_modular_avatar_component", request)),
-        "add modular avatar component",
-    )
-    payload.setdefault("ok", True)
-    emit_log(
-        "info",
-        "modular_avatar",
-        "Modular Avatar component added.",
-        {"gameObjectPath": request["gameObjectPath"], "componentType": request["componentType"]},
-    )
-    return payload
-
-
 def build_inspect_modular_avatar_component_request(params: dict[str, Any]) -> dict[str, Any]:
     request: dict[str, Any] = {
         "gameObjectPath": str(
@@ -17445,7 +17370,7 @@ def build_inspect_modular_avatar_component_request(params: dict[str, Any]) -> di
 def inspect_modular_avatar_component_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     request = build_inspect_modular_avatar_component_request(params)
-    invalid = _validate_add_modular_avatar_component_request(request)
+    invalid = validate_owned_add_modular_avatar_component_request(request)
     if invalid is not None:
         return invalid
     settings = load_dashboard_settings(build_agent_connection_request(params))
@@ -21293,6 +21218,50 @@ ADD_OUTFIT_PART_APPROVED_WRITE = AddOutfitPartApprovedWriteService(
         log=emit_log,
     )
 )
+ADD_MODULAR_AVATAR_COMPONENT_PREVIEW = AddModularAvatarComponentPreviewService(
+    AddModularAvatarComponentPreviewPorts(
+        build_request=build_owned_add_modular_avatar_component_request,
+        load_settings=lambda params: load_dashboard_settings(
+            build_agent_connection_request(params)
+        ),
+        invoke_preview=lambda settings, request: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(
+                    settings,
+                    "vrc_add_modular_avatar_component",
+                    request,
+                    execution_context={"lane": "app_preview"},
+                )
+            ),
+            "add modular avatar component preview",
+        ),
+    )
+)
+ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE = (
+    AddModularAvatarComponentApprovedWriteService(
+        AddModularAvatarComponentApprovedWritePorts(
+            primitive_live_connection=lambda: PRIMITIVE_BASIS_LIVE_CONNECTION,
+            primitive_live_guard_fields=lambda params: _primitive_live_guard_fields(
+                params
+            ),
+            build_request=build_owned_add_modular_avatar_component_request,
+            load_settings=lambda params: load_dashboard_settings(
+                build_agent_connection_request(params)
+            ),
+            invoke_approved=lambda settings, request: ensure_dict_payload(
+                extract_tool_result_payload(
+                    invoke_unity_mcp(
+                        settings,
+                        "vrc_add_modular_avatar_component",
+                        request,
+                    )
+                ),
+                "add modular avatar component",
+            ),
+            log=emit_log,
+        )
+    )
+)
 CLOTHING_FX_READ = ClothingFxReadService(
     ClothingFxReadPorts(
         load_settings=lambda request: load_dashboard_settings(request),
@@ -21322,7 +21291,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         preview_setup_outfit=SETUP_OUTFIT_PREVIEW.preview,
         preview_add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_PREVIEW.preview,
         preview_add_outfit_part=ADD_OUTFIT_PART_PREVIEW.preview,
-        preview_add_modular_avatar_component=preview_add_modular_avatar_component_sync,
+        preview_add_modular_avatar_component=ADD_MODULAR_AVATAR_COMPONENT_PREVIEW.preview,
         preview_manage_wardrobe=preview_manage_wardrobe_sync,
         preview_create_wardrobe=preview_create_wardrobe_sync,
         preview_add_outfit=preview_add_outfit_workflow_sync,
@@ -21333,7 +21302,7 @@ WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
     setup_outfit=SETUP_OUTFIT_APPROVED_WRITE.execute,
     add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_APPROVED_WRITE.execute,
     add_outfit_part=ADD_OUTFIT_PART_APPROVED_WRITE.execute,
-    add_modular_avatar_component=add_modular_avatar_component_sync,
+    add_modular_avatar_component=ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE.execute,
     manage_wardrobe=manage_wardrobe_sync,
     create_wardrobe=create_wardrobe_sync,
     prepare_add_outfit=prepare_add_outfit_request,
@@ -21722,7 +21691,7 @@ class PrimitiveBasisLiveUnityConnection:
         )
 
     def preview_component(self, params: dict[str, Any]) -> dict[str, Any]:
-        request = build_add_modular_avatar_component_request(params, True)
+        request = build_owned_add_modular_avatar_component_request(params, True)
         request.update(_primitive_live_guard_fields(params))
         return self._invoke_payload(
             "vrc_add_modular_avatar_component",
@@ -21731,7 +21700,7 @@ class PrimitiveBasisLiveUnityConnection:
         )
 
     def apply_component(self, params: dict[str, Any]) -> dict[str, Any]:
-        request = build_add_modular_avatar_component_request(params, False)
+        request = build_owned_add_modular_avatar_component_request(params, False)
         request.update(_primitive_live_guard_fields(params))
         return self._invoke_payload(
             "vrc_add_modular_avatar_component",

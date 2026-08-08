@@ -21,6 +21,10 @@ class ClothingFxLogPort(Protocol):
     ) -> None: ...
 
 
+class PrimitiveLiveComponentApplyPort(Protocol):
+    def apply_component(self, params: dict[str, Any]) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ClothingFxReadPorts:
     """Read-only capabilities for clothing discovery and FX blueprint shaping."""
@@ -486,6 +490,61 @@ def build_add_outfit_part_request(
     return request
 
 
+def _normalize_wardrobe_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def build_add_modular_avatar_component_request(
+    params: dict[str, Any],
+    preview: bool,
+) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "gameObjectPath": str(
+            params.get("game_object_path")
+            or params.get("gameObjectPath")
+            or params.get("target_path")
+            or params.get("targetPath")
+            or ""
+        ).strip(),
+        "componentType": str(
+            params.get("component_type") or params.get("componentType") or ""
+        ).strip(),
+        "preview": preview,
+        "saveScene": _normalize_wardrobe_bool(
+            params.get("save_scene", params.get("saveScene")),
+            False,
+        ),
+    }
+    avatar_path = str(
+        params.get("avatar_path") or params.get("avatarPath") or ""
+    ).strip()
+    if avatar_path:
+        request["avatarPath"] = avatar_path
+    if (
+        params.get("allow_duplicate") is not None
+        or params.get("allowDuplicate") is not None
+    ):
+        request["allowDuplicate"] = bool(
+            params.get("allow_duplicate", params.get("allowDuplicate"))
+        )
+    references = params.get("references")
+    if isinstance(references, dict) and references:
+        request["references"] = references
+    fields = params.get("fields")
+    if isinstance(fields, dict) and fields:
+        request["fields"] = fields
+    return request
+
+
 AddWardrobeOutfitRequestBuilder = Callable[
     [dict[str, Any], bool],
     dict[str, Any],
@@ -675,6 +734,106 @@ def validate_add_outfit_part_request(
         return {
             "ok": False,
             "error": "objectPaths is required (the part's scene objects to toggle on/off).",
+        }
+    return None
+
+
+AddModularAvatarComponentRequestBuilder = Callable[
+    [dict[str, Any], bool],
+    dict[str, Any],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class AddModularAvatarComponentPreviewPorts:
+    """Fixed preview capability with no approved/live Unity port."""
+
+    build_request: AddModularAvatarComponentRequestBuilder
+    load_settings: Callable[[dict[str, Any]], Any]
+    invoke_preview: Callable[[Any, dict[str, Any]], dict[str, Any]]
+
+
+class AddModularAvatarComponentPreviewService:
+    """Own only the read/preview Modular Avatar component path."""
+
+    def __init__(self, ports: AddModularAvatarComponentPreviewPorts) -> None:
+        self._ports = ports
+
+    def preview(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = self._ports.build_request(normalized, True)
+        invalid = validate_add_modular_avatar_component_request(request)
+        if invalid is not None:
+            return invalid
+        settings = self._ports.load_settings(normalized)
+        payload = self._ports.invoke_preview(settings, request)
+        payload.setdefault("ok", True)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class AddModularAvatarComponentApprovedWritePorts:
+    """Registry-only fixed live Modular Avatar component capabilities."""
+
+    primitive_live_connection: Callable[[], PrimitiveLiveComponentApplyPort | None]
+    primitive_live_guard_fields: Callable[[dict[str, Any]], dict[str, Any]]
+    build_request: AddModularAvatarComponentRequestBuilder
+    load_settings: Callable[[dict[str, Any]], Any]
+    invoke_approved: Callable[[Any, dict[str, Any]], dict[str, Any]]
+    log: ClothingFxLogPort
+
+
+class AddModularAvatarComponentApprovedWriteService:
+    """Own the approved Modular Avatar component execution endpoint."""
+
+    def __init__(self, ports: AddModularAvatarComponentApprovedWritePorts) -> None:
+        self._ports = ports
+
+    def execute(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        live_connection = self._ports.primitive_live_connection()
+        if (
+            live_connection is not None
+            and self._ports.primitive_live_guard_fields(normalized)
+        ):
+            return live_connection.apply_component(normalized)
+        request = self._ports.build_request(normalized, False)
+        invalid = validate_add_modular_avatar_component_request(request)
+        if invalid is not None:
+            return invalid
+        settings = self._ports.load_settings(normalized)
+        payload = self._ports.invoke_approved(settings, request)
+        payload.setdefault("ok", True)
+        self._ports.log(
+            "info",
+            "modular_avatar",
+            "Modular Avatar component added.",
+            {
+                "gameObjectPath": request["gameObjectPath"],
+                "componentType": request["componentType"],
+            },
+        )
+        return payload
+
+
+def validate_add_modular_avatar_component_request(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not request["gameObjectPath"]:
+        return {
+            "ok": False,
+            "error": (
+                "gameObjectPath is required (the scene object to add the Modular "
+                "Avatar component to)."
+            ),
+        }
+    if not request["componentType"]:
+        return {
+            "ok": False,
+            "error": (
+                "componentType is required (e.g. MergeArmature, BoneProxy, "
+                "MenuInstaller, MergeAnimator, Parameters)."
+            ),
         }
     return None
 

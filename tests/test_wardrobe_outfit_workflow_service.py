@@ -8,6 +8,10 @@ from typing import Any
 import pytest
 
 from wardrobe_outfit_workflow_service import (
+    AddModularAvatarComponentApprovedWritePorts,
+    AddModularAvatarComponentApprovedWriteService,
+    AddModularAvatarComponentPreviewPorts,
+    AddModularAvatarComponentPreviewService,
     AddOutfitPartApprovedWritePorts,
     AddOutfitPartApprovedWriteService,
     AddOutfitPartPreviewPorts,
@@ -30,6 +34,7 @@ from wardrobe_outfit_workflow_service import (
     WardrobeOutfitWorkflowService,
     build_add_wardrobe_outfit_request,
     build_add_outfit_part_request,
+    build_add_modular_avatar_component_request,
     coerce_setup_outfit_float_param,
 )
 
@@ -343,6 +348,10 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "add_outfit_part_sync" not in bindings
     assert "build_add_outfit_part_request" not in bindings
     assert "_validate_add_outfit_part_request" not in bindings
+    assert "preview_add_modular_avatar_component_sync" not in bindings
+    assert "add_modular_avatar_component_sync" not in bindings
+    assert "build_add_modular_avatar_component_request" not in bindings
+    assert "_validate_add_modular_avatar_component_request" not in bindings
     assert "scan_avatar_items_sync" not in bindings
     assert "scan_avatar_controls_sync" not in bindings
     assert "scan_wardrobe_sync" not in bindings
@@ -370,10 +379,36 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "preview_add_outfit_part=ADD_OUTFIT_PART_PREVIEW.preview" in source
     assert "add_outfit_part=ADD_OUTFIT_PART_APPROVED_WRITE.execute" in source
     assert source.count("build_request=build_owned_add_outfit_part_request") == 2
+    assert (
+        "preview_add_modular_avatar_component="
+        "ADD_MODULAR_AVATAR_COMPONENT_PREVIEW.preview"
+    ) in source
+    assert (
+        "add_modular_avatar_component="
+        "ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE.execute"
+    ) in source
+    assert (
+        source.count(
+            "build_request=build_owned_add_modular_avatar_component_request"
+        )
+        == 2
+    )
+    flattened_source = " ".join(source.split())
+    assert "primitive_live_guard_fields=lambda params:" in flattened_source
+    assert "_primitive_live_guard_fields(" in flattened_source
     assert not any(
         isinstance(node, ast.ImportFrom)
         and any(
             alias.name == "build_add_wardrobe_outfit_request"
+            and alias.asname is None
+            for alias in node.names
+        )
+        for node in tree.body
+    )
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and any(
+            alias.name == "build_add_modular_avatar_component_request"
             and alias.asname is None
             for alias in node.names
         )
@@ -830,6 +865,163 @@ def test_add_outfit_part_validation_has_no_settings_or_unity_side_effects(
     approved_service = AddOutfitPartApprovedWriteService(
         AddOutfitPartApprovedWritePorts(
             build_request=build_add_outfit_part_request,
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_approved=lambda _settings, _request: calls.append("approved"),
+            log=lambda *_args, **_kwargs: calls.append("log"),
+        )
+    )
+
+    expected = {"ok": False, "error": error}
+    assert preview_service.preview(params) == expected
+    assert approved_service.execute(params) == expected
+    assert calls == []
+
+
+def test_modular_avatar_component_owners_separate_preview_and_approved_capabilities() -> None:
+    calls: list[tuple[Any, ...]] = []
+    settings = object()
+
+    def load_settings(params: dict[str, Any]) -> Any:
+        calls.append(("settings", params))
+        return settings
+
+    preview_service = AddModularAvatarComponentPreviewService(
+        AddModularAvatarComponentPreviewPorts(
+            build_request=build_add_modular_avatar_component_request,
+            load_settings=load_settings,
+            invoke_preview=lambda actual_settings, request: (
+                calls.append(("preview", actual_settings, request))
+                or {"componentType": "MergeArmature"}
+            ),
+        )
+    )
+    approved_service = AddModularAvatarComponentApprovedWriteService(
+        AddModularAvatarComponentApprovedWritePorts(
+            primitive_live_connection=lambda: None,
+            primitive_live_guard_fields=lambda _params: {},
+            build_request=build_add_modular_avatar_component_request,
+            load_settings=load_settings,
+            invoke_approved=lambda actual_settings, request: (
+                calls.append(("approved", actual_settings, request))
+                or {"addedComponent": True}
+            ),
+            log=lambda level, scope, message, data=None: calls.append(
+                ("log", level, scope, message, data)
+            ),
+        )
+    )
+    params = {
+        "avatarPath": "Scene/Avatar",
+        "gameObjectPath": "Scene/Avatar/Outfit",
+        "componentType": "MergeArmature",
+        "saveScene": "yes",
+        "references": {"mergeTarget": "Armature"},
+        "fields": {"prefix": "", "nested": {"enabled": True}},
+    }
+
+    assert preview_service.preview(params) == {
+        "componentType": "MergeArmature",
+        "ok": True,
+    }
+    assert approved_service.execute(params) == {
+        "addedComponent": True,
+        "ok": True,
+    }
+    assert set(AddModularAvatarComponentPreviewPorts.__dataclass_fields__) == {
+        "build_request",
+        "load_settings",
+        "invoke_preview",
+    }
+    preview_request = next(call for call in calls if call[0] == "preview")[2]
+    approved_request = next(call for call in calls if call[0] == "approved")[2]
+    assert preview_request["preview"] is True
+    assert approved_request["preview"] is False
+    assert preview_request["saveScene"] is True
+    assert approved_request["references"] == {"mergeTarget": "Armature"}
+    assert approved_request["references"] is params["references"]
+    assert approved_request["fields"] == {
+        "prefix": "",
+        "nested": {"enabled": True},
+    }
+    assert approved_request["fields"] is params["fields"]
+    assert (
+        "log",
+        "info",
+        "modular_avatar",
+        "Modular Avatar component added.",
+        {
+            "gameObjectPath": "Scene/Avatar/Outfit",
+            "componentType": "MergeArmature",
+        },
+    ) in calls
+
+
+def test_modular_avatar_component_approved_live_shortcut_has_no_generic_unity_side_effects() -> None:
+    calls: list[str] = []
+
+    class LiveConnection:
+        def apply_component(self, _params: dict[str, Any]) -> dict[str, Any]:
+            calls.append("primitive-live")
+            return {"ok": True, "live": True}
+
+    service = AddModularAvatarComponentApprovedWriteService(
+        AddModularAvatarComponentApprovedWritePorts(
+            primitive_live_connection=LiveConnection,
+            primitive_live_guard_fields=lambda _params: {"sessionId": "live-1"},
+            build_request=lambda _params, _preview: (
+                calls.append("build") or {}
+            ),
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_approved=lambda _settings, _request: calls.append("approved"),
+            log=lambda *_args, **_kwargs: calls.append("log"),
+        )
+    )
+
+    assert service.execute({"primitiveLive": {"sessionId": "live-1"}}) == {
+        "ok": True,
+        "live": True,
+    }
+    assert calls == ["primitive-live"]
+
+
+@pytest.mark.parametrize(
+    ("params", "error"),
+    [
+        (
+            {"componentType": "MergeArmature"},
+            (
+                "gameObjectPath is required (the scene object to add the Modular "
+                "Avatar component to)."
+            ),
+        ),
+        (
+            {"gameObjectPath": "Avatar/Outfit"},
+            (
+                "componentType is required (e.g. MergeArmature, BoneProxy, "
+                "MenuInstaller, MergeAnimator, Parameters)."
+            ),
+        ),
+    ],
+)
+def test_modular_avatar_component_validation_has_no_unity_side_effects(
+    params: dict[str, Any],
+    error: str,
+) -> None:
+    calls: list[str] = []
+    preview_service = AddModularAvatarComponentPreviewService(
+        AddModularAvatarComponentPreviewPorts(
+            build_request=build_add_modular_avatar_component_request,
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_preview=lambda _settings, _request: calls.append("preview"),
+        )
+    )
+    approved_service = AddModularAvatarComponentApprovedWriteService(
+        AddModularAvatarComponentApprovedWritePorts(
+            primitive_live_connection=lambda: None,
+            primitive_live_guard_fields=lambda _params: (
+                calls.append("live-check") or {}
+            ),
+            build_request=build_add_modular_avatar_component_request,
             load_settings=lambda _params: calls.append("settings"),
             invoke_approved=lambda _settings, _request: calls.append("approved"),
             log=lambda *_args, **_kwargs: calls.append("log"),

@@ -1,8 +1,12 @@
+import random
+
 import pytest
 
 import dashboard_server as dashboard
+import unity_execution_plans_workflows as workflow_plans
 from unity_execution_plans_workflows import build_workflow_execution_plan
 from wardrobe_outfit_workflow_service import (
+    build_add_modular_avatar_component_request,
     build_add_outfit_part_request,
     build_add_wardrobe_outfit_request,
     build_setup_outfit_request,
@@ -123,7 +127,7 @@ def test_create_wardrobe_plan_has_shared_builder_parity_and_passes_preview_false
                 "saveScene": "false",
                 "allowDuplicate": "false",
             },
-            dashboard.build_add_modular_avatar_component_request,
+            build_add_modular_avatar_component_request,
         ),
     ],
 )
@@ -309,6 +313,220 @@ def test_add_outfit_part_plan_preserves_falsey_text_fallback_and_path_coercion()
         "Avatar/List",
         "42",
     ]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, False),
+        (True, True),
+        (False, False),
+        ("1", True),
+        ("yes", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("off", False),
+        ("unexpected", False),
+    ],
+)
+def test_modular_component_plan_preserves_save_scene_normalization(
+    value: object,
+    expected: bool,
+) -> None:
+    params = {
+        "gameObjectPath": "Avatar/Outfit",
+        "componentType": "MergeArmature",
+        "saveScene": value,
+    }
+    plan = build_workflow_execution_plan(
+        "vrcforge_add_modular_avatar_component",
+        params,
+    )
+
+    assert plan == [
+        (
+            "vrc_add_modular_avatar_component",
+            build_add_modular_avatar_component_request(params, False),
+        )
+    ]
+    assert plan[0][1]["saveScene"] is expected
+
+
+@pytest.mark.parametrize(
+    ("allow_arguments", "expected"),
+    [
+        ({"allowDuplicate": None}, None),
+        ({"allow_duplicate": None}, None),
+        ({"allow_duplicate": None, "allowDuplicate": True}, False),
+        ({"allow_duplicate": False, "allowDuplicate": True}, False),
+        ({"allowDuplicate": "false"}, True),
+    ],
+)
+def test_modular_component_plan_preserves_allow_duplicate_null_and_falsey_aliases(
+    allow_arguments: dict[str, object],
+    expected: bool | None,
+) -> None:
+    params = {
+        "gameObjectPath": "Avatar/Outfit",
+        "componentType": "MergeArmature",
+        **allow_arguments,
+    }
+    plan = build_workflow_execution_plan(
+        "vrcforge_add_modular_avatar_component",
+        params,
+    )
+
+    assert len(plan) == 1
+    assert plan == [
+        (
+            "vrc_add_modular_avatar_component",
+            build_add_modular_avatar_component_request(params, False),
+        )
+    ]
+    if expected is None:
+        assert "allowDuplicate" not in plan[0][1]
+    else:
+        assert plan[0][1]["allowDuplicate"] is expected
+
+
+def test_modular_component_plan_preserves_paths_component_and_dict_projection() -> None:
+    params = {
+        "game_object_path": "",
+        "gameObjectPath": 0,
+        "target_path": False,
+        "targetPath": "Avatar/Outfit",
+        "component_type": "",
+        "componentType": "MergeArmature",
+        "avatar_path": "",
+        "avatarPath": "Avatar",
+        "references": {"mergeTarget": "Armature"},
+        "fields": {"nested": {"enabled": True}},
+    }
+    plan = build_workflow_execution_plan(
+        "vrcforge_add_modular_avatar_component",
+        params,
+    )
+
+    assert plan == [
+        (
+            "vrc_add_modular_avatar_component",
+            build_add_modular_avatar_component_request(params, False),
+        )
+    ]
+    assert plan[0][1] == {
+        "gameObjectPath": "Avatar/Outfit",
+        "componentType": "MergeArmature",
+        "preview": False,
+        "saveScene": False,
+        "avatarPath": "Avatar",
+        "references": {"mergeTarget": "Armature"},
+        "fields": {"nested": {"enabled": True}},
+    }
+
+
+def test_modular_component_plan_deep_copies_nested_reference_and_field_payloads() -> None:
+    references = {"mergeTarget": {"path": "Armature"}}
+    fields = {"nested": {"enabled": True}}
+    plan = build_workflow_execution_plan(
+        "vrcforge_add_modular_avatar_component",
+        {
+            "gameObjectPath": "Avatar/Outfit",
+            "componentType": "MergeArmature",
+            "references": references,
+            "fields": fields,
+        },
+    )
+
+    references["mergeTarget"]["path"] = "Changed"
+    fields["nested"]["enabled"] = False
+
+    assert plan[0][1]["references"] == {
+        "mergeTarget": {"path": "Armature"}
+    }
+    assert plan[0][1]["fields"] == {"nested": {"enabled": True}}
+
+
+@pytest.mark.parametrize(
+    ("guard_key", "guard_value"),
+    [
+        (guard_key, guard_value)
+        for guard_key in (
+            "primitiveLive",
+            "primitive_live",
+            "expectedSceneIdentity",
+            "expected_scene_identity",
+        )
+        for guard_value in (None, False)
+    ],
+)
+def test_modular_component_plan_rejects_live_identity_guard_arguments(
+    guard_key: str,
+    guard_value: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builder_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        workflow_plans,
+        "build_add_modular_avatar_component_request",
+        lambda params, _preview: builder_calls.append(params) or {},
+    )
+
+    with pytest.raises(ValueError, match="frozen live-instance identity/readback"):
+        build_workflow_execution_plan(
+            "vrcforge_add_modular_avatar_component",
+            {
+                "gameObjectPath": "Avatar/Outfit",
+                "componentType": "MergeArmature",
+                guard_key: guard_value,
+            },
+        )
+    assert builder_calls == []
+
+
+def test_modular_component_randomized_plan_parity_uses_one_canonical_call() -> None:
+    rng = random.Random(0xC5)
+    text_values: list[object] = [None, "", False, 0, "Avatar/Outfit", " MergeArmature "]
+    bool_values: list[object] = [None, True, False, 0, 1, "yes", "false", "unknown"]
+    aliases = (
+        "game_object_path",
+        "gameObjectPath",
+        "target_path",
+        "targetPath",
+        "component_type",
+        "componentType",
+        "avatar_path",
+        "avatarPath",
+    )
+
+    for _ in range(200):
+        params: dict[str, object] = {}
+        for alias in aliases:
+            if rng.choice((True, False)):
+                params[alias] = rng.choice(text_values)
+        for alias in ("save_scene", "saveScene", "allow_duplicate", "allowDuplicate"):
+            if rng.choice((True, False)):
+                params[alias] = rng.choice(bool_values)
+        params["references"] = rng.choice(
+            [None, [], {}, {"target": "Armature"}, {"nested": {"value": 1}}]
+        )
+        params["fields"] = rng.choice(
+            [None, "bad", {}, {"prefix": ""}, {"nested": {"enabled": True}}]
+        )
+
+        plan = build_workflow_execution_plan(
+            "vrcforge_add_modular_avatar_component",
+            params,
+        )
+
+        assert plan == [
+            (
+                "vrc_add_modular_avatar_component",
+                build_add_modular_avatar_component_request(params, False),
+            )
+        ]
+        assert len(plan) == 1
+        assert plan[0][1]["preview"] is False
 
 
 def test_restore_plan_preserves_existing_python_truthiness() -> None:

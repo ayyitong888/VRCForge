@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from wardrobe_outfit_workflow_service import (
+    build_add_modular_avatar_component_request,
     build_add_outfit_part_request,
     build_add_wardrobe_outfit_request,
 )
@@ -145,18 +146,12 @@ def _add_outfit_part(params: dict[str, Any]) -> WorkflowPlan:
 def _add_modular_avatar_component(params: dict[str, Any]) -> WorkflowPlan:
     if any(key in params for key in ("primitiveLive", "primitive_live", "expectedSceneIdentity", "expected_scene_identity")):
         raise ValueError("vrcforge_add_modular_avatar_component needs frozen live-instance identity/readback.")
-    request: dict[str, Any] = {
-        "gameObjectPath": _text(params, "game_object_path", "gameObjectPath", "target_path", "targetPath"),
-        "componentType": _text(params, "component_type", "componentType"),
-        "preview": False,
-        "saveScene": _bool(params, "save_scene", "saveScene", default=False),
-    }
-    _optional_text(request, params, "avatarPath", "avatar_path", "avatarPath")
-    _optional_python_bool(request, params, "allowDuplicate", "allow_duplicate", "allowDuplicate")
-    for key in ("references", "fields"):
-        if isinstance(params.get(key), dict) and params[key]:
-            request[key] = deepcopy(params[key])
-    return [("vrc_add_modular_avatar_component", request)]
+    return [
+        (
+            "vrc_add_modular_avatar_component",
+            build_add_modular_avatar_component_request(deepcopy(params), False),
+        )
+    ]
 
 
 def _manage_wardrobe(params: dict[str, Any]) -> WorkflowPlan:
