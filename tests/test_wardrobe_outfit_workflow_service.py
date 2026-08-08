@@ -10,12 +10,17 @@ import pytest
 from wardrobe_outfit_workflow_service import (
     ClothingFxReadPorts,
     ClothingFxReadService,
+    SetupOutfitApprovedWritePorts,
+    SetupOutfitApprovedWriteService,
+    SetupOutfitPreviewPorts,
+    SetupOutfitPreviewService,
     WardrobeArtifactReadPorts,
     WardrobeArtifactReadService,
     WardrobeOutfitApprovedWriteHandlers,
     WardrobeOutfitWorkflowError,
     WardrobeOutfitWorkflowPorts,
     WardrobeOutfitWorkflowService,
+    coerce_setup_outfit_float_param,
 )
 
 
@@ -318,6 +323,8 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "scan_clothes_sync" not in bindings
     assert "generate_clothing_fx_sync" not in bindings
     assert "apply_clothing_fx_sync" not in bindings
+    assert "preview_setup_outfit_sync" not in bindings
+    assert "setup_outfit_sync" not in bindings
     assert "scan_avatar_items_sync" not in bindings
     assert "scan_avatar_controls_sync" not in bindings
     assert "scan_wardrobe_sync" not in bindings
@@ -331,6 +338,8 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert (
         "WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx" in source
     )
+    assert "preview_setup_outfit=SETUP_OUTFIT_PREVIEW.preview" in source
+    assert "setup_outfit=SETUP_OUTFIT_APPROVED_WRITE.execute" in source
     assert "scan_avatar_items=WARDROBE_ARTIFACT_READ.scan_avatar_items" in source
     assert "scan_avatar_controls=WARDROBE_ARTIFACT_READ.scan_avatar_controls" in source
     assert "scan_wardrobe=WARDROBE_ARTIFACT_READ.scan_wardrobe" in source
@@ -396,6 +405,117 @@ def test_wardrobe_artifact_read_owner_preserves_read_parameters_and_shapes() -> 
     assert ("items", {"max_items": 42, "avatarPath": "Scene/Avatar"}) in calls
     assert ("controls", {"avatar_path": " Scene/Avatar "}) in calls
     assert ("wardrobe", {}) in calls
+
+
+def test_setup_outfit_owners_separate_preview_from_single_approved_poll_owner() -> None:
+    calls: list[tuple[Any, ...]] = []
+    settings = object()
+
+    def load_settings(params: dict[str, Any]) -> Any:
+        calls.append(("settings", params))
+        return settings
+
+    def preview(actual_settings: Any, request: dict[str, Any]) -> dict[str, Any]:
+        calls.append(("preview", actual_settings, request))
+        return {"ready": True}
+
+    def approved(actual_settings: Any, request: dict[str, Any]) -> dict[str, Any]:
+        calls.append(("approved", actual_settings, request))
+        return {
+            "pending": True,
+            "status": "pending",
+            "jobId": "job-1",
+            "outfitGlobalObjectId": "global-running",
+            "mutationStarted": True,
+        }
+
+    def poll(actual_settings: Any, job_id: str) -> dict[str, Any]:
+        calls.append(("poll", actual_settings, job_id))
+        return {
+            "ok": False,
+            "pending": False,
+            "status": "unavailable",
+            "jobId": job_id,
+        }
+
+    preview_service = SetupOutfitPreviewService(
+        SetupOutfitPreviewPorts(
+            load_settings=load_settings,
+            invoke_preview=preview,
+        )
+    )
+    approved_service = SetupOutfitApprovedWriteService(
+        SetupOutfitApprovedWritePorts(
+            load_settings=load_settings,
+            start_approved=approved,
+            poll_existing_job=poll,
+            retryable_poll_error=RuntimeError,
+            monotonic=lambda: 0.0,
+            sleep=lambda _seconds: None,
+            log=lambda level, scope, message, data=None: calls.append(
+                ("log", level, scope, message, data)
+            ),
+        )
+    )
+    params = {
+        "avatarPath": "Avatar",
+        "outfitPath": "Avatar/Outfit",
+        "setupOutfitPollIntervalSeconds": 0,
+        "setupOutfitPollTimeoutSeconds": 1,
+    }
+
+    preview_payload = preview_service.preview(params)
+    approved_payload = approved_service.execute(params)
+
+    assert preview_payload == {"ready": True, "ok": True}
+    assert approved_payload["status"] == "unavailable"
+    assert approved_payload["commitState"] == "unknown"
+    assert sum(call[0] == "preview" for call in calls) == 1
+    assert sum(call[0] == "approved" for call in calls) == 1
+    assert sum(call[0] == "poll" for call in calls) == 1
+    assert next(call for call in calls if call[0] == "preview")[2]["confirmSetup"] is False
+    assert next(call for call in calls if call[0] == "approved")[2]["confirmSetup"] is True
+
+
+def test_setup_outfit_owners_missing_target_have_no_settings_or_unity_side_effects() -> None:
+    calls: list[str] = []
+    preview_service = SetupOutfitPreviewService(
+        SetupOutfitPreviewPorts(
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_preview=lambda _settings, _request: calls.append("preview"),
+        )
+    )
+    approved_service = SetupOutfitApprovedWriteService(
+        SetupOutfitApprovedWritePorts(
+            load_settings=lambda _params: calls.append("settings"),
+            start_approved=lambda _settings, _request: calls.append("approved"),
+            poll_existing_job=lambda _settings, _job_id: calls.append("poll"),
+            retryable_poll_error=RuntimeError,
+            monotonic=lambda: 0.0,
+            sleep=lambda _seconds: None,
+            log=lambda *_args, **_kwargs: calls.append("log"),
+        )
+    )
+
+    assert preview_service.preview({}) == {
+        "ok": False,
+        "error": "outfitPath is required.",
+    }
+    assert approved_service.execute({}) == {
+        "ok": False,
+        "error": "outfitPath is required.",
+    }
+    assert calls == []
+
+
+def test_setup_outfit_nan_poll_values_preserve_safe_minimum_clamp() -> None:
+    assert coerce_setup_outfit_float_param(
+        {"timeout": "nan"},
+        ("timeout",),
+        180.0,
+        0.0,
+        3600.0,
+    ) == 0.0
 
 
 def test_approved_writes_are_a_separate_least_authority_binding() -> None:

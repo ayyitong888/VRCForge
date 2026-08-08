@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
@@ -161,6 +162,288 @@ class WardrobeArtifactReadService:
     def scan_wardrobe(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized = params or {}
         return self._ports.scan_wardrobe(normalized)
+
+
+@dataclass(frozen=True, slots=True)
+class SetupOutfitPreviewPorts:
+    """Fixed app-preview capability with no approved/live Unity port."""
+
+    load_settings: Callable[[dict[str, Any]], Any]
+    invoke_preview: Callable[[Any, dict[str, Any]], dict[str, Any]]
+
+
+class SetupOutfitPreviewService:
+    """Own only the read/preview Setup Outfit path."""
+
+    def __init__(self, ports: SetupOutfitPreviewPorts) -> None:
+        self._ports = ports
+
+    def preview(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = build_setup_outfit_request(normalized, False)
+        if not request["outfitPath"]:
+            return {"ok": False, "error": "outfitPath is required."}
+        settings = self._ports.load_settings(normalized)
+        payload = self._ports.invoke_preview(settings, request)
+        payload.setdefault("ok", True)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class SetupOutfitApprovedWritePorts:
+    """Registry-only Setup Outfit start and polling capabilities.
+
+    ``start_approved`` is one fixed live invocation and ``poll_existing_job`` is
+    one fixed peer-lane poll accepting only a job id. The service owns no generic
+    Unity tool, checkpoint, approval store, process, transport, or credential.
+    """
+
+    load_settings: Callable[[dict[str, Any]], Any]
+    start_approved: Callable[[Any, dict[str, Any]], dict[str, Any]]
+    poll_existing_job: Callable[[Any, str], dict[str, Any]]
+    retryable_poll_error: type[Exception]
+    monotonic: Callable[[], float]
+    sleep: Callable[[float], None]
+    log: ClothingFxLogPort
+
+
+class SetupOutfitApprovedWriteService:
+    """Own the single approved start and authoritative existing-job poll."""
+
+    def __init__(self, ports: SetupOutfitApprovedWritePorts) -> None:
+        self._ports = ports
+
+    def execute(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = build_setup_outfit_request(normalized, True)
+        if not request["outfitPath"]:
+            return {"ok": False, "error": "outfitPath is required."}
+        settings = self._ports.load_settings(normalized)
+        payload = self._ports.start_approved(settings, request)
+        payload = self.wait_for_existing_job(settings, normalized, payload)
+        if str(payload.get("status") or "").lower() in {"error", "timeout"}:
+            payload["ok"] = False
+        else:
+            payload.setdefault("ok", True)
+        self._ports.log(
+            "info" if payload.get("ok") else "error",
+            "wardrobe",
+            (
+                "Modular Avatar Setup Outfit completed."
+                if payload.get("ok")
+                else "Modular Avatar Setup Outfit failed."
+            ),
+            {
+                "outfitPath": request["outfitPath"],
+                "jobId": payload.get("jobId"),
+                "status": payload.get("status"),
+            },
+        )
+        return payload
+
+    def wait_for_existing_job(
+        self,
+        settings: Any,
+        params: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        job_id = str(payload.get("jobId") or payload.get("job_id") or "").strip()
+        if not job_id or not is_setup_outfit_job_pending(payload):
+            return normalize_setup_outfit_terminal_payload(payload)
+        timeout_seconds = coerce_setup_outfit_float_param(
+            params,
+            ("setup_outfit_poll_timeout_seconds", "setupOutfitPollTimeoutSeconds"),
+            180.0,
+            0.0,
+            3600.0,
+        )
+        if timeout_seconds <= 0:
+            return setup_outfit_timeout_payload(job_id, payload, None)
+        interval_seconds = coerce_setup_outfit_float_param(
+            params,
+            ("setup_outfit_poll_interval_seconds", "setupOutfitPollIntervalSeconds"),
+            1.0,
+            0.0,
+            30.0,
+        )
+        request_timeout_seconds = int(
+            coerce_setup_outfit_float_param(
+                params,
+                (
+                    "setup_outfit_poll_request_timeout_seconds",
+                    "setupOutfitPollRequestTimeoutSeconds",
+                ),
+                min(float(getattr(settings, "unity_mcp_timeout_seconds", 30) or 30), 8.0),
+                1.0,
+                60.0,
+            )
+        )
+        poll_settings = copy.copy(settings)
+        try:
+            poll_settings.unity_mcp_timeout_seconds = request_timeout_seconds
+        except Exception:
+            pass
+        deadline = self._ports.monotonic() + timeout_seconds
+        last_payload = payload
+        last_error: str | None = None
+        while self._ports.monotonic() < deadline:
+            if interval_seconds > 0:
+                self._ports.sleep(
+                    min(
+                        interval_seconds,
+                        max(0.0, deadline - self._ports.monotonic()),
+                    )
+                )
+                if self._ports.monotonic() >= deadline:
+                    break
+            try:
+                polled = self._ports.poll_existing_job(poll_settings, job_id)
+                last_error = None
+            except self._ports.retryable_poll_error as exc:
+                last_error = str(exc)
+                continue
+            if not is_setup_outfit_job_pending(polled):
+                return normalize_setup_outfit_terminal_payload(
+                    preserve_setup_outfit_terminal_authority(last_payload, polled)
+                )
+            last_payload = polled
+        return setup_outfit_timeout_payload(job_id, last_payload, last_error)
+
+
+def normalize_setup_outfit_terminal_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    status = str(payload.get("status") or "").lower()
+    if status in {"error", "timeout", "unavailable"}:
+        payload["ok"] = False
+        if any(
+            payload.get(field) is True
+            for field in ("mutationStarted", "continuationConsumed", "committed")
+        ):
+            payload["committed"] = True
+            payload["commitState"] = "unknown"
+            payload["checkpointRecoveryRequired"] = True
+    elif status in {"completed", ""}:
+        payload.setdefault("ok", True)
+    return payload
+
+
+def preserve_setup_outfit_terminal_authority(
+    previous: dict[str, Any], terminal: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict(terminal)
+    status = str(result.get("status") or "").lower()
+    if status == "completed":
+        complete_receipt = (
+            result.get("committed") is True
+            and result.get("commitState") == "complete"
+            and result.get("checkpointRecoveryRequired") is False
+            and bool(str(result.get("outfitGlobalObjectId") or "").strip())
+        )
+        if complete_receipt:
+            return result
+        result["ok"] = False
+        result["status"] = "error"
+        result["error"] = (
+            "Setup Outfit completed without its exact committed readback receipt."
+        )
+        status = "error"
+    if status not in {"error", "timeout", "unavailable"}:
+        return result
+    previous_requires_recovery = any(
+        previous.get(field) is True
+        for field in ("mutationStarted", "continuationConsumed", "committed")
+    )
+    if not previous_requires_recovery:
+        return result
+    for field in ("avatarPath", "outfitPath", "outfitGlobalObjectId"):
+        if not result.get(field) and previous.get(field):
+            result[field] = previous[field]
+    for field in ("continuationConsumed", "mutationStarted"):
+        if previous.get(field) is True:
+            result[field] = True
+    result["committed"] = True
+    result["commitState"] = "unknown"
+    result["checkpointRecoveryRequired"] = True
+    return result
+
+
+def is_setup_outfit_job_pending(payload: dict[str, Any]) -> bool:
+    status = str(payload.get("status") or "").lower()
+    return bool(payload.get("jobId") or payload.get("job_id")) and (
+        payload.get("pending") is True or status in {"pending", "running"}
+    )
+
+
+def setup_outfit_timeout_payload(
+    job_id: str,
+    last_payload: dict[str, Any],
+    last_error: str | None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ok": False,
+        "pending": False,
+        "status": "timeout",
+        "jobId": job_id,
+        "lastStatus": last_payload.get("status"),
+        "error": f"Setup Outfit job {job_id} did not finish before the poll timeout.",
+        "lastPayload": last_payload,
+    }
+    if last_error:
+        result["lastPollError"] = last_error
+    for field in (
+        "avatarPath",
+        "outfitPath",
+        "outfitGlobalObjectId",
+        "continuationConsumed",
+        "mutationStarted",
+    ):
+        if field in last_payload:
+            result[field] = last_payload[field]
+    if any(
+        last_payload.get(field) is True
+        for field in ("mutationStarted", "continuationConsumed", "committed")
+    ):
+        result["committed"] = True
+        result["commitState"] = "unknown"
+        result["checkpointRecoveryRequired"] = True
+    return result
+
+
+def coerce_setup_outfit_float_param(
+    params: dict[str, Any],
+    names: tuple[str, ...],
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw: Any = None
+    for name in names:
+        if name in params:
+            raw = params.get(name)
+            break
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = default
+    return max(minimum, min(value, maximum))
+
+
+def build_setup_outfit_request(
+    params: dict[str, Any],
+    confirm: bool,
+) -> dict[str, Any]:
+    return {
+        "avatarPath": str(
+            params.get("avatar_path") or params.get("avatarPath") or ""
+        ).strip(),
+        "outfitPath": str(
+            params.get("outfit_path") or params.get("outfitPath") or ""
+        ).strip(),
+        "confirmSetup": confirm,
+        "saveScene": bool(params.get("save_scene", params.get("saveScene", True))),
+    }
 
 
 class InspectOutfitPackagePort(Protocol):

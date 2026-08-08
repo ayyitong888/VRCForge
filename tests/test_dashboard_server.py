@@ -9666,7 +9666,7 @@ class DashboardServerTests(unittest.TestCase):
             payload={"data": {"ok": True, "confirmed": False, "outfitPath": "Avatar/Outfit"}},
         )
 
-        result = dashboard_server.preview_setup_outfit_sync(
+        result = dashboard_server.WARDROBE_OUTFIT_WORKFLOWS.preview_setup_outfit(
             {"avatarPath": "Avatar", "outfitPath": "Avatar/Outfit", "saveScene": False}
         )
 
@@ -9716,12 +9716,14 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_setup_outfit_write_uses_job_polling(self) -> None:
         source = (Path(__file__).resolve().parents[1] / "dashboard_server.py").read_text(encoding="utf-8")
-        start = source.index("def setup_outfit_sync")
-        end = source.index("\ndef _coerce_path_list", start)
-        setup_source = source[start:end]
-
-        self.assertIn("wait_for_setup_outfit_job(settings, params, payload)", setup_source)
-        self.assertNotIn("unity_mcp_timeout_seconds = max(settings.unity_mcp_timeout_seconds, 120)", setup_source)
+        self.assertNotIn("def setup_outfit_sync", source)
+        self.assertNotIn("def wait_for_setup_outfit_job", source)
+        self.assertIn("SETUP_OUTFIT_APPROVED_WRITE.wait_for_existing_job", source)
+        self.assertIn('execution_context={"lane": "app_setup_outfit_poll"}', source)
+        self.assertNotIn(
+            "unity_mcp_timeout_seconds = max(settings.unity_mcp_timeout_seconds, 120)",
+            source,
+        )
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -9758,7 +9760,7 @@ class DashboardServerTests(unittest.TestCase):
             ),
         ]
 
-        result = dashboard_server.setup_outfit_sync(
+        result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.setup_outfit(
             {
                 "avatarPath": "Avatar",
                 "outfitPath": "Avatar/Hoodie",
@@ -9794,7 +9796,7 @@ class DashboardServerTests(unittest.TestCase):
             ),
         ]
 
-        result = dashboard_server.setup_outfit_sync(
+        result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.setup_outfit(
             {
                 "avatarPath": "Avatar",
                 "outfitPath": "Avatar/Hoodie",
@@ -9819,7 +9821,7 @@ class DashboardServerTests(unittest.TestCase):
             payload={"data": {"ok": True, "pending": True, "status": "pending", "jobId": "job-3"}},
         )
 
-        result = dashboard_server.setup_outfit_sync(
+        result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.setup_outfit(
             {
                 "avatarPath": "Avatar",
                 "outfitPath": "Avatar/Hoodie",

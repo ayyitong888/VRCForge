@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
 import dashboard_server
+from wardrobe_outfit_workflow_service import (
+    normalize_setup_outfit_terminal_payload,
+    setup_outfit_timeout_payload,
+)
 
 
 def test_setup_outfit_wait_uses_the_narrow_app_poll_lane(monkeypatch) -> None:
@@ -28,7 +32,7 @@ def test_setup_outfit_wait_uses_the_narrow_app_poll_lane(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
-    result = dashboard_server.wait_for_setup_outfit_job(
+    result = dashboard_server.SETUP_OUTFIT_APPROVED_WRITE.wait_for_existing_job(
         SimpleNamespace(unity_mcp_timeout_seconds=5),
         {
             "setupOutfitPollIntervalSeconds": 0,
@@ -49,7 +53,7 @@ def test_setup_outfit_wait_uses_the_narrow_app_poll_lane(monkeypatch) -> None:
 
 def test_setup_outfit_unavailable_is_terminal_failure() -> None:
     payload = {"status": "unavailable", "pending": False, "jobId": "a" * 32}
-    assert dashboard_server.normalize_setup_outfit_terminal_payload(payload)["ok"] is False
+    assert normalize_setup_outfit_terminal_payload(payload)["ok"] is False
 
 
 def test_setup_outfit_unavailable_after_continuation_is_recovery_required() -> None:
@@ -61,7 +65,7 @@ def test_setup_outfit_unavailable_after_continuation_is_recovery_required() -> N
         "mutationStarted": False,
     }
 
-    result = dashboard_server.normalize_setup_outfit_terminal_payload(payload)
+    result = normalize_setup_outfit_terminal_payload(payload)
 
     assert result["ok"] is False
     assert result["committed"] is True
@@ -100,7 +104,7 @@ def test_setup_outfit_wait_rejects_incomplete_completed_receipt(monkeypatch) -> 
             payload={"data": next(responses)},
         ),
     )
-    result = dashboard_server.wait_for_setup_outfit_job(
+    result = dashboard_server.SETUP_OUTFIT_APPROVED_WRITE.wait_for_existing_job(
         SimpleNamespace(unity_mcp_timeout_seconds=5),
         {
             "setupOutfitPollIntervalSeconds": 0,
@@ -128,7 +132,7 @@ def test_setup_outfit_timeout_preserves_running_mutation_authority() -> None:
         "mutationStarted": True,
     }
 
-    result = dashboard_server.setup_outfit_timeout_payload(job_id, last_payload, "poll failed")
+    result = setup_outfit_timeout_payload(job_id, last_payload, "poll failed")
 
     assert result["ok"] is False
     assert result["status"] == "timeout"
@@ -171,7 +175,7 @@ def test_setup_outfit_wait_preserves_running_authority_across_bare_unavailable(m
         )
 
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
-    result = dashboard_server.wait_for_setup_outfit_job(
+    result = dashboard_server.SETUP_OUTFIT_APPROVED_WRITE.wait_for_existing_job(
         SimpleNamespace(unity_mcp_timeout_seconds=5),
         {
             "setupOutfitPollIntervalSeconds": 0,

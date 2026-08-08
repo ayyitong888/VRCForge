@@ -2,6 +2,7 @@ import pytest
 
 import dashboard_server as dashboard
 from unity_execution_plans_workflows import build_workflow_execution_plan
+from wardrobe_outfit_workflow_service import build_setup_outfit_request
 
 
 def test_create_wardrobe_freezes_the_three_exact_core_calls() -> None:
@@ -48,7 +49,7 @@ def test_runtime_dependent_workflows_fail_closed_with_missing_fact(target: str) 
 def test_setup_outfit_freezes_only_the_initial_write_call() -> None:
     params = {"avatarPath": "Avatar", "outfitPath": "Avatar/Outfit", "saveScene": "false"}
     assert build_workflow_execution_plan("vrcforge_setup_outfit", params) == [
-        ("vrc_setup_outfit", dashboard.build_setup_outfit_request(params, True))
+        ("vrc_setup_outfit", build_setup_outfit_request(params, True))
     ]
 
 
