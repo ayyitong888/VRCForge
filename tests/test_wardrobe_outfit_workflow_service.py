@@ -8,6 +8,10 @@ from typing import Any
 import pytest
 
 from wardrobe_outfit_workflow_service import (
+    AddOutfitPartApprovedWritePorts,
+    AddOutfitPartApprovedWriteService,
+    AddOutfitPartPreviewPorts,
+    AddOutfitPartPreviewService,
     AddWardrobeOutfitApprovedWritePorts,
     AddWardrobeOutfitApprovedWriteService,
     AddWardrobeOutfitPreviewPorts,
@@ -25,6 +29,7 @@ from wardrobe_outfit_workflow_service import (
     WardrobeOutfitWorkflowPorts,
     WardrobeOutfitWorkflowService,
     build_add_wardrobe_outfit_request,
+    build_add_outfit_part_request,
     coerce_setup_outfit_float_param,
 )
 
@@ -334,6 +339,10 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "add_wardrobe_outfit_sync" not in bindings
     assert "build_add_wardrobe_outfit_request" not in bindings
     assert "_validate_add_wardrobe_outfit_request" not in bindings
+    assert "preview_add_outfit_part_sync" not in bindings
+    assert "add_outfit_part_sync" not in bindings
+    assert "build_add_outfit_part_request" not in bindings
+    assert "_validate_add_outfit_part_request" not in bindings
     assert "scan_avatar_items_sync" not in bindings
     assert "scan_avatar_controls_sync" not in bindings
     assert "scan_wardrobe_sync" not in bindings
@@ -358,10 +367,22 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
         in source
     )
     assert source.count("build_request=build_owned_add_wardrobe_outfit_request") == 2
+    assert "preview_add_outfit_part=ADD_OUTFIT_PART_PREVIEW.preview" in source
+    assert "add_outfit_part=ADD_OUTFIT_PART_APPROVED_WRITE.execute" in source
+    assert source.count("build_request=build_owned_add_outfit_part_request") == 2
     assert not any(
         isinstance(node, ast.ImportFrom)
         and any(
             alias.name == "build_add_wardrobe_outfit_request"
+            and alias.asname is None
+            for alias in node.names
+        )
+        for node in tree.body
+    )
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and any(
+            alias.name == "build_add_outfit_part_request"
             and alias.asname is None
             for alias in node.names
         )
@@ -681,6 +702,134 @@ def test_add_wardrobe_outfit_validation_has_no_settings_or_unity_side_effects(
     approved_service = AddWardrobeOutfitApprovedWriteService(
         AddWardrobeOutfitApprovedWritePorts(
             build_request=build_request,
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_approved=lambda _settings, _request: calls.append("approved"),
+            log=lambda *_args, **_kwargs: calls.append("log"),
+        )
+    )
+
+    expected = {"ok": False, "error": error}
+    assert preview_service.preview(params) == expected
+    assert approved_service.execute(params) == expected
+    assert calls == []
+
+
+def test_add_outfit_part_owners_separate_preview_and_approved_capabilities() -> None:
+    calls: list[tuple[Any, ...]] = []
+    settings = object()
+
+    def load_settings(params: dict[str, Any]) -> Any:
+        calls.append(("settings", params))
+        return settings
+
+    preview_service = AddOutfitPartPreviewService(
+        AddOutfitPartPreviewPorts(
+            build_request=build_add_outfit_part_request,
+            load_settings=load_settings,
+            invoke_preview=lambda actual_settings, request: (
+                calls.append(("preview", actual_settings, request))
+                or {"plan": {"partParameterName": "Hat"}}
+            ),
+        )
+    )
+    approved_service = AddOutfitPartApprovedWriteService(
+        AddOutfitPartApprovedWritePorts(
+            build_request=build_add_outfit_part_request,
+            load_settings=load_settings,
+            invoke_approved=lambda actual_settings, request: (
+                calls.append(("approved", actual_settings, request))
+                or {"assignedPartParameter": "Hat"}
+            ),
+            log=lambda level, scope, message, data=None: calls.append(
+                ("log", level, scope, message, data)
+            ),
+        )
+    )
+    params = {
+        "avatarPath": "Scene/Avatar",
+        "parameterName": "Clothes",
+        "partName": "Hat",
+        "outfitValue": 2,
+        "objectPaths": ["Outfits/Hoodie/Hat"],
+    }
+
+    assert preview_service.preview(params) == {
+        "plan": {"partParameterName": "Hat"},
+        "ok": True,
+    }
+    assert approved_service.execute(params) == {
+        "assignedPartParameter": "Hat",
+        "ok": True,
+    }
+    assert set(AddOutfitPartPreviewPorts.__dataclass_fields__) == {
+        "build_request",
+        "load_settings",
+        "invoke_preview",
+    }
+    assert next(call for call in calls if call[0] == "preview")[2]["preview"] is True
+    assert next(call for call in calls if call[0] == "approved")[2]["preview"] is False
+    assert sum(call[0] == "preview" for call in calls) == 1
+    assert sum(call[0] == "approved" for call in calls) == 1
+    assert (
+        "log",
+        "info",
+        "wardrobe",
+        "Outfit part added.",
+        {"parameterName": "Clothes", "partName": "Hat", "value": 2},
+    ) in calls
+
+
+@pytest.mark.parametrize(
+    ("params", "error"),
+    [
+        (
+            {
+                "partName": "Hat",
+                "value": 2,
+                "objectPaths": ["Outfits/Hat"],
+            },
+            (
+                "parameterName is required (the existing int wardrobe parameter "
+                "the part is gated on)."
+            ),
+        ),
+        (
+            {
+                "parameterName": "Clothes",
+                "value": 2,
+                "objectPaths": ["Outfits/Hat"],
+            },
+            "partName is required (display name for the new part toggle).",
+        ),
+        (
+            {
+                "parameterName": "Clothes",
+                "partName": "Hat",
+                "objectPaths": ["Outfits/Hat"],
+            },
+            "value is required (the wardrobe int value N this part belongs to).",
+        ),
+        (
+            {"parameterName": "Clothes", "partName": "Hat", "value": 2},
+            "objectPaths is required (the part's scene objects to toggle on/off).",
+        ),
+    ],
+)
+def test_add_outfit_part_validation_has_no_settings_or_unity_side_effects(
+    params: dict[str, Any],
+    error: str,
+) -> None:
+    calls: list[str] = []
+    preview_service = AddOutfitPartPreviewService(
+        AddOutfitPartPreviewPorts(
+            build_request=build_add_outfit_part_request,
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_preview=lambda _settings, _request: calls.append("preview"),
+        )
+    )
+    approved_service = AddOutfitPartApprovedWriteService(
+        AddOutfitPartApprovedWritePorts(
+            build_request=build_add_outfit_part_request,
             load_settings=lambda _params: calls.append("settings"),
             invoke_approved=lambda _settings, _request: calls.append("approved"),
             log=lambda *_args, **_kwargs: calls.append("log"),

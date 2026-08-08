@@ -8249,7 +8249,7 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"data": {"preview": True, "plan": {"partParameterName": "Hat"}}},
         )
-        result = dashboard_server.preview_add_outfit_part_sync({
+        result = dashboard_server.WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit_part({
             "avatar_path": "Scene/HeroAvatar",
             "parameter_name": "Clothes",
             "part_name": "Hat",
@@ -8303,7 +8303,7 @@ class DashboardServerTests(unittest.TestCase):
             stderr="",
             payload={"data": {"ok": True, "assignedPartParameter": "Hat", "fxLayerName": "Hat (part)"}},
         )
-        result = dashboard_server.add_outfit_part_sync({
+        result = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.add_outfit_part({
             "avatarPath": "Scene/HeroAvatar",
             "parameterName": "Clothes",
             "partName": "Hat",
@@ -8318,13 +8318,13 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(params["preview"])
 
     def test_add_outfit_part_requires_parameter_value_and_objects(self) -> None:
-        missing_value = dashboard_server.add_outfit_part_sync({
+        missing_value = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.add_outfit_part({
             "parameter_name": "Clothes",
             "part_name": "Hat",
             "object_paths": ["Outfits/Hoodie/Hat"],
         })
         self.assertFalse(missing_value["ok"])
-        missing_objects = dashboard_server.add_outfit_part_sync({
+        missing_objects = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.add_outfit_part({
             "parameter_name": "Clothes",
             "part_name": "Hat",
             "value": 2,

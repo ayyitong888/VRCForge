@@ -3,6 +3,7 @@ import pytest
 import dashboard_server as dashboard
 from unity_execution_plans_workflows import build_workflow_execution_plan
 from wardrobe_outfit_workflow_service import (
+    build_add_outfit_part_request,
     build_add_wardrobe_outfit_request,
     build_setup_outfit_request,
 )
@@ -112,7 +113,7 @@ def test_create_wardrobe_plan_has_shared_builder_parity_and_passes_preview_false
                 "defaultOn": "false",
                 "writeDefaults": "false",
             },
-            dashboard.build_add_outfit_part_request,
+            build_add_outfit_part_request,
         ),
         (
             "vrcforge_add_modular_avatar_component",
@@ -186,6 +187,128 @@ def test_add_wardrobe_plan_reuses_authoritative_builder_for_null_alias_and_path_
             assert camel not in arguments
         else:
             assert arguments[camel] is expected_flag
+
+
+@pytest.mark.parametrize(
+    ("value_arguments", "expected_value"),
+    [
+        ({"value": None}, None),
+        ({"value": None, "outfitValue": 2}, 2),
+        ({"outfit_value": None, "outfitValue": 2}, None),
+        ({"outfitValue": "2"}, 2),
+        ({"value": 0, "outfitValue": 2}, 0),
+    ],
+)
+def test_add_outfit_part_plan_preserves_value_alias_null_and_fallback_parity(
+    value_arguments: dict[str, object],
+    expected_value: int | None,
+) -> None:
+    params: dict[str, object] = {
+        "parameterName": "Clothes",
+        "partName": "Hat",
+        "objectPaths": ["Avatar/Hat"],
+        **value_arguments,
+    }
+
+    plan = build_workflow_execution_plan("vrcforge_add_outfit_part", params)
+
+    assert plan == [
+        ("vrc_add_outfit_part", build_add_outfit_part_request(params, False))
+    ]
+    assert len(plan) == 1
+    if expected_value is None:
+        assert "value" not in plan[0][1]
+    else:
+        assert plan[0][1]["value"] == expected_value
+
+
+@pytest.mark.parametrize(
+    ("flag_arguments", "expected_flag"),
+    [
+        ({"camel": None}, None),
+        ({"snake": None}, None),
+        ({"snake": None, "camel": True}, False),
+        ({"snake": False, "camel": True}, False),
+        ({"camel": "false"}, True),
+    ],
+)
+def test_add_outfit_part_plan_preserves_flag_null_precedence_and_truthiness(
+    flag_arguments: dict[str, object],
+    expected_flag: bool | None,
+) -> None:
+    flag_aliases = (
+        ("add_menu_toggle", "addMenuToggle"),
+        ("set_objects_default_off", "setObjectsDefaultOff"),
+        ("default_on", "defaultOn"),
+        ("write_defaults", "writeDefaults"),
+    )
+    params: dict[str, object] = {
+        "parameterName": "Clothes",
+        "partName": "Hat",
+        "value": 2,
+        "objectPaths": ["Avatar/Hat"],
+    }
+    for snake, camel in flag_aliases:
+        if "snake" in flag_arguments:
+            params[snake] = flag_arguments["snake"]
+        if "camel" in flag_arguments:
+            params[camel] = flag_arguments["camel"]
+
+    plan = build_workflow_execution_plan("vrcforge_add_outfit_part", params)
+
+    assert plan == [
+        ("vrc_add_outfit_part", build_add_outfit_part_request(params, False))
+    ]
+    assert len(plan) == 1
+    for _snake, camel in flag_aliases:
+        if expected_flag is None:
+            assert camel not in plan[0][1]
+        else:
+            assert plan[0][1][camel] is expected_flag
+
+
+def test_add_outfit_part_plan_preserves_falsey_text_fallback_and_path_coercion() -> None:
+    params: dict[str, object] = {
+        "avatar_path": "",
+        "avatarPath": "Avatar",
+        "parameter_name": 0,
+        "parameterName": "Clothes",
+        "part_name": "",
+        "partName": "",
+        "display_name": False,
+        "displayName": "Hat",
+        "part_parameter_name": "",
+        "partParameterName": "HatToggle",
+        "sub_menu_name": "",
+        "subMenuName": "More",
+        "clip_output_dir": 0,
+        "clipOutputDir": "Assets/Clips",
+        "value": 2,
+        "object_paths": "Avatar/A;Avatar/B",
+        "objectPaths": ("Avatar/Tuple", "Avatar/Tuple"),
+        "on_object_paths": ["Avatar/List", "Avatar/List"],
+        "onObjectPaths": 42,
+    }
+
+    plan = build_workflow_execution_plan("vrcforge_add_outfit_part", params)
+
+    assert plan == [
+        ("vrc_add_outfit_part", build_add_outfit_part_request(params, False))
+    ]
+    assert len(plan) == 1
+    arguments = plan[0][1]
+    assert arguments["avatarPath"] == "Avatar"
+    assert arguments["parameterName"] == "Clothes"
+    assert arguments["partName"] == "Hat"
+    assert arguments["partParameterName"] == "HatToggle"
+    assert arguments["subMenuName"] == "More"
+    assert arguments["clipOutputDir"] == "Assets/Clips"
+    assert arguments["objectPaths"] == [
+        "Avatar/A;Avatar/B",
+        "Avatar/Tuple",
+        "Avatar/List",
+        "42",
+    ]
 
 
 def test_restore_plan_preserves_existing_python_truthiness() -> None:

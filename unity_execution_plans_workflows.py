@@ -12,7 +12,10 @@ from copy import deepcopy
 from collections.abc import Mapping
 from typing import Any
 
-from wardrobe_outfit_workflow_service import build_add_wardrobe_outfit_request
+from wardrobe_outfit_workflow_service import (
+    build_add_outfit_part_request,
+    build_add_wardrobe_outfit_request,
+)
 
 
 WorkflowPlan = list[tuple[str, dict[str, Any]]]
@@ -131,25 +134,12 @@ def _add_wardrobe_outfit(params: dict[str, Any]) -> WorkflowPlan:
 
 
 def _add_outfit_part(params: dict[str, Any]) -> WorkflowPlan:
-    request: dict[str, Any] = {
-        "avatarPath": _text(params, "avatar_path", "avatarPath"),
-        "parameterName": _text(params, "parameter_name", "parameterName"),
-        "partName": _text(params, "part_name", "partName", "display_name", "displayName"),
-        "objectPaths": _path_list(params, "object_paths", "objectPaths", "on_object_paths", "onObjectPaths"),
-        "preview": False,
-    }
-    for source in ("value", "outfit_value", "outfitValue"):
-        if source in params:
-            request["value"] = int(params[source])
-            break
-    _optional_text(request, params, "partParameterName", "part_parameter_name", "partParameterName", "bool_parameter_name", "boolParameterName")
-    _optional_text(request, params, "subMenuName", "sub_menu_name", "subMenuName")
-    _optional_text(request, params, "clipOutputDir", "clip_output_dir", "clipOutputDir")
-    _optional_python_bool(request, params, "addMenuToggle", "add_menu_toggle", "addMenuToggle")
-    _optional_python_bool(request, params, "setObjectsDefaultOff", "set_objects_default_off", "setObjectsDefaultOff")
-    _optional_python_bool(request, params, "defaultOn", "default_on", "defaultOn")
-    _optional_python_bool(request, params, "writeDefaults", "write_defaults", "writeDefaults")
-    return [("vrc_add_outfit_part", request)]
+    return [
+        (
+            "vrc_add_outfit_part",
+            build_add_outfit_part_request(params, False),
+        )
+    ]
 
 
 def _add_modular_avatar_component(params: dict[str, Any]) -> WorkflowPlan:
