@@ -12,6 +12,8 @@ from copy import deepcopy
 from collections.abc import Mapping
 from typing import Any
 
+from wardrobe_outfit_workflow_service import build_add_wardrobe_outfit_request
+
 
 WorkflowPlan = list[tuple[str, dict[str, Any]]]
 
@@ -120,25 +122,12 @@ def _setup_outfit(params: dict[str, Any]) -> WorkflowPlan:
 
 
 def _add_wardrobe_outfit(params: dict[str, Any]) -> WorkflowPlan:
-    request: dict[str, Any] = {
-        "avatarPath": _text(params, "avatar_path", "avatarPath"),
-        "parameterName": _text(params, "parameter_name", "parameterName"),
-        "outfitName": _text(params, "outfit_name", "outfitName", "display_name", "displayName"),
-        "objectPaths": _path_list(params, "object_paths", "objectPaths", "on_object_paths", "onObjectPaths"),
-        "preview": False,
-    }
-    off_paths = _path_list(params, "off_object_paths", "offObjectPaths")
-    if off_paths:
-        request["offObjectPaths"] = off_paths
-    _optional_python_bool(request, params, "addMenuToggle", "add_menu_toggle", "addMenuToggle")
-    _optional_python_bool(request, params, "setObjectsDefaultOff", "set_objects_default_off", "setObjectsDefaultOff")
-    _optional_python_bool(request, params, "subMenuOverflow", "sub_menu_overflow", "subMenuOverflow")
-    _optional_python_bool(request, params, "writeDefaults", "write_defaults", "writeDefaults")
-    _optional_text(request, params, "subMenuName", "sub_menu_name", "subMenuName")
-    _optional_text(request, params, "clipOutputDir", "clip_output_dir", "clipOutputDir")
-    if "value" in params:
-        request["value"] = int(params["value"])
-    return [("vrc_add_wardrobe_outfit", request)]
+    return [
+        (
+            "vrc_add_wardrobe_outfit",
+            build_add_wardrobe_outfit_request(params, False),
+        )
+    ]
 
 
 def _add_outfit_part(params: dict[str, Any]) -> WorkflowPlan:

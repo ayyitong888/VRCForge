@@ -293,6 +293,10 @@ from package_install_workflow_service import (
     resolve_project_path,
 )
 from wardrobe_outfit_workflow_service import (
+    AddWardrobeOutfitApprovedWritePorts,
+    AddWardrobeOutfitApprovedWriteService,
+    AddWardrobeOutfitPreviewPorts,
+    AddWardrobeOutfitPreviewService,
     ClothingFxReadPorts,
     ClothingFxReadService,
     SetupOutfitApprovedWritePorts,
@@ -305,6 +309,7 @@ from wardrobe_outfit_workflow_service import (
     WardrobeOutfitWorkflowError,
     WardrobeOutfitWorkflowPorts,
     WardrobeOutfitWorkflowService,
+    build_add_wardrobe_outfit_request as build_owned_add_wardrobe_outfit_request,
 )
 from outfit_import_planner import (
     build_outfit_import_plan,
@@ -17334,99 +17339,6 @@ def _coerce_path_list(params: dict[str, Any], *keys: str) -> list[str]:
     return result
 
 
-def build_add_wardrobe_outfit_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
-    request: dict[str, Any] = {
-        "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-        "parameterName": str(params.get("parameter_name") or params.get("parameterName") or "").strip(),
-        "outfitName": str(
-            params.get("outfit_name")
-            or params.get("outfitName")
-            or params.get("display_name")
-            or params.get("displayName")
-            or ""
-        ).strip(),
-        "objectPaths": _coerce_path_list(
-            params, "object_paths", "objectPaths", "on_object_paths", "onObjectPaths"
-        ),
-        "preview": preview,
-    }
-    off_objects = _coerce_path_list(params, "off_object_paths", "offObjectPaths")
-    if off_objects:
-        request["offObjectPaths"] = off_objects
-    if params.get("add_menu_toggle") is not None or params.get("addMenuToggle") is not None:
-        request["addMenuToggle"] = bool(params.get("add_menu_toggle", params.get("addMenuToggle")))
-    if params.get("set_objects_default_off") is not None or params.get("setObjectsDefaultOff") is not None:
-        request["setObjectsDefaultOff"] = bool(
-            params.get("set_objects_default_off", params.get("setObjectsDefaultOff"))
-        )
-    if params.get("sub_menu_overflow") is not None or params.get("subMenuOverflow") is not None:
-        request["subMenuOverflow"] = bool(params.get("sub_menu_overflow", params.get("subMenuOverflow")))
-    sub_menu_name = str(params.get("sub_menu_name") or params.get("subMenuName") or "").strip()
-    if sub_menu_name:
-        request["subMenuName"] = sub_menu_name
-    clip_dir = str(params.get("clip_output_dir") or params.get("clipOutputDir") or "").strip()
-    if clip_dir:
-        request["clipOutputDir"] = clip_dir
-    if params.get("value") is not None:
-        request["value"] = int(params.get("value"))
-    if params.get("write_defaults") is not None or params.get("writeDefaults") is not None:
-        request["writeDefaults"] = bool(params.get("write_defaults", params.get("writeDefaults")))
-    return request
-
-
-def _validate_add_wardrobe_outfit_request(request: dict[str, Any]) -> dict[str, Any] | None:
-    if not request["parameterName"]:
-        return {"ok": False, "error": "parameterName is required (the existing int wardrobe parameter)."}
-    if not request["outfitName"]:
-        return {"ok": False, "error": "outfitName is required (display name for the new outfit)."}
-    if not request["objectPaths"]:
-        return {"ok": False, "error": "objectPaths is required (the new outfit's scene objects to turn on)."}
-    return None
-
-
-def preview_add_wardrobe_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    request = build_add_wardrobe_outfit_request(params, True)
-    invalid = _validate_add_wardrobe_outfit_request(request)
-    if invalid is not None:
-        return invalid
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = ensure_dict_payload(
-        extract_tool_result_payload(
-            invoke_unity_mcp(
-                settings,
-                "vrc_add_wardrobe_outfit",
-                request,
-                execution_context={"lane": "app_preview"},
-            )
-        ),
-        "add wardrobe outfit preview",
-    )
-    payload.setdefault("ok", True)
-    return payload
-
-
-def add_wardrobe_outfit_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    request = build_add_wardrobe_outfit_request(params, False)
-    invalid = _validate_add_wardrobe_outfit_request(request)
-    if invalid is not None:
-        return invalid
-    settings = load_dashboard_settings(build_agent_connection_request(params))
-    payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_add_wardrobe_outfit", request)),
-        "add wardrobe outfit",
-    )
-    payload.setdefault("ok", True)
-    emit_log(
-        "info",
-        "wardrobe",
-        "Wardrobe outfit added.",
-        {"parameterName": request["parameterName"], "outfitName": request["outfitName"]},
-    )
-    return payload
-
-
 def build_add_outfit_part_request(params: dict[str, Any], preview: bool) -> dict[str, Any]:
     request: dict[str, Any] = {
         "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
@@ -20436,7 +20348,10 @@ def _prepare_add_outfit_state(params: dict[str, Any]) -> dict[str, Any]:
             wardrobe_source["clipOutputDir"] = clip_output_dir
         if params.get("write_defaults") is not None or params.get("writeDefaults") is not None:
             wardrobe_source["writeDefaults"] = _workflow_bool(params, ("write_defaults", "writeDefaults"), True)
-        wardrobe_arguments = build_add_wardrobe_outfit_request(wardrobe_source, False)
+        wardrobe_arguments = build_owned_add_wardrobe_outfit_request(
+            wardrobe_source,
+            False,
+        )
         wardrobe_arguments.update({
             **project_params,
             "expectedAssignedValue": assigned_value,
@@ -21409,6 +21324,40 @@ SETUP_OUTFIT_APPROVED_WRITE = SetupOutfitApprovedWriteService(
         log=emit_log,
     )
 )
+ADD_WARDROBE_OUTFIT_PREVIEW = AddWardrobeOutfitPreviewService(
+    AddWardrobeOutfitPreviewPorts(
+        build_request=build_owned_add_wardrobe_outfit_request,
+        load_settings=lambda params: load_dashboard_settings(
+            build_agent_connection_request(params)
+        ),
+        invoke_preview=lambda settings, request: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(
+                    settings,
+                    "vrc_add_wardrobe_outfit",
+                    request,
+                    execution_context={"lane": "app_preview"},
+                )
+            ),
+            "add wardrobe outfit preview",
+        ),
+    )
+)
+ADD_WARDROBE_OUTFIT_APPROVED_WRITE = AddWardrobeOutfitApprovedWriteService(
+    AddWardrobeOutfitApprovedWritePorts(
+        build_request=build_owned_add_wardrobe_outfit_request,
+        load_settings=lambda params: load_dashboard_settings(
+            build_agent_connection_request(params)
+        ),
+        invoke_approved=lambda settings, request: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(settings, "vrc_add_wardrobe_outfit", request)
+            ),
+            "add wardrobe outfit",
+        ),
+        log=emit_log,
+    )
+)
 CLOTHING_FX_READ = ClothingFxReadService(
     ClothingFxReadPorts(
         load_settings=lambda request: load_dashboard_settings(request),
@@ -21436,7 +21385,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         generate_clothing_fx=CLOTHING_FX_READ.generate_clothing_fx,
         preview_apply_clothing_fx=CLOTHING_FX_READ.preview_apply_clothing_fx,
         preview_setup_outfit=SETUP_OUTFIT_PREVIEW.preview,
-        preview_add_wardrobe_outfit=preview_add_wardrobe_outfit_sync,
+        preview_add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_PREVIEW.preview,
         preview_add_outfit_part=preview_add_outfit_part_sync,
         preview_add_modular_avatar_component=preview_add_modular_avatar_component_sync,
         preview_manage_wardrobe=preview_manage_wardrobe_sync,
@@ -21447,7 +21396,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
 WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
     apply_clothing_fx=apply_clothing_fx_approved_sync,
     setup_outfit=SETUP_OUTFIT_APPROVED_WRITE.execute,
-    add_wardrobe_outfit=add_wardrobe_outfit_sync,
+    add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_APPROVED_WRITE.execute,
     add_outfit_part=add_outfit_part_sync,
     add_modular_avatar_component=add_modular_avatar_component_sync,
     manage_wardrobe=manage_wardrobe_sync,

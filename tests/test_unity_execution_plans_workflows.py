@@ -2,7 +2,10 @@ import pytest
 
 import dashboard_server as dashboard
 from unity_execution_plans_workflows import build_workflow_execution_plan
-from wardrobe_outfit_workflow_service import build_setup_outfit_request
+from wardrobe_outfit_workflow_service import (
+    build_add_wardrobe_outfit_request,
+    build_setup_outfit_request,
+)
 
 
 def test_create_wardrobe_freezes_the_three_exact_core_calls() -> None:
@@ -95,7 +98,7 @@ def test_create_wardrobe_plan_has_shared_builder_parity_and_passes_preview_false
                 "subMenuOverflow": "false",
                 "writeDefaults": "false",
             },
-            dashboard.build_add_wardrobe_outfit_request,
+            build_add_wardrobe_outfit_request,
         ),
         (
             "vrcforge_add_outfit_part",
@@ -131,6 +134,58 @@ def test_workflow_plan_preserves_existing_python_truthiness(
     assert build_workflow_execution_plan(target, params) == [
         (build_workflow_execution_plan(target, params)[0][0], dashboard_builder(params, False))
     ]
+
+
+@pytest.mark.parametrize(
+    ("flag_arguments", "expected_flag"),
+    [
+        ({"camel": None}, None),
+        ({"snake": None}, None),
+        ({"snake": None, "camel": True}, False),
+        ({"snake": False, "camel": True}, False),
+        ({"camel": "false"}, True),
+    ],
+)
+def test_add_wardrobe_plan_reuses_authoritative_builder_for_null_alias_and_path_parity(
+    flag_arguments: dict[str, object],
+    expected_flag: bool | None,
+) -> None:
+    flag_aliases = (
+        ("add_menu_toggle", "addMenuToggle"),
+        ("set_objects_default_off", "setObjectsDefaultOff"),
+        ("sub_menu_overflow", "subMenuOverflow"),
+        ("write_defaults", "writeDefaults"),
+    )
+    params: dict[str, object] = {
+        "avatarPath": "Avatar",
+        "parameterName": "Clothes",
+        "outfitName": "Hoodie",
+        "object_paths": ("Avatar/A", "Avatar/A", "Avatar/B"),
+        "objectPaths": ["Avatar/B", "Avatar/C"],
+        "off_object_paths": ["Avatar/Off", "Avatar/Off"],
+        "value": None,
+    }
+    for snake, camel in flag_aliases:
+        if "snake" in flag_arguments:
+            params[snake] = flag_arguments["snake"]
+        if "camel" in flag_arguments:
+            params[camel] = flag_arguments["camel"]
+
+    plan = build_workflow_execution_plan("vrcforge_add_wardrobe_outfit", params)
+
+    assert plan == [
+        ("vrc_add_wardrobe_outfit", build_add_wardrobe_outfit_request(params, False))
+    ]
+    assert len(plan) == 1
+    arguments = plan[0][1]
+    assert arguments["objectPaths"] == ["Avatar/A", "Avatar/B", "Avatar/C"]
+    assert arguments["offObjectPaths"] == ["Avatar/Off"]
+    assert "value" not in arguments
+    for _snake, camel in flag_aliases:
+        if expected_flag is None:
+            assert camel not in arguments
+        else:
+            assert arguments[camel] is expected_flag
 
 
 def test_restore_plan_preserves_existing_python_truthiness() -> None:

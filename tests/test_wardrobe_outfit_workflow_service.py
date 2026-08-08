@@ -8,6 +8,10 @@ from typing import Any
 import pytest
 
 from wardrobe_outfit_workflow_service import (
+    AddWardrobeOutfitApprovedWritePorts,
+    AddWardrobeOutfitApprovedWriteService,
+    AddWardrobeOutfitPreviewPorts,
+    AddWardrobeOutfitPreviewService,
     ClothingFxReadPorts,
     ClothingFxReadService,
     SetupOutfitApprovedWritePorts,
@@ -20,6 +24,7 @@ from wardrobe_outfit_workflow_service import (
     WardrobeOutfitWorkflowError,
     WardrobeOutfitWorkflowPorts,
     WardrobeOutfitWorkflowService,
+    build_add_wardrobe_outfit_request,
     coerce_setup_outfit_float_param,
 )
 
@@ -325,6 +330,10 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "apply_clothing_fx_sync" not in bindings
     assert "preview_setup_outfit_sync" not in bindings
     assert "setup_outfit_sync" not in bindings
+    assert "preview_add_wardrobe_outfit_sync" not in bindings
+    assert "add_wardrobe_outfit_sync" not in bindings
+    assert "build_add_wardrobe_outfit_request" not in bindings
+    assert "_validate_add_wardrobe_outfit_request" not in bindings
     assert "scan_avatar_items_sync" not in bindings
     assert "scan_avatar_controls_sync" not in bindings
     assert "scan_wardrobe_sync" not in bindings
@@ -340,6 +349,24 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     )
     assert "preview_setup_outfit=SETUP_OUTFIT_PREVIEW.preview" in source
     assert "setup_outfit=SETUP_OUTFIT_APPROVED_WRITE.execute" in source
+    assert (
+        "preview_add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_PREVIEW.preview"
+        in source
+    )
+    assert (
+        "add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_APPROVED_WRITE.execute"
+        in source
+    )
+    assert source.count("build_request=build_owned_add_wardrobe_outfit_request") == 2
+    assert not any(
+        isinstance(node, ast.ImportFrom)
+        and any(
+            alias.name == "build_add_wardrobe_outfit_request"
+            and alias.asname is None
+            for alias in node.names
+        )
+        for node in tree.body
+    )
     assert "scan_avatar_items=WARDROBE_ARTIFACT_READ.scan_avatar_items" in source
     assert "scan_avatar_controls=WARDROBE_ARTIFACT_READ.scan_avatar_controls" in source
     assert "scan_wardrobe=WARDROBE_ARTIFACT_READ.scan_wardrobe" in source
@@ -516,6 +543,154 @@ def test_setup_outfit_nan_poll_values_preserve_safe_minimum_clamp() -> None:
         0.0,
         3600.0,
     ) == 0.0
+
+
+def test_add_wardrobe_outfit_owners_separate_preview_and_approved_capabilities() -> None:
+    calls: list[tuple[Any, ...]] = []
+    settings = object()
+
+    def build_request(
+        params: dict[str, Any], preview: bool
+    ) -> dict[str, Any]:
+        calls.append(("build", params, preview))
+        return {
+            "avatarPath": params.get("avatarPath", ""),
+            "parameterName": params.get("parameterName", ""),
+            "outfitName": params.get("outfitName", ""),
+            "objectPaths": params.get("objectPaths", []),
+            "preview": preview,
+        }
+
+    def load_settings(params: dict[str, Any]) -> Any:
+        calls.append(("settings", params))
+        return settings
+
+    preview_service = AddWardrobeOutfitPreviewService(
+        AddWardrobeOutfitPreviewPorts(
+            build_request=build_request,
+            load_settings=load_settings,
+            invoke_preview=lambda actual_settings, request: (
+                calls.append(("preview", actual_settings, request))
+                or {"plan": {"value": 3}}
+            ),
+        )
+    )
+    approved_service = AddWardrobeOutfitApprovedWriteService(
+        AddWardrobeOutfitApprovedWritePorts(
+            build_request=build_request,
+            load_settings=load_settings,
+            invoke_approved=lambda actual_settings, request: (
+                calls.append(("approved", actual_settings, request))
+                or {"assignedValue": 3}
+            ),
+            log=lambda level, scope, message, data=None: calls.append(
+                ("log", level, scope, message, data)
+            ),
+        )
+    )
+    params = {
+        "avatarPath": "Scene/Avatar",
+        "parameterName": "Clothes",
+        "outfitName": "Hoodie",
+        "objectPaths": ["Outfits/Hoodie"],
+    }
+
+    assert preview_service.preview(params) == {
+        "plan": {"value": 3},
+        "ok": True,
+    }
+    assert approved_service.execute(params) == {
+        "assignedValue": 3,
+        "ok": True,
+    }
+    assert set(AddWardrobeOutfitPreviewPorts.__dataclass_fields__) == {
+        "build_request",
+        "load_settings",
+        "invoke_preview",
+    }
+    assert [call[2] for call in calls if call[0] == "build"] == [True, False]
+    assert sum(call[0] == "preview" for call in calls) == 1
+    assert sum(call[0] == "approved" for call in calls) == 1
+    assert (
+        "log",
+        "info",
+        "wardrobe",
+        "Wardrobe outfit added.",
+        {"parameterName": "Clothes", "outfitName": "Hoodie"},
+    ) in calls
+
+
+def test_add_wardrobe_outfit_paths_preserve_legacy_scalar_and_tuple_coercion() -> None:
+    request = build_add_wardrobe_outfit_request(
+        {
+            "parameterName": "Clothes",
+            "outfitName": "Hoodie",
+            "object_paths": "Avatar/A;Avatar/B\nAvatar/C",
+            "objectPaths": ("Avatar/Tuple", "Avatar/Tuple"),
+            "onObjectPaths": 42,
+        },
+        True,
+    )
+
+    assert request["objectPaths"] == [
+        "Avatar/A;Avatar/B\nAvatar/C",
+        "Avatar/Tuple",
+        "42",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("params", "error"),
+    [
+        (
+            {"outfitName": "Hoodie", "objectPaths": ["Outfits/Hoodie"]},
+            "parameterName is required (the existing int wardrobe parameter).",
+        ),
+        (
+            {"parameterName": "Clothes", "objectPaths": ["Outfits/Hoodie"]},
+            "outfitName is required (display name for the new outfit).",
+        ),
+        (
+            {"parameterName": "Clothes", "outfitName": "Hoodie"},
+            "objectPaths is required (the new outfit's scene objects to turn on).",
+        ),
+    ],
+)
+def test_add_wardrobe_outfit_validation_has_no_settings_or_unity_side_effects(
+    params: dict[str, Any], error: str
+) -> None:
+    calls: list[str] = []
+
+    def build_request(
+        arguments: dict[str, Any], preview: bool
+    ) -> dict[str, Any]:
+        return {
+            "parameterName": arguments.get("parameterName", ""),
+            "outfitName": arguments.get("outfitName", ""),
+            "objectPaths": arguments.get("objectPaths", []),
+            "preview": preview,
+        }
+
+    preview_service = AddWardrobeOutfitPreviewService(
+        AddWardrobeOutfitPreviewPorts(
+            build_request=build_request,
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_preview=lambda _settings, _request: calls.append("preview"),
+        )
+    )
+    approved_service = AddWardrobeOutfitApprovedWriteService(
+        AddWardrobeOutfitApprovedWritePorts(
+            build_request=build_request,
+            load_settings=lambda _params: calls.append("settings"),
+            invoke_approved=lambda _settings, _request: calls.append("approved"),
+            log=lambda *_args, **_kwargs: calls.append("log"),
+        )
+    )
+
+    expected = {"ok": False, "error": error}
+    assert preview_service.preview(params) == expected
+    assert approved_service.execute(params) == expected
+    assert calls == []
 
 
 def test_approved_writes_are_a_separate_least_authority_binding() -> None:

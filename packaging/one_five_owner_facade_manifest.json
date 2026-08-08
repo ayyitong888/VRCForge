@@ -329,6 +329,8 @@
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "SETUP_OUTFIT_PREVIEW"},
         {"source": "dashboard_server.py", "scope": "module", "name": "SETUP_OUTFIT_APPROVED_WRITE"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "ADD_WARDROBE_OUTFIT_PREVIEW"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "ADD_WARDROBE_OUTFIT_APPROVED_WRITE"},
         {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_ARTIFACT_READ"},
         {"source": "dashboard_server.py", "scope": "module", "name": "CLOTHING_FX_READ"},
         {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_OUTFIT_WORKFLOWS"},
@@ -342,8 +344,6 @@
             "inspect_outfit_package",
             "build_outfit_import_plan",
             "apply_clothing_fx_approved_sync",
-            "preview_add_wardrobe_outfit_sync",
-            "add_wardrobe_outfit_sync",
             "preview_add_outfit_part_sync",
             "add_outfit_part_sync",
             "preview_add_modular_avatar_component_sync",

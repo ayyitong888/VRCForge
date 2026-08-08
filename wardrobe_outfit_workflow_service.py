@@ -310,6 +310,191 @@ class SetupOutfitApprovedWriteService:
         return setup_outfit_timeout_payload(job_id, last_payload, last_error)
 
 
+def _coerce_add_wardrobe_outfit_path_list(
+    params: dict[str, Any],
+    *keys: str,
+) -> list[str]:
+    result: list[str] = []
+    for key in keys:
+        raw = params.get(key)
+        if raw is None:
+            continue
+        items = raw if isinstance(raw, (list, tuple)) else [raw]
+        for item in items:
+            text = str(item).strip()
+            if text and text not in result:
+                result.append(text)
+    return result
+
+
+def build_add_wardrobe_outfit_request(
+    params: dict[str, Any],
+    preview: bool,
+) -> dict[str, Any]:
+    request: dict[str, Any] = {
+        "avatarPath": str(
+            params.get("avatar_path") or params.get("avatarPath") or ""
+        ).strip(),
+        "parameterName": str(
+            params.get("parameter_name") or params.get("parameterName") or ""
+        ).strip(),
+        "outfitName": str(
+            params.get("outfit_name")
+            or params.get("outfitName")
+            or params.get("display_name")
+            or params.get("displayName")
+            or ""
+        ).strip(),
+        "objectPaths": _coerce_add_wardrobe_outfit_path_list(
+            params,
+            "object_paths",
+            "objectPaths",
+            "on_object_paths",
+            "onObjectPaths",
+        ),
+        "preview": preview,
+    }
+    off_objects = _coerce_add_wardrobe_outfit_path_list(
+        params,
+        "off_object_paths",
+        "offObjectPaths",
+    )
+    if off_objects:
+        request["offObjectPaths"] = off_objects
+    if (
+        params.get("add_menu_toggle") is not None
+        or params.get("addMenuToggle") is not None
+    ):
+        request["addMenuToggle"] = bool(
+            params.get("add_menu_toggle", params.get("addMenuToggle"))
+        )
+    if (
+        params.get("set_objects_default_off") is not None
+        or params.get("setObjectsDefaultOff") is not None
+    ):
+        request["setObjectsDefaultOff"] = bool(
+            params.get("set_objects_default_off", params.get("setObjectsDefaultOff"))
+        )
+    if (
+        params.get("sub_menu_overflow") is not None
+        or params.get("subMenuOverflow") is not None
+    ):
+        request["subMenuOverflow"] = bool(
+            params.get("sub_menu_overflow", params.get("subMenuOverflow"))
+        )
+    sub_menu_name = str(
+        params.get("sub_menu_name") or params.get("subMenuName") or ""
+    ).strip()
+    if sub_menu_name:
+        request["subMenuName"] = sub_menu_name
+    clip_dir = str(
+        params.get("clip_output_dir") or params.get("clipOutputDir") or ""
+    ).strip()
+    if clip_dir:
+        request["clipOutputDir"] = clip_dir
+    if params.get("value") is not None:
+        request["value"] = int(params.get("value"))
+    if (
+        params.get("write_defaults") is not None
+        or params.get("writeDefaults") is not None
+    ):
+        request["writeDefaults"] = bool(
+            params.get("write_defaults", params.get("writeDefaults"))
+        )
+    return request
+
+
+AddWardrobeOutfitRequestBuilder = Callable[
+    [dict[str, Any], bool],
+    dict[str, Any],
+]
+
+
+@dataclass(frozen=True, slots=True)
+class AddWardrobeOutfitPreviewPorts:
+    """Fixed preview capability with no approved/live Unity port."""
+
+    build_request: AddWardrobeOutfitRequestBuilder
+    load_settings: Callable[[dict[str, Any]], Any]
+    invoke_preview: Callable[[Any, dict[str, Any]], dict[str, Any]]
+
+
+class AddWardrobeOutfitPreviewService:
+    """Own only the read/preview Add Wardrobe Outfit path."""
+
+    def __init__(self, ports: AddWardrobeOutfitPreviewPorts) -> None:
+        self._ports = ports
+
+    def preview(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = self._ports.build_request(normalized, True)
+        invalid = validate_add_wardrobe_outfit_request(request)
+        if invalid is not None:
+            return invalid
+        settings = self._ports.load_settings(normalized)
+        payload = self._ports.invoke_preview(settings, request)
+        payload.setdefault("ok", True)
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class AddWardrobeOutfitApprovedWritePorts:
+    """Registry-only fixed live Add Wardrobe Outfit capability."""
+
+    build_request: AddWardrobeOutfitRequestBuilder
+    load_settings: Callable[[dict[str, Any]], Any]
+    invoke_approved: Callable[[Any, dict[str, Any]], dict[str, Any]]
+    log: ClothingFxLogPort
+
+
+class AddWardrobeOutfitApprovedWriteService:
+    """Own the approved Add Wardrobe Outfit execution endpoint."""
+
+    def __init__(self, ports: AddWardrobeOutfitApprovedWritePorts) -> None:
+        self._ports = ports
+
+    def execute(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        normalized = params or {}
+        request = self._ports.build_request(normalized, False)
+        invalid = validate_add_wardrobe_outfit_request(request)
+        if invalid is not None:
+            return invalid
+        settings = self._ports.load_settings(normalized)
+        payload = self._ports.invoke_approved(settings, request)
+        payload.setdefault("ok", True)
+        self._ports.log(
+            "info",
+            "wardrobe",
+            "Wardrobe outfit added.",
+            {
+                "parameterName": request["parameterName"],
+                "outfitName": request["outfitName"],
+            },
+        )
+        return payload
+
+
+def validate_add_wardrobe_outfit_request(
+    request: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not request["parameterName"]:
+        return {
+            "ok": False,
+            "error": "parameterName is required (the existing int wardrobe parameter).",
+        }
+    if not request["outfitName"]:
+        return {
+            "ok": False,
+            "error": "outfitName is required (display name for the new outfit).",
+        }
+    if not request["objectPaths"]:
+        return {
+            "ok": False,
+            "error": "objectPaths is required (the new outfit's scene objects to turn on).",
+        }
+    return None
+
+
 def normalize_setup_outfit_terminal_payload(payload: dict[str, Any]) -> dict[str, Any]:
     status = str(payload.get("status") or "").lower()
     if status in {"error", "timeout", "unavailable"}:
