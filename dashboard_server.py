@@ -264,6 +264,22 @@ from optimization_workflow_service import (
     OptimizerProofStore,
     OptimizerProofStorePorts,
 )
+from avatar_tuning_workflow_service import (
+    AvatarTuningApprovedWriteHandlers,
+    AvatarTuningWorkflowPorts,
+    AvatarTuningWorkflowService,
+)
+from package_install_workflow_service import (
+    PackageInstallApprovedWriteHandler,
+    PackageInstallWorkflowPorts,
+    PackageInstallWorkflowService,
+)
+from wardrobe_outfit_workflow_service import (
+    WardrobeOutfitApprovedWriteHandlers,
+    WardrobeOutfitWorkflowError,
+    WardrobeOutfitWorkflowPorts,
+    WardrobeOutfitWorkflowService,
+)
 from outfit_import_planner import (
     build_outfit_import_plan,
     build_post_import_outfit_validation,
@@ -6433,7 +6449,7 @@ def app_build_test_readiness(request: BuildTestReadinessRequest) -> dict[str, An
 @app.post("/api/app/avatars")
 def app_list_avatars(request: DashboardStateRequest) -> dict[str, Any]:
     params = request.model_dump(by_alias=True)
-    return read_avatars_sync(build_agent_dashboard_request(params))
+    return AVATAR_TUNING_WORKFLOWS.read_avatars(build_agent_dashboard_request(params))
 
 
 @app.post("/api/app/optimization/plan")
@@ -6507,32 +6523,33 @@ def app_project_index_scan(request: ProjectIndexScanRequest) -> dict[str, Any]:
 
 @app.post("/api/app/outfit-packages/inspect")
 def app_outfit_package_inspect(request: OutfitPackageInspectRequest) -> dict[str, Any]:
-    return inspect_outfit_package_sync(request.model_dump(by_alias=True))
+    try:
+        return WARDROBE_OUTFIT_WORKFLOWS.inspect_outfit_package(
+            request.model_dump(by_alias=True)
+        )
+    except WardrobeOutfitWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post("/api/app/outfit-imports/plan")
 def app_outfit_import_plan(request: OutfitImportPlanRequest) -> dict[str, Any]:
-    return plan_outfit_import_sync(request.model_dump(by_alias=True))
+    try:
+        return WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import(
+            request.model_dump(by_alias=True)
+        )
+    except WardrobeOutfitWorkflowError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @app.post("/api/app/outfit-imports/request")
 async def app_request_outfit_import(request: OutfitImportPlanRequest) -> dict[str, Any]:
     params = request.model_dump(by_alias=True)
-    preview = plan_outfit_import_sync(params)
-    plan_payload = preview.get("plan") if isinstance(preview.get("plan"), dict) else {}
-    if not preview.get("ok") or not plan_payload.get("readyToApply"):
-        raise HTTPException(status_code=400, detail=preview.get("error") or "Outfit import plan is not ready to apply.")
     try:
-        payload = AGENT_GATEWAY.create_apply_request(
-            {
-                "target_tool": "vrcforge_import_outfit_package",
-                "arguments": params,
-                "reason": "Import outfit package through VRCForge supervised Golden Path.",
-                "preview": preview,
-                "agent_name": "desktop-agent",
-            }
+        payload = WARDROBE_OUTFIT_WORKFLOWS.request_outfit_import(
+            params,
+            agent_name="desktop-agent",
         )
-    except AgentGatewayError as exc:
+    except (AgentGatewayError, WardrobeOutfitWorkflowError) as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     return payload
@@ -6540,17 +6557,20 @@ async def app_request_outfit_import(request: OutfitImportPlanRequest) -> dict[st
 
 @app.post("/api/app/package-install/diagnose")
 def app_package_install_diagnostics(request: PackageInstallDiagnosticsRequest) -> dict[str, Any]:
-    return diagnose_package_install_errors_sync(request.model_dump(by_alias=True))
+    return PACKAGE_INSTALL_WORKFLOWS.diagnose_install(request.model_dump(by_alias=True))
 
 
 @app.post("/api/app/package-install/plan")
 def app_package_install_plan(request: PackageInstallPlanRequest) -> dict[str, Any]:
-    return package_install_plan_sync(request.model_dump(by_alias=True))
+    return PACKAGE_INSTALL_WORKFLOWS.plan_install(request.model_dump(by_alias=True))
 
 
 @app.post("/api/app/package-install/request")
 async def app_package_install_request(request: PackageInstallPlanRequest) -> dict[str, Any]:
-    payload = request_package_install_sync(request.model_dump(by_alias=True), agent_name="desktop-agent")
+    payload = PACKAGE_INSTALL_WORKFLOWS.request_install(
+        request.model_dump(by_alias=True),
+        agent_name="desktop-agent",
+    )
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=payload)
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
@@ -9173,174 +9193,134 @@ async def read_unity_tools(request: ConnectionRequest) -> dict[str, Any]:
 
 @app.post("/api/scene/avatars")
 async def read_scene_avatars(request: AvatarSceneScanRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(scan_scene_avatars_sync, request)
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.scan_scene_avatars, request)
 
 
 @app.post("/api/avatars")
 async def read_avatars(request: DashboardRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(read_avatars_sync, request)
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.read_avatars, request)
 
 
 @app.post("/api/avatar/blendshapes")
 async def read_avatar_blendshapes(request: AvatarBlendshapeListRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(read_avatar_blendshapes_sync, request)
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes, request)
 
 
 @app.post("/api/pipeline/plan")
 async def build_pipeline_plan(request: DashboardRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(run_dashboard_pipeline_sync, request, False)
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.plan_face_tuning, request)
 
 
 @app.post("/api/pipeline/run")
 async def run_pipeline(request: DashboardRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_run_face_tuning",
-        request,
-        reason="Apply the generated face-tuning plan to the selected Unity avatar.",
-        preview_callback=lambda: run_dashboard_pipeline_sync(request, True),
-        allow_mock_execute=True,
-    )
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.request_face_tuning, request)
 
 
 @app.post("/api/blendshapes/apply")
 async def apply_manual_blendshapes(request: ManualBlendshapeApplyRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_apply_blendshapes",
+        AVATAR_TUNING_WORKFLOWS.request_manual_blendshape_apply,
         request,
-        reason="Apply the selected Blendshape adjustments to the Unity avatar.",
-        preview_callback=lambda: apply_manual_blendshapes_sync(request),
-        allow_mock_execute=True,
     )
 
 
 @app.post("/api/blendshapes/undo")
 async def undo_manual_blendshapes(request: UndoBlendshapeRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_undo_blendshapes",
+        AVATAR_TUNING_WORKFLOWS.request_manual_blendshape_undo,
         request,
-        reason="Restore the previous approved Blendshape values for the selected avatar.",
     )
 
 
 @app.get("/api/tuning/history")
 def read_tuning_history(avatar_path: str | None = None) -> dict[str, Any]:
-    store = load_tuning_history_store()
-    records = list(store.get("records") or [])
-    if avatar_path:
-        records = [
-            record for record in records
-            if record.get("avatar_path") == avatar_path or record.get("avatar_name") == avatar_path
-        ]
-    return {"ok": True, "records": records, "count": len(records)}
+    return AVATAR_TUNING_WORKFLOWS.list_tuning_history(avatar_path)
 
 
 @app.post("/api/tuning/history/{history_id}/reapply")
 async def reapply_tuning_history(history_id: str, request: DashboardRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_reapply_tuning_history",
+        AVATAR_TUNING_WORKFLOWS.request_reapply_tuning_history,
+        history_id,
         request,
-        reason="Reapply the selected saved face-tuning history record to Unity.",
-        preview_callback=lambda: apply_saved_tuning_history_sync(history_id, request),
-        allow_mock_execute=True,
-        extra_arguments={"historyId": history_id},
     )
 
 
 @app.get("/api/tuning/presets")
 def read_tuning_presets(avatar_path: str | None = None) -> dict[str, Any]:
-    store = load_tuning_preset_store()
-    presets = list(store.get("presets") or [])
-    if avatar_path:
-        presets = [
-            preset for preset in presets
-            if preset.get("avatar_path") == avatar_path or preset.get("avatar_name") == avatar_path
-        ]
-    return {"ok": True, "presets": presets, "count": len(presets)}
+    return AVATAR_TUNING_WORKFLOWS.list_tuning_presets(avatar_path)
 
 
 @app.post("/api/tuning/presets")
 async def create_tuning_preset(request: TuningPresetCreateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(create_tuning_preset_sync, request)
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.create_tuning_preset, request)
 
 
 @app.post("/api/tuning/presets/{preset_id}/apply")
 async def apply_tuning_preset(preset_id: str, request: DashboardRequest) -> dict[str, Any]:
     return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_apply_tuning_preset",
+        AVATAR_TUNING_WORKFLOWS.request_apply_tuning_preset,
+        preset_id,
         request,
-        reason="Apply the selected saved face-tuning preset to Unity.",
-        preview_callback=lambda: apply_saved_tuning_preset_sync(preset_id, request),
-        allow_mock_execute=True,
-        extra_arguments={"presetId": preset_id},
     )
 
 
 @app.post("/api/tuning/presets/{preset_id}/rename")
 async def rename_tuning_preset(preset_id: str, request: TuningPresetRenameRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(rename_tuning_preset_sync, preset_id, request)
+    return await asyncio.to_thread(
+        AVATAR_TUNING_WORKFLOWS.rename_tuning_preset,
+        preset_id,
+        request,
+    )
 
 
 @app.post("/api/tuning/presets/{preset_id}/duplicate")
 async def duplicate_tuning_preset(preset_id: str, request: TuningPresetDuplicateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(duplicate_tuning_preset_sync, preset_id, request)
+    return await asyncio.to_thread(
+        AVATAR_TUNING_WORKFLOWS.duplicate_tuning_preset,
+        preset_id,
+        request,
+    )
 
 
 @app.post("/api/tuning/presets/{preset_id}/delete")
 async def delete_tuning_preset(preset_id: str) -> dict[str, Any]:
-    return await asyncio.to_thread(delete_tuning_preset_sync, preset_id)
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.delete_tuning_preset, preset_id)
 
 
 @app.get("/api/tuning/locks")
 def read_tuning_locks(avatar_path: str | None = None) -> dict[str, Any]:
-    resolved_avatar = avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-    locked = load_locked_blendshapes(resolved_avatar)
-    return {"ok": True, "avatarPath": resolved_avatar, "lockedBlendshapes": locked, "count": len(locked)}
+    return AVATAR_TUNING_WORKFLOWS.read_tuning_locks(avatar_path)
 
 
 @app.post("/api/tuning/locks")
 async def update_tuning_locks(request: TuningLocksUpdateRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(update_tuning_locks_sync, request)
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.update_tuning_locks, request)
 
 
 @app.post("/api/tuning/locks/ai-select")
 async def ai_select_tuning_locks(request: TuningLocksAiSelectRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(ai_select_tuning_locks_sync, request)
+    return await asyncio.to_thread(AVATAR_TUNING_WORKFLOWS.ai_select_tuning_locks, request)
 
 
 @app.post("/api/clothes/scan")
 async def scan_clothes(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(scan_clothes_sync, request)
+    return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.scan_clothes, request)
 
 
 @app.post("/api/clothes/toggle")
 async def toggle_clothing(request: ClothingToggleRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_toggle_scene_object",
-        request,
-        reason="Change the selected Unity clothing object's active state.",
-    )
+    return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.request_toggle_clothing, request)
 
 
 @app.post("/api/clothes/generate-fx")
 async def generate_clothing_fx(request: AvatarScopedConnectionRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(generate_clothing_fx_sync, request)
+    return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.generate_clothing_fx, request)
 
 
 @app.post("/api/clothes/apply-fx")
 async def apply_clothing_fx(request: ClothingApplyFxRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(
-        request_supervised_unity_write,
-        "vrcforge_apply_clothing_fx",
-        request,
-        reason="Author the planned clothing FX assets in the selected Unity project.",
-        preview_callback=lambda: apply_clothing_fx_sync(request),
-    )
+    return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.request_apply_clothing_fx, request)
 
 
 @app.post("/api/parameters/scan")
@@ -22455,14 +22435,14 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "List installed community .vsk skill packages.", "read/debug", list_skill_packages_sync)
     AGENT_GATEWAY.register_tool("vrcforge_preflight_skill_package", "Inspect and verify a local .vsk skill package before import.", "plan/preview", preflight_skill_package_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_project_index", "Scan and update the local project index, returning only structural file deltas and scanner-family hints.", "read/debug", scan_project_index_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", inspect_outfit_package_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_inspect_outfit_package", "Inspect a UnityPackage, Booth ZIP/folder, or loose prefab/texture folder without reading paid asset binary contents.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.inspect_outfit_package)
     AGENT_GATEWAY.register_tool(
         "vrcforge_inspect_chat_attachment",
         "Inspect a vault-stored chat attachment by payloadHash: bounded archive listing with bomb/zip-slip guards, single-entry text extract via entryPath, or image header metadata. Read-only; materialization goes through the supervised import lane.",
         "read/debug",
         inspect_chat_attachment_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "Build a supervised import plan for a UnityPackage, Booth folder, or loose prefab/texture folder without writing Unity project files.", "plan/preview", plan_outfit_import_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_plan_outfit_import", "Build a supervised import plan for a UnityPackage, Booth folder, or loose prefab/texture folder without writing Unity project files.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.plan_outfit_import)
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: build_full_health_payload())
     AGENT_GATEWAY.register_tool(
         "vrcforge_know_yourself",
@@ -22484,18 +22464,18 @@ def register_agent_gateway_tools() -> None:
             load_dashboard_settings(build_agent_connection_request(params))
         ).get("tools", {}),
     )
-    AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: read_avatars_sync(build_agent_dashboard_request(params)))
-    AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Scan face-related Blendshapes for an avatar.", "read/debug", lambda params: read_avatar_blendshapes_sync(AvatarBlendshapeListRequest(**build_agent_dashboard_request(params).model_dump())))
+    AGENT_GATEWAY.register_tool("vrcforge_list_avatars", "List avatars from the current Unity project.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatars(build_agent_dashboard_request(params)))
+    AGENT_GATEWAY.register_tool("vrcforge_scan_blendshapes", "Scan face-related Blendshapes for an avatar.", "read/debug", lambda params: AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(AvatarBlendshapeListRequest(**build_agent_dashboard_request(params).model_dump())))
     AGENT_GATEWAY.register_tool("vrcforge_scan_materials", "Scan shader/material inventory for an avatar.", "read/debug", lambda params: scan_shader_materials_sync(ShaderMaterialScanRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_modular_avatar", "Detect the Modular Avatar package and scan avatars for Modular Avatar components.", "read/debug", lambda params: scan_addon_framework_sync("modular_avatar", params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_inspect_modular_avatar_component", "Read the exact presence, count, type, scene dirty state, and AvatarObjectReference paths for one Modular Avatar component without writing.", "read/debug", inspect_modular_avatar_component_sync)
     AGENT_GATEWAY.register_tool("vrcforge_inspect_primitive_basis_fixture", "Read the fixed primitive-basis fixture identity and active-scene binding without writing.", "read/debug", inspect_primitive_basis_fixture_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_vrcfury", "Detect the VRCFury package and scan avatars for VRCFury components.", "read/debug", lambda params: scan_addon_framework_sync("vrcfury", params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_items", "Scan avatar hierarchy items including wardrobe-related objects and component types.", "read/debug", scan_avatar_items_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_items", "Scan avatar hierarchy items including wardrobe-related objects and component types.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_avatar_items)
     AGENT_GATEWAY.register_tool("vrcforge_scan_fx_animator", "Scan FX animator layers, states, and parameters for an avatar.", "read/debug", scan_fx_animator_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_animation_bindings", "Scan animation clip bindings for an avatar or animator controller.", "read/debug", scan_animation_bindings_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", scan_avatar_controls_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "Detect int-exclusive wardrobe(s) by reconciling an expression Int parameter, menu toggle values, FX Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults.", "read/debug", scan_wardrobe_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_avatar_controls)
+    AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "Detect int-exclusive wardrobe(s) by reconciling an expression Int parameter, menu toggle values, FX Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_wardrobe)
     AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
     AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, SDK, avatar, hierarchy, parameters, menu, FX, bindings, materials, performance, plugin, MCP, package, and residue checks.", "read/debug", build_validation_report_sync)
     AGENT_GATEWAY.register_tool("vrcforge_build_test_readiness", "Run the read-only Build & Test readiness gate without building, publishing, or repairing automatically.", "read/debug", build_test_readiness_sync)
@@ -22599,17 +22579,17 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_fx_animator", "Preview FX AnimatorController layer/state/transition create/update/delete without writing.", "plan/preview", lambda params: manage_fx_animator_sync(params, preview=True))
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_backup", "Preview which files a safe backup restore would overwrite, without writing.", "plan/preview", preview_safe_backup_restore_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_performance", "Calculate VRChat SDK performance statistics and rank for an avatar.", "read/debug", scan_avatar_performance_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", package_manager_status_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_package_install_plan", "Plan a VPM package install using ALCOM/VCC UI handoff, VCC vpm CLI, vrc-get CLI, or agent-managed download fallback without writing.", "plan/preview", package_install_plan_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_package_install_request", "Request supervised VPM package installation through the selected package manager; creates an approval request only.", "supervised-write", lambda params: request_package_install_sync(params or {}, agent_name=str((params or {}).get("agent_name") or (params or {}).get("agentName") or "external-agent")), write=True)
-    AGENT_GATEWAY.register_tool("vrcforge_diagnose_package_install_errors", "Read package-manager output and Unity compile errors to explain plugin/package install failures without repairing automatically.", "read/debug", diagnose_package_install_errors_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", preview_setup_outfit_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", preview_add_wardrobe_outfit_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit_part", "Preview adding an int-gated part toggle (e.g. a hat) to one outfit value of an int-exclusive wardrobe: Bool parameter, dedicated FX layer (int Equals N AND bool gating), on/off clips, and menu toggle, without writing.", "plan/preview", preview_add_outfit_part_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_add_modular_avatar_component", "Preview adding a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters) to a scene object, resolving references and fields, without writing.", "plan/preview", preview_add_modular_avatar_component_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_wardrobe", "Preview destructive or structural wardrobe management actions (remove/rename/reorder outfits, set default value, delete wardrobe) without writing.", "plan/preview", preview_manage_wardrobe_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_create_wardrobe", "Preview creating an empty int-exclusive wardrobe skeleton (Int parameter, FX layer/default state, and menu), without writing.", "plan/preview", preview_create_wardrobe_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, scan/create wardrobe if needed, and add the outfit to it.", "plan/preview", preview_add_outfit_workflow_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_package_manager_status", "Detect vrc-get/ALCOM/vpm CLIs and addon package install state.", "read/debug", PACKAGE_INSTALL_WORKFLOWS.package_manager_status)
+    AGENT_GATEWAY.register_tool("vrcforge_package_install_plan", "Plan a VPM package install using ALCOM/VCC UI handoff, VCC vpm CLI, vrc-get CLI, or agent-managed download fallback without writing.", "plan/preview", PACKAGE_INSTALL_WORKFLOWS.plan_install)
+    AGENT_GATEWAY.register_tool("vrcforge_package_install_request", "Request supervised VPM package installation through the selected package manager; creates an approval request only.", "supervised-write", lambda params: PACKAGE_INSTALL_WORKFLOWS.request_install(params or {}, agent_name=str((params or {}).get("agent_name") or (params or {}).get("agentName") or "external-agent")), write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_diagnose_package_install_errors", "Read package-manager output and Unity compile errors to explain plugin/package install failures without repairing automatically.", "read/debug", PACKAGE_INSTALL_WORKFLOWS.diagnose_install)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_setup_outfit", "Check Modular Avatar Setup Outfit readiness for an outfit object, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_setup_outfit)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_wardrobe_outfit", "Preview adding one outfit to an existing int-exclusive wardrobe (assigned int value, FX state, on/off objects, menu placement), without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_wardrobe_outfit)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit_part", "Preview adding an int-gated part toggle (e.g. a hat) to one outfit value of an int-exclusive wardrobe: Bool parameter, dedicated FX layer (int Equals N AND bool gating), on/off clips, and menu toggle, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit_part)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_modular_avatar_component", "Preview adding a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters) to a scene object, resolving references and fields, without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_modular_avatar_component)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_manage_wardrobe", "Preview destructive or structural wardrobe management actions (remove/rename/reorder outfits, set default value, delete wardrobe) without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_manage_wardrobe)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_create_wardrobe", "Preview creating an empty int-exclusive wardrobe skeleton (Int parameter, FX layer/default state, and menu), without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_create_wardrobe)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, scan/create wardrobe if needed, and add the outfit to it.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit)
     AGENT_GATEWAY.register_tool("vrcforge_list_checkpoints", "List pre-write git checkpoints created by VRCForge.", "read/debug", lambda params: AGENT_GATEWAY.list_checkpoints(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_preview_restore_checkpoint", "Preview restoring Assets/Packages/ProjectSettings from a VRCForge checkpoint.", "plan/preview", lambda params: AGENT_GATEWAY.preview_restore_checkpoint(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_list_interrupted_apply_recoveries", "List interrupted or unfinished approved writes that must be restored or resolved before new writes.", "read/debug", lambda params: AGENT_GATEWAY.list_interrupted_apply_recoveries(params or {}))
@@ -22624,9 +22604,9 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_get_gameobject", "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components.", "read/debug", get_gameobject_sync)
     AGENT_GATEWAY.register_tool("vrcforge_find_assets", "Search the project for assets by query/type/folder.", "read/debug", find_assets_sync)
     AGENT_GATEWAY.register_tool("vrcforge_get_asset_info", "Describe a project asset: path, GUID, type, importer, and prefab details.", "read/debug", get_asset_info_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_plan_face_tuning", "Generate a face tuning plan without applying it.", "plan/preview", lambda params: run_dashboard_pipeline_sync(build_agent_dashboard_request(params), False))
+    AGENT_GATEWAY.register_tool("vrcforge_plan_face_tuning", "Generate a face tuning plan without applying it.", "plan/preview", lambda params: AVATAR_TUNING_WORKFLOWS.plan_face_tuning(build_agent_dashboard_request(params)))
     AGENT_GATEWAY.register_tool("vrcforge_plan_shader_tuning", "Generate a shader/material tuning plan without applying it.", "plan/preview", lambda params: generate_shader_material_plan_sync(build_agent_shader_request(params)))
-    AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", preview_agent_blendshape_apply)
+    AGENT_GATEWAY.register_tool("vrcforge_preview_blendshape_apply", "Preview blendshape apply payload without writing to Unity.", "plan/preview", AVATAR_TUNING_WORKFLOWS.preview_agent_blendshape_apply)
     AGENT_GATEWAY.register_tool("vrcforge_preview_shader_apply", "Preview shader/material apply payload without writing to Unity.", "plan/preview", preview_agent_shader_apply)
     AGENT_GATEWAY.register_tool(
         "vrcforge_preview_material_shader_assignment",
@@ -22719,8 +22699,8 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_apply_blendshapes",
         "Apply validated Blendshape adjustments through VRCForge.",
         "medium",
-        apply_manual_blendshapes_approved_sync,
-        request_preparer=prepare_manual_blendshape_apply_request,
+        AVATAR_TUNING_APPROVED_WRITES.execute_manual_apply,
+        request_preparer=AVATAR_TUNING_APPROVED_WRITES.prepare_manual_apply,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
@@ -22728,8 +22708,8 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_run_face_tuning",
         "Run and apply a generated face tuning plan through VRCForge.",
         "high",
-        run_face_tuning_approved_sync,
-        request_preparer=prepare_face_tuning_execution_request,
+        AVATAR_TUNING_APPROVED_WRITES.execute_face_tuning,
+        request_preparer=AVATAR_TUNING_APPROVED_WRITES.prepare_face_tuning,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
@@ -22755,8 +22735,8 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_reapply_tuning_history",
         "Reapply one saved face-tuning history record through VRCForge.",
         "high",
-        reapply_tuning_history_approved_sync,
-        request_preparer=prepare_reapply_tuning_history_request,
+        AVATAR_TUNING_APPROVED_WRITES.execute_reapply_history,
+        request_preparer=AVATAR_TUNING_APPROVED_WRITES.prepare_reapply_history,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
@@ -22764,8 +22744,8 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_apply_tuning_preset",
         "Apply one saved face-tuning preset through VRCForge.",
         "high",
-        apply_tuning_preset_approved_sync,
-        request_preparer=prepare_apply_tuning_preset_request,
+        AVATAR_TUNING_APPROVED_WRITES.execute_apply_preset,
+        request_preparer=AVATAR_TUNING_APPROVED_WRITES.prepare_apply_preset,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
@@ -22803,8 +22783,8 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_undo_blendshapes",
         "Undo the last Blendshape apply snapshot for an avatar.",
         "medium",
-        undo_manual_blendshapes_approved_sync,
-        request_preparer=prepare_manual_blendshape_undo_request,
+        AVATAR_TUNING_APPROVED_WRITES.execute_manual_undo,
+        request_preparer=AVATAR_TUNING_APPROVED_WRITES.prepare_manual_undo,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
@@ -22833,37 +22813,37 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_setup_outfit",
         "Run Modular Avatar Setup Outfit on an outfit object through VRCForge.",
         "high",
-        setup_outfit_sync,
+        WARDROBE_OUTFIT_APPROVED_WRITES.setup_outfit,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_wardrobe_outfit",
         "Add one outfit to an existing int-exclusive wardrobe (assign next int value, set new objects scene-default off, author an on/off clip, add an FX Any-State Equals state, and a menu toggle) through VRCForge.",
         "high",
-        add_wardrobe_outfit_sync,
+        WARDROBE_OUTFIT_APPROVED_WRITES.add_wardrobe_outfit,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_manage_wardrobe",
         "Manage an existing int-exclusive wardrobe: remove/rename/reorder outfits, set default value, or delete wardrobe bindings through VRCForge.",
         "high",
-        manage_wardrobe_sync,
+        WARDROBE_OUTFIT_APPROVED_WRITES.manage_wardrobe,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_outfit_part",
         "Add an int-gated part toggle (e.g. a hat) to one outfit value of an existing int-exclusive wardrobe: create a Bool parameter, author a dedicated FX layer gated on (int Equals N AND bool), set the part scene-default off, and add a menu toggle through VRCForge.",
         "high",
-        add_outfit_part_sync,
+        WARDROBE_OUTFIT_APPROVED_WRITES.add_outfit_part,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_add_modular_avatar_component",
         "Add a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters) to a scene object, resolving AvatarObjectReference/asset references and scalar fields, through VRCForge.",
         "high",
-        add_modular_avatar_component_sync,
+        WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_create_wardrobe",
         "Create an empty int-exclusive wardrobe skeleton (expression Int parameter, FX layer/default state, and wardrobe menu) through VRCForge.",
         "high",
-        create_wardrobe_sync,
+        WARDROBE_OUTFIT_APPROVED_WRITES.create_wardrobe,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_ensure_expression_parameter",
@@ -22917,8 +22897,8 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_add_outfit",
         "Run the approval-bound add-outfit workflow against one existing verified wardrobe: instantiate an exact prefab, optionally unpack it, run Modular Avatar Setup Outfit, and bind the exact approved wardrobe value.",
         "high",
-        add_outfit_workflow_approved_sync,
-        request_preparer=prepare_add_outfit_request,
+        WARDROBE_OUTFIT_APPROVED_WRITES.add_outfit,
+        request_preparer=WARDROBE_OUTFIT_APPROVED_WRITES.prepare_add_outfit,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
@@ -22926,8 +22906,8 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_import_outfit_package",
         "Import a direct UnityPackage or copy loose outfit prefab/material/texture assets into the Unity project through VRCForge.",
         "high",
-        import_outfit_package_approved_sync,
-        request_preparer=prepare_outfit_import_package_request,
+        WARDROBE_OUTFIT_APPROVED_WRITES.import_package,
+        request_preparer=WARDROBE_OUTFIT_APPROVED_WRITES.prepare_import_package,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
@@ -23015,8 +22995,8 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_install_vpm_package",
         "Install a VPM package through the VRCForge package manager strategy: ALCOM/VCC UI handoff for humans, VCC vpm or vrc-get CLI for supervised non-interactive installs.",
         "medium",
-        install_vpm_package_sync,
-        request_preparer=prepare_vpm_package_install_request,
+        PACKAGE_INSTALL_APPROVED_WRITE.execute,
+        request_preparer=PACKAGE_INSTALL_APPROVED_WRITE.prepare,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_configure_optimizer_component",
@@ -23124,6 +23104,102 @@ if DASHBOARD_STATE is None:
     DASHBOARD_STATE = load_initial_dashboard_state()
 
 
+WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
+    WardrobeOutfitWorkflowPorts(
+        selected_project_path=lambda: (
+            DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
+        ),
+        inspect_package=inspect_outfit_package,
+        build_import_plan=build_outfit_import_plan,
+        create_apply_request=AGENT_GATEWAY.create_apply_request,
+        request_supervised_write=request_supervised_unity_write,
+        scan_avatar_items=scan_avatar_items_sync,
+        scan_avatar_controls=scan_avatar_controls_sync,
+        scan_wardrobe=scan_wardrobe_sync,
+        scan_clothes=scan_clothes_sync,
+        generate_clothing_fx=generate_clothing_fx_sync,
+        preview_apply_clothing_fx=apply_clothing_fx_sync,
+        preview_setup_outfit=preview_setup_outfit_sync,
+        preview_add_wardrobe_outfit=preview_add_wardrobe_outfit_sync,
+        preview_add_outfit_part=preview_add_outfit_part_sync,
+        preview_add_modular_avatar_component=preview_add_modular_avatar_component_sync,
+        preview_manage_wardrobe=preview_manage_wardrobe_sync,
+        preview_create_wardrobe=preview_create_wardrobe_sync,
+        preview_add_outfit=preview_add_outfit_workflow_sync,
+    )
+)
+WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
+    setup_outfit=setup_outfit_sync,
+    add_wardrobe_outfit=add_wardrobe_outfit_sync,
+    add_outfit_part=add_outfit_part_sync,
+    add_modular_avatar_component=add_modular_avatar_component_sync,
+    manage_wardrobe=manage_wardrobe_sync,
+    create_wardrobe=create_wardrobe_sync,
+    prepare_add_outfit=prepare_add_outfit_request,
+    add_outfit=add_outfit_workflow_approved_sync,
+    prepare_import_package=prepare_outfit_import_package_request,
+    import_package=import_outfit_package_approved_sync,
+)
+
+PACKAGE_INSTALL_WORKFLOWS = PackageInstallWorkflowService(
+    PackageInstallWorkflowPorts(
+        selected_project_path=lambda: (
+            DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
+        ),
+        locate_managers=locate_vpm_package_managers,
+        detect_package=detect_addon_package,
+        addon_frameworks=ADDON_FRAMEWORKS,
+        optimizer_dependencies=OPTIMIZER_DEPENDENCIES,
+        summarize_debug=summarize_debug_payload,
+        read_compile_errors=read_agent_compile_errors,
+        redact_support=redact_support_payload,
+        create_apply_request=AGENT_GATEWAY.create_apply_request,
+    )
+)
+PACKAGE_INSTALL_APPROVED_WRITE = PackageInstallApprovedWriteHandler(
+    prepare=prepare_vpm_package_install_request,
+    execute=install_vpm_package_sync,
+)
+
+AVATAR_TUNING_WORKFLOWS = AvatarTuningWorkflowService(
+    AvatarTuningWorkflowPorts(
+        scan_scene_avatars=scan_scene_avatars_sync,
+        read_avatars=read_avatars_sync,
+        read_avatar_blendshapes=read_avatar_blendshapes_sync,
+        run_face_tuning=run_dashboard_pipeline_sync,
+        preview_manual_blendshapes=apply_manual_blendshapes_sync,
+        preview_agent_blendshape_apply=preview_agent_blendshape_apply,
+        request_supervised_write=request_supervised_unity_write,
+        load_history=load_tuning_history_store,
+        load_presets=load_tuning_preset_store,
+        load_locked_blendshapes=load_locked_blendshapes,
+        current_avatar_path=lambda: (
+            DASHBOARD_RUNTIME.current_avatar_path if DASHBOARD_RUNTIME else ""
+        ),
+        create_preset=create_tuning_preset_sync,
+        rename_preset=rename_tuning_preset_sync,
+        duplicate_preset=duplicate_tuning_preset_sync,
+        delete_preset=delete_tuning_preset_sync,
+        update_locks=update_tuning_locks_sync,
+        ai_select_locks=ai_select_tuning_locks_sync,
+        preview_saved_history=apply_saved_tuning_history_sync,
+        preview_saved_preset=apply_saved_tuning_preset_sync,
+    )
+)
+AVATAR_TUNING_APPROVED_WRITES = AvatarTuningApprovedWriteHandlers(
+    prepare_manual_apply=prepare_manual_blendshape_apply_request,
+    execute_manual_apply=apply_manual_blendshapes_approved_sync,
+    prepare_manual_undo=prepare_manual_blendshape_undo_request,
+    execute_manual_undo=undo_manual_blendshapes_approved_sync,
+    prepare_face_tuning=prepare_face_tuning_execution_request,
+    execute_face_tuning=run_face_tuning_approved_sync,
+    prepare_reapply_history=prepare_reapply_tuning_history_request,
+    execute_reapply_history=reapply_tuning_history_approved_sync,
+    prepare_apply_preset=prepare_apply_tuning_preset_request,
+    execute_apply_preset=apply_tuning_preset_approved_sync,
+)
+
+
 def _preview_optimizer_parameter_bit_packing(
     params: dict[str, Any],
 ) -> dict[str, Any]:
@@ -23136,7 +23212,7 @@ def _preview_optimizer_parameter_bit_packing(
 OPTIMIZATION_APPLY_PREVIEWS = OptimizationApplyPreviewService(
     OptimizationApplyPreviewPorts(
         resolve_project_path=resolve_addon_project_path,
-        package_install_plan=package_install_plan_sync,
+        package_install_plan=PACKAGE_INSTALL_WORKFLOWS.plan_install,
         build_parameter_bit_packing_arguments=(
             build_parameter_bit_packing_wrapper_arguments
         ),

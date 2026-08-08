@@ -376,6 +376,116 @@
       ]
     },
     {
+      "id": "dashboard.wardrobe-outfit-root-owners",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_OUTFIT_WORKFLOWS"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_OUTFIT_APPROVED_WRITES"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "inspect_outfit_package",
+            "build_outfit_import_plan",
+            "scan_avatar_items_sync",
+            "scan_avatar_controls_sync",
+            "scan_wardrobe_sync",
+            "scan_clothes_sync",
+            "generate_clothing_fx_sync",
+            "apply_clothing_fx_sync",
+            "preview_setup_outfit_sync",
+            "setup_outfit_sync",
+            "preview_add_wardrobe_outfit_sync",
+            "add_wardrobe_outfit_sync",
+            "preview_add_outfit_part_sync",
+            "add_outfit_part_sync",
+            "preview_add_modular_avatar_component_sync",
+            "add_modular_avatar_component_sync",
+            "preview_manage_wardrobe_sync",
+            "manage_wardrobe_sync",
+            "preview_create_wardrobe_sync",
+            "create_wardrobe_sync",
+            "preview_add_outfit_workflow_sync",
+            "prepare_add_outfit_request",
+            "add_outfit_workflow_approved_sync",
+            "prepare_outfit_import_package_request",
+            "import_outfit_package_approved_sync"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dashboard.package-install-root-owners",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_INSTALL_WORKFLOWS"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_INSTALL_APPROVED_WRITE"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "read_agent_compile_errors",
+            "detect_addon_package",
+            "locate_vpm_package_managers",
+            "prepare_vpm_package_install_request",
+            "install_vpm_package_sync",
+            "_optimizer_package_catalog",
+            "package_manager_status_sync",
+            "_select_package_install_strategy",
+            "package_install_plan_sync",
+            "request_package_install_sync",
+            "diagnose_package_install_errors_sync",
+            "_classify_package_install_symptoms",
+            "_build_package_install_fix_suggestions"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dashboard.avatar-tuning-root-owners",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_WORKFLOWS"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_APPROVED_WRITES"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "scan_scene_avatars_sync",
+            "read_avatars_sync",
+            "read_avatar_blendshapes_sync",
+            "run_dashboard_pipeline_sync",
+            "apply_manual_blendshapes_sync",
+            "preview_agent_blendshape_apply",
+            "load_tuning_history_store",
+            "load_tuning_preset_store",
+            "load_locked_blendshapes",
+            "create_tuning_preset_sync",
+            "rename_tuning_preset_sync",
+            "duplicate_tuning_preset_sync",
+            "delete_tuning_preset_sync",
+            "update_tuning_locks_sync",
+            "ai_select_tuning_locks_sync",
+            "apply_saved_tuning_history_sync",
+            "apply_saved_tuning_preset_sync",
+            "prepare_manual_blendshape_apply_request",
+            "apply_manual_blendshapes_approved_sync",
+            "prepare_manual_blendshape_undo_request",
+            "undo_manual_blendshapes_approved_sync",
+            "prepare_face_tuning_execution_request",
+            "run_face_tuning_approved_sync",
+            "prepare_reapply_tuning_history_request",
+            "reapply_tuning_history_approved_sync",
+            "prepare_apply_tuning_preset_request",
+            "apply_tuning_preset_approved_sync"
+          ]
+        }
+      ]
+    },
+    {
       "id": "dashboard.memory-review-root-graph",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "MEMORY_REVIEW"}
