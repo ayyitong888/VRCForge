@@ -10174,7 +10174,7 @@ class DashboardServerTests(unittest.TestCase):
             payload={"data": {"ok": True, "assets": [{"assetPath": "Assets/Outfits/Hoodie.prefab", "guid": "abc", "name": "Hoodie"}]}},
         )
 
-        result = dashboard_server.preview_add_outfit_workflow_sync({
+        result = dashboard_server.PREPARED_ADD_OUTFIT_PREVIEW.preview({
             "avatarPath": "Avatar",
             "assetQuery": "hoodie",
             "outfitName": "Hoodie",

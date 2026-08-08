@@ -333,6 +333,14 @@ from wardrobe_outfit_workflow_service import (
     build_manage_wardrobe_request as build_owned_manage_wardrobe_request,
     validate_add_modular_avatar_component_request as validate_owned_add_modular_avatar_component_request,
 )
+from prepared_add_outfit_workflow_service import (
+    PreparedAddOutfitApprovedWritePorts,
+    PreparedAddOutfitApprovedWriteService,
+    PreparedAddOutfitPreparer,
+    PreparedAddOutfitPreviewService,
+    PreparedAddOutfitStateBuilder,
+    PreparedAddOutfitStatePorts,
+)
 from outfit_import_planner import (
     build_outfit_import_plan,
     build_post_import_outfit_validation,
@@ -17218,20 +17226,6 @@ def toggle_scene_object_sync(params: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "objectPath": object_path, "active": active, "result": payload}
 
 
-def _coerce_path_list(params: dict[str, Any], *keys: str) -> list[str]:
-    result: list[str] = []
-    for key in keys:
-        raw = params.get(key)
-        if raw is None:
-            continue
-        items = raw if isinstance(raw, (list, tuple)) else [raw]
-        for item in items:
-            text = str(item).strip()
-            if text and text not in result:
-                result.append(text)
-    return result
-
-
 def build_inspect_modular_avatar_component_request(params: dict[str, Any]) -> dict[str, Any]:
     request: dict[str, Any] = {
         "gameObjectPath": str(
@@ -19601,517 +19595,6 @@ def _expected_prefab_assets(plan_payload: dict[str, Any]) -> list[str]:
     return [str(path) for path in (plan_payload.get("expectedAssetPaths") or []) if str(path).lower().endswith(".prefab")]
 
 
-def _workflow_project_params(params: dict[str, Any]) -> dict[str, Any]:
-    project_value = str(params.get("project_path") or params.get("projectPath") or "").strip()
-    return {"projectPath": project_value} if project_value else {}
-
-
-def _workflow_bool(params: dict[str, Any], keys: tuple[str, ...], default: bool) -> bool:
-    for key in keys:
-        if key not in params or params.get(key) is None:
-            continue
-        raw = params.get(key)
-        if isinstance(raw, bool):
-            return raw
-        if isinstance(raw, (int, float)):
-            return raw != 0
-        text = str(raw).strip().lower()
-        if text in {"1", "true", "yes", "y", "on"}:
-            return True
-        if text in {"0", "false", "no", "n", "off"}:
-            return False
-    return default
-
-
-def _workflow_parameter_name(params: dict[str, Any]) -> tuple[str, bool]:
-    for key in ("parameter_name", "parameterName", "wardrobe_parameter", "wardrobeParameter"):
-        value = str(params.get(key) or "").strip()
-        if value:
-            return value, True
-    return "Clothes", False
-
-
-def _wardrobe_parameter_names(scan_payload: dict[str, Any]) -> list[str]:
-    wardrobes = scan_payload.get("wardrobes") if isinstance(scan_payload.get("wardrobes"), list) else []
-    names: list[str] = []
-    for wardrobe in wardrobes:
-        if not isinstance(wardrobe, dict):
-            continue
-        name = str(wardrobe.get("parameterName") or "").strip()
-        if name and name not in names:
-            names.append(name)
-    return names
-
-
-def _wardrobe_candidate_parameter_names(scan_payload: dict[str, Any]) -> list[str]:
-    candidates = scan_payload.get("wardrobeCandidates") if isinstance(scan_payload.get("wardrobeCandidates"), list) else []
-    names: list[str] = []
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            continue
-        name = str(candidate.get("parameterName") or "").strip()
-        if name and name not in names:
-            names.append(name)
-    return names
-
-
-def _workflow_wardrobe_create_args(params: dict[str, Any], avatar_path: str, parameter_name: str) -> dict[str, Any]:
-    result = {
-        **_workflow_project_params(params),
-        "avatarPath": avatar_path,
-        "parameterName": parameter_name,
-    }
-    for src_key, dst_key in (
-        ("menu_name", "menuName"),
-        ("menuName", "menuName"),
-        ("sub_menu_name", "subMenuName"),
-        ("subMenuName", "subMenuName"),
-        ("default_control_name", "defaultControlName"),
-        ("defaultControlName", "defaultControlName"),
-        ("layer_name", "layerName"),
-        ("layerName", "layerName"),
-        ("asset_dir", "assetDir"),
-        ("assetDir", "assetDir"),
-        ("clip_output_dir", "clipOutputDir"),
-        ("clipOutputDir", "clipOutputDir"),
-    ):
-        value = str(params.get(src_key) or "").strip()
-        if value:
-            result[dst_key] = value
-    for src_key, dst_key in (
-        ("write_defaults", "writeDefaults"),
-        ("writeDefaults", "writeDefaults"),
-        ("saved", "saved"),
-        ("network_synced", "networkSynced"),
-        ("networkSynced", "networkSynced"),
-    ):
-        if src_key in params and params.get(src_key) is not None:
-            result[dst_key] = params.get(src_key)
-    return result
-
-
-def _resolve_workflow_asset(params: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    asset_path = build_asset_path_target(params)
-    guid = str(params.get("guid") or "").strip()
-    if asset_path or guid:
-        return {"assetPath": asset_path, "guid": guid, "source": "explicit"}, None
-    query = str(params.get("query") or params.get("asset_query") or params.get("assetQuery") or "").strip()
-    if not query:
-        return None, {"ok": False, "error": "assetPath, guid, or assetQuery/query is required."}
-    search = find_assets_sync({
-        **_workflow_project_params(params),
-        "query": query,
-        "typeName": str(params.get("type_name") or params.get("typeName") or "Prefab").strip() or "Prefab",
-        "folder": str(params.get("folder") or "").strip(),
-        "limit": 1,
-    })
-    if not search.get("ok"):
-        return None, search
-    assets = search.get("assets") if isinstance(search.get("assets"), list) else []
-    if not assets:
-        return None, {"ok": False, "error": f"No prefab asset matched query '{query}'."}
-    first = ensure_dict_payload(assets[0], "workflow asset")
-    return {
-        "assetPath": str(first.get("assetPath") or ""),
-        "guid": str(first.get("guid") or ""),
-        "name": str(first.get("name") or ""),
-        "source": "query",
-        "query": query,
-    }, None
-
-
-ADD_OUTFIT_CONTINUATION_NONCE_KEY = "__vrcforgeAddOutfitContinuationNonce"
-
-
-def _canonical_add_outfit_asset(payload: dict[str, Any]) -> dict[str, Any]:
-    asset_path = str(payload.get("assetPath") or "").replace("\\", "/").strip()
-    guid = str(payload.get("guid") or "").strip().lower()
-    dependency_hash = str(payload.get("dependencyHash") or "").strip().lower()
-    if (
-        payload.get("ok") is not True
-        or payload.get("isPrefab") is not True
-        or not asset_path.startswith("Assets/")
-        or ".." in PurePosixPath(asset_path).parts
-        or len(guid) != 32
-        or any(character not in "0123456789abcdef" for character in guid)
-        or len(dependency_hash) != 32
-        or any(character not in "0123456789abcdef" for character in dependency_hash)
-    ):
-        raise RuntimeError("Add Outfit prefab asset identity is incomplete or invalid.")
-    return {
-        "assetPath": asset_path,
-        "guid": guid,
-        "dependencyHash": dependency_hash,
-        "name": str(payload.get("name") or payload.get("prefabRootName") or "").strip(),
-        "assetType": str(payload.get("assetType") or "").strip(),
-        "prefabAssetType": str(payload.get("prefabAssetType") or "").strip(),
-    }
-
-
-def _canonical_add_outfit_gameobject(payload: dict[str, Any], label: str) -> dict[str, Any]:
-    path = str(payload.get("gameObjectPath") or "").replace("\\", "/").strip().strip("/")
-    global_id = str(payload.get("globalObjectId") or "").strip()
-    scene_path = str(payload.get("scenePath") or "").replace("\\", "/").strip()
-    count = int(payload.get("hierarchyPathCount", 0) or 0)
-    if payload.get("ok") is not True or not path or not global_id or not scene_path or count != 1:
-        raise RuntimeError(f"Add Outfit {label} identity is incomplete or ambiguous.")
-    raw_children = payload.get("children")
-    if not isinstance(raw_children, list):
-        raise RuntimeError(f"Add Outfit {label} child readback is invalid.")
-    children = sorted(
-        str(item.get("gameObjectPath") or "").replace("\\", "/").strip().strip("/")
-        for item in raw_children
-        if isinstance(item, dict)
-    )
-    return {"gameObjectPath": path, "globalObjectId": global_id, "scenePath": scene_path, "children": children}
-
-
-def _selected_add_outfit_wardrobe(scan: dict[str, Any], parameter_name: str, explicit: bool) -> tuple[dict[str, Any], str, int]:
-    if scan.get("ok") is not True:
-        raise RuntimeError(scan.get("error") or "Wardrobe scan failed during Add Outfit preparation.")
-    fingerprint = str(scan.get("fingerprint") or "").strip().lower()
-    if len(fingerprint) != 64 or any(character not in "0123456789abcdef" for character in fingerprint):
-        raise RuntimeError("Wardrobe scan fingerprint is invalid.")
-    wardrobes = [item for item in (scan.get("wardrobes") or []) if isinstance(item, dict)]
-    if not wardrobes:
-        candidates = _wardrobe_candidate_parameter_names(scan)
-        detail = f" Candidate groups: {', '.join(candidates)}." if candidates else ""
-        raise RuntimeError("Add Outfit requires an existing verified wardrobe. Approve vrcforge_create_wardrobe first, then retry." + detail)
-    selected: dict[str, Any] | None = None
-    if explicit:
-        selected = next((item for item in wardrobes if str(item.get("parameterName") or "") == parameter_name), None)
-        if selected is None:
-            raise RuntimeError(f"Verified wardrobe '{parameter_name}' was not found. Create or repair it in a separate approved action, then retry.")
-    else:
-        selected = wardrobes[0]
-        parameter_name = str(selected.get("parameterName") or "").strip()
-    outfits = selected.get("outfits")
-    if not parameter_name or not isinstance(outfits, list):
-        raise RuntimeError("Selected wardrobe readback is invalid.")
-    values = [int(item.get("value")) for item in outfits if isinstance(item, dict) and item.get("value") is not None]
-    assigned_value = (max(values) if values else 0) + 1
-    return copy.deepcopy(selected), fingerprint, assigned_value
-
-
-def _prepare_add_outfit_state(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    continuation_nonce = str(params.get(ADD_OUTFIT_CONTINUATION_NONCE_KEY) or "").strip().lower()
-    if continuation_nonce and (len(continuation_nonce) != 64 or any(character not in "0123456789abcdef" for character in continuation_nonce)):
-        raise RuntimeError("Prepared Add Outfit continuation nonce is invalid.")
-    project_root = _resolve_unity_project_root_for_import(params, {})
-    project_identity = _prepared_import_project_identity(project_root)
-    project_params = {"projectPath": project_identity["projectPath"]}
-    asset_ref, asset_error = _resolve_workflow_asset({**params, **project_params})
-    if asset_error:
-        raise RuntimeError(str(asset_error.get("error") or "Add Outfit prefab could not be resolved."))
-    assert asset_ref is not None
-    asset = _canonical_add_outfit_asset(get_asset_info_sync({**project_params, "assetPath": asset_ref.get("assetPath"), "guid": asset_ref.get("guid")}))
-    avatar_requested = str(params.get("avatar_path") or params.get("avatarPath") or "").strip()
-    parent_requested = str(params.get("parent_path") or params.get("parentPath") or avatar_requested).strip()
-    if not avatar_requested or not parent_requested:
-        raise RuntimeError("avatarPath and a resolvable parentPath are required for Add Outfit.")
-    parent = _canonical_add_outfit_gameobject(get_gameobject_sync({**project_params, "gameObjectPath": parent_requested}), "parent")
-    avatar = parent if parent["gameObjectPath"] == avatar_requested else _canonical_add_outfit_gameobject(
-        get_gameobject_sync({**project_params, "gameObjectPath": avatar_requested}), "avatar"
-    )
-    outfit_name = str(params.get("outfit_name") or params.get("outfitName") or params.get("name") or asset.get("name") or "Outfit").strip()
-    if not outfit_name or "/" in outfit_name or "\\" in outfit_name:
-        raise RuntimeError("Add Outfit name must be a non-empty single hierarchy segment.")
-    outfit_path = f"{parent['gameObjectPath'].rstrip('/')}/{outfit_name}"
-    if outfit_path in parent["children"]:
-        raise RuntimeError("Approval-bound Add Outfit target already exists.")
-
-    manage_wardrobe = _workflow_bool(params, ("manage_wardrobe", "manageWardrobe"), True)
-    setup_outfit = _workflow_bool(params, ("setup_outfit", "setupOutfit"), True)
-    unpack_prefab = _workflow_bool(params, ("unpack_prefab", "unpackPrefab"), False)
-    parameter_name, parameter_explicit = _workflow_parameter_name(params)
-    wardrobe_scan: dict[str, Any] | None = None
-    selected_wardrobe: dict[str, Any] | None = None
-    wardrobe_fingerprint = ""
-    assigned_value: int | None = None
-    if manage_wardrobe:
-        wardrobe_scan = WARDROBE_ARTIFACT_READ.scan_wardrobe(
-            {**project_params, "avatarPath": avatar["gameObjectPath"]}
-        )
-        selected_wardrobe, wardrobe_fingerprint, assigned_value = _selected_add_outfit_wardrobe(
-            wardrobe_scan, parameter_name, parameter_explicit
-        )
-        parameter_name = str(selected_wardrobe.get("parameterName") or "")
-
-    continuation_tools: list[str] = []
-    if unpack_prefab:
-        continuation_tools.append("vrc_unpack_prefab")
-    if setup_outfit:
-        continuation_tools.append("vrc_setup_outfit")
-    if manage_wardrobe:
-        continuation_tools.append("vrc_add_wardrobe_outfit")
-
-    instantiate_arguments = {
-        **project_params,
-        "assetPath": asset["assetPath"],
-        "guid": asset["guid"],
-        "parentPath": parent["gameObjectPath"],
-        "name": outfit_name,
-        "worldPositionStays": _workflow_bool(params, ("world_position_stays", "worldPositionStays"), True),
-        "expectedPrefabGuid": asset["guid"],
-        "expectedAssetDependencyHash": asset["dependencyHash"],
-        "expectedScenePath": parent["scenePath"],
-        "expectedParentGlobalObjectId": parent["globalObjectId"],
-        "expectedResultPath": outfit_path,
-        "preview": False,
-    }
-    if continuation_nonce and continuation_tools:
-        instantiate_arguments.update({
-            "approvedObjectReceiptNonce": continuation_nonce,
-            "approvedContinuationTools": continuation_tools,
-        })
-    calls: list[tuple[str, dict[str, Any]]] = [("vrc_instantiate_prefab", instantiate_arguments)]
-    if unpack_prefab:
-        mode = str(params.get("unpack_mode") or params.get("unpackMode") or "outermost").strip().lower()
-        if mode not in {"outermost", "completely"}:
-            raise RuntimeError("Add Outfit unpack mode must be outermost or completely.")
-        unpack_arguments = {
-            **project_params,
-            "gameObjectPath": outfit_path,
-            "expectedPrefabGuid": asset["guid"],
-            "expectedAssetDependencyHash": asset["dependencyHash"],
-            "expectedScenePath": parent["scenePath"],
-            "mode": mode,
-            "preview": False,
-        }
-        if continuation_nonce:
-            unpack_arguments["approvedObjectReceiptNonce"] = continuation_nonce
-        calls.append(("vrc_unpack_prefab", unpack_arguments))
-    if setup_outfit:
-        setup_arguments = {
-            **project_params,
-            "avatarPath": avatar["gameObjectPath"],
-            "outfitPath": outfit_path,
-            "confirmSetup": True,
-            "saveScene": _workflow_bool(params, ("save_scene", "saveScene"), True),
-        }
-        if continuation_nonce:
-            setup_arguments["approvedObjectReceiptNonce"] = continuation_nonce
-        calls.append(("vrc_setup_outfit", setup_arguments))
-    if manage_wardrobe:
-        assert assigned_value is not None
-        wardrobe_source: dict[str, Any] = {
-            **project_params,
-            "avatarPath": avatar["gameObjectPath"],
-            "parameterName": parameter_name,
-            "outfitName": outfit_name,
-            "objectPaths": [outfit_path],
-            "value": assigned_value,
-            "offObjectPaths": _coerce_path_list(params, "off_object_paths", "offObjectPaths"),
-            "addMenuToggle": _workflow_bool(params, ("add_menu_toggle", "addMenuToggle"), True),
-            "setObjectsDefaultOff": _workflow_bool(params, ("set_objects_default_off", "setObjectsDefaultOff"), True),
-            "subMenuOverflow": _workflow_bool(params, ("sub_menu_overflow", "subMenuOverflow"), True),
-            "subMenuName": str(params.get("sub_menu_name") or params.get("subMenuName") or "Wardrobe").strip() or "Wardrobe",
-        }
-        clip_output_dir = str(params.get("clip_output_dir") or params.get("clipOutputDir") or "").strip()
-        if clip_output_dir:
-            wardrobe_source["clipOutputDir"] = clip_output_dir
-        if params.get("write_defaults") is not None or params.get("writeDefaults") is not None:
-            wardrobe_source["writeDefaults"] = _workflow_bool(params, ("write_defaults", "writeDefaults"), True)
-        wardrobe_arguments = build_owned_add_wardrobe_outfit_request(
-            wardrobe_source,
-            False,
-        )
-        wardrobe_arguments.update({
-            **project_params,
-            "expectedAssignedValue": assigned_value,
-            "expectedWardrobeFingerprint": wardrobe_fingerprint,
-        })
-        if continuation_nonce:
-            wardrobe_arguments["approvedObjectReceiptNonce"] = continuation_nonce
-        calls.append(("vrc_add_wardrobe_outfit", wardrobe_arguments))
-
-    read_facts = {
-        "asset": asset,
-        "avatar": avatar,
-        "parent": parent,
-        "outfitPath": outfit_path,
-        "wardrobeFingerprint": wardrobe_fingerprint,
-        "selectedWardrobe": selected_wardrobe,
-        "assignedValue": assigned_value,
-    }
-    evidence = {
-        "schema": "vrcforge.prepared-add-outfit.v1",
-        "projectIdentity": project_identity,
-        "readFacts": read_facts,
-        "readFactsSha256": shader_evidence_sha256(read_facts),
-        "callsSha256": shader_evidence_sha256([{"tool": tool, "arguments": arguments} for tool, arguments in calls]),
-        "manageWardrobe": manage_wardrobe,
-        "setupOutfit": setup_outfit,
-        "unpackPrefab": unpack_prefab,
-        "parameterName": parameter_name if manage_wardrobe else "",
-        "outfitName": outfit_name,
-    }
-    preview = {
-        "ok": True,
-        "preview": True,
-        "plan": {
-            "action": "add_outfit_workflow",
-            "projectPath": project_identity["projectPath"],
-            "avatarPath": avatar["gameObjectPath"],
-            "parentPath": parent["gameObjectPath"],
-            "outfitPath": outfit_path,
-            "outfitName": outfit_name,
-            "asset": asset,
-            "manageWardrobe": manage_wardrobe,
-            "parameterName": parameter_name if manage_wardrobe else None,
-            "assignedValue": assigned_value,
-            "wardrobeFingerprint": wardrobe_fingerprint or None,
-            "steps": [{"tool": tool, "write": True} for tool, _arguments in calls],
-        },
-    }
-    return {"calls": calls, "evidence": evidence, "preview": preview}
-
-
-def preview_add_outfit_workflow_sync(params: dict[str, Any]) -> dict[str, Any]:
-    try:
-        return _prepare_add_outfit_state(params or {})["preview"]
-    except (RuntimeError, UnityMcpError, ValueError) as exc:
-        return {"ok": False, "preview": True, "error": str(exc)}
-
-
-def prepare_add_outfit_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], Any]:
-    if PREPARED_UNITY_EXECUTION_ARGUMENT_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved prepared Unity execution key.")
-    if ADD_OUTFIT_CONTINUATION_NONCE_KEY in arguments:
-        raise RuntimeError("Caller may not provide the reserved Add Outfit continuation nonce.")
-    prepared_arguments = copy.deepcopy(arguments)
-    prepared_arguments[ADD_OUTFIT_CONTINUATION_NONCE_KEY] = secrets.token_hex(32)
-    state = _prepare_add_outfit_state(prepared_arguments)
-    return install_prepared_calls(prepared_arguments, state["calls"], state["evidence"]), state["preview"]
-
-
-def _require_add_outfit_receipt(expected: dict[str, Any], actual: dict[str, Any], label: str) -> None:
-    for key, value in expected.items():
-        if actual.get(key) != value:
-            raise RuntimeError(f"Add Outfit {label} receipt did not match approved {key}.")
-
-
-def add_outfit_workflow_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    steps: list[dict[str, Any]] = []
-    writes_started = False
-    try:
-        evidence = prepared_evidence(arguments)
-        if not isinstance(evidence, dict) or evidence.get("schema") != "vrcforge.prepared-add-outfit.v1":
-            raise RuntimeError("Prepared Add Outfit evidence is invalid.")
-        read_facts = evidence.get("readFacts")
-        if not isinstance(read_facts, dict) or shader_evidence_sha256(read_facts) != evidence.get("readFactsSha256"):
-            raise RuntimeError("Prepared Add Outfit read facts are invalid.")
-        project_identity = evidence.get("projectIdentity")
-        if not isinstance(project_identity, dict):
-            raise RuntimeError("Prepared Add Outfit project identity is invalid.")
-        _verify_prepared_import_project_identity(project_identity)
-        live = _prepare_add_outfit_state({key: value for key, value in arguments.items() if key != PREPARED_UNITY_EXECUTION_ARGUMENT_KEY})
-        live_calls = live["calls"]
-        if shader_evidence_sha256(live["evidence"]["readFacts"]) != evidence.get("readFactsSha256"):
-            raise RuntimeError("Add Outfit read facts drifted after approval.")
-        if shader_evidence_sha256([{"tool": tool, "arguments": call_args} for tool, call_args in live_calls]) != evidence.get("callsSha256"):
-            raise RuntimeError("Add Outfit Core calls drifted after approval.")
-        settings = load_dashboard_settings(build_agent_connection_request(arguments))
-        settings.unity_mcp_timeout_seconds = max(int(settings.unity_mcp_timeout_seconds or 30), 300)
-        instantiate_global_id = ""
-        wardrobe_receipt_fingerprint = ""
-        for index, (expected_tool, expected_arguments) in enumerate(live_calls):
-            tool_name, tool_arguments = prepared_call(arguments, index)
-            if tool_name != expected_tool:
-                raise RuntimeError("Prepared Add Outfit Core call order is invalid.")
-            _require_prepared_import_evidence(expected_arguments, tool_arguments, "Add Outfit Core arguments")
-            writes_started = True
-            payload = ensure_dict_payload(extract_tool_result_payload(invoke_unity_mcp(settings, tool_name, tool_arguments)), f"prepared Add Outfit {tool_name}")
-            if payload.get("ok") is not True:
-                raise RuntimeError(payload.get("error") or f"{tool_name} failed.")
-            if tool_name == "vrc_instantiate_prefab":
-                _require_add_outfit_receipt({
-                    "assetPath": expected_arguments["assetPath"],
-                    "gameObjectPath": expected_arguments["expectedResultPath"],
-                    "prefabGuid": expected_arguments["expectedPrefabGuid"],
-                    "dependencyHash": expected_arguments["expectedAssetDependencyHash"],
-                    "scenePath": expected_arguments["expectedScenePath"],
-                    "parentGlobalObjectId": expected_arguments["expectedParentGlobalObjectId"],
-                    "continuationRegistered": bool(expected_arguments.get("approvedContinuationTools")),
-                    "continuationCount": len(expected_arguments.get("approvedContinuationTools") or []),
-                }, payload, "instantiate")
-                instantiate_global_id = str(payload.get("globalObjectId") or "").strip()
-                if not instantiate_global_id:
-                    raise RuntimeError("Add Outfit instantiate receipt omitted GlobalObjectId.")
-            elif tool_name == "vrc_unpack_prefab":
-                _require_add_outfit_receipt({
-                    "gameObjectPath": expected_arguments["gameObjectPath"],
-                    "unpacked": True,
-                    "continuationConsumed": bool(expected_arguments.get("approvedObjectReceiptNonce")),
-                }, payload, "unpack")
-                instantiate_global_id = str(payload.get("globalObjectId") or "").strip()
-                if not instantiate_global_id:
-                    raise RuntimeError("Add Outfit unpack receipt omitted GlobalObjectId.")
-            elif tool_name == "vrc_setup_outfit":
-                _require_add_outfit_receipt({
-                    "outfitGlobalObjectId": instantiate_global_id,
-                    "continuationConsumed": False,
-                }, payload, "setup start")
-                payload = SETUP_OUTFIT_APPROVED_WRITE.wait_for_existing_job(
-                    settings,
-                    {},
-                    payload,
-                )
-                if payload.get("ok") is not True or str(payload.get("status") or "").lower() in {"error", "timeout"}:
-                    raise RuntimeError(payload.get("error") or "Setup Outfit did not complete successfully.")
-                _require_add_outfit_receipt({
-                    "outfitGlobalObjectId": instantiate_global_id,
-                    "continuationConsumed": bool(expected_arguments.get("approvedObjectReceiptNonce")),
-                    "committed": True,
-                    "commitState": "complete",
-                    "checkpointRecoveryRequired": False,
-                }, payload, "setup completion")
-            elif tool_name == "vrc_add_wardrobe_outfit":
-                _require_add_outfit_receipt({
-                    "parameterName": expected_arguments["parameterName"],
-                    "outfitName": expected_arguments["outfitName"],
-                    "assignedValue": expected_arguments["expectedAssignedValue"],
-                    "continuationConsumed": bool(expected_arguments.get("approvedObjectReceiptNonce")),
-                }, payload, "wardrobe")
-                wardrobe_receipt_fingerprint = str(payload.get("wardrobeFingerprint") or "").strip().lower()
-                if (
-                    len(wardrobe_receipt_fingerprint) != 64
-                    or any(character not in "0123456789abcdef" for character in wardrobe_receipt_fingerprint)
-                    or wardrobe_receipt_fingerprint == str(expected_arguments.get("expectedWardrobeFingerprint") or "").lower()
-                ):
-                    raise RuntimeError("Add Outfit wardrobe receipt fingerprint is not a valid post-write readback.")
-            steps.append({"tool": tool_name, "ok": True, "receipt": payload})
-
-        final_object = _canonical_add_outfit_gameobject(
-            get_gameobject_sync({"projectPath": project_identity["projectPath"], "gameObjectPath": read_facts["outfitPath"]}),
-            "final object",
-        )
-        if final_object["gameObjectPath"] != read_facts["outfitPath"] or final_object["scenePath"] != read_facts["parent"]["scenePath"]:
-            raise RuntimeError("Add Outfit final object readback drifted from approval.")
-        if instantiate_global_id and final_object["globalObjectId"] != instantiate_global_id:
-            raise RuntimeError("Add Outfit final object GlobalObjectId changed after execution.")
-        if evidence.get("manageWardrobe") is True:
-            scan = WARDROBE_ARTIFACT_READ.scan_wardrobe(
-                {
-                    "projectPath": project_identity["projectPath"],
-                    "avatarPath": read_facts["avatar"]["gameObjectPath"],
-                }
-            )
-            if str(scan.get("fingerprint") or "").strip().lower() != wardrobe_receipt_fingerprint:
-                raise RuntimeError("Add Outfit final wardrobe fingerprint did not match the Core write receipt.")
-            selected = next((item for item in (scan.get("wardrobes") or []) if isinstance(item, dict) and str(item.get("parameterName") or "") == evidence.get("parameterName")), None)
-            expected_value = read_facts.get("assignedValue")
-            if not isinstance(selected, dict) or not any(isinstance(item, dict) and int(item.get("value", -1)) == int(expected_value) for item in (selected.get("outfits") or [])):
-                raise RuntimeError("Add Outfit wardrobe readback did not contain the approved value.")
-        emit_log("info", "wardrobe", "Prepared Add Outfit workflow executed.", {"outfitPath": read_facts["outfitPath"], "parameterName": evidence.get("parameterName")})
-        return {"ok": True, "preview": False, "committed": True, "outfitPath": read_facts["outfitPath"], "steps": steps, "finalObject": final_object}
-    except (RuntimeError, UnityMcpError, ValueError) as exc:
-        emit_log("error", "wardrobe", "Prepared Add Outfit workflow failed.", {"error": str(exc)})
-        if writes_started:
-            return {"ok": False, "committed": True, "commitState": "unknown", "checkpointRecoveryRequired": True, "steps": steps, "error": str(exc)}
-        raise to_http_exception(exc) from exc
-
 
 def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool(
@@ -21066,6 +20549,69 @@ CREATE_WARDROBE_APPROVED_WRITE = CreateWardrobeApprovedWriteService(
         log=emit_log,
     )
 )
+PREPARED_ADD_OUTFIT_STATE = PreparedAddOutfitStateBuilder(
+    PreparedAddOutfitStatePorts(
+        resolve_project_root=lambda params: _resolve_unity_project_root_for_import(
+            params, {}
+        ),
+        capture_project_identity=_prepared_import_project_identity,
+        find_assets=find_assets_sync,
+        get_asset_info=get_asset_info_sync,
+        get_gameobject=get_gameobject_sync,
+        scan_wardrobe=WARDROBE_ARTIFACT_READ.scan_wardrobe,
+        ensure_dict=ensure_dict_payload,
+        digest=shader_evidence_sha256,
+    )
+)
+PREPARED_ADD_OUTFIT_PREVIEW = PreparedAddOutfitPreviewService(
+    state_builder=PREPARED_ADD_OUTFIT_STATE,
+    handled_errors=(RuntimeError, UnityMcpError, ValueError),
+)
+PREPARED_ADD_OUTFIT_PREPARER = PreparedAddOutfitPreparer(
+    state_builder=PREPARED_ADD_OUTFIT_STATE,
+    nonce_hex=secrets.token_hex,
+)
+PREPARED_ADD_OUTFIT_APPROVED_WRITE = PreparedAddOutfitApprovedWriteService(
+    PreparedAddOutfitApprovedWritePorts(
+        state_builder=PREPARED_ADD_OUTFIT_STATE,
+        digest=shader_evidence_sha256,
+        verify_project_identity=_verify_prepared_import_project_identity,
+        require_evidence=_require_prepared_import_evidence,
+        load_settings=lambda arguments: load_dashboard_settings(
+            build_agent_connection_request(arguments)
+        ),
+        instantiate=lambda settings, arguments: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(settings, "vrc_instantiate_prefab", arguments)
+            ),
+            "prepared Add Outfit vrc_instantiate_prefab",
+        ),
+        unpack=lambda settings, arguments: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(settings, "vrc_unpack_prefab", arguments)
+            ),
+            "prepared Add Outfit vrc_unpack_prefab",
+        ),
+        start_setup=lambda settings, arguments: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(settings, "vrc_setup_outfit", arguments)
+            ),
+            "prepared Add Outfit vrc_setup_outfit",
+        ),
+        poll_setup=SETUP_OUTFIT_APPROVED_WRITE.wait_for_existing_job,
+        add_wardrobe=lambda settings, arguments: ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(settings, "vrc_add_wardrobe_outfit", arguments)
+            ),
+            "prepared Add Outfit vrc_add_wardrobe_outfit",
+        ),
+        read_gameobject=get_gameobject_sync,
+        read_wardrobe=WARDROBE_ARTIFACT_READ.scan_wardrobe,
+        log=emit_log,
+        map_error=lambda exc: to_http_exception(exc),
+        handled_errors=(RuntimeError, UnityMcpError, ValueError),
+    )
+)
 CLOTHING_FX_READ = ClothingFxReadService(
     ClothingFxReadPorts(
         load_settings=lambda request: load_dashboard_settings(request),
@@ -21098,7 +20644,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         preview_add_modular_avatar_component=ADD_MODULAR_AVATAR_COMPONENT_PREVIEW.preview,
         preview_manage_wardrobe=MANAGE_WARDROBE_PREVIEW.preview,
         preview_create_wardrobe=CREATE_WARDROBE_PREVIEW.preview,
-        preview_add_outfit=preview_add_outfit_workflow_sync,
+        preview_add_outfit=PREPARED_ADD_OUTFIT_PREVIEW.preview,
     )
 )
 WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
@@ -21109,8 +20655,8 @@ WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
     add_modular_avatar_component=ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE.execute,
     manage_wardrobe=MANAGE_WARDROBE_APPROVED_WRITE.execute,
     create_wardrobe=CREATE_WARDROBE_APPROVED_WRITE.execute,
-    prepare_add_outfit=prepare_add_outfit_request,
-    add_outfit=add_outfit_workflow_approved_sync,
+    prepare_add_outfit=PREPARED_ADD_OUTFIT_PREPARER.prepare,
+    add_outfit=PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute,
     prepare_import_package=prepare_outfit_import_package_request,
     import_package=import_outfit_package_approved_sync,
 )

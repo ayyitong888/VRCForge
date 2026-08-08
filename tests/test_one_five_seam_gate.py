@@ -208,6 +208,10 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         "MANAGE_WARDROBE_APPROVED_WRITE",
         "CREATE_WARDROBE_PREVIEW",
         "CREATE_WARDROBE_APPROVED_WRITE",
+        "PREPARED_ADD_OUTFIT_STATE",
+        "PREPARED_ADD_OUTFIT_PREVIEW",
+        "PREPARED_ADD_OUTFIT_PREPARER",
+        "PREPARED_ADD_OUTFIT_APPROVED_WRITE",
         "WARDROBE_OUTFIT_WORKFLOWS",
         "WARDROBE_OUTFIT_APPROVED_WRITES",
     }
@@ -230,6 +234,10 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         "manage_wardrobe_sync",
         "preview_create_wardrobe_sync",
         "create_wardrobe_sync",
+        "_prepare_add_outfit_state",
+        "preview_add_outfit_workflow_sync",
+        "prepare_add_outfit_request",
+        "add_outfit_workflow_approved_sync",
     }.isdisjoint(
         groups["dashboard.wardrobe-outfit-root-owners"]["facades"][0]["methods"]
     )

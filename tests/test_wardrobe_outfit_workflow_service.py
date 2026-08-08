@@ -373,6 +373,11 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "_create_wardrobe_primitive_args" not in bindings
     assert "preview_create_wardrobe_sync" not in bindings
     assert "create_wardrobe_sync" not in bindings
+    assert "_prepare_add_outfit_state" not in bindings
+    assert "preview_add_outfit_workflow_sync" not in bindings
+    assert "prepare_add_outfit_request" not in bindings
+    assert "add_outfit_workflow_approved_sync" not in bindings
+    assert "_coerce_path_list" not in bindings
     assert "scan_avatar_items_sync" not in bindings
     assert "scan_avatar_controls_sync" not in bindings
     assert "scan_wardrobe_sync" not in bindings
@@ -421,6 +426,15 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     assert "create_wardrobe=CREATE_WARDROBE_APPROVED_WRITE.execute" in source
     assert source.count("build_calls=build_owned_create_wardrobe_core_calls") == 2
     assert source.count("build_request=build_owned_create_wardrobe_request") == 2
+    assert (
+        "preview_add_outfit=PREPARED_ADD_OUTFIT_PREVIEW.preview" in source
+    )
+    assert (
+        "prepare_add_outfit=PREPARED_ADD_OUTFIT_PREPARER.prepare" in source
+    )
+    assert (
+        "add_outfit=PREPARED_ADD_OUTFIT_APPROVED_WRITE.execute" in source
+    )
 
     assignments = {
         node.targets[0].id: node.value
