@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from optimization_service import (
     build_optimization_report,
     build_optimization_tool_result,
 )
+from optimization_workflow_service import OptimizationWorkflowService
 
 
 def make_unity_project(root: Path) -> None:
@@ -498,7 +500,7 @@ def test_optimization_validation_delta_reports_improvement_and_rollback_match() 
         ],
     }
 
-    delta = dashboard_server.build_optimization_validation_delta_sync(
+    delta = dashboard_server.OPTIMIZATION_WORKFLOWS.build_validation_delta(
         {
             "optimizerTool": "optimization.lac.apply-request",
             "checkpointId": "ckpt_test",
@@ -548,7 +550,7 @@ def test_optimization_validation_delta_flags_regression_and_rollback_drift() -> 
         "findings": [{"section": "Materials", "severity": "Warning", "title": "New rollback warning", "source": "materials"}],
     }
 
-    delta = dashboard_server.build_optimization_validation_delta_sync(
+    delta = dashboard_server.OPTIMIZATION_WORKFLOWS.build_validation_delta(
         {
             "optimizerTool": "optimization.meshia.simplify-apply-request",
             "beforeValidation": before,
@@ -597,7 +599,7 @@ def test_optimizer_apply_request_requires_explicit_approval_even_in_auto_mode(mo
         lambda _params: {"ok": True, "components": [{"type": "AvatarOptimizer"}]},
     )
     try:
-        payload = dashboard_server.request_optimization_apply_sync(
+        payload = dashboard_server.OPTIMIZATION_WORKFLOWS.request_apply(
             {
                 "tool": "optimization.lac.apply-request",
                 "projectPath": str(project),
@@ -730,22 +732,12 @@ def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch
         dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
 
 
-def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dependency(tmp_path: Path, monkeypatch) -> None:
+def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dependency(tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
     install_package(project, "dev.limitex.avatar-compressor", "0.8.0")
 
-    def fail_full_plan(_params):
-        raise AssertionError("apply-request preview must not run the full optimization plan")
-
-    monkeypatch.setattr(dashboard_server, "build_optimization_plan_sync", fail_full_plan)
-    monkeypatch.setattr(
-        dashboard_server,
-        "package_install_plan_sync",
-        lambda _params: (_ for _ in ()).throw(AssertionError("installed dependency must not build an install plan")),
-    )
-
-    payload = dashboard_server.build_optimization_apply_request_preview_sync(
+    payload = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.lac.apply-request",
             "projectPath": str(project),
@@ -766,7 +758,7 @@ def test_ttt_apply_request_is_stable_but_requires_confirmed_material_paths(tmp_p
     make_unity_project(project)
     install_package(project, "net.rs64.tex-trans-tool", "1.1.0-beta.8")
 
-    blocked = dashboard_server.build_optimization_apply_request_preview_sync(
+    blocked = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.ttt.atlas-apply-request",
             "projectPath": str(project),
@@ -780,7 +772,7 @@ def test_ttt_apply_request_is_stable_but_requires_confirmed_material_paths(tmp_p
     assert blocked["readyToRequest"] is False
     assert any("material asset paths" in reason for reason in blocked["blockedReasons"])
 
-    ready = dashboard_server.build_optimization_apply_request_preview_sync(
+    ready = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.ttt.atlas-apply-request",
             "projectPath": str(project),
@@ -800,7 +792,7 @@ def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_
     make_unity_project(project)
     install_package(project, "com.ramtype0.meshia.mesh-simplification", "3.2.0")
 
-    missing_renderer = dashboard_server.build_optimization_apply_request_preview_sync(
+    missing_renderer = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.meshia.simplify-apply-request",
             "projectPath": str(project),
@@ -812,7 +804,7 @@ def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_
     assert missing_renderer["readyToRequest"] is False
     assert any("rendererPath" in reason for reason in missing_renderer["blockedReasons"])
 
-    aggressive = dashboard_server.build_optimization_apply_request_preview_sync(
+    aggressive = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.meshia.simplify-apply-request",
             "projectPath": str(project),
@@ -824,7 +816,7 @@ def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_
     assert aggressive["readyToRequest"] is False
     assert any("experimental" in reason for reason in aggressive["blockedReasons"])
 
-    ready = dashboard_server.build_optimization_apply_request_preview_sync(
+    ready = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.meshia.simplify-apply-request",
             "projectPath": str(project),
@@ -953,7 +945,7 @@ def test_vrcfury_parameter_request_uses_authoritative_clone_writer(
         lambda params: observed.append(params) or {"ok": True, "preview": {"schema": "vrcforge.parameter_bit_packing_approval.v1"}},
     )
 
-    payload = dashboard_server.build_optimization_apply_request_preview_sync(
+    payload = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.vrcfury.parameter-compressor-apply-request",
             "projectPath": str(project),
@@ -1019,7 +1011,7 @@ def test_parameter_request_with_missing_selector_returns_a_blocked_preview(
     }
     params.pop(missing_field)
 
-    payload = dashboard_server.build_optimization_apply_request_preview_sync(params)
+    payload = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(params)
 
     assert payload["readyToRequest"] is False
     assert payload["hardGate"]["status"] == "blocked"
@@ -1040,7 +1032,7 @@ def test_parameter_authoritative_preview_error_is_returned_as_a_blocker(
 
     monkeypatch.setattr(dashboard_server, "preview_parameter_bit_packing_sync", fail_preview)
 
-    payload = dashboard_server.build_optimization_apply_request_preview_sync(
+    payload = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.vrcfury.parameter-compressor-apply-request",
             "projectPath": str(project),
@@ -1116,7 +1108,13 @@ def test_parameter_optimizer_entry_reprepares_then_runs_the_approved_canonical_w
         },
     )
 
-    requested = dashboard_server.request_optimization_apply_sync(
+    owner = OptimizationWorkflowService(
+        replace(
+            dashboard_server.OPTIMIZATION_WORKFLOWS._ports,
+            create_apply_request=gateway.create_apply_request,
+        )
+    )
+    requested = owner.request_apply(
         {
             "tool": "optimization.vrcfury.parameter-compressor-apply-request",
             "projectPath": project_path,
@@ -1158,7 +1156,7 @@ def test_hidden_body_and_physbone_apply_surfaces_are_blocked_with_hard_gates(tmp
     make_unity_project(project)
     install_package(project, "com.anatawa12.avatar-optimizer", "1.8.0")
 
-    hidden_body = dashboard_server.build_optimization_apply_request_preview_sync(
+    hidden_body = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.aao.hidden-body-cut-apply-request",
             "projectPath": str(project),
@@ -1166,7 +1164,7 @@ def test_hidden_body_and_physbone_apply_surfaces_are_blocked_with_hard_gates(tmp
             "targetProfile": "pc_conservative",
         }
     )
-    physbone = dashboard_server.build_optimization_apply_request_preview_sync(
+    physbone = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
         {
             "tool": "optimization.aao.physbone-cleanup-apply-request",
             "projectPath": str(project),

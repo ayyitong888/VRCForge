@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 import zipfile
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +42,11 @@ from agent_question_service import (
     GoalQuestionResolutionPort,
 )
 from agent_goal_service import AgentGoalServiceError
+from optimization_workflow_service import (
+    OptimizationWorkflowService,
+    OptimizerProofStore,
+    OptimizerProofStorePorts,
+)
 from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_collaboration_service import SubAgentCollaborationService
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
@@ -13606,8 +13612,19 @@ namespace VRCForge.Editor
     def test_optimizer_proof_index_detail_and_screenshot_are_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             original_artifacts_dir = dashboard_server.ARTIFACTS_DIR
+            original_workflows = dashboard_server.OPTIMIZATION_WORKFLOWS
             temp_artifacts = Path(temp_dir) / "artifacts"
             dashboard_server.ARTIFACTS_DIR = temp_artifacts
+            proofs = OptimizerProofStore(
+                OptimizerProofStorePorts(
+                    artifact_root=temp_artifacts,
+                    to_artifact_url=dashboard_server.to_artifact_url,
+                    to_runtime_artifact_url=dashboard_server.to_runtime_artifact_url,
+                )
+            )
+            dashboard_server.OPTIMIZATION_WORKFLOWS = OptimizationWorkflowService(
+                replace(original_workflows._ports, proofs=proofs)
+            )
             proof_root = temp_artifacts / "optimizer-apply-smoke"
             run_id = "optimizer-apply-smoke-20260624-010101"
             screenshot = proof_root / run_id / "screenshots" / "before.png"
@@ -13681,14 +13698,26 @@ namespace VRCForge.Editor
                 self.assertEqual(screenshot_response.status_code, 200)
                 self.assertEqual(screenshot_response.content, b"proof image")
             finally:
+                dashboard_server.OPTIMIZATION_WORKFLOWS = original_workflows
                 dashboard_server.ARTIFACTS_DIR = original_artifacts_dir
 
     def test_optimizer_proof_screenshot_rejects_paths_outside_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             original_artifacts_dir = dashboard_server.ARTIFACTS_DIR
+            original_workflows = dashboard_server.OPTIMIZATION_WORKFLOWS
             temp_path = Path(temp_dir)
             temp_artifacts = temp_path / "artifacts"
             dashboard_server.ARTIFACTS_DIR = temp_artifacts
+            proofs = OptimizerProofStore(
+                OptimizerProofStorePorts(
+                    artifact_root=temp_artifacts,
+                    to_artifact_url=dashboard_server.to_artifact_url,
+                    to_runtime_artifact_url=dashboard_server.to_runtime_artifact_url,
+                )
+            )
+            dashboard_server.OPTIMIZATION_WORKFLOWS = OptimizationWorkflowService(
+                replace(original_workflows._ports, proofs=proofs)
+            )
             proof_root = temp_artifacts / "optimizer-apply-smoke"
             proof_root.mkdir(parents=True)
             outside = temp_path / "outside.png"
@@ -13714,6 +13743,7 @@ namespace VRCForge.Editor
 
                 self.assertEqual(response.status_code, 403)
             finally:
+                dashboard_server.OPTIMIZATION_WORKFLOWS = original_workflows
                 dashboard_server.ARTIFACTS_DIR = original_artifacts_dir
 
     # ------------------------------------------------------------------

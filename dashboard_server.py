@@ -240,8 +240,6 @@ from memory_review_host import build_memory_review_router
 from memory_review_provider import invoke_memory_review_provider
 from memory_review_runtime import MemoryReviewRuntimeCoordinator
 from optimization_service import (
-    OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL,
-    OPTIMIZATION_APPLY_REQUEST_BY_GATEWAY,
     OPTIMIZATION_APPLY_REQUEST_DEFINITIONS,
     OPTIMIZATION_GATEWAY_TOOL_NAMES,
     OPTIMIZER_DEPENDENCIES,
@@ -250,6 +248,21 @@ from optimization_service import (
     build_optimization_report,
     build_optimization_tool_result,
     normalize_tool_name,
+)
+from optimization_apply_preview import (
+    OptimizationApplyPreviewError,
+    OptimizationApplyPreviewPorts,
+    OptimizationApplyPreviewService,
+    confirmed_ttt_material_paths,
+    meshia_relative_vertex_count,
+    normalize_optimizer_profile_id,
+)
+from optimization_validation_delta import build_optimization_validation_delta
+from optimization_workflow_service import (
+    OptimizationWorkflowPorts,
+    OptimizationWorkflowService,
+    OptimizerProofStore,
+    OptimizerProofStorePorts,
 )
 from outfit_import_planner import (
     build_outfit_import_plan,
@@ -6425,21 +6438,24 @@ def app_list_avatars(request: DashboardStateRequest) -> dict[str, Any]:
 
 @app.post("/api/app/optimization/plan")
 def app_optimization_plan(request: OptimizationPlanRequest) -> dict[str, Any]:
-    return build_optimization_plan_sync(request.model_dump(by_alias=True))
+    return OPTIMIZATION_WORKFLOWS.build_plan(request.model_dump(by_alias=True))
 
 
 @app.post("/api/app/optimization/tool")
 def app_optimization_tool(request: OptimizationToolRequest) -> dict[str, Any]:
     params = request.model_dump(by_alias=True)
     tool_name = str(params.pop("tool", "") or "")
-    return build_optimization_tool_sync(tool_name, params)
+    return OPTIMIZATION_WORKFLOWS.build_tool(tool_name, params)
 
 
 @app.post("/api/app/optimization/apply-request")
 async def app_optimization_apply_request(request: OptimizationApplyRequest) -> dict[str, Any]:
     params = request.model_dump(by_alias=True)
     try:
-        payload = request_optimization_apply_sync(params, agent_name="desktop-agent")
+        payload = OPTIMIZATION_WORKFLOWS.request_apply(
+            params,
+            agent_name="desktop-agent",
+        )
     except (AgentGatewayError, ValueError) as exc:
         status_code = exc.status_code if isinstance(exc, AgentGatewayError) else 400
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
@@ -6451,18 +6467,20 @@ async def app_optimization_apply_request(request: OptimizationApplyRequest) -> d
 
 @app.post("/api/app/optimization/validation-delta")
 def app_optimization_validation_delta(request: OptimizationValidationDeltaRequest) -> dict[str, Any]:
-    return build_optimization_validation_delta_sync(request.model_dump(by_alias=True))
+    return OPTIMIZATION_WORKFLOWS.build_validation_delta(
+        request.model_dump(by_alias=True)
+    )
 
 
 @app.get("/api/app/optimization/proofs")
 def app_optimization_proof_index(limit: int = 10) -> dict[str, Any]:
-    return list_optimizer_proofs_sync(limit=limit)
+    return OPTIMIZATION_WORKFLOWS.list_proofs(limit=limit)
 
 
 @app.get("/api/app/optimization/proofs/{run_id}")
 def app_optimization_proof_detail(run_id: str) -> dict[str, Any]:
     try:
-        return read_optimizer_proof_sync(run_id)
+        return OPTIMIZATION_WORKFLOWS.read_proof(run_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Optimizer proof was not found.") from exc
     except ValueError as exc:
@@ -6472,7 +6490,7 @@ def app_optimization_proof_detail(run_id: str) -> dict[str, Any]:
 @app.get("/api/app/optimization/proofs/{run_id}/screenshots/{stage}")
 def app_optimization_proof_screenshot(run_id: str, stage: str) -> FileResponse:
     try:
-        path = optimizer_proof_screenshot_path(run_id, stage)
+        path = OPTIMIZATION_WORKFLOWS.proof_screenshot_path(run_id, stage)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Optimizer proof screenshot was not found.") from exc
     except PermissionError as exc:
@@ -20523,931 +20541,29 @@ def build_test_readiness_sync(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_optimization_validation_context(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    return build_validation_report_sync(
-        {
-            "avatarPath": str(params.get("avatar_path") or params.get("avatarPath") or "").strip(),
-            "projectPath": str(params.get("project_path") or params.get("projectPath") or DASHBOARD_STATE.selected_project_path or "").strip(),
-            "includeQuest": bool(params.get("include_quest", params.get("includeQuest", True))),
-            "includeSources": True,
-            "includeReadiness": True,
-            "gateBuild": False,
-            "maxErrors": int(params.get("max_errors") or params.get("maxErrors") or 50),
-        }
-    )
 
 
 VALIDATION_DELTA_SEVERITIES = ("Error", "Warning", "Suggestion", "Info", "Ignored")
 
 
-def _validation_delta_counts(report: dict[str, Any]) -> dict[str, int]:
-    summary = ensure_dict(report.get("summary"))
-    counts = ensure_dict(summary.get("severityCounts"))
-    return {severity: int(counts.get(severity) or 0) for severity in VALIDATION_DELTA_SEVERITIES}
 
 
-def _validation_delta_sections(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    sections: dict[str, dict[str, Any]] = {}
-    for item in report.get("sections") or []:
-        if not isinstance(item, dict):
-            continue
-        section_id = str(item.get("id") or item.get("name") or "").strip()
-        if not section_id:
-            continue
-        sections[section_id] = {
-            "id": section_id,
-            "name": item.get("name") or section_id,
-            "status": item.get("status") or "unknown",
-            "counts": {severity: int(ensure_dict(item.get("counts")).get(severity) or 0) for severity in VALIDATION_DELTA_SEVERITIES},
-        }
-    return sections
 
 
-def _validation_delta_finding_key(finding: dict[str, Any]) -> str:
-    parts = [
-        str(finding.get("id") or ""),
-        str(finding.get("section") or finding.get("sectionId") or ""),
-        str(finding.get("severity") or ""),
-        str(finding.get("title") or finding.get("message") or ""),
-        str(finding.get("source") or ""),
-    ]
-    normalized = "|".join(re.sub(r"\s+", " ", part.strip().lower()) for part in parts)
-    return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
-def _validation_delta_findings(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    result: dict[str, dict[str, Any]] = {}
-    for item in report.get("findings") or []:
-        if not isinstance(item, dict):
-            continue
-        key = _validation_delta_finding_key(item)
-        result[key] = {
-            "key": key,
-            "id": item.get("id"),
-            "section": item.get("section") or item.get("sectionId"),
-            "severity": item.get("severity"),
-            "title": item.get("title") or item.get("message"),
-            "source": item.get("source"),
-        }
-    return result
 
 
-def _validation_delta_summary(report: dict[str, Any]) -> dict[str, Any]:
-    summary = ensure_dict(report.get("summary"))
-    return {
-        "schema": report.get("schema"),
-        "ok": bool(report.get("ok", True)),
-        "gateStatus": ensure_dict(report.get("gate")).get("status") or summary.get("gateStatus"),
-        "severityCounts": _validation_delta_counts(report),
-        "findingCount": int(summary.get("findingCount") or len(report.get("findings") or [])),
-        "failedSourceCount": int(summary.get("failedSourceCount") or 0),
-        "generatedAt": report.get("generatedAt"),
-    }
 
 
-def _validation_delta_count_change(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
-    return {severity: int(after.get(severity, 0)) - int(before.get(severity, 0)) for severity in VALIDATION_DELTA_SEVERITIES}
 
 
-def _validation_delta_status(before: dict[str, Any], after: dict[str, Any], rollback: dict[str, Any]) -> str:
-    before_counts = ensure_dict(before.get("severityCounts"))
-    after_counts = ensure_dict(after.get("severityCounts"))
-    before_gate = str(before.get("gateStatus") or "")
-    after_gate = str(after.get("gateStatus") or "")
-    rollback_counts = ensure_dict(rollback.get("severityCounts"))
-    error_delta = int(after_counts.get("Error") or 0) - int(before_counts.get("Error") or 0)
-    warning_delta = int(after_counts.get("Warning") or 0) - int(before_counts.get("Warning") or 0)
-    suggestion_delta = int(after_counts.get("Suggestion") or 0) - int(before_counts.get("Suggestion") or 0)
-    if after_gate == "blocked" and before_gate != "blocked":
-        return "regressed"
-    if error_delta > 0 or warning_delta > 0:
-        return "regressed"
-    if error_delta < 0 or warning_delta < 0 or suggestion_delta < 0:
-        return "improved"
-    if rollback_counts and rollback_counts != before_counts:
-        return "rollback-drift"
-    return "unchanged"
 
 
-def _validation_delta_source_payload(report: dict[str, Any], source_name: str) -> dict[str, Any]:
-    source = ensure_dict(ensure_dict(report.get("sources")).get(source_name))
-    payload = ensure_dict(source.get("payload"))
-    return payload or ensure_dict(source.get("summary"))
-
-
-def _validation_delta_walk_dicts(value: Any):
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from _validation_delta_walk_dicts(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _validation_delta_walk_dicts(child)
-
-
-def _validation_delta_normalize_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "", value.lower())
-
-
-def _validation_delta_first_numeric(value: Any, names: tuple[str, ...]) -> int | float | None:
-    wanted = {_validation_delta_normalize_key(name) for name in names}
-    for entry in _validation_delta_walk_dicts(value):
-        for key, raw in entry.items():
-            if _validation_delta_normalize_key(str(key)) not in wanted or isinstance(raw, bool):
-                continue
-            if isinstance(raw, (int, float)):
-                return raw
-            if isinstance(raw, list):
-                return len(raw)
-            if isinstance(raw, str):
-                match = re.search(r"-?\d+(?:\.\d+)?", raw.replace(",", ""))
-                if match:
-                    number = float(match.group(0))
-                    return int(number) if number.is_integer() else number
-    return None
-
-
-def _validation_delta_first_text(value: Any, names: tuple[str, ...]) -> str | None:
-    wanted = {_validation_delta_normalize_key(name) for name in names}
-    for entry in _validation_delta_walk_dicts(value):
-        for key, raw in entry.items():
-            if _validation_delta_normalize_key(str(key)) in wanted and raw is not None:
-                text = str(raw).strip()
-                if text:
-                    return text
-    return None
-
-
-def _validation_delta_platform_profile(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "rank": _validation_delta_first_text(payload, ("rank", "performanceRank", "overallRank", "rating")) or "unknown",
-        "triangles": _validation_delta_first_numeric(payload, ("triangleCount", "triangles", "polygonCount", "polygons")),
-        "materialSlots": _validation_delta_first_numeric(payload, ("materialSlotCount", "slotCount", "materialCount")),
-        "skinnedMeshes": _validation_delta_first_numeric(payload, ("skinnedMeshCount", "skinnedMeshes", "skinnedMeshRendererCount")),
-        "textureMemoryBytes": _validation_delta_first_numeric(payload, ("textureMemoryBytes", "textureBytes", "vramBytes", "totalTextureBytes", "totalVRAMBytes")),
-        "downloadSizeBytes": _validation_delta_first_numeric(payload, ("downloadSizeBytes", "downloadSize", "compressedSizeBytes", "buildSizeBytes", "fileSizeBytes")),
-        "uncompressedSizeBytes": _validation_delta_first_numeric(payload, ("uncompressedSizeBytes", "uncompressedSize", "uncompressedBytes", "bundleUncompressedSizeBytes")),
-        "physBoneComponents": _validation_delta_first_numeric(payload, ("physBoneCount", "physBones", "physBoneComponents")),
-        "physBoneAffectedTransforms": _validation_delta_first_numeric(payload, ("physBoneAffectedTransforms", "affectedTransforms")),
-    }
-
-
-def _validation_delta_parameter_profile(report: dict[str, Any]) -> dict[str, Any]:
-    payload = _validation_delta_source_payload(report, "parameters")
-    parameter_items = _validation_delta_first_numeric(payload, ("totalParameters", "totalCustomParameters", "parameterCount", "customParameterCount"))
-    return {
-        "syncedBits": _validation_delta_first_numeric(payload, ("syncedBits", "bitsUsed", "totalEstimatedCost", "totalCost", "parameterCost")),
-        "totalCustomParameters": parameter_items,
-    }
-
-
-def _validation_delta_profile_snapshot(report: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "pc": _validation_delta_platform_profile(_validation_delta_source_payload(report, "performance_pc")),
-        "quest": _validation_delta_platform_profile(_validation_delta_source_payload(report, "performance_quest")),
-        "parameters": _validation_delta_parameter_profile(report),
-    }
-
-
-def _validation_delta_numeric_delta(before: Any, after: Any) -> int | float | None:
-    if before is None or after is None:
-        return None
-    if isinstance(before, (int, float)) and isinstance(after, (int, float)):
-        delta = after - before
-        return int(delta) if isinstance(delta, float) and delta.is_integer() else delta
-    return None
-
-
-def _validation_delta_platform_delta(before: dict[str, Any], after: dict[str, Any], rollback: dict[str, Any]) -> dict[str, Any]:
-    numeric_keys = [
-        "triangles",
-        "materialSlots",
-        "skinnedMeshes",
-        "textureMemoryBytes",
-        "downloadSizeBytes",
-        "uncompressedSizeBytes",
-        "physBoneComponents",
-        "physBoneAffectedTransforms",
-    ]
-    return {
-        "rankBefore": before.get("rank") or "unknown",
-        "rankAfter": after.get("rank") or "unknown",
-        "rankRollback": rollback.get("rank") if rollback else None,
-        "rankChanged": (before.get("rank") or "unknown") != (after.get("rank") or "unknown"),
-        "rollbackRankMatchesBefore": bool(rollback) and (rollback.get("rank") or "unknown") == (before.get("rank") or "unknown"),
-        "metricsDelta": {key: _validation_delta_numeric_delta(before.get(key), after.get(key)) for key in numeric_keys},
-        "rollbackMetricsMatchBefore": bool(rollback)
-        and all(rollback.get(key) == before.get(key) for key in numeric_keys if before.get(key) is not None or rollback.get(key) is not None),
-    }
-
-
-def _validation_delta_profile_diff(before_report: dict[str, Any], after_report: dict[str, Any], rollback_report: dict[str, Any]) -> dict[str, Any]:
-    before = _validation_delta_profile_snapshot(before_report)
-    after = _validation_delta_profile_snapshot(after_report)
-    rollback = _validation_delta_profile_snapshot(rollback_report) if rollback_report else {}
-    before_params = ensure_dict(before.get("parameters"))
-    after_params = ensure_dict(after.get("parameters"))
-    rollback_params = ensure_dict(rollback.get("parameters"))
-    parameter_delta = {
-        "syncedBitsDelta": _validation_delta_numeric_delta(before_params.get("syncedBits"), after_params.get("syncedBits")),
-        "totalCustomParametersDelta": _validation_delta_numeric_delta(before_params.get("totalCustomParameters"), after_params.get("totalCustomParameters")),
-        "rollbackMatchesBefore": bool(rollback_report)
-        and rollback_params.get("syncedBits") == before_params.get("syncedBits")
-        and rollback_params.get("totalCustomParameters") == before_params.get("totalCustomParameters"),
-    }
-    return {
-        "readOnly": True,
-        "before": before,
-        "after": after,
-        "rollback": rollback,
-        "pc": _validation_delta_platform_delta(ensure_dict(before.get("pc")), ensure_dict(after.get("pc")), ensure_dict(rollback.get("pc"))),
-        "quest": _validation_delta_platform_delta(ensure_dict(before.get("quest")), ensure_dict(after.get("quest")), ensure_dict(rollback.get("quest"))),
-        "parameters": parameter_delta,
-    }
-
-
-def build_optimization_validation_delta_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    before_report = ensure_dict(params.get("beforeValidation") or params.get("before_validation") or params.get("before") or {})
-    after_report = ensure_dict(params.get("afterValidation") or params.get("after_validation") or params.get("after") or {})
-    rollback_report = ensure_dict(params.get("rollbackValidation") or params.get("rollback_validation") or params.get("rollback") or {})
-    before = _validation_delta_summary(before_report)
-    after = _validation_delta_summary(after_report)
-    rollback = _validation_delta_summary(rollback_report) if rollback_report else {}
-    before_findings = _validation_delta_findings(before_report)
-    after_findings = _validation_delta_findings(after_report)
-    rollback_findings = _validation_delta_findings(rollback_report) if rollback_report else {}
-    before_sections = _validation_delta_sections(before_report)
-    after_sections = _validation_delta_sections(after_report)
-    section_deltas = []
-    for section_id in sorted(set(before_sections) | set(after_sections)):
-        before_section = before_sections.get(section_id) or {"id": section_id, "counts": {}}
-        after_section = after_sections.get(section_id) or {"id": section_id, "counts": {}}
-        section_deltas.append(
-            {
-                "id": section_id,
-                "name": after_section.get("name") or before_section.get("name") or section_id,
-                "beforeStatus": before_section.get("status"),
-                "afterStatus": after_section.get("status"),
-                "severityDelta": _validation_delta_count_change(
-                    ensure_dict(before_section.get("counts")),
-                    ensure_dict(after_section.get("counts")),
-                ),
-            }
-        )
-    added_keys = sorted(set(after_findings) - set(before_findings))
-    removed_keys = sorted(set(before_findings) - set(after_findings))
-    persistent_keys = sorted(set(before_findings) & set(after_findings))
-    rollback_matches_before = bool(rollback_report) and rollback.get("severityCounts") == before.get("severityCounts") and rollback.get("gateStatus") == before.get("gateStatus")
-    status = _validation_delta_status(before, after, rollback)
-    profile_diff = _validation_delta_profile_diff(before_report, after_report, rollback_report)
-    return {
-        "ok": status not in {"regressed", "rollback-drift"},
-        "schema": "vrcforge.optimization.validation_delta.v1",
-        "readOnly": True,
-        "noProjectWrites": True,
-        "generatedAt": _validation_now(),
-        "optimizerTool": str(params.get("optimizerTool") or params.get("optimizer_tool") or ""),
-        "approvalId": str(params.get("approvalId") or params.get("approval_id") or ""),
-        "checkpointId": str(params.get("checkpointId") or params.get("checkpoint_id") or ""),
-        "status": status,
-        "before": before,
-        "after": after,
-        "rollback": rollback,
-        "severityDelta": _validation_delta_count_change(
-            ensure_dict(before.get("severityCounts")),
-            ensure_dict(after.get("severityCounts")),
-        ),
-        "findingDelta": {
-            "addedCount": len(added_keys),
-            "removedCount": len(removed_keys),
-            "persistentCount": len(persistent_keys),
-            "added": [after_findings[key] for key in added_keys[:50]],
-            "removed": [before_findings[key] for key in removed_keys[:50]],
-        },
-        "profileDiff": profile_diff,
-        "parameterBudgetDelta": profile_diff.get("parameters"),
-        "sectionDeltas": section_deltas,
-        "rollbackProof": {
-            "provided": bool(rollback_report),
-            "matchesBeforeSeverityAndGate": rollback_matches_before,
-            "remainingFindingCount": len(rollback_findings) if rollback_report else None,
-        },
-        "policy": {
-            "deltaIsReadOnly": True,
-            "optimizerApplyStillRequiresApprovalCheckpointValidationRollback": True,
-            "externalAgentsMayGenerateReports": True,
-            "externalAgentsMustNotApplyDirectly": True,
-        },
-    }
-
-
-def optimizer_proof_root() -> Path:
-    return ARTIFACTS_DIR / "optimizer-apply-smoke"
-
-
-def _optimizer_proof_run_id(value: str) -> str:
-    run_id = str(value or "").strip()
-    if run_id.endswith(".json"):
-        run_id = run_id[:-5]
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,160}", run_id):
-        raise ValueError("Invalid optimizer proof run id.")
-    return run_id
-
-
-def _path_is_under(path: Path, root: Path) -> bool:
-    try:
-        path.resolve().relative_to(root.resolve())
-        return True
-    except ValueError:
-        return False
-
-
-def _optimizer_proof_path(run_id: str) -> Path:
-    root = optimizer_proof_root().resolve()
-    path = (root / f"{_optimizer_proof_run_id(run_id)}.json").resolve()
-    if not _path_is_under(path, root):
-        raise ValueError("Invalid optimizer proof path.")
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(path)
-    return path
-
-
-def _read_optimizer_proof_file(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Optimizer proof is not valid JSON: {path.name}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError(f"Optimizer proof JSON must be an object: {path.name}")
-    return payload
-
-
-def _optimizer_proof_steps(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    steps = report.get("steps")
-    if not isinstance(steps, list):
-        return {}
-    mapped: dict[str, dict[str, Any]] = {}
-    for step in steps:
-        if isinstance(step, dict):
-            name = str(step.get("name") or "")
-            if name:
-                mapped[name] = step
-    return mapped
-
-
-def _optimizer_proof_latest_delta(report: dict[str, Any]) -> dict[str, Any]:
-    steps = _optimizer_proof_steps(report)
-    return steps.get("validation.delta_after_rollback") or steps.get("validation.delta_after_apply") or {}
-
-
-def _optimizer_proof_visual_summary(report: dict[str, Any], run_id: str) -> dict[str, Any]:
-    visual = ensure_dict(report.get("visualRegression"))
-    screenshots = ensure_dict(visual.get("screenshots"))
-    screenshot_summary: dict[str, dict[str, Any]] = {}
-    for stage, raw in screenshots.items():
-        stage_name = str(stage or "")
-        entry = ensure_dict(raw)
-        summarized = {
-            "stage": stage_name,
-            "captured": bool(entry.get("captured")),
-            "artifactOk": bool(entry.get("artifactOk")),
-            "exists": bool(entry.get("exists")),
-            "size": entry.get("size"),
-            "sha256": entry.get("sha256"),
-            "warning": entry.get("warning") or entry.get("error"),
-        }
-        image_path = Path(str(entry.get("artifactImagePath") or "")) if entry.get("artifactImagePath") else None
-        if image_path and image_path.exists() and _path_is_under(image_path, ARTIFACTS_DIR):
-            summarized["imageUrl"] = to_artifact_url(str(image_path)) or to_runtime_artifact_url(str(image_path))
-        screenshot_summary[stage_name] = summarized
-    return {
-        "schema": visual.get("schema"),
-        "status": visual.get("status") or "unavailable",
-        "proofPassed": bool(visual.get("proofPassed")),
-        "requiresHumanReview": bool(visual.get("requiresHumanReview")),
-        "scoring": ensure_dict(visual.get("scoring")) or {"mode": "not-run"},
-        "screenshots": screenshot_summary,
-    }
-
-
-def summarize_optimizer_proof(path: Path, report: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload = report or _read_optimizer_proof_file(path)
-    run_id = path.stem
-    summary = ensure_dict(payload.get("summary"))
-    steps = _optimizer_proof_steps(payload)
-    delta = _optimizer_proof_latest_delta(payload)
-    profile_diff = ensure_dict(delta.get("profileDiff"))
-    parameter_delta = ensure_dict(delta.get("parameterBudgetDelta"))
-    checkpoint_step = ensure_dict(steps.get("optimizer.verify_checkpoint_delta"))
-    rollback_proof = ensure_dict(delta.get("rollbackProof"))
-    modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
-    profile_unavailable = not bool(profile_diff)
-    return {
-        "runId": run_id,
-        "schema": payload.get("schema"),
-        "ok": bool(payload.get("ok")),
-        "status": summary.get("status") or ("passed" if payload.get("ok") else "failed"),
-        "tool": summary.get("tool"),
-        "checkpointId": summary.get("checkpointId"),
-        "rollbackDone": bool(summary.get("rollbackDone") or payload.get("rollbackDone")),
-        "changedFileCount": checkpoint_step.get("changedFileCount"),
-        "failedSteps": summary.get("failedSteps") if isinstance(summary.get("failedSteps"), list) else [],
-        "startedAt": payload.get("startedAt"),
-        "finishedAt": payload.get("finishedAt"),
-        "modifiedAt": modified,
-        "visualRegression": _optimizer_proof_visual_summary(payload, run_id),
-        "rollbackProof": rollback_proof,
-        "profileDiff": profile_diff,
-        "profileDiffUnavailable": profile_unavailable,
-        "parameterBudgetDelta": parameter_delta,
-        "reportPath": str(path),
-    }
-
-
-def list_optimizer_proofs_sync(limit: int = 10) -> dict[str, Any]:
-    safe_limit = max(1, min(int(limit or 10), 50))
-    root = optimizer_proof_root()
-    proofs: list[dict[str, Any]] = []
-    if root.exists():
-        files = sorted(root.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
-        for path in files[:safe_limit]:
-            try:
-                proofs.append(summarize_optimizer_proof(path))
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                proofs.append(
-                    {
-                        "runId": path.stem,
-                        "ok": False,
-                        "status": "unreadable",
-                        "modifiedAt": datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(),
-                        "error": str(exc),
-                    }
-                )
-    return {
-        "ok": True,
-        "schema": "vrcforge.optimization.proof_index.v1",
-        "readOnly": True,
-        "artifactRoot": str(root),
-        "count": len(proofs),
-        "proofs": proofs,
-    }
-
-
-def read_optimizer_proof_sync(run_id: str) -> dict[str, Any]:
-    path = _optimizer_proof_path(run_id)
-    report = _read_optimizer_proof_file(path)
-    return {
-        "ok": True,
-        "schema": "vrcforge.optimization.proof_detail.v1",
-        "readOnly": True,
-        "proof": summarize_optimizer_proof(path, report),
-        "report": report,
-    }
-
-
-def optimizer_proof_screenshot_path(run_id: str, stage: str) -> Path:
-    stage_name = str(stage or "").strip()
-    if not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", stage_name):
-        raise ValueError("Invalid optimizer proof screenshot stage.")
-    report = _read_optimizer_proof_file(_optimizer_proof_path(run_id))
-    screenshot = ensure_dict(ensure_dict(ensure_dict(report.get("visualRegression")).get("screenshots")).get(stage_name))
-    path_value = str(screenshot.get("artifactImagePath") or "").strip()
-    if not path_value:
-        raise FileNotFoundError(stage_name)
-    path = Path(path_value).resolve()
-    if not _path_is_under(path, ARTIFACTS_DIR):
-        raise PermissionError(path)
-    if not path.exists() or not path.is_file():
-        raise FileNotFoundError(path)
-    return path
-
-
-def build_optimization_plan_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    validation = build_optimization_validation_context(params)
-    return build_optimization_report(params, validation)
-
-
-def build_optimization_tool_sync(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    external_name = normalize_tool_name(tool_name)
-    if external_name in {"optimization.target.profile", "optimization.dependency.doctor"}:
-        validation: dict[str, Any] = {}
-    else:
-        validation = build_optimization_validation_context(params)
-    return build_optimization_tool_result(external_name, params, validation)
-
-
-def normalize_optimization_apply_request_name(tool_name: str) -> str:
-    value = str(tool_name or "").strip()
-    if value in OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL:
-        return value
-    definition = OPTIMIZATION_APPLY_REQUEST_BY_GATEWAY.get(value)
-    if definition:
-        return str(definition["externalName"])
-    aliases = {
-        "lac": "optimization.lac.apply-request",
-        "lac_profile": "optimization.lac.apply-request",
-        "aao": "optimization.aao.trace-apply-request",
-        "aao_trace": "optimization.aao.trace-apply-request",
-        "ttt": "optimization.ttt.atlas-apply-request",
-        "textrans": "optimization.ttt.atlas-apply-request",
-        "textrans_tool": "optimization.ttt.atlas-apply-request",
-        "ma2bt": "optimization.ma2bt.convert-apply-request",
-        "ma2bt_pro": "optimization.ma2bt.convert-apply-request",
-        "meshia": "optimization.meshia.simplify-apply-request",
-        "vrcfury_parameter": "optimization.vrcfury.parameter-compressor-apply-request",
-        "vrcfury_parameter_compressor": "optimization.vrcfury.parameter-compressor-apply-request",
-        "vrcfury_direct_tree": "optimization.vrcfury.direct-tree-apply-request",
-        "hidden_body_cut": "optimization.aao.hidden-body-cut-apply-request",
-        "aao_hidden_body_cut": "optimization.aao.hidden-body-cut-apply-request",
-        "physbone_cleanup": "optimization.aao.physbone-cleanup-apply-request",
-        "aao_physbone_cleanup": "optimization.aao.physbone-cleanup-apply-request",
-    }
-    key = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
-    if key in aliases:
-        return aliases[key]
-    raise ValueError(f"Unknown optimization apply-request tool: {tool_name}")
-
-
-def _normalize_optimizer_profile_id(value: Any) -> str:
-    raw = str(value or "pc_conservative").strip().lower()
-    key = re.sub(r"[^a-z0-9]+", "_", raw).strip("_")
-    aliases = {
-        "conservative": "pc_conservative",
-        "conservative_pc": "pc_conservative",
-        "pc_conservative": "pc_conservative",
-        "medium": "pc_medium",
-        "balanced": "balanced",
-        "balanced_pc": "balanced_pc",
-        "pc_medium": "pc_medium",
-        "high_quality": "high_quality",
-        "quality": "high_quality",
-        "custom": "custom",
-    }
-    return aliases.get(key, key or "pc_conservative")
-
-
-def _option_string_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item or "").strip()]
-    if isinstance(value, tuple):
-        return [str(item).strip() for item in value if str(item or "").strip()]
-    text = str(value or "").strip()
-    return [text] if text else []
-
-
-def _confirmed_ttt_material_paths(params: dict[str, Any], options: dict[str, Any]) -> list[str]:
-    values: list[str] = []
-    for key in (
-        "atlasTargetMaterials",
-        "materialPaths",
-        "materials",
-        "targetMaterialPaths",
-        "confirmedMaterialPaths",
-        "userConfirmedMaterialPaths",
-    ):
-        values.extend(_option_string_list(options.get(key)))
-        values.extend(_option_string_list(params.get(key)))
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        normalized = value.replace("\\", "/").strip()
-        key = normalized.lower()
-        if normalized and key not in seen:
-            seen.add(key)
-            result.append(normalized)
-    return result
-
-
-def _meshia_renderer_path(params: dict[str, Any], options: dict[str, Any]) -> str:
-    return str(
-        options.get("rendererPath")
-        or options.get("targetRendererPath")
-        or params.get("rendererPath")
-        or params.get("targetRendererPath")
-        or params.get("targetPath")
-        or ""
-    ).strip()
-
-
-def _meshia_relative_vertex_count(profile: str, options: dict[str, Any]) -> tuple[float, str]:
-    raw = (
-        options.get("relativeVertexCount")
-        or options.get("targetRatio")
-        or options.get("ratio")
-        or options.get("vertexRatio")
-        or ""
-    )
-    if raw == "":
-        return (0.9 if profile in {"pc_conservative", "conservative_pc"} else 0.85), ""
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return 0.0, "Meshia relativeVertexCount must be a number between 0.75 and 1.0 for the stable request path."
-    if value < 0.75 or value > 1.0:
-        return value, "Meshia stable request path only allows relativeVertexCount between 0.75 and 1.0. Lower ratios remain experimental."
-    return value, ""
-
-
-def _find_optimizer_dependency(dependency_doctor: dict[str, Any], optimizer_id: str) -> dict[str, Any]:
-    for dependency in dependency_doctor.get("dependencies") or []:
-        if str(dependency.get("id") or "") == optimizer_id:
-            return dependency
-    return {}
-
-
-def _optimization_preview_blocked_write_reason(definition: dict[str, Any]) -> str:
-    mode = str(definition.get("mode") or "")
-    if mode == "vrcfury_parameter_compressor":
-        return "The Parameter Compressor request is unavailable because this build did not register its validated writer path."
-    if mode == "vrcfury_direct_tree":
-        return "VRCFury Direct Tree is experimental: VRCForge exposes the request name but blocks writes until controller behavior and rollback proof exist."
-    if mode == "aao_hidden_body_cut":
-        return "AAO hidden body cut is experimental: request preview is blocked until manual occlusion evidence, visual confirmation, validation delta, and rollback proof exist."
-    if mode == "aao_physbone_cleanup":
-        return "AAO PhysBone cleanup is experimental: request preview is blocked until motion behavior proof, validation delta, and rollback proof exist."
-    return "This optimizer apply path is still plan-only/experimental; VRCForge will not configure it automatically yet."
-
-
-def _optimization_preview_hard_gate(
-    definition: dict[str, Any],
-    dependency_status: str,
-    blocked_reasons: list[str],
-) -> dict[str, Any]:
-    rows = [
-        {
-            "id": "dependency.installed",
-            "label": "Optimizer dependency installed",
-            "required": True,
-            "status": "pass" if dependency_status == "installed" else "blocked",
-            "blockedReason": None if dependency_status == "installed" else "Install or repair the optimizer dependency first.",
-        },
-        {
-            "id": "rollback.required",
-            "label": "Rollback proof required",
-            "required": True,
-            "status": "pass",
-            "blockedReason": None,
-        },
-    ]
-    if not definition.get("writeSupported"):
-        rows.append(
-            {
-                "id": "experimental.writer_proof",
-                "label": "Experimental writer proof",
-                "required": True,
-                "status": "blocked",
-                "blockedReason": _optimization_preview_blocked_write_reason(definition),
-            }
-        )
-    if blocked_reasons:
-        rows.append(
-            {
-                "id": "preview.blocked_reasons",
-                "label": "Preview-specific blockers",
-                "required": True,
-                "status": "blocked",
-                "blockedReason": "; ".join(blocked_reasons),
-            }
-        )
-    blocking = [row for row in rows if row.get("required") and row.get("status") == "blocked"]
-    return {
-        "status": "blocked" if blocking else "pass",
-        "blockingCount": len(blocking),
-        "blockingIds": [str(row.get("id")) for row in blocking],
-        "rows": rows,
-    }
-
-
-def build_optimization_apply_request_preview_sync(params: dict[str, Any]) -> dict[str, Any]:
-    params = params or {}
-    tool = normalize_optimization_apply_request_name(str(params.get("tool") or params.get("externalName") or params.get("gatewayName") or ""))
-    definition = OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL[tool]
-    project_value = resolve_addon_project_path(params)
-    avatar_path = str(
-        params.get("source_avatar_path")
-        or params.get("sourceAvatarPath")
-        or params.get("avatar_path")
-        or params.get("avatarPath")
-        or ""
-    ).strip()
-    profile = _normalize_optimizer_profile_id(
-        params.get("profile") or params.get("targetProfile") or params.get("target_profile") or "pc_conservative"
-    )
-    options = ensure_dict(params.get("options") or {})
-    target_path = avatar_path
-    dependency_doctor = build_optimization_tool_result(
-        "optimization.dependency.doctor",
-        {"projectPath": project_value},
-        {},
-    ).get("result") or {}
-    dependency = _find_optimizer_dependency(dependency_doctor, str(definition["optimizerId"]))
-    package_ids = [str(item) for item in dependency.get("packageIds") or [] if str(item or "").strip()]
-    dependency_status = str(dependency.get("status") or "unknown")
-    install_plan = None
-    wants_install_plan = bool(
-        params.get("installMissingDependencies")
-        or params.get("install_missing_dependencies")
-        or params.get("allowAgentManagedDownload")
-        or dependency_status != "installed"
-    )
-    if package_ids and wants_install_plan:
-        install_plan = package_install_plan_sync(
-            {
-                "projectPath": project_value,
-                "packageId": package_ids[0],
-                "repository": dependency.get("vpmRepository") or "",
-                "allowAgentManagedDownload": bool(params.get("installMissingDependencies") or params.get("allowAgentManagedDownload")),
-            }
-        )
-    supported_write = bool(definition.get("writeSupported"))
-    stable_callable = bool(definition.get("stableCallable"))
-    supported_profiles = [str(item) for item in definition.get("supportedProfiles") or []]
-    blocked_reasons: list[str] = []
-    if not project_value:
-        blocked_reasons.append("Unity projectPath is required.")
-    if not avatar_path and supported_write:
-        blocked_reasons.append("avatarPath is required for supervised optimizer context and rollback proof.")
-    if dependency_status != "installed":
-        blocked_reasons.append(f"{dependency.get('label') or definition['optimizerId']} is {dependency_status}; install or repair it first.")
-    if not supported_write:
-        blocked_reasons.append(_optimization_preview_blocked_write_reason(definition))
-    if not stable_callable:
-        blocked_reasons.append("This optimizer is not yet part of the stable avatar optimization skill set.")
-    if supported_profiles and profile not in supported_profiles:
-        blocked_reasons.append(f"Profile '{profile}' is not enabled for stable delegated apply yet.")
-    mode = str(definition.get("mode") or "")
-    authoritative_preview: dict[str, Any] | None = None
-    apply_arguments: dict[str, Any] = {"projectPath": project_value}
-    if mode == "vrcfury_parameter_compressor":
-        source_scene_path = str(
-            options.get("sourceScenePath")
-            or options.get("source_scene_path")
-            or params.get("sourceScenePath")
-            or params.get("source_scene_path")
-            or ""
-        ).strip()
-        output_clone_name = str(
-            options.get("outputCloneName")
-            or options.get("output_clone_name")
-            or params.get("outputCloneName")
-            or params.get("output_clone_name")
-            or ""
-        ).strip()
-        if not source_scene_path:
-            blocked_reasons.append("sourceScenePath is required for the authoritative parameter build preview.")
-        if not avatar_path:
-            blocked_reasons.append("sourceAvatarPath (or avatarPath) is required for the authoritative parameter build preview.")
-        if not output_clone_name:
-            blocked_reasons.append("outputCloneName is required for the authoritative parameter build preview.")
-        target_path = avatar_path
-        if project_value and source_scene_path and avatar_path and output_clone_name:
-            try:
-                apply_arguments = build_parameter_bit_packing_wrapper_arguments(
-                    {
-                        "projectPath": project_value,
-                        "sourceScenePath": source_scene_path,
-                        "sourceAvatarPath": avatar_path,
-                        "outputCloneName": output_clone_name,
-                    }
-                )
-            except ValueError as exc:
-                blocked_reasons.append(str(exc))
-        if not blocked_reasons:
-            try:
-                authoritative_preview = preview_parameter_bit_packing_sync(
-                    {
-                        "projectPath": project_value,
-                        "sourceScenePath": source_scene_path,
-                        "sourceAvatarPath": avatar_path,
-                        "outputCloneName": output_clone_name,
-                    }
-                ).get("preview")
-            except (AgentGatewayError, AuthoritativeUnityWriteError, ValueError) as exc:
-                blocked_reasons.append(str(exc))
-    elif mode == "ttt_atlas":
-        material_paths = _confirmed_ttt_material_paths(params, options)
-        if not material_paths:
-            blocked_reasons.append("TexTransTool atlas setup requires user-confirmed material asset paths in options.atlasTargetMaterials.")
-        invalid_material_paths = [item for item in material_paths if not item.replace("\\", "/").startswith("Assets/")]
-        if invalid_material_paths:
-            blocked_reasons.append("TexTransTool material references must be Unity asset paths under Assets/.")
-        options = {**options, "atlasTargetMaterials": material_paths}
-    elif mode == "meshia_simplify":
-        renderer_path = _meshia_renderer_path(params, options)
-        if not renderer_path:
-            blocked_reasons.append("Meshia stable setup requires options.rendererPath for one user-selected low-risk Renderer object.")
-        target_path = renderer_path or avatar_path
-        ratio, ratio_error = _meshia_relative_vertex_count(profile, options)
-        if ratio_error:
-            blocked_reasons.append(ratio_error)
-        options = {**options, "rendererPath": renderer_path, "relativeVertexCount": ratio}
-    if mode != "vrcfury_parameter_compressor":
-        apply_arguments = {
-            "projectPath": project_value,
-            "avatarPath": avatar_path,
-            "targetPath": target_path,
-            "optimizerId": definition["optimizerId"],
-            "mode": definition["mode"],
-            "componentType": definition.get("componentType") or "",
-            "profile": profile,
-            "options": options,
-            "sourceApplyRequestTool": definition["externalName"],
-        }
-    return {
-        "ok": True,
-        "schema": "vrcforge.optimization.apply_request.v1",
-        "externalName": definition["externalName"],
-        "gatewayName": definition["gatewayName"],
-        "targetTool": definition["targetTool"],
-        "versionStage": definition["versionStage"],
-        "directApplyExposed": False,
-        "requestOnly": True,
-        "requiresApproval": True,
-        "requiresCheckpoint": True,
-        "requiresValidation": True,
-        "requiresRollbackProof": True,
-        "hardGate": _optimization_preview_hard_gate(definition, dependency_status, blocked_reasons),
-        "rollbackRequirements": {
-            "checkpointScope": ["Assets", "Packages", "ProjectSettings"],
-            "restoreTool": "vrcforge_restore_checkpoint",
-            "postRestoreValidationRequired": True,
-            "generatedResidueCheckRequired": True,
-        },
-        "writeSupported": supported_write,
-        "stableCallable": stable_callable,
-        "supportedProfiles": supported_profiles,
-        "readyToRequest": not blocked_reasons,
-        "blockedReasons": blocked_reasons,
-        "dependency": dependency,
-        "dependencyInstallPlan": install_plan,
-        "authoritativePreview": authoritative_preview,
-        "plan": build_optimization_tool_result(str(definition["planTool"]), params, {}),
-        "applyArguments": apply_arguments,
-        "policy": {
-            "oneOptimizerStepAtATime": True,
-            "noDirectExternalApply": True,
-            "noOneClickAllOptimizers": True,
-            "checkpointValidationRollbackRequired": True,
-        },
-    }
-
-
-def request_optimization_apply_sync(params: dict[str, Any], agent_name: str = "external-agent") -> dict[str, Any]:
-    params = params or {}
-    preview = build_optimization_apply_request_preview_sync(params)
-    install_missing = bool(params.get("installMissingDependencies") or params.get("install_missing_dependencies"))
-    dependency = ensure_dict(preview.get("dependency"))
-    package_ids = [str(item) for item in dependency.get("packageIds") or [] if str(item or "").strip()]
-    if preview.get("blockedReasons") and install_missing and package_ids:
-        install_plan = ensure_dict(preview.get("dependencyInstallPlan"))
-        if not install_plan.get("canExecuteCommandInstall"):
-            return {
-                "ok": False,
-                "status": "blocked",
-                "error": "Dependency is missing and no supported package-manager CLI is available for a supervised install request.",
-                "preview": preview,
-                "installPlan": install_plan,
-            }
-        return AGENT_GATEWAY.create_apply_request(
-            {
-                "target_tool": "vrcforge_install_vpm_package",
-                "arguments": {
-                    "projectPath": preview["applyArguments"].get("projectPath"),
-                    "packageId": package_ids[0],
-                    "repository": install_plan.get("repository") or dependency.get("vpmRepository") or "",
-                    "includePrerelease": bool(params.get("includePrerelease") or params.get("include_prerelease") or params.get("prerelease")),
-                },
-                "reason": f"Install dependency for {preview['externalName']} before optimizer configuration.",
-                "preview": install_plan,
-                "agent_name": agent_name,
-                "requires_explicit_approval": True,
-                "explicit_approval_reason": "Optimizer dependency install requests require explicit user approval even when global auto mode is enabled.",
-            },
-            internal_wrapper=True,
-        )
-    if not preview.get("readyToRequest"):
-        return {"ok": False, "status": "blocked", "preview": preview, "error": "; ".join(preview.get("blockedReasons") or [])}
-    return AGENT_GATEWAY.create_apply_request(
-        {
-            "target_tool": str(preview["targetTool"]),
-            "arguments": preview["applyArguments"],
-            "reason": f"Request supervised optimizer configuration for {preview['externalName']}.",
-            "preview": preview,
-            "agent_name": agent_name,
-            "requires_explicit_approval": True,
-            "never_auto_approve": str(ensure_dict(preview.get("applyArguments")).get("toolName") or "") == PARAMETER_BIT_PACKING_TOOL,
-            "explicit_approval_reason": "Optimizer apply requests require explicit user approval even when global auto mode is enabled.",
-        },
-        internal_wrapper=True,
-    )
 
 
 def _lac_component_properties(profile: str) -> dict[str, Any]:
-    profile_id = _normalize_optimizer_profile_id(profile)
+    profile_id = normalize_optimizer_profile_id(profile)
     if profile_id in {"pc_conservative", "high_quality"}:
         return {
             "Preset": "HighQuality",
@@ -21510,7 +20626,7 @@ def _optimizer_component_properties(optimizer_id: str, profile: str, options: di
             "maResponsivePrefixes": ["MA Responsive: ", "RC MA Responsive: "],
         }
     if optimizer_id == "textrans_tool":
-        material_paths = _confirmed_ttt_material_paths({}, options)
+        material_paths = confirmed_ttt_material_paths({}, options)
         properties: dict[str, Any] = {}
         if material_paths:
             properties["AtlasTargetMaterials"] = material_paths
@@ -21519,7 +20635,10 @@ def _optimizer_component_properties(optimizer_id: str, profile: str, options: di
             properties["AllMaterialMergeReference"] = reference.replace("\\", "/")
         return properties
     if optimizer_id == "meshia":
-        ratio, _ratio_error = _meshia_relative_vertex_count(_normalize_optimizer_profile_id(profile), options)
+        ratio, _ratio_error = meshia_relative_vertex_count(
+            normalize_optimizer_profile_id(profile),
+            options,
+        )
         return {
             "target": {
                 "Kind": "RelativeVertexCount",
@@ -21624,7 +20743,9 @@ def prepare_configure_optimizer_component_request(
     if not optimizer_id or not mode or not avatar_path or not target_path or not component_type:
         raise RuntimeError("optimizerId, mode, avatarPath, targetPath, and componentType are required.")
     project_path = resolve_addon_project_path(params)
-    profile = _normalize_optimizer_profile_id(params.get("profile") or "pc_conservative")
+    profile = normalize_optimizer_profile_id(
+        params.get("profile") or "pc_conservative"
+    )
     options = ensure_dict(params.get("options") or {})
     properties = _optimizer_component_properties(optimizer_id, profile, options)
     if not properties:
@@ -23378,8 +22499,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
     AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, SDK, avatar, hierarchy, parameters, menu, FX, bindings, materials, performance, plugin, MCP, package, and residue checks.", "read/debug", build_validation_report_sync)
     AGENT_GATEWAY.register_tool("vrcforge_build_test_readiness", "Run the read-only Build & Test readiness gate without building, publishing, or repairing automatically.", "read/debug", build_test_readiness_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_optimization_plan", "Build the read-only vrcforge.optimization.v1 model optimization dashboard plan and recommended step order without modifying the Unity project.", "plan/preview", build_optimization_plan_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_optimization_validation_delta", "Compare before/after/rollback vrcforge.validation.v1 reports for one optimizer step without writing project files.", "read/debug", build_optimization_validation_delta_sync)
+    AGENT_GATEWAY.register_tool("vrcforge_optimization_plan", "Build the read-only vrcforge.optimization.v1 model optimization dashboard plan and recommended step order without modifying the Unity project.", "plan/preview", OPTIMIZATION_WORKFLOWS.build_plan)
+    AGENT_GATEWAY.register_tool("vrcforge_optimization_validation_delta", "Compare before/after/rollback vrcforge.validation.v1 reports for one optimizer step without writing project files.", "read/debug", OPTIMIZATION_WORKFLOWS.build_validation_delta)
     for definition in OPTIMIZATION_TOOL_DEFINITIONS:
         gateway_tool = definition["gatewayName"]
         external_tool = definition["externalName"]
@@ -23387,7 +22508,10 @@ def register_agent_gateway_tools() -> None:
             gateway_tool,
             definition["description"],
             definition["category"],
-            lambda params, _tool=external_tool: build_optimization_tool_sync(_tool, params or {}),
+            lambda params, _tool=external_tool: OPTIMIZATION_WORKFLOWS.build_tool(
+                _tool,
+                params or {},
+            ),
         )
     for definition in STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS:
         gateway_tool = str(definition["gatewayName"])
@@ -23396,7 +22520,7 @@ def register_agent_gateway_tools() -> None:
             gateway_tool,
             str(definition["description"]),
             "supervised-write",
-            lambda params, _tool=external_tool: request_optimization_apply_sync(
+            lambda params, _tool=external_tool: OPTIMIZATION_WORKFLOWS.request_apply(
                 {**ensure_dict(params or {}), "tool": _tool},
                 agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
             ),
@@ -23998,6 +23122,50 @@ if DASHBOARD_API_CONFIG is None:
 
 if DASHBOARD_STATE is None:
     DASHBOARD_STATE = load_initial_dashboard_state()
+
+
+def _preview_optimizer_parameter_bit_packing(
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    try:
+        return preview_parameter_bit_packing_sync(params)
+    except (AgentGatewayError, AuthoritativeUnityWriteError) as exc:
+        raise OptimizationApplyPreviewError(str(exc)) from exc
+
+
+OPTIMIZATION_APPLY_PREVIEWS = OptimizationApplyPreviewService(
+    OptimizationApplyPreviewPorts(
+        resolve_project_path=resolve_addon_project_path,
+        package_install_plan=package_install_plan_sync,
+        build_parameter_bit_packing_arguments=(
+            build_parameter_bit_packing_wrapper_arguments
+        ),
+        preview_parameter_bit_packing=_preview_optimizer_parameter_bit_packing,
+    )
+)
+OPTIMIZER_PROOFS = OptimizerProofStore(
+    OptimizerProofStorePorts(
+        artifact_root=ARTIFACTS_DIR,
+        to_artifact_url=to_artifact_url,
+        to_runtime_artifact_url=to_runtime_artifact_url,
+    )
+)
+OPTIMIZATION_WORKFLOWS = OptimizationWorkflowService(
+    OptimizationWorkflowPorts(
+        selected_project_path=lambda: (
+            DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
+        ),
+        build_validation_report=build_validation_report_sync,
+        build_report=build_optimization_report,
+        normalize_tool_name=normalize_tool_name,
+        build_tool_result=build_optimization_tool_result,
+        build_apply_preview=OPTIMIZATION_APPLY_PREVIEWS.build,
+        build_validation_delta=build_optimization_validation_delta,
+        create_apply_request=AGENT_GATEWAY.create_apply_request,
+        proofs=OPTIMIZER_PROOFS,
+        parameter_bit_packing_tool=PARAMETER_BIT_PACKING_TOOL,
+    )
+)
 
 AGENT_GATEWAY.checkpoint_project_root_resolver = lambda: DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
 AGENT_GATEWAY.checkpoint_prepare_handler = prepare_unity_checkpoint_sync
