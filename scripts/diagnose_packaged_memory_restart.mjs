@@ -335,6 +335,32 @@ function runSelfTest() {
   if (isLocalAcceptanceBuildPolicy({ ...local, allowDirty: true })) {
     throw new Error("self-test: dirty local policy was accepted.");
   }
+  const selected = onlyCandidateMatching(
+    {
+      candidates: [
+        { candidateId: "candidate-user", scope: "user", proposedText: "user fact", state: "accepted" },
+        { candidateId: "candidate-project-a", scope: "project", proposedText: "project A fact", state: "accepted" },
+        { candidateId: "candidate-project-b", scope: "project", proposedText: "project B fact", state: "accepted" },
+      ],
+    },
+    "accepted",
+    "project A self-test candidate",
+    { scope: "project", proposedText: "project A fact" },
+  );
+  if (selected.candidateId !== "candidate-project-a") {
+    throw new Error("self-test: exact scoped candidate selection failed.");
+  }
+  try {
+    onlyCandidateMatching(
+      { candidates: [{ candidateId: "candidate-user", scope: "user", proposedText: "user fact", state: "accepted" }] },
+      "accepted",
+      "missing project self-test candidate",
+      { scope: "project", proposedText: "project A fact" },
+    );
+    throw new Error("self-test: missing exact scoped candidate was accepted.");
+  } catch (error) {
+    if (!String(error?.message || error).includes("expected exactly one matching candidate")) throw error;
+  }
   console.log("Memory restart probe self-test passed");
 }
 
@@ -937,7 +963,10 @@ async function tauriInvoke(cdp, command, args) {
         );
         return { ok: true, value };
       } catch (error) {
-        return { ok: false, error: String(error?.stack || error) };
+        const detail = error?.stack
+          || error?.message
+          || (typeof error === "string" ? error : JSON.stringify(error));
+        return { ok: false, error: String(detail || "unknown error") };
       }
     })()`,
   );
@@ -986,6 +1015,7 @@ function summarizeReviewSnapshot(payload) {
       provider: String(payload?.provider || ""),
       model: String(payload?.model || ""),
     },
+    automaticCaptureEnabled: payload?.automaticCaptureEnabled !== false,
     unreadCount: Number(payload?.unreadCount || 0),
     runState: String(payload?.runStatus?.state || ""),
     runPhase: String(payload?.runStatus?.phase || ""),
@@ -1086,6 +1116,56 @@ function onlyCandidate(snapshot, expectedState, label) {
     throw new Error(`${label}: candidate state ${candidate.state || "<missing>"} did not equal ${expectedState}.`);
   }
   return candidate;
+}
+
+function onlyCandidateMatching(snapshot, expectedState, label, { scope, proposedText }) {
+  const matches = (Array.isArray(snapshot?.candidates) ? snapshot.candidates : []).filter((candidate) => (
+    candidate?.state === expectedState
+    && candidate?.scope === scope
+    && candidate?.proposedText === proposedText
+  ));
+  if (matches.length !== 1) {
+    throw new Error(`${label}: expected exactly one matching candidate, got ${matches.length}.`);
+  }
+  return matches[0];
+}
+
+async function configureAutomaticReviewScope(report, cdp, scope, projectRoot = "") {
+  const current = await fetchReviewPair(cdp, scope, projectRoot);
+  assertReviewPair(report, current, `automatic Memory ${scope} pre-configuration`);
+  if (current.rest.mode !== "off" || current.rest.automaticCaptureEnabled !== true) {
+    throw new Error("automatic Memory scope selection requires the default-on, provider-free Review configuration.");
+  }
+  const configured = await appApi("/api/app/agent/memory/review/config", {
+    method: "POST",
+    body: {
+      mode: "off",
+      cadenceMinutes: current.rest.config.cadenceMinutes || 1440,
+      inputCharCap: current.rest.config.inputCharCap || 12000,
+      tokenCap: current.rest.config.tokenCap || 2048,
+      costCapUsd: current.rest.config.costCapUsd || 0,
+      inputCostPerMillionUsd: current.rest.config.inputCostPerMillionUsd || 0,
+      outputCostPerMillionUsd: current.rest.config.outputCostPerMillionUsd || 0,
+      retentionDays: current.rest.config.retentionDays || 30,
+      automaticCaptureEnabled: current.rest.automaticCaptureEnabled,
+      provider: "",
+      model: "",
+      scope,
+      ...(projectRoot ? { projectRoot } : {}),
+      expectedRevision: current.rest.revision,
+    },
+  });
+  const pair = await fetchReviewPair(cdp, scope, projectRoot);
+  assertReviewPair(report, pair, `automatic Memory ${scope} configured visibility`);
+  if (
+    pair.rest.scope !== scope
+    || pair.rest.configuredProjectMatches !== true
+    || (scope === "project") !== pair.rest.projectBound
+    || pair.rest.revision !== Number(configured?.revision || 0)
+  ) {
+    throw new Error(`automatic Memory ${scope} Review scope configuration did not bind the requested scope.`);
+  }
+  return pair;
 }
 
 async function seedReviewChats({
@@ -1515,17 +1595,23 @@ async function runAutomaticMemoryPackagedProof(report, cdp, sourceVersion, provi
     addAssertion(report, "automatic Memory admitted a historical, credential, permission, or action negative");
   }
   const reviewBeforeRestart = {
-    user: await fetchReviewPair(cdp, "user"),
-    projectA: await fetchReviewPair(cdp, "project", projectARoot),
-    projectB: await fetchReviewPair(cdp, "project", projectBRoot),
+    user: await configureAutomaticReviewScope(report, cdp, "user"),
+    projectA: await configureAutomaticReviewScope(report, cdp, "project", projectARoot),
+    projectB: await configureAutomaticReviewScope(report, cdp, "project", projectBRoot),
   };
   for (const [name, pair] of Object.entries(reviewBeforeRestart)) {
     assertReviewPair(report, pair, `automatic Memory ${name} Review visibility`);
   }
   const candidates = {
-    user: onlyCandidate(reviewBeforeRestart.user.rest, "accepted", "automatic user accepted candidate"),
-    projectA: onlyCandidate(reviewBeforeRestart.projectA.rest, "accepted", "automatic project A accepted candidate"),
-    projectB: onlyCandidate(reviewBeforeRestart.projectB.rest, "accepted", "automatic project B accepted candidate"),
+    user: onlyCandidateMatching(reviewBeforeRestart.user.rest, "accepted", "automatic user accepted candidate", {
+      scope: "user", proposedText: userText,
+    }),
+    projectA: onlyCandidateMatching(reviewBeforeRestart.projectA.rest, "accepted", "automatic project A accepted candidate", {
+      scope: "project", proposedText: projectAText,
+    }),
+    projectB: onlyCandidateMatching(reviewBeforeRestart.projectB.rest, "accepted", "automatic project B accepted candidate", {
+      scope: "project", proposedText: projectBText,
+    }),
   };
   report.phases.automaticMemoryBeforeRestart = {
     sourceVersion,
@@ -1551,8 +1637,12 @@ async function undoAndEraseAutomaticMemory(report, cdp, candidates) {
     ["projectB", candidates.projectB, projectBRoot, "project"],
   ];
   for (const [name, candidate, projectRoot, scope] of scopes) {
-    const review = await fetchReviewPair(cdp, scope, projectRoot);
+    const review = await configureAutomaticReviewScope(report, cdp, scope, projectRoot);
     assertReviewPair(report, review, `automatic Memory ${name} before undo`);
+    onlyCandidateMatching(review.rest, "accepted", `automatic Memory ${name} before undo`, {
+      scope,
+      proposedText: candidate.proposedText,
+    });
     const undone = await tauriInvoke(cdp, "mutate_agent_memory_review_candidate", {
       request: {
         id: candidate.candidateId,
