@@ -424,16 +424,11 @@
     },
     {
       "id": "dashboard.package-install-root-owners",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_INSTALL_WORKFLOWS"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_INSTALL_APPROVED_WRITE"}
-      ],
       "facades": [
         {
           "source": "dashboard_server.py",
           "scope": "module",
           "methods": [
-            "read_agent_compile_errors",
             "detect_addon_package",
             "locate_vpm_package_managers",
             "prepare_vpm_package_install_request",
@@ -448,6 +443,17 @@
             "_build_package_install_fix_suggestions"
           ]
         }
+      ]
+    },
+    {
+      "id": "dashboard.package-install-typed-root-owners",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_MANAGER_DISCOVERY"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_DETECTION"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_INSTALL_WORKFLOWS"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "VPM_PACKAGE_INSTALL_PREPARER"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "VPM_PACKAGE_INSTALL_EXECUTOR"},
+        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_INSTALL_APPROVED_WRITE"}
       ]
     },
     {

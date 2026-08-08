@@ -47,6 +47,10 @@ from optimization_workflow_service import (
     OptimizerProofStore,
     OptimizerProofStorePorts,
 )
+from package_install_workflow_service import (
+    PackageInstallWorkflowPorts,
+    PackageInstallWorkflowService,
+)
 from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_collaboration_service import SubAgentCollaborationService
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
@@ -4118,31 +4122,36 @@ class DashboardServerTests(unittest.TestCase):
                 )
 
     def test_package_request_propagates_doctor_never_auto_policy(self) -> None:
-        plan = {
-            "ok": True,
-            "canExecuteCommandInstall": True,
-            "projectPath": r"C:\Unity\Avatar",
-            "packageId": "com.example.safe-package",
-            "repository": "",
-            "package": {},
-        }
-        with (
-            patch("dashboard_server.package_install_plan_sync", return_value=plan),
-            patch.object(
-                dashboard_server.AGENT_GATEWAY,
-                "create_apply_request",
-                return_value={"ok": True, "status": "pending"},
-            ) as create_request,
-        ):
-            result = dashboard_server.request_package_install_sync(
-                {
-                    "projectPath": r"C:\Unity\Avatar",
-                    "packageId": "com.example.safe-package",
-                    "requiresExplicitApproval": True,
-                    "neverAutoApprove": True,
-                },
-                agent_name="doctor",
+        create_request = Mock(return_value={"ok": True, "status": "pending"})
+        workflow = PackageInstallWorkflowService(
+            PackageInstallWorkflowPorts(
+                selected_project_path=lambda: r"C:\Unity\Avatar",
+                locate_managers=lambda: [
+                    {
+                        "name": "vrc-get",
+                        "source": "PATH",
+                        "supportsCommandInstall": True,
+                        "supportsUiHandoff": False,
+                    }
+                ],
+                detect_package=lambda _project, _package_ids: {"installed": False},
+                addon_frameworks={},
+                optimizer_dependencies=[],
+                summarize_debug=lambda value: value,
+                read_compile_errors=lambda _params: {"ok": True, "errors": []},
+                redact_support=lambda value: value,
+                create_apply_request=create_request,
             )
+        )
+        result = workflow.request_install(
+            {
+                "projectPath": r"C:\Unity\Avatar",
+                "packageId": "com.example.safe-package",
+                "requiresExplicitApproval": True,
+                "neverAutoApprove": True,
+            },
+            agent_name="doctor",
+        )
 
         self.assertEqual(result["status"], "pending")
         request = create_request.call_args.args[0]
@@ -4575,6 +4584,20 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertNotIn("diagnostic-alias.key", lowered)
 
     def test_validation_report_mvp_is_read_only_and_registered(self) -> None:
+        run_validation_source = dashboard_server._run_validation_source
+
+        def package_manager_observation(name, callback):
+            if name == "package_manager":
+                return {
+                    "ok": True,
+                    "payload": {
+                        "ok": True,
+                        "preferredCli": {"name": "vrc-get"},
+                        "managers": [{"name": "vrc-get"}],
+                    },
+                }
+            return run_validation_source(name, callback)
+
         with (
             patch(
                 "dashboard_server.read_agent_compile_errors",
@@ -4616,7 +4639,10 @@ class DashboardServerTests(unittest.TestCase):
                     },
                 },
             ),
-            patch("dashboard_server.package_manager_status_sync", return_value={"ok": True, "preferredCli": {"name": "vrc-get"}, "managers": [{"name": "vrc-get"}]}),
+            patch(
+                "dashboard_server._run_validation_source",
+                side_effect=package_manager_observation,
+            ),
             patch("dashboard_server.scan_avatar_items_sync", return_value={"ok": True, "itemCount": 4}),
             patch("dashboard_server.scan_generated_asset_residue_sync", return_value={"ok": True, "projectReadable": True, "residueCount": 0}),
         ):
@@ -4676,29 +4702,23 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["gate"]["status"], "pass")
 
     def test_build_test_readiness_is_read_only_gate(self) -> None:
-        validation = {
+        readiness = {
             "ok": False,
-            "schema": "vrcforge.validation.v1",
-            "summary": {"severityCounts": {"Error": 1, "Warning": 0, "Suggestion": 0, "Info": 2, "Ignored": 0}},
-            "sections": [
-                {"name": "Unity compile", "status": "error", "findingIds": ["compile.1"], "counts": {"Error": 1}},
-                {"name": "VRChat SDK", "status": "info", "findingIds": ["dependencies.2"], "counts": {"Info": 1}},
-                {"name": "Selected avatar", "status": "info", "findingIds": ["selected_avatar.3"], "counts": {"Info": 1}},
-                {"name": "MCP bridge", "status": "info", "findingIds": [], "counts": {"Info": 1}},
-                {"name": "Package manager", "status": "info", "findingIds": [], "counts": {"Info": 1}},
-            ],
+            "schema": "vrcforge.build_test_readiness.v1",
+            "readOnly": True,
+            "autoBuild": False,
+            "autoPublish": False,
+            "status": "blocked",
             "gate": {"enabled": True, "status": "blocked", "blockingFindingIds": ["compile.1"]},
+            "suggestedFixPlans": [
+                {
+                    "id": "resolve_validation_blockers",
+                    "requiresPreviewApprovalCheckpointValidationRollback": True,
+                }
+            ],
+            "rules": {"noUnattendedVrchatSdkPublish": True},
         }
-        diagnostics = {
-            "ok": True,
-            "schema": "vrcforge.package_install_diagnostics.v1",
-            "symptoms": [{"code": "compile"}],
-            "suggestedFixPlans": [{"id": "explain_compile_errors_request", "title": "Explain compile errors"}],
-        }
-        with (
-            patch("dashboard_server.build_validation_report_sync", return_value=validation),
-            patch("dashboard_server.diagnose_package_install_errors_sync", return_value=diagnostics),
-        ):
+        with patch("dashboard_server.build_test_readiness_sync", return_value=readiness):
             with TestClient(dashboard_server.app) as client:
                 response = client.post("/api/app/build-test/readiness", json={"avatarPath": "Scene/Avatar", "projectPath": r"C:\Private\UnityProject"})
 
@@ -13190,7 +13210,10 @@ namespace VRCForge.Editor
             "vrcforge_install_vpm_package"
         ]
         self.assertFalse(handler.requires_approved_execution_context)
-        self.assertIs(handler.request_preparer, dashboard_server.prepare_vpm_package_install_request)
+        self.assertIs(
+            handler.request_preparer,
+            dashboard_server.PACKAGE_INSTALL_APPROVED_WRITE.prepare,
+        )
 
     def test_safe_backup_is_approval_bound_to_one_canonical_core_call(self) -> None:
         self.assertNotIn("vrcforge_create_safe_backup", dashboard_server.AGENT_GATEWAY._tools)  # noqa: SLF001 - manifest boundary.
@@ -14129,20 +14152,36 @@ namespace VRCForge.Editor
             self.assertTrue(approval["preview"]["plan"]["rollbackProofRequired"])
 
     def test_package_install_diagnostics_is_read_only_and_suggests_supervised_fix(self) -> None:
-        with (
-            patch("dashboard_server.package_manager_status_sync", return_value={"ok": True, "preferredCli": {"name": "vrc-get"}}),
-            patch(
-                "dashboard_server.read_agent_compile_errors",
-                return_value={"ok": True, "result": {"payload": {"errors": [{"message": "CS0246 missing type"}]}}},
-            ),
-        ):
-            payload = dashboard_server.diagnose_package_install_errors_sync(
-                {
-                    "projectPath": "E:/unity/milltina",
-                    "packageId": "nadena.dev.modular-avatar",
-                    "stderrSummary": "network timeout then compilation failed CS0246",
-                }
+        workflow = PackageInstallWorkflowService(
+            PackageInstallWorkflowPorts(
+                selected_project_path=lambda: "E:/unity/milltina",
+                locate_managers=lambda: [
+                    {
+                        "name": "vrc-get",
+                        "source": "PATH",
+                        "supportsCommandInstall": True,
+                        "supportsUiHandoff": False,
+                    }
+                ],
+                detect_package=lambda _project, _package_ids: {"installed": False},
+                addon_frameworks={},
+                optimizer_dependencies=[],
+                summarize_debug=lambda value: value,
+                read_compile_errors=lambda _params: {
+                    "ok": True,
+                    "result": {"payload": {"errors": [{"message": "CS0246 missing type"}]}},
+                },
+                redact_support=lambda value: value,
+                create_apply_request=lambda _params, **_kwargs: {"ok": False},
             )
+        )
+        payload = workflow.diagnose_install(
+            {
+                "projectPath": "E:/unity/milltina",
+                "packageId": "nadena.dev.modular-avatar",
+                "stderrSummary": "network timeout then compilation failed CS0246",
+            }
+        )
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["schema"], "vrcforge.package_install_diagnostics.v1")
@@ -14155,28 +14194,43 @@ namespace VRCForge.Editor
         self.assertIn("retry_vpm_install_request", {item["id"] for item in payload["suggestedFixPlans"]})
 
     def test_package_install_diagnostics_does_not_scan_status_snapshot_as_log(self) -> None:
-        with (
-            patch(
-                "dashboard_server.package_manager_status_sync",
-                return_value={
-                    "ok": True,
-                    "preferredCli": {"name": "vrc-get"},
+        workflow = PackageInstallWorkflowService(
+            PackageInstallWorkflowPorts(
+                selected_project_path=lambda: "E:/unity/milltina",
+                locate_managers=lambda: [
+                    {
+                        "name": "vrc-get",
+                        "source": "PATH",
+                        "supportsCommandInstall": True,
+                        "supportsUiHandoff": False,
+                    }
+                ],
+                detect_package=lambda _project, package_ids: {
+                    "installed": True,
+                    "packageId": package_ids[0],
                     "sourceSummary": {"vpmManifest": True, "manifest": True},
                 },
-            ),
-            patch(
-                "dashboard_server.read_agent_compile_errors",
-                return_value={"ok": True, "result": {"payload": {"errors": []}}},
-            ),
-        ):
-            payload = dashboard_server.diagnose_package_install_errors_sync(
-                {
-                    "projectPath": "E:/unity/milltina",
-                    "packageId": "com.anatawa12.avatar-optimizer",
-                    "stdoutSummary": "",
-                    "stderrSummary": "",
-                }
+                addon_frameworks={
+                    "fixture": {"packageIds": ["com.example.fixture"]},
+                },
+                optimizer_dependencies=[],
+                summarize_debug=lambda value: value,
+                read_compile_errors=lambda _params: {
+                    "ok": True,
+                    "result": {"payload": {"errors": []}},
+                },
+                redact_support=lambda value: value,
+                create_apply_request=lambda _params, **_kwargs: {"ok": False},
             )
+        )
+        payload = workflow.diagnose_install(
+            {
+                "projectPath": "E:/unity/milltina",
+                "packageId": "com.anatawa12.avatar-optimizer",
+                "stdoutSummary": "",
+                "stderrSummary": "",
+            }
+        )
 
         self.assertTrue(payload["ok"])
         self.assertEqual({symptom["code"] for symptom in payload["symptoms"]}, {"unknown"})

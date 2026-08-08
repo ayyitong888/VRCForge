@@ -17,6 +17,12 @@ from optimization_service import (
     build_optimization_tool_result,
 )
 from optimization_workflow_service import OptimizationWorkflowService
+from package_install_workflow_service import (
+    PackageInstallWorkflowPorts,
+    PackageInstallWorkflowService,
+    VpmPackageInstallExecutionPorts,
+    VpmPackageInstallExecutor,
+)
 
 
 def make_unity_project(root: Path) -> None:
@@ -33,6 +39,42 @@ def install_package(root: Path, package_id: str, version: str = "1.0.0") -> None
     (package_dir / "package.json").write_text(
         f'{{"name":"{package_id}","version":"{version}"}}',
         encoding="utf-8",
+    )
+
+
+def package_workflow_for_test(
+    project: Path,
+    managers: list[dict],
+    create_apply_request=lambda params, **_kwargs: params,
+) -> PackageInstallWorkflowService:
+    return PackageInstallWorkflowService(
+        PackageInstallWorkflowPorts(
+            selected_project_path=lambda: str(project),
+            locate_managers=lambda: managers,
+            detect_package=dashboard_server.PACKAGE_DETECTION.detect,
+            addon_frameworks=dashboard_server.ADDON_FRAMEWORKS,
+            optimizer_dependencies=dashboard_server.OPTIMIZER_DEPENDENCIES,
+            summarize_debug=lambda value: value,
+            read_compile_errors=lambda _params: {"ok": True, "errors": []},
+            redact_support=lambda value: value,
+            create_apply_request=create_apply_request,
+        )
+    )
+
+
+def package_executor_without_process(
+    calls: list[list[str]],
+) -> VpmPackageInstallExecutor:
+    def forbidden_process(argv: list[str], **_kwargs) -> object:
+        calls.append(list(argv))
+        raise AssertionError("unprepared execution must not start a process")
+
+    return VpmPackageInstallExecutor(
+        VpmPackageInstallExecutionPorts(
+            detect_package=dashboard_server.PACKAGE_DETECTION.detect,
+            process_environment=dict,
+            run_install_process=forbidden_process,
+        )
     )
 
 
@@ -1237,10 +1279,9 @@ def test_optimizer_profile_diff_requires_before_after_and_rollback_snapshots(tmp
 def test_package_install_plan_prefers_vcc_alcom_handoff_before_agent_download(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
-    monkeypatch.setattr(
-        dashboard_server,
-        "locate_vpm_package_managers",
-        lambda: [
+    workflow = package_workflow_for_test(
+        project,
+        [
             {
                 "name": "vcc",
                 "path": "C:/Program Files/VRChat Creator Companion/CreatorCompanion.exe",
@@ -1252,7 +1293,7 @@ def test_package_install_plan_prefers_vcc_alcom_handoff_before_agent_download(mo
         ],
     )
 
-    plan = dashboard_server.package_install_plan_sync(
+    plan = workflow.plan_install(
         {
             "projectPath": str(project),
             "packageId": "com.anatawa12.avatar-optimizer",
@@ -1271,10 +1312,7 @@ def test_package_install_plan_prefers_vcc_alcom_handoff_before_agent_download(mo
 def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypatch, tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     make_unity_project(project)
-    monkeypatch.setattr(
-        dashboard_server,
-        "locate_vpm_package_managers",
-        lambda: [
+    managers = [
             {
                 "name": "vrc-get",
                 "path": "C:/tools/vrc-get.exe",
@@ -1284,8 +1322,7 @@ def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypa
                 "supportsUiHandoff": False,
                 "source": "vrcforge-managed",
             }
-        ],
-    )
+        ]
     captured: dict[str, object] = {}
 
     def fake_create_apply_request(params, *, internal_wrapper=False):
@@ -1301,9 +1338,12 @@ def test_package_install_request_creates_checkpointed_approval_with_cli(monkeypa
             },
         }
 
-    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "create_apply_request", fake_create_apply_request)
-
-    payload = dashboard_server.request_package_install_sync(
+    workflow = package_workflow_for_test(
+        project,
+        managers,
+        fake_create_apply_request,
+    )
+    payload = workflow.request_install(
         {
             "projectPath": str(project),
             "packageId": "com.anatawa12.avatar-optimizer",
@@ -1327,38 +1367,7 @@ def test_vrc_get_install_rejects_unprepared_direct_execution(monkeypatch, tmp_pa
     make_unity_project(project)
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(
-        dashboard_server,
-        "locate_vpm_package_managers",
-        lambda: [
-            {
-                "name": "vrc-get",
-                "path": "C:/tools/vrc-get.exe",
-                "kind": "managed-cli",
-                "supportsCommandInstall": True,
-                "supportsUiHandoff": False,
-            }
-        ],
-    )
-
-    class Proc:
-        returncode = 0
-        stdout = "installed"
-        stderr = ""
-
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        return Proc()
-
-    monkeypatch.setattr(dashboard_server.subprocess, "run", fake_run)
-    refresh_calls: list[dict] = []
-    monkeypatch.setattr(
-        dashboard_server,
-        "refresh_asset_database_sync",
-        lambda params: refresh_calls.append(params) or {"ok": True},
-    )
-
-    result = dashboard_server.install_vpm_package_sync(
+    result = package_executor_without_process(calls).execute(
         {
             "projectPath": str(project),
             "packageId": "com.anatawa12.avatar-optimizer",
@@ -1369,7 +1378,6 @@ def test_vrc_get_install_rejects_unprepared_direct_execution(monkeypatch, tmp_pa
     assert result["ok"] is False
     assert "seal" in result["error"].lower()
     assert calls == []
-    assert refresh_calls == []
 
 
 def test_vrc_get_install_never_mutates_repository_from_direct_execution(monkeypatch, tmp_path: Path) -> None:
@@ -1377,38 +1385,7 @@ def test_vrc_get_install_never_mutates_repository_from_direct_execution(monkeypa
     make_unity_project(project)
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(
-        dashboard_server,
-        "locate_vpm_package_managers",
-        lambda: [
-            {
-                "name": "vrc-get",
-                "path": "C:/tools/vrc-get.exe",
-                "kind": "managed-cli",
-                "supportsCommandInstall": True,
-                "supportsUiHandoff": False,
-            }
-        ],
-    )
-
-    class Proc:
-        returncode = 0
-        stdout = "ok"
-        stderr = ""
-
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        return Proc()
-
-    monkeypatch.setattr(dashboard_server.subprocess, "run", fake_run)
-    refresh_calls: list[dict] = []
-    monkeypatch.setattr(
-        dashboard_server,
-        "refresh_asset_database_sync",
-        lambda params: refresh_calls.append(params) or {"ok": True},
-    )
-
-    result = dashboard_server.install_vpm_package_sync(
+    result = package_executor_without_process(calls).execute(
         {
             "projectPath": str(project),
             "packageId": "com.poiyomi.toon",
@@ -1418,7 +1395,6 @@ def test_vrc_get_install_never_mutates_repository_from_direct_execution(monkeypa
 
     assert result["ok"] is False
     assert calls == []
-    assert refresh_calls == []
 
 
 def test_legacy_repository_install_branch_is_absent(monkeypatch, tmp_path: Path) -> None:
@@ -1426,41 +1402,7 @@ def test_legacy_repository_install_branch_is_absent(monkeypatch, tmp_path: Path)
     make_unity_project(project)
     calls: list[list[str]] = []
 
-    monkeypatch.setattr(
-        dashboard_server,
-        "locate_vpm_package_managers",
-        lambda: [
-            {
-                "name": "vrc-get",
-                "path": "C:/tools/vrc-get.exe",
-                "kind": "managed-cli",
-                "supportsCommandInstall": True,
-                "supportsUiHandoff": False,
-            }
-        ],
-    )
-
-    class Proc:
-        def __init__(self, returncode: int, stdout: str = "", stderr: str = "") -> None:
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
-    def fake_run(command, **kwargs):
-        calls.append(command)
-        if command[:3] == ["C:/tools/vrc-get.exe", "repo", "add"]:
-            return Proc(1, stderr="repository already exists")
-        return Proc(0, stdout="ok")
-
-    monkeypatch.setattr(dashboard_server.subprocess, "run", fake_run)
-    refresh_calls: list[dict] = []
-    monkeypatch.setattr(
-        dashboard_server,
-        "refresh_asset_database_sync",
-        lambda params: refresh_calls.append(params) or {"ok": True},
-    )
-
-    result = dashboard_server.install_vpm_package_sync(
+    result = package_executor_without_process(calls).execute(
         {
             "projectPath": str(project),
             "packageId": "com.poiyomi.toon",
@@ -1470,7 +1412,6 @@ def test_legacy_repository_install_branch_is_absent(monkeypatch, tmp_path: Path)
 
     assert result["ok"] is False
     assert calls == []
-    assert refresh_calls == []
     assert not hasattr(dashboard_server, "install_vpm_package_legacy_sync")
 
 

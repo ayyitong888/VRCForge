@@ -384,12 +384,7 @@ class PackageInstallWorkflowService:
         return params or {}
 
     def _project_path(self, params: dict[str, Any]) -> str:
-        return str(
-            params.get("project_path")
-            or params.get("projectPath")
-            or self._ports.selected_project_path()
-            or ""
-        ).strip()
+        return resolve_project_path(params, self._ports.selected_project_path())
 
     def _optimizer_package_catalog(self) -> dict[str, dict[str, str]]:
         catalog: dict[str, dict[str, str]] = {}
@@ -799,6 +794,21 @@ class PackageInstallWorkflowService:
             },
             internal_wrapper=True,
         )
+
+
+def resolve_project_path(
+    params: Mapping[str, Any] | None,
+    selected_project_path: str,
+) -> str:
+    """Resolve an explicit project path before the app-owned current selection."""
+
+    normalized = params or {}
+    return str(
+        normalized.get("project_path")
+        or normalized.get("projectPath")
+        or selected_project_path
+        or ""
+    ).strip()
 
 
 def _ensure_dict(value: Any) -> dict[str, Any]:
