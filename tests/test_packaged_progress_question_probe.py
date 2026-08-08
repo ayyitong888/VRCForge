@@ -28,8 +28,10 @@ def test_question_probe_has_release_binding_isolation_and_owned_cleanup() -> Non
     assert 'VRCFORGE_DESKTOP_EXECUTOR: "0"' in source
     assert "APPDATA: hostProfileRoot" in source
     assert "LOCALAPPDATA: hostProfileRoot" in source
-    assert "USERPROFILE: hostProfileRoot" in source
-    assert "HOME: hostProfileRoot" in source
+    assert "USERPROFILE: hostProfileRoot" not in source
+    assert "HOME: hostProfileRoot" not in source
+    assert 'process.env.USERPROFILE = "host-user-profile-preserved"' in source
+    assert 'process.env.HOME = "host-home-preserved"' in source
     assert "WEBVIEW2_USER_DATA_FOLDER: webviewDataRoot" in source
     assert '"OPENAI_API_KEY", "ANTHROPIC_API_KEY"' in source
     assert '"XAI_API_KEY", "OLLAMA_API_KEY"' in source
@@ -40,6 +42,10 @@ def test_question_probe_has_release_binding_isolation_and_owned_cleanup() -> Non
     assert "closeExistingVrcforgeProcesses" not in source
     assert "closePackagedProcesses" not in source
     assert "async function forceCloseLaunch(launch)" in source
+    assert "Packaged app exited before launch completed" in source
+    assert "wrapped.launchDiagnostics" in source
+    assert "report.phases.launchFailure" in source
+    assert "report.closures.launchFailure" in source
     assert "$ids.Contains([int]$candidate.ParentProcessId)" in source
     assert "$path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)" in source
     assert "$path.Equals($exe, [StringComparison]::OrdinalIgnoreCase)" in source

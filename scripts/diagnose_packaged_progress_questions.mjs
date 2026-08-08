@@ -227,8 +227,6 @@ function isolatedLaunchEnvironment() {
     VRCFORGE_DESKTOP_EXECUTOR: "0",
     APPDATA: hostProfileRoot,
     LOCALAPPDATA: hostProfileRoot,
-    USERPROFILE: hostProfileRoot,
-    HOME: hostProfileRoot,
     WEBVIEW2_USER_DATA_FOLDER: webviewDataRoot,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
       `--remote-debugging-port=${cdpPort} --remote-allow-origins=*`,
@@ -273,10 +271,12 @@ function runSelfTest() {
     "GOOGLE_APPLICATION_CREDENTIALS", "LLM_API_KEY",
   ];
   const previousEnvironment = new Map(
-    ["VRCFORGE_DISABLE_APP_AUTH", ...isolatedCredentialKeys]
+    ["VRCFORGE_DISABLE_APP_AUTH", "USERPROFILE", "HOME", ...isolatedCredentialKeys]
       .map((key) => [key, process.env[key]]),
   );
   process.env.VRCFORGE_DISABLE_APP_AUTH = "1";
+  process.env.USERPROFILE = "host-user-profile-preserved";
+  process.env.HOME = "host-home-preserved";
   for (const key of isolatedCredentialKeys) process.env[key] = `must-not-escape-${key}`;
   try {
     const env = isolatedLaunchEnvironment();
@@ -288,8 +288,8 @@ function runSelfTest() {
       || env.VRCFORGE_DESKTOP_EXECUTOR !== "0"
       || env.APPDATA !== hostProfileRoot
       || env.LOCALAPPDATA !== hostProfileRoot
-      || env.USERPROFILE !== hostProfileRoot
-      || env.HOME !== hostProfileRoot
+      || env.USERPROFILE !== "host-user-profile-preserved"
+      || env.HOME !== "host-home-preserved"
       || env.WEBVIEW2_USER_DATA_FOLDER !== webviewDataRoot
     ) {
       throw new Error("self-test: packaged runtime paths or credentials were not isolated.");
@@ -577,7 +577,8 @@ async function waitForJson(url, timeoutMs = 45000) {
     }
     await sleep(150);
   }
-  throw lastError || new Error(`Timed out waiting for ${url}`);
+  const cause = String(lastError?.message || lastError || "endpoint unavailable");
+  throw new Error(`Timed out waiting for ${url}; last=${cause}`);
 }
 
 function connectCdp(webSocketDebuggerUrl) {
@@ -658,10 +659,15 @@ async function launchPackagedApp() {
   const child = spawn(exe, [], { detached: false, stdio: "ignore", env: isolatedLaunchEnvironment() });
   const launch = { childPid: child.pid, launchedAt: new Date().toISOString(), cdp: null };
   const spawnFailure = new Promise((_, rejectSpawn) => child.once("error", rejectSpawn));
+  const childExit = new Promise((_, rejectExit) => child.once("exit", (code, signal) => {
+    rejectExit(new Error(`Packaged app exited before launch completed: code=${code}, signal=${signal || "none"}.`));
+  }));
+  const attemptedCdpUrl = `http://127.0.0.1:${cdpPort}/json/list`;
   try {
     const targets = await Promise.race([
-      waitForJson(`http://127.0.0.1:${cdpPort}/json/list`),
+      waitForJson(attemptedCdpUrl),
       spawnFailure,
+      childExit,
     ]);
     const page = Array.isArray(targets)
       ? targets.find((target) => target?.type === "page" && target?.webSocketDebuggerUrl)
@@ -673,12 +679,29 @@ async function launchPackagedApp() {
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable");
     const renderer = await waitForRenderer(cdp);
-    const health = await waitForJson(`${appOrigin}/api/health`);
+    const health = await Promise.race([
+      waitForJson(`${appOrigin}/api/health`),
+      childExit,
+    ]);
     return { ...launch, cdp, renderer, health };
   } catch (error) {
     try { launch.cdp?.close(); } catch { /* The renderer may not have connected. */ }
-    await forceCloseLaunch(launch).catch(() => {});
-    throw error;
+    const beforeCleanup = await processSnapshot().catch((snapshotError) => ({
+      error: String(snapshotError?.stack || snapshotError),
+    }));
+    const cleanup = await forceCloseLaunch(launch).catch((cleanupError) => ({
+      error: String(cleanupError?.stack || cleanupError),
+      finalSnapshot: null,
+    }));
+    const wrapped = new Error(`Packaged launch failed for ${attemptedCdpUrl}: ${String(error?.message || error)}`);
+    wrapped.launchDiagnostics = {
+      childPid: child.pid,
+      attemptedCdpUrl,
+      cause: String(error?.message || error),
+      beforeCleanup,
+      cleanup,
+    };
+    throw wrapped;
   }
 }
 
@@ -1238,6 +1261,15 @@ async function main() {
     if (containsSensitiveText(questionLog)) addAssertion(report, "Question JSONL persisted the sensitive raw answer");
   } catch (error) {
     report.error = String(error?.stack || error);
+    if (error?.launchDiagnostics) {
+      report.phases.launchFailure = {
+        childPid: error.launchDiagnostics.childPid,
+        attemptedCdpUrl: error.launchDiagnostics.attemptedCdpUrl,
+        cause: error.launchDiagnostics.cause,
+        beforeCleanup: error.launchDiagnostics.beforeCleanup,
+      };
+      report.closures.launchFailure = error.launchDiagnostics.cleanup;
+    }
     addAssertion(report, "probe threw before the Question lifecycle completed");
   } finally {
     if (app) {
