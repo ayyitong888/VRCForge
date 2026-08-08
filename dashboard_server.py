@@ -306,6 +306,8 @@ from wardrobe_outfit_workflow_service import (
     AddWardrobeOutfitApprovedWriteService,
     AddWardrobeOutfitPreviewPorts,
     AddWardrobeOutfitPreviewService,
+    ClothingFxApprovedWritePorts,
+    ClothingFxApprovedWriteService,
     ClothingFxReadPorts,
     ClothingFxReadService,
     CreateWardrobeApprovedWritePorts,
@@ -12480,33 +12482,6 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
         raise to_http_exception(exc) from exc
 
 
-def apply_clothing_fx_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    normalized_arguments = dict(arguments)
-    if "dry_run" not in normalized_arguments and "dryRun" in normalized_arguments:
-        normalized_arguments["dry_run"] = normalized_arguments["dryRun"]
-    request = ClothingApplyFxRequest(**normalized_arguments)
-    if request.dry_run:
-        try:
-            return CLOTHING_FX_READ.preview_apply_clothing_fx(request)
-        except RuntimeError as exc:
-            raise to_http_exception(exc) from exc
-    try:
-        settings = load_dashboard_settings(request)
-        avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
-        items = request.items
-        if not items:
-            raise RuntimeError("No clothing items provided. Run /api/clothes/scan or /api/clothes/generate-fx first.")
-
-        apply_payload = build_clothes_fx_apply_preview(avatar_path, items)
-
-        payload = apply_clothing_fx_direct(settings, avatar_path, items)
-        emit_log("success", "fx", "Clothing FX assets authored in Unity.", {"avatarPath": avatar_path, "itemCount": len(items)})
-        return {"ok": True, "avatarPath": avatar_path, "dryRun": False, "applyPayload": apply_payload, "result": payload, "itemCount": len(items)}
-    except (RuntimeError, UnityMcpError) as exc:
-        emit_log("error", "fx", "Failed to apply clothing FX.", {"error": str(exc)})
-        raise to_http_exception(exc) from exc
-
-
 def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest) -> dict[str, Any]:
     try:
         settings = load_dashboard_settings(request)
@@ -20284,6 +20259,19 @@ CLOTHING_FX_READ = ClothingFxReadService(
         log=emit_log,
     )
 )
+CLOTHING_FX_APPROVED_WRITE = ClothingFxApprovedWriteService(
+    ClothingFxApprovedWritePorts(
+        parse_request=lambda arguments: ClothingApplyFxRequest(**arguments),
+        preview=CLOTHING_FX_READ.preview_apply_clothing_fx,
+        load_settings=lambda request: load_dashboard_settings(request),
+        current_avatar_path=lambda: DASHBOARD_RUNTIME.current_avatar_path,
+        build_apply_preview=build_clothes_fx_apply_preview,
+        apply_approved=apply_clothing_fx_direct,
+        log=emit_log,
+        map_error=lambda exc: to_http_exception(exc),
+        handled_errors=(RuntimeError, UnityMcpError),
+    )
+)
 WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
     WardrobeOutfitWorkflowPorts(
         selected_project_path=lambda: (
@@ -20399,7 +20387,7 @@ PREPARED_OUTFIT_IMPORT_APPROVED_WRITE = PreparedOutfitImportApprovedWriteService
     )
 )
 WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
-    apply_clothing_fx=apply_clothing_fx_approved_sync,
+    apply_clothing_fx=CLOTHING_FX_APPROVED_WRITE.execute,
     setup_outfit=SETUP_OUTFIT_APPROVED_WRITE.execute,
     add_wardrobe_outfit=ADD_WARDROBE_OUTFIT_APPROVED_WRITE.execute,
     add_outfit_part=ADD_OUTFIT_PART_APPROVED_WRITE.execute,

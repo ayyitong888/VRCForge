@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 import dashboard_server
 import unity_status_service
@@ -14267,24 +14268,77 @@ namespace VRCForge.Editor
             )
         self.assertEqual(response.status_code, 400)
 
-    def test_apply_clothing_fx_approved_handler_keeps_live_shape_and_registry_identity(
+    def test_apply_clothing_fx_registry_uses_only_the_typed_approved_owner(
         self,
     ) -> None:
+        registration = dashboard_server.AGENT_GATEWAY._write_handlers[
+            "vrcforge_apply_clothing_fx"
+        ]
+        handler = registration.handler
+        ports = dashboard_server.CLOTHING_FX_APPROVED_WRITE._ports
+
+        self.assertIs(
+            handler,
+            dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx,
+        )
+        self.assertIs(handler.__self__, dashboard_server.CLOTHING_FX_APPROVED_WRITE)
+        self.assertEqual(handler.__func__.__name__, "execute")
+        self.assertIs(ports.apply_approved, dashboard_server.apply_clothing_fx_direct)
+        self.assertIs(ports.preview.__self__, dashboard_server.CLOTHING_FX_READ)
+        self.assertEqual(ports.preview.__func__.__name__, "preview_apply_clothing_fx")
+        self.assertIs(
+            ports.build_apply_preview,
+            dashboard_server.build_clothes_fx_apply_preview,
+        )
+        self.assertIsInstance(
+            ports.parse_request(
+                {
+                    "avatarPath": "MyAvatar",
+                    "items": [{"displayName": "Jacket"}],
+                    "dry_run": False,
+                }
+            ),
+            dashboard_server.ClothingApplyFxRequest,
+        )
+        self.assertTrue(registration.requires_approved_execution_context)
+        self.assertIs(
+            registration.checkpoint_prepare_handler,
+            dashboard_server.prepare_authoritative_unity_checkpoint_sync,
+        )
+        self.assertIs(
+            registration.request_preparer,
+            dashboard_server.prepare_avatar_scoped_tuning_write_request,
+        )
+
+    def test_registered_clothing_fx_live_uses_fixed_lower_port_once(self) -> None:
         settings = SimpleNamespace()
         items = [{"displayName": "Jacket", "parameterName": "Cloth_Jacket"}]
+        transport = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            payload={"createdCount": 1},
+        )
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[
+            "vrcforge_apply_clothing_fx"
+        ].handler
+
         with (
-            patch("dashboard_server.load_dashboard_settings", return_value=settings) as load_settings,
             patch(
-                "dashboard_server.build_clothes_fx_apply_preview",
-                return_value="frozen-preview",
-            ) as build_preview,
+                "dashboard_server.load_dashboard_settings",
+                return_value=settings,
+            ) as load_settings,
             patch(
-                "dashboard_server.apply_clothing_fx_direct",
-                return_value={"createdCount": 1},
-            ) as apply_live,
-            patch("dashboard_server.emit_log"),
+                "dashboard_server.invoke_unity_mcp",
+                return_value=transport,
+            ) as invoke,
+            patch.object(
+                dashboard_server.DIAGNOSTIC_LOGGER,
+                "emit",
+                return_value=None,
+            ) as log,
         ):
-            payload = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx(
+            payload = handler(
                 {
                     "avatarPath": "MyAvatar",
                     "items": items,
@@ -14298,33 +14352,96 @@ namespace VRCForge.Editor
                 "ok": True,
                 "avatarPath": "MyAvatar",
                 "dryRun": False,
-                "applyPayload": "frozen-preview",
+                "applyPayload": dashboard_server.build_clothes_fx_apply_preview(
+                    "MyAvatar",
+                    items,
+                ),
                 "result": {"createdCount": 1},
                 "itemCount": 1,
             },
         )
         load_settings.assert_called_once()
-        build_preview.assert_called_once_with("MyAvatar", items)
-        apply_live.assert_called_once_with(settings, "MyAvatar", items)
-        self.assertIs(
-            dashboard_server.AGENT_GATEWAY._write_handlers[
-                "vrcforge_apply_clothing_fx"
-            ].handler,
-            dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx,
+        invoke.assert_called_once_with(
+            settings,
+            "vrc_apply_clothing_fx",
+            {"avatarPath": "MyAvatar", "items": items},
         )
+        self.assertEqual(log.call_count, 1)
+
+    def test_clothing_fx_production_parser_preserves_string_false_and_plan_rejection(
+        self,
+    ) -> None:
+        calls: list[tuple] = []
+        production_ports = dashboard_server.CLOTHING_FX_APPROVED_WRITE._ports
+        local_owner = dashboard_server.ClothingFxApprovedWriteService(
+            replace(
+                production_ports,
+                preview=lambda request: calls.append(("preview", request)) or {},
+                load_settings=lambda request: calls.append(("settings", request))
+                or "settings",
+                current_avatar_path=lambda: calls.append(("current-avatar",))
+                or "Scene/CurrentAvatar",
+                build_apply_preview=lambda avatar, items: calls.append(
+                    ("build", avatar, items)
+                )
+                or "frozen-preview",
+                apply_approved=lambda settings, avatar, items: calls.append(
+                    ("apply", settings, avatar, items)
+                )
+                or {"createdCount": 1},
+                log=lambda level, scope, message, data=None: calls.append(
+                    ("log", level, scope, message, data)
+                ),
+            )
+        )
+        arguments = {
+            "avatarPath": "MyAvatar",
+            "items": [{"displayName": "Jacket"}],
+            "dryRun": "false",
+        }
+
+        payload = local_owner.execute(arguments)
+
+        self.assertFalse(payload["dryRun"])
+        self.assertEqual([call[0] for call in calls], ["settings", "build", "apply", "log"])
+        self.assertEqual(calls[2][1:], ("settings", "MyAvatar", arguments["items"]))
+        registration = dashboard_server.AGENT_GATEWAY._write_handlers[
+            "vrcforge_apply_clothing_fx"
+        ]
+        with self.assertRaisesRegex(ValueError, "dry_run=false"):
+            registration.approved_execution_plan_builder(arguments)
+
+    def test_clothing_fx_production_parser_fails_before_all_effect_ports(self) -> None:
+        calls: list[str] = []
+        production_ports = dashboard_server.CLOTHING_FX_APPROVED_WRITE._ports
+        local_owner = dashboard_server.ClothingFxApprovedWriteService(
+            replace(
+                production_ports,
+                preview=lambda _request: calls.append("preview") or {},
+                load_settings=lambda _request: calls.append("settings") or object(),
+                current_avatar_path=lambda: calls.append("current-avatar") or "Avatar",
+                build_apply_preview=lambda _avatar, _items: calls.append("build") or "{}",
+                apply_approved=lambda _settings, _avatar, _items: calls.append("apply") or {},
+                log=lambda _level, _scope, _message, _data=None: calls.append("log"),
+                map_error=lambda exc: calls.append("map-error") or exc,
+            )
+        )
+
+        for arguments in (
+            {"items": None, "dry_run": False},
+            {"items": [], "dry_run": None},
+        ):
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValidationError):
+                    local_owner.execute(arguments)
+                self.assertEqual(calls, [])
 
     def test_registered_clothing_fx_handler_dry_run_never_calls_unity(self) -> None:
         settings = SimpleNamespace()
         handler = dashboard_server.AGENT_GATEWAY._write_handlers[
             "vrcforge_apply_clothing_fx"
         ].handler
-        with (
-            patch("dashboard_server.load_dashboard_settings", return_value=settings),
-            patch(
-                "dashboard_server.apply_clothing_fx_direct",
-                side_effect=AssertionError("dry-run reached the Unity write port"),
-            ) as apply_live,
-        ):
+        with patch("dashboard_server.load_dashboard_settings", return_value=settings):
             payload = handler(
                 {
                     "avatarPath": "MyAvatar",
@@ -14336,7 +14453,6 @@ namespace VRCForge.Editor
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["dryRun"])
         self.assertIn("vrc_apply_clothing_fx", payload["applyPayload"])
-        apply_live.assert_not_called()
 
     def test_registered_clothing_fx_handler_prefers_snake_dry_run_on_conflict(
         self,
@@ -14344,12 +14460,9 @@ namespace VRCForge.Editor
         handler = dashboard_server.AGENT_GATEWAY._write_handlers[
             "vrcforge_apply_clothing_fx"
         ].handler
-        with (
-            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
-            patch(
-                "dashboard_server.apply_clothing_fx_direct",
-                side_effect=AssertionError("snake dry_run=true did not win"),
-            ) as apply_live,
+        with patch(
+            "dashboard_server.load_dashboard_settings",
+            return_value=SimpleNamespace(),
         ):
             payload = handler(
                 {
@@ -14361,7 +14474,6 @@ namespace VRCForge.Editor
             )
 
         self.assertTrue(payload["dryRun"])
-        apply_live.assert_not_called()
 
     # ------------------------------------------------------------------
     # /api/parameters/apply-optimization (dry_run=True)

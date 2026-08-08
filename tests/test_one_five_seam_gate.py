@@ -196,6 +196,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     } == {
         "WARDROBE_ARTIFACT_READ",
         "CLOTHING_FX_READ",
+        "CLOTHING_FX_APPROVED_WRITE",
         "SETUP_OUTFIT_PREVIEW",
         "SETUP_OUTFIT_APPROVED_WRITE",
         "ADD_WARDROBE_OUTFIT_PREVIEW",
@@ -245,7 +246,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     }.isdisjoint(
         groups["dashboard.wardrobe-outfit-root-owners"]["facades"][0]["methods"]
     )
-    assert "apply_clothing_fx_approved_sync" in groups[
+    assert "apply_clothing_fx_approved_sync" not in groups[
         "dashboard.wardrobe-outfit-root-owners"
     ]["facades"][0]["methods"]
     assert len(groups["dashboard.project-snapshot-root-facades"]["facades"][0]["methods"]) == 17

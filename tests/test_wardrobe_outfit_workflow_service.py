@@ -20,6 +20,8 @@ from wardrobe_outfit_workflow_service import (
     AddWardrobeOutfitApprovedWriteService,
     AddWardrobeOutfitPreviewPorts,
     AddWardrobeOutfitPreviewService,
+    ClothingFxApprovedWritePorts,
+    ClothingFxApprovedWriteService,
     ClothingFxReadPorts,
     ClothingFxReadService,
     CreateWardrobeApprovedWritePorts,
@@ -98,6 +100,84 @@ def _clothing_reads(calls: list[tuple[Any, ...]]) -> ClothingFxReadService:
             build_apply_preview=build_apply_preview,
             ensure_list=ensure_list,
             log=log,
+        )
+    )
+
+
+class _MappedClothingFxError(RuntimeError):
+    pass
+
+
+def _clothing_approved(
+    calls: list[tuple[Any, ...]],
+    *,
+    preview_error: Exception | None = None,
+    apply_error: Exception | None = None,
+    parse_error: Exception | None = None,
+) -> ClothingFxApprovedWriteService:
+    settings = object()
+
+    def parse_request(arguments: dict[str, Any]) -> Any:
+        calls.append(("parse", dict(arguments)))
+        if parse_error is not None:
+            raise parse_error
+        return SimpleNamespace(
+            dry_run=bool(arguments.get("dry_run", True)),
+            avatar_path=arguments.get("avatarPath") or arguments.get("avatar_path"),
+            items=arguments.get("items") or [],
+        )
+
+    def preview(request: Any) -> dict[str, Any]:
+        calls.append(("preview", request))
+        if preview_error is not None:
+            raise preview_error
+        return {"ok": True, "dryRun": True, "itemCount": len(request.items)}
+
+    def load_settings(request: Any) -> Any:
+        calls.append(("settings", request))
+        return settings
+
+    def current_avatar_path() -> str:
+        calls.append(("current-avatar",))
+        return "Scene/CurrentAvatar"
+
+    def build_preview(avatar_path: str | None, items: list[dict[str, Any]]) -> str:
+        calls.append(("build-preview", avatar_path, items))
+        return "frozen-preview"
+
+    def apply(
+        actual_settings: Any,
+        avatar_path: str | None,
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        calls.append(("apply", actual_settings, avatar_path, items))
+        if apply_error is not None:
+            raise apply_error
+        return {"createdCount": len(items)}
+
+    def log(
+        level: str,
+        scope: str,
+        message: str,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        calls.append(("log", level, scope, message, data))
+
+    def map_error(exc: Exception) -> Exception:
+        calls.append(("map-error", exc))
+        return _MappedClothingFxError(str(exc))
+
+    return ClothingFxApprovedWriteService(
+        ClothingFxApprovedWritePorts(
+            parse_request=parse_request,
+            preview=preview,
+            load_settings=load_settings,
+            current_avatar_path=current_avatar_path,
+            build_apply_preview=build_preview,
+            apply_approved=apply,
+            log=log,
+            map_error=map_error,
+            handled_errors=(RuntimeError,),
         )
     )
 
@@ -337,6 +417,136 @@ def test_clothing_fx_read_owner_logs_and_preserves_runtime_errors() -> None:
     ]
 
 
+def test_clothing_fx_approved_owner_preserves_live_order_shape_and_log() -> None:
+    calls: list[tuple[Any, ...]] = []
+    service = _clothing_approved(calls)
+    items = [{"displayName": "Jacket"}]
+
+    payload = service.execute({"items": items, "dryRun": False})
+
+    assert payload == {
+        "ok": True,
+        "avatarPath": "Scene/CurrentAvatar",
+        "dryRun": False,
+        "applyPayload": "frozen-preview",
+        "result": {"createdCount": 1},
+        "itemCount": 1,
+    }
+    assert [call[0] for call in calls] == [
+        "parse",
+        "settings",
+        "current-avatar",
+        "build-preview",
+        "apply",
+        "log",
+    ]
+    assert calls[0][1]["dry_run"] is False
+    assert calls[4][2:] == ("Scene/CurrentAvatar", items)
+    assert calls[5] == (
+        "log",
+        "success",
+        "fx",
+        "Clothing FX assets authored in Unity.",
+        {"avatarPath": "Scene/CurrentAvatar", "itemCount": 1},
+    )
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expect_preview"),
+    [
+        ({"items": [{"displayName": "Jacket"}], "dryRun": True}, True),
+        (
+            {
+                "items": [{"displayName": "Jacket"}],
+                "dry_run": True,
+                "dryRun": False,
+            },
+            True,
+        ),
+        (
+            {
+                "items": [{"displayName": "Jacket"}],
+                "dry_run": False,
+                "dryRun": True,
+            },
+            False,
+        ),
+    ],
+)
+def test_clothing_fx_approved_owner_preserves_camel_projection_and_snake_precedence(
+    arguments: dict[str, Any],
+    expect_preview: bool,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    payload = _clothing_approved(calls).execute(arguments)
+
+    assert payload["dryRun"] is expect_preview
+    assert ("preview" in [call[0] for call in calls]) is expect_preview
+    assert ("apply" in [call[0] for call in calls]) is (not expect_preview)
+
+
+def test_clothing_fx_approved_owner_parses_before_any_side_effect() -> None:
+    calls: list[tuple[Any, ...]] = []
+    parse_error = ValueError("invalid request")
+
+    with pytest.raises(ValueError, match="invalid request") as exc_info:
+        _clothing_approved(calls, parse_error=parse_error).execute({"dryRun": False})
+
+    assert exc_info.value is parse_error
+    assert [call[0] for call in calls] == ["parse"]
+
+
+@pytest.mark.parametrize("phase", ["preview", "apply"])
+def test_clothing_fx_approved_owner_maps_handled_errors_without_extra_writes(
+    phase: str,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    error = RuntimeError("Cannot connect to Unity MCP server")
+    service = _clothing_approved(
+        calls,
+        preview_error=error if phase == "preview" else None,
+        apply_error=error if phase == "apply" else None,
+    )
+
+    with pytest.raises(_MappedClothingFxError, match="Cannot connect"):
+        service.execute(
+            {
+                "avatarPath": "Scene/Avatar",
+                "items": [{"displayName": "Jacket"}],
+                "dryRun": phase == "preview",
+            }
+        )
+
+    names = [call[0] for call in calls]
+    assert names.count("map-error") == 1
+    if phase == "preview":
+        assert "settings" not in names
+        assert "apply" not in names
+        assert "log" not in names
+    else:
+        assert names.count("apply") == 1
+        assert calls[-2][:4] == (
+            "log",
+            "error",
+            "fx",
+            "Failed to apply clothing FX.",
+        )
+
+
+def test_clothing_fx_approved_owner_has_only_frozen_fixed_ports() -> None:
+    assert set(ClothingFxApprovedWritePorts.__dataclass_fields__) == {
+        "parse_request",
+        "preview",
+        "load_settings",
+        "current_avatar_path",
+        "build_apply_preview",
+        "apply_approved",
+        "log",
+        "map_error",
+        "handled_errors",
+    }
+
+
 def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
     tree = ast.parse((REPO_ROOT / "dashboard_server.py").read_text(encoding="utf-8"))
     bindings = {
@@ -387,7 +597,10 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
         "preview_apply_clothing_fx=CLOTHING_FX_READ.preview_apply_clothing_fx"
         in source
     )
-    assert source.count("apply_clothing_fx_approved_sync") == 2
+    assert "apply_clothing_fx_approved_sync" not in bindings
+    assert "CLOTHING_FX_APPROVED_WRITE = ClothingFxApprovedWriteService(" in source
+    assert "preview=CLOTHING_FX_READ.preview_apply_clothing_fx" in source
+    assert "apply_clothing_fx=CLOTHING_FX_APPROVED_WRITE.execute" in source
     assert (
         "WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx" in source
     )

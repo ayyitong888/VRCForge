@@ -134,6 +134,73 @@ class ClothingFxReadService:
 
 
 @dataclass(frozen=True, slots=True)
+class ClothingFxApprovedWritePorts:
+    """Fixed Clothing FX capabilities available only to the write registry."""
+
+    parse_request: Callable[[dict[str, Any]], Any]
+    preview: Callable[[Any], dict[str, Any]]
+    load_settings: Callable[[Any], Any]
+    current_avatar_path: Callable[[], str]
+    build_apply_preview: Callable[[str | None, list[dict[str, Any]]], str]
+    apply_approved: Callable[[Any, str | None, list[dict[str, Any]]], dict[str, Any]]
+    log: ClothingFxLogPort
+    map_error: Callable[[Exception], Exception]
+    handled_errors: tuple[type[Exception], ...]
+
+
+class ClothingFxApprovedWriteService:
+    """Execute the sealed Clothing FX write only after registry approval."""
+
+    def __init__(self, ports: ClothingFxApprovedWritePorts) -> None:
+        self._ports = ports
+
+    def execute(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        normalized_arguments = dict(arguments)
+        if "dry_run" not in normalized_arguments and "dryRun" in normalized_arguments:
+            normalized_arguments["dry_run"] = normalized_arguments["dryRun"]
+        request = self._ports.parse_request(normalized_arguments)
+        if request.dry_run:
+            try:
+                return self._ports.preview(request)
+            except self._ports.handled_errors as exc:
+                raise self._ports.map_error(exc) from exc
+
+        try:
+            settings = self._ports.load_settings(request)
+            avatar_path = request.avatar_path or self._ports.current_avatar_path()
+            items = request.items
+            if not items:
+                raise RuntimeError(
+                    "No clothing items provided. Run /api/clothes/scan or "
+                    "/api/clothes/generate-fx first."
+                )
+            apply_payload = self._ports.build_apply_preview(avatar_path, items)
+            payload = self._ports.apply_approved(settings, avatar_path, items)
+            self._ports.log(
+                "success",
+                "fx",
+                "Clothing FX assets authored in Unity.",
+                {"avatarPath": avatar_path, "itemCount": len(items)},
+            )
+            return {
+                "ok": True,
+                "avatarPath": avatar_path,
+                "dryRun": False,
+                "applyPayload": apply_payload,
+                "result": payload,
+                "itemCount": len(items),
+            }
+        except self._ports.handled_errors as exc:
+            self._ports.log(
+                "error",
+                "fx",
+                "Failed to apply clothing FX.",
+                {"error": str(exc)},
+            )
+            raise self._ports.map_error(exc) from exc
+
+
+@dataclass(frozen=True, slots=True)
 class WardrobeArtifactReadPorts:
     """Three fixed Wardrobe reads supplied at composition time.
 
