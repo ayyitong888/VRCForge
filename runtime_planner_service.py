@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 import hashlib
 import json
 import math
 from pathlib import Path
 import re
-from threading import RLock
 import time
 from types import MappingProxyType
 from typing import Mapping, Protocol
@@ -83,6 +83,18 @@ class PlannerModelResult:
 
 class PlannerModelPort(Protocol):
     def plan(self, prompt: str) -> PlannerModelResult: ...
+
+
+@dataclass(frozen=True, slots=True)
+class PlannerTurnMetadata:
+    verified_context_limit: int | None = None
+    planner_label: str = ""
+
+
+class PlannerTurnPort(Protocol):
+    """Bind one host-owned provider snapshot without exposing its credentials."""
+
+    def bind(self, request: Mapping[str, object]) -> AbstractContextManager[PlannerTurnMetadata]: ...
 
 
 class RuntimeHistoryCompactionPort(Protocol):
@@ -574,7 +586,7 @@ def _planner_tool_observation_candidates(value: dict[object, object]) -> list[tu
     ordered = [preferred[key] for key in _PLANNER_TOOL_OBSERVATION_FIELD_ORDER if key in preferred]
     return ordered + counts
 
-def _sanitize_planner_tool_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS) -> str:
+def sanitize_planner_observation_text(value: object, limit: int = RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS) -> str:
     """Make a short, model-visible tool summary safe even when a tool mislabeled it.
 
     This is intentionally stricter than UI/audit redaction: planning observations
@@ -593,12 +605,12 @@ def _planner_safe_tool_observation_value(value: object, *, depth: int = 0) -> ob
     if isinstance(value, bool) or isinstance(value, (int, float)):
         return value
     if isinstance(value, str):
-        return _sanitize_planner_tool_observation_text(redact_sensitive(value))
+        return sanitize_planner_observation_text(redact_sensitive(value))
     if isinstance(value, list):
         if depth >= RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH:
             return None
         projected_list = [
-            _sanitize_planner_tool_observation_text(redact_sensitive(item))
+            sanitize_planner_observation_text(redact_sensitive(item))
             for item in value[:RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS]
             if isinstance(item, str)
         ]
@@ -643,7 +655,7 @@ def format_planner_tool_observation(value: object) -> str:
         text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     else:
         text = str(value)
-    return _sanitize_planner_tool_observation_text(text, RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
+    return sanitize_planner_observation_text(text, RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
 
 def redact_sensitive(value: object) -> object:
     if isinstance(value, dict):
@@ -679,18 +691,17 @@ def redact_sensitive(value: object) -> object:
 
 
 class RuntimePlannerService:
-    def __init__(self, *, catalog: PlannerCatalogPort, desktop: DesktopPlanningObservationPort, model: PlannerModelPort | None = None, compactor: RuntimeHistoryCompactionPort | None = None, planner_label: str = "") -> None:
+    def __init__(self, *, catalog: PlannerCatalogPort, desktop: DesktopPlanningObservationPort, model: PlannerModelPort | None = None, compactor: RuntimeHistoryCompactionPort | None = None, turn: PlannerTurnPort | None = None) -> None:
         self._catalog = catalog
         self._desktop = desktop
         self._model = model
         self._compactor = compactor
-        self._planner_label = str(planner_label or "").strip()
-        self._label_lock = RLock()
+        self._turn = turn
 
-    @property
-    def planner_label(self) -> str:
-        with self._label_lock:
-            return self._planner_label
+    def bind_turn(self, request: Mapping[str, object]) -> AbstractContextManager[PlannerTurnMetadata]:
+        if self._turn is None:
+            return nullcontext(PlannerTurnMetadata())
+        return self._turn.bind(MappingProxyType(dict(request)))
 
 
     def _desktop_action_observation(self, value: object) -> str:
@@ -730,6 +741,7 @@ class RuntimePlannerService:
                 reasoning_trace=reasoning_trace,
                 propagate_provider_errors=bool(params.get("_backgroundGoalRun")),
                 exposure_layer=exposure_layer,
+                planner_label=str(params.get("_plannerAttemptLabel") or "").strip(),
             )
             if llm_plan is not None:
                 return llm_plan
@@ -873,7 +885,7 @@ class RuntimePlannerService:
             params = params or {}
             provider_label = str(params.get("providerLabel") or params.get("provider_label") or params.get("provider") or "").strip()
             model = str(params.get("model") or "").strip()
-            label = f"{provider_label} · {model}" if provider_label and model else provider_label or model or str(self.planner_label or "").strip()
+            label = f"{provider_label} · {model}" if provider_label and model else provider_label or model or str(params.get("_plannerAttemptLabel") or "").strip()
             if label:
                 reply = f"上一条使用的是 {label}。"
                 summary = "Answered the provider/model follow-up from runtime metadata."
@@ -1076,6 +1088,7 @@ class RuntimePlannerService:
             reasoning_trace: dict[str, object] | None = None,
             propagate_provider_errors: bool = False,
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
+            planner_label: str = "",
         ) -> dict[str, object] | None:
             model_port = self._model
             if model_port is None:
@@ -1093,10 +1106,7 @@ class RuntimePlannerService:
                 if reasoning_trace is not None:
                     reasoning_trace.clear()
                     reasoning_trace.update(provider_reasoning)
-                planner_label = raw_response.planner_label.strip() or self.planner_label
-                if raw_response.planner_label:
-                    with self._label_lock:
-                        self._planner_label = planner_label
+                planner_label = raw_response.planner_label.strip() or str(planner_label or "").strip()
                 response_text, provider_usage = normalize_llm_plan_result(raw_response)
                 self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
                 payload = parse_llm_plan_response(response_text)
@@ -1296,6 +1306,7 @@ class RuntimePlannerService:
             loop_state: list[dict[str, object]],
             context_usage: dict[str, object],
             attempt_compaction: bool = True,
+            runtime_exposure_layer: str = EXPOSURE_LAYER_PLANNING,
         ) -> tuple[list[dict[str, object]], dict[str, object] | None, bool]:
             """Compact only at the safe boundary before a continuation sample.
 
@@ -1321,6 +1332,7 @@ class RuntimePlannerService:
                 history,
                 loop_state,
                 observe=observe,
+                exposure_layer=runtime_exposure_layer,
             )
             next_prompt_tokens = estimate_runtime_context_tokens(next_prompt)
             provider_overhead = max(0, last_input_tokens - previous_prompt_tokens)
@@ -1373,6 +1385,7 @@ class RuntimePlannerService:
                     replacement_history,
                     loop_state,
                     observe=observe,
+                    exposure_layer=runtime_exposure_layer,
                 )
                 after_tokens = provider_overhead + estimate_runtime_context_tokens(replacement_prompt)
                 minimum_reduction = max(1024, int(context_limit * 0.10 + 0.999999))
@@ -1535,11 +1548,11 @@ class RuntimePlannerService:
                 ):
                     value = result.get(key)
                     if value not in (None, ""):
-                        fields.append(f"{key}={_sanitize_planner_tool_observation_text(value, 120)}")
+                        fields.append(f"{key}={sanitize_planner_observation_text(value, 120)}")
                 for key in ("error", "reason"):
                     value = result.get(key)
                     if value not in (None, ""):
-                        fields.append(f"{key}={_sanitize_planner_tool_observation_text(value, 180)}")
+                        fields.append(f"{key}={sanitize_planner_observation_text(value, 180)}")
                 for key, value in planner_safe_tool_result_fields(result).items():
                     fields.append(f"{key}={format_planner_tool_observation(value)}")
             elif result is not None:

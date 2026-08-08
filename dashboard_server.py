@@ -25,6 +25,7 @@ import urllib.request
 import zipfile
 from collections import deque
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
@@ -416,6 +417,15 @@ from provider_vision_service import (
     ProviderVisionStatePorts,
     VisionModelConfig,
     VisionProfileConfig,
+)
+from runtime_planner_service import (
+    EXPOSURE_LAYER_EXECUTION as RUNTIME_PLANNER_EXECUTION_LAYER,
+    PlannerCatalogSnapshot,
+    PlannerModelResult,
+    PlannerSkill,
+    PlannerTool,
+    PlannerTurnMetadata,
+    RuntimePlannerService,
 )
 from shader_vision_protection_service import (
     ProtectionWorkflowPorts,
@@ -3075,8 +3085,7 @@ def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsReques
 
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
-    verified_context_limit = verified_runtime_context_limit(runtime_request)
-    runtime_params = agent_runtime_request_payload(runtime_request, verified_context_limit)
+    runtime_params = agent_runtime_request_payload(runtime_request)
     try:
         if runtime_request.computer_use_requested:
             AGENT_GATEWAY.require_computer_use_enabled()
@@ -3115,7 +3124,6 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
 
 def agent_runtime_request_payload(
     runtime_request: AgentRuntimeMessageRequest,
-    verified_context_limit: int | None,
 ) -> dict[str, Any]:
     return {
         "session_id": runtime_request.session_id,
@@ -3133,40 +3141,13 @@ def agent_runtime_request_payload(
         "provider": runtime_request.provider,
         "providerLabel": runtime_request.provider_label,
         "model": runtime_request.model,
-        "_contextCompactionLimit": verified_context_limit,
+        "_requestedContextLimit": runtime_request.context_limit,
         "history": runtime_request.history,
         "_computerUseRequested": runtime_request.computer_use_requested,
         "_computerUseGrantId": runtime_request.computer_use_grant_id,
         "_computerUseVisualTheme": runtime_request.computer_use_visual_theme,
         "_computerUseVisualAccent": runtime_request.computer_use_visual_accent,
     }
-
-
-def verified_runtime_context_limit(runtime_request: AgentRuntimeMessageRequest) -> int | None:
-    if runtime_request.context_limit is None:
-        return None
-    settings = load_dashboard_settings(ConnectionRequest())
-    raw_requested_provider = str(runtime_request.provider or "").strip()
-    if not raw_requested_provider:
-        return None
-    try:
-        requested_provider = normalize_provider_name(raw_requested_provider)
-        configured_provider = normalize_provider_name(str(settings.llm_provider or ""))
-    except RuntimeError:
-        return None
-    requested_model = str(runtime_request.model or "").strip().lower()
-    configured_model = str(settings.llm_model or "").strip().lower()
-    if requested_model.startswith("models/"):
-        requested_model = requested_model[7:]
-    if configured_model.startswith("models/"):
-        configured_model = configured_model[7:]
-    if not requested_model:
-        return None
-    if requested_provider != configured_provider or requested_model != configured_model:
-        return None
-    return runtime_request.context_limit
-
-
 def probe_background_goal_provider(provider: str, base_url: str) -> bool:
     """Perform a bounded loopback reachability check without sending a prompt."""
 
@@ -13146,68 +13127,121 @@ def extract_streaming_reply_text(raw_json_fragment: str) -> str:
     return text
 
 
-def _agent_gateway_llm_plan(prompt: str) -> dict[str, Any]:
-    """LLM planner hook for the agent gateway (multi-provider dispatch).
+def _runtime_planner_model_id(value: object) -> str:
+    model = str(value or "").strip().lower()
+    return model[7:] if model.startswith("models/") else model
 
-    Raises when no API key is configured so the gateway falls back to the
-    deterministic local planner.
-    """
-    settings = load_dashboard_settings(ConnectionRequest())
-    if provider_requires_api_key(settings.llm_provider) and not settings.llm_api_key:
-        raise RuntimeError("LLM API key is not configured; planner falls back to deterministic-local.")
-    label_parts = [provider_display_name(settings.llm_provider), str(settings.llm_model or "").strip()]
-    AGENT_GATEWAY.llm_planner_label = " · ".join(part for part in label_parts if part)
-    AGENT_GATEWAY.llm_reasoning_trace = {}
-    stream_state = {"raw": "", "field": "", "text": ""}
 
-    def stream_callback(delta: str) -> None:
-        stream_state["raw"] += delta
-        field_name, text = extract_streaming_dialogue_text(stream_state["raw"])
-        if not text:
-            return
-        if field_name != stream_state["field"]:
-            if stream_state["field"] and stream_state["text"] and not text.startswith(stream_state["text"]):
-                stream_state["field"] = field_name
-                stream_state["text"] = text
+class _RuntimePlannerProviderTurnBinding:
+    """Keep one full Provider config inside the host for exactly one runtime turn."""
+
+    def __init__(self) -> None:
+        self._config: ContextVar[ProviderApiConfig | None] = ContextVar(
+            "vrcforge_runtime_planner_provider_config",
+            default=None,
+        )
+
+    @contextmanager
+    def bind(self, request: Mapping[str, object]):
+        config = PROVIDER_CONFIGURATION.current_api_config()
+        requested_limit = request.get("_requestedContextLimit")
+        verified_limit: int | None = None
+        requested_provider = str(request.get("provider") or "").strip()
+        requested_model = _runtime_planner_model_id(request.get("model"))
+        if requested_limit is not None and requested_provider and requested_model:
+            try:
+                provider_matches = normalize_provider_name(requested_provider) == normalize_provider_name(config.provider)
+            except RuntimeError:
+                provider_matches = False
+            if provider_matches and requested_model == _runtime_planner_model_id(config.model):
+                verified_limit = int(requested_limit)
+        label = " · ".join(
+            part
+            for part in (provider_display_name(config.provider), str(config.model or "").strip())
+            if part
+        )
+        token = self._config.set(config)
+        try:
+            yield PlannerTurnMetadata(
+                verified_context_limit=verified_limit,
+                planner_label=label,
+            )
+        finally:
+            self._config.reset(token)
+
+    def current_config(self) -> ProviderApiConfig:
+        config = self._config.get()
+        if config is None:
+            raise RuntimeError("runtime planner provider turn is not bound")
+        return config
+
+
+class _RuntimePlannerModel:
+    def __init__(self, turn: _RuntimePlannerProviderTurnBinding) -> None:
+        self._turn = turn
+
+    def plan(self, prompt: str) -> PlannerModelResult:
+        config = self._turn.current_config()
+        if provider_requires_api_key(config.provider) and not config.api_key:
+            raise RuntimeError("LLM API key is not configured; planner falls back to deterministic-local.")
+        planner_label = " · ".join(
+            part
+            for part in (provider_display_name(config.provider), str(config.model or "").strip())
+            if part
+        )
+        stream_state = {"raw": "", "field": "", "text": ""}
+
+        def stream_callback(delta: str) -> None:
+            stream_state["raw"] += delta
+            field_name, text = extract_streaming_dialogue_text(stream_state["raw"])
+            if not text:
                 return
-            stream_state["field"] = field_name
-        if text == stream_state["text"]:
-            return
-        text_delta = text[len(stream_state["text"]) :]
-        stream_state["text"] = text
+            if field_name != stream_state["field"]:
+                if stream_state["field"] and stream_state["text"] and not text.startswith(stream_state["text"]):
+                    stream_state["field"] = field_name
+                    stream_state["text"] = text
+                    return
+                stream_state["field"] = field_name
+            if text == stream_state["text"]:
+                return
+            text_delta = text[len(stream_state["text"]) :]
+            stream_state["text"] = text
+            context = AGENT_GATEWAY.runtime_stream_context()
+            client_turn_id = str(context.get("clientTurnId") or "").strip()
+            if not client_turn_id:
+                return
+            EVENT_BUS.broadcast_from_sync(
+                "agentRuntimeDelta",
+                {
+                    "sessionId": context.get("sessionId") or "",
+                    "turnId": context.get("turnId") or "",
+                    "clientTurnId": client_turn_id,
+                    "textDelta": text_delta[:1000],
+                },
+            )
+
+        response = request_llm_plan_with_metadata(
+            PROVIDER_TEXT_PROBE.probe_settings(config),
+            prompt,
+            stream_callback=stream_callback,
+        )
         context = AGENT_GATEWAY.runtime_stream_context()
-        client_turn_id = str(context.get("clientTurnId") or "").strip()
-        if not client_turn_id:
-            return
-        EVENT_BUS.broadcast_from_sync(
-            "agentRuntimeDelta",
-            {
-                "sessionId": context.get("sessionId") or "",
-                "turnId": context.get("turnId") or "",
-                "clientTurnId": client_turn_id,
-                "textDelta": text_delta[:1000],
-            },
+        if context.get("clientTurnId"):
+            EVENT_BUS.broadcast_from_sync(
+                "agentRuntimeDelta",
+                {
+                    "sessionId": context.get("sessionId") or "",
+                    "turnId": context.get("turnId") or "",
+                    "clientTurnId": context.get("clientTurnId") or "",
+                    "done": True,
+                },
+            )
+        return PlannerModelResult(
+            text=response.text,
+            usage=dict(response.usage or {}),
+            reasoning=dict(response.reasoning or {}),
+            planner_label=planner_label,
         )
-
-    response = request_llm_plan_with_metadata(settings, prompt, stream_callback=stream_callback)
-    context = AGENT_GATEWAY.runtime_stream_context()
-    if context.get("clientTurnId"):
-        EVENT_BUS.broadcast_from_sync(
-            "agentRuntimeDelta",
-            {
-                "sessionId": context.get("sessionId") or "",
-                "turnId": context.get("turnId") or "",
-                "clientTurnId": context.get("clientTurnId") or "",
-                "done": True,
-            },
-        )
-    reasoning = dict(response.reasoning or {})
-    if int(reasoning.get("itemCount") or 0) > 0:
-        AGENT_GATEWAY.llm_reasoning_trace = reasoning
-    return {"text": response.text, "usage": dict(response.usage or {}), "reasoning": reasoning}
-
-
-AGENT_GATEWAY.llm_plan_fn = _agent_gateway_llm_plan
 
 
 def mcp_trigger_selection_config_binding(config: ProviderApiConfig) -> tuple[str, str, str, str]:
@@ -13285,30 +13319,91 @@ def verify_mcp_trigger_selection_receipt(
     )
 
 
-def _agent_gateway_context_compact(
-    history: list[dict[str, Any]],
-    metadata: dict[str, Any],
-) -> dict[str, Any]:
-    """Host compactor for safe runtime continuation boundaries."""
+class _RuntimePlannerCompactor:
+    def __init__(self, turn: _RuntimePlannerProviderTurnBinding) -> None:
+        self._turn = turn
 
-    settings = load_dashboard_settings(ConnectionRequest())
-    summarizer: Callable[[str], Any] | None = None
-    if not provider_requires_api_key(settings.llm_provider) or str(settings.llm_api_key or "").strip():
-        summarizer = lambda prompt: request_llm_plan(settings, prompt)
-    return compact_context(
-        history,
-        summarizer=summarizer,
-        trigger="auto",
-        phase="mid_turn",
-        language=str(metadata.get("language") or ""),
-        provider=settings.llm_provider,
-        model=settings.llm_model,
-        target_tokens=metadata.get("targetTokens"),
-        real_context_limit=metadata.get("realContextLimit"),
+    def compact(
+        self,
+        history: tuple[Mapping[str, object], ...],
+        metadata: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        config = self._turn.current_config()
+        settings = PROVIDER_TEXT_PROBE.probe_settings(config)
+        summarizer: Callable[[str], Any] | None = None
+        if not provider_requires_api_key(config.provider) or str(config.api_key or "").strip():
+            summarizer = lambda prompt: request_llm_plan(settings, prompt)
+        return compact_context(
+            [dict(entry) for entry in history],
+            summarizer=summarizer,
+            trigger="auto",
+            phase="mid_turn",
+            language=str(metadata.get("language") or ""),
+            provider=config.provider,
+            model=config.model,
+            target_tokens=metadata.get("targetTokens"),
+            real_context_limit=metadata.get("realContextLimit"),
+        )
+
+
+def _runtime_planner_tool(tool: Any) -> PlannerTool:
+    return PlannerTool(
+        name=str(tool.name),
+        description=str(tool.description),
+        category=str(tool.category),
+        write=bool(tool.write),
+        advanced=bool(tool.advanced),
+        requires_user_activation=bool(tool.requires_user_activation),
     )
 
 
-AGENT_GATEWAY.runtime_context_compact_fn = _agent_gateway_context_compact
+class _RuntimePlannerCatalog:
+    def read(self, exposure_layer: str) -> PlannerCatalogSnapshot:
+        layer = normalize_exposure_layer(exposure_layer)
+        gateway_config = AGENT_GATEWAY.ensure_config()
+        visible_tools = tuple(
+            _runtime_planner_tool(tool)
+            for tool in AGENT_GATEWAY._tools.values()
+            if AGENT_GATEWAY._tool_visible(tool, gateway_config, layer)
+        )
+        routable_tools = tuple(
+            _runtime_planner_tool(tool)
+            for tool in AGENT_GATEWAY._tools.values()
+        )
+        skill_payloads = AGENT_GATEWAY.build_skill_registry(
+            gateway_config,
+            RUNTIME_PLANNER_EXECUTION_LAYER,
+        ).get("skills") or []
+        skills = tuple(
+            PlannerSkill(
+                name=str(skill.get("name") or ""),
+                title=str(skill.get("title") or ""),
+                source=str(skill.get("source") or ""),
+                skill_type=str(skill.get("skillType") or ""),
+                category=str(skill.get("category") or ""),
+                description=str(skill.get("description") or ""),
+                when_to_use=str(skill.get("whenToUse") or ""),
+                enabled=bool(skill.get("enabled", True)),
+                disable_model_invocation=bool(skill.get("disableModelInvocation")),
+            )
+            for skill in skill_payloads
+            if isinstance(skill, dict) and str(skill.get("name") or "").strip()
+        )
+        return PlannerCatalogSnapshot(
+            visible_tools=visible_tools,
+            routable_tools=routable_tools,
+            skills=skills,
+            computer_use_model_invocable=AGENT_GATEWAY.desktop.computer_use_model_invocable(
+                gateway_config
+            ),
+        )
+
+
+class _RuntimePlannerDesktopObservation:
+    def summarize_action_result(self, result: object) -> str:
+        return AGENT_GATEWAY.desktop.desktop_action_observation(result)
+
+
 AGENT_GATEWAY.vision_analyze_fn = PROVIDER_VISION.analyze
 
 
@@ -20554,6 +20649,16 @@ AGENT_GATEWAY.checkpoint_restore_handler = reload_unity_checkpoint_sync
 AGENT_GATEWAY.scoped_approval_reviewer_fn = _review_saved_project_category_approval
 
 register_agent_gateway_tools()
+
+_RUNTIME_PLANNER_TURN = _RuntimePlannerProviderTurnBinding()
+RUNTIME_PLANNER = RuntimePlannerService(
+    catalog=_RuntimePlannerCatalog(),
+    desktop=_RuntimePlannerDesktopObservation(),
+    model=_RuntimePlannerModel(_RUNTIME_PLANNER_TURN),
+    compactor=_RuntimePlannerCompactor(_RUNTIME_PLANNER_TURN),
+    turn=_RUNTIME_PLANNER_TURN,
+)
+AGENT_GATEWAY.bind_runtime_planner(RUNTIME_PLANNER)
 
 
 def create_primitive_basis_live_runtime(

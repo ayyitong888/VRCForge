@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from agent_gateway import parse_llm_plan_response
+from runtime_planner_service import parse_llm_plan_response
 
 
 class SelectionReceiptAuthority:

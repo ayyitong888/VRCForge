@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 import chat_attachment_vault
 import dashboard_server
-from agent_gateway import planner_safe_tool_result_fields
+from runtime_planner_service import planner_safe_tool_result_fields
 from chat_attachment_vault import (
     ChatAttachmentVault,
     ChatAttachmentVaultError,

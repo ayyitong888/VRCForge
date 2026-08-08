@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -15,6 +16,7 @@ from runtime_planner_service import (
     PlannerModelResult,
     PlannerSkill,
     PlannerTool,
+    PlannerTurnMetadata,
     RuntimePlannerService,
     planner_safe_tool_result_fields,
 )
@@ -76,6 +78,22 @@ class FakeCompactor:
         return dict(self.result)
 
 
+@dataclass
+class FakeTurn:
+    metadata: PlannerTurnMetadata
+    events: list[str] = field(default_factory=list)
+    requests: list[dict[str, object]] = field(default_factory=list)
+
+    @contextmanager
+    def bind(self, request: dict[str, object]):
+        self.requests.append(dict(request))
+        self.events.append("enter")
+        try:
+            yield self.metadata
+        finally:
+            self.events.append("exit")
+
+
 def tool(
     name: str,
     *,
@@ -98,12 +116,14 @@ def service(
     desktop: FakeDesktop | None = None,
     model: FakeModel | None = None,
     compactor: FakeCompactor | None = None,
+    turn: FakeTurn | None = None,
 ) -> RuntimePlannerService:
     return RuntimePlannerService(
         catalog=catalog or FakeCatalog(),
         desktop=desktop or FakeDesktop(),
         model=model,
         compactor=compactor,
+        turn=turn,
     )
 
 
@@ -375,6 +395,73 @@ def test_compaction_port_preserves_success_and_fail_closed_metadata() -> None:
     assert failed_blocked is True
 
 
+def test_turn_binding_returns_only_nonsecret_metadata_and_always_releases() -> None:
+    turn = FakeTurn(
+        PlannerTurnMetadata(
+            verified_context_limit=64_000,
+            planner_label="Fixture Provider · model-a",
+        )
+    )
+    planner = service(turn=turn)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        with planner.bind_turn(
+            {
+                "provider": "fixture",
+                "model": "model-a",
+                "_requestedContextLimit": 64_000,
+            }
+        ) as metadata:
+            assert metadata == PlannerTurnMetadata(
+                verified_context_limit=64_000,
+                planner_label="Fixture Provider · model-a",
+            )
+            assert not hasattr(metadata, "api_key")
+            raise RuntimeError("stop")
+
+    assert turn.events == ["enter", "exit"]
+    assert turn.requests == [
+        {
+            "provider": "fixture",
+            "model": "model-a",
+            "_requestedContextLimit": 64_000,
+        }
+    ]
+
+
+def test_compaction_projects_pre_and_post_prompts_with_current_exposure_layer() -> None:
+    catalog = FakeCatalog()
+    planner = service(
+        catalog=catalog,
+        compactor=FakeCompactor(
+            {
+                "summary": "bounded summary",
+                "providerAttempts": 1,
+                "summaryDigest": "a" * 64,
+            }
+        ),
+    )
+
+    replacement, metadata, blocked = planner.maybe_compact_runtime_history(
+        message="continue",
+        params={"_contextCompactionLimit": 10_000},
+        observe={},
+        history=[{"role": "user", "text": "x" * 20_000}],
+        loop_state=[],
+        context_usage={
+            "exact": True,
+            "lastInputTokens": 10_000,
+            "lastPromptEstimatedTokens": 5_000,
+        },
+        runtime_exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert replacement == [{"role": "agent", "text": "bounded summary"}]
+    assert metadata is not None and metadata["applied"] is True
+    assert blocked is False
+    assert catalog.reads == [EXPOSURE_LAYER_EXECUTION, EXPOSURE_LAYER_EXECUTION]
+
+
 def _function_map(tree: ast.Module, class_name: str | None = None) -> dict[str, ast.FunctionDef]:
     body: list[ast.stmt]
     if class_name is None:
@@ -430,62 +517,90 @@ def normalized(node: ast.FunctionDef) -> str:
     return ast.dump(transformed, include_attributes=False)
 
 
-def test_unchanged_planner_policy_is_normalized_ast_equivalent_to_gateway_source() -> None:
-    old_tree = ast.parse((ROOT / "agent_gateway.py").read_text(encoding="utf-8"))
-    new_tree = ast.parse((ROOT / "runtime_planner_service.py").read_text(encoding="utf-8"))
-    old_module = _function_map(old_tree)
-    new_module = _function_map(new_tree)
-    old_owner = _function_map(old_tree, "AgentGateway")
-    new_owner = _function_map(new_tree, "RuntimePlannerService")
 
-    equivalent_module_functions = {
+
+def test_gateway_and_dashboard_expose_only_one_typed_runtime_planner_root() -> None:
+    gateway_tree = ast.parse((ROOT / "agent_gateway.py").read_text(encoding="utf-8"))
+    dashboard_tree = ast.parse((ROOT / "dashboard_server.py").read_text(encoding="utf-8"))
+    gateway_owner = next(
+        item for item in gateway_tree.body if isinstance(item, ast.ClassDef) and item.name == "AgentGateway"
+    )
+    old_class_methods = {
+        "_plan_agent_turn",
+        "_disconnected_local_plan",
+        "_local_plan_agent_turn",
+        "_plan_runtime_meta_question",
+        "_plan_write_intent",
+        "_avatars_from_loop_state",
+        "_build_avatar_write_params",
+        "_llm_plan_agent_turn",
+        "_record_llm_context_usage",
+        "_maybe_compact_runtime_history",
+        "_message_with_runtime_context",
+        "_llm_loop_step_observation",
+        "_build_llm_plan_prompt",
+        "_match_runtime_skill",
+        "_match_package_skill_route",
+        "_runtime_skill_route",
+        "_desktop_action_observation",
+    }
+    assert not old_class_methods.intersection(
+        item.name for item in gateway_owner.body if isinstance(item, ast.FunctionDef)
+    )
+    old_module_helpers = {
         "parse_llm_plan_response",
+        "normalize_llm_plan_result",
         "usage_int",
         "estimate_runtime_context_tokens",
         "classify_runtime_compaction_failure",
         "bounded_runtime_compaction_integer",
         "runtime_compaction_audit_view",
         "runtime_compaction_cancelled_view",
-        "summarize_text",
-        "extract_skill_invocation",
-        "extract_shell_command_candidate",
-        "detect_avatar_write_intent",
-        "extract_avatar_paths",
-        "has_any",
-        "ensure_dict",
-        "ensure_list",
-        "normalize_skill_id",
-        "normalize_exposure_layer",
-        "tool_usage_description",
-        "summarize_params",
-        "summarize_value",
-        "_normalize_planner_tool_observation_key",
-        "_planner_tool_observation_count_key_allowed",
-        "_planner_tool_observation_candidates",
         "_sanitize_planner_tool_observation_text",
-        "_planner_safe_tool_observation_value",
         "planner_safe_tool_result_fields",
         "format_planner_tool_observation",
-        "redact_sensitive",
+        "extract_shell_command_candidate",
     }
-    for name in sorted(equivalent_module_functions):
-        assert normalized(new_module[name]) == normalized(old_module[name]), name
+    assert not old_module_helpers.intersection(
+        item.name for item in gateway_tree.body if isinstance(item, ast.FunctionDef)
+    )
+    old_roots = {
+        "llm_plan_fn",
+        "runtime_context_compact_fn",
+        "llm_planner_label",
+        "llm_reasoning_trace",
+        "llm_context_usage",
+    }
+    assert not old_roots.intersection(
+        item.attr for item in ast.walk(gateway_owner) if isinstance(item, ast.Attribute)
+    )
+    assert not {
+        "_agent_gateway_llm_plan",
+        "_agent_gateway_context_compact",
+        "verified_runtime_context_limit",
+    }.intersection(
+        item.name for item in dashboard_tree.body if isinstance(item, ast.FunctionDef)
+    )
+    bind_calls = [
+        item
+        for item in ast.walk(dashboard_tree)
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Attribute)
+        and item.func.attr == "bind_runtime_planner"
+    ]
+    assert len(bind_calls) == 1
 
-    equivalent_owner_methods = {
-        "_plan_agent_turn": "plan_agent_turn",
-        "_disconnected_local_plan": "_disconnected_local_plan",
-        "_local_plan_agent_turn": "_local_plan_agent_turn",
-        "_plan_runtime_meta_question": "_plan_runtime_meta_question",
-        "_plan_write_intent": "_plan_write_intent",
-        "_avatars_from_loop_state": "_avatars_from_loop_state",
-        "_build_avatar_write_params": "_build_avatar_write_params",
-        "_record_llm_context_usage": "record_context_usage",
-        "_message_with_runtime_context": "_message_with_runtime_context",
-        "_llm_loop_step_observation": "_llm_loop_step_observation",
-        "_match_runtime_skill": "_match_runtime_skill",
-    }
-    for old_name, new_name in equivalent_owner_methods.items():
-        assert normalized(new_owner[new_name]) == normalized(old_owner[old_name]), old_name
+
+def test_gateway_runtime_planner_binding_is_single_assignment(tmp_path: Path) -> None:
+    from agent_gateway import AgentGateway
+
+    gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
+    planner = service()
+    gateway.bind_runtime_planner(planner)
+
+    assert gateway.runtime_planner is planner
+    with pytest.raises(RuntimeError, match="already bound"):
+        gateway.bind_runtime_planner(planner)
 
 
 def test_owner_surface_has_no_dynamic_host_or_execution_authority() -> None:
@@ -520,9 +635,10 @@ def test_owner_surface_has_no_dynamic_host_or_execution_authority() -> None:
             "runtime_session",
         }
     )
-    assert self_attributes.intersection({"_catalog", "_desktop", "_model", "_compactor"}) == {
+    assert self_attributes.intersection({"_catalog", "_desktop", "_model", "_compactor", "_turn"}) == {
         "_catalog",
         "_desktop",
         "_model",
         "_compactor",
+        "_turn",
     }

@@ -21,8 +21,8 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 import dashboard_server
-from agent_gateway import detect_avatar_write_intent
 from approved_unity_execution import current_approved_unity_execution
+from runtime_planner_service import detect_avatar_write_intent
 
 
 class AgentLoopP0Tests(unittest.TestCase):
@@ -45,10 +45,8 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.gateway._write_handlers[
             "vrcforge_create_gameobject"
         ].checkpoint_prepare_handler = lambda _root, _arguments: {"ok": True}
-        self.original_planner_label = self.gateway.llm_planner_label
 
     def tearDown(self) -> None:
-        self.gateway.llm_planner_label = self.original_planner_label
         self.gateway.checkpoint_prepare_handler = self.original_prepare
         self.gateway._write_handlers[
             "vrcforge_create_gameobject"
@@ -223,11 +221,11 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertIsNone(detect_avatar_write_intent("inspect the scene root"))
 
     def test_scene_root_and_avatar_target_conflict_fails_closed(self) -> None:
-        plan = self.gateway._plan_write_intent(
+        plan = self.gateway.runtime_planner.plan_agent_turn(
             "create an object at the scene root",
             {"avatarPath": "AvatarRoot"},
-            [],
-            False,
+            {},
+            loop_state=[],
         )
 
         self.assertIsNotNone(plan)
@@ -272,10 +270,10 @@ class AgentLoopP0Tests(unittest.TestCase):
     def test_unplanned_message_without_provider_is_honest_not_fake(self) -> None:
         gateway = self.gateway
 
-        def raising_plan_fn(prompt):
-            raise RuntimeError("no provider connected")
-
-        with patch.object(gateway, "llm_plan_fn", raising_plan_fn):
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=RuntimeError("no provider connected"),
+        ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",
@@ -295,15 +293,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_provider_model_followup_replies_without_tooling(self) -> None:
         gateway = self.gateway
-        gateway.llm_planner_label = ""
-
-        def raising_plan_fn(prompt):
-            raise AssertionError("meta follow-up should not call the LLM planner")
-
-        with patch.object(gateway, "llm_plan_fn", raising_plan_fn), patch.object(
-            gateway,
-            "_execute_runtime_skill",
-        ) as execute_skill:
+        with patch.object(gateway, "_execute_runtime_skill") as execute_skill:
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",

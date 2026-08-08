@@ -103,7 +103,6 @@ def test_approval_transaction_facade_is_delegate_only_and_keeps_domain_boundarie
         "_validated_memory_evidence_for_applied_write",
         "_write_handler_allows_future_category",
         "execute_shell_payload",
-        "_plan_write_intent",
     }.isdisjoint(implementation_methods)
 
     for method_name, implementation in implementation_methods.items():

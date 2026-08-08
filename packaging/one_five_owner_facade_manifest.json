@@ -727,58 +727,11 @@
       ]
     },
     {
-      "id": "gateway.runtime-planner-owner",
+      "id": "dashboard.runtime-planner-typed-root-owner",
       "rootSymbols": [
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "llm_plan_fn"},
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "runtime_context_compact_fn"},
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "llm_planner_label"},
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "llm_reasoning_trace"},
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "llm_context_usage"}
+        {"source": "dashboard_server.py", "scope": "module", "name": "RUNTIME_PLANNER"}
       ],
-      "facades": [
-        {
-          "source": "agent_gateway.py",
-          "scope": "class",
-          "class": "AgentGateway",
-          "methods": [
-            "_plan_agent_turn",
-            "_disconnected_local_plan",
-            "_local_plan_agent_turn",
-            "_plan_runtime_meta_question",
-            "_plan_write_intent",
-            "_avatars_from_loop_state",
-            "_build_avatar_write_params",
-            "_llm_plan_agent_turn",
-            "_record_llm_context_usage",
-            "_maybe_compact_runtime_history",
-            "_message_with_runtime_context",
-            "_llm_loop_step_observation",
-            "_build_llm_plan_prompt",
-            "_match_runtime_skill",
-            "_match_package_skill_route",
-            "_runtime_skill_route",
-            "_desktop_action_observation"
-          ]
-        },
-        {
-          "source": "agent_gateway.py",
-          "scope": "module",
-          "methods": [
-            "parse_llm_plan_response",
-            "normalize_llm_plan_result",
-            "usage_int",
-            "estimate_runtime_context_tokens",
-            "classify_runtime_compaction_failure",
-            "bounded_runtime_compaction_integer",
-            "runtime_compaction_audit_view",
-            "runtime_compaction_cancelled_view",
-            "_sanitize_planner_tool_observation_text",
-            "planner_safe_tool_result_fields",
-            "format_planner_tool_observation",
-            "extract_shell_command_candidate"
-          ]
-        }
-      ]
+      "facades": []
     },
     {
       "id": "gateway.shell-policy-execution-owner",

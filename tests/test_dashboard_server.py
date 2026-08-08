@@ -9,6 +9,8 @@ import threading
 import time
 import unittest
 import zipfile
+from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,7 +26,6 @@ from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
     CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
-    RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS,
     redact_background_goal_persistence,
     redact_sensitive,
     summarize_text,
@@ -71,10 +72,178 @@ from provider_test_integration_service import (
     ProviderTestIntegrationService,
     ProviderTestServicePorts,
 )
+from runtime_planner_service import (
+    EXPOSURE_LAYER_EXECUTION,
+    PlannerCatalogSnapshot,
+    PlannerModelResult,
+    PlannerSkill,
+    PlannerTool,
+    PlannerTurnMetadata,
+    RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS,
+    RuntimePlannerService,
+)
 from skill_packages import SkillPackageError, SkillPackageService
 from sub_agent_collaboration_service import SubAgentCollaborationService
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
+
+
+class _TestRuntimePlannerCatalog:
+    def __init__(self, gateway: AgentGateway) -> None:
+        self._gateway = gateway
+
+    @staticmethod
+    def _tool(value) -> PlannerTool:
+        return PlannerTool(
+            name=str(value.name),
+            description=str(value.description),
+            category=str(value.category),
+            write=bool(value.write),
+            advanced=bool(value.advanced),
+            requires_user_activation=bool(value.requires_user_activation),
+        )
+
+    def read(self, exposure_layer: str) -> PlannerCatalogSnapshot:
+        config = self._gateway.ensure_config()
+        visible_tools = tuple(
+            self._tool(tool)
+            for tool in self._gateway._tools.values()
+            if self._gateway._tool_visible(tool, config, exposure_layer)
+        )
+        skills = tuple(
+            PlannerSkill(
+                name=str(skill.get("name") or ""),
+                title=str(skill.get("title") or ""),
+                source=str(skill.get("source") or ""),
+                skill_type=str(skill.get("skillType") or ""),
+                category=str(skill.get("category") or ""),
+                description=str(skill.get("description") or ""),
+                when_to_use=str(skill.get("whenToUse") or ""),
+                enabled=bool(skill.get("enabled", True)),
+                disable_model_invocation=bool(skill.get("disableModelInvocation")),
+            )
+            for skill in self._gateway.build_skill_registry(config, EXPOSURE_LAYER_EXECUTION).get("skills") or []
+            if isinstance(skill, dict) and str(skill.get("name") or "").strip()
+        )
+        return PlannerCatalogSnapshot(
+            visible_tools=visible_tools,
+            routable_tools=tuple(self._tool(tool) for tool in self._gateway._tools.values()),
+            skills=skills,
+            computer_use_model_invocable=self._gateway.desktop.computer_use_model_invocable(config),
+        )
+
+
+class _TestRuntimePlannerDesktop:
+    def __init__(self, gateway: AgentGateway) -> None:
+        self._gateway = gateway
+
+    def summarize_action_result(self, result: object) -> str:
+        return self._gateway.desktop.desktop_action_observation(result)
+
+
+def _model_payload_from_final_plan(plan: Mapping[str, object]) -> dict[str, object]:
+    if plan.get("skillNeeded"):
+        return {
+            "action": "skill",
+            "skill_tool": plan.get("skillTool"),
+            "skill_params": plan.get("skillParams") or {},
+            "summary": plan.get("summary") or "",
+            "reply": plan.get("reply") or "",
+        }
+    if plan.get("shellNeeded"):
+        return {
+            "action": "shell",
+            "shell_command": plan.get("shellCommand") or "",
+            "summary": plan.get("summary") or "",
+            "reply": plan.get("reply") or "",
+        }
+    return {
+        "action": "reply",
+        "summary": plan.get("summary") or "",
+        "reply": plan.get("reply") or "",
+    }
+
+
+class _TestRuntimePlannerModel:
+    def __init__(self, respond: Callable[[str], object]) -> None:
+        self._respond = respond
+
+    def plan(self, prompt: str) -> PlannerModelResult:
+        response = self._respond(prompt)
+        if isinstance(response, PlannerModelResult):
+            return response
+        if not isinstance(response, Mapping):
+            return PlannerModelResult(text=str(response or ""), planner_label="test")
+        if any(key in response for key in ("text", "content", "response", "message")):
+            text = str(
+                response.get("text")
+                or response.get("content")
+                or response.get("response")
+                or response.get("message")
+                or ""
+            )
+            usage = response.get("usage") or response.get("tokenUsage") or {}
+            reasoning = response.get("reasoning") or {}
+        else:
+            text = json.dumps(_model_payload_from_final_plan(response))
+            usage = {}
+            reasoning = {}
+        return PlannerModelResult(
+            text=text,
+            usage=usage if isinstance(usage, Mapping) else {},
+            reasoning=reasoning if isinstance(reasoning, Mapping) else {},
+            planner_label=str(response.get("plannerLabel") or response.get("planner") or "test"),
+        )
+
+
+class _TestRuntimePlannerCompactor:
+    def __init__(self, compact: Callable[[list[dict[str, object]], dict[str, object]], Mapping[str, object]]) -> None:
+        self._compact = compact
+
+    def compact(
+        self,
+        history: tuple[Mapping[str, object], ...],
+        request: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        return self._compact([dict(entry) for entry in history], dict(request))
+
+
+class _TestRuntimePlannerTurn:
+    def bind(self, request: Mapping[str, object]):
+        requested_limit = request.get("_contextCompactionLimit") or request.get("_requestedContextLimit")
+        verified_limit = int(requested_limit) if requested_limit is not None else None
+        return nullcontext(
+            PlannerTurnMetadata(
+                verified_context_limit=verified_limit,
+                planner_label="test",
+            )
+        )
+
+
+def bind_test_runtime_planner(
+    gateway: AgentGateway,
+    respond: Callable[[str], object],
+    *,
+    compact: Callable[[list[dict[str, object]], dict[str, object]], Mapping[str, object]] | None = None,
+) -> RuntimePlannerService:
+    planner = RuntimePlannerService(
+        catalog=_TestRuntimePlannerCatalog(gateway),
+        desktop=_TestRuntimePlannerDesktop(gateway),
+        model=_TestRuntimePlannerModel(respond),
+        compactor=_TestRuntimePlannerCompactor(compact) if compact is not None else None,
+        turn=_TestRuntimePlannerTurn(),
+    )
+    gateway.bind_runtime_planner(planner)
+    return planner
+
+
+def _test_runtime_provider_config(*, model: str = "test-model") -> ProviderApiConfig:
+    return ProviderApiConfig(
+        provider="ollama",
+        api_key="",
+        base_url="http://127.0.0.1:11434",
+        model=model,
+    )
 
 
 def isolated_provider_configuration_service(
@@ -1579,16 +1748,23 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_computer_use_tool_is_visible_only_for_explicit_app_turn(self) -> None:
         captured: list[str] = []
-        previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
-        previous_label = dashboard_server.AGENT_GATEWAY.llm_planner_label
 
-        def plan_fn(prompt: str) -> dict:
+        def plan_fn(_settings, prompt: str, *, stream_callback=None) -> LlmPlanResponse:
             captured.append(prompt)
-            return {"text": json.dumps({"action": "reply", "reply": "done"})}
+            return LlmPlanResponse(
+                text=json.dumps({"action": "reply", "reply": "done"}),
+                usage={},
+                reasoning={},
+            )
 
-        try:
-            dashboard_server.AGENT_GATEWAY.llm_plan_fn = plan_fn
-            dashboard_server.AGENT_GATEWAY.llm_planner_label = "TestProvider / model"
+        with (
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=_test_runtime_provider_config(),
+            ),
+            patch("dashboard_server.request_llm_plan_with_metadata", side_effect=plan_fn),
+        ):
             with TestClient(dashboard_server.app) as client:
                 ordinary = client.post(
                     "/api/app/agent/message",
@@ -1608,9 +1784,6 @@ class DashboardServerTests(unittest.TestCase):
                         "computerUseGrantId": grant.json()["grantId"],
                     },
                 )
-        finally:
-            dashboard_server.AGENT_GATEWAY.llm_plan_fn = previous_fn
-            dashboard_server.AGENT_GATEWAY.llm_planner_label = previous_label
 
         self.assertEqual(ordinary.status_code, 200)
         self.assertEqual(grant.status_code, 200)
@@ -1621,9 +1794,19 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(dashboard_server.AGENT_GATEWAY.computer_use_turn_active())
 
     def test_computer_use_turn_grant_is_required_bound_and_single_use(self) -> None:
-        previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
-        dashboard_server.AGENT_GATEWAY.llm_plan_fn = lambda _prompt: {"text": json.dumps({"action": "reply", "reply": "done"})}
-        try:
+        response = LlmPlanResponse(
+            text=json.dumps({"action": "reply", "reply": "done"}),
+            usage={},
+            reasoning={},
+        )
+        with (
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=_test_runtime_provider_config(),
+            ),
+            patch("dashboard_server.request_llm_plan_with_metadata", return_value=response),
+        ):
             with TestClient(dashboard_server.app) as client:
                 forged = client.post(
                     "/api/app/agent/message",
@@ -1655,8 +1838,6 @@ class DashboardServerTests(unittest.TestCase):
                         "computerUseGrantId": grant.json()["grantId"],
                     },
                 )
-        finally:
-            dashboard_server.AGENT_GATEWAY.llm_plan_fn = previous_fn
 
         self.assertEqual(forged.status_code, 403)
         self.assertEqual(grant.status_code, 200)
@@ -2835,24 +3016,17 @@ class DashboardServerTests(unittest.TestCase):
                     json={"chatId": "chat-background-denied"},
                 )
                 delivery = woken.json()["delivery"]
-                plan = {
-                    "summary": "Request the guarded write.",
-                    "reply": "This write requires approval.",
-                    "planner": "test",
-                    "nextStep": "done",
-                }
-                with patch.object(dashboard_server.AGENT_GATEWAY, "_plan_agent_turn", return_value=plan):
-                    runtime = client.post(
-                        "/api/app/agent/message",
-                        json={
-                            "message": delivery["resumePrompt"],
-                            "clientTurnId": delivery["clientTurnId"],
-                            "goalDeliveryId": delivery["deliveryId"],
-                            "shell_command": "Set-Content -Path Assets/background-goal.txt -Value guarded -Encoding utf8",
-                            "workspace_root": workspace,
-                            "cwd": workspace,
-                        },
-                    )
+                runtime = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": delivery["resumePrompt"],
+                        "clientTurnId": delivery["clientTurnId"],
+                        "goalDeliveryId": delivery["deliveryId"],
+                        "shell_command": "Set-Content -Path Assets/background-goal.txt -Value guarded -Encoding utf8",
+                        "workspace_root": workspace,
+                        "cwd": workspace,
+                    },
+                )
 
                 self.assertEqual(runtime.status_code, 200)
                 approval_id = runtime.json()["shell"]["approval_id"]
@@ -3458,7 +3632,7 @@ class DashboardServerTests(unittest.TestCase):
                     },
                 }
 
-            gateway.llm_plan_fn = fake_llm
+            bind_test_runtime_planner(gateway, fake_llm)
             results: dict[str, dict[str, object]] = {}
 
             def run_turn(name: str, message: str) -> None:
@@ -3526,8 +3700,7 @@ class DashboardServerTests(unittest.TestCase):
                     "providerAttempts": 1,
                 }
 
-            gateway.llm_plan_fn = fake_llm
-            gateway.runtime_context_compact_fn = compact_fn
+            bind_test_runtime_planner(gateway, fake_llm, compact=compact_fn)
             history = [
                 {"role": "user" if index % 2 == 0 else "agent", "text": f"OLD_HISTORY_{index}_" + ("x" * 1200)}
                 for index in range(24)
@@ -3601,9 +3774,12 @@ class DashboardServerTests(unittest.TestCase):
                     },
                 }
 
-            gateway.llm_plan_fn = fake_llm
-            gateway.runtime_context_compact_fn = lambda _history, _metadata: (_ for _ in ()).throw(
-                TimeoutError("compactor unavailable")
+            bind_test_runtime_planner(
+                gateway,
+                fake_llm,
+                compact=lambda _history, _metadata: (_ for _ in ()).throw(
+                    TimeoutError("compactor unavailable")
+                ),
             )
             response = gateway.runtime_message(
                 {
@@ -3666,8 +3842,7 @@ class DashboardServerTests(unittest.TestCase):
                 compactor_calls += 1
                 raise TimeoutError("compactor unavailable")
 
-            gateway.llm_plan_fn = fake_llm
-            gateway.runtime_context_compact_fn = failing_compactor
+            bind_test_runtime_planner(gateway, fake_llm, compact=failing_compactor)
             response = gateway.runtime_message(
                 {
                     "message": "continue safely",
@@ -3734,8 +3909,7 @@ class DashboardServerTests(unittest.TestCase):
                     "summaryDigest": "cancelled-summary-digest",
                 }
 
-            gateway.llm_plan_fn = fake_llm
-            gateway.runtime_context_compact_fn = cancelling_compactor
+            bind_test_runtime_planner(gateway, fake_llm, compact=cancelling_compactor)
             response = gateway.runtime_message(
                 {
                     "message": "continue safely",
@@ -3763,38 +3937,52 @@ class DashboardServerTests(unittest.TestCase):
             "observe": {},
             "plan": {"summary": "done", "reply": "done", "planner": "test"},
         }
-        configured = SimpleNamespace(llm_provider="custom", llm_model="model-id")
+        configured = ProviderApiConfig(
+            provider="ollama",
+            api_key="",
+            base_url="http://127.0.0.1:11434",
+            model="model-id",
+        )
         with (
             patch.object(dashboard_server.AGENT_GATEWAY, "runtime_message", return_value=runtime_payload) as runtime_message,
-            patch("dashboard_server.load_dashboard_settings", return_value=configured),
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=configured,
+            ),
         ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",
                     json={
                         "message": "continue",
-                        "provider": "custom",
+                        "provider": "ollama",
                         "model": "model-id",
                         "contextLimit": 64_000,
                     },
                 )
 
-        self.assertEqual(response.status_code, 200)
-        forwarded = runtime_message.call_args.args[0]
-        self.assertEqual(forwarded["_contextCompactionLimit"], 64_000)
-        self.assertEqual(forwarded["provider"], "custom")
-        self.assertEqual(forwarded["model"], "model-id")
+            forwarded = runtime_message.call_args.args[0]
+            with dashboard_server.RUNTIME_PLANNER.bind_turn(forwarded) as matching_metadata:
+                self.assertEqual(matching_metadata.verified_context_limit, 64_000)
 
-        mismatched = dashboard_server.AgentRuntimeMessageRequest.model_validate(
-            {
-                "message": "continue",
-                "provider": "custom",
-                "model": "other-model",
-                "contextLimit": 64_000,
-            }
-        )
-        with patch("dashboard_server.load_dashboard_settings", return_value=configured):
-            self.assertIsNone(dashboard_server.verified_runtime_context_limit(mismatched))
+            mismatched = dashboard_server.AgentRuntimeMessageRequest.model_validate(
+                {
+                    "message": "continue",
+                    "provider": "ollama",
+                    "model": "other-model",
+                    "contextLimit": 64_000,
+                }
+            )
+            with dashboard_server.RUNTIME_PLANNER.bind_turn(
+                dashboard_server.agent_runtime_request_payload(mismatched)
+            ) as mismatched_metadata:
+                self.assertIsNone(mismatched_metadata.verified_context_limit)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(forwarded["_requestedContextLimit"], 64_000)
+        self.assertEqual(forwarded["provider"], "ollama")
+        self.assertEqual(forwarded["model"], "model-id")
 
     def test_agent_gateway_requires_token_and_is_disabled_by_default(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -5469,18 +5657,30 @@ class DashboardServerTests(unittest.TestCase):
     def test_agent_runtime_cancel_after_planner_return_marks_turn_cancelled(self) -> None:
         client_turn_id = "client-cancel-after-plan"
 
-        def fake_plan(*_args, **_kwargs):
+        def fake_request(_settings, _prompt, *, stream_callback=None) -> LlmPlanResponse:
             dashboard_server.AGENT_GATEWAY.request_runtime_cancel(
                 {"clientTurnId": client_turn_id, "reason": "user_stop"}
             )
-            return {
-                "summary": "planner completed after stop",
-                "reply": "this should not surface",
-                "planner": "test",
-                "nextStep": "done",
-            }
+            return LlmPlanResponse(
+                text=json.dumps(
+                    {
+                        "action": "reply",
+                        "summary": "planner completed after stop",
+                        "reply": "this should not surface",
+                    }
+                ),
+                usage={},
+                reasoning={},
+            )
 
-        with patch.object(dashboard_server.AGENT_GATEWAY, "_plan_agent_turn", side_effect=fake_plan):
+        with (
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=_test_runtime_provider_config(),
+            ),
+            patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_request),
+        ):
             payload = dashboard_server.AGENT_GATEWAY.runtime_message(
                 {
                     "message": "cancel after provider call",
@@ -5496,7 +5696,10 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config.json", root / "audit")
-            gateway.llm_plan_fn = Mock(side_effect=ConnectionError("provider unavailable"))
+            bind_test_runtime_planner(
+                gateway,
+                Mock(side_effect=ConnectionError("provider unavailable")),
+            )
 
             interactive = gateway.runtime_message({"message": "hello"})
             self.assertEqual(interactive["plan"]["planner"], "deterministic-local")
@@ -5570,8 +5773,8 @@ class DashboardServerTests(unittest.TestCase):
                 "continueLoop": True,
             }
 
-            with patch.object(gateway, "_plan_agent_turn", return_value=repeated_plan):
-                payload = gateway.runtime_message({"message": "exercise bounded failure"})
+            bind_test_runtime_planner(gateway, lambda _prompt: repeated_plan)
+            payload = gateway.runtime_message({"message": "exercise bounded failure"})
 
         self.assertEqual(len(payload["steps"]), 3)
         self.assertEqual(payload["plan"]["nextStep"], "loop_suppressed")
@@ -5610,8 +5813,9 @@ class DashboardServerTests(unittest.TestCase):
                 }
             )
 
-            with patch.object(gateway, "_plan_agent_turn", side_effect=plans):
-                payload = gateway.runtime_message({"message": "exercise distinct failures"})
+            plan_iterator = iter(plans)
+            bind_test_runtime_planner(gateway, lambda _prompt: next(plan_iterator))
+            payload = gateway.runtime_message({"message": "exercise distinct failures"})
 
         self.assertEqual(len(payload["steps"]), 3)
         self.assertEqual(payload["plan"]["nextStep"], "done")
@@ -5644,8 +5848,9 @@ class DashboardServerTests(unittest.TestCase):
                     }
                 )
 
-            with patch.object(gateway, "_plan_agent_turn", side_effect=plans):
-                payload = gateway.runtime_message({"message": "exercise tool-call budget"})
+            plan_iterator = iter(plans)
+            bind_test_runtime_planner(gateway, lambda _prompt: next(plan_iterator))
+            payload = gateway.runtime_message({"message": "exercise tool-call budget"})
 
         self.assertEqual(calls, [f"vrcforge_test_tool_budget_{index}" for index in range(3)])
         self.assertEqual(len([step for step in payload["steps"] if step["kind"] == "skill"]), 3)
@@ -5689,10 +5894,9 @@ class DashboardServerTests(unittest.TestCase):
                     }
                 )
 
-            with (
-                patch.object(gateway.desktop, "consume_computer_use_turn_grant"),
-                patch.object(gateway, "_plan_agent_turn", side_effect=plans),
-            ):
+            plan_iterator = iter(plans)
+            bind_test_runtime_planner(gateway, lambda _prompt: next(plan_iterator))
+            with patch.object(gateway.desktop, "consume_computer_use_turn_grant"):
                 payload = gateway.runtime_message(
                     {"message": "exercise bootstrap tool-call budget", "_computerUseRequested": True}
                 )
@@ -5719,10 +5923,8 @@ class DashboardServerTests(unittest.TestCase):
                 "planner": "test",
                 "nextStep": "done",
             }
-            with (
-                patch.object(gateway.desktop, "consume_computer_use_turn_grant"),
-                patch.object(gateway, "_plan_agent_turn", return_value=terminal),
-            ):
+            bind_test_runtime_planner(gateway, lambda _prompt: terminal)
+            with patch.object(gateway.desktop, "consume_computer_use_turn_grant"):
                 first = gateway.runtime_message(
                     {"session_id": "same-session", "message": "first", "_computerUseRequested": True}
                 )
@@ -5791,17 +5993,13 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(runs[0]["providerLabel"], "DeepSeek")
 
     @patch("dashboard_server.request_llm_plan_with_metadata")
-    @patch("dashboard_server.load_dashboard_settings")
+    @patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config")
     def test_agent_runtime_message_includes_provider_reasoning_trace(
         self,
-        mock_load_settings,
+        mock_current_api_config,
         mock_request_llm_plan,
     ) -> None:
-        mock_load_settings.return_value = SimpleNamespace(
-            llm_provider="ollama",
-            llm_api_key="",
-            llm_model="qwen3",
-        )
+        mock_current_api_config.return_value = _test_runtime_provider_config(model="qwen3")
         mock_request_llm_plan.return_value = LlmPlanResponse(
             text=json.dumps({"action": "reply", "reply": "ready"}),
             reasoning={
@@ -5826,17 +6024,13 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["reasoning"]["items"][0]["text"], "visible model thinking")
 
     @patch("dashboard_server.request_llm_plan_with_metadata")
-    @patch("dashboard_server.load_dashboard_settings")
+    @patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config")
     def test_agent_runtime_message_reports_provider_context_usage(
         self,
-        mock_load_settings,
+        mock_current_api_config,
         mock_request_llm_plan,
     ) -> None:
-        mock_load_settings.return_value = SimpleNamespace(
-            llm_provider="ollama",
-            llm_api_key="",
-            llm_model="deepseek-v4-pro",
-        )
+        mock_current_api_config.return_value = _test_runtime_provider_config(model="deepseek-v4-pro")
         mock_request_llm_plan.return_value = LlmPlanResponse(
             text=json.dumps({"action": "reply", "reply": "ready"}),
             reasoning={},
@@ -5881,7 +6075,7 @@ class DashboardServerTests(unittest.TestCase):
         usage: dict[str, object] = {}
 
         for tokens in (40_000, 45_000):
-            dashboard_server.AGENT_GATEWAY._record_llm_context_usage(
+            dashboard_server.RUNTIME_PLANNER.record_context_usage(
                 usage,
                 "prompt",
                 [{"role": "user", "text": "history"}],
@@ -5919,7 +6113,7 @@ class DashboardServerTests(unittest.TestCase):
                 "peakTotalTokens",
             )
         }
-        dashboard_server.AGENT_GATEWAY._record_llm_context_usage(usage, "missing", [], None)
+        dashboard_server.RUNTIME_PLANNER.record_context_usage(usage, "missing", [], None)
 
         self.assertEqual(usage["requestCount"], 3)
         self.assertFalse(usage["exact"])
@@ -5928,18 +6122,14 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
     @patch("dashboard_server.request_llm_plan_with_metadata")
-    @patch("dashboard_server.load_dashboard_settings")
+    @patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config")
     def test_agent_runtime_stream_callback_emits_summary_deltas(
         self,
-        mock_load_settings,
+        mock_current_api_config,
         mock_request_llm_plan,
         mock_broadcast,
     ) -> None:
-        mock_load_settings.return_value = SimpleNamespace(
-            llm_provider="ollama",
-            llm_api_key="",
-            llm_model="qwen3",
-        )
+        mock_current_api_config.return_value = _test_runtime_provider_config(model="qwen3")
 
         def fake_request(_settings, _prompt, stream_callback=None):
             self.assertIsNotNone(stream_callback)
@@ -5958,11 +6148,12 @@ class DashboardServerTests(unittest.TestCase):
             "clientTurnId": "client-stream",
         }
         try:
-            payload = dashboard_server._agent_gateway_llm_plan("hello")
+            with dashboard_server.RUNTIME_PLANNER.bind_turn({}):
+                payload = dashboard_server.RUNTIME_PLANNER.plan_agent_turn("hello", {}, {})
         finally:
             dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {}
 
-        self.assertEqual(json.loads(payload["text"])["summary"], "hello")
+        self.assertEqual(payload["summary"], "hello")
         events = [call.args for call in mock_broadcast.call_args_list]
         self.assertEqual(events[0][0], "agentRuntimeDelta")
         self.assertEqual(events[0][1]["textDelta"], "hel")
@@ -5972,17 +6163,18 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.EVENT_BUS.broadcast_from_sync")
     @patch("dashboard_server.request_llm_plan_with_metadata")
-    @patch("dashboard_server.load_dashboard_settings")
+    @patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config")
     def test_agent_runtime_stream_callback_continues_when_reply_replaces_summary_prefix(
         self,
-        mock_load_settings,
+        mock_current_api_config,
         mock_request_llm_plan,
         mock_broadcast,
     ) -> None:
-        mock_load_settings.return_value = SimpleNamespace(
-            llm_provider="deepseek",
-            llm_api_key="test-key",
-            llm_model="deepseek-chat",
+        mock_current_api_config.return_value = ProviderApiConfig(
+            provider="deepseek",
+            api_key="test-key",
+            base_url="https://api.deepseek.com",
+            model="deepseek-chat",
         )
 
         def fake_request(_settings, _prompt, stream_callback=None):
@@ -6003,49 +6195,52 @@ class DashboardServerTests(unittest.TestCase):
             "clientTurnId": "client-stream-prefix",
         }
         try:
-            payload = dashboard_server._agent_gateway_llm_plan("hello")
+            with dashboard_server.RUNTIME_PLANNER.bind_turn({}):
+                payload = dashboard_server.RUNTIME_PLANNER.plan_agent_turn("hello", {}, {})
         finally:
             dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {}
 
-        self.assertEqual(json.loads(payload["text"])["reply"], "hello world")
+        self.assertEqual(payload["reply"], "hello world")
         delta_events = [call.args[1] for call in mock_broadcast.call_args_list if call.args[0] == "agentRuntimeDelta" and not call.args[1].get("done")]
         self.assertEqual([event["textDelta"] for event in delta_events], ["hel", "lo wor", "ld"])
         self.assertTrue(mock_broadcast.call_args_list[-1].args[1]["done"])
 
     def test_agent_runtime_prompt_uses_full_visible_dialogue_only(self) -> None:
         captured: dict[str, str] = {}
-        previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
-        previous_label = dashboard_server.AGENT_GATEWAY.llm_planner_label
+        def plan_fn(_settings, prompt: str, *, stream_callback=None) -> LlmPlanResponse:
+            captured["prompt"] = prompt
+            return LlmPlanResponse(
+                text=json.dumps({"action": "reply", "reply": "done"}),
+                usage={"exact": True, "inputTokens": 77, "outputTokens": 5, "totalTokens": 82},
+                reasoning={},
+            )
+
+        long_tail = "visible-long-history-" + ("x" * 700) + "-tail-kept"
+        history = [
+            {"role": "user", "text": "first turn is still present", "tool": "DO_NOT_SEND_TOOL_FIELD"},
+            {"role": "agent", "text": "assistant visible reply one", "reasoning": "DO_NOT_SEND_COT_FIELD"},
+        ]
+        for index in range(13):
+            history.append({"role": "user", "text": f"middle user {index}"})
+        history.append({"role": "agent", "text": long_tail, "shell": {"stdout": "DO_NOT_SEND_STDOUT_FIELD"}})
+
         try:
-            dashboard_server.AGENT_GATEWAY.llm_planner_label = "TestProvider / model"
-
-            def plan_fn(prompt: str) -> dict:
-                captured["prompt"] = prompt
-                return {
-                    "text": json.dumps({"action": "reply", "reply": "done"}),
-                    "usage": {"exact": True, "inputTokens": 77, "outputTokens": 5, "totalTokens": 82},
-                }
-
-            dashboard_server.AGENT_GATEWAY.llm_plan_fn = plan_fn
-            long_tail = "visible-long-history-" + ("x" * 700) + "-tail-kept"
-            history = [
-                {"role": "user", "text": "first turn is still present", "tool": "DO_NOT_SEND_TOOL_FIELD"},
-                {"role": "agent", "text": "assistant visible reply one", "reasoning": "DO_NOT_SEND_COT_FIELD"},
-            ]
-            for index in range(13):
-                history.append({"role": "user", "text": f"middle user {index}"})
-            history.append({"role": "agent", "text": long_tail, "shell": {"stdout": "DO_NOT_SEND_STDOUT_FIELD"}})
-
-            payload = dashboard_server.AGENT_GATEWAY.runtime_message(
-                {
+            with (
+                patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "current_api_config",
+                    return_value=_test_runtime_provider_config(),
+                ),
+                patch("dashboard_server.request_llm_plan_with_metadata", side_effect=plan_fn),
+            ):
+                payload = dashboard_server.AGENT_GATEWAY.runtime_message(
+                    {
                     "message": "latest user message",
                     "session_id": "sess-full-visible-history",
                     "history": history,
-                }
-            )
+                    }
+                )
         finally:
-            dashboard_server.AGENT_GATEWAY.llm_plan_fn = previous_fn
-            dashboard_server.AGENT_GATEWAY.llm_planner_label = previous_label
             dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-full-visible-history", None)
 
         self.assertTrue(payload["ok"])
@@ -6061,8 +6256,6 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_agent_runtime_prompt_filters_project_memory_by_project_root(self) -> None:
         captured: list[str] = []
-        previous_fn = dashboard_server.AGENT_GATEWAY.llm_plan_fn
-        previous_label = dashboard_server.AGENT_GATEWAY.llm_planner_label
         try:
             dashboard_server.AGENT_GATEWAY.create_agent_memory(
                 {"scope": "project", "kind": "style", "text": "ProjectA private memory", "projectRoot": "ProjectA"}
@@ -6073,22 +6266,30 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.AGENT_GATEWAY.create_agent_memory(
                 {"scope": "user", "kind": "preference", "text": "Global user memory"}
             )
-            dashboard_server.AGENT_GATEWAY.llm_planner_label = "TestProvider / model"
 
-            def plan_fn(prompt: str) -> dict:
+            def plan_fn(_settings, prompt: str, *, stream_callback=None) -> LlmPlanResponse:
                 captured.append(prompt)
-                return {"text": json.dumps({"action": "reply", "reply": "done"})}
+                return LlmPlanResponse(
+                    text=json.dumps({"action": "reply", "reply": "done"}),
+                    usage={},
+                    reasoning={},
+                )
 
-            dashboard_server.AGENT_GATEWAY.llm_plan_fn = plan_fn
-            dashboard_server.AGENT_GATEWAY.runtime_message(
-                {"message": "use scoped memory", "session_id": "sess-memory-project-a", "projectRoot": "ProjectA"}
-            )
-            dashboard_server.AGENT_GATEWAY.runtime_message(
-                {"message": "use only user memory", "session_id": "sess-memory-no-project"}
-            )
+            with (
+                patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "current_api_config",
+                    return_value=_test_runtime_provider_config(),
+                ),
+                patch("dashboard_server.request_llm_plan_with_metadata", side_effect=plan_fn),
+            ):
+                dashboard_server.AGENT_GATEWAY.runtime_message(
+                    {"message": "use scoped memory", "session_id": "sess-memory-project-a", "projectRoot": "ProjectA"}
+                )
+                dashboard_server.AGENT_GATEWAY.runtime_message(
+                    {"message": "use only user memory", "session_id": "sess-memory-no-project"}
+                )
         finally:
-            dashboard_server.AGENT_GATEWAY.llm_plan_fn = previous_fn
-            dashboard_server.AGENT_GATEWAY.llm_planner_label = previous_label
             dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-memory-project-a", None)
             dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-memory-no-project", None)
 
@@ -6105,7 +6306,11 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            prompt = gateway._build_llm_plan_prompt(
+            planner = bind_test_runtime_planner(
+                gateway,
+                lambda _prompt: {"action": "reply", "reply": "unused"},
+            )
+            prompt = planner._build_llm_plan_prompt(
                 "continue after tool execution",
                 history=[],
                 loop_state=[
@@ -6146,7 +6351,7 @@ class DashboardServerTests(unittest.TestCase):
                     },
                 ],
             )
-            observation = gateway._llm_loop_step_observation(
+            observation = planner._llm_loop_step_observation(
                 {
                     "tool": "shell",
                     "result": {
