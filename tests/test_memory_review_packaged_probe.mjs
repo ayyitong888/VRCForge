@@ -36,6 +36,8 @@ assert.match(source, /runAutomaticMemoryPackagedProof/);
 assert.match(source, /undoAndEraseAutomaticMemory/);
 assert.match(source, /savedVia: "packaged-webview-tauri-ipc"/);
 assert.match(source, /"save_chats"/);
+assert.match(source, /planner: "packaged-memory-probe"/);
+assert.match(source, /shellNeeded: false/);
 assert.match(source, /automaticCapture\.eligibleCount/);
 assert.match(source, /automaticCapture\.acceptedCount/);
 assert.match(source, /automaticCapture\.conflictCount/);

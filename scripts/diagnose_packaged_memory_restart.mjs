@@ -1426,7 +1426,15 @@ async function runAutomaticMemoryPackagedProof(report, cdp, sourceVersion, provi
   const reply = (id) => ({
     id: `${id}-agent`,
     type: "agent",
-    response: { ok: true, plan: { summary: "Acknowledged", reply: "Acknowledged" } },
+    response: {
+      ok: true,
+      plan: {
+        summary: "Acknowledged",
+        planner: "packaged-memory-probe",
+        shellNeeded: false,
+        reply: "Acknowledged",
+      },
+    },
   });
   const chats = [
     {
