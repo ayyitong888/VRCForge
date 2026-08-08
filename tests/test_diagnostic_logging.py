@@ -1263,8 +1263,11 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
             ),
             patch.object(dashboard_server.AGENT_GATEWAY, "list_checkpoints", return_value={"items": []}),
             patch.object(dashboard_server.AGENT_GATEWAY, "recent_audit_logs", return_value=[]),
-            patch.object(dashboard_server.SUB_AGENT_REGISTRY, "recent_events", return_value=[]),
-            patch.object(dashboard_server.SUB_AGENT_REGISTRY, "list_tasks", return_value={"tasks": []}),
+            patch.object(
+                dashboard_server,
+                "_SUB_AGENT_COLLABORATION",
+                SimpleNamespace(recent_events=lambda **_kwargs: [], list_tasks=lambda **_kwargs: {"tasks": []}),
+            ),
         ):
             result = dashboard_server.build_support_bundle(
                 dashboard_server.SupportBundleRequest(includeFullPaths=True, logLimit=20)

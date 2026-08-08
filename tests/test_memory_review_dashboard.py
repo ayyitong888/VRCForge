@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from types import SimpleNamespace
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -206,9 +207,9 @@ def test_project_source_inventory_never_treats_truncation_or_damage_as_deletion(
         lambda *_args, **_kwargs: ([], {"status": "missing"}, None),
     )
     monkeypatch.setattr(
-        dashboard_server.SUB_AGENT_REGISTRY,
-        "list_tasks",
-        lambda **_kwargs: {"tasks": [{} for _ in range(200)]},
+        dashboard_server,
+        "_SUB_AGENT_COLLABORATION",
+        SimpleNamespace(list_tasks=lambda **_kwargs: {"tasks": [{} for _ in range(200)]}),
     )
     original_paths = (
         dashboard_server.AGENT_GATEWAY.config_path,
@@ -1183,7 +1184,7 @@ def test_source_commit_critical_section_blocks_every_source_writer_until_commit(
         for name, lock in (
             ("gateway", dashboard_server.AGENT_GATEWAY._lock),
             ("chat", dashboard_server.CHAT_TRANSCRIPTS_LOCK),
-            ("task", dashboard_server.SUB_AGENT_REGISTRY._lock),
+            ("task", dashboard_server._SUB_AGENT_COLLABORATION.source_commit_lock()),
             ("audit", dashboard_server.AGENT_GATEWAY._audit_append_lock),
         ):
             writer = threading.Thread(target=source_writer, args=(name, lock), daemon=True)

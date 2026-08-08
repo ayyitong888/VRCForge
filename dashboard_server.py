@@ -289,9 +289,8 @@ from provider_model_catalog_service import ProviderModelCatalogService
 from provider_configuration_service import ProviderConfigurationService
 from provider_test_integration_service import ProviderTestIntegrationService
 from provider_vision_integration_service import ProviderVisionIntegrationService
-import sub_agent_delegate
 from sub_agent_delegate import build_sub_agent_role_handlers, build_sub_agent_roles
-from sub_agent_tasks import SUB_AGENT_LOG_SCHEMA, SUB_AGENT_RESULT_SCHEMA, SubAgentTaskRegistry
+from sub_agent_collaboration_service import SubAgentCollaborationPorts, SubAgentCollaborationService
 from vrchat_blendshape_agent import (
     BlendshapePlan,
     DEFAULT_LLM_PROVIDER,
@@ -2060,13 +2059,16 @@ DESKTOP_EXECUTOR = EmbeddedDesktopWorker(
 # 子代理角色与执行全部由 sub_agent_delegate 域模块提供：
 # 统一经 AGENT_GATEWAY.execute_runtime_skill 的 allowlist 路径分发，
 # 组合根只负责把 gateway 绑进去。
-SUB_AGENT_REGISTRY = SubAgentTaskRegistry(
-    artifact_dir=SUB_AGENT_TASK_DIR,
-    roles=build_sub_agent_roles(),
-    handlers=build_sub_agent_role_handlers(AGENT_GATEWAY),
-    max_concurrent=5,
-    reconcile_on_init=False,
-    lane_budget=RUNTIME_LANE_BUDGET,
+# STOPGAP: this composition singleton is removed with all remaining 1.5 seams.
+# The service itself exclusively owns the durable registry, handlers and workers.
+_SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
+    SubAgentCollaborationPorts(
+        artifact_dir=SUB_AGENT_TASK_DIR,
+        gateway=AGENT_GATEWAY,
+        lane_budget=RUNTIME_LANE_BUDGET,
+        build_roles=build_sub_agent_roles,
+        build_handlers=build_sub_agent_role_handlers,
+    )
 )
 AGENT_MCP_MOUNT = AgentMcpMount()
 AGENT_MCP_APP = None
@@ -2208,7 +2210,7 @@ async def on_startup() -> None:
     await emit_safety_posture_snapshot("startup")
     if BACKEND_OWNER_LEASE.owned:
         try:
-            await asyncio.to_thread(SUB_AGENT_REGISTRY.reconcile_startup, refresh_from_disk=True)
+            await asyncio.to_thread(_SUB_AGENT_COLLABORATION.reconcile_startup, refresh_from_disk=True)
         except Exception as exc:  # noqa: BLE001 - optional user-data recovery must not block startup.
             emit_log("warn", "subagent", "Sub-agent startup reconciliation had a warning.", {"error": str(exc)})
         try:
@@ -3515,7 +3517,7 @@ MEMORY_REVIEW_DASHBOARD_ADAPTER = MemoryReviewDashboardAdapter(
     load_chat_transcript_file=lambda *args, **kwargs: load_chat_transcript_file(
         *args, **kwargs
     ),
-    list_tasks=lambda: SUB_AGENT_REGISTRY.list_tasks(
+    list_tasks=lambda: _SUB_AGENT_COLLABORATION.list_tasks(
         include_events=False,
         limit=500,
     ),
@@ -3529,7 +3531,7 @@ MEMORY_REVIEW_SOURCE_COMMIT_LOCK = MemoryReviewSourceCommitLock(
     MEMORY_REVIEW_SERVICE.transaction_lock,
     AGENT_GATEWAY._lock,
     CHAT_TRANSCRIPTS_LOCK,
-    SUB_AGENT_REGISTRY._lock,
+    _SUB_AGENT_COLLABORATION.source_commit_lock(),
     AGENT_GATEWAY._audit_append_lock,
 )
 
@@ -6067,33 +6069,6 @@ def plan_outfit_import_sync(params: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-# 子代理角色执行已迁入 sub_agent_delegate 域模块（统一走
-# AGENT_GATEWAY.execute_runtime_skill 的 allowlist 分发）。
-# 下面的薄委托仅为组合根兼容层：既有测试与外部引用继续可用。
-def run_project_index_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    return sub_agent_delegate.run_project_index_review(AGENT_GATEWAY, payload, cancel_event)
-
-
-def run_outfit_package_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    return sub_agent_delegate.run_outfit_package_inspection(AGENT_GATEWAY, payload, cancel_event)
-
-
-def run_validation_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    return sub_agent_delegate.run_validation_triage(AGENT_GATEWAY, payload, cancel_event)
-
-
-def run_selected_context_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    return sub_agent_delegate.run_selected_context_review(payload, cancel_event)
-
-
-def run_package_install_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    return sub_agent_delegate.run_package_install_diagnosis(AGENT_GATEWAY, payload, cancel_event)
-
-
-def run_outfit_import_plan_sub_agent(payload: dict[str, Any], cancel_event: Any) -> dict[str, Any]:
-    return sub_agent_delegate.run_outfit_import_plan_review(AGENT_GATEWAY, payload, cancel_event)
-
-
 def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
     params = params or {}
     bridge = resolve_stdio_bridge(ROOT_DIR)
@@ -6590,7 +6565,7 @@ async def app_package_install_request(request: PackageInstallPlanRequest) -> dic
 
 @app.get("/api/app/sub-agents")
 def app_list_sub_agents(includeEvents: bool = False, limit: int = 50) -> dict[str, Any]:
-    return SUB_AGENT_REGISTRY.list_tasks(include_events=includeEvents, limit=limit)
+    return _SUB_AGENT_COLLABORATION.list_tasks(include_events=includeEvents, limit=limit)
 
 
 @app.post("/api/app/sub-agents")
@@ -6598,7 +6573,7 @@ async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]
     if not request.parent_chat_id.strip():
         raise HTTPException(status_code=400, detail="Sub-agent tasks require a durable parentChatId.")
     try:
-        payload = SUB_AGENT_REGISTRY.create_task(
+        payload = _SUB_AGENT_COLLABORATION.create_task(
             role=request.role,
             task=request.task,
             display_name=request.display_name,
@@ -6609,13 +6584,13 @@ async def app_create_sub_agent(request: SubAgentCreateRequest) -> dict[str, Any]
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    await EVENT_BUS.broadcast("subAgentTasks", _SUB_AGENT_COLLABORATION.list_tasks())
     return payload
 
 
 @app.get("/api/app/sub-agents/{task_id}")
 def app_get_sub_agent(task_id: str) -> dict[str, Any]:
-    payload = SUB_AGENT_REGISTRY.get_task(task_id, include_events=True)
+    payload = _SUB_AGENT_COLLABORATION.get_task(task_id, include_events=True)
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Sub-agent task was not found.")
     return payload
@@ -6623,25 +6598,25 @@ def app_get_sub_agent(task_id: str) -> dict[str, Any]:
 
 @app.post("/api/app/sub-agents/{task_id}/cancel")
 async def app_cancel_sub_agent(task_id: str) -> dict[str, Any]:
-    payload = SUB_AGENT_REGISTRY.cancel_task(task_id)
+    payload = _SUB_AGENT_COLLABORATION.cancel_task(task_id)
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Sub-agent task was not found.")
-    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    await EVENT_BUS.broadcast("subAgentTasks", _SUB_AGENT_COLLABORATION.list_tasks())
     return payload
 
 
 @app.post("/api/app/sub-agents/{task_id}/retry")
 async def app_retry_sub_agent(task_id: str) -> dict[str, Any]:
-    payload = SUB_AGENT_REGISTRY.retry_task(task_id)
+    payload = _SUB_AGENT_COLLABORATION.retry_task(task_id)
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Sub-agent task was not found.")
-    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    await EVENT_BUS.broadcast("subAgentTasks", _SUB_AGENT_COLLABORATION.list_tasks())
     return payload
 
 
 @app.post("/api/app/sub-agents/{task_id}/merge")
 async def app_merge_sub_agent(task_id: str, request: SubAgentMergeRequest) -> dict[str, Any]:
-    payload = SUB_AGENT_REGISTRY.merge_task(
+    payload = _SUB_AGENT_COLLABORATION.merge_task(
         task_id,
         decision=request.decision,
         chat_id=request.chat_id,
@@ -6651,13 +6626,13 @@ async def app_merge_sub_agent(task_id: str, request: SubAgentMergeRequest) -> di
         error_text = str(payload.get("error") or "Sub-agent task was not found.")
         status_code = 404 if "not found" in error_text else 409
         raise HTTPException(status_code=status_code, detail=error_text)
-    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    await EVENT_BUS.broadcast("subAgentTasks", _SUB_AGENT_COLLABORATION.list_tasks())
     return payload
 
 
 @app.post("/api/app/sub-agents/{task_id}/handoff-ack")
 async def app_acknowledge_sub_agent_handoff(task_id: str, request: SubAgentHandoffAckRequest) -> dict[str, Any]:
-    payload = SUB_AGENT_REGISTRY.acknowledge_handoff(
+    payload = _SUB_AGENT_COLLABORATION.acknowledge_handoff(
         task_id,
         expected_revision=request.expected_revision,
     )
@@ -6665,7 +6640,7 @@ async def app_acknowledge_sub_agent_handoff(task_id: str, request: SubAgentHando
         error_text = str(payload.get("error") or "Sub-agent task was not found.")
         status_code = 404 if "not found" in error_text else 409
         raise HTTPException(status_code=status_code, detail=error_text)
-    await EVENT_BUS.broadcast("subAgentTasks", SUB_AGENT_REGISTRY.list_tasks())
+    await EVENT_BUS.broadcast("subAgentTasks", _SUB_AGENT_COLLABORATION.list_tasks())
     return payload
 
 
@@ -7208,8 +7183,8 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         write_support_bundle_member(bundle, "safety-posture.json", safety_posture, request.include_full_paths)
         write_support_bundle_text_member(bundle, "diagnostic-log.txt", DIAGNOSTIC_LOGGER.tail_lines(log_limit))
         write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.recent_audit_logs(limit=log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_REGISTRY.recent_events(limit=log_limit), request.include_full_paths)
-        write_support_bundle_member(bundle, "sub-agent-tasks.json", SUB_AGENT_REGISTRY.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "sub-agent-events.json", _SUB_AGENT_COLLABORATION.recent_events(limit=log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "sub-agent-tasks.json", _SUB_AGENT_COLLABORATION.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
     emit_log(
         "success",
@@ -7760,6 +7735,7 @@ def _repair_skills_doctor(_context: dict[str, Any], _mode: str, phases: PhaseLog
 
 
 def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
+    subagent_targets = _SUB_AGENT_COLLABORATION.maintenance_targets()
     targets = [
         SessionStoreTarget(
             "session.chat.app",
@@ -7829,14 +7805,14 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
         ),
         SessionStoreTarget(
             "session.subagent-events",
-            SUB_AGENT_REGISTRY._event_log_path(),
+            subagent_targets.event_log_path,
             "app_owned",
             "jsonl",
-            (SUB_AGENT_LOG_SCHEMA,),
+            (subagent_targets.log_schema,),
             schema_required=True,
             required_string_fields=("timestamp", "taskId", "event"),
             required_object_fields=("task",),
-            guard_root=SUB_AGENT_REGISTRY.artifact_dir,
+            guard_root=subagent_targets.artifact_dir,
         ),
     ]
     with CHAT_TRANSCRIPTS_LOCK:
@@ -7885,7 +7861,7 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
                 guard_root=AGENT_GATEWAY.agent_goal_result_dir,
             )
         )
-    subagent_results = SUB_AGENT_REGISTRY.artifact_dir / "results"
+    subagent_results = subagent_targets.result_dir
     for result_path in sorted(subagent_results.glob("*.json")):
         suffix = hashlib.sha256(result_path.name.encode()).hexdigest()[:16]
         targets.append(
@@ -7894,7 +7870,7 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
                 result_path,
                 "app_owned",
                 "json",
-                (SUB_AGENT_RESULT_SCHEMA,),
+                (subagent_targets.result_schema,),
                 schema_required=True,
                 required_string_fields=("taskId",),
                 required_object_fields=("result",),
@@ -8020,9 +7996,13 @@ def _repair_session_storage_doctor(context: dict[str, Any], _mode: str, phases: 
             else:
                 failures += 1
             continue
-        lock = CHAT_TRANSCRIPTS_LOCK if target.store_id.startswith("session.chat") else SUB_AGENT_REGISTRY._lock if target.store_id.startswith("session.subagent") else AGENT_GATEWAY._lock
-        with lock:
-            result = repair_session_store(target, scan)
+        if target.store_id.startswith("session.subagent"):
+            with _SUB_AGENT_COLLABORATION.maintenance_lock():
+                result = repair_session_store(target, scan)
+        else:
+            lock = CHAT_TRANSCRIPTS_LOCK if target.store_id.startswith("session.chat") else AGENT_GATEWAY._lock
+            with lock:
+                result = repair_session_store(target, scan)
         changed = bool(result.get("changed")) or changed
         if result.get("status") in {"repaired", "quarantined", "already_repaired"}:
             recovered_store_count += 1

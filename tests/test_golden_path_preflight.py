@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import dashboard_server
+from sub_agent_collaboration_service import SubAgentCollaborationService
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 
 
@@ -196,9 +197,17 @@ def test_sub_agent_endpoint_runs_project_index_worker(tmp_path: Path, monkeypatc
     registry = SubAgentTaskRegistry(
         tmp_path / "sub-agents",
         roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
-        handlers={"project_index_review": dashboard_server.run_project_index_sub_agent},
+        handlers={
+            "project_index_review": dashboard_server.build_sub_agent_role_handlers(
+                dashboard_server.AGENT_GATEWAY
+            )["project_index_review"]
+        },
     )
-    monkeypatch.setattr(dashboard_server, "SUB_AGENT_REGISTRY", registry)
+    monkeypatch.setattr(
+        dashboard_server,
+        "_SUB_AGENT_COLLABORATION",
+        SubAgentCollaborationService.from_registry_for_testing(registry),
+    )
 
     with TestClient(dashboard_server.app) as client:
         created = client.post(
@@ -232,9 +241,17 @@ def test_sub_agent_endpoint_runs_selected_context_worker(tmp_path: Path, monkeyp
     registry = SubAgentTaskRegistry(
         tmp_path / "sub-agents",
         roles=[SubAgentRole("selected_context_review", "Selection", "Review selected text.")],
-        handlers={"selected_context_review": dashboard_server.run_selected_context_sub_agent},
+        handlers={
+            "selected_context_review": dashboard_server.build_sub_agent_role_handlers(
+                dashboard_server.AGENT_GATEWAY
+            )["selected_context_review"]
+        },
     )
-    monkeypatch.setattr(dashboard_server, "SUB_AGENT_REGISTRY", registry)
+    monkeypatch.setattr(
+        dashboard_server,
+        "_SUB_AGENT_COLLABORATION",
+        SubAgentCollaborationService.from_registry_for_testing(registry),
+    )
 
     with TestClient(dashboard_server.app) as client:
         created = client.post(

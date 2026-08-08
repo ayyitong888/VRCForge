@@ -31,6 +31,7 @@ from agent_gateway import (
     resolve_powershell_executable,
 )
 from skill_packages import SkillPackageError, SkillPackageService
+from sub_agent_collaboration_service import SubAgentCollaborationService
 from sub_agent_tasks import SubAgentRole, SubAgentTaskRegistry
 from vrchat_blendshape_agent import BlendshapeAdjustment, BlendshapePlan, LlmPlanResponse
 
@@ -887,16 +888,17 @@ class DashboardServerTests(unittest.TestCase):
             original_status_task = dashboard_server.STATUS_MONITOR_TASK
             dashboard_server.AGENT_MCP_INIT_TASK = None
             dashboard_server.STATUS_MONITOR_TASK = None
+            reconcile_sub_agents = Mock(return_value=True)
             try:
                 with (
                     patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
                     patch("dashboard_server.status_monitor_loop", side_effect=slow_status_loop),
                     patch("dashboard_server.BACKEND_OWNER_LEASE", SimpleNamespace(owned=True)),
                     patch.object(
-                        dashboard_server.SUB_AGENT_REGISTRY,
-                        "reconcile_startup",
-                        return_value=True,
-                    ) as reconcile_sub_agents,
+                        dashboard_server,
+                        "_SUB_AGENT_COLLABORATION",
+                        SimpleNamespace(reconcile_startup=reconcile_sub_agents),
+                    ),
                     patch.object(
                         dashboard_server.AGENT_GATEWAY,
                         "reconcile_stale_agent_goal_deliveries",
@@ -933,6 +935,7 @@ class DashboardServerTests(unittest.TestCase):
             original_status_task = dashboard_server.STATUS_MONITOR_TASK
             dashboard_server.AGENT_MCP_INIT_TASK = None
             dashboard_server.STATUS_MONITOR_TASK = None
+            reconcile_sub_agents = Mock(side_effect=AssertionError("a non-owner must not reconcile sub-agent tasks"))
             try:
                 with (
                     patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
@@ -941,10 +944,10 @@ class DashboardServerTests(unittest.TestCase):
                     patch("dashboard_server.desktop_executor_enabled", return_value=False),
                     patch("dashboard_server.load_project_snapshot_cache"),
                     patch.object(
-                        dashboard_server.SUB_AGENT_REGISTRY,
-                        "reconcile_startup",
-                        side_effect=AssertionError("a non-owner must not reconcile sub-agent tasks"),
-                    ) as reconcile_sub_agents,
+                        dashboard_server,
+                        "_SUB_AGENT_COLLABORATION",
+                        SimpleNamespace(reconcile_startup=reconcile_sub_agents),
+                    ),
                     patch.object(
                         dashboard_server.AGENT_GATEWAY,
                         "reconcile_stale_agent_goal_deliveries",
@@ -981,6 +984,7 @@ class DashboardServerTests(unittest.TestCase):
             original_status_task = dashboard_server.STATUS_MONITOR_TASK
             dashboard_server.AGENT_MCP_INIT_TASK = None
             dashboard_server.STATUS_MONITOR_TASK = None
+            reconcile_sub_agents = Mock(side_effect=sub_agent_error)
             try:
                 with (
                     patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
@@ -989,10 +993,10 @@ class DashboardServerTests(unittest.TestCase):
                     patch("dashboard_server.desktop_executor_enabled", return_value=False),
                     patch("dashboard_server.load_project_snapshot_cache"),
                     patch.object(
-                        dashboard_server.SUB_AGENT_REGISTRY,
-                        "reconcile_startup",
-                        side_effect=sub_agent_error,
-                    ) as reconcile_sub_agents,
+                        dashboard_server,
+                        "_SUB_AGENT_COLLABORATION",
+                        SimpleNamespace(reconcile_startup=reconcile_sub_agents),
+                    ),
                     patch.object(
                         dashboard_server.AGENT_GATEWAY,
                         "reconcile_stale_agent_goal_deliveries",
@@ -2706,14 +2710,14 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(target.exists())
 
     def test_sub_agent_routes_persist_parent_handoff_and_merge_revision(self) -> None:
-        original_registry = dashboard_server.SUB_AGENT_REGISTRY
+        original_service = dashboard_server._SUB_AGENT_COLLABORATION
         with tempfile.TemporaryDirectory() as tmp:
             registry = SubAgentTaskRegistry(
                 Path(tmp),
                 roles=[SubAgentRole("test_role", "Test", "Test role")],
                 handlers={"test_role": lambda _payload, _cancel: {"ok": True, "summaryText": "ready"}},
             )
-            dashboard_server.SUB_AGENT_REGISTRY = registry
+            dashboard_server._SUB_AGENT_COLLABORATION = SubAgentCollaborationService.from_registry_for_testing(registry)
             try:
                 with TestClient(dashboard_server.app) as client:
                     ownerless = client.post(
@@ -2752,7 +2756,7 @@ class DashboardServerTests(unittest.TestCase):
                         },
                     )
             finally:
-                dashboard_server.SUB_AGENT_REGISTRY = original_registry
+                dashboard_server._SUB_AGENT_COLLABORATION = original_service
 
         self.assertEqual(ownerless.status_code, 400)
         self.assertEqual(task["parentChatId"], "chat-a")
@@ -12841,13 +12845,14 @@ namespace VRCForge.Editor
 
     def test_agent_mcp_stdio_main_does_not_reconcile_sub_agent_tasks(self) -> None:
         args = dashboard_server.parse_args(["--agent-mcp-stdio", "--preflight", "--no-start"])
+        reconcile_sub_agents = Mock(side_effect=AssertionError("stdio mode must not reconcile backend-owned tasks"))
         with (
             patch("dashboard_server.parse_args", return_value=args),
             patch.object(
-                dashboard_server.SUB_AGENT_REGISTRY,
-                "reconcile_startup",
-                side_effect=AssertionError("stdio mode must not reconcile backend-owned tasks"),
-            ) as reconcile_sub_agents,
+                dashboard_server,
+                "_SUB_AGENT_COLLABORATION",
+                SimpleNamespace(reconcile_startup=reconcile_sub_agents),
+            ),
             patch("tools.vrcforge_agent_mcp_stdio.VRCForgeBridge") as bridge_class,
             patch.object(
                 dashboard_server.BACKEND_OWNER_LEASE,
@@ -12865,13 +12870,14 @@ namespace VRCForge.Editor
 
     def test_cli_main_does_not_reconcile_sub_agent_tasks(self) -> None:
         args = dashboard_server.parse_args(["--cli", "skill", "list"])
+        reconcile_sub_agents = Mock(side_effect=AssertionError("CLI mode must not reconcile backend-owned tasks"))
         with (
             patch("dashboard_server.parse_args", return_value=args),
             patch.object(
-                dashboard_server.SUB_AGENT_REGISTRY,
-                "reconcile_startup",
-                side_effect=AssertionError("CLI mode must not reconcile backend-owned tasks"),
-            ) as reconcile_sub_agents,
+                dashboard_server,
+                "_SUB_AGENT_COLLABORATION",
+                SimpleNamespace(reconcile_startup=reconcile_sub_agents),
+            ),
             patch("tools.vrcforge_cli.main", return_value=0) as cli_main,
             patch.object(
                 dashboard_server.BACKEND_OWNER_LEASE,
