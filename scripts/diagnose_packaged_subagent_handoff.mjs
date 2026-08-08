@@ -6,6 +6,8 @@ import { appendFile, mkdir, readFile, realpath, stat, writeFile } from "node:fs/
 import { dirname, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
+const allowUnpushed = process.argv.includes("--allow-unpushed");
+const selfTest = process.argv.includes("--self-test");
 const cdpPort = Number(process.env.VRCFORGE_SUBAGENT_PROBE_CDP_PORT || "9349");
 const marker = `SUBAGENT_HANDOFF_PROBE_${Date.now()}`;
 const shortMarker = `SAPH${Date.now().toString(36)}`;
@@ -15,6 +17,7 @@ const exe = resolve(packagedRoot, "VRCForge.exe");
 const userDataRoot = resolve(evidenceRoot, "user-data");
 const configRoot = resolve(userDataRoot, "config");
 const webviewDataRoot = resolve(evidenceRoot, "webview2-user-data");
+const hostProfileRoot = resolve(evidenceRoot, "host-profile");
 const reportPath = resolve(evidenceRoot, "report.json");
 const appOrigin = "http://127.0.0.1:8757";
 const appRequestOrigin = "http://tauri.localhost";
@@ -28,12 +31,28 @@ const subAgentArtifactRoot = resolve(userDataRoot, "artifacts", "dashboard", "su
 const subAgentEventLogPath = resolve(subAgentArtifactRoot, "sub-agent-events.jsonl");
 let appSessionToken = "";
 
+const allowedOptions = new Set(["--allow-unpushed", "--self-test", "--help", "-h"]);
+if (process.argv.slice(2).some((item) => !allowedOptions.has(item))) {
+  console.error("Unknown packaged sub-agent handoff probe option.");
+  process.exit(2);
+}
+
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  console.log(`Usage: node scripts/diagnose_packaged_subagent_handoff.mjs
+  console.log(`Usage: node scripts/diagnose_packaged_subagent_handoff.mjs [--allow-unpushed] [--self-test]
 
 Runs a packaged VRCForge restart/idempotency acceptance probe for durable
-Sub-agent result handoffs. Requires a strict release build whose manifest
-commit equals pushed origin/main.
+Sub-agent result handoffs.
+
+Default mode is strict-release evidence: release-manifest.json, VERSION, HEAD,
+origin/main, ZIP and extracted executable must bind a strict release-eligible
+build policy. --allow-unpushed is only non-release local acceptance: it still
+requires VERSION, manifest commit == HEAD, ZIP and extracted executable hashes,
+but accepts only a clean worktree plus an explicit local-acceptance,
+release-ineligible policy with allowDirty=false, and writes
+strictReleaseBinding=false to its report.
+
+--self-test validates the pure build-policy boundary without reading a package,
+reserving a port, or starting VRCForge.
 
 Coverage:
   - isolated backend and WebView2 user data
@@ -102,6 +121,100 @@ function sha256File(path) {
   });
 }
 
+function normalizeBuildPolicy(manifest) {
+  const raw = manifest?.buildPolicy && typeof manifest.buildPolicy === "object"
+    ? manifest.buildPolicy
+    : {};
+  return {
+    mode: String(raw.mode || ""),
+    releaseEligible: raw.releaseEligible === true,
+    allowDirty: raw.allowDirty === true,
+    allowUnpushed: raw.allowUnpushed === true,
+    allowVersionMismatch: raw.allowVersionMismatch === true,
+  };
+}
+
+function isStrictBuildPolicy(policy) {
+  return policy.mode === "strict"
+    && policy.releaseEligible === true
+    && policy.allowDirty === false
+    && policy.allowUnpushed === false
+    && policy.allowVersionMismatch === false;
+}
+
+function isLocalAcceptanceBuildPolicy(policy) {
+  return policy.mode === "local-acceptance"
+    && policy.releaseEligible === false
+    && policy.allowDirty === false
+    && policy.allowUnpushed === true;
+}
+
+function runSelfTest() {
+  const strict = normalizeBuildPolicy({
+    buildPolicy: {
+      mode: "strict",
+      releaseEligible: true,
+      allowDirty: false,
+      allowUnpushed: false,
+      allowVersionMismatch: false,
+    },
+  });
+  const local = normalizeBuildPolicy({
+    buildPolicy: {
+      mode: "local-acceptance",
+      releaseEligible: false,
+      allowDirty: false,
+      allowUnpushed: true,
+      allowVersionMismatch: true,
+    },
+  });
+  if (!isStrictBuildPolicy(strict) || isLocalAcceptanceBuildPolicy(strict)) {
+    throw new Error("self-test: strict build policy classification failed.");
+  }
+  if (!isLocalAcceptanceBuildPolicy(local) || isStrictBuildPolicy(local)) {
+    throw new Error("self-test: local-acceptance build policy classification failed.");
+  }
+  if (isLocalAcceptanceBuildPolicy({ ...local, releaseEligible: true })) {
+    throw new Error("self-test: release-eligible policy was accepted as local-only evidence.");
+  }
+  if (isLocalAcceptanceBuildPolicy({ ...local, allowUnpushed: false })) {
+    throw new Error("self-test: local policy without explicit allowUnpushed was accepted.");
+  }
+  if (isLocalAcceptanceBuildPolicy({ ...local, allowDirty: true })) {
+    throw new Error("self-test: dirty local policy was accepted.");
+  }
+  const previousDisableAuth = process.env.VRCFORGE_DISABLE_APP_AUTH;
+  process.env.VRCFORGE_DISABLE_APP_AUTH = "1";
+  try {
+    const env = isolatedLaunchEnvironment();
+    if (Object.hasOwn(env, "VRCFORGE_DISABLE_APP_AUTH")) {
+      throw new Error("self-test: inherited VRCForge control escaped environment isolation.");
+    }
+    if (
+      env.VRCFORGE_CONFIG_PATH !== resolve(configRoot, "config.json")
+      || env.VRCFORGE_DESKTOP_EXECUTOR !== "0"
+      || env.APPDATA !== hostProfileRoot
+      || env.LOCALAPPDATA !== hostProfileRoot
+      || env.USERPROFILE !== hostProfileRoot
+      || env.HOME !== hostProfileRoot
+    ) {
+      throw new Error("self-test: packaged runtime paths were not fully isolated.");
+    }
+  } finally {
+    if (previousDisableAuth === undefined) {
+      delete process.env.VRCFORGE_DISABLE_APP_AUTH;
+    } else {
+      process.env.VRCFORGE_DISABLE_APP_AUTH = previousDisableAuth;
+    }
+  }
+  console.log("sub-agent handoff probe self-test passed");
+}
+
+if (selfTest) {
+  runSelfTest();
+  process.exit(0);
+}
+
 async function prepareManifestBoundPackage(sourceVersion) {
   const manifestPath = resolve(repoRoot, "dist", "release", "release-manifest.json");
   let manifest;
@@ -109,7 +222,7 @@ async function prepareManifestBoundPackage(sourceVersion) {
     manifest = JSON.parse((await readFile(manifestPath, "utf8")).replace(/^\uFEFF/, ""));
   } catch (error) {
     if (error?.code === "ENOENT") {
-      throw new Error(`Strict packaged probe requires ${manifestPath}.`);
+      throw new Error(`Packaged sub-agent handoff probe requires ${manifestPath}.`);
     }
     throw new Error(`Release manifest could not be read: ${String(error?.message || error)}`);
   }
@@ -119,14 +232,23 @@ async function prepareManifestBoundPackage(sourceVersion) {
   const escapedRepoRoot = escapePowerShellLiteral(repoRoot);
   const headCommit = (await runPowerShell(`git -C '${escapedRepoRoot}' rev-parse HEAD`)).trim().toLowerCase();
   const originMainCommit = (await runPowerShell(`git -C '${escapedRepoRoot}' rev-parse origin/main`)).trim().toLowerCase();
+  const worktreeClean = (await runPowerShell(`git -C '${escapedRepoRoot}' status --porcelain=v1`)) === "";
   const manifestCommit = String(manifest?.commit || "").trim().toLowerCase();
+  const buildPolicy = normalizeBuildPolicy(manifest);
+  const strictBuildPolicy = isStrictBuildPolicy(buildPolicy);
+  const localAcceptanceBuildPolicy = isLocalAcceptanceBuildPolicy(buildPolicy);
   if (
     !/^[0-9a-f]{40}$/.test(headCommit) ||
     !/^[0-9a-f]{40}$/.test(originMainCommit) ||
-    headCommit !== originMainCommit ||
     manifestCommit !== headCommit
   ) {
-    throw new Error(`Release binding mismatch: manifest=${manifestCommit || "<missing>"}, HEAD=${headCommit || "<missing>"}, origin/main=${originMainCommit || "<missing>"}.`);
+    throw new Error(`Manifest binding mismatch: manifest=${manifestCommit || "<missing>"}, HEAD=${headCommit || "<missing>"}, origin/main=${originMainCommit || "<missing>"}.`);
+  }
+  if (!allowUnpushed && (headCommit !== originMainCommit || !worktreeClean || !strictBuildPolicy)) {
+    throw new Error("Strict packaged probe requires clean HEAD=origin/main and a strict release-eligible buildPolicy.");
+  }
+  if (allowUnpushed && (!worktreeClean || !localAcceptanceBuildPolicy)) {
+    throw new Error("--allow-unpushed requires a clean worktree plus buildPolicy.mode=local-acceptance, releaseEligible=false, allowDirty=false, and allowUnpushed=true.");
   }
   const portableName = `VRCForge_Windows_x64_${sourceVersion}.zip`;
   const portable = (Array.isArray(manifest?.artifacts) ? manifest.artifacts : [])
@@ -147,7 +269,7 @@ async function prepareManifestBoundPackage(sourceVersion) {
       $entry = @($archive.Entries | Where-Object {
         $name = $_.FullName.Replace('\\', '/')
         $name.Equals('VRCForge.exe', [StringComparison]::OrdinalIgnoreCase)
-      } | Select-Object -First 1)
+      })
       if ($entry.Count -ne 1) { throw 'Portable package did not contain exactly one VRCForge.exe entry.' }
       $sha = [Security.Cryptography.SHA256]::Create()
       $stream = $entry[0].Open()
@@ -178,6 +300,11 @@ async function prepareManifestBoundPackage(sourceVersion) {
     commit: manifestCommit,
     headCommit,
     originMainCommit,
+    worktreeClean,
+    buildPolicy,
+    strictBuildPolicy,
+    localAcceptanceBuildPolicy,
+    strictReleaseBinding: !allowUnpushed && worktreeClean && headCommit === originMainCommit && strictBuildPolicy,
     portableName,
     portableSha256,
     innerExeSha256,
@@ -410,21 +537,62 @@ async function waitForEval(cdp, expression, timeoutMs = 45000) {
 }
 
 function isolatedLaunchEnvironment() {
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("VRCFORGE_")),
+  );
   return {
-    ...process.env,
+    ...inherited,
     VRCFORGE_USER_DATA_DIR: userDataRoot,
     VRCFORGE_CONFIG_DIR: configRoot,
     VRCFORGE_CONFIG_PATH: resolve(configRoot, "config.json"),
     VRCFORGE_SETTINGS_PATH: resolve(configRoot, "settings.json"),
     VRCFORGE_LOG_DIR: resolve(userDataRoot, "logs"),
     VRCFORGE_ARTIFACTS_DIR: resolve(userDataRoot, "artifacts"),
+    VRCFORGE_DESKTOP_EXECUTOR: "0",
+    APPDATA: hostProfileRoot,
+    LOCALAPPDATA: hostProfileRoot,
+    USERPROFILE: hostProfileRoot,
+    HOME: hostProfileRoot,
     WEBVIEW2_USER_DATA_FOLDER: webviewDataRoot,
     WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
       `--remote-debugging-port=${cdpPort} --remote-allow-origins=*`,
   };
 }
 
+async function proveLoopbackPortReleased(port) {
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    return false;
+  }
+  const server = createServer();
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen(port, "127.0.0.1", resolveListen);
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (server.listening) {
+      await new Promise((resolveClose) => server.close(() => resolveClose()));
+    }
+  }
+}
+
+async function assertNoHostUnityProcesses() {
+  const raw = await runPowerShell(`
+    $count = @(Get-Process -Name Unity -ErrorAction SilentlyContinue).Count
+    [pscustomobject]@{ count = $count } | ConvertTo-Json -Compress
+  `);
+  const count = Number((raw ? JSON.parse(raw) : {}).count || 0);
+  if (count !== 0) {
+    throw new Error(`environment-not-isolated: ${count} host Unity process(es) were running; nothing was terminated.`);
+  }
+  return true;
+}
+
 async function launchPackagedApp(requireComposerEnabled = true) {
+  await assertNoHostUnityProcesses();
   appSessionToken = "";
   const child = spawn(exe, [], {
     detached: false,
@@ -1131,9 +1299,16 @@ async function closeForRestart(report, app, label) {
 
 async function main() {
   await mkdir(evidenceRoot, { recursive: true });
+  await mkdir(hostProfileRoot, { recursive: true });
   const report = {
     schema: "vrcforge.packaged_subagent_handoff_probe.v1",
     marker,
+    mode: allowUnpushed ? "local-preacceptance" : "strict-release",
+    strictReleaseBinding: false,
+    releaseEligible: false,
+    releaseEvidence: allowUnpushed
+      ? "non-release local-preacceptance only"
+      : "strict release binding pending completion",
     exe,
     userDataRoot,
     webviewDataRoot,
@@ -1152,6 +1327,7 @@ async function main() {
     assertions: [],
   };
   let provider;
+  let providerPort = 0;
   let app;
   try {
     if (!Number.isInteger(cdpPort) || cdpPort < 1024 || cdpPort > 65535 || cdpPort === 8757) {
@@ -1159,6 +1335,26 @@ async function main() {
     }
     const sourceVersion = (await readFile(resolve(repoRoot, "VERSION"), "utf8")).trim();
     const releaseBinding = await prepareManifestBoundPackage(sourceVersion);
+    report.strictReleaseBinding = releaseBinding.strictReleaseBinding === true;
+    report.releaseEligible = releaseBinding.buildPolicy.releaseEligible === true;
+    report.releaseBinding = {
+      strict: report.strictReleaseBinding,
+      manifestCommit: releaseBinding.commit,
+      headCommit: releaseBinding.headCommit,
+      originMainCommit: releaseBinding.originMainCommit,
+      worktreeClean: releaseBinding.worktreeClean,
+      buildPolicy: releaseBinding.buildPolicy,
+      strictBuildPolicy: releaseBinding.strictBuildPolicy,
+      localAcceptanceBuildPolicy: releaseBinding.localAcceptanceBuildPolicy,
+      portableSha256: releaseBinding.portableSha256,
+      extractedExeSha256: releaseBinding.exeSha256,
+    };
+    if (allowUnpushed && (report.strictReleaseBinding || report.releaseEligible)) {
+      addAssertion(report, "allow-unpushed mode was incorrectly marked as strict or release-eligible evidence");
+    }
+    if (!allowUnpushed && (!report.strictReleaseBinding || !report.releaseEligible)) {
+      addAssertion(report, "strict mode did not retain strict release binding and release eligibility");
+    }
     const packageStat = await stat(exe);
     report.package = {
       sourceVersion,
@@ -1171,9 +1367,10 @@ async function main() {
     if (!snapshotIsClear(report.initialSnapshot)) {
       throw new Error(`Preflight found an existing packaged instance or occupied probe port; nothing was terminated: ${JSON.stringify(report.initialSnapshot)}`);
     }
+    report.hostUnityIsolation = await assertNoHostUnityProcesses();
 
     provider = createFakeProvider();
-    const providerPort = await provider.listen();
+    providerPort = await provider.listen();
     report.provider = { port: providerPort };
 
     app = await launchPackagedApp(false);
@@ -1585,6 +1782,15 @@ async function main() {
       await provider.close().catch((error) => {
         addAssertion(report, `provider cleanup failed: ${String(error?.message || error)}`);
       });
+      const portReleased = providerPort > 0
+        ? await proveLoopbackPortReleased(providerPort)
+        : true;
+      if (report.provider) {
+        report.provider.portReleased = portReleased;
+      }
+      if (!portReleased) {
+        addAssertion(report, "isolated fake-provider loopback port remained occupied after cleanup");
+      }
     }
     try {
       report.finalSnapshot = await processSnapshot();
