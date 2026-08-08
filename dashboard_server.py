@@ -212,21 +212,15 @@ from external_agent_connector_installer import (
     uninstall_connector,
 )
 from external_agent_connectors import ExternalAgentConnectorOptions, build_connector_bundle
-from memory_consolidation import MemoryConsolidationService
-from memory_consolidation_sources import MemoryScope
 from memory_review_dashboard_adapter import (
     MEMORY_REVIEW_AUDIT_SCAN_MAX_BYTES,
     MEMORY_REVIEW_AUDIT_SCAN_MAX_ROWS,
     MemoryReviewDashboardAdapter,
-    MemoryReviewSourceCommitLock,
 )
-from memory_review_host import (
-    MemoryReviewHost,
-    MemoryReviewSourceInventory,
-    build_memory_review_router,
-)
+from memory_review_composition import MemoryReviewComposition, MemoryReviewCompositionPorts, build_memory_review_composition
+from memory_review_host import build_memory_review_router
 from memory_review_provider import invoke_memory_review_provider
-from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
+from memory_review_runtime import MemoryReviewRuntimeCoordinator
 from optimization_service import (
     OPTIMIZATION_APPLY_REQUEST_BY_EXTERNAL,
     OPTIMIZATION_APPLY_REQUEST_BY_GATEWAY,
@@ -1987,35 +1981,14 @@ DASHBOARD_COMPOSITION_CONTEXT = DashboardCompositionContext(
     agent_gateway=lambda: AGENT_GATEWAY,
 )
 RUNTIME_LANE_BUDGET = RuntimeLaneBudget()
-MEMORY_REVIEW_IDLE_GATE = MemoryReviewIdleGate()
 BACKGROUND_GOAL_PREFLIGHT = ProviderPreflightCache(
     lambda provider, base_url: probe_background_goal_provider(provider, base_url)
-)
-ACCEPTED_MEMORY_STORE = AGENT_GATEWAY.agent_memory_store
-MEMORY_REVIEW_SERVICE = MemoryConsolidationService(
-    lambda: AGENT_GATEWAY.audit_dir / "memory-review",
-    accepted_memory_store=ACCEPTED_MEMORY_STORE,
-    lock=AGENT_GATEWAY._lock,
 )
 
 
 async def broadcast_background_goal_state(_state: dict[str, Any]) -> None:
     await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.list_agent_goals())
     await EVENT_BUS.broadcast("agentGoalBackground", AGENT_GATEWAY.agent_goal_background_state())
-
-
-async def broadcast_memory_review_state(_state: dict[str, Any] | None = None) -> None:
-    # Desktop/WebView bridges receive only a refresh signal. Candidate prose,
-    # source records, and revision metadata remain behind the authenticated
-    # snapshot endpoint.
-    await EVENT_BUS.broadcast("agentMemoryReview", {"changed": True})
-
-
-MEMORY_REVIEW_RUNTIME = MemoryReviewRuntimeCoordinator(
-    lane_budget=RUNTIME_LANE_BUDGET,
-    preflight=BACKGROUND_GOAL_PREFLIGHT,
-    on_state=broadcast_memory_review_state,
-)
 
 
 BACKGROUND_GOAL_COORDINATOR = BackgroundGoalDeliveryCoordinator(
@@ -2222,7 +2195,7 @@ async def on_startup() -> None:
         except Exception as exc:  # noqa: BLE001 - optional user-data recovery must not block startup.
             emit_log("warn", "agent", "Goal delivery startup reconciliation had a warning.", {"error": str(exc)})
         try:
-            await MEMORY_REVIEW_HOST.reconcile_startup(memory_review_authorized_project_roots())
+            await MEMORY_REVIEW.host.reconcile_startup(MEMORY_REVIEW.authorized_project_roots())
         except Exception:  # noqa: BLE001 - review recovery remains isolated from core startup.
             emit_log("warn", "agent", "Memory Review startup reconciliation had a bounded warning.", {"failureClass": "reconcile"})
     if desktop_executor_enabled():
@@ -2295,7 +2268,7 @@ async def on_shutdown() -> None:
         except asyncio.CancelledError:
             pass
         BACKGROUND_GOAL_MONITOR_TASK = None
-    await MEMORY_REVIEW_HOST.shutdown()
+    await MEMORY_REVIEW.host.shutdown()
     wake_drains = list(BACKGROUND_GOAL_WAKE_DRAIN_TASKS)
     for task in wake_drains:
         task.cancel()
@@ -2649,35 +2622,7 @@ def read_app_runtime_snapshot(
         progress = {"ok": True, "schema": "vrcforge.agent_progress.v1", "items": [], "count": 0}
         questions = {"ok": True, "schema": "vrcforge.agent_questions.v1", "questions": [], "count": 0}
         memory = {"ok": True, "schema": "vrcforge.agent_memory_list.v1", "memories": [], "count": 0}
-    memory_review_summary: dict[str, Any] = {
-        "revision": 0,
-        "unreadCount": 0,
-        "runStatus": "idle",
-        "needsAttention": False,
-        "failureClass": "",
-    }
-    try:
-        review_project = ""
-        if str(projectRoot or "").strip():
-            _review_scope, review_project = resolve_memory_review_request_scope("project", projectRoot)
-        review = MEMORY_REVIEW_HOST.snapshot(requested_project_root=review_project)
-        review_status = review.get("runStatus") if isinstance(review.get("runStatus"), dict) else {}
-        last_run = review.get("lastRun") if isinstance(review.get("lastRun"), dict) else {}
-        last_status = str((last_run or {}).get("status") or "").strip().casefold()
-        failure_class = str(
-            (last_run or {}).get("failureClass")
-            or (last_run or {}).get("deferredReason")
-            or ""
-        ).strip().casefold()
-        memory_review_summary = {
-            "revision": int(review.get("revision") or 0),
-            "unreadCount": int(review.get("unreadCount") or 0),
-            "runStatus": str((review_status or {}).get("state") or "idle"),
-            "needsAttention": bool(last_status in {"failed", "timed_out", "skipped"}),
-            "failureClass": failure_class,
-        }
-    except Exception:  # noqa: BLE001 - runtime sidebar summary fails closed.
-        pass
+    memory_review_summary = MEMORY_REVIEW.runtime_summary(projectRoot)
     approval_items = AGENT_GATEWAY.list_approvals()
     return {
         "ok": True,
@@ -3498,122 +3443,76 @@ CHAT_REQUESTED_PROJECT_PATH_LIMIT = 100
 CHAT_REQUESTED_PROJECT_PATHS: dict[str, str] = {}
 
 
-MEMORY_REVIEW_DASHBOARD_ADAPTER = MemoryReviewDashboardAdapter(
-    project_snapshot=lambda: cached_project_snapshot_payload(refresh_async=False),
-    selected_project_path=lambda: (
-        str(DASHBOARD_STATE.selected_project_path or "")
-        if DASHBOARD_STATE is not None
-        else ""
-    ),
-    indexed_project_paths=lambda: load_chat_project_index_paths(),
-    requested_project_paths=lambda: list(CHAT_REQUESTED_PROJECT_PATHS.values()),
-    resolve_project_root=lambda candidate: resolve_chat_project_root(candidate),
-    chat_lock=CHAT_TRANSCRIPTS_LOCK,
-    chat_transcripts_path=lambda: chat_transcripts_path(),
-    project_chat_transcripts_path=lambda project_root: project_chat_transcripts_path(
-        project_root
-    ),
-    chat_store_target=lambda *args, **kwargs: chat_store_target(*args, **kwargs),
-    load_chat_transcript_file=lambda *args, **kwargs: load_chat_transcript_file(
-        *args, **kwargs
-    ),
-    list_tasks=lambda: _SUB_AGENT_COLLABORATION.list_tasks(
-        include_events=False,
-        limit=500,
-    ),
-    audit_log_path=lambda: AGENT_GATEWAY.audit_log_path,
-    load_provider_settings=lambda: load_dashboard_settings(ConnectionRequest()),
-    normalize_provider=lambda provider: normalize_provider_name(provider),
-    provider_display_name=lambda provider: provider_display_name(provider),
-    provider_requires_api_key=lambda provider: provider_requires_api_key(provider),
-)
-MEMORY_REVIEW_SOURCE_COMMIT_LOCK = MemoryReviewSourceCommitLock(
-    MEMORY_REVIEW_SERVICE.transaction_lock,
-    AGENT_GATEWAY._lock,
-    CHAT_TRANSCRIPTS_LOCK,
-    _SUB_AGENT_COLLABORATION.source_commit_lock(),
-    AGENT_GATEWAY._audit_append_lock,
-)
-
-
-def memory_review_authorized_project_roots() -> list[str]:
-    return MEMORY_REVIEW_DASHBOARD_ADAPTER.authorized_project_roots()
-
-
-def resolve_memory_review_request_scope(
-    scope: str = "",
-    project_root: str = "",
-) -> tuple[MemoryScope, str]:
-    return MEMORY_REVIEW_DASHBOARD_ADAPTER.resolve_scope(
-        scope,
-        project_root,
-        authorized_project_roots=memory_review_authorized_project_roots(),
+# STOPGAP: keep one app-lifetime Memory Review graph while the remaining 1.5
+# domains move to typed composition.  The final 1.5 seam-retirement gate must
+# inject this graph into lifecycle/controllers and remove this root lookup and
+# Gateway callback binding before the version bump.
+MEMORY_REVIEW: MemoryReviewComposition = build_memory_review_composition(
+    MemoryReviewCompositionPorts(
+        accepted_memory_store=AGENT_GATEWAY.agent_memory_store,
+        review_root=lambda: AGENT_GATEWAY.audit_dir / "memory-review",
+        shared_state_lock=AGENT_GATEWAY._lock,
+        audit_append_lock=AGENT_GATEWAY._audit_append_lock,
+        list_memory=lambda limit, project_root: AGENT_GATEWAY.list_agent_memory(
+            limit=limit,
+            project_root=project_root,
+        ),
+        acquire_background_project_read=AGENT_GATEWAY.try_acquire_background_project_read,
+        release_background_project_read=AGENT_GATEWAY.release_background_project_read,
+        bind_background_activity=lambda callback: setattr(
+            AGENT_GATEWAY,
+            "background_activity_started_fn",
+            callback,
+        ),
+        lane_budget=RUNTIME_LANE_BUDGET,
+        preflight=BACKGROUND_GOAL_PREFLIGHT,
+        build_runtime=lambda lane_budget, preflight, on_state: MemoryReviewRuntimeCoordinator(
+            lane_budget=lane_budget,
+            preflight=preflight,
+            on_state=on_state,
+        ),
+        adapter=MemoryReviewDashboardAdapter(
+            project_snapshot=lambda: cached_project_snapshot_payload(refresh_async=False),
+            selected_project_path=lambda: (
+                str(DASHBOARD_STATE.selected_project_path or "")
+                if DASHBOARD_STATE is not None
+                else ""
+            ),
+            indexed_project_paths=lambda: load_chat_project_index_paths(),
+            requested_project_paths=lambda: list(CHAT_REQUESTED_PROJECT_PATHS.values()),
+            resolve_project_root=lambda candidate: resolve_chat_project_root(candidate),
+            chat_lock=CHAT_TRANSCRIPTS_LOCK,
+            chat_transcripts_path=lambda: chat_transcripts_path(),
+            project_chat_transcripts_path=lambda project_root: project_chat_transcripts_path(project_root),
+            chat_store_target=lambda *args, **kwargs: chat_store_target(*args, **kwargs),
+            load_chat_transcript_file=lambda *args, **kwargs: load_chat_transcript_file(*args, **kwargs),
+            list_tasks=lambda: _SUB_AGENT_COLLABORATION.list_tasks(
+                include_events=False,
+                limit=500,
+            ),
+            audit_log_path=lambda: AGENT_GATEWAY.audit_log_path,
+            load_provider_settings=lambda: load_dashboard_settings(ConnectionRequest()),
+            normalize_provider=normalize_provider_name,
+            provider_display_name=provider_display_name,
+            provider_requires_api_key=provider_requires_api_key,
+        ),
+        broadcast=EVENT_BUS.broadcast,
+        emit_warning=lambda failure_class: emit_log(
+            "warn",
+            "agent",
+            "Memory Review background run had a bounded failure.",
+            {"failureClass": str(failure_class or "runtime")},
+        ),
+        chat_lock=CHAT_TRANSCRIPTS_LOCK,
+        provider_call=lambda settings, payload, token_cap: invoke_memory_review_provider(
+            settings,
+            payload,
+            token_cap=token_cap,
+        ),
+        sub_agent_source_commit_lock=_SUB_AGENT_COLLABORATION.source_commit_lock,
     )
-
-
-def read_memory_review_audit_inventory() -> tuple[list[dict[str, Any]], bool, str]:
-    return MEMORY_REVIEW_DASHBOARD_ADAPTER.read_audit_inventory()
-
-
-def collect_memory_review_sources(
-    scope: MemoryScope,
-    canonical_project: str = "",
-) -> MemoryReviewSourceInventory:
-    return MEMORY_REVIEW_DASHBOARD_ADAPTER.collect_sources(scope, canonical_project)
-
-
-def load_memory_review_provider_context() -> Any:
-    return MEMORY_REVIEW_DASHBOARD_ADAPTER.load_provider_context()
-
-
-def memory_review_project_root_for_scope_key(scope_key: str) -> str:
-    return MEMORY_REVIEW_DASHBOARD_ADAPTER.project_root_for_scope_key(
-        scope_key,
-        authorized_project_roots=memory_review_authorized_project_roots(),
-    )
-
-
-def call_memory_review_provider(settings: Settings, payload: dict[str, Any], token_cap: int) -> dict[str, Any]:
-    return invoke_memory_review_provider(settings, payload, token_cap=token_cap)
-
-
-async def broadcast_agent_memory_from_review(project_root: str) -> None:
-    await EVENT_BUS.broadcast(
-        "agentMemory",
-        AGENT_GATEWAY.list_agent_memory(limit=30, project_root=project_root),
-    )
-
-
-def log_memory_review_bounded_warning(failure_class: str) -> None:
-    emit_log(
-        "warn",
-        "agent",
-        "Memory Review background run had a bounded failure.",
-        {"failureClass": str(failure_class or "runtime")},
-    )
-
-
-MEMORY_REVIEW_HOST = MemoryReviewHost(
-    service=MEMORY_REVIEW_SERVICE,
-    runtime=MEMORY_REVIEW_RUNTIME,
-    resolve_scope=resolve_memory_review_request_scope,
-    collect_sources=collect_memory_review_sources,
-    load_provider_context=load_memory_review_provider_context,
-    provider_call=call_memory_review_provider,
-    on_changed=broadcast_memory_review_state,
-    on_memory_changed=broadcast_agent_memory_from_review,
-    root_for_scope_key=memory_review_project_root_for_scope_key,
-    acquire_background_lease=AGENT_GATEWAY.try_acquire_background_project_read,
-    release_background_lease=AGENT_GATEWAY.release_background_project_read,
-    on_bounded_warning=log_memory_review_bounded_warning,
-    source_commit_lock=MEMORY_REVIEW_SOURCE_COMMIT_LOCK,
-    idle_gate=MEMORY_REVIEW_IDLE_GATE,
 )
-RUNTIME_LANE_BUDGET.set_interactive_acquire_callback(
-    MEMORY_REVIEW_IDLE_GATE.signal_activity
-)
-AGENT_GATEWAY.background_activity_started_fn = MEMORY_REVIEW_IDLE_GATE.signal_activity
-app.include_router(build_memory_review_router(MEMORY_REVIEW_HOST))
+app.include_router(build_memory_review_router(MEMORY_REVIEW.host))
 
 
 @app.get("/api/app/agent/memory")
@@ -3647,12 +3546,9 @@ async def app_delete_agent_memory(memory_id: str, request: AgentMemoryDeleteRequ
         payload = AGENT_GATEWAY.delete_agent_memory(memory_id, {"reason": request.reason if request else ""})
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await asyncio.to_thread(
-        MEMORY_REVIEW_SERVICE.reconcile_external_memory_deletions,
-        [memory_id],
-    )
+    await asyncio.to_thread(MEMORY_REVIEW.service.reconcile_external_memory_deletions, [memory_id])
     await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30))
-    await broadcast_memory_review_state()
+    await MEMORY_REVIEW.notify_review_changed()
     return payload
 
 
@@ -3662,9 +3558,9 @@ async def app_clear_agent_memory(request: AgentMemoryClearRequest) -> dict[str, 
         payload = AGENT_GATEWAY.clear_agent_memory({"scope": request.scope, "reason": request.reason, "projectRoot": request.project_root})
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await asyncio.to_thread(MEMORY_REVIEW_SERVICE.reconcile_external_memory_deletions)
+    await asyncio.to_thread(MEMORY_REVIEW.service.reconcile_external_memory_deletions)
     await EVENT_BUS.broadcast("agentMemory", AGENT_GATEWAY.list_agent_memory(limit=30, project_root=request.project_root or ""))
-    await broadcast_memory_review_state()
+    await MEMORY_REVIEW.notify_review_changed()
     return payload
 
 
@@ -15157,7 +15053,7 @@ async def background_goal_monitor_loop() -> None:
         except Exception as exc:  # noqa: BLE001 - monitoring must not interrupt the core runtime.
             emit_log("warn", "agent", "Background goal monitor check had a warning.", {"error": str(exc)})
         try:
-            await MEMORY_REVIEW_HOST.schedule_due_background(memory_review_background_blocker)
+            await MEMORY_REVIEW.host.schedule_due_background(memory_review_background_blocker)
         except Exception:  # noqa: BLE001 - Memory Review cannot interrupt Goal monitoring.
             emit_log("warn", "agent", "Memory Review monitor check had a bounded warning.", {"failureClass": "monitor"})
         await asyncio.sleep(30)

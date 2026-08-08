@@ -5,26 +5,32 @@ import json
 import threading
 from types import SimpleNamespace
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import dashboard_server
 from background_goal_runtime import ProviderPreflightCache, RuntimeLaneBudget
 from memory_consolidation_sources import MemoryScope, admit_memory_source, project_scope_key
+from memory_review_composition import MemoryReviewComposition, MemoryReviewCompositionPorts, build_memory_review_composition
+from memory_review_dashboard_adapter import (
+    MEMORY_REVIEW_AUDIT_SCAN_MAX_BYTES,
+    MemoryReviewDashboardAdapter,
+)
 from memory_review_host import (
     MemoryReviewCancelRequest,
     MemoryReviewConfigRequest,
     MemoryReviewSourceInventory,
+    MemoryReviewProviderContext,
+    build_memory_review_router,
 )
+from memory_consolidation_sources import resolve_memory_scope
 from memory_review_runtime import MemoryReviewRuntimeCoordinator
 from vrchat_blendshape_agent import Settings
-
-
-REAL_COLLECT_MEMORY_REVIEW_SOURCES = dashboard_server.collect_memory_review_sources
 
 
 @dataclass
@@ -39,6 +45,8 @@ class DashboardMemoryReviewHarness:
     provider_calls: list[dict[str, Any]]
     events: list[tuple[str, Any]]
     client: TestClient
+    composition: MemoryReviewComposition
+    ports: MemoryReviewCompositionPorts
     host: Any | None = None
 
     def configure(
@@ -163,31 +171,31 @@ def _candidate_result(payload: dict[str, Any], *, text: str = "I prefer concise 
 
 def test_source_inventory_marks_only_authoritative_source_types_complete(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     user_scope = MemoryScope(kind="user", scope_key="user")
-    monkeypatch.setattr(dashboard_server, "chat_transcripts_path", lambda: tmp_path / "chats.json")
-    monkeypatch.setattr(
-        dashboard_server,
-        "load_chat_transcript_file",
-        lambda *_args, **_kwargs: ([], {"status": "missing"}, None),
+    source_status = {"value": "missing"}
+    adapter = MemoryReviewDashboardAdapter(
+        project_snapshot=lambda: {"projects": []}, selected_project_path=lambda: "",
+        indexed_project_paths=lambda: [], requested_project_paths=lambda: [],
+        resolve_project_root=lambda _value: None, chat_lock=threading.RLock(),
+        chat_transcripts_path=lambda: tmp_path / "chats.json",
+        project_chat_transcripts_path=lambda _root: None, chat_store_target=lambda *args, **kwargs: None,
+        load_chat_transcript_file=lambda *args, **kwargs: ([], {"status": source_status["value"]}, None),
+        list_tasks=lambda: {"tasks": []}, audit_log_path=lambda: tmp_path / "audit.jsonl",
+        load_provider_settings=lambda: _settings(), normalize_provider=lambda value: value,
+        provider_display_name=lambda value: value, provider_requires_api_key=lambda _value: False,
     )
-    user_inventory = REAL_COLLECT_MEMORY_REVIEW_SOURCES(user_scope)
+    user_inventory = adapter.collect_sources(user_scope)
     assert user_inventory.complete_source_types == frozenset({"user_chat"})
 
-    monkeypatch.setattr(
-        dashboard_server,
-        "load_chat_transcript_file",
-        lambda *_args, **_kwargs: ([], {"status": "needs_repair"}, {"reason": "invalid"}),
-    )
-    unavailable_inventory = REAL_COLLECT_MEMORY_REVIEW_SOURCES(user_scope)
+    source_status["value"] = "needs_repair"
+    unavailable_inventory = adapter.collect_sources(user_scope)
     assert unavailable_inventory.complete_source_types == frozenset()
     assert unavailable_inventory.reason_counts["chat_inventory_unavailable"] == 1
 
 
 def test_project_source_inventory_never_treats_truncation_or_damage_as_deletion(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "Project"
     project.mkdir()
@@ -196,35 +204,21 @@ def test_project_source_inventory_never_treats_truncation_or_damage_as_deletion(
         scope_key=project_scope_key(str(project)),
         project_root=str(project.resolve()),
     )
-    monkeypatch.setattr(
-        dashboard_server,
-        "project_chat_transcripts_path",
-        lambda _root: tmp_path / "project-chats.json",
+    audit = tmp_path / "gateway-audit.jsonl"
+    audit.write_text("{malformed\n", encoding="utf-8")
+    adapter = MemoryReviewDashboardAdapter(
+        project_snapshot=lambda: {"projects": []}, selected_project_path=lambda: "",
+        indexed_project_paths=lambda: [], requested_project_paths=lambda: [],
+        resolve_project_root=lambda value: Path(value) if value else None, chat_lock=threading.RLock(),
+        chat_transcripts_path=lambda: tmp_path / "chats.json",
+        project_chat_transcripts_path=lambda _root: tmp_path / "project-chats.json",
+        chat_store_target=lambda *args, **kwargs: None,
+        load_chat_transcript_file=lambda *args, **kwargs: ([], {"status": "missing"}, None),
+        list_tasks=lambda: {"tasks": [{} for _ in range(200)]}, audit_log_path=lambda: audit,
+        load_provider_settings=lambda: _settings(), normalize_provider=lambda value: value,
+        provider_display_name=lambda value: value, provider_requires_api_key=lambda _value: False,
     )
-    monkeypatch.setattr(
-        dashboard_server,
-        "load_chat_transcript_file",
-        lambda *_args, **_kwargs: ([], {"status": "missing"}, None),
-    )
-    monkeypatch.setattr(
-        dashboard_server,
-        "_SUB_AGENT_COLLABORATION",
-        SimpleNamespace(list_tasks=lambda **_kwargs: {"tasks": [{} for _ in range(200)]}),
-    )
-    original_paths = (
-        dashboard_server.AGENT_GATEWAY.config_path,
-        dashboard_server.AGENT_GATEWAY.audit_dir,
-    )
-    dashboard_server.AGENT_GATEWAY.configure_paths(
-        tmp_path / "gateway.json",
-        tmp_path / "gateway-audit",
-    )
-    dashboard_server.AGENT_GATEWAY.audit_dir.mkdir(parents=True, exist_ok=True)
-    dashboard_server.AGENT_GATEWAY.audit_log_path.write_text("{malformed\n", encoding="utf-8")
-    try:
-        inventory = REAL_COLLECT_MEMORY_REVIEW_SOURCES(project_scope, str(project.resolve()))
-    finally:
-        dashboard_server.AGENT_GATEWAY.configure_paths(*original_paths)
+    inventory = adapter.collect_sources(project_scope, str(project.resolve()))
     assert inventory.complete_source_types == frozenset({"user_chat"})
     assert inventory.reason_counts["task_inventory_truncated"] == 1
     assert inventory.reason_counts["audit_inventory_incomplete"] == 1
@@ -238,13 +232,24 @@ def test_large_audit_tail_scan_is_bounded_and_does_not_take_gateway_state_lock(
     gateway.configure_paths(tmp_path / "gateway.json", tmp_path / "gateway-audit")
     gateway.audit_dir.mkdir(parents=True, exist_ok=True)
     gateway.audit_log_path.write_bytes(
-        b'{"oversized":"' + (b"x" * (dashboard_server.MEMORY_REVIEW_AUDIT_SCAN_MAX_BYTES + 1024)) + b'"}\n'
+        b'{"oversized":"' + (b"x" * (MEMORY_REVIEW_AUDIT_SCAN_MAX_BYTES + 1024)) + b'"}\n'
     )
     completed = threading.Event()
     result: dict[str, Any] = {}
+    adapter = MemoryReviewDashboardAdapter(
+        project_snapshot=lambda: {"projects": []}, selected_project_path=lambda: "",
+        indexed_project_paths=lambda: [], requested_project_paths=lambda: [],
+        resolve_project_root=lambda _value: None, chat_lock=threading.RLock(),
+        chat_transcripts_path=lambda: tmp_path / "chats.json",
+        project_chat_transcripts_path=lambda _root: None, chat_store_target=lambda *args, **kwargs: None,
+        load_chat_transcript_file=lambda *args, **kwargs: ([], {"status": "missing"}, None),
+        list_tasks=lambda: {"tasks": []}, audit_log_path=lambda: gateway.audit_log_path,
+        load_provider_settings=lambda: _settings(), normalize_provider=lambda value: value,
+        provider_display_name=lambda value: value, provider_requires_api_key=lambda _value: False,
+    )
 
     def scan() -> None:
-        result["value"] = dashboard_server.read_memory_review_audit_inventory()
+        result["value"] = adapter.read_audit_inventory()
         completed.set()
 
     try:
@@ -262,9 +267,10 @@ def test_large_audit_tail_scan_is_bounded_and_does_not_take_gateway_state_lock(
 
 
 @pytest.fixture
-def memory_review_dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def memory_review_dashboard(tmp_path: Path):
     gateway = dashboard_server.AGENT_GATEWAY
     original_paths = (gateway.config_path, gateway.audit_dir)
+    original_background_activity = gateway.background_activity_started_fn
     project = tmp_path / "AuthorizedProject"
     other_project = tmp_path / "OtherProject"
     unauthorized_project = tmp_path / "UnauthorizedProject"
@@ -282,16 +288,6 @@ def memory_review_dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "call": lambda _settings, payload, **_kwargs: _candidate_result(payload)
     }
 
-    monkeypatch.setattr(
-        dashboard_server,
-        "memory_review_authorized_project_roots",
-        lambda: [str(project), str(other_project)],
-    )
-    monkeypatch.setattr(
-        dashboard_server,
-        "load_dashboard_settings",
-        lambda _request: settings["value"],
-    )
     def source_inventory(scope: MemoryScope, _project_root: str = "") -> MemoryReviewSourceInventory:
         complete_types = {"user_chat"}
         if scope.kind == "project":
@@ -301,8 +297,6 @@ def memory_review_dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             complete_source_types=frozenset(complete_types),
             reason_counts={"admitted": len(sources)},
         )
-
-    monkeypatch.setattr(dashboard_server, "collect_memory_review_sources", source_inventory)
 
     def call_provider(
         current_settings: Settings,
@@ -324,47 +318,114 @@ def memory_review_dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             token_cap=token_cap if token_cap is not None else kwargs.get("token_cap"),
         )
 
-    monkeypatch.setattr(dashboard_server, "invoke_memory_review_provider", call_provider)
-
     async def capture_event(event_type: str, payload: Any) -> None:
         events.append((event_type, payload))
-
-    monkeypatch.setattr(dashboard_server.EVENT_BUS, "broadcast", capture_event)
 
     async def no_wait(_seconds: float) -> None:
         return None
 
     lane_budget = RuntimeLaneBudget()
-    monkeypatch.setattr(dashboard_server, "RUNTIME_LANE_BUDGET", lane_budget)
-    runtime = MemoryReviewRuntimeCoordinator(
-        lane_budget=lane_budget,
-        preflight=ProviderPreflightCache(lambda _provider, _url: True),
-        on_state=dashboard_server.broadcast_memory_review_state,
-        sleep=no_wait,
-        provider_timeout_seconds=0.25,
-    )
-    monkeypatch.setattr(dashboard_server, "MEMORY_REVIEW_RUNTIME", runtime)
-    host = getattr(dashboard_server, "MEMORY_REVIEW_HOST", None)
-    if host is not None:
-        monkeypatch.setattr(host, "_resolve_scope", dashboard_server.resolve_memory_review_request_scope)
-        monkeypatch.setattr(host, "_collect_sources", source_inventory)
-        monkeypatch.setattr(host, "_provider_call", call_provider)
-        monkeypatch.setattr(
-            host,
-            "_root_for_scope_key",
-            lambda scope_key: next(
-                (
-                    str(candidate.resolve())
-                    for candidate in (project, other_project)
-                    if project_scope_key(str(candidate)) == scope_key
+    class TestAdapter:
+        def authorized_project_roots(self) -> list[str]:
+            return [str(project), str(other_project)]
+
+        def resolve_scope(self, scope: str = "", project_root: str = "", **_kwargs: Any):
+            resolved = resolve_memory_scope(
+                scope or ("project" if project_root else "user"),
+                project_root,
+                authorized_project_roots=self.authorized_project_roots() if project_root else None,
+            )
+            root = ""
+            if resolved.kind == "project":
+                root = next(
+                    item for item in self.authorized_project_roots()
+                    if project_scope_key(item) == resolved.scope_key
+                )
+            return resolved, root
+
+        def collect_sources(self, scope: MemoryScope, project_root: str = "") -> MemoryReviewSourceInventory:
+            return source_inventory(scope, project_root)
+
+        def load_provider_context(self) -> MemoryReviewProviderContext:
+            current = settings["value"]
+            provider_name = dashboard_server.normalize_provider_name(current.llm_provider)
+            return MemoryReviewProviderContext(
+                settings=current,
+                provider=provider_name,
+                provider_label=dashboard_server.provider_display_name(provider_name),
+                model=current.llm_model,
+                base_url=current.llm_base_url,
+                credential_ready=(
+                    not dashboard_server.provider_requires_api_key(provider_name)
+                    or bool(str(current.llm_api_key or "").strip())
                 ),
-                "",
+            )
+
+        def project_root_for_scope_key(self, scope_key: str, **_kwargs: Any) -> str:
+            return next((item for item in self.authorized_project_roots() if project_scope_key(item) == scope_key), "")
+
+    ports = MemoryReviewCompositionPorts(
+            accepted_memory_store=gateway.agent_memory_store,
+            review_root=lambda: gateway.audit_dir / "memory-review",
+            shared_state_lock=gateway._lock,
+            audit_append_lock=gateway._audit_append_lock,
+            list_memory=lambda limit, project_root: gateway.list_agent_memory(
+                limit=limit,
+                project_root=project_root,
             ),
-        )
-        monkeypatch.setattr(host, "runtime", runtime)
-        monkeypatch.setattr(host, "_background_task", None)
-        lane_budget.set_interactive_acquire_callback(host._idle_gate.signal_activity)  # noqa: SLF001
-    client = TestClient(dashboard_server.app)
+            acquire_background_project_read=gateway.try_acquire_background_project_read,
+            release_background_project_read=gateway.release_background_project_read,
+            bind_background_activity=lambda callback: setattr(
+                gateway,
+                "background_activity_started_fn",
+                callback,
+            ),
+            lane_budget=lane_budget,
+            preflight=ProviderPreflightCache(lambda _provider, _url: True),
+            build_runtime=lambda budget, preflight, on_state: MemoryReviewRuntimeCoordinator(
+                lane_budget=budget, preflight=preflight, on_state=on_state,
+                sleep=no_wait, provider_timeout_seconds=0.25,
+            ),
+            adapter=TestAdapter(), broadcast=capture_event, emit_warning=lambda _failure: None,
+            provider_call=call_provider,
+            chat_lock=dashboard_server.CHAT_TRANSCRIPTS_LOCK,
+            sub_agent_source_commit_lock=dashboard_server._SUB_AGENT_COLLABORATION.source_commit_lock,
+    )
+    composition = build_memory_review_composition(ports)
+    test_app = FastAPI()
+    test_app.include_router(build_memory_review_router(composition.host))
+
+    @test_app.get("/api/app/agent/memory")
+    def read_memory(limit: int = 50, projectRoot: str = "", scope: str = "") -> dict[str, Any]:
+        return gateway.list_agent_memory(limit=limit, project_root=projectRoot, scope=scope)
+
+    @test_app.post("/api/app/agent/memory")
+    async def create_memory(payload: dict[str, Any]) -> dict[str, Any]:
+        created = gateway.create_agent_memory(payload)
+        await capture_event("agentMemory", gateway.list_agent_memory(limit=30, project_root=str(payload.get("projectRoot") or "")))
+        return created
+
+    @test_app.delete("/api/app/agent/memory/{memory_id}")
+    async def delete_memory(memory_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        deleted = gateway.delete_agent_memory(memory_id, {"reason": str((payload or {}).get("reason") or "")})
+        await asyncio.to_thread(composition.service.reconcile_external_memory_deletions, [memory_id])
+        await capture_event("agentMemory", gateway.list_agent_memory(limit=30))
+        await composition.notify_review_changed()
+        return deleted
+
+    @test_app.post("/api/app/agent/memory/clear")
+    async def clear_memory(payload: dict[str, Any]) -> dict[str, Any]:
+        cleared = gateway.clear_agent_memory(payload)
+        await asyncio.to_thread(composition.service.reconcile_external_memory_deletions)
+        await capture_event("agentMemory", gateway.list_agent_memory(limit=30, project_root=str(payload.get("projectRoot") or "")))
+        await composition.notify_review_changed()
+        return cleared
+
+    @test_app.get("/api/app/runtime/snapshot")
+    def runtime_snapshot(projectRoot: str = "") -> dict[str, Any]:
+        return {"memoryReview": composition.runtime_summary(projectRoot)}
+
+    client = TestClient(test_app)
     harness = DashboardMemoryReviewHarness(
         root=tmp_path,
         project=project,
@@ -376,12 +437,15 @@ def memory_review_dashboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         provider_calls=provider_calls,
         events=events,
         client=client,
-        host=host,
+        composition=composition,
+        ports=ports,
+        host=composition.host,
     )
     try:
         yield harness
     finally:
         client.close()
+        gateway.background_activity_started_fn = original_background_activity
         gateway.configure_paths(*original_paths)
 
 
@@ -455,7 +519,7 @@ def test_saved_scope_and_provider_must_match_before_a_paid_run(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     configured = env.configure("suggest_only")
 
@@ -498,7 +562,7 @@ def test_switching_projects_does_not_masquerade_as_the_saved_binding(
     )
     assert Path(configured["projectRoot"]) == env.project.resolve()
     assert configured["configuredProjectMatches"] is True
-    scope, _root = dashboard_server.resolve_memory_review_request_scope(
+    scope, _root = env.composition.resolve_scope(
         "project",
         str(env.project),
     )
@@ -536,7 +600,7 @@ def test_off_and_shadow_make_no_provider_call_or_candidate_prose_persistence(
     assert off.status_code == 400
     assert env.provider_calls == []
 
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     secret_source_text = "Please remember concise replies with credential-never-persist at C:\\Users\\Private\\notes.txt"
     env.sources.append(_source(scope, text=secret_source_text))
     configured = env.configure("shadow")
@@ -588,7 +652,7 @@ def test_provider_pricing_is_paired_and_persisted_with_actual_usage(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
 
     unpaired = env.client.post(
@@ -639,7 +703,7 @@ def test_retry_usage_is_bounded_by_the_run_cap_and_records_attempt_evidence(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     calls = {"count": 0}
 
@@ -677,7 +741,7 @@ def test_monetary_cap_fails_closed_when_provider_usage_is_incomplete(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     env.provider["call"] = lambda _settings, payload, **_kwargs: {
         **_candidate_result(payload),
@@ -701,7 +765,7 @@ def test_suggest_accept_is_the_only_path_into_memory_and_runtime_prompt(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     configured = env.configure("suggest_only")
     result = env.run(revision=configured["revision"])
@@ -739,7 +803,7 @@ def test_legacy_memory_removal_immediately_reconciles_review_state(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources[:] = [_source(scope)]
     configured = env.configure("suggest_only")
     proposed = env.run(revision=configured["revision"]).json()
@@ -777,7 +841,7 @@ def test_reject_and_defer_never_enter_memory(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     configured = env.configure("suggest_only")
     snapshot = env.run(revision=configured["revision"]).json()
@@ -796,7 +860,7 @@ def test_reject_and_defer_never_enter_memory(
 
 
 def _make_project_candidate(env: DashboardMemoryReviewHarness) -> tuple[dict[str, Any], dict[str, Any]]:
-    scope, canonical = dashboard_server.resolve_memory_review_request_scope("project", str(env.project))
+    scope, canonical = env.composition.resolve_scope("project", str(env.project))
     env.sources[:] = [_source(scope, source_id="project-chat")]
     configured = env.configure(
         "suggest_only",
@@ -972,7 +1036,7 @@ def test_memory_review_events_are_signal_only(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     configured = env.configure("suggest_only")
     env.run(revision=configured["revision"])
@@ -1003,7 +1067,7 @@ def test_provider_secret_and_machine_path_never_reach_snapshot_or_audit(
     assert snapshot["provider"] == ""
 
     env.settings["value"] = _settings(api_key="credential-must-not-persist")
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     raw_token = "token=dashboard-private-token-114514"
     raw_source_path = "C:\\Users\\Private\\source.txt"
     env.sources.append(
@@ -1027,10 +1091,9 @@ def test_provider_secret_and_machine_path_never_reach_snapshot_or_audit(
 
 def test_unreachable_preflight_and_timeout_never_commit_candidates(
     memory_review_dashboard: DashboardMemoryReviewHarness,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
 
     async def no_wait(_seconds: float) -> None:
@@ -1049,9 +1112,15 @@ def test_unreachable_preflight_and_timeout_never_commit_candidates(
         sleep=no_wait,
         provider_timeout_seconds=0.1,
     )
-    monkeypatch.setattr(dashboard_server, "MEMORY_REVIEW_RUNTIME", unreachable_runtime)
-    if env.host is not None:
-        monkeypatch.setattr(env.host, "runtime", unreachable_runtime)
+    env.client.close()
+    env.composition = build_memory_review_composition(
+        replace(env.ports, lane_budget=budget, build_runtime=lambda *_args: unreachable_runtime)
+    )
+    env.host = env.composition.host
+    assert env.host.runtime is unreachable_runtime
+    isolated_app = FastAPI()
+    isolated_app.include_router(build_memory_review_router(env.host))
+    env.client = TestClient(isolated_app)
     configured = env.configure("suggest_only")
     unreachable = env.run(revision=configured["revision"])
     assert unreachable.status_code == 503
@@ -1072,9 +1141,15 @@ def test_unreachable_preflight_and_timeout_never_commit_candidates(
         sleep=no_wait,
         provider_timeout_seconds=0.01,
     )
-    monkeypatch.setattr(dashboard_server, "MEMORY_REVIEW_RUNTIME", timeout_runtime)
-    if env.host is not None:
-        monkeypatch.setattr(env.host, "runtime", timeout_runtime)
+    env.client.close()
+    env.composition = build_memory_review_composition(
+        replace(env.ports, lane_budget=slow_budget, build_runtime=lambda *_args: timeout_runtime)
+    )
+    env.host = env.composition.host
+    assert env.host.runtime is timeout_runtime
+    isolated_app = FastAPI()
+    isolated_app.include_router(build_memory_review_router(env.host))
+    env.client = TestClient(isolated_app)
 
     def slow_provider(_settings: Settings, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
         time.sleep(0.05)
@@ -1093,7 +1168,7 @@ def test_schema_failure_is_non_consuming_and_cannot_hot_loop(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
 
     def invalid_schema(
@@ -1124,7 +1199,7 @@ def test_source_edit_during_provider_call_rejects_stale_output(
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources[:] = [_source(scope, revision="1", text="Please remember concise replies.")]
 
     def edit_source_before_return(
@@ -1151,7 +1226,7 @@ def test_source_commit_critical_section_blocks_every_source_writer_until_commit(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources[:] = [_source(scope)]
     configured = env.configure("suggest_only")
     commit_entered = threading.Event()
@@ -1207,7 +1282,7 @@ def test_cancelled_provider_run_is_immediately_terminal(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources[:] = [_source(scope)]
     configured = env.configure("suggest_only")
     started = threading.Event()
@@ -1255,7 +1330,7 @@ def test_cancellation_after_durable_commit_starts_cannot_race_terminal_state(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources[:] = [_source(scope)]
     configured = env.configure("suggest_only")
     commit_started = threading.Event()
@@ -1295,7 +1370,7 @@ def test_explicit_cancel_drains_late_provider_without_candidate_commit(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources[:] = [_source(scope)]
     configured = env.configure("suggest_only")
     started = threading.Event()
@@ -1343,7 +1418,7 @@ def test_config_change_while_provider_is_in_flight_cannot_commit_candidates(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources[:] = [_source(scope)]
     configured = env.configure("suggest_only")
     started = threading.Event()
@@ -1395,7 +1470,7 @@ def test_switching_to_off_during_retry_prevents_every_later_provider_call(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources[:] = [_source(scope)]
     configured = env.configure("suggest_only")
     retry_waiting = threading.Event()
@@ -1456,7 +1531,7 @@ def test_project_read_lease_wraps_only_scan_and_commit_not_provider_wait(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope(
+    scope, _root = env.composition.resolve_scope(
         "project",
         str(env.project),
     )
@@ -1529,7 +1604,7 @@ def test_paid_project_commit_lease_failure_preserves_usage_and_persists_no_candi
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope(
+    scope, _root = env.composition.resolve_scope(
         "project",
         str(env.project),
     )
@@ -1590,7 +1665,7 @@ def test_missing_project_exposes_only_erase_handle_and_permanent_erase_still_wor
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope(
+    scope, _root = env.composition.resolve_scope(
         "project",
         str(env.project),
     )
@@ -1779,7 +1854,7 @@ def test_interactive_start_revokes_paid_background_before_late_commit(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     configured = env.configure("bounded_background", scope="user")
     before = env.host.service.review_store.snapshot(include_internal=True)
@@ -1855,7 +1930,7 @@ def test_activity_during_durable_run_begin_leaves_no_stuck_running_record(
 ) -> None:
     env = memory_review_dashboard
     assert env.host is not None
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     env.configure("bounded_background", scope="user")
     begin_committed = threading.Event()
@@ -1943,21 +2018,15 @@ def test_background_schedule_is_blocked_while_project_write_is_applying(
 
 def test_runtime_snapshot_exposes_only_review_unread_summary(
     memory_review_dashboard: DashboardMemoryReviewHarness,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     configured = env.configure("suggest_only")
     candidate_snapshot = env.run(revision=configured["revision"]).json()
     assert candidate_snapshot["unreadCount"] == 1
     candidate_text = candidate_snapshot["candidates"][0]["proposedText"]
 
-    monkeypatch.setattr(
-        dashboard_server,
-        "build_workspace_diff_summary",
-        lambda *_args, **_kwargs: {"ok": True, "status": "clean", "files": []},
-    )
     runtime = env.client.get("/api/app/runtime/snapshot").json()
     assert runtime["memoryReview"] == {
         "revision": candidate_snapshot["revision"],
@@ -1976,7 +2045,7 @@ def test_open_inbox_read_mutation_clears_unread_without_changing_candidate_state
     memory_review_dashboard: DashboardMemoryReviewHarness,
 ) -> None:
     env = memory_review_dashboard
-    scope, _root = dashboard_server.resolve_memory_review_request_scope("user", "")
+    scope, _root = env.composition.resolve_scope("user", "")
     env.sources.append(_source(scope))
     configured = env.configure("suggest_only")
     proposed = env.run(revision=configured["revision"]).json()

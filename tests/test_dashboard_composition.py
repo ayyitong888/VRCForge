@@ -13,7 +13,10 @@ import dashboard_server
 
 
 CONTRACT_PATH = Path(__file__).parent / "fixtures" / "dashboard_composition_contract_v1.json"
-DASHBOARD_SOURCE_PATH = Path(__file__).parents[1] / "dashboard_server.py"
+EVENT_SOURCE_PATHS = (
+    Path(__file__).parents[1] / "dashboard_server.py",
+    Path(__file__).parents[1] / "memory_review_composition.py",
+)
 
 
 def _canonical_sha256(payload: object) -> str:
@@ -39,23 +42,24 @@ def _route_manifest() -> list[dict[str, object]]:
 
 
 def _observed_literal_event_types() -> list[str]:
-    tree = ast.parse(DASHBOARD_SOURCE_PATH.read_text(encoding="utf-8-sig"))
     event_types: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not node.args:
-            continue
-        function = node.func
-        if isinstance(function, ast.Attribute):
-            name = function.attr
-        elif isinstance(function, ast.Name):
-            name = function.id
-        else:
-            name = ""
-        if name not in {"broadcast", "broadcast_from_sync", "build_event_message"}:
-            continue
-        first_argument = node.args[0]
-        if isinstance(first_argument, ast.Constant) and isinstance(first_argument.value, str):
-            event_types.add(first_argument.value)
+    for source_path in EVENT_SOURCE_PATHS:
+        tree = ast.parse(source_path.read_text(encoding="utf-8-sig"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            function = node.func
+            if isinstance(function, ast.Attribute):
+                name = function.attr
+            elif isinstance(function, ast.Name):
+                name = function.id
+            else:
+                name = ""
+            if name not in {"broadcast", "broadcast_from_sync", "build_event_message"}:
+                continue
+            first_argument = node.args[0]
+            if isinstance(first_argument, ast.Constant) and isinstance(first_argument.value, str):
+                event_types.add(first_argument.value)
     return sorted(event_types)
 
 
