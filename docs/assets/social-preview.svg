@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">VRCForge</title>
+  <desc id="desc">VRCForge — Local AI Workbench for VRChat Avatar Editing, version 1.4.0.</desc>
+  <defs>
+    <linearGradient id="background" x1="80" y1="0" x2="1200" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1020"/>
+      <stop offset="0.55" stop-color="#131B35"/>
+      <stop offset="1" stop-color="#24143C"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="206" y1="176" x2="416" y2="414" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#67E8F9"/>
+      <stop offset="0.52" stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#F472B6"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(1024 140) rotate(135) scale(500 420)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8B5CF6" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#8B5CF6" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#030712" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" rx="32" fill="url(#background)"/>
+  <rect width="1280" height="640" rx="32" fill="url(#glow)"/>
+
+  <g opacity="0.18" stroke="#A78BFA" fill="none">
+    <path d="M760 78H1190"/>
+    <path d="M824 124H1238"/>
+    <path d="M888 170H1190"/>
+    <circle cx="1178" cy="78" r="5" fill="#A78BFA"/>
+    <circle cx="812" cy="124" r="5" fill="#67E8F9"/>
+    <circle cx="1202" cy="170" r="5" fill="#F472B6"/>
+    <path d="M760 562H1190"/>
+    <path d="M824 516H1238"/>
+    <path d="M888 470H1190"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <path d="M182 166L306 116L430 166V316C430 393 376 460 306 484C236 460 182 393 182 316V166Z" fill="#111827" stroke="#334155" stroke-width="4"/>
+    <path d="M226 204L279 360L306 294L333 360L386 204H342L306 298L270 204H226Z" fill="url(#accent)"/>
+    <path d="M259 397H353" stroke="#67E8F9" stroke-width="12" stroke-linecap="round"/>
+    <path d="M278 429H334" stroke="#A78BFA" stroke-width="8" stroke-linecap="round"/>
+  </g>
+
+  <g font-family="Segoe UI, Inter, Arial, sans-serif">
+    <text x="510" y="268" fill="#F8FAFC" font-size="94" font-weight="750" letter-spacing="-3">VRCForge</text>
+    <text x="515" y="333" fill="#CBD5E1" font-size="30" font-weight="400">Local AI Workbench for VRChat Avatar Editing</text>
+    <g transform="translate(515 382)">
+      <rect width="138" height="46" rx="23" fill="#312E81" stroke="#818CF8"/>
+      <circle cx="25" cy="23" r="7" fill="#67E8F9"/>
+      <text x="45" y="31" fill="#E0E7FF" font-size="22" font-weight="650">v1.4.0</text>
+    </g>
+    <text x="515" y="474" fill="#94A3B8" font-size="23">Local-first · Supervised writes · Checkpoint &amp; restore</text>
+  </g>
+
+  <rect x="20" y="20" width="1240" height="600" rx="22" fill="none" stroke="#FFFFFF" stroke-opacity="0.08"/>
+</svg>
