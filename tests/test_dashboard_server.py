@@ -11212,10 +11212,13 @@ class DashboardServerTests(unittest.TestCase):
                 (project / "Packages").mkdir()
                 (project / "ProjectSettings").mkdir()
                 (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1\n", encoding="utf-8")
+                empty_catalog = Path(temp_dir) / "empty-catalog"
                 with (
-                    patch("dashboard_server.discover_vcc_projects", return_value=[]),
-                    patch("dashboard_server.discover_alcom_projects", return_value=[]),
-                    patch("dashboard_server.discover_unity_hub_projects", return_value=[]),
+                    patch.dict(
+                        os.environ,
+                        {"APPDATA": str(empty_catalog), "LOCALAPPDATA": str(empty_catalog)},
+                        clear=False,
+                    ),
                     patch("dashboard_server.load_project_prefs", return_value={"customPaths": [], "hiddenPaths": []}),
                     patch(
                         "dashboard_server.list_running_unity_processes",
@@ -13961,9 +13964,11 @@ namespace VRCForge.Editor
             dashboard_server.CURRENT_UNITY_STATUS = {"instances": []}
             try:
                 with (
-                    patch("dashboard_server.discover_vcc_projects", return_value=[]),
-                    patch("dashboard_server.discover_alcom_projects", return_value=[]),
-                    patch("dashboard_server.discover_unity_hub_projects", return_value=[]),
+                    patch.dict(
+                        os.environ,
+                        {"APPDATA": str(root / "empty-catalog"), "LOCALAPPDATA": str(root / "empty-catalog")},
+                        clear=False,
+                    ),
                     patch("dashboard_server.discover_running_unity_projects", return_value=[]),
                     patch("dashboard_server.load_project_prefs", return_value={"customPaths": [], "hiddenPaths": []}),
                 ):
@@ -14013,11 +14018,11 @@ namespace VRCForge.Editor
                 ]
             }
             try:
-                with patch("dashboard_server.discover_vcc_projects", return_value=[]), patch(
-                    "dashboard_server.discover_unity_hub_projects", return_value=[]
-                ), patch(
-                    "dashboard_server.discover_running_unity_projects", return_value=[]
-                ):
+                with patch.dict(
+                    os.environ,
+                    {"APPDATA": str(root / "empty-catalog"), "LOCALAPPDATA": str(root / "empty-catalog")},
+                    clear=False,
+                ), patch("dashboard_server.discover_running_unity_projects", return_value=[]):
                     projects = dashboard_server.discover_projects([root], include_external=True)
             finally:
                 dashboard_server.CURRENT_UNITY_STATUS = original_status
@@ -14040,9 +14045,14 @@ namespace VRCForge.Editor
                 encoding="utf-8",
             )
 
-            vcc_settings = root / "vcc-settings.json"
-            alcom_settings = root / "vrc-get-settings.json"
-            unity_hub_projects = root / "projects-v1.json"
+            local_app_data = root / "local-app-data"
+            roaming_app_data = root / "roaming-app-data"
+            vcc_settings = local_app_data / "VRChatCreatorCompanion" / "settings.json"
+            alcom_settings = roaming_app_data / "ALCOM" / "settings.json"
+            unity_hub_projects = roaming_app_data / "UnityHub" / "projects-v1.json"
+            vcc_settings.parent.mkdir(parents=True)
+            alcom_settings.parent.mkdir(parents=True)
+            unity_hub_projects.parent.mkdir(parents=True)
             vcc_settings.write_text(json.dumps({"userProjects": [str(project_dir)]}), encoding="utf-8")
             alcom_settings.write_text(json.dumps({"projects": [{"path": str(project_dir)}]}), encoding="utf-8")
             unity_hub_projects.write_text(
@@ -14052,13 +14062,13 @@ namespace VRCForge.Editor
 
             with patch.object(dashboard_server.DASHBOARD_STATE, "selected_project_path", ""), patch.object(
                 dashboard_server, "CURRENT_UNITY_STATUS", {"instances": []}
+            ), patch.dict(
+                os.environ,
+                {"APPDATA": str(roaming_app_data), "LOCALAPPDATA": str(local_app_data)},
+                clear=False,
             ), patch("dashboard_server.load_project_prefs", return_value={"customPaths": []}), patch(
-                "dashboard_server.discover_vcc_projects", return_value=[str(project_dir)]
-            ), patch(
-                "dashboard_server.discover_alcom_projects", return_value=[str(project_dir)]
-            ), patch("dashboard_server.discover_unity_hub_projects", return_value=[
-                {"name": "Avatar Project", "path": str(project_dir), "editorVersion": "2022.3.22f1"}
-            ]), patch("dashboard_server.discover_running_unity_projects", return_value=[]):
+                "dashboard_server.discover_running_unity_projects", return_value=[]
+            ):
                 projects = dashboard_server.discover_projects([], include_external=True)
 
             self.assertEqual(len(projects), 1)
@@ -14066,8 +14076,14 @@ namespace VRCForge.Editor
             self.assertEqual(projects[0]["sources"], ["vcc", "alcom", "unity-hub"])
             self.assertEqual(projects[0]["editorVersion"], "2022.3.22f1")
 
-            self.assertEqual(dashboard_server.discover_projects_from_settings_files([vcc_settings]), [dashboard_server.normalize_path_string(str(project_dir))])
-            self.assertEqual(dashboard_server.discover_projects_from_settings_files([alcom_settings]), [dashboard_server.normalize_path_string(str(project_dir))])
+            self.assertEqual(
+                dashboard_server.PROJECT_CATALOG_DISCOVERY.discover_projects_from_settings_files([vcc_settings]),
+                [dashboard_server.normalize_path_string(str(project_dir))],
+            )
+            self.assertEqual(
+                dashboard_server.PROJECT_CATALOG_DISCOVERY.discover_projects_from_settings_files([alcom_settings]),
+                [dashboard_server.normalize_path_string(str(project_dir))],
+            )
 
     def test_has_unity_mcp_dependency_accepts_bundled_core_with_utf8_bom_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

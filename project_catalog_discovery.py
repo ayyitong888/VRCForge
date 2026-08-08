@@ -1,64 +1,85 @@
 from __future__ import annotations
 
-from typing import Any
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectCatalogDiscoveryPorts:
+    appdata_path: Callable[[], Path]
+    local_appdata_path: Callable[[], Path]
+    path_exists: Callable[[Path], bool]
+    read_text: Callable[[Path, str | None, str | None], str]
+    list_children: Callable[[Path], tuple[Path, ...]]
+    path_is_dir: Callable[[Path], bool]
+    normalize_path_string: Callable[[str], str]
+    is_unity_project_path: Callable[[Path], bool]
+    parse_editor_version: Callable[[Path], str]
 
 
 class ProjectCatalogDiscovery:
-    """Discover external Unity project catalogues through Dashboard-owned helpers."""
+    """Read only known VCC, ALCOM, and Unity Hub catalogue locations."""
 
-    __slots__ = ("_host",)
+    __slots__ = ("_ports",)
 
-    def __init__(self, host: Any) -> None:
-        self._host = host
+    def __init__(self, ports: ProjectCatalogDiscoveryPorts) -> None:
+        self._ports = ports
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._host, name)
-
-    def _impl_discover_vcc_projects(self) -> list[str]:
+    def discover_vcc_projects(self) -> list[str]:
         candidates = [
-            self._host.Path(self._host.os.environ.get("LOCALAPPDATA", "")) / "VRChatCreatorCompanion" / "settings.json",
-            self._host.Path(self._host.os.environ.get("LOCALAPPDATA", "")) / "VRChatCreatorCompanion" / "vrc-get-settings.json",
-            self._host.Path(self._host.os.environ.get("APPDATA", "")) / "VRChatCreatorCompanion" / "settings.json",
-            self._host.Path(self._host.os.environ.get("APPDATA", "")) / "VRChatCreatorCompanion" / "vrc-get-settings.json",
+            self._ports.local_appdata_path() / "VRChatCreatorCompanion" / "settings.json",
+            self._ports.local_appdata_path() / "VRChatCreatorCompanion" / "vrc-get-settings.json",
+            self._ports.appdata_path() / "VRChatCreatorCompanion" / "settings.json",
+            self._ports.appdata_path() / "VRChatCreatorCompanion" / "vrc-get-settings.json",
         ]
-        return self._host.discover_projects_from_settings_files(candidates)
+        return self.discover_projects_from_settings_files(candidates)
 
-    def _impl_discover_alcom_projects(self) -> list[str]:
+    def discover_alcom_projects(self) -> list[str]:
         candidates = [
-            self._host.Path(self._host.os.environ.get("LOCALAPPDATA", "")) / "VRChatCreatorCompanion" / "vrc-get-settings.json",
-            self._host.Path(self._host.os.environ.get("APPDATA", "")) / "VRChatCreatorCompanion" / "vrc-get-settings.json",
-            self._host.Path(self._host.os.environ.get("LOCALAPPDATA", "")) / "ALCOM" / "settings.json",
-            self._host.Path(self._host.os.environ.get("APPDATA", "")) / "ALCOM" / "settings.json",
-            self._host.Path(self._host.os.environ.get("LOCALAPPDATA", "")) / "Alcom" / "settings.json",
-            self._host.Path(self._host.os.environ.get("APPDATA", "")) / "Alcom" / "settings.json",
-            self._host.Path(self._host.os.environ.get("LOCALAPPDATA", "")) / "vrc-get" / "settings.json",
-            self._host.Path(self._host.os.environ.get("APPDATA", "")) / "vrc-get" / "settings.json",
+            self._ports.local_appdata_path() / "VRChatCreatorCompanion" / "vrc-get-settings.json",
+            self._ports.appdata_path() / "VRChatCreatorCompanion" / "vrc-get-settings.json",
+            self._ports.local_appdata_path() / "ALCOM" / "settings.json",
+            self._ports.appdata_path() / "ALCOM" / "settings.json",
+            self._ports.local_appdata_path() / "Alcom" / "settings.json",
+            self._ports.appdata_path() / "Alcom" / "settings.json",
+            self._ports.local_appdata_path() / "vrc-get" / "settings.json",
+            self._ports.appdata_path() / "vrc-get" / "settings.json",
         ]
-        return self._host.discover_projects_from_settings_files(candidates)
+        return self.discover_projects_from_settings_files(candidates)
 
-    def _impl_discover_projects_from_settings_files(self, candidates: list[Path]) -> list[str]:
+    def discover_projects_from_settings_files(self, candidates: list[Path]) -> list[str]:
         projects: list[str] = []
         for settings_path in candidates:
-            if not settings_path.exists():
+            if not self._ports.path_exists(settings_path):
                 continue
             raw_text = ""
             try:
-                raw_text = settings_path.read_text(encoding="utf-8-sig")
-                payload = self._host.json.loads(raw_text)
+                raw_text = self._ports.read_text(settings_path, "utf-8-sig", None)
+                payload = json.loads(raw_text)
             except Exception:  # noqa: BLE001
-                projects.extend(self._host.extract_windows_paths_from_text(raw_text or settings_path.read_text(errors="ignore")))
+                projects.extend(
+                    self.extract_windows_paths_from_text(
+                        raw_text or self._ports.read_text(settings_path, None, "ignore")
+                    )
+                )
                 continue
-            projects.extend(self._host.extract_project_paths_from_json(payload))
+            projects.extend(self.extract_project_paths_from_json(payload))
         return sorted(
             {
-                self._host.normalize_path_string(project)
+                self._ports.normalize_path_string(project)
                 for project in projects
-                if project and self._host.is_unity_project_path(self._host.Path(self._host.normalize_path_string(project)))
+                if project
+                and self._ports.is_unity_project_path(
+                    Path(self._ports.normalize_path_string(project))
+                )
             },
             key=str.casefold,
         )
 
-    def _impl_extract_project_paths_from_json(self, payload: Any) -> list[str]:
+    def extract_project_paths_from_json(self, payload: Any) -> list[str]:
         paths: list[str] = []
 
         def visit(value: Any, key_hint: str = "") -> None:
@@ -69,39 +90,42 @@ class ProjectCatalogDiscovery:
                         visit(item, lowered)
                     elif lowered in {"path", "projectpath", "project", "directorypath"}:
                         if isinstance(item, str) and item.strip():
-                            paths.append(self._host.normalize_path_string(item))
+                            paths.append(self._ports.normalize_path_string(item))
                     elif key_hint in {"userprojects", "projects", "recentprojects", "knownprojects"}:
                         visit(item, key_hint)
             elif isinstance(value, list):
                 for item in value:
                     visit(item, key_hint)
-            elif isinstance(value, str) and key_hint in {"userprojects", "projects", "recentprojects", "knownprojects"}:
-                paths.append(self._host.normalize_path_string(value))
+            elif isinstance(value, str) and key_hint in {
+                "userprojects",
+                "projects",
+                "recentprojects",
+                "knownprojects",
+            }:
+                paths.append(self._ports.normalize_path_string(value))
 
         visit(payload)
         return paths
 
-    def _impl_extract_windows_paths_from_text(self, value: str) -> list[str]:
-        import re
-
+    def extract_windows_paths_from_text(self, value: str) -> list[str]:
         paths: list[str] = []
         for match in re.finditer(r"[A-Za-z]:\\\\[^\"\\r\\n,]+(?:\\\\[^\"\\r\\n,]+)*", value):
             candidate = match.group(0).replace("\\\\", "\\").strip()
             if "\\unity" in candidate.casefold() or "\\projects" in candidate.casefold():
-                paths.append(self._host.normalize_path_string(candidate))
+                paths.append(self._ports.normalize_path_string(candidate))
         return paths
 
-    def _impl_discover_unity_hub_projects(self) -> list[dict[str, str]]:
+    def discover_unity_hub_projects(self) -> list[dict[str, str]]:
         projects: list[dict[str, str]] = []
         seen: set[str] = set()
         for hub_projects in [
-            self._host.Path(self._host.os.environ.get("APPDATA", "")) / "UnityHub" / "projects-v1.json",
-            self._host.Path(self._host.os.environ.get("LOCALAPPDATA", "")) / "UnityHub" / "projects-v1.json",
+            self._ports.appdata_path() / "UnityHub" / "projects-v1.json",
+            self._ports.local_appdata_path() / "UnityHub" / "projects-v1.json",
         ]:
-            if not hub_projects.exists():
+            if not self._ports.path_exists(hub_projects):
                 continue
             try:
-                payload = self._host.json.loads(hub_projects.read_text(encoding="utf-8-sig"))
+                payload = json.loads(self._ports.read_text(hub_projects, "utf-8-sig", None))
             except Exception:  # noqa: BLE001
                 continue
             data = payload.get("data") if isinstance(payload, dict) else {}
@@ -110,8 +134,8 @@ class ProjectCatalogDiscovery:
             for key, value in data.items():
                 if not isinstance(value, dict):
                     continue
-                path = self._host.normalize_path_string(str(value.get("path") or key or "").strip())
-                if not path or not self._host.is_unity_project_path(self._host.Path(path)):
+                path = self._ports.normalize_path_string(str(value.get("path") or key or "").strip())
+                if not path or not self._ports.is_unity_project_path(Path(path)):
                     continue
                 key_text = path.casefold()
                 if key_text in seen:
@@ -119,19 +143,19 @@ class ProjectCatalogDiscovery:
                 seen.add(key_text)
                 projects.append(
                     {
-                        "name": str(value.get("title") or value.get("name") or self._host.Path(path).name),
+                        "name": str(value.get("title") or value.get("name") or Path(path).name),
                         "path": path,
                         "editorVersion": str(value.get("version") or value.get("unityVersion") or "Unknown"),
                     }
                 )
 
-        for project_root in self._host.discover_unity_hub_project_roots():
-            if not project_root.exists():
+        for project_root in self.discover_unity_hub_project_roots():
+            if not self._ports.path_exists(project_root):
                 continue
-            for child in sorted(project_root.iterdir(), key=lambda item: item.name.casefold()):
-                if not child.is_dir() or not self._host.is_unity_project_path(child):
+            for child in sorted(self._ports.list_children(project_root), key=lambda item: item.name.casefold()):
+                if not self._ports.path_is_dir(child) or not self._ports.is_unity_project_path(child):
                     continue
-                path = self._host.normalize_path_string(str(child))
+                path = self._ports.normalize_path_string(str(child))
                 key_text = path.casefold()
                 if key_text in seen:
                     continue
@@ -140,24 +164,26 @@ class ProjectCatalogDiscovery:
                     {
                         "name": child.name,
                         "path": path,
-                        "editorVersion": self._host.parse_editor_version(child / "ProjectSettings" / "ProjectVersion.txt"),
+                        "editorVersion": self._ports.parse_editor_version(
+                            child / "ProjectSettings" / "ProjectVersion.txt"
+                        ),
                     }
                 )
         return projects
 
-    def _impl_discover_unity_hub_project_roots(self) -> list[Path]:
+    def discover_unity_hub_project_roots(self) -> list[Path]:
         roots: list[Path] = []
         for project_dir in [
-            self._host.Path(self._host.os.environ.get("APPDATA", "")) / "UnityHub" / "projectDir.json",
-            self._host.Path(self._host.os.environ.get("LOCALAPPDATA", "")) / "UnityHub" / "projectDir.json",
+            self._ports.appdata_path() / "UnityHub" / "projectDir.json",
+            self._ports.local_appdata_path() / "UnityHub" / "projectDir.json",
         ]:
-            if not project_dir.exists():
+            if not self._ports.path_exists(project_dir):
                 continue
             try:
-                payload = self._host.json.loads(project_dir.read_text(encoding="utf-8-sig"))
+                payload = json.loads(self._ports.read_text(project_dir, "utf-8-sig", None))
             except Exception:  # noqa: BLE001
                 continue
             directory = payload.get("directoryPath") if isinstance(payload, dict) else ""
             if isinstance(directory, str) and directory.strip():
-                roots.append(self._host.Path(self._host.normalize_path_string(directory)))
+                roots.append(Path(self._ports.normalize_path_string(directory)))
         return roots

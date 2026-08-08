@@ -144,26 +144,10 @@
       "hostProxy": {"source": "path_to_skill_controller.py", "class": "PathToSkillDashboardController"}
     },
     {
-      "id": "dashboard.project-catalog-host-proxy",
+      "id": "dashboard.project-catalog-typed-root-owner",
       "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "_PROJECT_CATALOG_DISCOVERY"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "discover_vcc_projects",
-            "discover_alcom_projects",
-            "discover_projects_from_settings_files",
-            "extract_project_paths_from_json",
-            "extract_windows_paths_from_text",
-            "discover_unity_hub_projects",
-            "discover_unity_hub_project_roots"
-          ]
-        }
-      ],
-      "hostProxy": {"source": "project_catalog_discovery.py", "class": "ProjectCatalogDiscovery"}
+        {"source": "dashboard_server.py", "scope": "module", "name": "PROJECT_CATALOG_DISCOVERY"}
+      ]
     },
     {
       "id": "dashboard.provider-typed-root-owners",

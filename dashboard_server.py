@@ -392,7 +392,7 @@ from skill_package_controller import SkillPackageController
 from skill_package_governance import SkillPackageGovernanceService
 from skill_package_projection import SkillPackageProjectionService
 from path_to_skill_controller import PathToSkillDashboardController
-from project_catalog_discovery import ProjectCatalogDiscovery
+from project_catalog_discovery import ProjectCatalogDiscovery, ProjectCatalogDiscoveryPorts
 from project_snapshot_selection_service import ProjectSnapshotSelectionPorts, ProjectSnapshotSelectionService
 from provider_model_catalog_service import (
     ProviderModelCatalogPolicyPorts,
@@ -2023,7 +2023,22 @@ _SKILL_PACKAGE_CONTROLLER = SkillPackageController(sys.modules[__name__])
 _SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(sys.modules[__name__])
 _SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(sys.modules[__name__])
 _PATH_TO_SKILL_CONTROLLER = PathToSkillDashboardController(sys.modules[__name__])
-_PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(sys.modules[__name__])
+PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(
+    ProjectCatalogDiscoveryPorts(
+        appdata_path=lambda: Path(os.environ.get("APPDATA", "")),
+        local_appdata_path=lambda: Path(os.environ.get("LOCALAPPDATA", "")),
+        path_exists=lambda path: path.exists(),
+        read_text=lambda path, encoding, errors: path.read_text(
+            encoding=encoding,
+            errors=errors,
+        ),
+        list_children=lambda path: tuple(path.iterdir()),
+        path_is_dir=lambda path: path.is_dir(),
+        normalize_path_string=lambda value: normalize_path_string(value),
+        is_unity_project_path=lambda path: is_unity_project_path(path),
+        parse_editor_version=lambda path: parse_editor_version(path),
+    )
+)
 PROVIDER_MODEL_CATALOG = ProviderModelCatalogService(
     ProviderModelCatalogPolicyPorts(
         validate_provider_api_key=validate_provider_api_key,
@@ -15756,13 +15771,13 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
             upsert_project(name=child.name, path=str(child), editor_version=parse_editor_version(version_file), source="configured-root")
 
     if include_external:
-        for project_path in discover_vcc_projects():
+        for project_path in PROJECT_CATALOG_DISCOVERY.discover_vcc_projects():
             upsert_project(name=Path(project_path).name, path=project_path, source="vcc")
 
-        for project_path in discover_alcom_projects():
+        for project_path in PROJECT_CATALOG_DISCOVERY.discover_alcom_projects():
             upsert_project(name=Path(project_path).name, path=project_path, source="alcom")
 
-        for project in discover_unity_hub_projects():
+        for project in PROJECT_CATALOG_DISCOVERY.discover_unity_hub_projects():
             upsert_project(
                 name=project.get("name") or Path(project.get("path") or "").name,
                 path=project.get("path") or "",
@@ -15807,34 +15822,6 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         projects_by_key.values(),
         key=lambda item: (not item.get("activeMcp"), str(item.get("name") or "").casefold()),
     )
-
-
-def discover_vcc_projects() -> list[str]:
-    return _PROJECT_CATALOG_DISCOVERY._impl_discover_vcc_projects()
-
-
-def discover_alcom_projects() -> list[str]:
-    return _PROJECT_CATALOG_DISCOVERY._impl_discover_alcom_projects()
-
-
-def discover_projects_from_settings_files(candidates: list[Path]) -> list[str]:
-    return _PROJECT_CATALOG_DISCOVERY._impl_discover_projects_from_settings_files(candidates)
-
-
-def extract_project_paths_from_json(payload: Any) -> list[str]:
-    return _PROJECT_CATALOG_DISCOVERY._impl_extract_project_paths_from_json(payload)
-
-
-def extract_windows_paths_from_text(value: str) -> list[str]:
-    return _PROJECT_CATALOG_DISCOVERY._impl_extract_windows_paths_from_text(value)
-
-
-def discover_unity_hub_projects() -> list[dict[str, str]]:
-    return _PROJECT_CATALOG_DISCOVERY._impl_discover_unity_hub_projects()
-
-
-def discover_unity_hub_project_roots() -> list[Path]:
-    return _PROJECT_CATALOG_DISCOVERY._impl_discover_unity_hub_project_roots()
 
 
 def is_unity_project_path(path: Path) -> bool:
