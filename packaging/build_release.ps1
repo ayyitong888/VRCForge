@@ -647,6 +647,10 @@ try {
 
     $dotnetExe = Resolve-DotNetExe
     $pythonExe = Resolve-PythonExe
+    & $pythonExe .\packaging\check_one_five_seams.py --repo-root $repoRoot --version $Version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Final 1.5 owner/facade seam gate failed. Retire every declared migration seam before packaging 1.5.0."
+    }
     & $pythonExe .\packaging\scan_release_sensitive_strings.py --repo-root $repoRoot
     if ($LASTEXITCODE -ne 0) {
         throw "Release input sensitive-string scan failed."

@@ -34,6 +34,21 @@ function Enter-ReleaseOperationMutex {
     }
 }
 
+function Resolve-PythonExe {
+    $command = Get-Command python.exe -ErrorAction SilentlyContinue
+    if (-not $command) {
+        $command = Get-Command python -ErrorAction SilentlyContinue
+    }
+    if (-not $command) {
+        $command = Get-Command py.exe -ErrorAction SilentlyContinue
+    }
+    if ($command) {
+        return $command.Source
+    }
+
+    throw "Python is required to verify the final 1.5 owner/facade seam gate."
+}
+
 function Get-RequiredProperty {
     param(
         [object]$InputObject,
@@ -235,6 +250,12 @@ try {
 
     if ([string]::IsNullOrWhiteSpace($Version)) {
         $Version = (Get-Content -LiteralPath "VERSION" -Raw).Trim()
+    }
+
+    $pythonExe = Resolve-PythonExe
+    & $pythonExe .\packaging\check_one_five_seams.py --repo-root $repoRoot --version $Version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Final 1.5 owner/facade seam gate failed. Retire every declared migration seam before publishing 1.5.0."
     }
 
     git fetch origin --tags --prune | Out-Null

@@ -1,0 +1,33 @@
+{
+  "schema": "vrcforge.one_five_owner_facade_manifest.v1",
+  "enforceFromVersion": "1.5.0",
+  "publicApiAllowlist": {"contracts": []},
+  "seamGroups": [
+    {
+      "id": "retired.dashboard-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_OWNER"}
+      ],
+      "facades": [
+        {"source": "dashboard_server.py", "scope": "module", "methods": ["old_facade"]}
+      ],
+      "hostProxy": {"source": "legacy_owner.py", "class": "LegacyOwner"},
+      "markers": [
+        {"source": "dashboard_server.py", "text": "# STOPGAP(1.5): fixture migration owner."}
+      ]
+    },
+    {
+      "id": "retired.gateway-facade",
+      "rootSymbols": [
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_legacy"}
+      ],
+      "facades": [
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "methods": ["gateway_facade"]}
+      ]
+    },
+    {
+      "id": "retired.composition-class",
+      "classSymbol": {"source": "dashboard_composition.py", "class": "LegacyComposition"}
+    }
+  ]
+}

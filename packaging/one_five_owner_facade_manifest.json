@@ -1,0 +1,607 @@
+{
+  "schema": "vrcforge.one_five_owner_facade_manifest.v1",
+  "enforceFromVersion": "1.5.0",
+  "policy": {
+    "finalDeclaredMigrationHits": 0,
+    "finalUndeclaredMigrationSeams": 0,
+    "rootOrGatewayDelegateIsPublicApi": false,
+    "typedExternalIoPortsRemainAllowed": true
+  },
+  "publicApiAllowlist": {
+    "rule": "Preserve observable contracts, not Python root symbols kept only for migration or monkeypatching.",
+    "contracts": [
+      {
+        "id": "fastapi-route-request-response-openapi",
+        "identity": "HTTP method, route path, request and response schema, status semantics, and OpenAPI",
+        "guardPaths": [
+          "tests/fixtures/dashboard_composition_contract_v1.json",
+          "tests/test_dashboard_composition.py"
+        ]
+      },
+      {
+        "id": "tauri-command-surface",
+        "identity": "registered Tauri command names and their serialized request and response contracts",
+        "guardPaths": [
+          "src-tauri/src/main.rs",
+          "tests/test_golden_path_preflight.py"
+        ]
+      },
+      {
+        "id": "cli-mcp-tool-surface",
+        "identity": "CLI and MCP envelope schemas, tool ids, arguments, and exposure policy",
+        "guardPaths": [
+          "tests/test_agent_mcp_2026.py",
+          "tests/test_mcp_trigger_selection.py"
+        ]
+      },
+      {
+        "id": "eventbus-surface",
+        "identity": "EventBus event types and envelope schema",
+        "guardPaths": [
+          "tests/fixtures/dashboard_composition_contract_v1.json",
+          "tests/test_dashboard_composition.py"
+        ]
+      },
+      {
+        "id": "persisted-disk-schemas",
+        "identity": "durable schema ids, field meanings, scope, atomicity, and restart behavior",
+        "guardPaths": [
+          "tests/test_session_store_integrity.py",
+          "tests/test_project_selection_persistence.py"
+        ]
+      },
+      {
+        "id": "genuine-imported-models",
+        "identity": "dataclass and model imports used by modules outside the migration host",
+        "guardPaths": [
+          "tests/test_model_provider_adapters.py"
+        ]
+      }
+    ]
+  },
+  "seamGroups": [
+    {
+      "id": "dashboard.skill-package-projection-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_SKILL_PACKAGE_PROJECTION"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "_skill_projection_path_is_link_like",
+            "_resolve_skill_projection_source",
+            "_copy_projected_skill_file",
+            "_write_projected_skill_state",
+            "_capture_projected_skill_state",
+            "_restore_projected_skill_state",
+            "_set_projected_skills_enabled",
+            "_project_installed_skill",
+            "_projected_skill_name",
+            "_set_projected_skill_enabled",
+            "_delete_projected_skill_transaction"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "skill_package_projection.py", "class": "SkillPackageProjectionService"}
+    },
+    {
+      "id": "dashboard.skill-package-controller-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_SKILL_PACKAGE_CONTROLLER"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "import_skill_package_sync",
+            "set_skill_package_enabled_sync",
+            "uninstall_skill_package_sync"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "skill_package_controller.py", "class": "SkillPackageController"}
+    },
+    {
+      "id": "dashboard.skill-package-governance-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_SKILL_PACKAGE_GOVERNANCE"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "_disable_projected_skills_for_packages",
+            "set_skill_package_safe_mode_sync",
+            "trust_skill_package_signer_sync",
+            "revoke_skill_package_signer_sync",
+            "block_skill_package_sync"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "skill_package_governance.py", "class": "SkillPackageGovernanceService"}
+    },
+    {
+      "id": "dashboard.path-to-skill-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_PATH_TO_SKILL_CONTROLLER"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "_path_to_skill_kwargs",
+            "_path_to_skill_file_list",
+            "_path_to_skill_vsk_filename",
+            "capture_path_to_skill_sync"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "path_to_skill_controller.py", "class": "PathToSkillDashboardController"}
+    },
+    {
+      "id": "dashboard.project-catalog-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_PROJECT_CATALOG_DISCOVERY"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "discover_vcc_projects",
+            "discover_alcom_projects",
+            "discover_projects_from_settings_files",
+            "extract_project_paths_from_json",
+            "extract_windows_paths_from_text",
+            "discover_unity_hub_projects",
+            "discover_unity_hub_project_roots"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "project_catalog_discovery.py", "class": "ProjectCatalogDiscovery"}
+    },
+    {
+      "id": "dashboard.provider-configuration-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_PROVIDER_CONFIGURATION"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "serialize_app_api_config",
+            "load_initial_dashboard_api_config",
+            "load_initial_dashboard_vision_config",
+            "normalize_vision_config_request",
+            "load_config_document",
+            "normalize_api_config_request",
+            "save_dashboard_config_document",
+            "save_dashboard_api_config",
+            "save_dashboard_vision_config",
+            "serialize_api_config",
+            "serialize_vision_config",
+            "serialize_app_vision_config",
+            "build_effective_model_summary",
+            "mask_secret"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "provider_configuration_service.py", "class": "ProviderConfigurationService"}
+    },
+    {
+      "id": "dashboard.provider-model-catalog-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_PROVIDER_MODEL_CATALOG"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "provider_config_descriptor",
+            "enrich_provider_model_item",
+            "fetch_provider_models",
+            "fetch_openai_compatible_models",
+            "fetch_google_ai_studio_models",
+            "fetch_vertex_ai_models",
+            "fetch_anthropic_models",
+            "normalize_provider_model_list",
+            "read_model_attr",
+            "coerce_positive_int",
+            "build_provider_model_info"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "provider_model_catalog_service.py", "class": "ProviderModelCatalogService"}
+    },
+    {
+      "id": "dashboard.provider-test-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_PROVIDER_TEST_INTEGRATION"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "run_provider_test_sync",
+            "_run_provider_text_probe",
+            "_provider_probe_settings"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "provider_test_integration_service.py", "class": "ProviderTestIntegrationService"}
+    },
+    {
+      "id": "dashboard.provider-vision-host-proxy",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_PROVIDER_VISION_INTEGRATION"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "_agent_gateway_vision_analyze",
+            "provider_model_supports_vision",
+            "split_image_data_url",
+            "build_vision_analysis_prompt",
+            "_extract_openai_usage",
+            "_run_provider_vision_analysis"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "provider_vision_integration_service.py", "class": "ProviderVisionIntegrationService"}
+    },
+    {
+      "id": "dashboard.project-snapshot-root-facades",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_PROJECT_SNAPSHOT_SELECTION"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "project_snapshot_list",
+            "project_snapshot_cache_document",
+            "load_project_snapshot_cache",
+            "project_snapshot_identity",
+            "project_snapshot_label",
+            "project_snapshot_changes",
+            "annotate_project_snapshot",
+            "empty_project_snapshot_payload",
+            "_store_project_snapshot_cache",
+            "refresh_project_snapshot_cache_sync",
+            "schedule_project_snapshot_refresh",
+            "bootstrap_project_snapshot_payload",
+            "cached_project_snapshot_payload",
+            "project_snapshot_payload",
+            "canonical_selected_project_path",
+            "load_persisted_selected_project_path",
+            "persist_selected_project_path"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dashboard.unity-status-root-facades",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_UNITY_STATUS"}
+      ],
+      "facades": [
+        {
+          "source": "dashboard_server.py",
+          "scope": "module",
+          "methods": [
+            "build_unity_status_snapshot",
+            "build_vrcforge_mcp_core_unavailable_status",
+            "build_vrcforge_mcp_core_status"
+          ]
+        }
+      ],
+      "markers": [
+        {"source": "dashboard_server.py", "text": "# STOPGAP: Migration-only owner for the three root compatibility facades below."}
+      ]
+    },
+    {
+      "id": "dashboard.doctor-readiness-root-facade",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_DOCTOR_READINESS_REPORT"}
+      ],
+      "facades": [
+        {"source": "dashboard_server.py", "scope": "module", "methods": ["build_app_doctor_report"]}
+      ],
+      "markers": [
+        {"source": "dashboard_server.py", "text": "# STOPGAP: Migration-only owner for the root Doctor report facade below."}
+      ]
+    },
+    {
+      "id": "dashboard.know-yourself-root-facade",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_KNOW_YOURSELF_READINESS"}
+      ],
+      "facades": [
+        {"source": "dashboard_server.py", "scope": "module", "methods": ["know_yourself_sync"]}
+      ],
+      "markers": [
+        {"source": "dashboard_server.py", "text": "# STOPGAP: Migration-only owner for the root Know Yourself compatibility facade below."}
+      ]
+    },
+    {
+      "id": "dashboard.sub-agent-collaboration-root-owner",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "_SUB_AGENT_COLLABORATION"}
+      ],
+      "markers": [
+        {"source": "dashboard_server.py", "text": "# STOPGAP: this composition singleton is removed with all remaining 1.5 seams."}
+      ]
+    },
+    {
+      "id": "dashboard.question-root-owner",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "AGENT_QUESTIONS"}
+      ],
+      "markers": [
+        {"source": "dashboard_server.py", "text": "# STOPGAP(1.5): this app-lifetime owner shares the established durable state"}
+      ]
+    },
+    {
+      "id": "dashboard.memory-review-root-graph",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "MEMORY_REVIEW"}
+      ],
+      "markers": [
+        {"source": "dashboard_server.py", "text": "# STOPGAP: keep one app-lifetime Memory Review graph while the remaining 1.5"}
+      ]
+    },
+    {
+      "id": "dashboard.late-bound-composition-context",
+      "rootSymbols": [
+        {"source": "dashboard_server.py", "scope": "module", "name": "DASHBOARD_COMPOSITION_CONTEXT"}
+      ],
+      "classSymbol": {"source": "dashboard_composition.py", "class": "DashboardCompositionContext"},
+      "markers": [
+        {"source": "dashboard_server.py", "text": "# 1.5 strangler seam: keep the existing facade globals authoritative until"}
+      ]
+    },
+    {
+      "id": "gateway.approval-transaction-host-proxy",
+      "rootSymbols": [
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_approval_transactions"}
+      ],
+      "facades": [
+        {
+          "source": "agent_gateway.py",
+          "scope": "class",
+          "class": "AgentGateway",
+          "methods": [
+            "_observe_apply_lifecycle",
+            "register_write_handler",
+            "authenticate_approval",
+            "auto_approval_enabled",
+            "permission_audit_context",
+            "_auto_approval_block_reason",
+            "permission_state",
+            "update_permission_state",
+            "_execute_write_request",
+            "create_apply_request",
+            "_auto_execute_approval",
+            "_matching_project_category_allow_rule",
+            "_scoped_rule_execute_approval",
+            "apply_approved",
+            "list_approvals",
+            "approve",
+            "approve_with_project_category_rule",
+            "reject",
+            "recent_audit_logs",
+            "_call_write_handler",
+            "_create_pre_write_checkpoint",
+            "_create_pre_write_checkpoint_locked",
+            "has_in_flight_project_write",
+            "try_acquire_background_project_read",
+            "release_background_project_read",
+            "_apply_recovery_blocks_writes",
+            "_start_apply_recovery",
+            "_finish_apply_recovery",
+            "_resolve_apply_recoveries_for_checkpoint",
+            "visible_write_targets",
+            "_write_handler_rollback_policy",
+            "_inject_user_constraints_for_apply",
+            "_write_auto_manual_approval_reason",
+            "_new_approval",
+            "_approval_project_root",
+            "_ensure_approval_scope",
+            "_set_approval_status",
+            "request_approval_revision",
+            "_refresh_approval_expiry",
+            "_load_approval_from_audit",
+            "_reconcile_unrecoverable_linked_approval"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "agent_approval_transactions.py", "class": "AgentApprovalTransactionService"}
+    },
+    {
+      "id": "gateway.checkpoint-recovery-host-proxy",
+      "rootSymbols": [
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_checkpoint_recovery"}
+      ],
+      "facades": [
+        {
+          "source": "agent_gateway.py",
+          "scope": "class",
+          "class": "AgentGateway",
+          "methods": [
+            "list_checkpoints",
+            "inspect_checkpoint_storage",
+            "_inspect_checkpoint_storage_locked",
+            "repair_checkpoint_storage",
+            "_list_checkpoints_locked",
+            "checkpoint_archive_usage",
+            "_checkpoint_archive_usage_locked",
+            "_checkpoint_archive_labels",
+            "delete_checkpoint_archives",
+            "_delete_checkpoint_archives_locked",
+            "relocate_checkpoint_archives",
+            "_relocate_checkpoint_archives_locked",
+            "_rewrite_checkpoint_archive_paths",
+            "_remove_old_relocate_parents",
+            "prune_checkpoint_archives",
+            "_prune_checkpoint_archives_locked",
+            "list_interrupted_apply_recoveries",
+            "preview_interrupted_apply_recovery",
+            "export_interrupted_apply_incident_bundle",
+            "resolve_interrupted_apply_recovery",
+            "list_adjustment_checkpoints",
+            "get_adjustment_checkpoint",
+            "create_adjustment_checkpoint",
+            "update_adjustment_checkpoint",
+            "delete_adjustment_checkpoint",
+            "select_adjustment_checkpoint",
+            "overwrite_adjustment_checkpoint",
+            "preview_restore_adjustment_checkpoint",
+            "get_selected_adjustment_checkpoints",
+            "_normalize_adjustment_selection_slot",
+            "preview_restore_checkpoint",
+            "_preview_restore_checkpoint_locked",
+            "restore_checkpoint",
+            "_restore_checkpoint_locked",
+            "_create_project_chat_checkpoint",
+            "_create_project_chat_checkpoint_locked",
+            "_create_archive_checkpoint",
+            "_create_local_state_checkpoint",
+            "_checkpoint_project_key",
+            "_resolve_checkpoint_archive_path",
+            "_normalize_project_archive_member",
+            "_project_chat_checkpoint_source",
+            "_read_project_chat_checkpoint_bytes",
+            "_preview_project_chat_checkpoint",
+            "_preview_project_chat_checkpoint_locked",
+            "_restore_project_chat_checkpoint",
+            "_restore_project_chat_checkpoint_locked",
+            "_preview_archive_checkpoint",
+            "_preview_local_state_checkpoint",
+            "_restore_archive_checkpoint",
+            "_restore_local_state_checkpoint",
+            "_build_checkpoint_rollback_coverage_audit",
+            "_build_local_state_rollback_coverage_audit",
+            "_build_project_chat_rollback_coverage_audit",
+            "_checkpoint_framework_package_snapshot",
+            "_read_package_dependency_file",
+            "_stored_checkpoint_framework_package_snapshot",
+            "_local_state_checkpoint_roots",
+            "_local_state_archive_contents",
+            "_validate_local_state_archive_member",
+            "_cleanup_checkpoint_restore_unity_caches",
+            "_checkpoint_touches_packages",
+            "_checkpoint_touches_top_level",
+            "_resolve_checkpoint_project_root",
+            "_checkpoint_available",
+            "_append_checkpoint",
+            "_checkpoint_archive_files",
+            "_protected_checkpoint_archive_ids",
+            "_remove_empty_checkpoint_archive_parents",
+            "_read_checkpoint_entries",
+            "_load_checkpoint",
+            "_read_apply_recovery_entries",
+            "_append_apply_recovery_entry",
+            "_coalesced_apply_recoveries",
+            "_active_apply_recoveries",
+            "_select_apply_recovery",
+            "_classify_apply_recovery_incident",
+            "_read_adjustment_checkpoint_entries",
+            "_write_adjustment_checkpoint_entries",
+            "_load_adjustment_checkpoint",
+            "_normalize_adjustment_checkpoint_kind",
+            "_resolve_or_create_adjustment_base_checkpoint",
+            "_build_adjustment_checkpoint_entry",
+            "_apply_adjustment_checkpoint_metadata",
+            "_normalize_tags",
+            "_default_adjustment_checkpoint_label",
+            "_maybe_record_adjustment_checkpoint"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "agent_checkpoint_recovery.py", "class": "AgentCheckpointRecoveryService"}
+    },
+    {
+      "id": "gateway.skill-registry-host-proxy",
+      "rootSymbols": [
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_skill_registry"}
+      ],
+      "facades": [
+        {
+          "source": "agent_gateway.py",
+          "scope": "class",
+          "class": "AgentGateway",
+          "methods": [
+            "build_skill_registry",
+            "check_skill_registry",
+            "create_user_skill",
+            "update_user_skill",
+            "delete_user_skill",
+            "_builtin_skill_definitions",
+            "_skill_from_builtin_group",
+            "_skill_from_tool",
+            "_skill_from_write_handler",
+            "_skill_dependency_visible",
+            "user_skills_dir",
+            "_load_user_skills",
+            "_load_projected_skill_state",
+            "_find_user_skill",
+            "_save_user_skills",
+            "_save_user_skill",
+            "_normalize_user_skill",
+            "_ensure_user_skill_can_use_id",
+            "_decorate_skill_validation",
+            "_validate_skill",
+            "_load_runtime_skill_support_files"
+          ]
+        }
+      ],
+      "hostProxy": {"source": "agent_skill_registry.py", "class": "AgentSkillRegistryService"}
+    },
+    {
+      "id": "gateway.desktop-computer-use-stopgap-facade",
+      "facades": [
+        {
+          "source": "agent_gateway.py",
+          "scope": "class",
+          "class": "AgentGateway",
+          "methods": [
+            "_desktop_gateway_call",
+            "computer_use_turn_active",
+            "computer_use_model_invocable",
+            "require_computer_use_enabled",
+            "issue_computer_use_turn_grant",
+            "consume_computer_use_turn_grant",
+            "request_turn_authorized_desktop_action_and_wait",
+            "request_desktop_action",
+            "request_desktop_action_and_wait",
+            "list_desktop_actions",
+            "list_active_desktop_actions",
+            "get_desktop_action_result",
+            "register_desktop_bridge",
+            "heartbeat_desktop_bridge",
+            "unregister_desktop_bridge",
+            "desktop_bridge_status",
+            "claim_desktop_action",
+            "request_desktop_action_cancel",
+            "desktop_action_cancel_requested",
+            "complete_desktop_action"
+          ]
+        }
+      ],
+      "markers": [
+        {"source": "agent_gateway.py", "text": "# STOPGAP(1.5): preserve the accepted Gateway call surface while the"}
+      ]
+    }
+  ]
+}
