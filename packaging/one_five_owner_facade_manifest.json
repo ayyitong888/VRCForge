@@ -339,7 +339,7 @@
           "methods": [
             "inspect_outfit_package",
             "build_outfit_import_plan",
-            "apply_clothing_fx_sync",
+            "apply_clothing_fx_approved_sync",
             "preview_setup_outfit_sync",
             "setup_outfit_sync",
             "preview_add_wardrobe_outfit_sync",

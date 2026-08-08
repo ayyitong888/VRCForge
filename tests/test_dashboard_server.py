@@ -13976,6 +13976,102 @@ namespace VRCForge.Editor
             )
         self.assertEqual(response.status_code, 400)
 
+    def test_apply_clothing_fx_approved_handler_keeps_live_shape_and_registry_identity(
+        self,
+    ) -> None:
+        settings = SimpleNamespace()
+        items = [{"displayName": "Jacket", "parameterName": "Cloth_Jacket"}]
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=settings) as load_settings,
+            patch(
+                "dashboard_server.build_clothes_fx_apply_preview",
+                return_value="frozen-preview",
+            ) as build_preview,
+            patch(
+                "dashboard_server.apply_clothing_fx_direct",
+                return_value={"createdCount": 1},
+            ) as apply_live,
+            patch("dashboard_server.emit_log"),
+        ):
+            payload = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx(
+                {
+                    "avatarPath": "MyAvatar",
+                    "items": items,
+                    "dryRun": False,
+                }
+            )
+
+        self.assertEqual(
+            payload,
+            {
+                "ok": True,
+                "avatarPath": "MyAvatar",
+                "dryRun": False,
+                "applyPayload": "frozen-preview",
+                "result": {"createdCount": 1},
+                "itemCount": 1,
+            },
+        )
+        load_settings.assert_called_once()
+        build_preview.assert_called_once_with("MyAvatar", items)
+        apply_live.assert_called_once_with(settings, "MyAvatar", items)
+        self.assertIs(
+            dashboard_server.AGENT_GATEWAY._write_handlers[
+                "vrcforge_apply_clothing_fx"
+            ].handler,
+            dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx,
+        )
+
+    def test_registered_clothing_fx_handler_dry_run_never_calls_unity(self) -> None:
+        settings = SimpleNamespace()
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[
+            "vrcforge_apply_clothing_fx"
+        ].handler
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=settings),
+            patch(
+                "dashboard_server.apply_clothing_fx_direct",
+                side_effect=AssertionError("dry-run reached the Unity write port"),
+            ) as apply_live,
+        ):
+            payload = handler(
+                {
+                    "avatarPath": "MyAvatar",
+                    "items": [{"displayName": "Jacket"}],
+                    "dryRun": True,
+                }
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["dryRun"])
+        self.assertIn("vrc_apply_clothing_fx", payload["applyPayload"])
+        apply_live.assert_not_called()
+
+    def test_registered_clothing_fx_handler_prefers_snake_dry_run_on_conflict(
+        self,
+    ) -> None:
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[
+            "vrcforge_apply_clothing_fx"
+        ].handler
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
+            patch(
+                "dashboard_server.apply_clothing_fx_direct",
+                side_effect=AssertionError("snake dry_run=true did not win"),
+            ) as apply_live,
+        ):
+            payload = handler(
+                {
+                    "avatarPath": "MyAvatar",
+                    "items": [{"displayName": "Jacket"}],
+                    "dry_run": True,
+                    "dryRun": False,
+                }
+            )
+
+        self.assertTrue(payload["dryRun"])
+        apply_live.assert_not_called()
+
     # ------------------------------------------------------------------
     # /api/parameters/apply-optimization (dry_run=True)
     # ------------------------------------------------------------------

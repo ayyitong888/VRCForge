@@ -205,9 +205,13 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         "scan_avatar_items_sync",
         "scan_avatar_controls_sync",
         "scan_wardrobe_sync",
+        "apply_clothing_fx_sync",
     }.isdisjoint(
         groups["dashboard.wardrobe-outfit-root-owners"]["facades"][0]["methods"]
     )
+    assert "apply_clothing_fx_approved_sync" in groups[
+        "dashboard.wardrobe-outfit-root-owners"
+    ]["facades"][0]["methods"]
     assert len(groups["dashboard.project-snapshot-root-facades"]["facades"][0]["methods"]) == 17
     assert len(groups["dashboard.unity-status-root-facades"]["facades"][0]["methods"]) == 3
     assert len(groups["gateway.approval-transaction-host-proxy"]["facades"][0]["methods"]) == 41

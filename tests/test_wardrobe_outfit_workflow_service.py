@@ -40,6 +40,10 @@ def _clothing_reads(calls: list[tuple[Any, ...]]) -> ClothingFxReadService:
         calls.append(("blueprint", actual_settings, avatar_path))
         return {"items": [{"displayName": "Jacket"}], "itemCount": 1}
 
+    def build_apply_preview(avatar_path: str | None, items: list[dict[str, Any]]) -> str:
+        calls.append(("apply-preview", avatar_path, items))
+        return '{"tool":"vrc_apply_clothing_fx"}'
+
     def ensure_list(payload: Any, scope: str) -> list[Any]:
         calls.append(("ensure-list", payload, scope))
         if not isinstance(payload, list):
@@ -60,6 +64,7 @@ def _clothing_reads(calls: list[tuple[Any, ...]]) -> ClothingFxReadService:
             current_avatar_path=lambda: "Scene/CurrentAvatar",
             scan_controls=scan_controls,
             build_blueprint=build_blueprint,
+            build_apply_preview=build_apply_preview,
             ensure_list=ensure_list,
             log=log,
         )
@@ -226,6 +231,12 @@ def test_clothing_fx_read_owner_preserves_scan_and_blueprint_shapes_and_logs() -
     scan_request = SimpleNamespace(avatar_path="Scene/OverrideAvatar")
     scanned = service.scan_clothes(scan_request)
     generated = service.generate_clothing_fx(SimpleNamespace(avatar_path=None))
+    previewed = service.preview_apply_clothing_fx(
+        SimpleNamespace(
+            avatar_path=None,
+            items=[{"displayName": "Jacket"}],
+        )
+    )
 
     assert scanned == {
         "ok": True,
@@ -239,8 +250,25 @@ def test_clothing_fx_read_owner_preserves_scan_and_blueprint_shapes_and_logs() -
         "avatarPath": "Scene/CurrentAvatar",
         "fxBlueprint": {"items": [{"displayName": "Jacket"}], "itemCount": 1},
     }
+    assert previewed == {
+        "ok": True,
+        "avatarPath": "Scene/CurrentAvatar",
+        "dryRun": True,
+        "applyPayload": '{"tool":"vrc_apply_clothing_fx"}',
+        "itemCount": 1,
+    }
     assert any(call[:3] == ("log", "info", "fx") for call in calls)
     assert any(call[:3] == ("log", "success", "fx") for call in calls)
+    assert any(
+        call[:4]
+        == (
+            "log",
+            "info",
+            "fx",
+            "Clothing FX apply payload generated (dry-run).",
+        )
+        for call in calls
+    )
     assert any(call[0] == "scan" and call[2] == "Scene/OverrideAvatar" for call in calls)
     assert any(call[0] == "blueprint" and call[2] == "Scene/CurrentAvatar" for call in calls)
 
@@ -257,6 +285,7 @@ def test_clothing_fx_read_owner_logs_and_preserves_runtime_errors() -> None:
             current_avatar_path=lambda: "Scene/Avatar",
             scan_controls=fail_scan,
             build_blueprint=lambda _settings, _avatar: {},
+            build_apply_preview=lambda _avatar, _items: "{}",
             ensure_list=lambda payload, _scope: payload,
             log=lambda level, scope, message, data=None: calls.append(
                 (level, scope, message, data)
@@ -288,11 +317,20 @@ def test_dashboard_composes_clothing_fx_reads_without_legacy_facades() -> None:
 
     assert "scan_clothes_sync" not in bindings
     assert "generate_clothing_fx_sync" not in bindings
+    assert "apply_clothing_fx_sync" not in bindings
     assert "scan_avatar_items_sync" not in bindings
     assert "scan_avatar_controls_sync" not in bindings
     assert "scan_wardrobe_sync" not in bindings
     assert "scan_clothes=CLOTHING_FX_READ.scan_clothes" in source
     assert "generate_clothing_fx=CLOTHING_FX_READ.generate_clothing_fx" in source
+    assert (
+        "preview_apply_clothing_fx=CLOTHING_FX_READ.preview_apply_clothing_fx"
+        in source
+    )
+    assert source.count("apply_clothing_fx_approved_sync") == 2
+    assert (
+        "WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx" in source
+    )
     assert "scan_avatar_items=WARDROBE_ARTIFACT_READ.scan_avatar_items" in source
     assert "scan_avatar_controls=WARDROBE_ARTIFACT_READ.scan_avatar_controls" in source
     assert "scan_wardrobe=WARDROBE_ARTIFACT_READ.scan_wardrobe" in source
@@ -378,6 +416,7 @@ def test_approved_writes_are_a_separate_least_authority_binding() -> None:
         return call
 
     handlers = WardrobeOutfitApprovedWriteHandlers(
+        apply_clothing_fx=unary("apply-clothing-fx"),
         setup_outfit=unary("setup"),
         add_wardrobe_outfit=unary("add-wardrobe"),
         add_outfit_part=unary("add-part"),
@@ -392,6 +431,7 @@ def test_approved_writes_are_a_separate_least_authority_binding() -> None:
     payload = {"avatarPath": "Avatar"}
 
     assert handlers.setup_outfit(payload)["name"] == "setup"
+    assert handlers.apply_clothing_fx(payload)["name"] == "apply-clothing-fx"
     assert handlers.add_outfit(payload)["name"] == "add-outfit"
     assert handlers.import_package(payload)["name"] == "import"
     assert handlers.prepare_add_outfit(payload, {"preview": 1})[0]["preparedBy"] == "prepare-add-outfit"

@@ -28,6 +28,7 @@ class ClothingFxReadPorts:
     current_avatar_path: Callable[[], str]
     scan_controls: Callable[[Any, str | None], dict[str, Any]]
     build_blueprint: Callable[[Any, str | None], dict[str, Any]]
+    build_apply_preview: Callable[[str | None, list[dict[str, Any]]], str]
     ensure_list: Callable[[Any, str], list[Any]]
     log: ClothingFxLogPort
 
@@ -89,6 +90,39 @@ class ClothingFxReadService:
                 "error",
                 "fx",
                 "Failed to generate clothing FX blueprint.",
+                {"error": str(exc)},
+            )
+            raise
+
+    def preview_apply_clothing_fx(self, request: Any) -> dict[str, Any]:
+        try:
+            self._ports.load_settings(request)
+            avatar_path = request.avatar_path or self._ports.current_avatar_path()
+            items = request.items
+            if not items:
+                raise RuntimeError(
+                    "No clothing items provided. Run /api/clothes/scan or "
+                    "/api/clothes/generate-fx first."
+                )
+            apply_payload = self._ports.build_apply_preview(avatar_path, items)
+            self._ports.log(
+                "info",
+                "fx",
+                "Clothing FX apply payload generated (dry-run).",
+                {"avatarPath": avatar_path, "itemCount": len(items)},
+            )
+            return {
+                "ok": True,
+                "avatarPath": avatar_path,
+                "dryRun": True,
+                "applyPayload": apply_payload,
+                "itemCount": len(items),
+            }
+        except RuntimeError as exc:
+            self._ports.log(
+                "error",
+                "fx",
+                "Failed to apply clothing FX.",
                 {"error": str(exc)},
             )
             raise
@@ -213,6 +247,7 @@ class WardrobeOutfitWorkflowPorts:
 class WardrobeOutfitApprovedWriteHandlers:
     """Write capabilities handed only to the supervised approval registry."""
 
+    apply_clothing_fx: Callable[[dict[str, Any]], dict[str, Any]]
     setup_outfit: Callable[[dict[str, Any]], dict[str, Any]]
     add_wardrobe_outfit: Callable[[dict[str, Any]], dict[str, Any]]
     add_outfit_part: Callable[[dict[str, Any]], dict[str, Any]]

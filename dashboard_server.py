@@ -9467,7 +9467,13 @@ async def generate_clothing_fx(request: AvatarScopedConnectionRequest) -> dict[s
 
 @app.post("/api/clothes/apply-fx")
 async def apply_clothing_fx(request: ClothingApplyFxRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(WARDROBE_OUTFIT_WORKFLOWS.request_apply_clothing_fx, request)
+    try:
+        return await asyncio.to_thread(
+            WARDROBE_OUTFIT_WORKFLOWS.request_apply_clothing_fx,
+            request,
+        )
+    except RuntimeError as exc:
+        raise to_http_exception(exc) from exc
 
 
 @app.post("/api/parameters/scan")
@@ -12442,7 +12448,16 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
         raise to_http_exception(exc) from exc
 
 
-def apply_clothing_fx_sync(request: ClothingApplyFxRequest) -> dict[str, Any]:
+def apply_clothing_fx_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
+    normalized_arguments = dict(arguments)
+    if "dry_run" not in normalized_arguments and "dryRun" in normalized_arguments:
+        normalized_arguments["dry_run"] = normalized_arguments["dryRun"]
+    request = ClothingApplyFxRequest(**normalized_arguments)
+    if request.dry_run:
+        try:
+            return CLOTHING_FX_READ.preview_apply_clothing_fx(request)
+        except RuntimeError as exc:
+            raise to_http_exception(exc) from exc
     try:
         settings = load_dashboard_settings(request)
         avatar_path = request.avatar_path or DASHBOARD_RUNTIME.current_avatar_path
@@ -12451,10 +12466,6 @@ def apply_clothing_fx_sync(request: ClothingApplyFxRequest) -> dict[str, Any]:
             raise RuntimeError("No clothing items provided. Run /api/clothes/scan or /api/clothes/generate-fx first.")
 
         apply_payload = build_clothes_fx_apply_preview(avatar_path, items)
-
-        if request.dry_run:
-            emit_log("info", "fx", "Clothing FX apply payload generated (dry-run).", {"avatarPath": avatar_path, "itemCount": len(items)})
-            return {"ok": True, "avatarPath": avatar_path, "dryRun": True, "applyPayload": apply_payload, "itemCount": len(items)}
 
         payload = apply_clothing_fx_direct(settings, avatar_path, items)
         emit_log("success", "fx", "Clothing FX assets authored in Unity.", {"avatarPath": avatar_path, "itemCount": len(items)})
@@ -21248,7 +21259,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_apply_clothing_fx",
         "Apply generated clothing FX assets through VRCForge.",
         "high",
-        lambda params: apply_clothing_fx_sync(ClothingApplyFxRequest(**params)),
+        WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx,
     )
     AGENT_GATEWAY.register_write_handler(
         "vrcforge_apply_parameter_optimization",
@@ -21592,6 +21603,7 @@ CLOTHING_FX_READ = ClothingFxReadService(
         current_avatar_path=lambda: DASHBOARD_RUNTIME.current_avatar_path,
         scan_controls=scan_avatar_controls_direct,
         build_blueprint=build_clothing_fx_blueprint_from_controls,
+        build_apply_preview=build_clothes_fx_apply_preview,
         ensure_list=ensure_list_payload,
         log=emit_log,
     )
@@ -21610,7 +21622,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         scan_wardrobe=WARDROBE_ARTIFACT_READ.scan_wardrobe,
         scan_clothes=CLOTHING_FX_READ.scan_clothes,
         generate_clothing_fx=CLOTHING_FX_READ.generate_clothing_fx,
-        preview_apply_clothing_fx=apply_clothing_fx_sync,
+        preview_apply_clothing_fx=CLOTHING_FX_READ.preview_apply_clothing_fx,
         preview_setup_outfit=preview_setup_outfit_sync,
         preview_add_wardrobe_outfit=preview_add_wardrobe_outfit_sync,
         preview_add_outfit_part=preview_add_outfit_part_sync,
@@ -21621,6 +21633,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
     )
 )
 WARDROBE_OUTFIT_APPROVED_WRITES = WardrobeOutfitApprovedWriteHandlers(
+    apply_clothing_fx=apply_clothing_fx_approved_sync,
     setup_outfit=setup_outfit_sync,
     add_wardrobe_outfit=add_wardrobe_outfit_sync,
     add_outfit_part=add_outfit_part_sync,
