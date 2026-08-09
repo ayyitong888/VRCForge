@@ -79,7 +79,12 @@ class AgentLoopP0Tests(unittest.TestCase):
                 }
             return {"tool": tool, "status": "executed", "result": {}}
 
-        with patch.object(gateway, "_execute_runtime_skill", side_effect=fake_skill):
+        with patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            side_effect=lambda _owner, tool, params, agent_name=None: fake_skill(tool, params, agent_name),
+        ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",
@@ -150,8 +155,9 @@ class AgentLoopP0Tests(unittest.TestCase):
         project = self._unity_project()
 
         with patch.object(
-            gateway,
-            "_execute_runtime_skill",
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
             side_effect=AssertionError("an explicit scene-root target must not scan avatars"),
         ):
             with TestClient(dashboard_server.app) as client:
@@ -251,7 +257,12 @@ class AgentLoopP0Tests(unittest.TestCase):
                 }
             return {"tool": tool, "status": "executed", "result": {}}
 
-        with patch.object(gateway, "_execute_runtime_skill", side_effect=fake_skill):
+        with patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            side_effect=lambda _owner, tool, params, agent_name=None: fake_skill(tool, params, agent_name),
+        ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",
@@ -293,7 +304,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_provider_model_followup_replies_without_tooling(self) -> None:
         gateway = self.gateway
-        with patch.object(gateway, "_execute_runtime_skill") as execute_skill:
+        with patch.object(type(gateway.runtime_skills), "execute", autospec=True) as execute_skill:
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
                     "/api/app/agent/message",

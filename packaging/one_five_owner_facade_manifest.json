@@ -235,11 +235,7 @@
               "_summarize_loop_plan",
               "runtime_observe",
               "get_runtime_session",
-              "request_runtime_cancel",
-              "execute_runtime_skill",
-              "_execute_runtime_skill",
-              "_execute_skill_package",
-              "_execute_skill_entrypoint"
+              "request_runtime_cancel"
           ]
         }
       ]

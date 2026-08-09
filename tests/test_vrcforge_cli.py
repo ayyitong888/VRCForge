@@ -976,7 +976,7 @@ def test_skill_init_write_exports_installs_projects_and_loads_as_request_only(
 
     assert projection is not None
     assert projection["supportFiles"] == ["workflows/request-only-writer.json"]
-    loaded = gateway.execute_runtime_skill(
+    loaded = gateway.runtime_skills.execute(
         "request-only-writer",
         {"arguments": "apply the reviewed material preset"},
         "cli-request-only-integration",

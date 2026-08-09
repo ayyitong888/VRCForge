@@ -99,7 +99,7 @@ def test_signed_package_runtime_audit_includes_locked_identity_and_signer_contex
 
     projected = _project_signed_skill(gateway, installed.installed_path)
 
-    result = gateway.execute_runtime_skill("runtime-audit-fixture", {}, "test-agent")
+    result = gateway.runtime_skills.execute("runtime-audit-fixture", {}, "test-agent")
 
     assert result["status"] == "executed"
     assert result["result"]["supportFiles"] == [
@@ -145,7 +145,7 @@ def test_modified_projection_keeps_legacy_audit_shape_without_signer_misattribut
     projected = _project_signed_skill(gateway, installed.installed_path)
     projected.write_text(projected.read_text(encoding="utf-8") + "Locally edited instructions.\n", encoding="utf-8")
 
-    result = gateway.execute_runtime_skill("runtime-audit-fixture", {}, "test-agent")
+    result = gateway.runtime_skills.execute("runtime-audit-fixture", {}, "test-agent")
 
     assert result["status"] == "executed"
     events = _read_runtime_package_events(gateway)
@@ -185,7 +185,7 @@ def test_modified_locked_or_projected_support_file_cannot_keep_signed_runtime_at
         )
         target.write_text(target.read_text(encoding="utf-8") + "\n", encoding="utf-8")
 
-        result = gateway.execute_runtime_skill("runtime-audit-fixture", {}, "test-agent")
+        result = gateway.runtime_skills.execute("runtime-audit-fixture", {}, "test-agent")
 
         assert result["status"] == "executed"
         for event in _read_runtime_package_events(gateway):
@@ -211,7 +211,7 @@ def test_registry_package_sha_mismatch_cannot_keep_signed_runtime_attribution(tm
     registry["skills"]["community.tests.runtime-audit"]["package_sha256"] = "0" * 64
     service.registry_path.write_text(json.dumps(registry, ensure_ascii=False), encoding="utf-8")
 
-    result = gateway.execute_runtime_skill("runtime-audit-fixture", {}, "test-agent")
+    result = gateway.runtime_skills.execute("runtime-audit-fixture", {}, "test-agent")
 
     assert result["status"] == "executed"
     for event in _read_runtime_package_events(gateway):
@@ -259,7 +259,7 @@ def test_runtime_support_loader_blocks_traversal_and_sensitive_text(
     support_file.parent.mkdir(parents=True, exist_ok=True)
     support_file.write_text(support_content, encoding="utf-8")
 
-    result = gateway.execute_runtime_skill("unsafe-support", {}, "test-agent")
+    result = gateway.runtime_skills.execute("unsafe-support", {}, "test-agent")
 
     assert result["status"] == "blocked"
     assert result["ok"] is False
@@ -329,7 +329,7 @@ def test_runtime_skill_capture_is_one_package_then_user_locked_snapshot(
         audit_context,
     )
 
-    result = gateway.execute_runtime_skill("snapshot-skill", {}, "test-agent")
+    result = gateway.runtime_skills.execute("snapshot-skill", {}, "test-agent")
 
     assert writer is not None
     writer.join(timeout=1)

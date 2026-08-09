@@ -10,7 +10,7 @@ from sub_agent_tasks import SubAgentTaskRegistry
 
 
 class _Gateway:
-    def execute_runtime_skill(self, *_args, **_kwargs):  # pragma: no cover - handlers are not invoked here.
+    def execute(self, *_args, **_kwargs):  # pragma: no cover - handlers are not invoked here.
         return {"ok": True}
 
 

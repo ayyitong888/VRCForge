@@ -34,7 +34,7 @@ class FakeGateway:
         self._blocked = blocked
         self._error = error
 
-    def execute_runtime_skill(
+    def execute(
         self,
         tool_name: str,
         params: dict[str, object],

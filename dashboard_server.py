@@ -2264,13 +2264,13 @@ def track_timed_out_goal_wake(worker: asyncio.Task[dict[str, Any]]) -> None:
     drain_task.add_done_callback(BACKGROUND_GOAL_WAKE_DRAIN_TASKS.discard)
 BACKEND_OWNER_LEASE = BackendOwnerLease(lambda: AGENT_GATEWAY.audit_dir / "backend-owner.lock")
 # 子代理角色与执行全部由 sub_agent_delegate 域模块提供：
-# 统一经 AGENT_GATEWAY.execute_runtime_skill 的 allowlist 路径分发，
+# 统一经 AGENT_GATEWAY.runtime_skills 的 allowlist 路径分发，
 # 组合根只负责把 gateway 绑进去。
 # The service itself exclusively owns the durable registry, handlers and workers.
 SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
     SubAgentCollaborationPorts(
         artifact_dir=SUB_AGENT_TASK_DIR,
-        gateway=AGENT_GATEWAY,
+        gateway=AGENT_GATEWAY.runtime_skills,
         lane_budget=RUNTIME_LANE_BUDGET,
         build_roles=build_sub_agent_roles,
         build_handlers=build_sub_agent_role_handlers,

@@ -14,9 +14,9 @@ from sub_agent_tasks import CancelledError, SubAgentRole
 
 
 class RuntimeSkillGateway(Protocol):
-    """子代理分发所需的最小 gateway 面。"""
+    """子代理分发所需的最小 runtime Skill 执行面。"""
 
-    def execute_runtime_skill(
+    def execute(
         self,
         tool_name: str,
         params: dict[str, Any],
@@ -30,7 +30,7 @@ def _checkpoint(cancel_event: Any) -> None:
 
 
 def _dispatch(
-    gateway: RuntimeSkillGateway,
+    gateway: RuntimeSkillExecutor,
     tool_name: str,
     params: dict[str, Any],
     agent_name: str,
@@ -40,7 +40,7 @@ def _dispatch(
     blocked / unknown / failed 都转成 RuntimeError，由注册表落成
     failed 状态；这里绝不绕过 gateway 的策略闸另起炉灶。
     """
-    envelope = gateway.execute_runtime_skill(tool_name, dict(params or {}), agent_name)
+    envelope = gateway.execute(tool_name, dict(params or {}), agent_name)
     status = str(envelope.get("status") or "")
     if status == "blocked" or not envelope.get("ok"):
         raise RuntimeError(str(envelope.get("error") or f"Skill was not executable: {tool_name}"))

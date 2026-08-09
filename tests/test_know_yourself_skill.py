@@ -905,7 +905,7 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
         "开工程",
         {},
     )
-    executed = dashboard_server.AGENT_GATEWAY.execute_runtime_skill(
+    executed = dashboard_server.AGENT_GATEWAY.runtime_skills.execute(
         "know-yourself",
         {"editorFocusConfirmed": True},
         "know-yourself-contract-test",

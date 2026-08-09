@@ -306,7 +306,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
     )
     assert projection is not None
     assert projection["name"] == case["skill_name"]
-    loaded = gateway.execute_runtime_skill(
+    loaded = gateway.runtime_skills.execute(
         str(case["skill_name"]),
         {"projectPath": str(project), "arguments": "example target"},
         "example-package-test",
@@ -420,7 +420,7 @@ def test_signed_material_package_install_projection_and_runtime_support_are_comp
     for relative in projection["supportFiles"]:
         assert (gateway.skills.user_skills_dir / "material-preset-pack" / relative).is_file()
 
-    loaded = gateway.execute_runtime_skill("material-preset-pack", {}, "projection-integration-test")
+    loaded = gateway.runtime_skills.execute("material-preset-pack", {}, "projection-integration-test")
 
     assert loaded["status"] == "loaded"
     support = {item["path"]: item["content"] for item in loaded["result"]["supportFiles"]}

@@ -37,7 +37,7 @@ from agent_shell_service import (
 )
 
 if TYPE_CHECKING:
-    from agent_skill_registry import AgentSkillRegistryService, RuntimeSkillSnapshot
+    from agent_skill_registry import AgentSkillRegistryService
 from agent_goal_service import (
     AgentGoalService,
     GoalApprovalStatePorts,
@@ -60,6 +60,7 @@ from optimization_service import (
 )
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
+from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
 from runtime_planner_service import RuntimePlannerService
 from background_goal_runtime import (
     RepeatedFailureGuard,
@@ -1993,6 +1994,27 @@ class AgentGateway:
                 controller_factory=desktop_controller_factory,
             ),
         )
+        self._runtime_skill_executor = AgentRuntimeSkillExecutor(
+            AgentRuntimeSkillExecutorPorts(
+                ensure_config=self.ensure_config,
+                tool_for_name=lambda name: self._tools.get(name),
+                package_write_lock=self._skill_package_write_lock,
+                prepare_runtime_skill=self.skills.prepare_runtime_skill,
+                package_audit_context=lambda skill: self._runtime_skill_package_audit_context_locked(skill),
+                computer_use_model_invocable=self._desktop.computer_use_model_invocable,
+                tool_visible=self._tool_visible,
+                tool_params_audit=self._tool_params_audit,
+                read_user_constraints=self.read_user_constraints,
+                inject_user_constraints=self._inject_user_constraints,
+                append_audit=self.append_audit,
+                redact=redact_sensitive,
+                summarize_params=summarize_params,
+                ensure_string_list=ensure_string_list,
+                build_runtime_skill_payload=build_runtime_skill_payload,
+                blocked_skills=frozenset(RUNTIME_BLOCKED_SKILLS),
+                direct_categories=frozenset(RUNTIME_DIRECT_SKILL_CATEGORIES),
+            )
+        )
 
     @property
     def desktop(self) -> DesktopComputerUseService:
@@ -2028,6 +2050,10 @@ class AgentGateway:
     @property
     def runtime_runs(self) -> AgentRuntimeRunLedger:
         return self._runtime_run_ledger
+
+    @property
+    def runtime_skills(self) -> AgentRuntimeSkillExecutor:
+        return self._runtime_skill_executor
 
     def bind_runtime_planner(self, planner: RuntimePlannerService) -> None:
         if not isinstance(planner, RuntimePlannerService):
@@ -2794,7 +2820,7 @@ class AgentGateway:
             }
             if project_root:
                 bootstrap_params["projectRoot"] = project_root
-            bootstrap_payload = self._execute_runtime_skill(
+            bootstrap_payload = self._runtime_skill_executor.execute(
                 "vrcforge_agent_desktop_action",
                 bootstrap_params,
                 agent_name,
@@ -3046,7 +3072,7 @@ class AgentGateway:
                     "vrcforge_tool_registry",
                 }:
                     step_params.setdefault("exposureLayer", runtime_exposure_layer)
-                step_payload = self._execute_runtime_skill(
+                step_payload = self._runtime_skill_executor.execute(
                     step_tool, step_params, agent_name
                 )
                 skill_payload = step_payload
@@ -4951,188 +4977,6 @@ class AgentGateway:
 
 
 
-    def execute_runtime_skill(
-        self,
-        tool_name: str,
-        params: dict[str, Any],
-        agent_name: str,
-    ) -> dict[str, Any]:
-        """公开的 runtime allowlist 技能分发入口。
-
-        子代理委派（sub_agent_delegate）经这里执行技能，复用与
-        agentic 循环完全相同的阻断/可见性/审计/脱敏路径——
-        不允许在 gateway 之外长出平行分发。
-        """
-        return self._execute_runtime_skill(tool_name, params, agent_name)
-
-    def _execute_runtime_skill(
-        self,
-        tool_name: str,
-        params: dict[str, Any],
-        agent_name: str,
-    ) -> dict[str, Any]:
-        config = self.ensure_config()
-        tool = self._tools.get(tool_name)
-        if not tool:
-            with self._skill_package_write_lock:
-                snapshot = self.skills.prepare_runtime_skill(
-                    tool_name,
-                    config,
-                    self._runtime_skill_package_audit_context_locked,
-                )
-            if snapshot:
-                return self._execute_skill_package(snapshot, params, agent_name, config)
-            return {
-                "ok": False,
-                "status": "blocked",
-                "tool": tool_name,
-                "error": f"Unknown skill: {tool_name}",
-            }
-        user_activated_tool = bool(tool.requires_user_activation and self._desktop.computer_use_model_invocable(config))
-        if (
-            tool.name in RUNTIME_BLOCKED_SKILLS
-            or (tool.write and not user_activated_tool)
-            or (tool.category not in RUNTIME_DIRECT_SKILL_CATEGORIES and not user_activated_tool)
-        ):
-            return {
-                "ok": False,
-                "status": "blocked",
-                "tool": tool.name,
-                "category": tool.category,
-                "write": tool.write,
-                "advanced": tool.advanced,
-                "error": "This skill cannot run directly from the runtime loop.",
-            }
-        if not self._tool_visible(tool, config):
-            return {
-                "ok": False,
-                "status": "blocked",
-                "tool": tool.name,
-                "category": tool.category,
-                "write": tool.write,
-                "advanced": tool.advanced,
-                "error": "This skill is unavailable in the current permission mode.",
-            }
-
-        params_summary = self._tool_params_audit(tool.name, params)
-        user_constraints = self.read_user_constraints()
-        tool_params = self._inject_user_constraints(params, tool, user_constraints)
-        try:
-            result = tool.handler(tool_params)
-            payload = {
-                "ok": True,
-                "status": "executed",
-                "tool": tool.name,
-                "category": tool.category,
-                "write": tool.write,
-                "advanced": tool.advanced,
-                "summary": tool.description,
-                "paramsSummary": params_summary,
-                "result": redact_sensitive(result),
-            }
-            self.append_audit(
-                {
-                    "event": "runtime_skill_executed",
-                    "tool": tool.name,
-                    "agent": agent_name,
-                    "paramsSummary": params_summary,
-                    "status": "ok",
-                }
-            )
-            return payload
-        except Exception as exc:  # noqa: BLE001 - runtime must keep the agent loop alive.
-            self.append_audit(
-                {
-                    "event": "runtime_skill_executed",
-                    "tool": tool.name,
-                    "agent": agent_name,
-                    "paramsSummary": params_summary,
-                    "status": "error",
-                    "error": str(exc),
-                }
-            )
-            return {
-                "ok": False,
-                "status": "failed",
-                "tool": tool.name,
-                "category": tool.category,
-                "write": tool.write,
-                "advanced": tool.advanced,
-                "summary": tool.description,
-                "paramsSummary": params_summary,
-                "error": str(exc),
-            }
-
-    def _execute_skill_package(
-        self,
-        snapshot: RuntimeSkillSnapshot,
-        params: dict[str, Any],
-        agent_name: str,
-        config: AgentGatewayConfig,
-    ) -> dict[str, Any]:
-        skill = snapshot.skill
-        package_audit_context = snapshot.package_audit_context
-        validation = snapshot.validation
-        status = "loaded" if snapshot.loaded else "blocked"
-        support_files = list(snapshot.support_files)
-        result = redact_sensitive(build_runtime_skill_payload(skill, params, support_files=support_files))
-        payload = {
-            "ok": status == "loaded",
-            "status": status,
-            "tool": str(skill.get("name") or ""),
-            "category": str(skill.get("category") or ""),
-            "write": bool(skill.get("write")),
-            "advanced": bool(skill.get("advanced")),
-            "summary": str(skill.get("description") or skill.get("title") or ""),
-            "paramsSummary": summarize_params(params),
-            "result": result,
-        }
-        if status != "loaded":
-            payload["error"] = "; ".join(ensure_string_list(validation.get("reasons"))) or "Skill is unavailable."
-            self.append_audit(
-                {
-                    "event": "runtime_skill_package_loaded",
-                    "skill": skill.get("name"),
-                    "agent": agent_name,
-                    "status": payload["status"],
-                    "error": payload.get("error"),
-                    **package_audit_context,
-                }
-            )
-            return payload
-
-        entrypoint = str(skill.get("entrypointTool") or "").strip()
-        if entrypoint:
-            entrypoint_result = self._execute_skill_entrypoint(
-                skill,
-                entrypoint,
-                params,
-                agent_name,
-                config,
-                package_audit_context=package_audit_context,
-            )
-            payload["entrypointTool"] = entrypoint
-            payload["entrypoint"] = entrypoint_result
-            if entrypoint_result.get("status") == "executed":
-                payload["status"] = "executed"
-                payload["ok"] = True
-            elif entrypoint_result.get("status") in {"blocked", "failed"}:
-                payload["status"] = entrypoint_result.get("status")
-                payload["ok"] = False
-                payload["error"] = entrypoint_result.get("error")
-
-        self.append_audit(
-            {
-                "event": "runtime_skill_package_loaded",
-                "skill": skill.get("name"),
-                "agent": agent_name,
-                "status": payload["status"],
-                "entrypointTool": entrypoint,
-                **package_audit_context,
-            }
-        )
-        return payload
-
     def _runtime_skill_package_audit_context_locked(self, skill: dict[str, Any]) -> dict[str, Any]:
         """Resolve immutable installed-package identity for a projected skill.
 
@@ -5173,58 +5017,6 @@ class AgentGateway:
             )
         except Exception:  # noqa: BLE001 - enrichment must not break legacy skill execution.
             return {}
-
-    def _execute_skill_entrypoint(
-        self,
-        skill: dict[str, Any],
-        entrypoint: str,
-        params: dict[str, Any],
-        agent_name: str,
-        config: AgentGatewayConfig,
-        *,
-        package_audit_context: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        allowed_tools = ensure_string_list(skill.get("allowedTools") or skill.get("tools"))
-        disallowed_tools = ensure_string_list(skill.get("disallowedTools"))
-        if entrypoint in disallowed_tools:
-            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint tool is disallowed."}
-        if allowed_tools and entrypoint not in allowed_tools:
-            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint tool is not allowed."}
-        tool = self._tools.get(entrypoint)
-        if not tool:
-            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint requires approval or is not callable directly."}
-        if tool.name in RUNTIME_BLOCKED_SKILLS or tool.write or tool.category not in RUNTIME_DIRECT_SKILL_CATEGORIES:
-            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint cannot run directly from the runtime loop."}
-        if not self._tool_visible(tool, config):
-            return {"ok": False, "status": "blocked", "tool": entrypoint, "error": "Entrypoint is unavailable in the current permission mode."}
-        tool_params = {
-            key: value
-            for key, value in params.items()
-            if key not in {"arguments", "rawArguments", "skillArguments"}
-        }
-        user_constraints = self.read_user_constraints()
-        tool_params = self._inject_user_constraints(tool_params, tool, user_constraints)
-        try:
-            result = tool.handler(tool_params)
-            self.append_audit(
-                {
-                    "event": "runtime_skill_entrypoint_executed",
-                    "skill": skill.get("name"),
-                    "tool": entrypoint,
-                    "agent": agent_name,
-                    "status": "ok",
-                    **(package_audit_context or {}),
-                }
-            )
-            return {
-                "ok": True,
-                "status": "executed",
-                "tool": entrypoint,
-                "category": tool.category,
-                "result": redact_sensitive(result),
-            }
-        except Exception as exc:  # noqa: BLE001 - keep the agent loop alive.
-            return {"ok": False, "status": "failed", "tool": entrypoint, "category": tool.category, "error": str(exc)}
 
     def _extract_token(self, headers: dict[str, str], query_params: dict[str, str]) -> str:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
