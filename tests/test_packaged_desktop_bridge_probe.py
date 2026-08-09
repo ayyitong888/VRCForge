@@ -126,6 +126,10 @@ def test_desktop_probe_completes_isolated_first_run_before_waiting_for_the_compo
     assert "button[data-vrcforge-onboarding-skip]" in source
     assert 'actions.push("language-continue")' in source
     assert 'actions.push("onboarding-skip")' in source
+    assert "function composerIsReadyAfterOnboarding(state)" in source
+    assert "state?.composerReady && !state.languageGate && !state.onboarding" in source
+    assert "if (composerIsReadyAfterOnboarding(lastState))" in source
+    assert "composer readiness bypassed an active first-run overlay" in source
     assert "output.ready = await prepareComposerAfterFirstRun(cdp);" in source
     assert source.index("output.ready = await prepareComposerAfterFirstRun(cdp);") < source.index(
         'output.bootstrap = await appApi("/api/app/bootstrap")'

@@ -250,6 +250,10 @@ function isolatedLaunchEnvironment() {
   };
 }
 
+function composerIsReadyAfterOnboarding(state) {
+  return Boolean(state?.composerReady && !state.languageGate && !state.onboarding);
+}
+
 function runSelfTest() {
   const strict = normalizeBuildPolicy({
     buildPolicy: {
@@ -318,6 +322,13 @@ function runSelfTest() {
       || environment.WEBVIEW2_USER_DATA_FOLDER !== webviewDataRoot
     ) {
       throw new Error("self-test: packaged Desktop runtime paths or credentials were not isolated.");
+    }
+    if (
+      composerIsReadyAfterOnboarding({ composerReady: true, languageGate: true, onboarding: false })
+      || composerIsReadyAfterOnboarding({ composerReady: true, languageGate: false, onboarding: true })
+      || !composerIsReadyAfterOnboarding({ composerReady: true, languageGate: false, onboarding: false })
+    ) {
+      throw new Error("self-test: composer readiness bypassed an active first-run overlay.");
     }
   } finally {
     for (const [key, value] of previous) {
@@ -771,7 +782,7 @@ async function prepareComposerAfterFirstRun(cdp, timeoutMs = 30000) {
       }))()`,
       5000,
     ).catch((error) => ({ error: String(error) }));
-    if (lastState?.composerReady) {
+    if (composerIsReadyAfterOnboarding(lastState)) {
       return { ok: true, actions, bodyLength: lastState.bodyLength };
     }
     if (lastState?.languageGate && !actions.includes("language-continue")) {
