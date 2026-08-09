@@ -72,7 +72,11 @@ function Write-UnityPackageEntry {
         [bool]$UseSourceMeta = $true
     )
 
-    $entryDir = Join-Path $EntryRoot (New-StableUnityGuid "entry/$PathName")
+    # Unity's package importer treats the archive directory name as the asset
+    # identity during overwrite imports. It must therefore be the same GUID as
+    # asset.meta; a separate stable entry id causes a false "new GUID" warning
+    # and can invalidate references during an upgrade.
+    $entryDir = Join-Path $EntryRoot (Get-PackageAssetGuid $PathName)
     New-Item -ItemType Directory -Force -Path $entryDir | Out-Null
     Write-Utf8NoBom (Join-Path $entryDir "pathname") $PathName
 
@@ -347,7 +351,7 @@ try {
         }
     }
     foreach ($documentationPath in $documentationEntries.Keys) {
-        $documentationEntryRoot = Join-Path $tempRoot (New-StableUnityGuid "entry/$documentationPath")
+        $documentationEntryRoot = Join-Path $tempRoot (Get-PackageAssetGuid $documentationPath)
         $packagedDocumentationPath = Join-Path $documentationEntryRoot "asset"
         $packagedDocumentationMetaPath = Join-Path $documentationEntryRoot "asset.meta"
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $packagedDocumentationPath).Hash -cne

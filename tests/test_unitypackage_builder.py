@@ -384,6 +384,7 @@ def _read_unitypackage_inventory(package_path: Path) -> tuple[dict[str, str], se
             meta_text = archive.extractfile(members[f"{entry}/asset.meta"]).read().decode("utf-8")
             matches = re.findall(r"(?m)^guid:\s*([0-9a-fA-F]{32})\s*$", meta_text)
             assert len(matches) == 1, pathname
+            assert Path(entry).name.lower() == matches[0].lower(), pathname
             packaged_guids[pathname] = matches[0].lower()
             if f"{entry}/asset" in members:
                 file_paths.add(pathname)
