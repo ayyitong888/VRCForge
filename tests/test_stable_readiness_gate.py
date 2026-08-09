@@ -192,7 +192,7 @@ def write_evidence_tree(tmp_path: Path) -> None:
             "steps": [
                 {"name": "stdio.bridge_preflight", "advertisesRequestApply": True, "advertisesDirectApply": False},
                 {"name": "gateway.manifest", "directApplyAdvertised": []},
-                {"name": "mcp.tools_list", "directApplyListed": [], "requestApplyListed": True},
+                {"name": "stdio.mcp_tools_list", "directApplyListed": [], "requestApplyListed": True},
             ],
         },
     )

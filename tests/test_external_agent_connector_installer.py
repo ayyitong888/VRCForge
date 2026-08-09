@@ -413,6 +413,7 @@ def test_stdio_mcp_handshake_runs_2026_discover_and_tools_list(tmp_path: Path) -
     assert result["connected"] is True
     assert result["ready"] is True
     assert result["toolCount"] == 2
+    assert result["directApplyListed"] == []
 
 
 def test_stdio_mcp_handshake_rejects_legacy_or_incomplete_result(tmp_path: Path) -> None:

@@ -1229,7 +1229,7 @@ def check_external_agent_smoke(path: Path) -> dict[str, Any]:
     by_name = {str(step.get("name")): step for step in steps if isinstance(step, dict)}
     stdio = by_name.get("stdio.bridge_preflight", {})
     manifest = by_name.get("gateway.manifest", {})
-    mcp_tools = by_name.get("mcp.tools_list", {})
+    mcp_tools = by_name.get("stdio.mcp_tools_list", {})
     ok = bool(
         payload.get("schema") == "vrcforge.external_agent_bridge_smoke.v1"
         and payload.get("ok") is True

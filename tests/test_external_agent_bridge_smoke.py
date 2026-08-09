@@ -147,14 +147,35 @@ def test_stdio_mcp_tools_uses_explicit_gateway_config_env(monkeypatch: Any, tmp_
     def fake_handshake(spec: Any, timeout_seconds: float) -> dict[str, Any]:
         nonlocal seen_gateway_config
         seen_gateway_config = smoke.os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG", "")
-        return {"ok": True, "hasRequestApply": True, "toolCount": 1}
+        return {"ok": True, "hasRequestApply": True, "directApplyListed": [], "toolCount": 1}
 
     monkeypatch.setattr(smoke, "run_stdio_mcp_handshake", fake_handshake)
 
     result = bridge.check_stdio_mcp_tools()
 
     assert result["ok"] is True
+    assert result["directApplyListed"] == []
     assert seen_gateway_config == str(bridge.gateway_config_path)
+
+
+def test_stdio_mcp_tools_fail_when_direct_execution_tool_is_listed(monkeypatch: Any, tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    bridge = make_bridge_smoke(smoke, tmp_path)
+
+    monkeypatch.setattr(
+        smoke,
+        "run_stdio_mcp_handshake",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "hasRequestApply": True,
+            "directApplyListed": ["vrcforge_apply_approved"],
+        },
+    )
+
+    result = bridge.check_stdio_mcp_tools()
+
+    assert result["ok"] is False
+    assert result["directApplyListed"] == ["vrcforge_apply_approved"]
 
 
 def test_smoke_run_uses_stdio_discovery_without_legacy_http_mcp_probe(monkeypatch: Any, tmp_path: Path) -> None:

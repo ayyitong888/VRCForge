@@ -287,10 +287,14 @@ class ExternalAgentBridgeSmoke:
         finally:
             os.environ.clear()
             os.environ.update(previous_env)
+        direct_apply_listed = ensure_list(result.get("directApplyListed"))
         return {
             **result,
-            "ok": bool(result.get("ok")) and bool(result.get("hasRequestApply")),
+            "ok": bool(result.get("ok"))
+            and bool(result.get("hasRequestApply"))
+            and direct_apply_listed == [],
             "requestApplyListed": bool(result.get("hasRequestApply")),
+            "directApplyListed": direct_apply_listed,
         }
 
     def check_manifest(self) -> dict[str, Any]:

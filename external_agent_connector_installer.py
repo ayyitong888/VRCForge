@@ -34,6 +34,9 @@ ConnectorClient = Literal["codex", "codexApp", "codexCli", "claudeCode", "claude
 
 _CONFIG_PATH_LOCKS_GUARD = threading.Lock()
 _CONFIG_PATH_LOCKS: dict[str, threading.RLock] = {}
+_HIDDEN_EXTERNAL_EXECUTION_TOOLS = frozenset(
+    {"vrcforge_apply_approved", "vrcforge_execute_approved_shell"}
+)
 
 
 class ConnectorInstallError(RuntimeError):
@@ -415,6 +418,7 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
         tool_names = [str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)]
         connected = "vrcforge_bridge_preflight" in tool_names
         ready = "vrcforge_request_apply" in tool_names
+        direct_apply_listed = sorted(_HIDDEN_EXTERNAL_EXECUTION_TOOLS.intersection(tool_names))
         ok = connected
         return {
             "ok": ok,
@@ -428,6 +432,7 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
             "toolsSample": tool_names[:12],
             "hasBridgePreflight": connected,
             "hasRequestApply": ready,
+            "directApplyListed": direct_apply_listed,
             "stderrTail": _tail(stderr_lines),
             "transcriptTail": transcript[-4:],
             "error": "" if ok else "MCP tools/list did not expose the VRCForge bridge preflight tool.",
