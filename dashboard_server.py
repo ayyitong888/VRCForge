@@ -2147,9 +2147,7 @@ _PROJECT_SNAPSHOT_SELECTION = ProjectSnapshotSelectionService(
     selection_path=CONFIG_DIR / "selected-project.json",
     selection_schema=PROJECT_SELECTION_SCHEMA,
 )
-# STOPGAP: Migration-only owner for the three root compatibility facades below.
-# Remove it in the final 1.5 typed-composition seam-retirement gate.
-_UNITY_STATUS = UnityStatusService(
+UNITY_STATUS = UnityStatusService(
     UnityStatusPorts(
         load_settings=lambda: load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path))),
         selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
@@ -2184,7 +2182,7 @@ DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
 KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
     KnowYourselfReadinessPorts(
         load_settings_for_params=lambda params: load_dashboard_settings(build_agent_connection_request(params)),
-        build_unity_status=lambda settings: build_unity_status_snapshot(settings),
+        build_unity_status=lambda settings: UNITY_STATUS.build_unity_status_snapshot(settings),
         build_doctor_report=lambda: DOCTOR_READINESS_REPORT.build_app_doctor_report(),
         selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
         unity_editor_path=lambda: DASHBOARD_STATE.unity_editor_path,
@@ -2968,7 +2966,7 @@ async def refresh_app_unity_readiness() -> dict[str, Any]:
     global LAST_STATUS_CONNECTED
     global LAST_STATUS_FINGERPRINT
 
-    snapshot = await asyncio.to_thread(build_unity_status_snapshot)
+    snapshot = await asyncio.to_thread(UNITY_STATUS.build_unity_status_snapshot)
     fingerprint = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
     CURRENT_UNITY_STATUS = snapshot
     LAST_STATUS_FINGERPRINT = fingerprint
@@ -8423,7 +8421,7 @@ def repair_project_chat_store_sync(params: dict[str, Any]) -> dict[str, Any]:
 def _repair_unity_bridge_doctor(context: dict[str, Any], mode: str, phases: PhaseLog) -> dict[str, Any]:
     project_path = str(context.get("selected_project_path") or "").strip()
     if project_path and vrcforge_mcp_core_installed(Path(project_path)):
-        status = build_unity_status_snapshot(project_root=Path(project_path))
+        status = UNITY_STATUS.build_unity_status_snapshot(project_root=Path(project_path))
         if status.get("connected"):
             phases.add("core_ready", "ok", "The project-scoped VRCForge MCP Core is reachable.")
             return {"status": "healthy", "changed": False}
@@ -9391,12 +9389,12 @@ async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
 
 @app.post("/api/unity/status")
 async def read_unity_status(request: ConnectionRequest) -> dict[str, Any]:
-    return await asyncio.to_thread(build_unity_status_snapshot, load_dashboard_settings(request))
+    return await asyncio.to_thread(UNITY_STATUS.build_unity_status_snapshot, load_dashboard_settings(request))
 
 
 @app.post("/api/unity/instances")
 async def read_unity_instances(request: ConnectionRequest) -> dict[str, Any]:
-    status = await asyncio.to_thread(build_unity_status_snapshot, load_dashboard_settings(request))
+    status = await asyncio.to_thread(UNITY_STATUS.build_unity_status_snapshot, load_dashboard_settings(request))
     return {
         "ok": bool(status.get("connected")),
         "protocolVersion": "2026-07-28",
@@ -9409,7 +9407,7 @@ async def read_unity_instances(request: ConnectionRequest) -> dict[str, Any]:
 
 @app.post("/api/unity/tools")
 async def read_unity_tools(request: ConnectionRequest) -> dict[str, Any]:
-    status = await asyncio.to_thread(build_unity_status_snapshot, load_dashboard_settings(request))
+    status = await asyncio.to_thread(UNITY_STATUS.build_unity_status_snapshot, load_dashboard_settings(request))
     tools = status.get("tools") if isinstance(status.get("tools"), dict) else {}
     return {
         **tools,
@@ -14708,7 +14706,7 @@ async def status_monitor_loop() -> None:
     global LAST_STATUS_FINGERPRINT
 
     while True:
-        snapshot = await asyncio.to_thread(build_unity_status_snapshot)
+        snapshot = await asyncio.to_thread(UNITY_STATUS.build_unity_status_snapshot)
         fingerprint = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
         connected = bool(snapshot.get("connected"))
 
@@ -14774,24 +14772,6 @@ async def background_goal_monitor_loop() -> None:
         except Exception:  # noqa: BLE001 - Memory Review cannot interrupt Goal monitoring.
             emit_log("warn", "agent", "Memory Review monitor check had a bounded warning.", {"failureClass": "monitor"})
         await asyncio.sleep(30)
-
-
-def build_unity_status_snapshot(
-    settings: Settings | None = None,
-    project_root: Path | None = None,
-) -> dict[str, Any]:
-    return _UNITY_STATUS.build_unity_status_snapshot(settings, project_root)
-
-
-def build_vrcforge_mcp_core_unavailable_status(
-    project_root: Path | None,
-    error: str,
-) -> dict[str, Any]:
-    return _UNITY_STATUS.build_vrcforge_mcp_core_unavailable_status(project_root, error)
-
-
-def build_vrcforge_mcp_core_status(project_root: Path, settings: Settings) -> dict[str, Any]:
-    return _UNITY_STATUS.build_vrcforge_mcp_core_status(project_root, settings)
 
 
 def _repair_phase(phase_id: str, status: str, message: str, detail: Any = None) -> dict[str, Any]:
@@ -15230,7 +15210,7 @@ def wait_for_unity_tools_ready(
     deadline = time.monotonic() + max(1, wait_seconds)
     latest: dict[str, Any] = {}
     while time.monotonic() < deadline:
-        status = build_unity_status_snapshot(settings, project_root)
+        status = UNITY_STATUS.build_unity_status_snapshot(settings, project_root)
         latest = _unity_repair_status_summary(status, project_root)
         if unity_repair_tools_ready(latest):
             return True, latest
@@ -15238,7 +15218,7 @@ def wait_for_unity_tools_ready(
             time.sleep(min(poll_interval_seconds, max(0.0, deadline - time.monotonic())))
     if not latest:
         latest = _unity_repair_status_summary(
-            build_unity_status_snapshot(settings, project_root),
+            UNITY_STATUS.build_unity_status_snapshot(settings, project_root),
             project_root,
         )
     return False, latest
@@ -15444,7 +15424,7 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
         project_root = resolve_unity_mcp_repair_project(request.project_path)
         settings = load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
         if not vrcforge_mcp_core_installed(project_root):
-            before_status = build_vrcforge_mcp_core_unavailable_status(
+            before_status = UNITY_STATUS.build_vrcforge_mcp_core_unavailable_status(
                 project_root,
                 "The selected project does not contain the VRCForge MCP2 unitypackage.",
             )
@@ -15467,7 +15447,7 @@ def _repair_unity_mcp_bridge_sync_unlocked(request: UnityMcpRepairRequest, *, ge
                 "after": before,
             }
 
-        status = build_unity_status_snapshot(settings, project_root)
+        status = UNITY_STATUS.build_unity_status_snapshot(settings, project_root)
         summary = _unity_repair_status_summary(status, project_root)
         if unity_repair_tools_ready(summary):
             phases.append(_repair_phase("core_ready", "ok", "The project-scoped VRCForge MCP Core is reachable."))
@@ -15620,7 +15600,7 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
             {"corePath": str(selected_project / "Assets" / "VRCForge" / "Core" / "MCP")},
         )
 
-    unity_status = CURRENT_UNITY_STATUS or build_unity_status_snapshot(settings)
+    unity_status = CURRENT_UNITY_STATUS or UNITY_STATUS.build_unity_status_snapshot(settings)
     if unity_status.get("connected"):
         components["unityMcpBridgeReachable"] = health_component("ok", "Unity MCP bridge is reachable.", unity_status)
     else:
@@ -15680,7 +15660,7 @@ def build_bootstrap_payload() -> dict[str, Any]:
 
 def build_dashboard_socket_payload(include_secret: bool = False) -> dict[str, Any]:
     if CURRENT_UNITY_STATUS is None:
-        status = build_unity_status_snapshot()
+        status = UNITY_STATUS.build_unity_status_snapshot()
     else:
         status = CURRENT_UNITY_STATUS
     health = build_full_health_payload()
@@ -15895,7 +15875,7 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         if status is None:
             try:
                 settings = load_dashboard_settings(ConnectionRequest(settings_path=str(DASHBOARD_STATE.settings_path)))
-                status = build_unity_status_snapshot(settings)
+                status = UNITY_STATUS.build_unity_status_snapshot(settings)
             except Exception:  # noqa: BLE001
                 status = None
         for instance in (status or {}).get("instances") or []:
@@ -19338,13 +19318,13 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_unity_status",
         "Read Unity MCP bridge status.",
         "read/debug",
-        lambda params: build_unity_status_snapshot(load_dashboard_settings(build_agent_connection_request(params))),
+        lambda params: UNITY_STATUS.build_unity_status_snapshot(load_dashboard_settings(build_agent_connection_request(params))),
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_tools",
         "List Unity MCP tools visible to VRCForge.",
         "read/debug",
-        lambda params: build_unity_status_snapshot(
+        lambda params: UNITY_STATUS.build_unity_status_snapshot(
             load_dashboard_settings(build_agent_connection_request(params))
         ).get("tools", {}),
     )

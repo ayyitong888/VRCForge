@@ -395,7 +395,7 @@ class ContextCompactionRouteTests(unittest.TestCase):
             llm_model="deepseek-chat",
         )
         with patch(
-            "dashboard_server.build_unity_status_snapshot",
+            "unity_status_service.UnityStatusService.build_unity_status_snapshot",
             return_value={"connected": False, "error": "mocked"},
         ):
             with TestClient(dashboard_server.app) as client:

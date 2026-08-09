@@ -459,7 +459,7 @@ class DashboardServerTests(unittest.TestCase):
         dashboard_server.AGENT_GATEWAY.save_config(config)
         dashboard_server.AGENT_GATEWAY.desktop._desktop_bridges.clear()  # noqa: SLF001
         self.status_snapshot_patcher = patch(
-            "dashboard_server.build_unity_status_snapshot",
+            "unity_status_service.UnityStatusService.build_unity_status_snapshot",
             return_value={
                 "connected": False,
                 "host": "127.0.0.1",
@@ -1131,7 +1131,7 @@ class DashboardServerTests(unittest.TestCase):
 
         with (
             patch("dashboard_server.build_full_health_payload", side_effect=AssertionError("bootstrap waited for full health")),
-            patch("dashboard_server.build_unity_status_snapshot", side_effect=AssertionError("bootstrap waited for Unity diagnostics")),
+            patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", side_effect=AssertionError("bootstrap waited for Unity diagnostics")),
             patch("dashboard_server.status_monitor_loop", side_effect=idle_status_monitor),
         ):
             with TestClient(dashboard_server.app) as client:
@@ -1165,7 +1165,7 @@ class DashboardServerTests(unittest.TestCase):
         try:
             dashboard_server.CURRENT_UNITY_STATUS = {"connected": False}
             with (
-                patch("dashboard_server.build_unity_status_snapshot", return_value=snapshot) as mock_status,
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=snapshot) as mock_status,
                 patch("dashboard_server.status_monitor_loop", side_effect=idle_status_monitor),
                 patch("dashboard_server.bootstrap_project_snapshot_payload", side_effect=AssertionError("Unity refresh triggered project scan")),
             ):
@@ -4201,7 +4201,7 @@ class DashboardServerTests(unittest.TestCase):
 
             with (
                 patch(
-                    "dashboard_server.build_unity_status_snapshot",
+                    "unity_status_service.UnityStatusService.build_unity_status_snapshot",
                     return_value={"connected": False, "error": "Unity is closed."},
                 ),
                 patch("dashboard_server.repair_unity_mcp_bridge_sync") as legacy_repair,
@@ -4277,7 +4277,7 @@ class DashboardServerTests(unittest.TestCase):
                 with (
                     patch("unity_status_service.UnityMcpCoreClient", return_value=core_client),
                 ):
-                    status = dashboard_server.build_unity_status_snapshot(
+                    status = dashboard_server.UNITY_STATUS.build_unity_status_snapshot(
                         SimpleNamespace(unity_mcp_timeout_seconds=10),
                         project,
                     )
@@ -4317,7 +4317,7 @@ class DashboardServerTests(unittest.TestCase):
                 "error": "",
             }
             with (
-                patch("dashboard_server.build_unity_status_snapshot", return_value=healthy),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=healthy),
                 patch("dashboard_server.subprocess.Popen") as external_start,
                 patch("dashboard_server.launch_unity_project") as launch_unity,
             ):
@@ -11452,7 +11452,7 @@ class DashboardServerTests(unittest.TestCase):
             ]
             try:
                 with patch("unity_status_service.UnityMcpCoreClient", return_value=core_client) as mock_core:
-                    status = dashboard_server.build_unity_status_snapshot(
+                    status = dashboard_server.UNITY_STATUS.build_unity_status_snapshot(
                         SimpleNamespace(unity_mcp_timeout_seconds=5), project
                     )
             finally:
@@ -11547,7 +11547,7 @@ class DashboardServerTests(unittest.TestCase):
                 "error": "",
             }
             with (
-                patch("dashboard_server.build_unity_status_snapshot", return_value=healthy),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=healthy),
                 patch("dashboard_server.verify_unity_mcp_execution_connection", return_value=(True, {"tool": "vrc_check_roslyn_status"})),
                 patch("dashboard_server.subprocess.Popen") as mock_popen,
             ):
@@ -11590,7 +11590,7 @@ class DashboardServerTests(unittest.TestCase):
                 "error": "",
             }
             with (
-                patch("dashboard_server.build_unity_status_snapshot", return_value=healthy_other) as mock_status,
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=healthy_other) as mock_status,
                 patch("dashboard_server.recent_unity_mcp_execution_error", return_value={}),
                 patch("dashboard_server.ensure_unity_mcp_server_running", return_value=False),
                 patch("dashboard_server.verify_unity_mcp_execution_connection") as mock_probe,
@@ -11645,7 +11645,7 @@ class DashboardServerTests(unittest.TestCase):
                 "error": "",
             }
             with (
-                patch("dashboard_server.build_unity_status_snapshot", return_value=offline),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=offline),
                 patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
                 patch("dashboard_server.wait_for_unity_project_registration", return_value=(False, {"instances": []})),
                 patch(
@@ -11708,7 +11708,7 @@ class DashboardServerTests(unittest.TestCase):
                 "error": "",
             }
             with (
-                patch("dashboard_server.build_unity_status_snapshot", return_value=registered_without_tools),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=registered_without_tools),
                 patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
                 patch("dashboard_server.wait_for_unity_project_registration", return_value=(True, {"instances": [{"project": project.name}]})),
                 patch("dashboard_server.restart_unity_mcp_server", return_value=False),
@@ -11872,7 +11872,7 @@ namespace VRCForge.Editor
                 "error": "",
             }
             with (
-                patch("dashboard_server.build_unity_status_snapshot", return_value=registered_without_tools),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=registered_without_tools),
                 patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
                 patch("dashboard_server.wait_for_unity_project_registration", return_value=(True, {"instances": [{"project": project.name}]})),
                 patch("dashboard_server.wait_for_unity_tools_ready", side_effect=[(False, dashboard_server._unity_repair_status_summary(registered_without_tools)), (True, healthy_summary)]),
@@ -11942,7 +11942,7 @@ namespace VRCForge.Editor
                 "error": "",
             }
             with (
-                patch("dashboard_server.build_unity_status_snapshot", return_value=registered_without_tools),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=registered_without_tools),
                 patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
                 patch(
                     "dashboard_server.wait_for_unity_project_registration",
@@ -12006,7 +12006,7 @@ namespace VRCForge.Editor
                 "error": "",
             }
             with (
-                patch("dashboard_server.build_unity_status_snapshot", side_effect=[offline, healthy]),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", side_effect=[offline, healthy]),
                 patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
                 patch(
                     "dashboard_server.wait_for_unity_project_registration",
@@ -12096,7 +12096,7 @@ namespace VRCForge.Editor
 
             with (
                 patch("dashboard_server.load_dashboard_settings", return_value=settings),
-                patch("dashboard_server.build_unity_status_snapshot", side_effect=fake_status_snapshot),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", side_effect=fake_status_snapshot),
                 patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
                 patch(
                     "dashboard_server.wait_for_unity_project_registration",
@@ -12165,7 +12165,7 @@ namespace VRCForge.Editor
 
             with (
                 patch("dashboard_server.load_dashboard_settings", return_value=settings),
-                patch("dashboard_server.build_unity_status_snapshot", return_value=offline),
+                patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=offline),
                 patch("dashboard_server.ensure_unity_mcp_server_running", return_value=True),
                 patch(
                     "dashboard_server.wait_for_unity_project_registration",

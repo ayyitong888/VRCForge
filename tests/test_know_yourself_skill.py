@@ -740,7 +740,7 @@ def test_unity_status_requires_the_selected_project_core_contract(
     settings = SimpleNamespace(
         unity_mcp_timeout_seconds=5,
     )
-    status = dashboard_server.build_unity_status_snapshot(settings, project_a)
+    status = dashboard_server.UNITY_STATUS.build_unity_status_snapshot(settings, project_a)
 
     assert status["selectedInstanceMatched"] is False
     assert status["unityInstanceRegistered"] is False
@@ -791,7 +791,11 @@ def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(
             scoped.setattr(dashboard_server, "psutil", psutil_value)
             scoped.setattr(dashboard_server, "build_agent_connection_request", lambda _params: object())
             scoped.setattr(dashboard_server, "load_dashboard_settings", lambda _request: object())
-            scoped.setattr(dashboard_server, "build_unity_status_snapshot", lambda _settings: _unity())
+            scoped.setattr(
+                dashboard_server,
+                "UNITY_STATUS",
+                SimpleNamespace(build_unity_status_snapshot=lambda _settings: _unity()),
+            )
             scoped.setattr(
                 dashboard_server,
                 "DOCTOR_READINESS_REPORT",
@@ -858,7 +862,11 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
 
     monkeypatch.setattr(dashboard_server, "build_agent_connection_request", lambda _params: object())
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: object())
-    monkeypatch.setattr(dashboard_server, "build_unity_status_snapshot", lambda _settings: _unity())
+    monkeypatch.setattr(
+        dashboard_server,
+        "UNITY_STATUS",
+        SimpleNamespace(build_unity_status_snapshot=lambda _settings: _unity()),
+    )
     monkeypatch.setattr(
         dashboard_server,
         "DOCTOR_READINESS_REPORT",

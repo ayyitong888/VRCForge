@@ -166,26 +166,6 @@
       ]
     },
     {
-      "id": "dashboard.unity-status-root-facades",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "_UNITY_STATUS"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "build_unity_status_snapshot",
-            "build_vrcforge_mcp_core_unavailable_status",
-            "build_vrcforge_mcp_core_status"
-          ]
-        }
-      ],
-      "markers": [
-        {"source": "dashboard_server.py", "text": "# STOPGAP: Migration-only owner for the three root compatibility facades below."}
-      ]
-    },
-    {
       "id": "dashboard.sub-agent-collaboration-root-owner",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "_SUB_AGENT_COLLABORATION"}

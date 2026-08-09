@@ -31,7 +31,7 @@ def make_service(*, selected_project: str = "", core_installed=lambda _project: 
     )
 
 
-def test_unity_status_service_has_explicit_read_only_ports_and_narrow_root_facades() -> None:
+def test_unity_status_service_has_explicit_read_only_ports_and_no_root_facades() -> None:
     service_source = (ROOT / "unity_status_service.py").read_text(encoding="utf-8")
     dashboard_source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
     service = next(node for node in ast.parse(service_source).body if isinstance(node, ast.ClassDef) and node.name == "UnityStatusService")
@@ -46,19 +46,26 @@ def test_unity_status_service_has_explicit_read_only_ports_and_narrow_root_facad
     assert "Lock(" not in service_source
 
     tree = ast.parse(dashboard_source)
-    expected_calls = {
-        "build_unity_status_snapshot": "build_unity_status_snapshot",
-        "build_vrcforge_mcp_core_unavailable_status": "build_vrcforge_mcp_core_unavailable_status",
-        "build_vrcforge_mcp_core_status": "build_vrcforge_mcp_core_status",
-    }
-    for name, method_name in expected_calls.items():
-        facade = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
-        assert len(facade.body) == 1
-        returned = facade.body[0]
-        assert isinstance(returned, ast.Return)
-        assert isinstance(returned.value, ast.Call)
-        assert isinstance(returned.value.func, ast.Attribute)
-        assert returned.value.func.attr == method_name
+    assert not any(
+        isinstance(node, ast.FunctionDef) and node.name in METHODS
+        for node in tree.body
+    )
+    assert not any(
+        (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "_UNITY_STATUS"
+                for target in node.targets
+            )
+        )
+        or (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_UNITY_STATUS"
+        )
+        for node in tree.body
+    )
+    assert "STOPGAP: Migration-only owner for the three root compatibility facades below." not in dashboard_source
 
 
 def test_unity_status_service_projects_existing_core_schema_with_fake_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -159,5 +166,5 @@ def test_unity_status_service_preserves_core_error_and_missing_project_contract(
 
 
 def test_dashboard_unity_status_service_is_constructed_with_frozen_ports() -> None:
-    assert isinstance(dashboard_server._UNITY_STATUS, UnityStatusService)
-    assert dashboard_server._UNITY_STATUS._ports.required_tools == tuple(dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS)
+    assert isinstance(dashboard_server.UNITY_STATUS, UnityStatusService)
+    assert dashboard_server.UNITY_STATUS._ports.required_tools == tuple(dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS)
