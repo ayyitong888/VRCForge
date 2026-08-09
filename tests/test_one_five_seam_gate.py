@@ -172,35 +172,6 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         if group_id.startswith("dashboard.") and group.get("hostProxy")
     )
     assert dashboard_host_proxy_count == 0
-    assert {
-        item["name"]
-        for item in groups["dashboard.wardrobe-outfit-root-owners"]["rootSymbols"]
-    } == {
-        "WARDROBE_ARTIFACT_READ",
-        "CLOTHING_FX_READ",
-        "CLOTHING_FX_APPROVED_WRITE",
-        "SETUP_OUTFIT_PREVIEW",
-        "SETUP_OUTFIT_APPROVED_WRITE",
-        "ADD_WARDROBE_OUTFIT_PREVIEW",
-        "ADD_WARDROBE_OUTFIT_APPROVED_WRITE",
-        "ADD_OUTFIT_PART_PREVIEW",
-        "ADD_OUTFIT_PART_APPROVED_WRITE",
-        "ADD_MODULAR_AVATAR_COMPONENT_PREVIEW",
-        "ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE",
-        "MANAGE_WARDROBE_PREVIEW",
-        "MANAGE_WARDROBE_APPROVED_WRITE",
-        "CREATE_WARDROBE_PREVIEW",
-        "CREATE_WARDROBE_APPROVED_WRITE",
-        "PREPARED_ADD_OUTFIT_STATE",
-        "PREPARED_ADD_OUTFIT_PREVIEW",
-        "PREPARED_ADD_OUTFIT_PREPARER",
-        "PREPARED_ADD_OUTFIT_APPROVED_WRITE",
-        "PREPARED_OUTFIT_IMPORT_PREPARER",
-        "PREPARED_OUTFIT_IMPORT_APPROVED_WRITE",
-        "WARDROBE_OUTFIT_WORKFLOWS",
-        "WARDROBE_OUTFIT_APPROVED_WRITES",
-    }
-    assert groups["dashboard.wardrobe-outfit-root-owners"]["facades"] == []
     assert len(groups["gateway.approval-transaction-host-proxy"]["facades"][0]["methods"]) == 41
     assert len(groups["gateway.checkpoint-recovery-host-proxy"]["facades"][0]["methods"]) == 87
     assert "gateway.skill-registry-host-proxy" not in groups
@@ -225,6 +196,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.skill-package-governance-typed-root-owner" not in groups
     assert "dashboard.path-to-skill-typed-root-owners" not in groups
     assert "dashboard.project-catalog-typed-root-owner" not in groups
+    assert "dashboard.wardrobe-outfit-root-owners" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
     assert {item["id"] for item in manifest["publicApiAllowlist"]["contracts"]} == {
         "fastapi-route-request-response-openapi",

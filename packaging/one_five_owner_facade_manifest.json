@@ -61,35 +61,6 @@
   },
   "seamGroups": [
     {
-      "id": "dashboard.wardrobe-outfit-root-owners",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "SETUP_OUTFIT_PREVIEW"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "SETUP_OUTFIT_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "ADD_WARDROBE_OUTFIT_PREVIEW"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "ADD_WARDROBE_OUTFIT_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "ADD_OUTFIT_PART_PREVIEW"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "ADD_OUTFIT_PART_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "ADD_MODULAR_AVATAR_COMPONENT_PREVIEW"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "ADD_MODULAR_AVATAR_COMPONENT_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "MANAGE_WARDROBE_PREVIEW"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "MANAGE_WARDROBE_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "CREATE_WARDROBE_PREVIEW"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "CREATE_WARDROBE_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PREPARED_ADD_OUTFIT_STATE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PREPARED_ADD_OUTFIT_PREVIEW"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PREPARED_ADD_OUTFIT_PREPARER"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PREPARED_ADD_OUTFIT_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PREPARED_OUTFIT_IMPORT_PREPARER"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PREPARED_OUTFIT_IMPORT_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_ARTIFACT_READ"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "CLOTHING_FX_READ"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "CLOTHING_FX_APPROVED_WRITE"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_OUTFIT_WORKFLOWS"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "WARDROBE_OUTFIT_APPROVED_WRITES"}
-      ],
-      "facades": []
-    },
-    {
       "id": "dashboard.package-install-typed-root-owners",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_MANAGER_DISCOVERY"},
