@@ -127,16 +127,19 @@ Use a disposable install directory for smoke so an existing user install is not
 overwritten:
 
 ```powershell
+$smokeId = [guid]::NewGuid().ToString("N")
 python scripts\smoke_installer_install_uninstall.py `
   --installer dist\release\VRCForge_Offline_Installer_x64.exe `
-  --install-dir "$env:ProgramFiles\VRCForge-Smoke" `
+  --smoke-id $smokeId `
+  --install-dir "$env:ProgramFiles\VRCForge-Smoke-$smokeId" `
+  --user-data-root "$env:LOCALAPPDATA\VRCForge\installer-smoke\$smokeId" `
   --backend-port 8791
 ```
 
-The script defaults to `%ProgramFiles%\VRCForge`,
-`%LOCALAPPDATA%\VRCForge\agentic-app`, and
-`artifacts\installer-smoke`, but all three can be overridden with
-`--install-dir`, `--user-data-root`, and `--artifacts-dir`.
+The smoke requires the exact generated identity in both the disposable
+Program Files leaf and the isolated user-data root. This prevents the test from
+overwriting or uninstalling a real VRCForge installation. Reports default to
+`artifacts\installer-smoke`; use `--artifacts-dir` only to relocate evidence.
 
 Manual Unity package fallback smoke should import `VRCForge.unitypackage` into a
 fresh Unity 2022.3 project and verify zero compiler errors, protocol

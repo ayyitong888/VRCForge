@@ -199,6 +199,15 @@ def test_smoke_flavor_is_compile_time_scoped_and_cannot_enter_release_build() ->
     assert '$smokeId -cnotmatch "^[a-f0-9]{32}$"' in validator
 
 
+def test_installer_smoke_documentation_uses_the_exact_isolated_identity() -> None:
+    source = (REPO_ROOT / "packaging" / "README.md").read_text(encoding="utf-8")
+
+    assert '$smokeId = [guid]::NewGuid().ToString("N")' in source
+    assert "--smoke-id $smokeId" in source
+    assert '--install-dir "$env:ProgramFiles\\VRCForge-Smoke-$smokeId"' in source
+    assert '--user-data-root "$env:LOCALAPPDATA\\VRCForge\\installer-smoke\\$smokeId"' in source
+
+
 def test_payload_helper_accepts_only_the_exact_compiled_scope_identity() -> None:
     source = (REPO_ROOT / "installer" / "VRCForge_WebPayload.ps1").read_text(encoding="utf-8")
 
