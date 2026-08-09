@@ -223,7 +223,12 @@ def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously()
     skills = _read("src/hooks/use-skills-workspace-controller.ts")
     commands = _read("src-tauri/src/commands.rs")
 
-    assert "{ ...options, deferAgentCatalog: true }" in app
+    startup_refresh = app[
+        app.index("async function refreshStartupWithMetrics") : app.index("function resolveBackendReady")
+    ]
+    assert "await refreshWithRetry(target);" in startup_refresh
+    assert "refreshWithRetry(target, options)" not in startup_refresh
+    assert "void refreshProjectList(target, { allowDuringStartup: true });" in startup_refresh
     assert 'fetchBootstrap(target, { deferAgentCatalog: true })' in app
     assert "bootstrap?.agentManifest?.skills ?? []" in app
     assert "const bootstrapRequestSequenceRef = useRef(0)" in app
@@ -258,6 +263,11 @@ def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously()
     assert "skillRegistryRequestGateRef.current.isCurrent" in skills
     assert "skillRegistryRequestGateRef.current.endForeground" in skills
     assert "bootstrap.approvalsState?.ok !== false" in app
+    project_refresh = app[
+        app.index("async function refreshProjectList") : app.index("async function refreshWithRetry")
+    ]
+    assert "projectRefreshInFlightRef.current" in project_refresh
+    assert "!options.allowDuringStartup" in project_refresh
 
 
 def test_native_setup_starts_the_owned_backend_before_webview_hydration() -> None:

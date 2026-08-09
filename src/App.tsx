@@ -339,6 +339,7 @@ export default function App() {
     }>
   >([]);
   const healthRefreshInFlightRef = useRef(false);
+  const projectRefreshInFlightRef = useRef(false);
   const bootstrapRequestSequenceRef = useRef(0);
   const bootstrapForegroundRequestRef = useRef(0);
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
@@ -1706,10 +1707,13 @@ export default function App() {
   async function refreshStartupWithMetrics(target: string, options: { refreshProjects?: boolean } = {}) {
     const startedAt = performance.now();
     try {
-      await refreshWithRetry(target, options);
+      await refreshWithRetry(target);
     } finally {
       const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
       metrics.bootstrapRefreshMs ??= Math.round(performance.now() - startedAt);
+    }
+    if (options.refreshProjects) {
+      void refreshProjectList(target, { allowDuringStartup: true });
     }
   }
 
@@ -1922,10 +1926,14 @@ export default function App() {
     }
   }
 
-  async function refreshProjectList(target = endpoint) {
-    if (!runtimeConnected || loadingProjects) {
+  async function refreshProjectList(
+    target = endpoint,
+    options: { allowDuringStartup?: boolean } = {},
+  ) {
+    if ((!runtimeConnected && !options.allowDuringStartup) || projectRefreshInFlightRef.current) {
       return;
     }
+    projectRefreshInFlightRef.current = true;
     setLoadingProjects(true);
     try {
       const projectsPayload = await refreshProjects(target);
@@ -1944,6 +1952,7 @@ export default function App() {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      projectRefreshInFlightRef.current = false;
       setLoadingProjects(false);
     }
   }
