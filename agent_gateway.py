@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import hashlib
 import hmac
 import json
@@ -35,6 +36,7 @@ from agent_shell_service import (
     ShellProcessPorts,
     summarize_shell_result as summarize_owned_shell_result,
 )
+from agent_shell_process_supervisor import ShellSessionPorts
 
 if TYPE_CHECKING:
     from agent_approval_transactions import AgentApprovalTransactionService
@@ -311,6 +313,7 @@ WRAPPER_ONLY_WRITE_TARGETS = {
     "vrcforge_configure_optimizer_component",
     "vrcforge_install_vpm_package",
     "vrcforge_repair_project_chat_store",
+    "vrcforge_shell_execute",
 }
 SCOPED_ALLOW_RULE_FORBIDDEN_TOKENS = (
     "delete",
@@ -1483,18 +1486,19 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
     {
         "name": "shell-debug-loop",
         "title": "Shell Debug Loop",
-        "description": "Classify shell commands, run low-risk commands, and queue high-risk commands for approval.",
+        "description": "Run host shell commands and supervise Unity-project writes through approval and rollback.",
         "category": "debug",
-        "permissionMode": "approval_required",
+        "permissionMode": "unity_project_writes_approval",
         "riskLevel": "high",
         "whenToUse": "shell command, terminal debug, file inspection, approved command execution",
         "inputs": ["Command, workspace root, cwd, and approval id."],
         "outputs": ["Risk classification, shell output, or pending approval."],
-        "sideEffects": "low-risk reads may run directly; high-risk commands require approval",
-        "backupRestore": "caller must back up before write commands",
+        "sideEffects": "host commands run directly; possible Unity-project writes require approval",
+        "backupRestore": "Unity-project writes use the existing checkpoint and rollback transaction",
         "allowedTools": [
             "vrcforge_classify_shell",
             "vrcforge_execute_shell",
+            "vrcforge_shell_process",
             "vrcforge_execute_approved_shell",
             "vrcforge_shell_execute",
         ],
@@ -1695,6 +1699,7 @@ class AgentGateway:
         desktop_actions_changed: Callable[[], None] | None = None,
         desktop_controller_factory: Callable[[Path], Any] | None = None,
         shell_process_ports: ShellProcessPorts | None = None,
+        shell_session_ports: ShellSessionPorts | None = None,
         skill_package_write_lock: AbstractContextManager[object] | None = None,
         background_activity_started: Callable[[str], Any] | None = None,
     ) -> None:
@@ -1707,6 +1712,14 @@ class AgentGateway:
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self._lock = threading.RLock()
+        self._tool_agent_context: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "vrcforge_tool_agent",
+            default="",
+        )
+        self._tool_owner_context: contextvars.ContextVar[str] = contextvars.ContextVar(
+            "vrcforge_tool_owner",
+            default="",
+        )
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock)
         )
@@ -1963,6 +1976,40 @@ class AgentGateway:
             app_dir = os.environ.get("VRCFORGE_APP_DIR", "").strip()
             return Path(app_dir).resolve() if app_dir else Path.cwd().resolve()
 
+        def shell_session_finished(event: dict[str, Any]) -> None:
+            safe_event = {
+                "event": "shell_process_finished",
+                "shellSessionId": str(event.get("shellSessionId") or ""),
+                "status": str(event.get("status") or "unknown"),
+                "exitCode": event.get("exitCode"),
+                "timedOut": bool(event.get("timedOut")),
+                "cancelled": bool(event.get("cancelled")),
+                "terminationFailed": bool(event.get("terminationFailed")),
+            }
+            self.append_audit(safe_event)
+            runtime_session_id = str(event.get("runtimeSessionId") or "")
+            turn_id = str(event.get("turnId") or "")
+            client_turn_id = str(event.get("clientTurnId") or "")
+            if not (runtime_session_id or turn_id or client_turn_id):
+                return
+            status = (
+                "cancelled"
+                if safe_event["cancelled"]
+                else "completed"
+                if safe_event["status"] == "finished" and safe_event["exitCode"] == 0
+                else "failed"
+            )
+            self._runtime_run_ledger.append(
+                {
+                    **safe_event,
+                    "event": "runtime_shell_process_finished",
+                    "status": status,
+                    "sessionId": runtime_session_id,
+                    "turnId": turn_id,
+                    "clientTurnId": client_turn_id,
+                }
+            )
+
         # The service owns every child process for the gateway lifetime. Its
         # authority is limited to the caller-supplied cwd, approval identity is
         # still owned by the approval transaction service, and Dashboard owns
@@ -1991,9 +2038,12 @@ class AgentGateway:
                     )
                 ),
                 default_workspace_root=default_shell_workspace_root,
+                is_unity_project_root=self._is_unity_project_root,
                 error_factory=lambda detail, status: AgentGatewayError(detail, status_code=status),
+                session_finished=shell_session_finished,
             ),
             process_ports=shell_process_ports,
+            session_ports=shell_session_ports,
         )
         from agent_skill_registry import (
             AgentSkillRegistryPorts,
@@ -2080,6 +2130,20 @@ class AgentGateway:
                 controller_factory=desktop_controller_factory,
             ),
         )
+        def invoke_runtime_tool(
+            tool: AgentTool,
+            tool_params: dict[str, Any],
+            tool_agent_name: str,
+            tool_owner_id: str,
+        ) -> Any:
+            agent_token = self._tool_agent_context.set(tool_agent_name)
+            owner_token = self._tool_owner_context.set(tool_owner_id)
+            try:
+                return tool.handler(tool_params)
+            finally:
+                self._tool_owner_context.reset(owner_token)
+                self._tool_agent_context.reset(agent_token)
+
         self._runtime_skill_executor = AgentRuntimeSkillExecutor(
             AgentRuntimeSkillExecutorPorts(
                 ensure_config=self.ensure_config,
@@ -2097,8 +2161,10 @@ class AgentGateway:
                 summarize_params=summarize_params,
                 ensure_string_list=ensure_string_list,
                 build_runtime_skill_payload=build_runtime_skill_payload,
+                invoke_tool=invoke_runtime_tool,
                 blocked_skills=frozenset(RUNTIME_BLOCKED_SKILLS),
                 direct_categories=frozenset(RUNTIME_DIRECT_SKILL_CATEGORIES),
+                direct_write_tools=frozenset({"vrcforge_shell_process"}),
             )
         )
 
@@ -2109,6 +2175,46 @@ class AgentGateway:
     @property
     def shell(self) -> AgentShellService:
         return self._shell
+
+    @staticmethod
+    def _runtime_shell_owner(turn_id: str, client_turn_id: str, session_id: str) -> str:
+        scope = session_id or client_turn_id or turn_id or "runtime"
+        origin = turn_id or (f"client:{client_turn_id}" if client_turn_id else "session")
+        scope_bytes = json.dumps(scope, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        origin_bytes = json.dumps(origin, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        scope_digest = hashlib.sha256(scope_bytes).hexdigest()
+        origin_digest = hashlib.sha256(origin_bytes).hexdigest()
+        return f"runtime-session:{scope_digest}|origin:{origin_digest}"
+
+    def execute_shell_tool(self, params: dict[str, Any]) -> dict[str, Any]:
+        agent_name = self._tool_agent_context.get() or "external-agent"
+        owner_id = self._tool_owner_context.get() or f"agent:{agent_name}"
+        trusted = dict(params or {})
+        for key in (
+            "agent_name", "agentName", "agent_id", "agentId",
+            "runtime_session_id", "runtimeSessionId", "owner_session_id", "ownerSessionId",
+            "_trusted_owner_id", "_trustedOwnerId",
+        ):
+            trusted.pop(key, None)
+        trusted["_trusted_owner_id"] = owner_id
+        classification = self.shell.classify(trusted)
+        if classification.get("protectionScope") == "host" and classification.get("risk") == "low":
+            trusted.setdefault("yieldMs", 10_000)
+            trusted.setdefault("timeout", 30 * 60)
+        return self.shell.execute(trusted, agent_name=agent_name)
+
+    def control_shell_tool(self, params: dict[str, Any]) -> dict[str, Any]:
+        agent_name = self._tool_agent_context.get() or "external-agent"
+        owner_id = self._tool_owner_context.get() or f"agent:{agent_name}"
+        trusted = dict(params or {})
+        for key in (
+            "agent_name", "agentName", "agent_id", "agentId",
+            "runtime_session_id", "runtimeSessionId", "owner_session_id", "ownerSessionId",
+            "_trusted_owner_id", "_trustedOwnerId",
+        ):
+            trusted.pop(key, None)
+        trusted["_trusted_owner_id"] = owner_id
+        return self.shell.process(trusted, agent_name=agent_name)
 
     @property
     def skills(self) -> AgentSkillRegistryService:
@@ -2518,7 +2624,13 @@ class AgentGateway:
         core_call_audits: list[dict[str, Any]] = []
         try:
             with capture_unity_mcp_core_call_audits() as core_call_audits:
-                result = tool.handler(tool_params)
+                agent_token = self._tool_agent_context.set(agent_name)
+                owner_token = self._tool_owner_context.set(f"agent:{agent_name}")
+                try:
+                    result = tool.handler(tool_params)
+                finally:
+                    self._tool_owner_context.reset(owner_token)
+                    self._tool_agent_context.reset(agent_token)
             duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
             result_summary = summarize_params(result if isinstance(result, dict) else {"result": result})
             request_trace = (
@@ -2819,6 +2931,7 @@ class AgentGateway:
                 "vrcforge_agent_desktop_action",
                 bootstrap_params,
                 agent_name,
+                owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
             )
             tool_calls_used += 1
             skill_payload = bootstrap_payload
@@ -2966,10 +3079,14 @@ class AgentGateway:
             command = param_command if step_index == 0 else ""
             if not command:
                 command = str(plan.get("shellCommand") or "").strip()
+            shell_step_params = ensure_dict(plan.get("shellParams"))
 
             if command:
                 action_kind = "shell"
-                action_key = ("shell", command)
+                action_key = (
+                    "shell",
+                    command + "::" + json.dumps(shell_step_params, ensure_ascii=False, sort_keys=True, default=str),
+                )
             elif plan.get("writeNeeded") and plan.get("writeTool"):
                 action_kind = "write"
                 action_key = (
@@ -3009,28 +3126,64 @@ class AgentGateway:
             tool_calls_used += 1
             if action_kind == "shell":
                 step_tool = "shell"
+                shell_workspace_root = (
+                    params.get("workspace_root")
+                    or params.get("workspaceRoot")
+                    or project_root
+                )
+                explicit_shell_location = bool(
+                    shell_step_params.get("cwd")
+                    or params.get("cwd")
+                    or params.get("workspace_root")
+                    or params.get("workspaceRoot")
+                )
+                if not project_root:
+                    # Projectless chat uses the full host Shell lane. Give
+                    # ordinary commands a bounded foreground window, then
+                    # return a controllable session instead of blocking the
+                    # conversation for the entire command lifetime.
+                    shell_step_params.setdefault("yieldMs", 10_000)
+                    shell_step_params.setdefault("timeout", 30 * 60)
                 step_payload = self.shell.execute(
                     {
+                        **shell_step_params,
                         "command": command,
-                        "cwd": params.get("cwd"),
-                        "workspace_root": params.get("workspace_root") or params.get("workspaceRoot"),
+                        "cwd": shell_step_params.get("cwd") or params.get("cwd") or project_root,
+                        "workspace_root": shell_workspace_root,
+                        "projectRoot": project_root,
                         "session_id": session_id,
                         "turn_id": turn_id,
                         "client_turn_id": client_turn_id,
+                        "_trusted_owner_id": self._runtime_shell_owner(
+                            turn_id,
+                            client_turn_id,
+                            session_id,
+                        ),
                         "goalDeliveryId": goal_delivery_id,
                         "reason": plan.get("summary") or "Agent shell step",
                     },
                     agent_name=agent_name,
                 )
+                # Runtime turns already have a trusted per-turn owner. The
+                # external control capability is unnecessary here and must
+                # not enter model context or durable chat/run projections.
+                step_payload.pop("controlToken", None)
                 shell_payload = step_payload
+                shell_observation = (
+                    summarize_owned_shell_result(step_payload.get("result"))
+                    if step_payload.get("result")
+                    else {
+                        "status": step_payload.get("status"),
+                        "sessionId": step_payload.get("sessionId"),
+                        "session": ensure_dict(step_payload.get("session")),
+                    }
+                )
                 loop_state.append(
                     {
                         "tool": "shell",
                         "kind": "shell",
                         "status": step_payload.get("status"),
-                        "result": summarize_owned_shell_result(step_payload.get("result"))
-                        if step_payload.get("result")
-                        else None,
+                        "result": shell_observation,
                     }
                 )
             elif action_kind == "write":
@@ -3059,6 +3212,12 @@ class AgentGateway:
                         step_params.setdefault("goalDeliveryId", goal_delivery_id)
                     if project_root:
                         step_params.setdefault("projectRoot", project_root)
+                if step_tool == "vrcforge_shell_process":
+                    step_params["_trusted_owner_id"] = self._runtime_shell_owner(
+                        turn_id,
+                        client_turn_id,
+                        session_id,
+                    )
                 if step_tool == "vrcforge_agent_desktop_action":
                     step_params.setdefault("clientTurnId", client_turn_id)
                 if step_tool in {
@@ -3068,7 +3227,10 @@ class AgentGateway:
                 }:
                     step_params.setdefault("exposureLayer", runtime_exposure_layer)
                 step_payload = self._runtime_skill_executor.execute(
-                    step_tool, step_params, agent_name
+                    step_tool,
+                    step_params,
+                    agent_name,
+                    owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
                 )
                 skill_payload = step_payload
                 loop_step = {
@@ -3114,8 +3276,9 @@ class AgentGateway:
                 if action_kind == "shell":
                     failure_arguments: Any = {
                         "command": command,
-                        "cwd": params.get("cwd"),
+                        "cwd": shell_step_params.get("cwd") or params.get("cwd"),
                         "workspaceRoot": params.get("workspace_root") or params.get("workspaceRoot"),
+                        "shellParams": shell_step_params,
                     }
                 elif action_kind == "write":
                     failure_arguments = ensure_dict(plan.get("writeParams"))
@@ -3477,17 +3640,51 @@ class AgentGateway:
             "reason": reason,
         }
         cancelled_desktop_action_ids: list[str] = []
+        cancelled_shell_session_ids: list[str] = []
+        resolved_turn_id = turn_id
         resolved_client_turn_id = client_turn_id
-        if turn_id and not resolved_client_turn_id:
+        matching_run = None
+        if turn_id or client_turn_id:
             matching_run = next(
                 (
                     run
                     for run in self._runtime_run_ledger.list_runs(limit=200).get("runs", [])
-                    if str(run.get("turnId") or "") == turn_id
+                    if (
+                        turn_id
+                        and str(run.get("turnId") or "") == turn_id
+                    )
+                    or (
+                        client_turn_id
+                        and str(run.get("clientTurnId") or "") == client_turn_id
+                    )
                 ),
                 None,
             )
+        if not resolved_turn_id:
+            resolved_turn_id = str((matching_run or {}).get("turnId") or "")
+        if resolved_turn_id and not resolved_client_turn_id:
             resolved_client_turn_id = str((matching_run or {}).get("clientTurnId") or "")
+        resolved_session_id = session_id or str((matching_run or {}).get("sessionId") or "")
+        shell_owner_ids: set[str] = set()
+        if resolved_turn_id:
+            shell_owner_ids.add(
+                self._runtime_shell_owner(resolved_turn_id, resolved_client_turn_id, resolved_session_id)
+            )
+        elif resolved_client_turn_id:
+            shell_owner_ids.add(self._runtime_shell_owner("", resolved_client_turn_id, resolved_session_id))
+        elif resolved_session_id:
+            shell_owner_ids.add(resolved_session_id)
+            shell_owner_ids.add(self._runtime_shell_owner("", "", resolved_session_id))
+            for run in self._runtime_run_ledger.list_runs(limit=200).get("runs", []):
+                if str(run.get("sessionId") or "") != resolved_session_id:
+                    continue
+                run_turn_id = str(run.get("turnId") or "")
+                run_client_turn_id = str(run.get("clientTurnId") or "")
+                shell_owner_ids.add(
+                    self._runtime_shell_owner(run_turn_id, run_client_turn_id, resolved_session_id)
+                )
+        for shell_owner_id in shell_owner_ids:
+            cancelled_shell_session_ids.extend(self.shell.cancel_owner(shell_owner_id))
         for action in self._desktop.list_active_desktop_actions(limit=32).get("actions", []):
             action_id = str(action.get("actionId") or "")
             same_turn = bool(
@@ -3508,12 +3705,15 @@ class AgentGateway:
                 continue
         if cancelled_desktop_action_ids:
             event["cancelledDesktopActionIds"] = cancelled_desktop_action_ids
+        if cancelled_shell_session_ids:
+            event["cancelledShellSessionIds"] = cancelled_shell_session_ids
         self._runtime_run_ledger.append(event)
         return {
             "ok": True,
             "status": "cancel_requested",
             "event": event,
             "cancelledDesktopActionIds": cancelled_desktop_action_ids,
+            "cancelledShellSessionIds": cancelled_shell_session_ids,
         }
 
     @staticmethod
@@ -5236,6 +5436,8 @@ def summarize_params(value: Any) -> dict[str, Any]:
                 "apikey",
                 "access_token",
                 "approval_token",
+                "control_token",
+                "controltoken",
                 "refresh_token",
                 "secret",
                 "user_constraints",
@@ -5259,6 +5461,8 @@ def summarize_value(key: Any, value: Any) -> Any:
         "apikey",
         "access_token",
         "approval_token",
+        "control_token",
+        "controltoken",
         "refresh_token",
         "secret",
     }:
@@ -5298,6 +5502,8 @@ def redact_sensitive(value: Any) -> Any:
                 "apikey",
                 "access_token",
                 "approval_token",
+                "control_token",
+                "controltoken",
                 "refresh_token",
                 "secret",
                 "user_constraints",
@@ -5326,6 +5532,8 @@ _BACKGROUND_GOAL_SECRET_FIELDS = {
     "apikey",
     "access_token",
     "approval_token",
+    "control_token",
+    "controltoken",
     "refresh_token",
     "secret",
     "user_constraints",

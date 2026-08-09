@@ -432,6 +432,7 @@ from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION as RUNTIME_PLANNER_EXECUTION_LAYER,
     PlannerCatalogSnapshot,
     PlannerModelResult,
+    PlannerProviderNotConfiguredError,
     PlannerSkill,
     PlannerTool,
     PlannerTurnMetadata,
@@ -13300,7 +13301,7 @@ class _RuntimePlannerModel:
     def plan(self, prompt: str) -> PlannerModelResult:
         config = self._turn.current_config()
         if provider_requires_api_key(config.provider) and not config.api_key:
-            raise RuntimeError("LLM API key is not configured; planner falls back to deterministic-local.")
+            raise PlannerProviderNotConfiguredError("LLM API key is not configured.")
         planner_label = " · ".join(
             part
             for part in (provider_display_name(config.provider), str(config.model or "").strip())
@@ -19351,9 +19352,10 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_progress_update", "Update one visible agent progress item title, summary, order, or status.", "plan/preview", lambda params: AGENT_GATEWAY.update_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_progress_delete", "Delete one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.delete_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_ask_user", "Ask the user a short question with selectable options while the agent task continues.", "plan/preview", lambda params: AGENT_GATEWAY.questions.create(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "Classify a shell command before execution.", "read/debug", AGENT_GATEWAY.shell.classify)
-    AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.shell.execute(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
-    AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.shell.execute_approved, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "When to use: inspect how a proposed local Shell command will be routed before execution. When NOT to use: do not use it as proof that a command ran or that a write completed.", "read/debug", AGENT_GATEWAY.shell.classify)
+    AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "When to use: run a local host command, script, or bounded background/interactive process; possible Unity-project writes enter the selected permission mode and retain checkpoint/rollback protection. When NOT to use: do not use it for an already-started session or to bypass a dedicated VRCForge Unity tool.", "supervised-write", AGENT_GATEWAY.execute_shell_tool, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_shell_process", "When to use: list, poll, read logs from, write to, send keys to, submit or paste into, kill, clear, or remove a Shell process that this agent already started; pass the returned sessionId and controlToken for external-agent sessions. When NOT to use: do not use it to start a new command, modify Unity assets through process input, or control another agent or turn's session.", "supervised-write", AGENT_GATEWAY.control_shell_tool, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "When to use: apply the exact stored payload of a Shell approval through its checkpoint transaction. When NOT to use: do not call it with a new command or without the approval owner flow.", "supervised-write", AGENT_GATEWAY.shell.execute_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda params: AGENT_GATEWAY.build_manifest(normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda params: AGENT_GATEWAY.skills.check_skill_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", lambda params: AGENT_GATEWAY.build_tool_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
@@ -21088,6 +21090,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             start_runtime=False,
             cleanup_user_data=False,
             cleanup_user_data_root="",
+            shell_pty_worker=False,
             cli_args=raw_args[cli_index + 1 :],
         )
     parser = argparse.ArgumentParser(description="Launch the VRChat Blendshape control dashboard.")
@@ -21101,6 +21104,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cli", action="store_true", help="Run the VRCForge CLI against the local desktop runtime.")
     parser.add_argument("--cleanup-user-data", action="store_true", help="Installer helper: remove VRCForge user data and known project chat transcripts.")
     parser.add_argument("--cleanup-user-data-root", default="", help="Installer helper override for the VRCForge user data root.")
+    parser.add_argument("--shell-pty-worker", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args(raw_args)
 
 
@@ -21204,6 +21208,10 @@ def backend_bind_target_occupied(host: str, port: int) -> bool:
 
 def main() -> int:
     args = parse_args()
+    if args.shell_pty_worker:
+        from agent_shell_pty_worker import run_worker
+
+        return run_worker()
     if args.cli:
         from tools.vrcforge_cli import main as cli_main
 

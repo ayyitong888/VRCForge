@@ -312,6 +312,16 @@ def test_backend_packaging_collects_skill_registry_service() -> None:
     assert "--hidden-import agent_skill_registry" in source
 
 
+def test_backend_packaging_collects_and_verifies_winpty_runtime_files() -> None:
+    source = (REPO_ROOT / "packaging" / "build_backend.ps1").read_text(encoding="utf-8")
+
+    assert "--hidden-import winpty" in source
+    assert "--collect-data winpty" in source
+    assert '"_internal\\winpty\\OpenConsole.exe"' in source
+    assert '"_internal\\winpty\\winpty-agent.exe"' in source
+    assert "PyInstaller did not collect required PTY runtime file" in source
+
+
 def test_publish_path_only_accepts_strict_release_policy() -> None:
     source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
 

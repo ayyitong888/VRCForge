@@ -12,6 +12,10 @@ Source/debug users can install the Python packages from the repository root. Nor
 python -m pip install -r requirements.txt
 ```
 
+`pywinpty` supplies the native Windows ConPTY transport used by interactive
+and background Shell sessions. It is bundled in the Windows backend; source
+users receive it from the platform-qualified requirement.
+
 | Package | Used for | 用途 |
 | --- | --- | --- |
 | `fastapi` | Local app API, agent runtime, and gateway backend | 本地 app API、agent runtime 与 gateway 后端 |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -22,11 +23,20 @@ from agent_command_safety import (
     strip_quotes,
     tokenize_command,
 )
+from agent_shell_process_supervisor import (
+    ShellProcessSupervisor,
+    ShellSessionError,
+    ShellSessionPorts,
+    build_shell_environment,
+    normalize_shell_environment_overrides,
+    shell_control_input_text,
+)
 
 
 SHELL_RUNNER_NATIVE = "native-win-process"
 SHELL_RUNNER_POWERSHELL = "powershell-fallback"
 SHELL_NATIVE_BLOCK_PATTERN = re.compile(r"[|;&<>^`$%(){}\[\]#]|@\"|@'")
+SHELL_APPROVAL_BOUND_FILE_LIMIT = 16 * 1024 * 1024
 AUTO_APPROVAL_MANUAL_SHELL_COMMANDS = {
     "del",
     "erase",
@@ -36,6 +46,7 @@ AUTO_APPROVAL_MANUAL_SHELL_COMMANDS = {
     "rmdir",
     "remove-item",
 }
+UNITY_PROJECT_MARKERS = ("Assets", "Packages", "ProjectSettings")
 _POWERSHELL_EXECUTABLE_CACHE: str | None = None
 
 
@@ -104,10 +115,12 @@ class AgentShellPorts:
     permission_audit_context: Callable[[], dict[str, Any]]
     cancellation_requested: Callable[[str, str, str], bool]
     default_workspace_root: Callable[[], Path]
+    is_unity_project_root: Callable[[Path], bool]
     error_factory: Callable[[str, int], Exception] = lambda detail, status: AgentShellError(
         detail,
         status,
     )
+    session_finished: Callable[[dict[str, Any]], None] = lambda _event: None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +149,7 @@ class AgentShellService:
         ports: AgentShellPorts,
         *,
         process_ports: ShellProcessPorts | None = None,
+        session_ports: ShellSessionPorts | None = None,
     ) -> None:
         self._ports = ports
         self._process = process_ports or default_shell_process_ports()
@@ -146,6 +160,8 @@ class AgentShellService:
         self._next_admission_id = 0
         self._thread_admission = threading.local()
         self._accepting = True
+        self._sessions = ShellProcessSupervisor(session_ports)
+        self._session_input_buffers: dict[str, str] = {}
 
     @property
     def active_process_count(self) -> int:
@@ -159,6 +175,7 @@ class AgentShellService:
     def start(self) -> None:
         with self._lifecycle_lock:
             self._accepting = True
+        self._sessions.start()
 
     def shutdown(self, *, grace_seconds: float = 5.0) -> ShellShutdownReport:
         with self._lifecycle_lock:
@@ -188,10 +205,13 @@ class AgentShellService:
             if pending_count == 0 or self._process.monotonic() >= deadline:
                 break
             self._process.sleep(0.01)
+        session_snapshot, session_terminated, session_pending = self._sessions.shutdown(
+            grace_seconds=grace_seconds
+        )
         return ShellShutdownReport(
-            snapshot_count=snapshot_count,
-            terminated_count=terminated,
-            pending_count=pending_count,
+            snapshot_count=snapshot_count + session_snapshot,
+            terminated_count=terminated + session_terminated,
+            pending_count=pending_count + session_pending,
         )
 
     def _pending_owner_count_locked(self) -> int:
@@ -221,39 +241,15 @@ class AgentShellService:
         command = str(params.get("command") or "").strip()
         workspace_root = self._resolve_workspace_root(params)
         cwd = self._resolve_cwd(params, workspace_root)
-        reasons: list[str] = []
+
+        policy_error = self._requested_policy_error(params)
+        if policy_error:
+            return self._classification(command, cwd, workspace_root, "reject", [policy_error])
 
         if not command:
             return self._classification(command, cwd, workspace_root, "reject", ["Command is empty."])
         if len(command) > 4000:
             return self._classification(command, cwd, workspace_root, "reject", ["Command is too long."])
-        if not is_path_within(cwd, workspace_root):
-            reasons.append("cwd is outside the workspace root.")
-
-        lowered = command.lower()
-        if "\n" in command or "\r" in command:
-            reasons.append("Command contains multiple lines.")
-        if re.search(r"&&|\|\||[;|]|(?:^|\s)(?:\d?>|\*>|>>)", command):
-            reasons.append("Command contains chaining, pipeline, or redirection syntax.")
-        if "$(" in command or "{" in command or "}" in command or '@"' in command or "@'" in command:
-            reasons.append("Command contains advanced PowerShell syntax.")
-        if re.search(r"(^|\s|['\"])(?:\\\\|[a-zA-Z]:\\)", command):
-            outside_paths = [
-                token
-                for token in tokenize_command(command)
-                if looks_like_absolute_path(strip_quotes(token))
-                and not is_path_within(Path(strip_quotes(token)), workspace_root)
-            ]
-            if outside_paths:
-                reasons.append("Command references an absolute path outside the workspace root.")
-        if ".." in [
-            part
-            for token in tokenize_command(command)
-            for part in re.split(r"[\\/]+", strip_quotes(token))
-        ]:
-            reasons.append("Command contains parent path traversal.")
-        if re.search(r"\.(ps1|bat|cmd|exe)(?:\s|$)", lowered):
-            reasons.append("Command executes a script or executable directly.")
 
         tokens = tokenize_command(command)
         if not tokens:
@@ -264,20 +260,54 @@ class AgentShellService:
                 "reject",
                 ["Command could not be parsed."],
             )
-        if reasons:
-            return self._classification(command, cwd, workspace_root, "high", reasons)
-
-        command_name = strip_quotes(tokens[0]).lower()
-        args = [strip_quotes(token) for token in tokens[1:]]
-        low_reasons = self._low_risk_reasons(command_name, args, workspace_root)
-        if low_reasons:
-            return self._classification(command, cwd, workspace_root, "low", low_reasons)
+        requested_project_value = str(
+            params.get("projectRoot")
+            or params.get("project_root")
+            or params.get("projectPath")
+            or params.get("project_path")
+            or ""
+        ).strip()
+        if requested_project_value:
+            try:
+                requested_project = Path(requested_project_value).expanduser().resolve()
+            except (OSError, RuntimeError, ValueError):
+                return self._classification(
+                    command,
+                    cwd,
+                    workspace_root,
+                    "reject",
+                    ["The explicit Unity project root is invalid."],
+                )
+            if not self._ports.is_unity_project_root(requested_project):
+                return self._classification(
+                    command,
+                    cwd,
+                    workspace_root,
+                    "reject",
+                    ["The explicit Unity project root is not a valid Unity project."],
+                )
+        read_only = self._command_is_read_only(command)
+        protected_project = self._protected_unity_project_root(params, cwd, tokens, command)
+        if protected_project is not None and not read_only:
+            return self._classification(
+                command,
+                cwd,
+                workspace_root,
+                "high",
+                ["Command may modify a protected Unity project."],
+                project_root=protected_project,
+            )
         return self._classification(
             command,
             cwd,
             workspace_root,
-            "high",
-            ["Command is not in the low-risk allowlist."],
+            "low",
+            [
+                "Read-only Unity project inspection command."
+                if protected_project is not None
+                else "Host shell execution outside a protected Unity project."
+            ],
+            project_root=protected_project,
         )
 
     def execute(
@@ -319,28 +349,51 @@ class AgentShellService:
                     "approvalId": approval["id"],
                 }
 
-            result = self._run_command(
-                command,
-                Path(classification["cwd"]),
+            execution = self._execute_direct(
+                params,
+                classification,
                 admission_id=admission_id,
-                timeout_seconds=int(params.get("timeout_seconds") or 120),
-                cancel_ids=_cancel_ids(params),
+                owner_id=self._session_owner(params, agent_name),
             )
+            result = execution.get("result")
             self._ports.append_audit(
                 {
                     "event": "shell_executed",
                     "agent": agent_name,
                     "classification": classification,
-                    "result": summarize_shell_result(result),
+                    "result": summarize_shell_result(result) if isinstance(result, dict) else {
+                        "status": execution.get("status"),
+                        "sessionId": execution.get("sessionId"),
+                    },
                     **self._ports.permission_audit_context(),
                 }
             )
-            return {
-                "ok": result["ok"],
-                "status": "executed",
-                "classification": classification,
-                "result": result,
-            }
+            execution["classification"] = classification
+            return execution
+
+    def process(self, params: dict[str, Any], agent_name: str = "desktop-agent") -> dict[str, Any]:
+        try:
+            owner_id = self._process_owner(params, agent_name)
+            action = str(params.get("action") or "list").strip().lower().replace("-", "_")
+            if action in {"write", "paste", "submit", "send_keys"}:
+                with self._lifecycle_lock:
+                    pending = self._guard_process_input(params, owner_id=owner_id)
+                    result = self._sessions.control(params, owner_id=owner_id)
+                    session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
+                    if session_id:
+                        self._session_input_buffers[session_id] = pending
+                    return result
+            result = self._sessions.control(params, owner_id=owner_id)
+            if action == "remove":
+                session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
+                with self._lifecycle_lock:
+                    self._session_input_buffers.pop(session_id, None)
+            return result
+        except ShellSessionError as exc:
+            self._raise(exc.detail, exc.status_code)
+
+    def cancel_owner(self, owner_id: str) -> list[str]:
+        return self._sessions.kill_owner(owner_id)
 
     def execute_approved(self, params: dict[str, Any]) -> dict[str, Any]:
         with self._execution_admission():
@@ -367,12 +420,35 @@ class AgentShellService:
             self._raise("Stored shell approval command hash does not match.")
         workspace_root = self._resolve_workspace_root(params)
         cwd = self._resolve_cwd(params, workspace_root)
-        timeout_seconds = int(params.get("timeout_seconds") or params.get("timeoutSeconds") or 120)
+        timeout_seconds = self._timeout_seconds(params)
+        if any(
+            key in params
+            for key in (
+                "background",
+                "pty",
+                "yieldMs",
+                "yield_ms",
+                "env",
+                "host",
+                "node",
+                "elevated",
+                "security",
+                "ask",
+            )
+        ):
+            self._raise("Stored Unity-project shell approvals cannot contain advanced process options.")
         expected_cwd_hash = str(params.get("cwd_hash") or params.get("cwdHash") or "")
         expected_workspace_hash = str(
             params.get("workspace_root_hash") or params.get("workspaceRootHash") or ""
         )
         expected_timeout_hash = str(params.get("timeout_hash") or params.get("timeoutHash") or "")
+        expected_options_hash = str(
+            params.get("execution_options_hash") or params.get("executionOptionsHash") or ""
+        )
+        project_root_value = str(params.get("projectRoot") or params.get("project_root") or "").strip()
+        expected_project_root_hash = str(
+            params.get("project_root_hash") or params.get("projectRootHash") or ""
+        )
         if not expected_cwd_hash:
             self._raise("Stored shell approval cwd hash is required.")
         if expected_cwd_hash != stable_hash(str(cwd)):
@@ -385,9 +461,60 @@ class AgentShellService:
             self._raise("Stored shell approval timeout hash is required.")
         if expected_timeout_hash != stable_hash(str(timeout_seconds)):
             self._raise("Stored shell approval timeout hash does not match.")
+        if not expected_options_hash:
+            self._raise("Stored shell approval execution options hash is required.")
+        actual_options_hash = stable_hash(
+            json.dumps(
+                {
+                    "background": bool(params.get("background")),
+                    "pty": bool(params.get("pty")),
+                    "yieldMs": max(
+                        0,
+                        min(int(params.get("yieldMs") or params.get("yield_ms") or 10_000), 60_000),
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        if expected_options_hash != actual_options_hash:
+            self._raise("Stored shell approval execution options hash does not match.")
+        expected_execution_binding_hash = str(
+            params.get("execution_binding_hash") or params.get("executionBindingHash") or ""
+        )
+        if not expected_execution_binding_hash:
+            self._raise("Stored shell approval execution binding hash is required.")
+        current_execution_binding_hash = stable_hash(
+            json.dumps(
+                self._command_execution_binding(command, cwd),
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        if expected_execution_binding_hash != current_execution_binding_hash:
+            self._raise("Stored shell approval executable or referenced file binding has changed.", 409)
+        if not project_root_value:
+            self._raise("Stored shell approval Unity project root is required.")
+        project_root = Path(project_root_value).expanduser().resolve()
+        if not expected_project_root_hash:
+            self._raise("Stored shell approval Unity project root hash is required.")
+        if expected_project_root_hash != stable_hash(str(project_root)):
+            self._raise("Stored shell approval Unity project root hash does not match.")
+        if not self._ports.is_unity_project_root(project_root):
+            self._raise("Stored shell approval Unity project root is no longer valid.")
+
+        environment_overrides = self._environment_overrides(params)
+        if environment_overrides:
+            self._raise("Unity-project shell approvals cannot persist environment override values.")
 
         classification = self.classify(
-            {"command": command, "cwd": str(cwd), "workspace_root": str(workspace_root)}
+            {
+                "command": command,
+                "cwd": str(cwd),
+                "workspace_root": str(workspace_root),
+                "projectRoot": str(project_root),
+            }
         )
         if classification.get("risk") == "reject":
             self._raise(
@@ -396,14 +523,16 @@ class AgentShellService:
             )
         if classification.get("commandHash") != expected_hash:
             self._raise("Reclassified shell command hash does not match approval.")
+        if classification.get("projectRoot") != str(project_root):
+            self._raise("Reclassified shell Unity project root does not match approval.")
 
-        result = self._run_command(
-            command,
-            cwd,
+        execution = self._execute_direct(
+            params,
+            classification,
             admission_id=admission_id,
-            timeout_seconds=timeout_seconds,
-            cancel_ids=_cancel_ids(params),
+            owner_id=self._session_owner(params, "approved-shell"),
         )
+        result = execution.get("result")
         self._ports.append_audit(
             {
                 "event": "shell_approved_executed",
@@ -413,13 +542,249 @@ class AgentShellService:
                 "cwdHash": stable_hash(str(cwd)),
                 "workspaceRootHash": stable_hash(str(workspace_root)),
                 "timeoutHash": stable_hash(str(timeout_seconds)),
+                "projectRootHash": stable_hash(str(project_root)),
                 "cwd": str(cwd),
                 "workspaceRoot": str(workspace_root),
-                "result": summarize_shell_result(result),
+                "result": summarize_shell_result(result) if isinstance(result, dict) else {
+                    "status": execution.get("status"),
+                    "sessionId": execution.get("sessionId"),
+                },
                 **self._ports.permission_audit_context(),
             }
         )
-        return result
+        if isinstance(result, dict):
+            return result
+        return execution
+
+    def _execute_direct(
+        self,
+        params: dict[str, Any],
+        classification: dict[str, Any],
+        *,
+        admission_id: int,
+        owner_id: str,
+    ) -> dict[str, Any]:
+        command = str(classification["command"])
+        cwd = Path(classification["cwd"])
+        timeout_seconds = self._timeout_seconds(params)
+        env_overrides = self._environment_overrides(params)
+        use_sessions = bool(
+            params.get("background")
+            or params.get("pty")
+            or "yieldMs" in params
+            or "yield_ms" in params
+            or "env" in params
+            or timeout_seconds == 0
+        )
+        if use_sessions:
+            environment = build_shell_environment(self._process.environment(), env_overrides)
+            cancel_ids = _cancel_ids(params)
+
+            def cancel_requested() -> bool:
+                return bool(
+                    cancel_ids
+                    and self._ports.cancellation_requested(
+                        cancel_ids[0] if len(cancel_ids) > 0 else "",
+                        cancel_ids[1] if len(cancel_ids) > 1 else "",
+                        cancel_ids[2] if len(cancel_ids) > 2 else "",
+                    )
+                )
+
+            try:
+                return self._sessions.execute(
+                    command=command,
+                    argv=self._command_argv(command, interactive=bool(params.get("pty"))),
+                    cwd=cwd,
+                    environment=environment,
+                    owner_id=owner_id,
+                    background=bool(params.get("background")),
+                    yield_ms=max(0, min(int(params.get("yieldMs") or params.get("yield_ms") or 10_000), 60_000)),
+                    timeout_seconds=timeout_seconds,
+                    pty=bool(params.get("pty")),
+                    cancel_requested=cancel_requested,
+                    completion_context={
+                        "runtimeSessionId": str(
+                            params.get("session_id") or params.get("sessionId") or ""
+                        ),
+                        "turnId": str(params.get("turn_id") or params.get("turnId") or ""),
+                        "clientTurnId": str(
+                            params.get("client_turn_id") or params.get("clientTurnId") or ""
+                        ),
+                    },
+                    on_finished=self._ports.session_finished,
+                )
+            except ShellSessionError as exc:
+                self._raise(exc.detail, exc.status_code)
+        result = self._run_command(
+            command,
+            cwd,
+            admission_id=admission_id,
+            timeout_seconds=timeout_seconds,
+            cancel_ids=_cancel_ids(params),
+            environment_overrides=env_overrides,
+        )
+        return {"ok": result["ok"], "status": "executed", "result": result}
+
+    @staticmethod
+    def _session_owner(params: dict[str, Any], agent_name: str) -> str:
+        return str(
+            params.get("_trusted_owner_id")
+            or params.get("_trustedOwnerId")
+            or params.get("turn_id")
+            or params.get("turnId")
+            or params.get("client_turn_id")
+            or params.get("clientTurnId")
+            or params.get("session_id")
+            or params.get("sessionId")
+            or params.get("agent_id")
+            or params.get("agentId")
+            or agent_name
+            or "local-user"
+        )
+
+    @staticmethod
+    def _process_owner(params: dict[str, Any], agent_name: str) -> str:
+        return str(
+            params.get("_trusted_owner_id")
+            or params.get("_trustedOwnerId")
+            or params.get("runtime_session_id")
+            or params.get("runtimeSessionId")
+            or params.get("owner_session_id")
+            or params.get("ownerSessionId")
+            or params.get("agent_id")
+            or params.get("agentId")
+            or agent_name
+            or "local-user"
+        )
+
+    def _guard_process_input(self, params: dict[str, Any], *, owner_id: str) -> str:
+        action = str(params.get("action") or "list").strip().lower().replace("-", "_")
+        if action not in {"write", "paste", "submit", "send_keys"}:
+            return ""
+        session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
+        if not session_id:
+            return ""
+        context = self._sessions.control(
+            {
+                "action": "poll",
+                "sessionId": session_id,
+                "limit": 1,
+                "controlToken": params.get("controlToken") or params.get("control_token") or "",
+            },
+            owner_id=owner_id,
+        )
+        session = context.get("session") or {}
+        cwd = str(session.get("cwd") or self.default_workspace_root)
+        if action == "write":
+            text = str(params.get("data") if "data" in params else params.get("text") or "")
+        elif action == "paste":
+            text = str(params.get("text") or "")
+        elif action == "submit":
+            text = str(params.get("text") or "") + "\n"
+        else:
+            text = shell_control_input_text(params, pty=bool(session.get("pty")))
+        combined = (self._session_input_buffers.get(session_id) or "") + text
+        normalized = combined.replace("\r\n", "\n").replace("\r", "\n")
+        lines = normalized.split("\n")
+        candidates = lines[:-1]
+        remainder = lines[-1][-16_384:]
+        if remainder.strip():
+            candidates.append(remainder)
+        for command in candidates:
+            if not command.strip():
+                continue
+            classification = self.classify(
+                {
+                    "command": command,
+                    "cwd": cwd,
+                    "workspace_root": cwd,
+                    "projectRoot": params.get("projectRoot") or params.get("project_root") or "",
+                }
+            )
+            if classification.get("risk") in {"high", "reject"}:
+                self._raise(
+                    "Shell process input may target a Unity project. Run it as a new Shell command so approval, checkpoint, and rollback can be applied.",
+                    409,
+                )
+        return remainder
+
+    def _timeout_seconds(self, params: dict[str, Any]) -> int:
+        raw = params.get("timeout_seconds")
+        if raw is None:
+            raw = params.get("timeoutSeconds")
+        if raw is None:
+            raw = params.get("timeout")
+        if raw is None or raw == "":
+            return 120
+        value = int(raw)
+        if value < 0 or value > 86_400:
+            self._raise("timeout must be between 0 and 86400 seconds.")
+        return value
+
+    @staticmethod
+    def _requested_policy_error(params: dict[str, Any]) -> str:
+        host = str(params.get("host") or "").strip().lower()
+        if host and host not in {"local", "host"}:
+            return "This VRCForge Shell supports only the local host."
+        if str(params.get("node") or "").strip():
+            return "Remote Shell nodes are not supported."
+        elevated = params.get("elevated")
+        if elevated not in (None, False, 0, "", "false", "False"):
+            return "Per-command elevation is not supported; start VRCForge with the required user authority."
+        security = str(params.get("security") or "").strip().lower()
+        if security:
+            if security == "deny":
+                return "Shell execution was denied by the requested security policy."
+            return "Shell security is selected in VRCForge permission settings, not per command."
+        ask = str(params.get("ask") or "").strip().lower()
+        if ask:
+            return "Shell approval behavior is selected in VRCForge permission settings, not per command."
+        return ""
+
+    def _environment_overrides(self, params: dict[str, Any]) -> dict[str, str]:
+        try:
+            return normalize_shell_environment_overrides(params.get("env"))
+        except ShellSessionError as exc:
+            self._raise(exc.detail, exc.status_code)
+
+    @staticmethod
+    def _command_argv(command: str, *, interactive: bool = False) -> list[str]:
+        native_argv = native_shell_argv(command)
+        if native_argv is not None:
+            return native_argv
+        argv = [
+            resolve_powershell_executable(),
+            "-NoLogo",
+            "-NoProfile",
+        ]
+        if not interactive:
+            argv.append("-NonInteractive")
+        return [*argv, "-Command", command]
+
+    def _command_execution_binding(self, command: str, cwd: Path) -> dict[str, Any]:
+        argv = self._command_argv(command)
+        referenced_files: dict[str, str] = {}
+        candidates = [*argv[1:], *[strip_quotes(value) for value in tokenize_command(command)[1:]]]
+        for value in candidates:
+            if not value or value.startswith("-"):
+                continue
+            try:
+                path = Path(value).expanduser()
+                if not path.is_absolute():
+                    path = cwd / path
+                path = path.resolve()
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+            except (OSError, ValueError):
+                continue
+            if size > SHELL_APPROVAL_BOUND_FILE_LIMIT:
+                self._raise("A referenced shell file is too large to bind to approval.")
+            try:
+                referenced_files[str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                self._raise("A referenced shell file could not be bound to approval.", 409)
+        return {"argv": argv, "referencedFiles": referenced_files}
 
     def _raise(self, detail: str, status_code: int = 400) -> None:
         raise self._ports.error_factory(detail, status_code)
@@ -444,7 +809,10 @@ class AgentShellService:
         workspace_root: Path,
         risk: str,
         reasons: list[str],
+        *,
+        project_root: Path | None = None,
     ) -> dict[str, Any]:
+        resolved_project_root = str(project_root.resolve()) if project_root is not None else ""
         return {
             "ok": risk != "reject",
             "command": command,
@@ -454,10 +822,115 @@ class AgentShellService:
             "cwd": str(cwd),
             "workspaceRoot": str(workspace_root),
             "readOnly": self._command_is_read_only(command),
+            "requiresApproval": risk == "high",
+            "protectionScope": "unity_project" if resolved_project_root else "host",
+            "projectRoot": resolved_project_root,
             "plannedRunner": (
                 SHELL_RUNNER_NATIVE if native_shell_argv(command) is not None else SHELL_RUNNER_POWERSHELL
             ),
         }
+
+    def _protected_unity_project_root(
+        self,
+        params: dict[str, Any],
+        cwd: Path,
+        tokens: list[str],
+        command: str,
+    ) -> Path | None:
+        requested_value = str(
+            params.get("projectRoot")
+            or params.get("project_root")
+            or params.get("projectPath")
+            or params.get("project_path")
+            or ""
+        ).strip()
+        requested = Path(requested_value).expanduser().resolve() if requested_value else None
+        cwd_project = self._find_unity_project_root(cwd)
+        if cwd_project is not None:
+            return cwd_project
+        if requested is not None:
+            return requested
+        environment_project = self._environment_unity_project_root(params, command)
+        if environment_project is not None:
+            return environment_project
+        for token in tokens[1:]:
+            value = strip_quotes(token).strip()
+            if not value or value.startswith("-"):
+                continue
+            if not (
+                looks_like_absolute_path(value)
+                or value.startswith((".", "~"))
+                or "/" in value
+                or "\\" in value
+            ):
+                continue
+            try:
+                candidate = Path(value).expanduser()
+                if not candidate.is_absolute():
+                    candidate = cwd / candidate
+                candidate = candidate.resolve()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if requested is not None and is_path_within(candidate, requested):
+                return requested
+            discovered = self._find_unity_project_root(candidate)
+            if discovered is not None:
+                return discovered
+        # Nested shells and interpreters can place the real command in one
+        # quoted token. Inspect absolute Windows path substrings as a guardrail
+        # so the common `powershell -Command "Set-Content D:\..."` form still
+        # reaches the Unity approval lane.
+        for value in re.findall(r"(?i)(?:[a-z]:[\\/])[^\s\"'`;|&]+", command):
+            try:
+                discovered = self._find_unity_project_root(Path(value))
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if discovered is not None:
+                return discovered
+        return None
+
+    def _environment_unity_project_root(
+        self,
+        params: dict[str, Any],
+        command: str,
+    ) -> Path | None:
+        raw_environment = params.get("env")
+        if not isinstance(raw_environment, dict):
+            return None
+        for raw_name, raw_value in raw_environment.items():
+            name = str(raw_name).strip()
+            value = str(raw_value).strip()
+            if not name or not value:
+                continue
+            referenced = any(
+                re.search(pattern, command, flags=re.IGNORECASE)
+                for pattern in (
+                    rf"\$env:{re.escape(name)}\b",
+                    rf"\$\{{env:{re.escape(name)}\}}",
+                    rf"%{re.escape(name)}%",
+                )
+            )
+            if not referenced or not looks_like_absolute_path(value):
+                continue
+            project = self._find_unity_project_root(Path(value))
+            if project is not None:
+                return project
+        return None
+
+    def _find_unity_project_root(self, candidate: Path) -> Path | None:
+        try:
+            current = candidate.expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if current.is_file():
+            current = current.parent
+        for path in (current, *current.parents):
+            try:
+                if self._ports.is_unity_project_root(path):
+                    return path
+            except (OSError, RuntimeError, ValueError):
+                return None
+        return None
 
     @staticmethod
     def _command_is_read_only(command: str) -> bool:
@@ -492,13 +965,8 @@ class AgentShellService:
         return False
 
     def manual_approval_reason(self, classification: dict[str, Any]) -> str:
-        command = str(classification.get("command") or "")
-        tokens = [strip_quotes(token).lower() for token in tokenize_command(command)]
-        if any(token in AUTO_APPROVAL_MANUAL_SHELL_COMMANDS for token in tokens):
-            return "Delete/removal shell commands require manual approval in Auto Approve mode."
-        reasons = " ".join(str(reason or "").lower() for reason in _ensure_list(classification.get("reasons")))
-        if "outside the workspace root" in reasons or "parent path traversal" in reasons:
-            return "Shell commands that reference paths outside the workspace require manual approval in Auto Approve mode."
+        if classification.get("projectRoot") and classification.get("readOnly") is not True:
+            return "Shell commands that may modify a Unity project require explicit approval."
         return ""
 
     def _low_risk_reasons(self, command_name: str, args: list[str], workspace_root: Path) -> list[str]:
@@ -631,16 +1099,62 @@ class AgentShellService:
     ) -> dict[str, Any]:
         session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
         turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
+        timeout_seconds = self._timeout_seconds(params)
+        environment_overrides = self._environment_overrides(params)
+        if environment_overrides:
+            self._raise("Unity-project shell approvals cannot persist environment override values.")
+        if params.get("background") or params.get("pty") or "yieldMs" in params or "yield_ms" in params:
+            self._raise(
+                "Unity-project shell writes must run in the foreground until the approval transaction finishes."
+            )
+        if timeout_seconds == 0:
+            self._raise("Unity-project shell writes require a finite timeout.")
+        background = False
+        pty = False
+        yield_ms = 10_000
+        project_root = str(classification.get("projectRoot") or "").strip()
+        if not project_root:
+            self._raise("A protected Unity project root is required for shell approval.")
+        execution_binding_hash = stable_hash(
+            json.dumps(
+                self._command_execution_binding(
+                    str(classification["command"]),
+                    Path(str(classification["cwd"])),
+                ),
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        expected_binding = {
+            "commandHash": classification["commandHash"],
+            "cwdHash": stable_hash(classification["cwd"]),
+            "workspaceRootHash": stable_hash(classification["workspaceRoot"]),
+            "timeoutHash": stable_hash(str(timeout_seconds)),
+            "projectRootHash": stable_hash(project_root),
+            "executionOptionsHash": stable_hash(
+                json.dumps(
+                    {
+                        "background": background,
+                        "pty": pty,
+                        "yieldMs": yield_ms,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            ),
+            "executionBindingHash": execution_binding_hash,
+        }
         existing = self._ports.approvals.find_pending_shell(session_id, turn_id) if turn_id else None
         if existing is not None and (
             existing.get("targetTool") == "vrcforge_shell_execute"
             and existing.get("status") == "pending"
             and existing.get("sessionId") == session_id
             and existing.get("turnId") == turn_id
+            and all(existing.get(key) == value for key, value in expected_binding.items())
         ):
             return self._ports.approvals.redact(dict(existing))
 
-        timeout_seconds = int(params.get("timeout_seconds") or 120)
         arguments = {
             "command": classification["command"],
             "command_hash": classification["commandHash"],
@@ -652,11 +1166,17 @@ class AgentShellService:
             "turn_id": turn_id,
             "timeout_seconds": timeout_seconds,
             "timeout_hash": stable_hash(str(timeout_seconds)),
+            "execution_options_hash": expected_binding["executionOptionsHash"],
+            "execution_binding_hash": execution_binding_hash,
+            "projectRoot": project_root,
+            "project_root_hash": stable_hash(project_root),
             "classification_snapshot": classification,
         }
-        manual_reason = ""
-        if normalize_execution_mode(self._ports.approvals.execution_mode()) == "auto":
-            manual_reason = self.manual_approval_reason(classification)
+        manual_reason = (
+            self.manual_approval_reason(classification)
+            if self._ports.approvals.execution_mode() == "auto"
+            else ""
+        )
         approval = self._ports.approvals.create(
             ShellApprovalRequest(
                 agent_name=agent_name,
@@ -667,6 +1187,7 @@ class AgentShellService:
                     "command": classification["command"],
                     "cwd": classification["cwd"],
                     "workspaceRoot": classification["workspaceRoot"],
+                    "projectRoot": project_root,
                     "riskReasons": classification["reasons"],
                 },
                 risk_level="high",
@@ -683,9 +1204,7 @@ class AgentShellService:
             {
                 "sessionId": session_id,
                 "turnId": turn_id,
-                "commandHash": classification["commandHash"],
-                "cwdHash": stable_hash(classification["cwd"]),
-                "workspaceRootHash": stable_hash(classification["workspaceRoot"]),
+                **expected_binding,
             },
         )
         self._ports.append_audit(
@@ -706,6 +1225,7 @@ class AgentShellService:
         admission_id: int,
         timeout_seconds: int = 120,
         cancel_ids: list[str] | None = None,
+        environment_overrides: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         process: ShellProcess | None = None
         communicated = False
@@ -713,7 +1233,10 @@ class AgentShellService:
         try:
             started = self._process.monotonic()
             started_at = self._process.utc_now()
-            env = self._process.environment()
+            env = build_shell_environment(
+                self._process.environment(),
+                environment_overrides,
+            )
             env["GIT_PAGER"] = "cat"
             env["GIT_EXTERNAL_DIFF"] = ""
             native_argv = native_shell_argv(command)
@@ -732,6 +1255,12 @@ class AgentShellService:
                     "-Command",
                     command,
                 ]
+            if cancel_ids and self._ports.cancellation_requested(
+                cancel_ids[0] if len(cancel_ids) > 0 else "",
+                cancel_ids[1] if len(cancel_ids) > 1 else "",
+                cancel_ids[2] if len(cancel_ids) > 2 else "",
+            ):
+                self._raise("Shell execution was cancelled before start.", 409)
             creationflags = (
                 subprocess.CREATE_NO_WINDOW
                 if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW")
@@ -755,7 +1284,11 @@ class AgentShellService:
                 self._raise("Shell execution is shutting down.", 503)
             timed_out = False
             cancelled = False
-            deadline = self._process.monotonic() + max(1, min(timeout_seconds, 600))
+            deadline = (
+                self._process.monotonic() + timeout_seconds
+                if timeout_seconds > 0
+                else None
+            )
             while True:
                 try:
                     stdout, stderr = process.communicate(timeout=0.2)
@@ -772,7 +1305,7 @@ class AgentShellService:
                         stdout, stderr = process.communicate()
                         communicated = True
                         break
-                    if self._process.monotonic() >= deadline:
+                    if deadline is not None and self._process.monotonic() >= deadline:
                         timed_out = True
                         self._process.terminate_tree(process)
                         stdout, stderr = process.communicate()
@@ -987,6 +1520,7 @@ def summarize_shell_result(result: dict[str, Any]) -> dict[str, Any]:
         "exitCode": result.get("exitCode"),
         "timedOut": result.get("timedOut"),
         "durationSeconds": result.get("durationSeconds"),
+        "sessionId": result.get("sessionId"),
         "stdoutSummary": _summarize_text(str(result.get("stdout") or "")),
         "stderrSummary": _summarize_text(str(result.get("stderr") or "")),
     }

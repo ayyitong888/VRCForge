@@ -928,6 +928,8 @@ namespace VRCForge.Editor
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "LICENSE-MIT") -Destination (Join-Path $payloadRoot "licenses\uv-LICENSE-MIT.txt") -Force
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "LICENSE-APACHE") -Destination (Join-Path $payloadRoot "licenses\uv-LICENSE-APACHE-2.0.txt") -Force
     Copy-Item -LiteralPath (Join-Path $resolvedUvLicensePath "VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\uv-DISTRIBUTION-NOTES.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\pywinpty\LICENSE.txt") -Destination (Join-Path $payloadRoot "licenses\pywinpty-LICENSE-MIT.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $repoRoot "third_party\pywinpty\VRCFORGE_DISTRIBUTION_NOTES.txt") -Destination (Join-Path $payloadRoot "licenses\pywinpty-DISTRIBUTION-NOTES.txt") -Force
 
     $payloadIntegrityManifest = [ordered]@{
         schema = "vrcforge.payload-integrity.v1"

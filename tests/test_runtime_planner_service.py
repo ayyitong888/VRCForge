@@ -14,6 +14,7 @@ from runtime_planner_service import (
     EXPOSURE_LAYER_PLANNING,
     PlannerCatalogSnapshot,
     PlannerModelResult,
+    PlannerProviderNotConfiguredError,
     PlannerSkill,
     PlannerTool,
     PlannerTurnMetadata,
@@ -280,6 +281,163 @@ def test_typed_model_port_owns_reasoning_usage_label_and_exposure() -> None:
     assert usage["lastInputTokens"] == 120
     assert usage["peakInputTokens"] == 120
     assert catalog.reads.count(EXPOSURE_LAYER_EXECUTION) >= 2
+
+
+@pytest.mark.parametrize(
+    "response_text",
+    [
+        "",
+        "not-json",
+        "[]",
+        "{}",
+        '{"action":"skill","skill_tool":"missing-tool","summary":"done"}',
+        '{"action":"shell","summary":"done"}',
+        '{"action":"unknown","summary":"done"}',
+    ],
+)
+def test_invalid_model_actions_fail_closed_instead_of_claiming_success(response_text: str) -> None:
+    planner = service(model=FakeModel(PlannerModelResult(response_text)))
+
+    plan = planner._llm_plan_agent_turn("continue", {}, [])
+
+    assert plan is not None
+    assert plan["planner"] == "llm"
+    assert plan["plannerFailed"] is True
+    assert plan["plannerFailure"] == {
+        "code": "planner_invalid_response",
+        "phase": "initial",
+        "retryable": True,
+    }
+    assert plan["nextStep"] == "planner_failed"
+    assert plan["skillNeeded"] is False
+    assert plan["shellNeeded"] is False
+    assert "done" not in str(plan.get("reply") or "")
+
+
+def test_llm_shell_plan_preserves_bounded_process_options_and_documents_them() -> None:
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "shell",
+                    "shell_command": "python worker.py",
+                    "shell_params": {
+                        "cwd": r"D:\\work",
+                        "background": True,
+                        "pty": True,
+                        "yieldMs": 250,
+                        "timeout": 0,
+                        "env": {"MODE": "fixture"},
+                    },
+                }
+            )
+        )
+    )
+    planner = service(model=model)
+
+    plan = planner._llm_plan_agent_turn("start the worker", {}, [])
+
+    assert plan is not None
+    assert plan["shellNeeded"] is True
+    assert plan["shellCommand"] == "python worker.py"
+    assert plan["shellParams"] == {
+        "cwd": r"D:\\work",
+        "background": True,
+        "pty": True,
+        "yieldMs": 250,
+        "timeout": 0,
+        "env": {"MODE": "fixture"},
+    }
+    assert '"shell_params"' in model.prompts[0]
+    assert "background/pty/yieldMs/timeout/env" in model.prompts[0]
+    assert "Unity" in model.prompts[0]
+
+
+def test_post_tool_provider_failure_preserves_result_context_without_fake_disconnect() -> None:
+    model = FakeModel(
+        PlannerModelResult('{"action":"reply","reply":"unused"}'),
+        error=RuntimeError("upstream stream ended token=secret"),
+    )
+    planner = service(model=model)
+
+    plan = planner._llm_plan_agent_turn(
+        "continue",
+        {},
+        [],
+        loop_state=[
+            {"tool": "vrcforge_scan_materials", "status": "executed", "result": {"materialCount": 3}}
+        ],
+        context_usage={"requestCount": 1},
+        planner_label="DeepSeek · fixture-model",
+    )
+
+    assert plan is not None
+    assert plan["plannerFailed"] is True
+    assert plan["plannerFailure"] == {
+        "code": "provider_connection_failed",
+        "phase": "post_tool",
+        "retryable": True,
+    }
+    assert plan["providerConnected"] is True
+    assert plan["nextStep"] == "planner_failed"
+    assert "结果也已保留" in str(plan["reply"])
+    assert "没配置" not in str(plan["reply"])
+    assert "secret" not in str(plan)
+
+
+def test_bootstrap_observation_does_not_mislabel_first_provider_failure_as_post_tool() -> None:
+    planner = service(
+        model=FakeModel(
+            PlannerModelResult('{"action":"reply","reply":"unused"}'),
+            error=RuntimeError("upstream connection failed"),
+        )
+    )
+
+    plan = planner._llm_plan_agent_turn(
+        "continue",
+        {},
+        [],
+        loop_state=[
+            {"tool": "vrcforge_agent_desktop_action", "status": "executed", "result": {"apps": []}}
+        ],
+        context_usage={"requestCount": 0},
+    )
+
+    assert plan is not None
+    assert plan["plannerFailure"]["phase"] == "initial"
+    assert "providerConnected" not in plan
+
+
+def test_missing_provider_configuration_is_the_only_explicit_disconnected_failure() -> None:
+    model = FakeModel(
+        PlannerModelResult('{"action":"reply","reply":"unused"}'),
+        error=PlannerProviderNotConfiguredError("missing key"),
+    )
+    planner = service(model=model)
+
+    plan = planner._llm_plan_agent_turn("continue", {}, [])
+
+    assert plan is not None
+    assert plan["providerConnected"] is False
+    assert plan["plannerFailure"] == {
+        "code": "provider_not_configured",
+        "phase": "initial",
+        "retryable": False,
+    }
+    assert plan["nextStep"] == "planner_failed"
+
+
+def test_background_planner_still_propagates_provider_failure_for_retry_policy() -> None:
+    failure = RuntimeError("background provider failed")
+    planner = service(
+        model=FakeModel(
+            PlannerModelResult('{"action":"reply","reply":"unused"}'),
+            error=failure,
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="background provider failed"):
+        planner._llm_plan_agent_turn("continue", {}, [], propagate_provider_errors=True)
 
 
 def test_prompt_and_observation_use_only_typed_read_ports_and_bounded_projection() -> None:

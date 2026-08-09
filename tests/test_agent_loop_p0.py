@@ -83,7 +83,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             type(gateway.runtime_skills),
             "execute",
             autospec=True,
-            side_effect=lambda _owner, tool, params, agent_name=None: fake_skill(tool, params, agent_name),
+            side_effect=lambda _owner, tool, params, agent_name=None, owner_id="": fake_skill(tool, params, agent_name),
         ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
@@ -261,7 +261,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             type(gateway.runtime_skills),
             "execute",
             autospec=True,
-            side_effect=lambda _owner, tool, params, agent_name=None: fake_skill(tool, params, agent_name),
+            side_effect=lambda _owner, tool, params, agent_name=None, owner_id="": fake_skill(tool, params, agent_name),
         ):
             with TestClient(dashboard_server.app) as client:
                 response = client.post(
@@ -278,7 +278,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(payload["plan"].get("nextStep"), "done")
         self.assertIn("Multiple avatars", payload["plan"].get("summary", ""))
 
-    def test_unplanned_message_without_provider_is_honest_not_fake(self) -> None:
+    def test_unplanned_message_provider_failure_is_typed_not_fake_disconnect(self) -> None:
         gateway = self.gateway
 
         with patch(
@@ -294,13 +294,117 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         plan = payload["plan"]
-        self.assertEqual(plan["planner"], "deterministic-local")
-        self.assertFalse(plan.get("providerConnected", True))
+        self.assertEqual(plan["planner"], "llm")
+        self.assertTrue(plan.get("plannerFailed"))
+        self.assertEqual(plan.get("plannerFailure", {}).get("phase"), "initial")
+        self.assertEqual(plan.get("plannerFailure", {}).get("code"), "provider_request_failed")
         self.assertTrue(plan.get("deterministicTerminal"))
-        self.assertEqual(plan.get("nextStep"), "done")
+        self.assertEqual(plan.get("nextStep"), "planner_failed")
+        self.assertNotIn("还没接上可用的模型 Provider", plan.get("reply", ""))
         self.assertNotIn("write", payload)
         self.assertNotIn("skill", payload)
         self.assertEqual(payload.get("steps", []), [])
+
+    def test_projectless_runtime_shell_auto_yields_to_a_controllable_session(self) -> None:
+        gateway = self.gateway
+        calls: list[dict] = []
+
+        def execute_shell(params, agent_name="desktop-agent"):
+            calls.append({**params, "agentName": agent_name})
+            return {
+                "ok": True,
+                "status": "running",
+                "sessionId": "shell-fixture",
+                "session": {"sessionId": "shell-fixture", "status": "running"},
+                "classification": {"risk": "low", "protectionScope": "host"},
+            }
+
+        with patch.object(gateway.shell, "execute", side_effect=execute_shell):
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "run a long host task",
+                        "shell_command": "python worker.py",
+                        "cwd": str(Path.cwd()),
+                        "sessionId": "temporary-shell-chat",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["yieldMs"], 10_000)
+        self.assertEqual(calls[0]["timeout"], 30 * 60)
+        self.assertEqual(calls[0]["projectRoot"], "")
+        self.assertEqual(response.json()["shell"]["sessionId"], "shell-fixture")
+
+    def test_post_tool_provider_failure_preserves_skill_result_and_marks_run_failed(self) -> None:
+        gateway = self.gateway
+        llm_results = [
+            SimpleNamespace(
+                text='{"action":"skill","skill_tool":"vrcforge_scan_materials","skill_params":{}}',
+                usage={},
+                reasoning={},
+            ),
+            RuntimeError("upstream stream ended token=secret"),
+        ]
+        skill_calls: list[str] = []
+
+        def fake_llm(*_args, **_kwargs):
+            value = llm_results.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        def fake_skill(_owner, tool, params, agent_name=None, owner_id=""):
+            skill_calls.append(tool)
+            return {
+                "tool": tool,
+                "status": "executed",
+                "result": {"materialCount": 3},
+            }
+
+        with patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_llm):
+            with patch.object(
+                type(gateway.runtime_skills),
+                "execute",
+                autospec=True,
+                side_effect=fake_skill,
+            ):
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/agent/message",
+                        json={
+                            "message": "帮我整理列出未被使用的贴图",
+                            "provider": "deepseek",
+                            "providerLabel": "DeepSeek",
+                            "model": "fixture-model",
+                            "sessionId": "planner-failure-session",
+                            "clientTurnId": "planner-failure-turn",
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(skill_calls, ["vrcforge_scan_materials"])
+        self.assertEqual(len(payload.get("steps") or []), 1)
+        self.assertEqual(payload["skill"]["result"]["materialCount"], 3)
+        plan = payload["plan"]
+        self.assertEqual(plan.get("nextStep"), "planner_failed")
+        self.assertEqual(plan.get("plannerFailure", {}).get("phase"), "post_tool")
+        self.assertEqual(plan.get("plannerFailure", {}).get("code"), "provider_connection_failed")
+        self.assertTrue(plan.get("providerConnected"))
+        self.assertIn("结果也已保留", plan.get("reply", ""))
+        self.assertNotIn("没配置", plan.get("reply", ""))
+        self.assertNotIn("secret", str(payload))
+
+        completed = [
+            event
+            for event in gateway.runtime_runs.read_events()
+            if event.get("event") == "runtime_turn_completed"
+        ]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]["status"], "failed")
 
     def test_provider_model_followup_replies_without_tooling(self) -> None:
         gateway = self.gateway

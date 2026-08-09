@@ -44,6 +44,7 @@ from agent_shell_service import (
     native_shell_argv,
     resolve_powershell_executable,
 )
+from agent_shell_process_supervisor import ShellProcessSupervisor, ShellSessionPorts
 from wardrobe_outfit_workflow_service import (
     build_create_wardrobe_request,
     build_manage_wardrobe_request,
@@ -383,6 +384,36 @@ class FakeDashboardShellProcess:
         self.returncode: int | None = None
         self.stdout = stdout
         self.killed = False
+        self.output_read = False
+        self.writes: list[str] = []
+
+    def activate(self) -> None:
+        return
+
+    def read(self, _size: int = 4096) -> str:
+        if self.output_read:
+            return ""
+        self.output_read = True
+        self.returncode = 0
+        return self.stdout
+
+    def write(self, text: str) -> None:
+        self.writes.append(text)
+
+    def close_input(self) -> None:
+        return
+
+    def is_alive(self) -> bool:
+        return self.returncode is None
+
+    def exit_code(self) -> int | None:
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.kill()
+
+    def close(self) -> None:
+        return
 
     def poll(self) -> int | None:
         return self.returncode
@@ -397,6 +428,20 @@ class FakeDashboardShellProcess:
     def kill(self) -> None:
         self.killed = True
         self.returncode = -9
+
+
+class FakeDashboardShellJob:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def assign(self, _pid: int) -> None:
+        return
+
+    def active_process_count(self) -> int:
+        return 0
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def fake_dashboard_shell_process_ports(
@@ -3134,6 +3179,7 @@ class DashboardServerTests(unittest.TestCase):
                         "shell_command": "Set-Content -Path Assets/background-goal.txt -Value guarded -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
+                        "projectPath": workspace,
                     },
                 )
 
@@ -3152,7 +3198,10 @@ class DashboardServerTests(unittest.TestCase):
                 ).read_text(encoding="utf-8")
                 self.assertNotIn(workspace_path.name, run_sidecar)
 
-                rejected = client.post(f"/api/app/agent/approvals/{approval_id}/reject")
+                rejected = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/reject",
+                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                )
                 denied_state = client.get("/api/app/agent/goals/background").json()
                 acknowledged = client.post(
                     "/api/app/agent/goals/background/ack",
@@ -5639,7 +5688,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(restored.json()["permission"]["roslynRiskAcknowledged"])
             self.assertNotIn("unityAcknowledgement", restored.json())
 
-    def test_auto_permission_shell_delete_and_outside_read_require_manual_until_full_auto(self) -> None:
+    def test_host_shell_read_and_delete_run_directly_outside_unity_projects(self) -> None:
         def ps_quote(path: Path) -> str:
             return "'" + str(path).replace("'", "''") + "'"
 
@@ -5671,9 +5720,8 @@ class DashboardServerTests(unittest.TestCase):
                     "timeout_seconds": 5,
                 }
             )
-            self.assertEqual(outside_read["status"], "pending_approval")
-            self.assertTrue(outside_read["approval"]["requiresExplicitApproval"])
-            self.assertIn("outside", outside_read["approval"]["explicitApprovalReason"].lower())
+            self.assertEqual(outside_read["status"], "executed")
+            self.assertIn("outside-ok", outside_read["result"]["stdout"])
 
             delete_request = gateway.shell.execute(
                 {
@@ -5683,9 +5731,9 @@ class DashboardServerTests(unittest.TestCase):
                     "timeout_seconds": 5,
                 }
             )
-            self.assertEqual(delete_request["status"], "pending_approval")
-            self.assertTrue(delete_request["approval"]["requiresExplicitApproval"])
+            self.assertEqual(delete_request["status"], "executed")
             self.assertTrue(victim.exists())
+            self.assertEqual(len(shell_processes), 2)
 
             config = gateway.ensure_config()
             config.execution_mode = "roslyn_full_auto"
@@ -5703,7 +5751,7 @@ class DashboardServerTests(unittest.TestCase):
             )
             self.assertEqual(full_read["status"], "executed")
             self.assertIn("outside-ok", full_read["result"]["stdout"])
-            self.assertEqual(len(shell_processes), 1)
+            self.assertEqual(len(shell_processes), 3)
 
             full_delete = gateway.shell.execute(
                 {
@@ -5713,12 +5761,9 @@ class DashboardServerTests(unittest.TestCase):
                     "timeout_seconds": 5,
                 }
             )
-            # Full permission removes the approval prompt, not the rollback
-            # invariant: a mutating shell command still fails closed when the
-            # workspace is not a checkpointable Unity project.
-            self.assertEqual(full_delete["status"], "failed")
+            self.assertEqual(full_delete["status"], "executed")
             self.assertTrue(victim.exists())
-            self.assertIn("Unity project", full_delete["error"])
+            self.assertEqual(len(shell_processes), 4)
 
     def test_auto_permission_delete_write_requires_manual_until_full_auto(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5919,7 +5964,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["plan"]["nextStep"], "cancelled")
         self.assertEqual(payload["plan"]["reply"], "Request cancelled.")
 
-    def test_background_runtime_propagates_provider_failure_while_interactive_falls_back(self) -> None:
+    def test_background_runtime_propagates_provider_failure_while_interactive_is_typed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config.json", root / "audit")
@@ -5929,7 +5974,12 @@ class DashboardServerTests(unittest.TestCase):
             )
 
             interactive = gateway.runtime_message({"message": "hello"})
-            self.assertEqual(interactive["plan"]["planner"], "deterministic-local")
+            self.assertEqual(interactive["plan"]["planner"], "llm")
+            self.assertEqual(interactive["plan"]["nextStep"], "planner_failed")
+            self.assertEqual(
+                interactive["plan"]["plannerFailure"]["code"],
+                "provider_connection_failed",
+            )
 
             with self.assertRaises(ConnectionError):
                 gateway.runtime_message(
@@ -6761,40 +6811,55 @@ class DashboardServerTests(unittest.TestCase):
         )
         self.assertEqual(git_show_low["risk"], "low")
 
-        high = dashboard_server.AGENT_GATEWAY.shell.classify(
+        host_write = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Set-Content test.txt hi", "workspace_root": workspace_root}
         )
-        self.assertEqual(high["risk"], "high")
+        self.assertEqual(host_write["risk"], "low")
 
         home_path = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-Content ~\\.codex\\auth.json", "workspace_root": workspace_root}
         )
-        self.assertEqual(home_path["risk"], "high")
+        self.assertEqual(home_path["risk"], "low")
 
         root_relative = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-Content \\Windows\\win.ini", "workspace_root": workspace_root}
         )
-        self.assertEqual(root_relative["risk"], "high")
+        self.assertEqual(root_relative["risk"], "low")
 
         rg_preprocessor = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "rg --pre powershell TODO .", "workspace_root": workspace_root}
         )
-        self.assertEqual(rg_preprocessor["risk"], "high")
+        self.assertEqual(rg_preprocessor["risk"], "low")
 
         git_show_output = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "git show --stat --output=leak.txt HEAD", "workspace_root": workspace_root}
         )
-        self.assertEqual(git_show_output["risk"], "high")
+        self.assertEqual(git_show_output["risk"], "low")
 
         redirected = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-Content a.txt > b.txt", "workspace_root": workspace_root}
         )
-        self.assertEqual(redirected["risk"], "high")
+        self.assertEqual(redirected["risk"], "low")
 
         chained = dashboard_server.AGENT_GATEWAY.shell.classify(
             {"command": "Get-ChildItem; Remove-Item test.txt", "workspace_root": workspace_root}
         )
-        self.assertEqual(chained["risk"], "high")
+        self.assertEqual(chained["risk"], "low")
+
+        with tempfile.TemporaryDirectory() as project_root:
+            project = Path(project_root)
+            for marker in ("Assets", "Packages", "ProjectSettings"):
+                (project / marker).mkdir()
+            project_write = dashboard_server.AGENT_GATEWAY.shell.classify(
+                {
+                    "command": "Set-Content Assets/test.txt hi",
+                    "workspace_root": project_root,
+                    "cwd": project_root,
+                    "projectRoot": project_root,
+                }
+            )
+            self.assertEqual(project_write["risk"], "high")
+            self.assertEqual(project_write["protectionScope"], "unity_project")
 
         rejected = dashboard_server.AGENT_GATEWAY.shell.classify({"command": "", "workspace_root": workspace_root})
         self.assertEqual(rejected["risk"], "reject")
@@ -6864,8 +6929,21 @@ class DashboardServerTests(unittest.TestCase):
     def test_agent_runtime_shell_direct_and_approval_execution(self) -> None:
         shell_process_ports, shell_processes = fake_dashboard_shell_process_ports()
         original_process_ports = dashboard_server.AGENT_GATEWAY.shell._process
+        original_sessions = dashboard_server.AGENT_GATEWAY.shell._sessions
         dashboard_server.AGENT_GATEWAY.shell._process = shell_process_ports
+        def spawn_session(_argv: list[str], _cwd: Path, _env: dict[str, str]) -> FakeDashboardShellProcess:
+            process = FakeDashboardShellProcess("fixture shell output")
+            shell_processes.append(process)
+            return process
+        dashboard_server.AGENT_GATEWAY.shell._sessions = ShellProcessSupervisor(
+            ShellSessionPorts(
+                spawn_pipe=spawn_session,
+                spawn_pty=spawn_session,
+                create_job_owner=FakeDashboardShellJob,
+            )
+        )
         self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY.shell, "_process", original_process_ports)
+        self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY.shell, "_sessions", original_sessions)
         with tempfile.TemporaryDirectory() as workspace:
             for directory in ("Assets", "Packages", "ProjectSettings"):
                 (Path(workspace) / directory).mkdir()
@@ -6890,6 +6968,7 @@ class DashboardServerTests(unittest.TestCase):
                         "shell_command": "Set-Content -Path Assets/agent-loop.txt -Value hi -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
+                        "projectPath": workspace,
                     },
                 )
                 self.assertEqual(high.status_code, 200)
@@ -6899,8 +6978,11 @@ class DashboardServerTests(unittest.TestCase):
 
                 approval_id = high_payload["shell"]["approval_id"]
                 with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
-                    approved = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
-                self.assertEqual(approved.status_code, 200)
+                    approved = client.post(
+                        f"/api/app/agent/approvals/{approval_id}/approve",
+                        json={"expectedProjectRoot": workspace, "globalOnly": False},
+                    )
+                self.assertEqual(approved.status_code, 200, approved.text)
                 approved_payload = approved.json()
                 self.assertTrue(approved_payload["ok"])
                 self.assertEqual(approved_payload["execution"]["status"], "applied")
@@ -6913,21 +6995,27 @@ class DashboardServerTests(unittest.TestCase):
                     )
                 )
 
-                replay = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
+                replay = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/approve",
+                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                )
                 self.assertEqual(replay.status_code, 200)
                 self.assertFalse(replay.json()["ok"])
 
     def test_app_approval_revision_supersedes_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
-            target = Path(workspace) / "revision.txt"
+            for directory in ("Assets", "Packages", "ProjectSettings"):
+                (Path(workspace) / directory).mkdir()
+            target = Path(workspace) / "Assets" / "revision.txt"
             with TestClient(dashboard_server.app) as client:
                 high = client.post(
                     "/api/app/agent/message",
                     json={
                         "message": "write test file",
-                        "shell_command": "Set-Content -Path revision.txt -Value hi -Encoding utf8",
+                        "shell_command": "Set-Content -Path Assets/revision.txt -Value hi -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
+                        "projectPath": workspace,
                     },
                 )
                 self.assertEqual(high.status_code, 200)
@@ -6935,7 +7023,12 @@ class DashboardServerTests(unittest.TestCase):
 
                 revision = client.post(
                     f"/api/app/agent/approvals/{approval_id}/revision",
-                    json={"reason": "change request", "note": "use another name"},
+                    json={
+                        "reason": "change request",
+                        "note": "use another name",
+                        "expectedProjectRoot": workspace,
+                        "globalOnly": False,
+                    },
                 )
                 self.assertEqual(revision.status_code, 200)
                 revision_payload = revision.json()
@@ -6944,7 +7037,10 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(revision_payload["approval"]["revisionReason"], "change request")
                 self.assertFalse(target.exists())
 
-                stale_approval = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
+                stale_approval = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/approve",
+                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                )
                 self.assertEqual(stale_approval.status_code, 200)
                 self.assertFalse(stale_approval.json()["ok"])
                 self.assertFalse(target.exists())
@@ -6966,17 +7062,24 @@ class DashboardServerTests(unittest.TestCase):
                         "shell_command": "Set-Content -Path Assets/terminal.txt -Value hi -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
+                        "projectPath": workspace,
                     },
                 )
                 self.assertEqual(high.status_code, 200)
                 approval_id = high.json()["shell"]["approval_id"]
-                approved = client.post(f"/api/app/agent/approvals/{approval_id}/approve")
+                approved = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/approve",
+                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                )
                 self.assertEqual(approved.status_code, 200)
                 self.assertTrue(approved.json()["ok"])
                 self.assertFalse(target.exists())
                 self.assertEqual(len(shell_processes), 1)
 
-                rejected = client.post(f"/api/app/agent/approvals/{approval_id}/reject")
+                rejected = client.post(
+                    f"/api/app/agent/approvals/{approval_id}/reject",
+                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                )
                 self.assertEqual(rejected.status_code, 200)
                 rejected_payload = rejected.json()
                 self.assertFalse(rejected_payload["ok"])
@@ -7060,6 +7163,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_ask_user", tool_names)
         self.assertIn("vrcforge_classify_shell", tool_names)
         self.assertIn("vrcforge_execute_shell", tool_names)
+        self.assertIn("vrcforge_shell_process", tool_names)
+        process_tool = next(tool for tool in payload["tools"] if tool["name"] == "vrcforge_shell_process")
+        self.assertEqual(process_tool["category"], "supervised-write")
+        self.assertTrue(process_tool["write"])
         self.assertNotIn("vrcforge_execute_approved_shell", tool_names)
         self.assertIn("vrcforge_skill_manifest", tool_names)
         self.assertIn("vrcforge_tool_registry", tool_names)
@@ -8253,6 +8360,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(planning_tools)
         self.assertTrue(all(tool["_meta"]["permission"] == "ReadOnly" for tool in planning_tools))
         self.assertNotIn("vrcforge_request_apply", {tool["name"] for tool in planning_tools})
+        self.assertNotIn("vrcforge_shell_process", {tool["name"] for tool in planning_tools})
 
     def test_phase2_unity_tools_are_registered_without_roslyn(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor"

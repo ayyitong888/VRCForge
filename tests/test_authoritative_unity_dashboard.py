@@ -794,10 +794,14 @@ def test_existing_unity_writes_keep_the_saving_checkpoint_prepare(tmp_path: Path
     save_prepare.assert_called_once_with(project.resolve())
 
 
-@pytest.mark.parametrize("execution_mode", ["auto", "roslyn_full_auto"])
-def test_generic_parameter_request_cannot_bypass_manual_approval(
+@pytest.mark.parametrize(
+    ("execution_mode", "expected_status"),
+    [("auto", "pending"), ("roslyn_full_auto", "executed")],
+)
+def test_generic_parameter_request_respects_selected_permission_mode(
     tmp_path: Path,
     execution_mode: str,
+    expected_status: str,
 ) -> None:
     gateway = AgentGateway(
         tmp_path / "gateway" / "config.json",
@@ -819,12 +823,15 @@ def test_generic_parameter_request_cannot_bypass_manual_approval(
     config.roslyn_risk_acknowledged = execution_mode == "roslyn_full_auto"
     config.allow_roslyn_advanced = execution_mode == "roslyn_full_auto"
     gateway.save_config(config)
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
 
     result = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_unity_mcp_write",
             "arguments": {
-                "projectPath": "D:/Project",
+                "projectPath": str(project),
                 "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
                 "arguments": {},
             },
@@ -833,7 +840,12 @@ def test_generic_parameter_request_cannot_bypass_manual_approval(
         }
     )
 
-    assert result["status"] == "pending"
-    assert result["approval"]["requiresExplicitApproval"] is True
-    assert result["approval"]["autoApprovalBlocked"] is True
-    assert executed == []
+    assert result["status"] == expected_status
+    if execution_mode == "auto":
+        assert result["approval"]["requiresExplicitApproval"] is True
+        assert result["approval"]["autoApprovalBlocked"] is True
+        assert executed == []
+    else:
+        assert result["autoApproved"] is True
+        assert result["approval"].get("requiresExplicitApproval") is not True
+        assert len(executed) == 1

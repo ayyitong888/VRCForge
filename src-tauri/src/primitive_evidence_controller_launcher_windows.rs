@@ -1774,9 +1774,11 @@ mod tests {
     use crate::primitive_evidence_authority_windows::{AUTHORITY_PIPE_NAME, AUTHORITY_PIPE_SDDL};
     use serde_json::json;
     use std::{
+        env,
         fs,
         io::Write,
         os::windows::io::AsHandle,
+        process::Command as TestCommand,
         sync::atomic::{AtomicU64, Ordering},
     };
     use windows_sys::Win32::{
@@ -1787,6 +1789,21 @@ mod tests {
     struct ExternalFiles {
         root: PathBuf,
         files: Option<[File; EXTERNAL_HANDLE_COUNT]>,
+    }
+
+    fn run_isolated_test_or_continue(env_name: &str, test_name: &str) -> bool {
+        if env::var_os(env_name).is_some() {
+            return false;
+        }
+        let status = TestCommand::new(env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .arg("--nocapture")
+            .env(env_name, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated Windows handle test failed");
+        true
     }
 
     impl ExternalFiles {
@@ -1946,6 +1963,13 @@ mod tests {
 
     #[test]
     fn exact_startup_handle_list_inherits_only_the_external_six_objects() {
+        const ISOLATED_ENV: &str = "VRCFORGE_ISOLATED_CONTROLLER_HANDLE_TEST";
+        if run_isolated_test_or_continue(
+            ISOLATED_ENV,
+            "primitive_evidence_controller_launcher_windows::tests::exact_startup_handle_list_inherits_only_the_external_six_objects",
+        ) {
+            return;
+        }
         let files = ExternalFiles::new();
         // Warm the process-creation APIs before taking the leak baseline;
         // Windows may lazily initialize process-local bookkeeping on the first
@@ -2308,6 +2332,12 @@ mod tests {
 
     #[test]
     fn alias_failure_burns_partial_duplicates_without_handle_leak() {
+        if run_isolated_test_or_continue(
+            "VRCFORGE_ISOLATED_ALIAS_HANDLE_TEST",
+            "primitive_evidence_controller_launcher_windows::tests::alias_failure_burns_partial_duplicates_without_handle_leak",
+        ) {
+            return;
+        }
         let files = ExternalFiles::new();
         let before = process_handle_count();
         let mut handles = files.handles();

@@ -84,6 +84,7 @@ def test_runtime_step_permission_failures_are_structurally_denied(payload: dict[
         ({"nextStep": "await_user_instruction"}, ("parked", "await_user_instruction")),
         ({"nextStep": "paused", "stepLimitReached": True}, ("parked", "step_limit_reached")),
         ({"nextStep": "loop_suppressed"}, ("failed", "loop_suppressed")),
+        ({"nextStep": "planner_failed"}, ("failed", "planner_failed")),
         ({"nextStep": "cancelled"}, ("cancelled", "cancelled")),
     ],
 )

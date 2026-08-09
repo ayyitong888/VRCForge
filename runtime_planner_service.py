@@ -33,6 +33,10 @@ class RuntimePlannerError(ValueError):
         self.status_code = status_code
 
 
+class PlannerProviderNotConfiguredError(RuntimeError):
+    """The selected planner lane has no usable credential/configuration."""
+
+
 @dataclass(frozen=True, slots=True)
 class PlannerTool:
     name: str
@@ -774,6 +778,92 @@ class RuntimePlannerService:
             )
             return plan
 
+    def _planner_failure_plan(
+            self,
+            *,
+            cause_code: str,
+            phase: str,
+            planner_label: str,
+        ) -> dict[str, object]:
+            post_tool = phase == "post_tool"
+            invalid_response = cause_code == "planner_invalid_response"
+            not_configured = cause_code == "provider_not_configured"
+            if not_configured:
+                reply = (
+                    "当前还没有配置可用的模型 Provider 或 API Key，所以这条请求没有执行任何工具。"
+                    "请先在设置里完成 Provider 配置后重试。"
+                )
+            elif post_tool and invalid_response:
+                reply = (
+                    "上一步工具已经执行，结果也已保留，但模型返回的下一步规划格式无效。"
+                    "本轮没有继续猜测或重复调用工具，请重试。"
+                )
+            elif post_tool:
+                reply = (
+                    "上一步工具已经执行，结果也已保留，但读取结果后的下一次模型规划失败。"
+                    "本轮没有重复调用工具，请重试；如果仍然失败，再检查 Provider 连接或账户状态。"
+                )
+            elif invalid_response:
+                reply = (
+                    "模型已返回响应，但规划格式无效，所以本轮没有执行工具。"
+                    "请重试；如果持续出现，再检查所选模型是否支持结构化 JSON 输出。"
+                )
+            else:
+                reply = (
+                    "本轮模型规划请求失败，因此没有继续执行工具。"
+                    "请重试；如果仍然失败，再检查 Provider 连接、账户或模型可用性。"
+                )
+            plan: dict[str, object] = {
+                "summary": "The model planner failed before producing a valid next action.",
+                "reply": reply,
+                "planner": "llm",
+                "plannerLabel": planner_label,
+                "plannerFailed": True,
+                "plannerFailure": {
+                    "code": cause_code,
+                    "phase": phase,
+                    "retryable": cause_code != "provider_not_configured",
+                },
+                "deterministicTerminal": True,
+                "shellNeeded": False,
+                "shellCommand": "",
+                "skillNeeded": False,
+                "skillTool": "",
+                "skillCategory": "",
+                "skillParams": {},
+                "writeNeeded": False,
+                "writeTool": "",
+                "writeParams": {},
+                "continueLoop": False,
+                "nextStep": "planner_failed",
+            }
+            if not_configured:
+                plan["providerConnected"] = False
+            elif post_tool:
+                # The same frozen Provider turn already produced the action that
+                # led to the preserved tool result, so it was configured and
+                # reachable earlier in this exact turn.
+                plan["providerConnected"] = True
+            return plan
+
+    @staticmethod
+    def _planner_failure_code(exc: Exception) -> str:
+            if isinstance(exc, PlannerProviderNotConfiguredError):
+                return "provider_not_configured"
+            message = str(exc).casefold()
+            if isinstance(exc, TimeoutError) or any(marker in message for marker in ("timeout", "timed out", "deadline")):
+                return "provider_timeout"
+            if any(marker in message for marker in ("unauthorized", "forbidden", "authentication", "invalid api key")):
+                return "provider_auth_failed"
+            if any(marker in message for marker in ("quota", "credit", "billing", "insufficient balance")):
+                return "provider_credit_unavailable"
+            if isinstance(exc, (ConnectionError, OSError)) or any(
+                marker in message
+                for marker in ("connection", "network", "socket", "stream ended", "incomplete")
+            ):
+                return "provider_connection_failed"
+            return "provider_request_failed"
+
     def _local_plan_agent_turn(
             self,
             message: str,
@@ -1093,6 +1183,14 @@ class RuntimePlannerService:
             model_port = self._model
             if model_port is None:
                 return None
+            # Bootstrap observations may populate loop_state before the first
+            # provider request. Only a previously completed provider request
+            # proves that this is a post-tool continuation.
+            phase = (
+                "post_tool"
+                if int((context_usage or {}).get("requestCount") or 0) > 0
+                else "initial"
+            )
             try:
                 prompt = self._build_llm_plan_prompt(
                     self._message_with_runtime_context(message, observe),
@@ -1110,12 +1208,20 @@ class RuntimePlannerService:
                 response_text, provider_usage = normalize_llm_plan_result(raw_response)
                 self.record_context_usage(context_usage if context_usage is not None else {}, prompt, history, provider_usage)
                 payload = parse_llm_plan_response(response_text)
-            except Exception:  # noqa: BLE001 - interactive runs keep the local fallback.
+            except Exception as exc:  # noqa: BLE001 - interactive failures become a bounded typed result.
                 if propagate_provider_errors:
                     raise
-                return None
+                return self._planner_failure_plan(
+                    cause_code=self._planner_failure_code(exc),
+                    phase=phase,
+                    planner_label=str(planner_label or "").strip(),
+                )
             if not isinstance(payload, dict):
-                return None
+                return self._planner_failure_plan(
+                    cause_code="planner_invalid_response",
+                    phase=phase,
+                    planner_label=planner_label,
+                )
 
             action = str(payload.get("action") or "").strip().lower()
             summary = str(payload.get("summary") or "").strip()
@@ -1123,6 +1229,7 @@ class RuntimePlannerService:
             skill_tool = str(payload.get("skill_tool") or payload.get("skillTool") or "").strip()
             skill_params = ensure_dict(payload.get("skill_params") or payload.get("skillParams"))
             shell_command = str(payload.get("shell_command") or payload.get("shellCommand") or "").strip()
+            shell_params = ensure_dict(payload.get("shell_params") or payload.get("shellParams"))
 
             base = {
                 "planner": "llm",
@@ -1131,6 +1238,7 @@ class RuntimePlannerService:
                 "userConstraintsApplied": bool(observe.get("userConstraints", {}).get("enabled")),
                 "shellNeeded": False,
                 "shellCommand": "",
+                "shellParams": {},
                 "skillNeeded": False,
                 "skillTool": "",
                 "skillCategory": "",
@@ -1153,13 +1261,16 @@ class RuntimePlannerService:
                     "expectedResult": "Write tools will become visible without executing a tool.",
                     "nextStep": "enter_execution",
                 }
-            if action == "skill" and skill_tool:
+            if action == "skill":
                 catalog = self._catalog.read(exposure_layer)
-                known_tool = any(tool.name == skill_tool for tool in catalog.visible_tools) or (
-                    exposure_layer == EXPOSURE_LAYER_EXECUTION
-                    and any(
-                        normalize_skill_id(skill.name) == normalize_skill_id(skill_tool)
-                        for skill in catalog.skills
+                known_tool = bool(skill_tool) and (
+                    any(tool.name == skill_tool for tool in catalog.visible_tools)
+                    or (
+                        exposure_layer == EXPOSURE_LAYER_EXECUTION
+                        and any(
+                            normalize_skill_id(skill.name) == normalize_skill_id(skill_tool)
+                            for skill in catalog.skills
+                        )
                     )
                 )
                 if known_tool:
@@ -1181,26 +1292,32 @@ class RuntimePlannerService:
                         "expectedResult": "Skill output will be returned inline.",
                         "nextStep": "call_skill",
                     }
-            if action == "shell" and shell_command:
+            elif action == "shell" and shell_command:
                 return {
                     **base,
                     "summary": summary or "Prepared a shell step for the requested task.",
                     "shellNeeded": True,
                     "shellCommand": shell_command,
+                    "shellParams": shell_params,
                     "continueLoop": True,
                     "expectedResult": "Shell output will be returned inline.",
                     "nextStep": "classify_shell",
                 }
-            reply_text = reply or summary
-            if not reply_text:
-                return None
-            return {
-                **base,
-                "summary": reply_text,
-                "reply": reply_text,
-                "expectedResult": "Conversational reply.",
-                "nextStep": "done",
-            }
+            elif action == "reply":
+                reply_text = reply or summary
+                if reply_text:
+                    return {
+                        **base,
+                        "summary": reply_text,
+                        "reply": reply_text,
+                        "expectedResult": "Conversational reply.",
+                        "nextStep": "done",
+                    }
+            return self._planner_failure_plan(
+                cause_code="planner_invalid_response",
+                phase=phase,
+                planner_label=planner_label,
+            )
 
     def record_context_usage(
             self,
@@ -1610,11 +1727,11 @@ class RuntimePlannerService:
                 "直到信息足够后再用 reply 收尾。\n"
                 "可选动作：\n"
                 '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
-                '2. 执行 PowerShell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
+                '2. 执行 Shell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "shell_params": {"cwd": "<可选目录>"}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}。background/pty/yieldMs/timeout/env 只在确实需要主机后台或交互进程时按需添加；可能写 Unity 项目的命令必须省略这些高级选项，以进入审批和回滚事务。\n'
                 '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：{"action": "reply", "reply": "<回答>"}\n'
-                '4. 进入执行模式（仅当用户明确要求修改项目）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
+                '4. 进入执行模式（仅当用户明确要求项目写入或控制已启动的主机进程）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
                 "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
-                f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，写工具必须先进入 execution 层且仍走审批；"
+                f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，执行类工具必须先进入 execution 层；Unity 项目写入按当前权限模式走审批或全权限自动执行；"
                 "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
                 # VRCForge 自纠回环：失败要读错误、修正后重试或换路，绝不假装成功。
                 "如果『已执行步骤』里某一步失败或报错（status 是 failed/error，或结果里带 error/异常/traceback）："

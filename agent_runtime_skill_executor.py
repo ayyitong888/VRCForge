@@ -40,8 +40,10 @@ class AgentRuntimeSkillExecutorPorts:
     summarize_params: Callable[[Any], dict[str, Any]]
     ensure_string_list: Callable[[Any], list[str]]
     build_runtime_skill_payload: Callable[..., dict[str, Any]]
+    invoke_tool: Callable[[RuntimeSkillTool, dict[str, Any], str, str], Any]
     blocked_skills: frozenset[str]
     direct_categories: frozenset[str]
+    direct_write_tools: frozenset[str]
 
 
 class AgentRuntimeSkillExecutor:
@@ -57,6 +59,7 @@ class AgentRuntimeSkillExecutor:
         tool_name: str,
         params: dict[str, Any],
         agent_name: str,
+        owner_id: str = "",
     ) -> dict[str, Any]:
         config = self._ports.ensure_config()
         tool = self._ports.tool_for_name(tool_name)
@@ -68,7 +71,7 @@ class AgentRuntimeSkillExecutor:
                     self._ports.package_audit_context,
                 )
             if snapshot:
-                return self._execute_skill_package(snapshot, params, agent_name, config)
+                return self._execute_skill_package(snapshot, params, agent_name, config, owner_id)
             return {
                 "ok": False,
                 "status": "blocked",
@@ -78,10 +81,15 @@ class AgentRuntimeSkillExecutor:
         user_activated_tool = bool(
             tool.requires_user_activation and self._ports.computer_use_model_invocable(config)
         )
+        direct_write_tool = tool.name in self._ports.direct_write_tools
         if (
             tool.name in self._ports.blocked_skills
-            or (tool.write and not user_activated_tool)
-            or (tool.category not in self._ports.direct_categories and not user_activated_tool)
+            or (tool.write and not user_activated_tool and not direct_write_tool)
+            or (
+                tool.category not in self._ports.direct_categories
+                and not user_activated_tool
+                and not direct_write_tool
+            )
         ):
             return {
                 "ok": False,
@@ -107,7 +115,7 @@ class AgentRuntimeSkillExecutor:
         user_constraints = self._ports.read_user_constraints()
         tool_params = self._ports.inject_user_constraints(params, tool, user_constraints)
         try:
-            result = tool.handler(tool_params)
+            result = self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
             payload = {
                 "ok": True,
                 "status": "executed",
@@ -158,6 +166,7 @@ class AgentRuntimeSkillExecutor:
         params: dict[str, Any],
         agent_name: str,
         config: Any,
+        owner_id: str,
     ) -> dict[str, Any]:
         skill = snapshot.skill
         package_audit_context = snapshot.package_audit_context
@@ -203,6 +212,7 @@ class AgentRuntimeSkillExecutor:
                 params,
                 agent_name,
                 config,
+                owner_id,
                 package_audit_context=package_audit_context,
             )
             payload["entrypointTool"] = entrypoint
@@ -234,6 +244,7 @@ class AgentRuntimeSkillExecutor:
         params: dict[str, Any],
         agent_name: str,
         config: Any,
+        owner_id: str,
         *,
         package_audit_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -287,7 +298,7 @@ class AgentRuntimeSkillExecutor:
         user_constraints = self._ports.read_user_constraints()
         tool_params = self._ports.inject_user_constraints(tool_params, tool, user_constraints)
         try:
-            result = tool.handler(tool_params)
+            result = self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
             self._ports.append_audit(
                 {
                     "event": "runtime_skill_entrypoint_executed",

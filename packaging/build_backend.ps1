@@ -48,6 +48,9 @@ foreach ($module in $excludeModules) {
     --hidden-import agent_approval_transactions `
     --hidden-import agent_checkpoint_recovery `
     --hidden-import agent_skill_registry `
+    --hidden-import agent_shell_pty_worker `
+    --hidden-import winpty `
+    --collect-data winpty `
     --hidden-import tools.vrcforge_agent_mcp_stdio `
     --hidden-import tools.vrcforge_cli `
     @excludeArgs `
@@ -63,6 +66,15 @@ if ($LASTEXITCODE -ne 0) {
 $sourceOutputDir = Join-Path $tempDist "vrcforge_backend"
 if (-not (Test-Path -LiteralPath (Join-Path $sourceOutputDir "vrcforge_backend.exe"))) {
     throw "PyInstaller did not produce vrcforge_backend.exe."
+}
+$requiredWinPtyFiles = @(
+    "_internal\winpty\OpenConsole.exe",
+    "_internal\winpty\winpty-agent.exe"
+)
+foreach ($relativePath in $requiredWinPtyFiles) {
+    if (-not (Test-Path -LiteralPath (Join-Path $sourceOutputDir $relativePath))) {
+        throw "PyInstaller did not collect required PTY runtime file: $relativePath"
+    }
 }
 
 Remove-Item -LiteralPath $resolvedOutputDir -Recurse -Force -ErrorAction SilentlyContinue

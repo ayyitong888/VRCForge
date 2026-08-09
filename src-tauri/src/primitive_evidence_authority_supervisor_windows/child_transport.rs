@@ -1895,7 +1895,7 @@ fn duplicate_test_handle(source: HANDLE) -> Result<OwnedHandle, ParentPipeError>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, thread};
+    use std::{env, fs, process::Command as TestCommand, thread};
     use windows_sys::{
         Wdk::{
             Foundation::{NtQueryObject, ObjectBasicInformation},
@@ -2580,6 +2580,20 @@ mod tests {
 
     #[test]
     fn partial_creation_faults_and_normal_drop_are_handle_leak_bounded() {
+        const ISOLATED_ENV: &str = "VRCFORGE_ISOLATED_PIPE_HANDLE_TEST";
+        if env::var_os(ISOLATED_ENV).is_none() {
+            let status = TestCommand::new(env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(
+                    "primitive_evidence_authority_supervisor::native_windows::child_transport::tests::partial_creation_faults_and_normal_drop_are_handle_leak_bounded",
+                )
+                .arg("--nocapture")
+                .env(ISOLATED_ENV, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated pipe handle leak test failed");
+            return;
+        }
         let (security, exclusions) = fixture();
         let exercise = || {
             for fault in 0..=3 {

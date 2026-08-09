@@ -66,8 +66,10 @@ def make_executor(
                 "params": params,
                 "supportFiles": support_files,
             },
+            invoke_tool=lambda tool, params, _agent, _owner: tool.handler(params),
             blocked_skills=frozenset({"blocked-tool"}),
             direct_categories=frozenset({"read/debug", "plan/preview"}),
+            direct_write_tools=frozenset(),
         )
     )
     return executor, events
@@ -101,8 +103,10 @@ def test_gateway_and_subagents_share_one_least_authority_runtime_skill_owner(tmp
         "summarize_params",
         "ensure_string_list",
         "build_runtime_skill_payload",
+        "invoke_tool",
         "blocked_skills",
         "direct_categories",
+        "direct_write_tools",
     }
 
 

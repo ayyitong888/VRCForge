@@ -283,13 +283,13 @@ class AgentApprovalTransactionService:
     def _auto_approval_block_reason(self, approval: dict[str, Any], config: AgentGatewayConfig | None = None) -> str:
         config = config or self._ports.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
+        explicit_reason = str(approval.get("explicitApprovalReason") or "").strip()
         if mode == "roslyn_full_auto":
             return ""
+        if approval.get("requiresExplicitApproval"):
+            return explicit_reason or "This approval always requires manual confirmation."
         if mode != "auto":
             return "Current permission mode does not auto-approve."
-        explicit_reason = str(approval.get("explicitApprovalReason") or "").strip()
-        if approval.get("requiresExplicitApproval"):
-            return explicit_reason or "This approval requires manual confirmation in Auto Approve mode."
         if str(approval.get("targetTool") or "") == "vrcforge_shell_execute":
             arguments = ensure_dict(approval.get("arguments"))
             classification = ensure_dict(arguments.get("classification_snapshot") or approval.get("preview"))
@@ -327,6 +327,11 @@ class AgentApprovalTransactionService:
 
             previous = self.permission_state(config)
             config.execution_mode = mode
+            if entering_full_permission:
+                # Selecting Full Permission is the user's explicit global
+                # choice to enable write capability; do not leave a hidden
+                # legacy master switch silently disabling it.
+                config.allow_write_requests = True
             if acknowledge_roslyn_risk and entering_full_permission:
                 config.roslyn_risk_acknowledged = True
             config.allow_roslyn_advanced = False
@@ -518,12 +523,10 @@ class AgentApprovalTransactionService:
         full_permission_auto = execution_mode == "roslyn_full_auto"
         permission_context = self.permission_audit_context(config)
         auto_policy_reason = self._write_auto_manual_approval_reason(target_tool, arguments, preview)
-        requires_explicit_for_mode = never_auto_approve or (
-            (
-                requires_explicit_approval
-                or (execution_mode == "auto" and bool(auto_policy_reason or risk_escalation_reason))
-            )
-            and not full_permission_auto
+        requires_explicit_for_mode = False if full_permission_auto else (
+            never_auto_approve
+            or requires_explicit_approval
+            or (execution_mode == "auto" and bool(auto_policy_reason or risk_escalation_reason))
         )
         explicit_approval_reason = str(
             mandatory_manual_approval_reason
@@ -586,8 +589,11 @@ class AgentApprovalTransactionService:
                     separators=(",", ":"),
                 )
             )
-        if full_permission_auto and not never_auto_approve and (
-            requires_explicit_approval or auto_policy_reason or risk_escalation_reason
+        if full_permission_auto and (
+            never_auto_approve
+            or requires_explicit_approval
+            or auto_policy_reason
+            or risk_escalation_reason
         ):
             self._ports.append_audit(
                 {

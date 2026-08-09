@@ -193,8 +193,11 @@ def test_jsonl_reader_skips_only_invalid_utf8_line(tmp_path: Path) -> None:
     assert [event["id"] for event in events] == ["first", "last"]
 
 
-def test_never_auto_approve_survives_full_permission_mode(tmp_path: Path) -> None:
+def test_full_permission_overrides_manual_markers_after_user_selected_the_mode(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
     executed: list[dict] = []
     gateway.approval_transactions.register_write_handler(
         "vrcforge_test_manual_only",
@@ -212,23 +215,47 @@ def test_never_auto_approve_survives_full_permission_mode(tmp_path: Path) -> Non
     result = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_manual_only",
-            "arguments": {},
+            "arguments": {"projectRoot": str(project)},
             "requires_explicit_approval": True,
             "never_auto_approve": True,
         }
     )
 
-    assert result["status"] == "pending"
-    assert result["approval"]["requiresExplicitApproval"] is True
-    assert executed == []
+    assert result["status"] == "executed"
+    assert result["autoApproved"] is True
+    assert result["approval"].get("requiresExplicitApproval") is not True
+    assert executed == [{"projectRoot": str(project)}]
 
 
-@pytest.mark.parametrize("execution_mode", ["auto", "roslyn_full_auto"])
+def test_selecting_full_permission_enables_the_write_capability_it_promises(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    config = gateway.ensure_config()
+    config.allow_write_requests = False
+    gateway.save_config(config)
+
+    updated = gateway.approval_transactions.update_permission_state(
+        "roslyn_full_auto",
+        acknowledge_roslyn_risk=True,
+    )
+
+    assert updated["permission"]["fullPermission"] is True
+    assert updated["permission"]["allowWriteRequests"] is True
+    assert gateway.ensure_config().allow_write_requests is True
+
+
+@pytest.mark.parametrize(
+    ("execution_mode", "expected_status"),
+    [("auto", "pending"), ("roslyn_full_auto", "executed")],
+)
 def test_handler_manual_approval_policy_cannot_be_disabled_by_the_caller(
     tmp_path: Path,
     execution_mode: str,
+    expected_status: str,
 ) -> None:
     gateway = _gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
     executed: list[dict] = []
     gateway.approval_transactions.register_write_handler(
         "vrcforge_test_canonical_manual_only",
@@ -256,20 +283,31 @@ def test_handler_manual_approval_policy_cannot_be_disabled_by_the_caller(
     result = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_canonical_manual_only",
-            "arguments": {"caller": "cannot-disable-policy"},
+            "arguments": {"caller": "cannot-disable-policy", "projectRoot": str(project)},
             "requires_explicit_approval": False,
             "never_auto_approve": False,
             "explicit_approval_reason": "caller supplied text",
         }
     )
 
-    assert result["status"] == "pending"
-    assert result["approval"]["requiresExplicitApproval"] is True
-    assert result["approval"]["autoApprovalBlocked"] is True
-    assert result["approval"]["explicitApprovalReason"] == (
-        "The canonical operation always requires manual approval."
-    )
-    assert executed == []
+    assert result["status"] == expected_status
+    if execution_mode == "auto":
+        assert result["approval"]["requiresExplicitApproval"] is True
+        assert result["approval"]["autoApprovalBlocked"] is True
+        assert result["approval"]["explicitApprovalReason"] == (
+            "The canonical operation always requires manual approval."
+        )
+        assert executed == []
+    else:
+        assert result["autoApproved"] is True
+        assert result["approval"].get("requiresExplicitApproval") is not True
+        assert executed == [
+            {
+                "caller": "cannot-disable-policy",
+                "projectRoot": str(project),
+                "canonical": True,
+            }
+        ]
 
 
 def test_dedicated_checkpoint_preflight_failure_blocks_without_global_fallback(

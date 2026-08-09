@@ -1,0 +1,3 @@
+VRCForge bundles pywinpty 3.0.5 in the Windows backend to provide native
+ConPTY-backed interactive Shell sessions. VRCForge does not modify pywinpty.
+The package remains subject to its upstream MIT license in LICENSE.txt.

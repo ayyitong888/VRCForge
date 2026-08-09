@@ -141,6 +141,8 @@ def classify_runtime_plan_outcome(plan: Any) -> tuple[str, str]:
         return "cancelled", "cancelled"
     if next_step == "loop_suppressed":
         return "failed", "loop_suppressed"
+    if next_step == "planner_failed":
+        return "failed", "planner_failed"
     if next_step == "context_compaction_required":
         return "parked", "context_compaction_required"
     if next_step == "await_user_instruction":

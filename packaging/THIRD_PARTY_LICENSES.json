@@ -28,6 +28,22 @@
         "licenses/uv-LICENSE-APACHE-2.0.txt"
       ],
       "releaseDistributionNotes": "licenses/uv-DISTRIBUTION-NOTES.txt"
+    },
+    {
+      "name": "pywinpty",
+      "path": "third_party/pywinpty",
+      "license": "MIT",
+      "requiredLicenseFile": "LICENSE.txt",
+      "requiredLicenseText": [
+        "MIT License",
+        "Copyright (c) 2017 Spyder IDE",
+        "The above copyright notice and this permission notice shall be included in all"
+      ],
+      "requiredDistributionNotes": "VRCFORGE_DISTRIBUTION_NOTES.txt",
+      "releaseLicenseFiles": [
+        "licenses/pywinpty-LICENSE-MIT.txt"
+      ],
+      "releaseDistributionNotes": "licenses/pywinpty-DISTRIBUTION-NOTES.txt"
     }
   ]
 }

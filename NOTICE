@@ -22,6 +22,11 @@ Bundled third-party components and notices:
   * License: MIT OR Apache-2.0
   * The upstream license files and VRCForge distribution notes are preserved in
     binary release payloads under `licenses/`.
+* pywinpty
+  * Upstream: https://github.com/andfoy/pywinpty
+  * License: MIT
+  * The upstream license and VRCForge distribution notes are preserved in
+    binary release payloads under `licenses/`.
 
 The MCP Core runtime, command catalogue, input schema metadata, and tool result
 contract shipped in `VRCForge.unitypackage` are VRCForge-owned implementations.
