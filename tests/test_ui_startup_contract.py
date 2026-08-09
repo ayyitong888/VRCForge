@@ -266,6 +266,10 @@ def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerle
     assert "providerRequests.length === 0" in source[startup_branch:input_path]
     assert "sidebarMountsRecorded" in source
     assert "firstContentfulPaintRecorded" in source
+    assert 'evaluateStartupBudget(startupMetrics, startupSample)' in source[startup_branch:input_path]
+    assert 'sample === "cold"' in source
+    assert '"startupShellRecorded"' in source
+    assert '"cachedBootstrap"' not in source[source.index('sample === "cold"'):source.index(': Object.keys(checks)')]
     startup_report_write = source.index('await writeFile(outPath, `${JSON.stringify(output, null, 2)}\\n`, "utf8")', startup_branch)
     cold_marker_write = source.index("await writeColdStartupPairMarker(releaseBinding)", startup_branch)
     assert startup_report_write < cold_marker_write < input_path

@@ -618,9 +618,10 @@ const STARTUP_SHELL_BUDGET_MS = 100;
 const BACKEND_INVOKE_BUDGET_MS = 100;
 const CACHED_BOOTSTRAP_BUDGET_MS = 100;
 
-function evaluateStartupBudget(snapshot) {
+function evaluateStartupBudget(snapshot, sample = "warm") {
   const metrics = snapshot?.vrcforge || {};
   const checks = {
+    startupShellRecorded: Number.isFinite(metrics.startupShellPaintedMs),
     startupShellPainted: Number.isFinite(metrics.startupShellPaintedMs)
       && metrics.startupShellPaintedMs <= STARTUP_SHELL_BUDGET_MS,
     backendInvoke: Number.isFinite(metrics.startBackendInvokeMs)
@@ -643,8 +644,21 @@ function evaluateStartupBudget(snapshot) {
     firstContentfulPaintRecorded: Array.isArray(snapshot?.paint)
       && snapshot.paint.some((entry) => entry?.name === "first-contentful-paint" && Number.isFinite(entry.startTime)),
   };
+  const requiredCheckNames = sample === "cold"
+    ? [
+        "startupShellRecorded",
+        "backendInvoke",
+        "startupBeforeCenter",
+        "sidebarMountsRecorded",
+        "centerBeforeSidebars",
+        "sidebarsHydrated",
+        "firstContentfulPaintRecorded",
+      ]
+    : Object.keys(checks);
   return {
-    ok: Object.values(checks).every(Boolean),
+    ok: requiredCheckNames.every((name) => checks[name] === true),
+    sample,
+    requiredCheckNames,
     budgetsMs: {
       startupShellPainted: STARTUP_SHELL_BUDGET_MS,
       backendInvoke: BACKEND_INVOKE_BUDGET_MS,
@@ -683,6 +697,24 @@ function runSelfTest() {
   }
   if (evaluateStartupBudget({ ...passing, paint: [] }).ok) {
     throw new Error("self-test: missing first-contentful-paint evidence was accepted.");
+  }
+  const coldCalibration = evaluateStartupBudget({
+    ...passing,
+    vrcforge: {
+      ...passing.vrcforge,
+      startupShellPaintedMs: 108,
+      shellPaintedMs: 130,
+      centerUsableMs: 135,
+      sidebarsRequestedMs: 140,
+      leftSidebarMountedMs: 145,
+      rightSidebarMountedMs: 146,
+      sidebarsMountedMs: 150,
+      sidebarsHydratedMs: 1850,
+      bootstrapRefreshMs: 1850,
+    },
+  }, "cold");
+  if (!coldCalibration.ok || coldCalibration.checks.startupShellPainted !== false || coldCalibration.checks.cachedBootstrap !== false) {
+    throw new Error("self-test: cold calibration incorrectly required warm-only latency budgets.");
   }
   const fakeBinding = { manifestCommit: "a".repeat(40), portableSha256: "b".repeat(64) };
   const pairMarker = expectedStartupPairMarker(fakeBinding);
@@ -881,7 +913,7 @@ async function main() {
   );
 
   if (startupOnly) {
-    const startupBudget = evaluateStartupBudget(startupMetrics);
+    const startupBudget = evaluateStartupBudget(startupMetrics, startupSample);
     const nativeWindow = await firstNativeWindowVisible;
     const firstRunUiState = await readFirstRunUiState(cdp);
     const profilePreparation = startupSample === "cold"
