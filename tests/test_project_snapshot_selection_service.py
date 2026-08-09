@@ -53,7 +53,7 @@ def make_service(tmp_path: Path, *, build_snapshot=None, atomic_write=None, broa
     )
 
 
-def test_snapshot_selection_has_explicit_ports_owner_and_narrow_root_facades() -> None:
+def test_snapshot_selection_has_explicit_ports_owner_and_no_root_facades() -> None:
     service_source = (ROOT / "project_snapshot_selection_service.py").read_text(encoding="utf-8")
     dashboard_source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
     service = next(node for node in ast.parse(service_source).body if isinstance(node, ast.ClassDef) and node.name == "ProjectSnapshotSelectionService")
@@ -68,16 +68,21 @@ def test_snapshot_selection_has_explicit_ports_owner_and_narrow_root_facades() -
     assert "PROJECT_SNAPSHOT_CACHE =" not in dashboard_source
     assert "PROJECT_SELECTION_PATH =" not in dashboard_source
 
-    facades = {
-        node.name: node
-        for node in ast.parse(dashboard_source).body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in METHODS
-    }
-    assert set(facades) == METHODS
-    for facade in facades.values():
-        assert len(facade.body) == 1
-        assert isinstance(facade.body[0], ast.Return)
-        assert "_PROJECT_SNAPSHOT_SELECTION" in ast.unparse(facade.body[0])
+    dashboard_tree = ast.parse(dashboard_source)
+    assert not any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name in METHODS
+        for node in dashboard_tree.body
+    )
+    assert not any(
+        isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "_PROJECT_SNAPSHOT_SELECTION"
+            for target in node.targets
+        )
+        for node in dashboard_tree.body
+    )
 
 
 def test_snapshot_cache_fails_closed_and_returns_deep_copies(tmp_path: Path) -> None:

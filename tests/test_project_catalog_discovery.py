@@ -357,9 +357,9 @@ def test_catalog_owner_does_not_absorb_snapshot_process_or_doctor_domains() -> N
         "discover_projects",
         "discover_running_unity_projects",
         "build_project_snapshot_payload",
-        "schedule_project_snapshot_refresh",
-        "load_persisted_selected_project_path",
     ):
         assert name in dashboard_functions
+    assert "schedule_project_snapshot_refresh" not in dashboard_functions
+    assert "load_persisted_selected_project_path" not in dashboard_functions
     assert "build_unity_status_snapshot" not in dashboard_functions
     assert "build_app_doctor_report" not in dashboard_functions

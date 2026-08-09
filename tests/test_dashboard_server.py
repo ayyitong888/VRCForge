@@ -294,7 +294,7 @@ def isolated_provider_model_catalog_service(
         ),
     )
 def isolated_project_snapshot_service(*, cache_path: Path | None = None):
-    original = dashboard_server._PROJECT_SNAPSHOT_SELECTION
+    original = dashboard_server.PROJECT_SNAPSHOT_SELECTION
     return dashboard_server.ProjectSnapshotSelectionService(
         original._ports,
         cache_path=cache_path or original.cache_path,
@@ -1167,7 +1167,7 @@ class DashboardServerTests(unittest.TestCase):
             with (
                 patch("unity_status_service.UnityStatusService.build_unity_status_snapshot", return_value=snapshot) as mock_status,
                 patch("dashboard_server.status_monitor_loop", side_effect=idle_status_monitor),
-                patch("dashboard_server.bootstrap_project_snapshot_payload", side_effect=AssertionError("Unity refresh triggered project scan")),
+                patch("project_snapshot_selection_service.ProjectSnapshotSelectionService.bootstrap_project_snapshot_payload", side_effect=AssertionError("Unity refresh triggered project scan")),
             ):
                 with TestClient(dashboard_server.app) as client:
                     response = client.post("/api/app/unity/readiness/refresh")
@@ -1282,7 +1282,7 @@ class DashboardServerTests(unittest.TestCase):
                         "embedded_worker_enabled",
                         return_value=False,
                     ),
-                    patch("dashboard_server.load_project_snapshot_cache"),
+                    patch("project_snapshot_selection_service.ProjectSnapshotSelectionService.load_project_snapshot_cache"),
                     patch.object(
                         dashboard_server,
                         "_SUB_AGENT_COLLABORATION",
@@ -1335,7 +1335,7 @@ class DashboardServerTests(unittest.TestCase):
                         "embedded_worker_enabled",
                         return_value=False,
                     ),
-                    patch("dashboard_server.load_project_snapshot_cache"),
+                    patch("project_snapshot_selection_service.ProjectSnapshotSelectionService.load_project_snapshot_cache"),
                     patch.object(
                         dashboard_server,
                         "_SUB_AGENT_COLLABORATION",
@@ -1450,10 +1450,10 @@ class DashboardServerTests(unittest.TestCase):
         asyncio.run(exercise())
 
     def test_app_bootstrap_uses_cached_project_snapshot_without_waiting(self) -> None:
-        original_service = dashboard_server._PROJECT_SNAPSHOT_SELECTION
+        original_service = dashboard_server.PROJECT_SNAPSHOT_SELECTION
         service = isolated_project_snapshot_service()
         service._cache_loaded = True
-        dashboard_server._PROJECT_SNAPSHOT_SELECTION = service
+        dashboard_server.PROJECT_SNAPSHOT_SELECTION = service
         try:
             with (
                 patch.object(type(service), "schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
@@ -1474,10 +1474,10 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(schedule_refresh.call_count, 1)
             schedule_refresh.assert_called_once_with(force=True)
         finally:
-            dashboard_server._PROJECT_SNAPSHOT_SELECTION = original_service
+            dashboard_server.PROJECT_SNAPSHOT_SELECTION = original_service
 
     def test_projects_get_reads_cache_without_scheduling_refresh(self) -> None:
-        original_service = dashboard_server._PROJECT_SNAPSHOT_SELECTION
+        original_service = dashboard_server.PROJECT_SNAPSHOT_SELECTION
         service = isolated_project_snapshot_service()
         service._cache = {
             "selectedProjectPath": "",
@@ -1485,7 +1485,7 @@ class DashboardServerTests(unittest.TestCase):
             "projects": [{"name": "Cached Project", "path": "", "sources": ["test"]}],
         }
         service._cache_loaded = True
-        dashboard_server._PROJECT_SNAPSHOT_SELECTION = service
+        dashboard_server.PROJECT_SNAPSHOT_SELECTION = service
         try:
             with (
                 patch.object(type(service), "schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
@@ -1498,10 +1498,10 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.json()["projects"][0]["name"], "Cached Project")
             self.assertFalse(schedule_refresh.called)
         finally:
-            dashboard_server._PROJECT_SNAPSHOT_SELECTION = original_service
+            dashboard_server.PROJECT_SNAPSHOT_SELECTION = original_service
 
     def test_full_health_reads_project_cache_without_scheduling_refresh(self) -> None:
-        original_service = dashboard_server._PROJECT_SNAPSHOT_SELECTION
+        original_service = dashboard_server.PROJECT_SNAPSHOT_SELECTION
         service = isolated_project_snapshot_service()
         service._cache = {
             "selectedProjectPath": "",
@@ -1509,7 +1509,7 @@ class DashboardServerTests(unittest.TestCase):
             "projects": [{"name": "Cached Project", "path": "", "sources": ["test"]}],
         }
         service._cache_loaded = True
-        dashboard_server._PROJECT_SNAPSHOT_SELECTION = service
+        dashboard_server.PROJECT_SNAPSHOT_SELECTION = service
         try:
             with (
                 patch.object(type(service), "schedule_project_snapshot_refresh", return_value=True) as schedule_refresh,
@@ -1522,7 +1522,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.json()["projects"]["projects"][0]["name"], "Cached Project")
             self.assertFalse(schedule_refresh.called)
         finally:
-            dashboard_server._PROJECT_SNAPSHOT_SELECTION = original_service
+            dashboard_server.PROJECT_SNAPSHOT_SELECTION = original_service
 
     def test_root_serves_dashboard_page(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -14213,7 +14213,7 @@ namespace VRCForge.Editor
         originals = {
             "roots": list(dashboard_server.DASHBOARD_STATE.project_roots),
             "selected": dashboard_server.DASHBOARD_STATE.selected_project_path,
-            "service": dashboard_server._PROJECT_SNAPSHOT_SELECTION,
+            "service": dashboard_server.PROJECT_SNAPSHOT_SELECTION,
             "unity_status": dashboard_server.CURRENT_UNITY_STATUS,
         }
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -14242,7 +14242,7 @@ namespace VRCForge.Editor
                 ],
             }
             service._cache_loaded = True
-            dashboard_server._PROJECT_SNAPSHOT_SELECTION = service
+            dashboard_server.PROJECT_SNAPSHOT_SELECTION = service
             dashboard_server.CURRENT_UNITY_STATUS = {"instances": []}
             try:
                 with (
@@ -14254,8 +14254,8 @@ namespace VRCForge.Editor
                     patch("dashboard_server.discover_running_unity_projects", return_value=[]),
                     patch("dashboard_server.load_project_prefs", return_value={"customPaths": [], "hiddenPaths": []}),
                 ):
-                    refreshed = dashboard_server.refresh_project_snapshot_cache_sync()
-                    cached = dashboard_server.project_snapshot_payload(use_cache=True, refresh_async=False)
+                    refreshed = dashboard_server.PROJECT_SNAPSHOT_SELECTION.refresh_project_snapshot_cache_sync()
+                    cached = dashboard_server.PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False)
 
                 self.assertEqual(refreshed["scan"]["status"], "ready")
                 self.assertFalse(refreshed["scan"]["refreshing"])
@@ -14271,7 +14271,7 @@ namespace VRCForge.Editor
             finally:
                 dashboard_server.DASHBOARD_STATE.project_roots = originals["roots"]
                 dashboard_server.DASHBOARD_STATE.selected_project_path = originals["selected"]
-                dashboard_server._PROJECT_SNAPSHOT_SELECTION = originals["service"]
+                dashboard_server.PROJECT_SNAPSHOT_SELECTION = originals["service"]
                 dashboard_server.CURRENT_UNITY_STATUS = originals["unity_status"]
 
     def test_discover_projects_merges_active_mcp_instance_by_name(self) -> None:

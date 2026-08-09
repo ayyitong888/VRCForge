@@ -2132,7 +2132,7 @@ PROVIDER_VISION = ProviderVisionService(
     PROVIDER_VISION_POLICY,
     ProviderVisionSdkRunner(PROVIDER_VISION_POLICY),
 )
-_PROJECT_SNAPSHOT_SELECTION = ProjectSnapshotSelectionService(
+PROJECT_SNAPSHOT_SELECTION = ProjectSnapshotSelectionService(
     ProjectSnapshotSelectionPorts(
         build_snapshot=lambda: build_project_snapshot_payload(),
         selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
@@ -2450,7 +2450,7 @@ async def on_startup() -> None:
     EVENT_BUS.set_loop(asyncio.get_running_loop())
     AGENT_GATEWAY.shell.start()
     BACKGROUND_GOAL_COORDINATOR.start()
-    load_project_snapshot_cache()
+    PROJECT_SNAPSHOT_SELECTION.load_project_snapshot_cache()
     await asyncio.to_thread(DIAGNOSTIC_LOGGER.cleanup)
     await asyncio.to_thread(reconcile_diagnostic_trace_policy)
     await emit_safety_posture_snapshot("startup")
@@ -2667,7 +2667,7 @@ def build_full_health_payload() -> dict[str, Any]:
         },
         "state": serialize_dashboard_state(),
         "apiConfig": PROVIDER_CONFIGURATION.serialize_api_config(include_secret=False),
-        "projects": project_snapshot_payload(use_cache=True, refresh_async=False),
+        "projects": PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False),
         "logRetentionHours": int(LOG_RETENTION.total_seconds() // 3600),
         "unityStatus": CURRENT_UNITY_STATUS,
     }
@@ -3759,7 +3759,7 @@ MEMORY_REVIEW: MemoryReviewComposition = build_memory_review_composition(
             on_state=on_state,
         ),
         adapter=MemoryReviewDashboardAdapter(
-            project_snapshot=lambda: cached_project_snapshot_payload(refresh_async=False),
+            project_snapshot=lambda: PROJECT_SNAPSHOT_SELECTION.cached_project_snapshot_payload(refresh_async=False),
             selected_project_path=lambda: (
                 str(DASHBOARD_STATE.selected_project_path or "")
                 if DASHBOARD_STATE is not None
@@ -5822,7 +5822,7 @@ async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
         atomic_write_json(path, {"version": 1, "customPaths": custom_paths, "hiddenPaths": hidden_paths})
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入项目配置: {exc}") from exc
-    await EVENT_BUS.broadcast("projects", project_snapshot_payload(use_cache=True, refresh_async=False))
+    await EVENT_BUS.broadcast("projects", PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False))
     return {"ok": True, "path": str(path), "customPaths": custom_paths, "hiddenPaths": hidden_paths}
 
 
@@ -6985,7 +6985,7 @@ def build_bootstrap_app_health(*, refresh_projects: bool = False) -> dict[str, A
     api_config = PROVIDER_CONFIGURATION.serialize_app_api_config()
     agent_health = safe_agent_health()
     unity_status = CURRENT_UNITY_STATUS
-    projects = bootstrap_project_snapshot_payload() if refresh_projects else project_snapshot_payload(use_cache=True, refresh_async=False)
+    projects = PROJECT_SNAPSHOT_SELECTION.bootstrap_project_snapshot_payload() if refresh_projects else PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False)
     dashboard_index = DASHBOARD_DIR / "index.html"
     components: dict[str, dict[str, Any]] = {
         "backend": health_component(
@@ -8979,12 +8979,12 @@ async def dashboard_socket(websocket: WebSocket) -> None:
 
 @app.get("/api/projects")
 def read_projects() -> dict[str, Any]:
-    return project_snapshot_payload(use_cache=True, refresh_async=False)
+    return PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False)
 
 
 @app.post("/api/projects/refresh")
 async def refresh_projects() -> dict[str, Any]:
-    payload = await asyncio.to_thread(refresh_project_snapshot_cache_sync)
+    payload = await asyncio.to_thread(PROJECT_SNAPSHOT_SELECTION.refresh_project_snapshot_cache_sync)
     await EVENT_BUS.broadcast("projects", payload)
     await emit_log_async("info", "project", "Project list refreshed.", {"count": len(payload["projects"])})
     return payload
@@ -9005,7 +9005,7 @@ async def update_state(request: DashboardStateRequest) -> dict[str, Any]:
     if request.project_path is not None:
         try:
             selected_project_path = await asyncio.to_thread(
-                persist_selected_project_path,
+                PROJECT_SNAPSHOT_SELECTION.persist_selected_project_path,
                 request.project_path,
             )
         except ValueError as exc:
@@ -9354,7 +9354,7 @@ async def install_project(request: ProjectInstallRequest) -> dict[str, Any]:
         "output": install_result["summary"],
         "details": install_result,
     }
-    await EVENT_BUS.broadcast("projects", project_snapshot_payload(use_cache=True, refresh_async=False))
+    await EVENT_BUS.broadcast("projects", PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False))
     await emit_log_async("success", "project", "VRCForge installed into Unity project.", {"projectPath": project_path})
     return payload
 
@@ -9374,7 +9374,7 @@ async def open_project(request: ProjectActionRequest) -> dict[str, Any]:
 
     try:
         DASHBOARD_STATE.selected_project_path = await asyncio.to_thread(
-            persist_selected_project_path,
+            PROJECT_SNAPSHOT_SELECTION.persist_selected_project_path,
             project_path,
         )
     except OSError as exc:
@@ -15679,7 +15679,7 @@ def build_dashboard_socket_payload(include_secret: bool = False) -> dict[str, An
             "apiConfig": api_config,
             "effective": PROVIDER_CONFIGURATION.build_effective_model_summary(),
         },
-        "projects": project_snapshot_payload(use_cache=True, refresh_async=False),
+        "projects": PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False),
         "unityStatus": status,
     }
 
@@ -15707,62 +15707,6 @@ def build_project_snapshot_payload() -> dict[str, Any]:
         "unityEditorPath": DASHBOARD_STATE.unity_editor_path,
         "projects": projects,
     }
-
-
-def project_snapshot_list(value: Any) -> list[Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_list(value)
-
-
-def project_snapshot_cache_document(payload: dict[str, Any], *, updated_at: str, duration_ms: int) -> dict[str, Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_cache_document(payload, updated_at=updated_at, duration_ms=duration_ms)
-
-
-def load_project_snapshot_cache() -> dict[str, Any] | None:
-    return _PROJECT_SNAPSHOT_SELECTION.load_project_snapshot_cache()
-
-
-def project_snapshot_identity(project: dict[str, Any]) -> str:
-    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_identity(project)
-
-
-def project_snapshot_label(project: dict[str, Any]) -> dict[str, str]:
-    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_label(project)
-
-
-def project_snapshot_changes(previous: dict[str, Any] | None, current: dict[str, Any]) -> dict[str, Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_changes(previous, current)
-
-
-def annotate_project_snapshot(payload: dict[str, Any], *, status: str, cached: bool, error: str = "") -> dict[str, Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.annotate_project_snapshot(payload, status=status, cached=cached, error=error)
-
-
-def empty_project_snapshot_payload(*, status: str = "pending") -> dict[str, Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.empty_project_snapshot_payload(status=status)
-
-
-def _store_project_snapshot_cache(payload: dict[str, Any], *, started_at: str, duration_ms: int) -> None:
-    return _PROJECT_SNAPSHOT_SELECTION._store_project_snapshot_cache(payload, started_at=started_at, duration_ms=duration_ms)
-
-
-def refresh_project_snapshot_cache_sync() -> dict[str, Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.refresh_project_snapshot_cache_sync()
-
-
-def schedule_project_snapshot_refresh(*, force: bool = False) -> bool:
-    return _PROJECT_SNAPSHOT_SELECTION.schedule_project_snapshot_refresh(force=force)
-
-
-def bootstrap_project_snapshot_payload() -> dict[str, Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.bootstrap_project_snapshot_payload()
-
-
-def cached_project_snapshot_payload(*, refresh_async: bool = True, force_refresh: bool = False) -> dict[str, Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.cached_project_snapshot_payload(refresh_async=refresh_async, force_refresh=force_refresh)
-
-
-def project_snapshot_payload(*, use_cache: bool = False, refresh_async: bool = True) -> dict[str, Any]:
-    return _PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=use_cache, refresh_async=refresh_async)
 
 
 def discover_projects(project_roots: list[Path], include_external: bool = False) -> list[dict[str, Any]]:
@@ -15950,18 +15894,6 @@ def normalize_path_string(value: str) -> str:
     return str(Path(value)).replace("\\", "/")
 
 
-def canonical_selected_project_path(value: Any) -> str:
-    return _PROJECT_SNAPSHOT_SELECTION.canonical_selected_project_path(value)
-
-
-def load_persisted_selected_project_path() -> str:
-    return _PROJECT_SNAPSHOT_SELECTION.load_persisted_selected_project_path()
-
-
-def persist_selected_project_path(value: Any) -> str:
-    return _PROJECT_SNAPSHOT_SELECTION.persist_selected_project_path(value)
-
-
 def _review_saved_project_category_approval(approval: dict[str, Any]) -> str:
     config = PROVIDER_CONFIGURATION.current_api_config()
     return review_saved_project_category_approval(
@@ -16030,7 +15962,7 @@ def load_initial_dashboard_state() -> DashboardState:
     if not math.isfinite(status_push_interval_seconds) or not 0.25 <= status_push_interval_seconds <= 300:
         status_push_interval_seconds = 2.5
 
-    selected_project_path = load_persisted_selected_project_path()
+    selected_project_path = PROJECT_SNAPSHOT_SELECTION.load_persisted_selected_project_path()
     unity_instance = Path(selected_project_path).name if selected_project_path else settings.unity_mcp_instance
 
     return DashboardState(
