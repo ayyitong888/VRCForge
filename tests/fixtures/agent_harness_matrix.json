@@ -1,5 +1,5 @@
 {
-  "schema": "vrcforge.agent_harness_matrix.v2",
+  "schema": "vrcforge.agent_harness_matrix.v3",
   "selectionCases": [
     {"id":"selection-compile-errors","prompt":"检查 Unity 当前的 C# 编译错误。","expectedTool":"vrcforge_get_compile_errors","forbiddenTools":["vrcforge_unity_status"]},
     {"id":"selection-materials","prompt":"扫描这个 avatar 的材质，并列出 shader。","expectedTool":"vrcforge_scan_materials","forbiddenTools":["vrcforge_list_avatars"]},

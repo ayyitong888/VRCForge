@@ -1865,7 +1865,7 @@ class McpSelectionAcceptanceRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     visible_tools: list[dict[str, Any]] = Field(
         min_length=1,
-        max_length=64,
+        max_length=256,
         alias="visibleTools",
     )
     exposure_layer: Literal["planning", "execution"] = Field(default="planning", alias="exposureLayer")

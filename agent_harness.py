@@ -9,8 +9,8 @@ from agent_tool_result_contract import completion_gate_plan, normalize_agent_too
 from agent_task_loop import AgentTaskLoop
 
 
-AGENT_HARNESS_MATRIX_SCHEMA = "vrcforge.agent_harness_matrix.v2"
-AGENT_HARNESS_REPORT_SCHEMA = "vrcforge.agent_harness_report.v2"
+AGENT_HARNESS_MATRIX_SCHEMA = "vrcforge.agent_harness_matrix.v3"
+AGENT_HARNESS_REPORT_SCHEMA = "vrcforge.agent_harness_report.v3"
 _COMPLETION_STATUSES = frozenset({"ok", "failed", "needs_user_action"})
 
 
@@ -39,6 +39,7 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
         prompt = case.get("prompt")
         expected_tool = case.get("expectedTool")
         forbidden_tools = case.get("forbiddenTools", [])
+        exposure_layer = str(case.get("exposureLayer") or "planning")
         if not isinstance(prompt, str) or not prompt.strip():
             raise AgentHarnessError(f"selection case {case_id} requires a prompt")
         if not isinstance(expected_tool, str) or not expected_tool.strip():
@@ -49,6 +50,9 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
             raise AgentHarnessError(f"selection case {case_id} has invalid forbiddenTools")
         if expected_tool in forbidden_tools:
             raise AgentHarnessError(f"selection case {case_id} forbids its expected tool")
+        if exposure_layer not in {"planning", "execution"}:
+            raise AgentHarnessError(f"selection case {case_id} has invalid exposureLayer")
+        case["exposureLayer"] = exposure_layer
 
     for case in completion_cases:
         case_id = _case_id(case, seen_ids)
@@ -94,11 +98,34 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
 def evaluate_agent_harness(
     matrix: Mapping[str, Any],
     *,
-    select_tool: Callable[[str], str],
+    select_tool: Callable[[str, str], Any],
+    verify_selection: Callable[[str, Mapping[str, Any], str], bool] | None = None,
+    selection_source: str = "offline-runtime",
+    trusted_selection_receipts: bool = False,
 ) -> dict[str, Any]:
     selection_results: list[dict[str, Any]] = []
     for case in matrix["selectionCases"]:
-        selected_tool = str(select_tool(str(case["prompt"])) or "").strip()
+        prompt = str(case["prompt"])
+        exposure_layer = str(case.get("exposureLayer") or "planning")
+        raw_selection = select_tool(prompt, exposure_layer)
+        if isinstance(raw_selection, Mapping):
+            raw_calls = raw_selection.get("toolCalls") or raw_selection.get("tool_calls") or []
+            selected_calls = (
+                [str(item).strip() for item in raw_calls if str(item).strip()]
+                if isinstance(raw_calls, list)
+                else []
+            )
+        else:
+            selected_calls = [str(raw_selection).strip()] if str(raw_selection or "").strip() else []
+        selected_tool = selected_calls[0] if len(selected_calls) == 1 else ""
+        provider_evidence_valid = False
+        if verify_selection is not None and isinstance(raw_selection, Mapping):
+            try:
+                provider_evidence_valid = bool(
+                    verify_selection(prompt, raw_selection, exposure_layer)
+                )
+            except Exception:
+                provider_evidence_valid = False
         forbidden_tools = tuple(str(item) for item in case.get("forbiddenTools", []))
         passed = selected_tool == case["expectedTool"] and selected_tool not in forbidden_tools
         selection_results.append(
@@ -107,6 +134,8 @@ def evaluate_agent_harness(
                 "passed": passed,
                 "selectedTool": selected_tool,
                 "expectedTool": case["expectedTool"],
+                "exposureLayer": exposure_layer,
+                "providerEvidenceValid": provider_evidence_valid,
             }
         )
 
@@ -202,9 +231,21 @@ def evaluate_agent_harness(
         and completion_passed == len(completion_results)
         and loop_passed == len(loop_results)
     )
+    provider_evidence_valid = bool(selection_results) and all(
+        item["providerEvidenceValid"] for item in selection_results
+    )
+    release_accepted = bool(
+        accepted and trusted_selection_receipts and provider_evidence_valid
+    )
     return {
         "schema": AGENT_HARNESS_REPORT_SCHEMA,
         "accepted": accepted,
+        "releaseAccepted": release_accepted,
+        "selectionOnly": True,
+        "toolsExecuted": False,
+        "selectionSource": str(selection_source or "offline-runtime")[:200],
+        "trustedSelectionReceipts": bool(trusted_selection_receipts),
+        "providerEvidenceValid": provider_evidence_valid,
         "selection": {
             "passed": selection_passed,
             "total": len(selection_results),

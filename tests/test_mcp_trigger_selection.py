@@ -331,3 +331,18 @@ def test_selection_only_rejects_unknown_multi_or_malformed_calls(response: str) 
             model="configured-model",
             request_text=lambda _prompt: Response(response),
         )
+
+
+def test_app_selection_request_accepts_the_bounded_full_gateway_catalog() -> None:
+    request = dashboard_server.McpSelectionAcceptanceRequest(
+        message="Inspect the selected avatar.",
+        visibleTools=[
+            {
+                "name": f"vrcforge_fixture_{index}",
+                "description": "fixture",
+            }
+            for index in range(128)
+        ],
+    )
+
+    assert len(request.visible_tools) == 128
