@@ -117,7 +117,12 @@ function Get-GitHubReleaseSnapshot {
     $endpoint = if ($ReleaseId -gt 0) {
         "repos/{owner}/{repo}/releases/$ReleaseId"
     } else {
-        "repos/{owner}/{repo}/releases/tags/$Tag"
+        "repos/{owner}/{repo}/releases?per_page=100"
+    }
+    $apiArguments = if ($ReleaseId -gt 0) {
+        @("api", $endpoint)
+    } else {
+        @("api", "--paginate", "--slurp", $endpoint)
     }
     $previousErrorActionPreference = $ErrorActionPreference
     try {
@@ -125,14 +130,14 @@ function Get-GitHubReleaseSnapshot {
         # NativeCommandError while the script-wide preference is Stop. Capture
         # it with Continue so an expected REST 404 can be classified below.
         $ErrorActionPreference = "Continue"
-        $apiOutput = @(& gh api $endpoint 2>&1)
+        $apiOutput = @(& gh @apiArguments 2>&1)
         $apiExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $previousErrorActionPreference
     }
     $apiText = (@($apiOutput | ForEach-Object { [string]$_ }) -join [System.Environment]::NewLine).Trim()
     if ($apiExitCode -ne 0) {
-        if ($AllowMissing -and $apiText -match "(?i)\bHTTP\s+404\b") {
+        if ($AllowMissing -and $ReleaseId -gt 0 -and $apiText -match "(?i)\bHTTP\s+404\b") {
             return $null
         }
         throw "Unable to read back GitHub Release $releaseLocator through the GitHub REST API."
@@ -141,7 +146,30 @@ function Get-GitHubReleaseSnapshot {
     if ([string]::IsNullOrWhiteSpace($apiJson)) {
         throw "Unable to read back GitHub Release $releaseLocator through the GitHub REST API."
     }
-    $apiRelease = $apiJson | ConvertFrom-Json
+    $apiDocument = $apiJson | ConvertFrom-Json
+    if ($ReleaseId -gt 0) {
+        $apiRelease = $apiDocument
+    } else {
+        $matchingReleases = @(
+            foreach ($page in @($apiDocument)) {
+                foreach ($candidate in @($page)) {
+                    if ([string]$candidate.tag_name -ceq $Tag) {
+                        $candidate
+                    }
+                }
+            }
+        )
+        if ($matchingReleases.Count -eq 0) {
+            if ($AllowMissing) {
+                return $null
+            }
+            throw "Unable to read back GitHub Release $releaseLocator through the GitHub REST API."
+        }
+        if ($matchingReleases.Count -ne 1) {
+            throw "GitHub REST Release readback returned multiple records for tag $Tag."
+        }
+        $apiRelease = $matchingReleases[0]
+    }
     return [PSCustomObject]@{
         id = Get-RequiredProperty -InputObject $apiRelease -Name "id" -Context "GitHub REST Release readback"
         tagName = Get-RequiredProperty -InputObject $apiRelease -Name "tag_name" -Context "GitHub REST Release readback"

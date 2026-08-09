@@ -383,7 +383,7 @@ def test_publish_release_readback_only_tolerates_an_expected_missing_release(
         "$ErrorActionPreference = 'Stop'\n"
         "function Get-RequiredProperty { throw 'not reached' }\n"
         f"{function_source}\n"
-        f"$result = Get-GitHubReleaseSnapshot -Tag 'v1.5.0' {allow_missing_switch}\n"
+        f"$result = Get-GitHubReleaseSnapshot -ReleaseId 367539040 {allow_missing_switch}\n"
         "if ($null -ne $result) { throw 'expected a null missing-release result' }\n",
         encoding="utf-8",
     )
@@ -408,7 +408,76 @@ def test_publish_release_readback_only_tolerates_an_expected_missing_release(
 
     assert completed.returncode == expected_returncode, completed.stdout + completed.stderr
     if expected_returncode:
-        assert "Unable to read back GitHub Release tag v1.5.0" in completed.stderr
+        assert "Unable to read back GitHub Release id 367539040" in completed.stderr
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="the release publisher runs under Windows PowerShell",
+)
+def test_publish_release_readback_finds_an_existing_draft_by_exact_tag(
+    tmp_path: Path,
+) -> None:
+    source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(
+        encoding="utf-8"
+    )
+    required_start = source.index("function Get-RequiredProperty {")
+    required_end = source.index("function Get-StreamSha256 {", required_start)
+    snapshot_start = source.index("function Get-GitHubReleaseSnapshot {")
+    snapshot_end = source.index("function Assert-RemoteTagTarget {", snapshot_start)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    draft_record = {
+        "id": 367539040,
+        "tag_name": "v1.5.0",
+        "target_commitish": "3169dfe8a8a8bc102fa222e8b1397f18b2cd75cb",
+        "name": "VRCForge 1.5.0",
+        "body": "Draft notes",
+        "draft": True,
+        "prerelease": False,
+        "assets": [],
+    }
+    slurped_pages = json.dumps([[draft_record]], separators=(",", ":"))
+    (fake_bin / "gh.cmd").write_text(
+        f"@echo {slurped_pages}\r\n@exit /b 0\r\n",
+        encoding="utf-8",
+    )
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        f"{source[required_start:required_end]}\n"
+        f"{source[snapshot_start:snapshot_end]}\n"
+        "$result = Get-GitHubReleaseSnapshot -Tag 'v1.5.0'\n"
+        "$result | ConvertTo-Json -Depth 5 -Compress\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment.get("PATH", "")
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    snapshot = json.loads(completed.stdout)
+    assert snapshot["id"] == 367539040
+    assert snapshot["tagName"] == "v1.5.0"
+    assert snapshot["targetCommitish"] == "3169dfe8a8a8bc102fa222e8b1397f18b2cd75cb"
+    assert snapshot["isDraft"] is True
+    assert snapshot["isPrerelease"] is False
 
 
 def test_publish_path_requires_version_bound_release_notes_and_reads_them_back() -> None:
