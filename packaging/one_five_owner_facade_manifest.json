@@ -219,26 +219,6 @@
         }
       ],
       "hostProxy": {"source": "agent_checkpoint_recovery.py", "class": "AgentCheckpointRecoveryService"}
-    },
-    {
-      "id": "gateway.runtime-session-dispatch-owner",
-      "rootSymbols": [],
-      "facades": [
-        {
-          "source": "agent_gateway.py",
-          "scope": "class",
-          "class": "AgentGateway",
-            "methods": [
-              "_signal_background_activity",
-              "runtime_message",
-              "_runtime_message_impl",
-              "_summarize_loop_plan",
-              "runtime_observe",
-              "get_runtime_session",
-              "request_runtime_cancel"
-          ]
-        }
-      ]
     }
   ]
 }

@@ -186,6 +186,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.sub-agent-collaboration-root-owner" not in groups
     assert "dashboard.question-root-owner" not in groups
     assert "dashboard.provider-vision-host-proxy" not in groups
+    assert "gateway.runtime-session-dispatch-owner" not in groups
     assert "dashboard.provider-typed-root-owners" not in groups
     assert "dashboard.provider-vision-typed-root-owner" not in groups
     assert "dashboard.shader-vision-protection-typed-root-owner" not in groups
