@@ -227,6 +227,11 @@ def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerle
     assert 'profileRelative.startsWith("..") || isAbsolute(profileRelative)' in source
     assert 'startupSample === "cold" && profileExistedBefore' in source
     assert 'startupSample === "warm" && !profileExistedBefore' in source
+    assert "requireWarmStartupPairMarker(releaseBinding)" in source
+    assert "writeColdStartupPairMarker(releaseBinding)" in source
+    assert "manifestCommit: releaseBinding.manifestCommit" in source
+    assert "portableSha256: releaseBinding.portableSha256" in source
+    assert "profilePreparedForWarm: true" in source
     assert "prepareStartupPackage()" in source
     assert "manifestCommit !== headCommit || !worktreeClean" in source
     assert "portableSha256 !== String(portable.sha256).toLowerCase()" in source
@@ -250,13 +255,20 @@ def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerle
     input_path = source.index("const inputText =")
     assert startup_branch < input_path
     assert "providerRequestCount: providerRequests.length" in source[startup_branch:input_path]
-    assert "nativeWindowSnapshot(trackedLaunchIdentity)" in source[startup_branch:input_path]
-    assert "nativeWindow.visible === true" in source[startup_branch:input_path]
+    assert "firstNativeWindowVisible" in source[startup_branch:input_path]
+    assert "nativeVisibilityEvidenceOk(nativeWindow)" in source[startup_branch:input_path]
+    assert "visibleAtMs: Date.now() - launchedAt" in source
+    assert "readFirstRunUiState(cdp)" in source[startup_branch:input_path]
+    assert '"first-run-center-surface-under-onboarding"' in source[startup_branch:input_path]
+    assert "prepareColdProfileForWarm(cdp, firstRunUiState)" in source[startup_branch:input_path]
     assert "requestPackagedAppQuit(cdp)" in source[startup_branch:input_path]
     assert "forcedCleanupUsed: false" in source[startup_branch:input_path]
     assert "providerRequests.length === 0" in source[startup_branch:input_path]
     assert "sidebarMountsRecorded" in source
     assert "firstContentfulPaintRecorded" in source
+    startup_report_write = source.index('await writeFile(outPath, `${JSON.stringify(output, null, 2)}\\n`, "utf8")', startup_branch)
+    cold_marker_write = source.index("await writeColdStartupPairMarker(releaseBinding)", startup_branch)
+    assert startup_report_write < cold_marker_write < input_path
 
 
 def test_i18n_fallback_and_selected_locale_load_in_parallel() -> None:

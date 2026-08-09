@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
@@ -39,6 +39,7 @@ const userDataRoot = profileRoot ? resolve(profileRoot, "user-data") : "";
 const configRoot = userDataRoot ? resolve(userDataRoot, "config") : "";
 const hostProfileRoot = profileRoot ? resolve(profileRoot, "host-profile") : "";
 const webviewDataRoot = profileRoot ? resolve(profileRoot, "webview2-user-data") : "";
+const startupPairMarkerPath = profileRoot ? resolve(profileRoot, "startup-pair.json") : "";
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -110,6 +111,52 @@ function localAcceptanceBuildPolicy(policy) {
     && policy.releaseEligible === false
     && policy.allowDirty === false
     && policy.allowUnpushed === true;
+}
+
+function expectedStartupPairMarker(releaseBinding) {
+  return {
+    schema: "vrcforge.packaged_startup_pair.v1",
+    manifestCommit: releaseBinding.manifestCommit,
+    portableSha256: releaseBinding.portableSha256,
+    profileRoot,
+    coldCompleted: true,
+    profilePreparedForWarm: true,
+  };
+}
+
+function startupPairMarkerMatches(markerDocument, releaseBinding) {
+  const expected = expectedStartupPairMarker(releaseBinding);
+  return markerDocument?.schema === expected.schema
+    && markerDocument?.manifestCommit === expected.manifestCommit
+    && markerDocument?.portableSha256 === expected.portableSha256
+    && markerDocument?.profileRoot === expected.profileRoot
+    && markerDocument?.coldCompleted === true
+    && markerDocument?.profilePreparedForWarm === true;
+}
+
+async function requireWarmStartupPairMarker(releaseBinding) {
+  let markerDocument;
+  try {
+    markerDocument = JSON.parse((await readFile(startupPairMarkerPath, "utf8")).replace(/^\uFEFF/, ""));
+  } catch (error) {
+    throw new Error(`Warm startup evidence requires the successful cold marker: ${String(error?.message || error)}`);
+  }
+  if (!startupPairMarkerMatches(markerDocument, releaseBinding)) {
+    throw new Error("Warm startup profile marker did not match the exact manifest commit, portable ZIP, and profile identity.");
+  }
+  return markerDocument;
+}
+
+async function writeColdStartupPairMarker(releaseBinding) {
+  const markerDocument = expectedStartupPairMarker(releaseBinding);
+  const temporaryPath = `${startupPairMarkerPath}.${marker}.tmp`;
+  try {
+    await writeFile(temporaryPath, `${JSON.stringify(markerDocument, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    await rename(temporaryPath, startupPairMarkerPath);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+  return markerDocument;
 }
 
 async function prepareStartupPackage() {
@@ -326,6 +373,30 @@ async function nativeWindowSnapshot(identity) {
   return JSON.parse(value);
 }
 
+async function waitForFirstNativeWindowVisible(identity, launchedAt, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = { identityMatched: false, visible: false, handle: 0 };
+  while (Date.now() < deadline) {
+    try {
+      latest = await nativeWindowSnapshot(identity);
+    } catch (error) {
+      latest = { identityMatched: false, visible: false, handle: 0, error: String(error?.message || error) };
+    }
+    if (latest.identityMatched === true && latest.visible === true) {
+      return { ...latest, visibleAtMs: Date.now() - launchedAt, timedOut: false };
+    }
+    await sleep(50);
+  }
+  return { ...latest, visibleAtMs: null, timedOut: true };
+}
+
+function nativeVisibilityEvidenceOk(snapshot) {
+  return snapshot?.identityMatched === true
+    && snapshot?.visible === true
+    && Number.isFinite(snapshot?.visibleAtMs)
+    && snapshot?.timedOut === false;
+}
+
 async function forceCloseTrackedLaunch(identity) {
   if (!identity?.id || !identity?.startedAtUtc) return processSnapshot();
   await runPowerShell(`
@@ -456,6 +527,55 @@ async function waitForEval(cdp, expression, timeoutMs = 20000) {
   throw new Error(`Timed out waiting for expression: ${expression}; last=${JSON.stringify(lastValue)}`);
 }
 
+async function readFirstRunUiState(cdp) {
+  return evalValue(
+    cdp,
+    `(() => ({
+      languageGate: Boolean(document.querySelector('[data-vrcforge-onboarding-language-gate="true"]')),
+      onboarding: Boolean(document.querySelector('[data-vrcforge-onboarding="true"]')),
+      centerSurface: Boolean(document.querySelector('[data-chat-composer-dock], [data-empty-chat-content]')),
+    }))()`,
+  );
+}
+
+async function prepareColdProfileForWarm(cdp, initialState) {
+  const actions = [];
+  if (initialState?.languageGate) {
+    await evalValue(
+      cdp,
+      `(() => {
+        const selected = document.querySelector('button[data-vrcforge-onboarding-language-option][aria-pressed="true"]');
+        const proceed = document.querySelector('button[data-vrcforge-onboarding-language-continue]');
+        if (!selected || !proceed) return { ok: false };
+        proceed.click();
+        return { ok: true };
+      })()`,
+    );
+    await waitForEval(cdp, `(() => ({ ok: !document.querySelector('[data-vrcforge-onboarding-language-gate="true"]') }))()`);
+    actions.push("language-continue");
+  }
+  const afterLanguage = await readFirstRunUiState(cdp);
+  if (afterLanguage?.onboarding) {
+    await evalValue(
+      cdp,
+      `(() => {
+        const skip = document.querySelector('button[data-vrcforge-onboarding-skip]');
+        if (!skip) return { ok: false };
+        skip.click();
+        return { ok: true };
+      })()`,
+    );
+    await waitForEval(cdp, `(() => ({ ok: !document.querySelector('[data-vrcforge-onboarding="true"]') }))()`);
+    actions.push("onboarding-skip");
+  }
+  const finalState = await readFirstRunUiState(cdp);
+  return {
+    actions,
+    finalState,
+    ok: finalState?.languageGate === false && finalState?.onboarding === false,
+  };
+}
+
 function summarizeNetwork(events) {
   const requests = new Map();
   for (const event of events) {
@@ -564,6 +684,20 @@ function runSelfTest() {
   if (evaluateStartupBudget({ ...passing, paint: [] }).ok) {
     throw new Error("self-test: missing first-contentful-paint evidence was accepted.");
   }
+  const fakeBinding = { manifestCommit: "a".repeat(40), portableSha256: "b".repeat(64) };
+  const pairMarker = expectedStartupPairMarker(fakeBinding);
+  if (!startupPairMarkerMatches(pairMarker, fakeBinding)) {
+    throw new Error("self-test: exact cold-to-warm profile binding was rejected.");
+  }
+  if (startupPairMarkerMatches({ ...pairMarker, portableSha256: "c".repeat(64) }, fakeBinding)) {
+    throw new Error("self-test: a warm profile from a different portable ZIP was accepted.");
+  }
+  if (!nativeVisibilityEvidenceOk({ identityMatched: true, visible: true, visibleAtMs: 42, timedOut: false })) {
+    throw new Error("self-test: valid first-native-window visibility evidence was rejected.");
+  }
+  if (nativeVisibilityEvidenceOk({ identityMatched: true, visible: true, visibleAtMs: null, timedOut: true })) {
+    throw new Error("self-test: late native-window visibility without a timestamp was accepted.");
+  }
   for (const key of ["OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "HTTPS_PROXY", "VRCFORGE_CONFIG_PATH"]) {
     const excluded = key.toUpperCase().startsWith("VRCFORGE_") || inheritedEnvironmentIsSensitive(key);
     if (!excluded) {
@@ -584,12 +718,16 @@ async function main() {
   const profileExistedBefore = startupOnly
     ? (await runPowerShell(`if (Test-Path -LiteralPath '${escapePowerShellLiteral(profileRoot)}') { 'true' } else { 'false' }`)) === "true"
     : null;
+  let startupPairMarker = null;
   if (startupOnly) {
     if (startupSample === "cold" && profileExistedBefore) {
       throw new Error("Cold startup evidence requires a profile root that does not exist yet.");
     }
     if (startupSample === "warm" && !profileExistedBefore) {
       throw new Error("Warm startup evidence requires the exact profile root created by the cold run.");
+    }
+    if (startupSample === "warm") {
+      startupPairMarker = await requireWarmStartupPairMarker(releaseBinding);
     }
     await Promise.all([
       mkdir(configRoot, { recursive: true }),
@@ -613,6 +751,9 @@ async function main() {
   });
   trackedChild = child;
   trackedLaunchIdentity = await captureLaunchIdentity(child.pid);
+  const firstNativeWindowVisible = startupOnly
+    ? waitForFirstNativeWindowVisible(trackedLaunchIdentity, launchedAt)
+    : null;
   if (!startupOnly && !closeOnComplete) {
     child.unref();
   }
@@ -741,7 +882,18 @@ async function main() {
 
   if (startupOnly) {
     const startupBudget = evaluateStartupBudget(startupMetrics);
-    const nativeWindow = await nativeWindowSnapshot(trackedLaunchIdentity);
+    const nativeWindow = await firstNativeWindowVisible;
+    const firstRunUiState = await readFirstRunUiState(cdp);
+    const profilePreparation = startupSample === "cold"
+      ? await prepareColdProfileForWarm(cdp, firstRunUiState)
+      : {
+          actions: [],
+          finalState: firstRunUiState,
+          ok: firstRunUiState?.languageGate === false && firstRunUiState?.onboarding === false,
+        };
+    const centerEvidenceKind = firstRunUiState?.languageGate || firstRunUiState?.onboarding
+      ? "first-run-center-surface-under-onboarding"
+      : "interactive-center-surface";
     const providerRequests = summarizeNetwork(cdp.events).filter((entry) =>
       /(?:chat\/completions|\/v1\/responses|generativelanguage|anthropic\.com|openrouter\.ai)/i.test(entry.url || ""),
     );
@@ -771,6 +923,9 @@ async function main() {
       sample: startupSample,
       profileRoot,
       profileExistedBefore,
+      startupPairMarker: startupSample === "cold"
+        ? expectedStartupPairMarker(releaseBinding)
+        : startupPairMarker,
       releaseBinding,
       launchedAt,
       attachedAt,
@@ -779,17 +934,23 @@ async function main() {
       startupMetrics,
       startupBudget,
       nativeWindow,
+      firstRunUiState,
+      centerEvidenceKind,
+      profilePreparation,
       providerRequests,
       providerRequestCount: providerRequests.length,
       lifecycle,
       ok: startupBudget.ok
-        && nativeWindow.identityMatched === true
-        && nativeWindow.visible === true
+        && nativeVisibilityEvidenceOk(nativeWindow)
+        && profilePreparation.ok === true
         && providerRequests.length === 0
         && lifecycle.ok
         && lifecycle.forcedCleanupUsed === false,
     };
     await writeFile(outPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
+    if (output.ok && startupSample === "cold") {
+      await writeColdStartupPairMarker(releaseBinding);
+    }
     console.log(outPath);
     if (!output.ok) {
       console.error(`Packaged startup-only evidence failed: ${JSON.stringify({ startupBudget, nativeWindow, providerRequests, lifecycle })}`);
