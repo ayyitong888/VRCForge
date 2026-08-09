@@ -201,6 +201,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.avatar-tuning-root-owners" not in groups
     assert "dashboard.avatar-tuning-typed-root-owner" not in groups
     assert "dashboard.runtime-planner-typed-root-owner" not in groups
+    assert "dashboard.runtime-composition-root" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
     assert {item["id"] for item in manifest["publicApiAllowlist"]["contracts"]} == {
         "fastapi-route-request-response-openapi",

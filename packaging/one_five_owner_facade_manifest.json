@@ -221,25 +221,6 @@
       "hostProxy": {"source": "agent_checkpoint_recovery.py", "class": "AgentCheckpointRecoveryService"}
     },
     {
-      "id": "dashboard.runtime-composition-root",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "AGENT_GATEWAY"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "RUNTIME_LANE_BUDGET"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "BACKGROUND_GOAL_PREFLIGHT"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "BACKGROUND_GOAL_COORDINATOR"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "_agent_gateway_llm_plan",
-            "_agent_gateway_context_compact"
-          ]
-        }
-      ]
-    },
-    {
       "id": "gateway.runtime-session-dispatch-owner",
       "rootSymbols": [
         {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_runtime_sessions"},
