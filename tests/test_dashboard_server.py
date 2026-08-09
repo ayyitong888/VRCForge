@@ -5755,7 +5755,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             turn_payload = response.json()
 
-            dashboard_server.AGENT_GATEWAY._runtime_sessions.clear()
+            dashboard_server.AGENT_GATEWAY.runtime_sessions.clear()
             ledger_response = client.get(
                 "/api/app/agent/runs",
                 params={"sessionId": turn_payload["sessionId"], "limit": "10"},
@@ -6092,7 +6092,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(calls, ["bootstrap", "bootstrap"])
         self.assertEqual(first["steps"][0]["tool"], "vrcforge_agent_desktop_action")
         self.assertNotIn("steps", second)
-        self.assertEqual(gateway._runtime_sessions["same-session"]["desktopBootstrapToolCalls"], 1)
+        self.assertEqual(gateway.runtime_sessions.get_session("same-session")["desktopBootstrapToolCalls"], 1)
 
     def test_agent_question_keeps_goal_delivery_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6296,16 +6296,16 @@ class DashboardServerTests(unittest.TestCase):
             )
 
         mock_request_llm_plan.side_effect = fake_request
-        dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {
+        dashboard_server.AGENT_GATEWAY.runtime_sessions.set_stream_context({
             "sessionId": "sess-stream",
             "turnId": "turn-stream",
             "clientTurnId": "client-stream",
-        }
+        })
         try:
             with dashboard_server.RUNTIME_PLANNER.bind_turn({}):
                 payload = dashboard_server.RUNTIME_PLANNER.plan_agent_turn("hello", {}, {})
         finally:
-            dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {}
+            dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
 
         self.assertEqual(payload["summary"], "hello")
         events = [call.args for call in mock_broadcast.call_args_list]
@@ -6343,16 +6343,16 @@ class DashboardServerTests(unittest.TestCase):
             )
 
         mock_request_llm_plan.side_effect = fake_request
-        dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {
+        dashboard_server.AGENT_GATEWAY.runtime_sessions.set_stream_context({
             "sessionId": "sess-stream-prefix",
             "turnId": "turn-stream-prefix",
             "clientTurnId": "client-stream-prefix",
-        }
+        })
         try:
             with dashboard_server.RUNTIME_PLANNER.bind_turn({}):
                 payload = dashboard_server.RUNTIME_PLANNER.plan_agent_turn("hello", {}, {})
         finally:
-            dashboard_server.AGENT_GATEWAY._runtime_stream_context.value = {}
+            dashboard_server.AGENT_GATEWAY.runtime_sessions.clear_stream_context()
 
         self.assertEqual(payload["reply"], "hello world")
         delta_events = [call.args[1] for call in mock_broadcast.call_args_list if call.args[0] == "agentRuntimeDelta" and not call.args[1].get("done")]
@@ -6395,7 +6395,7 @@ class DashboardServerTests(unittest.TestCase):
                     }
                 )
         finally:
-            dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-full-visible-history", None)
+            dashboard_server.AGENT_GATEWAY.runtime_sessions.discard_session("sess-full-visible-history")
 
         self.assertTrue(payload["ok"])
         prompt = captured["prompt"]
@@ -6444,8 +6444,8 @@ class DashboardServerTests(unittest.TestCase):
                     {"message": "use only user memory", "session_id": "sess-memory-no-project"}
                 )
         finally:
-            dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-memory-project-a", None)
-            dashboard_server.AGENT_GATEWAY._runtime_sessions.pop("sess-memory-no-project", None)
+            dashboard_server.AGENT_GATEWAY.runtime_sessions.discard_session("sess-memory-project-a")
+            dashboard_server.AGENT_GATEWAY.runtime_sessions.discard_session("sess-memory-no-project")
 
         self.assertEqual(len(captured), 2)
         project_prompt, no_project_prompt = captured

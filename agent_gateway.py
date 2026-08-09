@@ -58,6 +58,7 @@ from optimization_service import (
     OPTIMIZATION_TOOL_DEFINITIONS,
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
+from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from runtime_planner_service import RuntimePlannerService
 from background_goal_runtime import (
     RepeatedFailureGuard,
@@ -1700,8 +1701,6 @@ class AgentGateway:
         self._tools: dict[str, AgentTool] = {}
         self._write_handlers: dict[str, AgentWriteHandler] = {}
         self._approvals: dict[str, dict[str, Any]] = {}
-        self._runtime_sessions: dict[str, dict[str, Any]] = {}
-        self._cancelled_runtime_turns: set[str] = set()
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self.checkpoint_project_root_resolver: Callable[[], str] | None = None
@@ -1709,6 +1708,9 @@ class AgentGateway:
         self.checkpoint_restore_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
         self.checkpoint_restore_handler: Callable[[Path, dict[str, Any]], dict[str, Any]] | None = None
         self._lock = threading.RLock()
+        self._runtime_session_state = AgentRuntimeSessionState(
+            AgentRuntimeSessionStatePorts(shared_state_lock=self._lock)
+        )
         self._agent_memory_store = AgentMemoryStore(
             lambda: self.agent_memory_log_path,
             lambda: self.audit_dir / "memory-review" / "accepted-audit.jsonl",
@@ -1778,7 +1780,6 @@ class AgentGateway:
         # Host-owned and deliberately optional.  The gateway treats every
         # result other than the exact string ``allow_auto`` as manual review.
         self.scoped_approval_reviewer_fn: Callable[[dict[str, Any]], str] | None = None
-        self._runtime_stream_context = threading.local()
         # 审计 JSONL 追加锁：见 append_audit。
         self._audit_append_lock = threading.Lock()
         # User-authored Skill CRUD and Doctor quarantine operate on the same
@@ -1880,10 +1881,12 @@ class AgentGateway:
                 ),
                 append_audit=self.append_audit,
                 permission_audit_context=self.permission_audit_context,
-                cancellation_requested=lambda session_id, turn_id, client_turn_id: self._runtime_cancel_requested(
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    client_turn_id=client_turn_id,
+                cancellation_requested=(
+                    lambda session_id, turn_id, client_turn_id: self._runtime_session_state.cancel_requested(
+                        session_id=session_id,
+                        turn_id=turn_id,
+                        client_turn_id=client_turn_id,
+                    )
                 ),
                 default_workspace_root=default_shell_workspace_root,
                 error_factory=lambda detail, status: AgentGatewayError(detail, status_code=status),
@@ -1947,7 +1950,7 @@ class AgentGateway:
             DesktopComputerUsePorts(
                 shared_state_lock=self._lock,
                 ensure_config=self.ensure_config,
-                runtime_cancel_requested=self._runtime_cancel_requested,
+                runtime_cancel_requested=self._runtime_session_state.cancel_requested,
                 signal_background_activity=self._signal_background_activity,
                 has_tool=lambda name: name in self._tools,
                 call_tool=lambda name, params, agent_name: self.call_tool(
@@ -2003,6 +2006,10 @@ class AgentGateway:
     def questions(self) -> AgentQuestionService:
         return self._questions
 
+    @property
+    def runtime_sessions(self) -> AgentRuntimeSessionState:
+        return self._runtime_session_state
+
     def bind_runtime_planner(self, planner: RuntimePlannerService) -> None:
         if not isinstance(planner, RuntimePlannerService):
             raise TypeError("runtime planner must be a RuntimePlannerService")
@@ -2015,8 +2022,7 @@ class AgentGateway:
             self.config_path = config_path
             self.audit_dir = audit_dir
             self._approvals.clear()
-            self._runtime_sessions.clear()
-            self._cancelled_runtime_turns.clear()
+            self._runtime_session_state.clear()
             self._desktop.configure_paths(audit_dir)
 
     def bind_project_chat_checkpoint_lock(self, lock: Any) -> None:
@@ -2415,7 +2421,7 @@ class AgentGateway:
                     for skill in skills["skills"]
                 ),
             },
-            "runtimeSessions": len(self._runtime_sessions),
+            "runtimeSessions": self._runtime_session_state.session_count(),
         }
 
     def auto_approval_enabled(self, config: AgentGatewayConfig | None = None) -> bool:
@@ -2658,7 +2664,7 @@ class AgentGateway:
         attachments = normalize_runtime_attachments(params.get("attachments"))
         params["_runtimeAttachments"] = attachments
         if history:
-            self._restore_runtime_session(session_id, history, now)
+            self._runtime_session_state.restore_session(session_id, history, now)
         project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
         observe = self.runtime_observe(session_id=session_id, project_root=project_root)
         if attachments:
@@ -2673,11 +2679,13 @@ class AgentGateway:
             observe["turn"] = turn_context
         reasoning_trace: dict[str, Any] = {}
         context_usage: dict[str, Any] = {}
-        self._runtime_stream_context.value = {
-            "sessionId": session_id,
-            "turnId": turn_id,
-            "clientTurnId": client_turn_id,
-        }
+        self._runtime_session_state.set_stream_context(
+            {
+                "sessionId": session_id,
+                "turnId": turn_id,
+                "clientTurnId": client_turn_id,
+            }
+        )
         self._append_runtime_run(
             {
                 "event": "runtime_turn_started",
@@ -2751,7 +2759,9 @@ class AgentGateway:
             if runtime_compaction is not None:
                 runtime_compaction = planner_policy.runtime_compaction_cancelled_view(runtime_compaction)
 
-        if bool(params.get("_computerUseRequested")) and not self._runtime_desktop_bootstrap_completed(session_id):
+        if bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
+            session_id
+        ):
             bootstrap_params: dict[str, Any] = {
                 "action": "computer_use",
                 "prompt": "Discover applications and windows for this user-started Computer Use turn.",
@@ -2784,10 +2794,11 @@ class AgentGateway:
             if bootstrap_vision is not None:
                 bootstrap_step["desktopVision"] = bootstrap_vision
             loop_state.append(bootstrap_step)
-            self._record_runtime_desktop_bootstrap(
+            self._runtime_session_state.record_desktop_bootstrap(
                 session_id,
-                status=str(bootstrap_payload.get("status") or "unknown"),
-                result=bootstrap_payload.get("result"),
+                now=utc_now_iso(),
+                status_summary=summarize_text(str(bootstrap_payload.get("status") or "unknown"), 80),
+                result_summary=summarize_params(bootstrap_payload.get("result")),
             )
             steps.append(
                 {
@@ -2800,7 +2811,11 @@ class AgentGateway:
             )
 
         for step_index in range(RUNTIME_AGENT_MAX_STEPS):
-            if self._consume_runtime_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
+            if self._runtime_session_state.consume_cancel_request(
+                session_id=session_id,
+                turn_id=turn_id,
+                client_turn_id=client_turn_id,
+            ):
                 discard_runtime_compaction_for_cancel()
                 last_plan = {
                     "summary": "Runtime turn was cancelled by the user.",
@@ -2831,7 +2846,7 @@ class AgentGateway:
                         runtime_compaction = compaction_result
                     elif compaction_blocked:
                         runtime_compaction = {**runtime_compaction, "blocked": True}
-                if self._consume_runtime_cancel_request(
+                if self._runtime_session_state.consume_cancel_request(
                     session_id=session_id,
                     turn_id=turn_id,
                     client_turn_id=client_turn_id,
@@ -2864,7 +2879,11 @@ class AgentGateway:
                 exposure_layer=runtime_exposure_layer,
             )
             iterations += 1
-            if self._consume_runtime_cancel_request(session_id=session_id, turn_id=turn_id, client_turn_id=client_turn_id):
+            if self._runtime_session_state.consume_cancel_request(
+                session_id=session_id,
+                turn_id=turn_id,
+                client_turn_id=client_turn_id,
+            ):
                 discard_runtime_compaction_for_cancel()
                 last_plan = {
                     "summary": "Runtime turn was cancelled by the user.",
@@ -3181,18 +3200,12 @@ class AgentGateway:
         if write_payload is not None:
             turn["write"] = write_payload
 
-        with self._lock:
-            session = self._runtime_sessions.setdefault(
-                session_id,
-                {
-                    "id": session_id,
-                    "createdAt": now,
-                    "updatedAt": now,
-                    "turns": [],
-                },
-            )
-            session["updatedAt"] = utc_now_iso()
-            session["turns"].append(turn)
+        self._runtime_session_state.append_turn(
+            session_id,
+            now=now,
+            updated_at=utc_now_iso(),
+            turn=turn,
+        )
 
         self.append_audit(
             {
@@ -3281,11 +3294,8 @@ class AgentGateway:
             payload["result"] = write_payload["result"]
         elif shell_payload is not None and shell_payload.get("result"):
             payload["result"] = shell_payload["result"]
-        self._runtime_stream_context.value = {}
+        self._runtime_session_state.clear_stream_context()
         return payload
-
-    def runtime_stream_context(self) -> dict[str, str]:
-        return dict(getattr(self._runtime_stream_context, "value", {}) or {})
 
     def _execute_write_request(
         self,
@@ -3331,73 +3341,10 @@ class AgentGateway:
             plan["reply"] = last_plan.get("reply") or last_plan.get("summary") or ""
         return plan
 
-    def _restore_runtime_session(self, session_id: str, history: list[dict[str, Any]], now: str) -> int:
-        """Rebuild an in-memory session from a client-supplied transcript (history replay).
-
-        The frontend resends the full prior conversation on every continued chat, so a
-        restarted backend can recover lost session context. No-op when the session
-        already holds live turns.
-        """
-        if not session_id:
-            return 0
-        with self._lock:
-            session = self._runtime_sessions.get(session_id)
-            if session and session.get("turns"):
-                return 0
-            turns: list[dict[str, Any]] = []
-            for index, entry in enumerate(history):
-                text = str(entry.get("text") or entry.get("message") or "").strip()
-                if not text:
-                    continue
-                role = str(entry.get("role") or "user").strip().lower()
-                if role not in ("user", "agent"):
-                    role = "user"
-                turns.append(
-                    {
-                        "id": f"restored_{index:04d}",
-                        "createdAt": str(entry.get("createdAt") or now),
-                        "restored": True,
-                        "role": role,
-                        "message": text,
-                    }
-                )
-            if not turns:
-                return 0
-            self._runtime_sessions[session_id] = {
-                "id": session_id,
-                "createdAt": now,
-                "updatedAt": now,
-                "restoredFromTranscript": True,
-                "turns": turns,
-            }
-            return len(turns)
-
-    def _runtime_desktop_bootstrap_completed(self, session_id: str) -> bool:
-        if not session_id:
-            return False
-        with self._lock:
-            session = self._runtime_sessions.get(session_id)
-            return bool(session and session.get("desktopBootstrapCompleted"))
-
-    def _record_runtime_desktop_bootstrap(self, session_id: str, *, status: str, result: Any) -> None:
-        if not session_id:
-            return
-        now = utc_now_iso()
-        with self._lock:
-            session = self._runtime_sessions.setdefault(
-                session_id,
-                {"id": session_id, "createdAt": now, "updatedAt": now, "turns": []},
-            )
-            session["desktopBootstrapCompleted"] = True
-            session["desktopBootstrapToolCalls"] = 1
-            session["desktopBootstrapStatus"] = summarize_text(status, 80)
-            session["desktopBootstrapSummary"] = summarize_params(result)
-            session["updatedAt"] = now
-
     def runtime_observe(self, session_id: str | None = None, project_root: str = "") -> dict[str, Any]:
         config = self.ensure_config()
         user_constraints = self.read_user_constraints()
-        session = self._runtime_sessions.get(session_id or "")
+        session_summary = self._runtime_session_state.session_summary(session_id or "")
         project_root = str(project_root or "").strip()
         pending = [
             item
@@ -3473,13 +3420,13 @@ class AgentGateway:
             },
             "session": {
                 "id": session_id or "",
-                "turnCount": len(session.get("turns", [])) if isinstance(session, dict) else 0,
-                "restoredFromTranscript": bool(session.get("restoredFromTranscript")) if isinstance(session, dict) else False,
+                "turnCount": session_summary["turnCount"],
+                "restoredFromTranscript": session_summary["restoredFromTranscript"],
             },
         }
 
     def get_runtime_session(self, session_id: str) -> dict[str, Any]:
-        session = self._runtime_sessions.get(session_id)
+        session = self._runtime_session_state.get_session(session_id)
         if not session:
             raise AgentGatewayError(f"Runtime session was not found: {session_id}", status_code=404)
         return {"ok": True, "session": session}
@@ -3610,13 +3557,11 @@ class AgentGateway:
         target_id = turn_id or client_turn_id
         if not target_id and not session_id:
             raise AgentGatewayError("turnId, clientTurnId, or sessionId is required.", status_code=400)
-        with self._lock:
-            if session_id and not (turn_id or client_turn_id):
-                self._cancelled_runtime_turns.add(session_id)
-            if turn_id:
-                self._cancelled_runtime_turns.add(turn_id)
-            if client_turn_id:
-                self._cancelled_runtime_turns.add(client_turn_id)
+        self._runtime_session_state.mark_cancel_requested(
+            session_id=session_id,
+            turn_id=turn_id,
+            client_turn_id=client_turn_id,
+        )
         event = {
             "event": "runtime_turn_cancel_requested",
             "status": "cancel_requested",
@@ -3664,35 +3609,6 @@ class AgentGateway:
             "event": event,
             "cancelledDesktopActionIds": cancelled_desktop_action_ids,
         }
-
-    def _runtime_cancel_requested(
-        self,
-        *,
-        session_id: str = "",
-        turn_id: str = "",
-        client_turn_id: str = "",
-    ) -> bool:
-        candidates = [item for item in (session_id, turn_id, client_turn_id) if item]
-        if not candidates:
-            return False
-        with self._lock:
-            return any(item in self._cancelled_runtime_turns for item in candidates)
-
-    def _consume_runtime_cancel_request(
-        self,
-        *,
-        session_id: str = "",
-        turn_id: str = "",
-        client_turn_id: str = "",
-    ) -> bool:
-        candidates = [item for item in (client_turn_id, turn_id, session_id) if item]
-        if not candidates:
-            return False
-        with self._lock:
-            matched = [item for item in candidates if item in self._cancelled_runtime_turns]
-            for item in matched:
-                self._cancelled_runtime_turns.discard(item)
-            return bool(matched)
 
     def record_runtime_queue_event(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}

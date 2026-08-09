@@ -222,11 +222,7 @@
     },
     {
       "id": "gateway.runtime-session-dispatch-owner",
-      "rootSymbols": [
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_runtime_sessions"},
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_cancelled_runtime_turns"},
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_runtime_stream_context"}
-      ],
+      "rootSymbols": [],
       "facades": [
         {
           "source": "agent_gateway.py",
@@ -237,18 +233,12 @@
             "_normalize_computer_use_accent",
             "runtime_message",
             "_runtime_message_impl",
-            "runtime_stream_context",
             "_summarize_loop_plan",
-            "_restore_runtime_session",
-            "_runtime_desktop_bootstrap_completed",
-            "_record_runtime_desktop_bootstrap",
             "runtime_observe",
             "get_runtime_session",
             "_runtime_run_from_turn",
             "_runtime_turn_run_status",
             "request_runtime_cancel",
-            "_runtime_cancel_requested",
-            "_consume_runtime_cancel_request",
             "record_runtime_queue_event",
             "list_runtime_runs",
             "runtime_run_log_path",

@@ -13214,7 +13214,7 @@ class _RuntimePlannerModel:
                 return
             text_delta = text[len(stream_state["text"]) :]
             stream_state["text"] = text
-            context = AGENT_GATEWAY.runtime_stream_context()
+            context = AGENT_GATEWAY.runtime_sessions.stream_context()
             client_turn_id = str(context.get("clientTurnId") or "").strip()
             if not client_turn_id:
                 return
@@ -13233,7 +13233,7 @@ class _RuntimePlannerModel:
             prompt,
             stream_callback=stream_callback,
         )
-        context = AGENT_GATEWAY.runtime_stream_context()
+        context = AGENT_GATEWAY.runtime_sessions.stream_context()
         if context.get("clientTurnId"):
             EVENT_BUS.broadcast_from_sync(
                 "agentRuntimeDelta",
