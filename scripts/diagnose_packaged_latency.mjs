@@ -1,17 +1,44 @@
 import { spawn } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const packagedRoot = resolve(repoRoot, "dist", "VRCForge_Windows_x64");
-const packagedRootPowerShell = packagedRoot.replaceAll("'", "''");
-const exe = resolve(packagedRoot, "VRCForge.exe");
+const args = process.argv.slice(2);
+const selfTest = args.includes("--self-test");
+const startupOnly = args.includes("--startup-only");
+const allowUnpushed = args.includes("--allow-unpushed");
+const profileRootIndex = args.indexOf("--profile-root");
+const sampleIndex = args.indexOf("--sample");
+const explicitProfileRoot = profileRootIndex >= 0 ? String(args[profileRootIndex + 1] || "").trim() : "";
+const startupSample = sampleIndex >= 0 ? String(args[sampleIndex + 1] || "").trim().toLowerCase() : "";
+if (startupOnly && !explicitProfileRoot) {
+  throw new Error("--startup-only requires --profile-root <isolated-path> so cold and warm runs can be bound explicitly.");
+}
+if (startupOnly && !["cold", "warm"].includes(startupSample)) {
+  throw new Error("--startup-only requires --sample cold or --sample warm.");
+}
 const port = Number(process.env.VRCFORGE_CDP_PORT || "9340");
 const marker = `LATENCY_PROBE_${Date.now()}`;
+const runRoot = resolve(repoRoot, "artifacts", "latency", marker);
+const packagedRoot = startupOnly ? resolve(runRoot, "package") : resolve(repoRoot, "dist", "VRCForge_Windows_x64");
+const packagedRootPowerShell = packagedRoot.replaceAll("'", "''");
+const exe = resolve(packagedRoot, "VRCForge.exe");
 const outPath = resolve(repoRoot, "artifacts", "latency", `packaged-latency-${marker}.json`);
 const maxWaitMs = Number(process.env.VRCFORGE_PROBE_WAIT_MS || "180000");
 const closeOnComplete = process.env.VRCFORGE_PROBE_CLOSE_ON_COMPLETE === "1";
+const profileRoot = explicitProfileRoot ? resolve(explicitProfileRoot) : "";
+const startupProfilesRoot = resolve(repoRoot, "artifacts", "latency", "profiles");
+const profileRelative = profileRoot ? relative(startupProfilesRoot, profileRoot) : "";
+if (startupOnly && (!profileRelative || profileRelative.startsWith("..") || isAbsolute(profileRelative))) {
+  throw new Error("--profile-root must be a dedicated child of artifacts/latency/profiles.");
+}
+const userDataRoot = profileRoot ? resolve(profileRoot, "user-data") : "";
+const configRoot = userDataRoot ? resolve(userDataRoot, "config") : "";
+const hostProfileRoot = profileRoot ? resolve(profileRoot, "host-profile") : "";
+const webviewDataRoot = profileRoot ? resolve(profileRoot, "webview2-user-data") : "";
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
@@ -41,6 +68,134 @@ function runPowerShell(script) {
       }
     });
   });
+}
+
+function escapePowerShellLiteral(value) {
+  return String(value).replaceAll("'", "''");
+}
+
+function sha256File(path) {
+  return new Promise((resolveHash, rejectHash) => {
+    const digest = createHash("sha256");
+    const input = createReadStream(path);
+    input.on("error", rejectHash);
+    input.on("data", (chunk) => digest.update(chunk));
+    input.on("end", () => resolveHash(digest.digest("hex")));
+  });
+}
+
+function normalizeBuildPolicy(manifest) {
+  const raw = manifest?.buildPolicy && typeof manifest.buildPolicy === "object"
+    ? manifest.buildPolicy
+    : {};
+  return {
+    mode: String(raw.mode || ""),
+    releaseEligible: raw.releaseEligible === true,
+    allowDirty: raw.allowDirty === true,
+    allowUnpushed: raw.allowUnpushed === true,
+    allowVersionMismatch: raw.allowVersionMismatch === true,
+  };
+}
+
+function strictBuildPolicy(policy) {
+  return policy.mode === "strict"
+    && policy.releaseEligible === true
+    && policy.allowDirty === false
+    && policy.allowUnpushed === false
+    && policy.allowVersionMismatch === false;
+}
+
+function localAcceptanceBuildPolicy(policy) {
+  return policy.mode === "local-acceptance"
+    && policy.releaseEligible === false
+    && policy.allowDirty === false
+    && policy.allowUnpushed === true;
+}
+
+async function prepareStartupPackage() {
+  const sourceVersion = (await readFile(resolve(repoRoot, "VERSION"), "utf8")).replace(/^\uFEFF/, "").trim();
+  const manifestPath = resolve(repoRoot, "dist", "release", "release-manifest.json");
+  const manifest = JSON.parse((await readFile(manifestPath, "utf8")).replace(/^\uFEFF/, ""));
+  const buildPolicy = normalizeBuildPolicy(manifest);
+  const escapedRepoRoot = escapePowerShellLiteral(repoRoot);
+  const headCommit = (await runPowerShell(`git -C '${escapedRepoRoot}' rev-parse HEAD`)).trim().toLowerCase();
+  const originMainCommit = (await runPowerShell(`git -C '${escapedRepoRoot}' rev-parse origin/main`)).trim().toLowerCase();
+  const worktreeClean = (await runPowerShell(`git -C '${escapedRepoRoot}' status --porcelain=v1`)) === "";
+  const manifestCommit = String(manifest?.commit || "").trim().toLowerCase();
+  if (String(manifest?.version || "") !== sourceVersion || manifestCommit !== headCommit || !worktreeClean) {
+    throw new Error("Startup probe requires a clean worktree and a release manifest bound to the exact source version and HEAD.");
+  }
+  if (allowUnpushed) {
+    if (!localAcceptanceBuildPolicy(buildPolicy)) {
+      throw new Error("--allow-unpushed requires a local-acceptance manifest with releaseEligible=false, allowDirty=false, and allowUnpushed=true.");
+    }
+  } else if (headCommit !== originMainCommit || !strictBuildPolicy(buildPolicy)) {
+    throw new Error("Strict startup evidence requires HEAD=origin/main and a strict release-eligible manifest.");
+  }
+  const portableName = `VRCForge_Windows_x64_${sourceVersion}.zip`;
+  const portable = (Array.isArray(manifest?.artifacts) ? manifest.artifacts : [])
+    .find((artifact) => artifact?.name === portableName);
+  if (!portable || !/^[0-9a-f]{64}$/i.test(String(portable.sha256 || ""))) {
+    throw new Error(`Release manifest did not contain a valid ${portableName} digest.`);
+  }
+  const portablePath = resolve(dirname(manifestPath), portableName);
+  const portableSha256 = await sha256File(portablePath);
+  if (portableSha256 !== String(portable.sha256).toLowerCase()) {
+    throw new Error("Startup probe portable ZIP did not match release-manifest.json.");
+  }
+  await mkdir(runRoot, { recursive: true });
+  await runPowerShell(`
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $destination = '${escapePowerShellLiteral(packagedRoot)}'
+    if (Test-Path -LiteralPath $destination) { throw 'Isolated startup package root already exists.' }
+    [IO.Compression.ZipFile]::ExtractToDirectory('${escapePowerShellLiteral(portablePath)}', $destination)
+  `);
+  const embeddedVersion = (await readFile(resolve(packagedRoot, "VERSION"), "utf8")).replace(/^\uFEFF/, "").trim();
+  if (embeddedVersion !== sourceVersion) {
+    throw new Error("Extracted startup package VERSION did not match the source version.");
+  }
+  return {
+    version: sourceVersion,
+    manifestCommit,
+    headCommit,
+    originMainCommit,
+    buildPolicy,
+    strictReleaseBinding: !allowUnpushed && headCommit === originMainCommit && strictBuildPolicy(buildPolicy),
+    portableName,
+    portableSha256,
+  };
+}
+
+function inheritedEnvironmentIsSensitive(key) {
+  const upper = String(key).toUpperCase();
+  return ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].includes(upper)
+    || /(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|BEARER[_-]?TOKEN)$/.test(upper)
+    || /^(?:OPENAI|ANTHROPIC|GOOGLE|GEMINI|DEEPSEEK|OPENROUTER|XAI|OLLAMA|AZURE_OPENAI|AWS|VERTEX|BEDROCK)_/.test(upper)
+    || upper === "GOOGLE_APPLICATION_CREDENTIALS"
+    || upper === "LLM_API_KEY";
+}
+
+function startupLaunchEnvironment() {
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => (
+      !key.toUpperCase().startsWith("VRCFORGE_")
+      && !inheritedEnvironmentIsSensitive(key)
+    )),
+  );
+  return {
+    ...inherited,
+    VRCFORGE_USER_DATA_DIR: userDataRoot,
+    VRCFORGE_CONFIG_DIR: configRoot,
+    VRCFORGE_CONFIG_PATH: resolve(configRoot, "config.json"),
+    VRCFORGE_SETTINGS_PATH: resolve(configRoot, "settings.json"),
+    VRCFORGE_LOG_DIR: resolve(userDataRoot, "logs"),
+    VRCFORGE_ARTIFACTS_DIR: resolve(userDataRoot, "artifacts"),
+    APPDATA: hostProfileRoot,
+    LOCALAPPDATA: hostProfileRoot,
+    WEBVIEW2_USER_DATA_FOLDER: webviewDataRoot,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:
+      `--remote-debugging-port=${port} --remote-allow-origins=*`,
+  };
 }
 
 async function processSnapshot() {
@@ -140,6 +295,35 @@ async function listenerOwnedByLaunch(identity) {
     'true'
   `);
   return value.trim().toLowerCase() === "true";
+}
+
+async function nativeWindowSnapshot(identity) {
+  if (!identity?.id || !identity?.startedAtUtc) return { identityMatched: false, visible: false, handle: 0 };
+  const value = await runPowerShell(`
+    Add-Type @'
+      using System;
+      using System.Runtime.InteropServices;
+      public static class VRCForgeStartupWindow {
+        [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+      }
+'@
+    $process = Get-Process -Id ${Number(identity.id)} -ErrorAction SilentlyContinue
+    if (-not $process) {
+      [pscustomobject]@{ identityMatched=$false; visible=$false; handle=0 } | ConvertTo-Json -Compress
+      exit 0
+    }
+    try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { $path = '' }
+    $expectedPath = [IO.Path]::GetFullPath('${packagedRootPowerShell}\\VRCForge.exe')
+    $expectedStart = [DateTime]::Parse('${String(identity.startedAtUtc).replaceAll("'", "''")}').ToUniversalTime()
+    $matched = $path.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase) -and $process.StartTime.ToUniversalTime() -eq $expectedStart
+    $handle = if ($matched) { [Int64]$process.MainWindowHandle } else { 0 }
+    [pscustomobject]@{
+      identityMatched = $matched
+      visible = $matched -and $handle -ne 0 -and [VRCForgeStartupWindow]::IsWindowVisible([IntPtr]$handle)
+      handle = $handle
+    } | ConvertTo-Json -Compress
+  `);
+  return JSON.parse(value);
 }
 
 async function forceCloseTrackedLaunch(identity) {
@@ -326,11 +510,18 @@ function evaluateStartupBudget(snapshot) {
     startupBeforeCenter: Number.isFinite(metrics.startupShellPaintedMs)
       && Number.isFinite(metrics.shellPaintedMs)
       && metrics.startupShellPaintedMs <= metrics.shellPaintedMs,
+    sidebarMountsRecorded: Number.isFinite(metrics.leftSidebarMountedMs)
+      && Number.isFinite(metrics.rightSidebarMountedMs),
     centerBeforeSidebars: Number.isFinite(metrics.centerUsableMs)
       && Number.isFinite(metrics.sidebarsRequestedMs)
       && Number.isFinite(metrics.sidebarsMountedMs)
       && metrics.centerUsableMs <= metrics.sidebarsRequestedMs
       && metrics.sidebarsRequestedMs <= metrics.sidebarsMountedMs,
+    sidebarsHydrated: Number.isFinite(metrics.sidebarsHydratedMs)
+      && Number.isFinite(metrics.sidebarsMountedMs)
+      && metrics.sidebarsMountedMs <= metrics.sidebarsHydratedMs,
+    firstContentfulPaintRecorded: Array.isArray(snapshot?.paint)
+      && snapshot.paint.some((entry) => entry?.name === "first-contentful-paint" && Number.isFinite(entry.startTime)),
   };
   return {
     ok: Object.values(checks).every(Boolean),
@@ -344,6 +535,44 @@ function evaluateStartupBudget(snapshot) {
   };
 }
 
+function runSelfTest() {
+  const passing = {
+    vrcforge: {
+      startupShellPaintedMs: 50,
+      shellPaintedMs: 70,
+      centerUsableMs: 75,
+      sidebarsRequestedMs: 80,
+      leftSidebarMountedMs: 85,
+      rightSidebarMountedMs: 86,
+      sidebarsMountedMs: 90,
+      sidebarsHydratedMs: 95,
+      startBackendInvokeMs: 40,
+      bootstrapRefreshMs: 45,
+      backendReadyEventMs: 800,
+    },
+    paint: [{ name: "first-contentful-paint", startTime: 18 }],
+  };
+  if (!evaluateStartupBudget(passing).ok) {
+    throw new Error("self-test: valid startup timing evidence was rejected.");
+  }
+  if (evaluateStartupBudget({ ...passing, vrcforge: { ...passing.vrcforge, bootstrapRefreshMs: 101 } }).ok) {
+    throw new Error("self-test: an over-budget bootstrap was accepted.");
+  }
+  if (evaluateStartupBudget({ ...passing, vrcforge: { ...passing.vrcforge, sidebarsHydratedMs: 89 } }).ok) {
+    throw new Error("self-test: sidebar hydration ordering drift was accepted.");
+  }
+  if (evaluateStartupBudget({ ...passing, paint: [] }).ok) {
+    throw new Error("self-test: missing first-contentful-paint evidence was accepted.");
+  }
+  for (const key of ["OPENAI_API_KEY", "ANTHROPIC_AUTH_TOKEN", "HTTPS_PROXY", "VRCFORGE_CONFIG_PATH"]) {
+    const excluded = key.toUpperCase().startsWith("VRCFORGE_") || inheritedEnvironmentIsSensitive(key);
+    if (!excluded) {
+      throw new Error(`self-test: sensitive environment classifier missed ${key}.`);
+    }
+  }
+  console.log("Packaged startup latency probe self-test passed");
+}
+
 let trackedChild = null;
 let trackedLaunchIdentity = null;
 let activeCdp = null;
@@ -351,19 +580,40 @@ let gracefulQuitAttempted = false;
 
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
+  const releaseBinding = startupOnly ? await prepareStartupPackage() : null;
+  const profileExistedBefore = startupOnly
+    ? (await runPowerShell(`if (Test-Path -LiteralPath '${escapePowerShellLiteral(profileRoot)}') { 'true' } else { 'false' }`)) === "true"
+    : null;
+  if (startupOnly) {
+    if (startupSample === "cold" && profileExistedBefore) {
+      throw new Error("Cold startup evidence requires a profile root that does not exist yet.");
+    }
+    if (startupSample === "warm" && !profileExistedBefore) {
+      throw new Error("Warm startup evidence requires the exact profile root created by the cold run.");
+    }
+    await Promise.all([
+      mkdir(configRoot, { recursive: true }),
+      mkdir(resolve(userDataRoot, "logs"), { recursive: true }),
+      mkdir(resolve(userDataRoot, "artifacts"), { recursive: true }),
+      mkdir(hostProfileRoot, { recursive: true }),
+      mkdir(webviewDataRoot, { recursive: true }),
+    ]);
+  }
   const beforeLaunch = await assertProbePreflightClear();
   const launchedAt = Date.now();
   const child = spawn(exe, [], {
-    detached: !closeOnComplete,
+    detached: startupOnly ? false : !closeOnComplete,
     stdio: "ignore",
-    env: {
-      ...process.env,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-allow-origins=*`,
-    },
+    env: startupOnly
+      ? startupLaunchEnvironment()
+      : {
+          ...process.env,
+          WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-allow-origins=*`,
+        },
   });
   trackedChild = child;
   trackedLaunchIdentity = await captureLaunchIdentity(child.pid);
-  if (!closeOnComplete) {
+  if (!startupOnly && !closeOnComplete) {
     child.unref();
   }
   const page = await waitForCdpTarget();
@@ -454,6 +704,7 @@ async function main() {
         metrics.centerUsableMs,
         metrics.sidebarsRequestedMs,
         metrics.sidebarsMountedMs,
+        metrics.sidebarsHydratedMs,
         metrics.startBackendInvokeMs,
         metrics.bootstrapRefreshMs,
       ].every(Number.isFinite) };
@@ -487,6 +738,65 @@ async function main() {
       })),
     }))()`,
   );
+
+  if (startupOnly) {
+    const startupBudget = evaluateStartupBudget(startupMetrics);
+    const nativeWindow = await nativeWindowSnapshot(trackedLaunchIdentity);
+    const providerRequests = summarizeNetwork(cdp.events).filter((entry) =>
+      /(?:chat\/completions|\/v1\/responses|generativelanguage|anthropic\.com|openrouter\.ai)/i.test(entry.url || ""),
+    );
+    gracefulQuitAttempted = true;
+    const listenerOwned = await listenerOwnedByLaunch(trackedLaunchIdentity).catch(() => false);
+    const quitRequest = listenerOwned
+      ? await requestPackagedAppQuit(cdp)
+      : { accepted: false, listenerOwnershipChanged: true, error: "Tracked packaged CDP listener changed owner; no Quit was attempted." };
+    cdp.close();
+    activeCdp = null;
+    const afterQuit = await waitForAppShutdown(20000);
+    const lifecycle = {
+      mode: "explicit-quit",
+      quitRequest,
+      afterQuit,
+      forcedCleanupUsed: false,
+      ok: Boolean(quitRequest.accepted && !snapshotHasResidue(afterQuit)),
+    };
+    if (!lifecycle.ok && snapshotHasResidue(afterQuit)) {
+      lifecycle.forcedCleanupUsed = true;
+      lifecycle.afterForcedCleanup = await forceCloseTrackedLaunch(trackedLaunchIdentity);
+    }
+    const output = {
+      schema: "vrcforge.packaged_startup_probe.v1",
+      marker,
+      mode: "startup-only",
+      sample: startupSample,
+      profileRoot,
+      profileExistedBefore,
+      releaseBinding,
+      launchedAt,
+      attachedAt,
+      attachMs: attachedAt - launchedAt,
+      readyProbe,
+      startupMetrics,
+      startupBudget,
+      nativeWindow,
+      providerRequests,
+      providerRequestCount: providerRequests.length,
+      lifecycle,
+      ok: startupBudget.ok
+        && nativeWindow.identityMatched === true
+        && nativeWindow.visible === true
+        && providerRequests.length === 0
+        && lifecycle.ok
+        && lifecycle.forcedCleanupUsed === false,
+    };
+    await writeFile(outPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
+    console.log(outPath);
+    if (!output.ok) {
+      console.error(`Packaged startup-only evidence failed: ${JSON.stringify({ startupBudget, nativeWindow, providerRequests, lifecycle })}`);
+      process.exitCode = 1;
+    }
+    return;
+  }
 
   const inputText = `Do not use tools. Reply in one short sentence and include this exact token: ${marker}`;
   const composerReady = await waitForEval(
@@ -688,7 +998,10 @@ async function main() {
   }
 }
 
-main().catch(async (error) => {
+if (selfTest) {
+  runSelfTest();
+} else {
+  main().catch(async (error) => {
   const cleanup = {
     quitRequest: { accepted: false, error: "CDP was unavailable before cleanup." },
     afterQuit: null,
@@ -727,5 +1040,6 @@ main().catch(async (error) => {
     lifecycle: cleanup,
   }, null, 2)}\n`, "utf8").catch(() => {});
   console.error(error);
-  process.exit(1);
-});
+    process.exit(1);
+  });
+}

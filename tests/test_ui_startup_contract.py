@@ -216,6 +216,49 @@ def test_startup_loads_app_and_locale_in_parallel_and_records_visible_shell() ->
     assert "process.exitCode = 1" in probe_source
 
 
+def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerless() -> None:
+    source = _read("scripts/diagnose_packaged_latency.mjs")
+
+    assert 'args.includes("--startup-only")' in source
+    assert 'args.includes("--allow-unpushed")' in source
+    assert 'args.indexOf("--profile-root")' in source
+    assert 'args.indexOf("--sample")' in source
+    assert 'relative(startupProfilesRoot, profileRoot)' in source
+    assert 'profileRelative.startsWith("..") || isAbsolute(profileRelative)' in source
+    assert 'startupSample === "cold" && profileExistedBefore' in source
+    assert 'startupSample === "warm" && !profileExistedBefore' in source
+    assert "prepareStartupPackage()" in source
+    assert "manifestCommit !== headCommit || !worktreeClean" in source
+    assert "portableSha256 !== String(portable.sha256).toLowerCase()" in source
+    assert "ExtractToDirectory" in source
+    assert "startupLaunchEnvironment()" in source
+    for key in (
+        "VRCFORGE_USER_DATA_DIR",
+        "VRCFORGE_CONFIG_DIR",
+        "VRCFORGE_CONFIG_PATH",
+        "VRCFORGE_SETTINGS_PATH",
+        "VRCFORGE_LOG_DIR",
+        "VRCFORGE_ARTIFACTS_DIR",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "WEBVIEW2_USER_DATA_FOLDER",
+    ):
+        assert key in source
+    assert '!key.toUpperCase().startsWith("VRCFORGE_")' in source
+    assert "inheritedEnvironmentIsSensitive(key)" in source
+    startup_branch = source.index("if (startupOnly) {", source.index("const startupMetrics"))
+    input_path = source.index("const inputText =")
+    assert startup_branch < input_path
+    assert "providerRequestCount: providerRequests.length" in source[startup_branch:input_path]
+    assert "nativeWindowSnapshot(trackedLaunchIdentity)" in source[startup_branch:input_path]
+    assert "nativeWindow.visible === true" in source[startup_branch:input_path]
+    assert "requestPackagedAppQuit(cdp)" in source[startup_branch:input_path]
+    assert "forcedCleanupUsed: false" in source[startup_branch:input_path]
+    assert "providerRequests.length === 0" in source[startup_branch:input_path]
+    assert "sidebarMountsRecorded" in source
+    assert "firstContentfulPaintRecorded" in source
+
+
 def test_i18n_fallback_and_selected_locale_load_in_parallel() -> None:
     source = _read("src/i18n.ts")
 

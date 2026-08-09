@@ -234,7 +234,7 @@ test("force-only packaged probes fail closed and never count forced cleanup as s
 
   const latency = await readFile(resolve(repoRoot, "scripts", probes[0]), "utf8");
   assert.match(latency, /VRCFORGE_PROBE_CLOSE_ON_COMPLETE === "1"/);
-  assert.match(latency, /detached: !closeOnComplete/);
+  assert.match(latency, /detached: startupOnly \? false : !closeOnComplete/);
   assert.match(latency, /"preserved-for-manual-inspection"/);
   assert.match(latency, /if \(completed && closeOnComplete\) \{/);
   assert.match(latency, /preserved-after-incomplete-probe-for-manual-inspection/);
