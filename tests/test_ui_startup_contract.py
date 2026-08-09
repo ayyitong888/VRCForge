@@ -329,6 +329,8 @@ def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerle
     assert '"first-run-center-surface-under-onboarding"' in source[startup_branch:input_path]
     assert "prepareColdProfileForWarm(cdp, firstRunUiState)" in source[startup_branch:input_path]
     assert "requestPackagedAppQuit(cdp)" in source[startup_branch:input_path]
+    assert "async function waitForOwnedCdpListener" in source
+    assert "await waitForOwnedCdpListener(trackedLaunchIdentity)" in source
     assert "forcedCleanupUsed: false" in source[startup_branch:input_path]
     assert "providerRequests.length === 0" in source[startup_branch:input_path]
     assert "sidebarMountsRecorded" in source

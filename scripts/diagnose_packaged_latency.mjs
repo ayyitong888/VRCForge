@@ -344,6 +344,19 @@ async function listenerOwnedByLaunch(identity) {
   return value.trim().toLowerCase() === "true";
 }
 
+async function waitForOwnedCdpListener(identity, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    try {
+      if (await listenerOwnedByLaunch(identity)) return true;
+    } catch {
+      // A newly-created WebView process may not be visible to CIM yet.
+    }
+    await sleep(50);
+  } while (Date.now() < deadline);
+  return false;
+}
+
 async function nativeWindowSnapshot(identity) {
   if (!identity?.id || !identity?.startedAtUtc) return { identityMatched: false, visible: false, handle: 0 };
   const value = await runPowerShell(`
@@ -790,7 +803,7 @@ async function main() {
     child.unref();
   }
   const page = await waitForCdpTarget();
-  if (!(await listenerOwnedByLaunch(trackedLaunchIdentity))) {
+  if (!(await waitForOwnedCdpListener(trackedLaunchIdentity))) {
     throw new Error("Packaged probe CDP listener was not owned by the captured launch generation.");
   }
   const cdp = connectCdp(page.webSocketDebuggerUrl);
