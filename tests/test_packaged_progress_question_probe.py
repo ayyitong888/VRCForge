@@ -49,6 +49,32 @@ def test_question_probe_has_release_binding_isolation_and_owned_cleanup() -> Non
     assert "$ids.Contains([int]$candidate.ParentProcessId)" in source
     assert "$path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)" in source
     assert "$path.Equals($exe, [StringComparison]::OrdinalIgnoreCase)" in source
+    assert "function sameLaunchIdentity(expected, observed)" in source
+    assert "startedAtUtc" in source
+    assert "creationDateUtc" in source
+    assert "captureLaunchIdentity(child.pid)" in source
+    assert "function cdpOwnershipAllowsAction(ownership)" in source
+    assert "function closeAuthorizationAction(identityCheck, cdpOwnership)" in source
+    assert "closeCalls.quit !== 0 || closeCalls.force !== 1" in source
+    assert "waitForOwnedCdpListener(launch)" in source
+    assert "$ids.Contains([int]$listeners[0].OwningProcess)" in source
+    assert "captureLaunchIdentity(processId, timeoutMs = 5000)" in source
+    assert "await sleep(50)" in source
+    assert "Tracked packaged PID generation changed; no Quit or forced termination is authorized" in source
+    close = source[source.index("async function closePackagedApp(launch)") : source.index("function assertGracefulClosure")]
+    assert close.index("validateLaunchIdentity(launch)") < close.index("requestPackagedAppQuit(launch.cdp)")
+    assert close.index("inspectCdpListenerOwnership(launch)") < close.index("requestPackagedAppQuit(launch.cdp)")
+    assert close.index('if (closeAction === "force-own-root")') < close.index("requestPackagedAppQuit(launch.cdp)")
+    assert "forced: true" in close
+    assert "evidenceFailure: true" in close
+    assert "forceCloseLaunch(launch)" in close
+    force = source[source.index("async function forceCloseLaunch(launch)") : source.index("async function closePackagedApp(launch)")]
+    assert force.count("Assert-TrackedRootIdentity") == 3
+    assert force.rindex("Assert-TrackedRootIdentity") < force.index("Stop-Process -Force")
+    launch = source[source.index("async function launchPackagedApp()") : source.index("async function readAppToken")]
+    assert launch.index("waitForOwnedCdpListener(launch)") < launch.index("waitForJson(attemptedCdpUrl)")
+    assert launch.index("waitForJson(attemptedCdpUrl)") < launch.index("const connectOwnership")
+    assert launch.index("const connectOwnership") < launch.index("connectCdp(page.webSocketDebuggerUrl)")
 
 
 def test_question_probe_contract_covers_auth_scope_redaction_and_restart() -> None:
@@ -140,6 +166,9 @@ def test_question_probe_self_test_and_unknown_option_are_side_effect_free() -> N
     )
     assert self_test.returncode == 0, self_test.stderr
     assert "Question lifecycle probe self-test passed" in self_test.stdout
+    assert "PID generation identity was not fail-closed" not in self_test.stderr
+    assert "foreign CDP listener ownership was accepted" not in self_test.stderr
+    assert "did not fail through one owned force cleanup" not in self_test.stderr
 
     unknown = subprocess.run(
         ["node", str(SCRIPT), "--unexpected-option"],

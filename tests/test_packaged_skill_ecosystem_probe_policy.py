@@ -43,3 +43,29 @@ def test_packaged_skill_probe_keeps_approval_packages_request_only() -> None:
     assert '"vrcforge_unity_mcp_write"' in source
     assert '"vrc_atomic_reference_rename"' in source
     assert '"post-safe-mode request-only outfit package"' in source
+
+
+def test_packaged_skill_probe_uses_explicit_app_quit_for_normal_shutdown() -> None:
+    source = (
+        ROOT / "scripts" / "diagnose_packaged_skill_ecosystem.mjs"
+    ).read_text(encoding="utf-8")
+
+    close_start = source.index("async function closePackagedApp")
+    close_end = source.index("async function waitForFileJson", close_start)
+    close = source[close_start:close_end]
+    assert "await assertOwnedCdpListener()" in close
+    assert "requestPackagedAppQuit(launch.cdp)" in close
+    assert close.index("requestPackagedAppQuit") < close.index("waitForPackagedClear(30000)")
+    assert "quit.accepted && cleared.ok" in close
+    assert close.index("waitForPackagedClear(30000)") < close.index("forceCloseLaunch")
+
+    launch_start = source.index("async function launchPackagedApp")
+    launch_end = source.index("async function readAppToken", launch_start)
+    launch = source[launch_start:launch_end]
+    assert launch.count("await assertOwnedCdpListener()") >= 2
+    assert launch.index("await assertOwnedCdpListener()") < launch.index("connectCdp(page.webSocketDebuggerUrl)")
+    assert "cdpListenerOwnershipRejectsForeignRoot" in source
+    assert "launch.childProcess?.kill" not in source
+    assert "no unverified process was terminated" in source
+    assert "CloseMainWindow" not in close
+    assert "requestManagedBackendShutdown" not in close

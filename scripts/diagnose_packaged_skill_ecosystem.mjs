@@ -12,6 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const allowUnpushed = process.argv.includes("--allow-unpushed");
@@ -1239,6 +1240,20 @@ async function processSnapshot() {
   return processSnapshotInFlight;
 }
 
+function cdpListenerOwnedByTrackedProcesses(snapshot) {
+  const listeners = (snapshot?.ports || []).filter((item) => Number(item.localPort) === cdpPort);
+  const trackedPids = new Set((snapshot?.trackedProcesses || []).map((item) => Number(item.pid)));
+  return listeners.length === 1 && trackedPids.has(Number(listeners[0].owningProcess));
+}
+
+async function assertOwnedCdpListener() {
+  const snapshot = await processSnapshot();
+  if (!cdpListenerOwnedByTrackedProcesses(snapshot)) {
+    throw new Error("Packaged probe CDP listener was not owned by the captured launch generation; no connection or Quit is authorized.");
+  }
+  return snapshot;
+}
+
 function startProcessTracking(rootPid) {
   trackedRootPid = Number(rootPid || 0);
   trackedRootObserved = false;
@@ -1357,13 +1372,7 @@ async function forceCloseLaunch(launch) {
   // PID + creation time + path before terminating the currently live one.
   const candidates = buildTrackedCleanupCandidates(rootPid);
   if (candidates.length === 0) {
-    const terminated = launch.childProcess?.kill?.() === true;
-    if (!terminated) {
-      throw new Error("Spawned packaged root could not be identity-bound or terminated through its child handle.");
-    }
-    const cleared = await waitForPackagedClear(20000);
-    if (!cleared.ok) throw new Error("Spawned packaged root handle terminated but its process boundary did not clear.");
-    return cleared.snapshot;
+    throw new Error("Spawned packaged root could not be identity-bound; no unverified process was terminated.");
   }
   const encodedCandidates = Buffer.from(JSON.stringify(candidates), "utf8").toString("base64");
   await runPowerShell(`
@@ -1389,8 +1398,7 @@ async function forceCloseLaunch(launch) {
 }
 
 async function closePackagedApp(launch) {
-  if (!launch?.childPid) throw new Error("Tracked packaged launch was unavailable for close.");
-  const escapedExe = escapePowerShellLiteral(exe);
+  if (!launch?.childPid || !launch?.cdp) throw new Error("Tracked packaged launch was unavailable for explicit Quit.");
   const rootPid = Number(launch.childPid);
   const rootIdentity = trackedProcessIdentities.get(trackedRootIdentityKey);
   if (
@@ -1398,62 +1406,27 @@ async function closePackagedApp(launch) {
     || rootIdentity.pid !== rootPid
     || normalizedPath(rootIdentity.path) !== normalizedPath(exe)
   ) {
-    throw new Error("Tracked packaged root generation was unavailable for graceful close.");
+    throw new Error("Tracked packaged root generation was unavailable for explicit Quit.");
   }
-  const escapedRootCreationDate = escapePowerShellLiteral(rootIdentity.creationDate);
-  const requestedRaw = await runPowerShell(`
-    ${powershellDmtfCreationDateHelper}
-    $exe = [IO.Path]::GetFullPath('${escapedExe}')
-    $expectedCreationDate = '${escapedRootCreationDate}'
-    $current = Get-CimInstance Win32_Process -Filter "ProcessId = ${rootPid}" -ErrorAction SilentlyContinue
-    $identityMatched = $false
-    if ($current) {
-      $currentCreationDate = Convert-VrcForgeCreationDateToDmtf $current.CreationDate
-      $sameCreation = ([string]$currentCreationDate).Equals($expectedCreationDate, [StringComparison]::Ordinal)
-      $samePath = ([string]$current.ExecutablePath).Equals($exe, [StringComparison]::OrdinalIgnoreCase)
-      $identityMatched = [bool]($sameCreation -and $samePath)
-    }
-    $targets = @()
-    if ($identityMatched) {
-      $targets = @(Get-Process -Id ${rootPid} -ErrorAction SilentlyContinue)
-    }
-    $results = @(foreach ($target in $targets) {
-      [pscustomobject]@{
-        pid = $target.Id
-        mainWindowHandle = [int64]$target.MainWindowHandle
-        closeRequested = [bool]$target.CloseMainWindow()
-      }
-    })
-    [pscustomobject]@{ identityMatched = $identityMatched; targets = $results } | ConvertTo-Json -Depth 4 -Compress
-  `);
-  const requested = requestedRaw ? JSON.parse(requestedRaw) : { targets: [] };
-  const targets = Array.isArray(requested?.targets)
-    ? requested.targets
-    : requested?.targets
-      ? [requested.targets]
-      : [];
-  const closeAccepted = requested?.identityMatched === true
-    && targets.length === 1
-    && Number(targets[0]?.pid) === rootPid
-    && Number(targets[0]?.mainWindowHandle) !== 0
-    && targets[0]?.closeRequested === true;
-  const graceful = await waitForPackagedClear(30000);
-  if (graceful.ok) {
+  await assertOwnedCdpListener();
+  const quit = await requestPackagedAppQuit(launch.cdp);
+  const cleared = await waitForPackagedClear(30000);
+  if (quit.accepted && cleared.ok) {
     return {
+      quit,
       trackedPidCount: 1,
-      targetedCount: targets.length,
-      closeAccepted,
-      graceful: closeAccepted,
+      targetedCount: 1,
+      graceful: true,
       forced: false,
-      finalSnapshot: summarizeSnapshot(graceful.snapshot),
+      finalSnapshot: summarizeSnapshot(cleared.snapshot),
     };
   }
-  const beforeForce = summarizeSnapshot(graceful.snapshot);
+  const beforeForce = summarizeSnapshot(cleared.snapshot);
   await forceCloseLaunch(launch);
   return {
+    quit,
     trackedPidCount: 1,
-    targetedCount: targets.length,
-    closeAccepted,
+    targetedCount: 1,
     graceful: false,
     forced: true,
     beforeForce,
@@ -1689,7 +1662,9 @@ try {
 }
 
 function assertGracefulClosure(report, closure, label) {
-  if (!closure.graceful) addAssertion(report, `packaged app did not complete an accepted graceful close ${label}`);
+  if (closure?.quit?.accepted !== true || closure?.graceful !== true || closure?.forced === true) {
+    addAssertion(report, `packaged app did not complete an accepted explicit Quit ${label}`);
+  }
   if (closure.targetedCount !== 1) addAssertion(report, `packaged app did not target exactly its tracked process ${label}`);
   if (closure.finalSnapshot?.processCount || closure.finalSnapshot?.portCount) {
     addAssertion(report, `packaged processes or probe ports remained ${label}`);
@@ -1876,6 +1851,7 @@ async function launchPackagedApp(releaseBinding) {
     stdio: "ignore",
     env: isolatedLaunchEnvironment(),
   });
+  child.unref();
   const launch = {
     childPid: child.pid,
     childProcess: child,
@@ -1891,11 +1867,13 @@ async function launchPackagedApp(releaseBinding) {
       waitForJson(`http://127.0.0.1:${cdpPort}/json/list`, 45000),
       spawnFailure,
     ]);
+    await assertOwnedCdpListener();
     const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
     if (!page) throw new Error("Packaged WebView2 page target was not found.");
     const cdp = connectCdp(page.webSocketDebuggerUrl);
     launch.cdp = cdp;
     await cdp.opened;
+    await assertOwnedCdpListener();
     await cdp.send("Runtime.enable", {}, 15000);
     await cdp.send("Page.enable", {}, 15000);
     const renderer = await waitForEval(
@@ -6800,6 +6778,15 @@ async function runSelfTest() {
     ],
   });
   const checks = {
+    cdpListenerOwnershipRejectsForeignRoot:
+      cdpListenerOwnedByTrackedProcesses({
+        ports: [{ localPort: cdpPort, owningProcess: 702 }],
+        trackedProcesses: [{ pid: 701 }],
+      }) === false
+      && cdpListenerOwnedByTrackedProcesses({
+        ports: [{ localPort: cdpPort, owningProcess: 701 }],
+        trackedProcesses: [{ pid: 701 }],
+      }) === true,
     requestOnlyPackagesHaveNoDirectEntrypoints: [...requestOnlyPackageSlugs]
       .every((slug) => !requiredPackageEntrypoints.has(slug)),
     validationRuntimeAcceptsReportedFindingsAndUnavailableSources: verifyValidationRuntimeResult({
@@ -7283,9 +7270,9 @@ async function main() {
       await attemptFailureApiCleanup(report, app.cdp);
     }
 
-    app.cdp.close();
     report.closure.normal = await closePackagedApp(app);
     assertGracefulClosure(report, report.closure.normal, "after Skill Ecosystem acceptance");
+    app.cdp.close();
     report.releaseBinding.completionExecutableVerified = (await sha256File(exe)) === releaseBinding.innerExeSha256;
     await releaseExecutableLaunchLock(app.executableLock);
     app.executableLock = null;
@@ -7336,14 +7323,12 @@ async function main() {
     addAssertion(report, `probe aborted: ${sanitizeReportText(String(error?.message || error))}`);
     if (app) await attemptFailureApiCleanup(report, app.cdp).catch(() => {});
   } finally {
-    if (app?.cdp) {
-      try { app.cdp.close(); } catch { /* Best effort. */ }
-    }
     try {
       if (app) {
         const closure = await closePackagedApp(app);
         report.closure.finally = closure;
         assertGracefulClosure(report, closure, "during finally cleanup");
+        try { app.cdp?.close(); } catch { /* Best effort. */ }
       }
     } catch (cleanupError) {
       report.cleanupError = safeError(cleanupError);

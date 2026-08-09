@@ -2,9 +2,11 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const packagedRoot = resolve(repoRoot, "dist", "VRCForge_Windows_x64");
+const packagedRootPowerShell = packagedRoot.replaceAll("'", "''");
 const exe = resolve(packagedRoot, "VRCForge.exe");
 const cdpPort = Number(process.env.VRCFORGE_GOAL_PROBE_CDP_PORT || "9347");
 const marker = `GOAL_RESTART_PROBE_${Date.now()}`;
@@ -39,30 +41,143 @@ function runPowerShell(script) {
   });
 }
 
-async function waitForPortReleased(port, timeoutMs = 20000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const listeners = await runPowerShell(`
-      $rows = Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue
-      if ($rows) { $rows.Count } else { 0 }
-    `);
-    if (Number(listeners || 0) === 0) {
-      return;
-    }
-    await sleep(250);
-  }
-  throw new Error(`Port ${port} remained in use.`);
+async function processSnapshot() {
+  const value = await runPowerShell(`
+    $root = [IO.Path]::GetFullPath('${packagedRootPowerShell}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $processes = @(foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { continue }
+      if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        [pscustomobject]@{ Id=$process.Id; ProcessName=$process.ProcessName; Path=$path }
+      }
+    })
+    $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+      Where-Object { $_.LocalPort -eq 8757 -or $_.LocalPort -eq ${cdpPort} } |
+      Select-Object LocalAddress,LocalPort,State,OwningProcess
+    [pscustomobject]@{ processes=@($processes); ports=@($ports) } | ConvertTo-Json -Depth 4 -Compress
+  `);
+  return value ? JSON.parse(value) : { processes: [], ports: [] };
 }
 
-async function closePackagedProcesses() {
-  const escapedRoot = packagedRoot.replaceAll("'", "''");
+function snapshotHasResidue(snapshot) {
+  return Boolean((snapshot?.processes || []).length || (snapshot?.ports || []).length);
+}
+
+async function assertProbePreflightClear() {
+  const snapshot = await processSnapshot();
+  if (snapshotHasResidue(snapshot)) {
+    throw new Error(`Preflight found an existing packaged-root process or occupied 8757/probe CDP port; nothing was terminated: ${JSON.stringify(snapshot)}`);
+  }
+  return snapshot;
+}
+
+async function waitForAppShutdown(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await processSnapshot();
+    if (!snapshotHasResidue(latest)) return latest;
+    await sleep(200);
+  }
+  return latest || processSnapshot();
+}
+
+async function captureLaunchIdentity(processId) {
+  const value = await runPowerShell(`
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+      $process = Get-Process -Id ${Number(processId)} -ErrorAction SilentlyContinue
+      if ($process) {
+        try { $candidatePath = [IO.Path]::GetFullPath([string]$process.Path) } catch { $candidatePath = '' }
+        if ($candidatePath) { break }
+      }
+      Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (-not $process) { throw 'Tracked packaged process exited before its identity could be captured.' }
+    try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { throw 'Tracked packaged process path was unavailable.' }
+    $expected = [IO.Path]::GetFullPath('${packagedRootPowerShell}\\VRCForge.exe')
+    if (-not $path.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+      throw 'Tracked packaged PID did not resolve to the expected executable.'
+    }
+    [pscustomobject]@{
+      id = [int]$process.Id
+      path = $path
+      startedAtUtc = $process.StartTime.ToUniversalTime().ToString('o')
+    } | ConvertTo-Json -Compress
+  `);
+  return JSON.parse(value);
+}
+
+async function listenerOwnedByLaunch(identity) {
+  if (!identity?.id || !identity?.startedAtUtc) return false;
+  const value = await runPowerShell(`
+    $rootProcessId = [int]${Number(identity.id)}
+    $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+    if (-not $rootProcess) { 'false'; exit 0 }
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { 'false'; exit 0 }
+    $expectedPath = [IO.Path]::GetFullPath('${packagedRootPowerShell}\\VRCForge.exe')
+    $expectedStart = [DateTime]::Parse('${String(identity.startedAtUtc).replaceAll("'", "''")}').ToUniversalTime()
+    if (-not $rootPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) { 'false'; exit 0 }
+    if ($rootProcess.StartTime.ToUniversalTime() -ne $expectedStart) { 'false'; exit 0 }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ${cdpPort} -ErrorAction SilentlyContinue)
+    if ($listeners.Count -lt 1) { 'false'; exit 0 }
+    foreach ($listener in $listeners) {
+      if (-not $ids.Contains([int]$listener.OwningProcess)) { 'false'; exit 0 }
+    }
+    'true'
+  `);
+  return value.trim().toLowerCase() === "true";
+}
+
+async function forceCloseTrackedLaunch(identity) {
+  if (!identity?.id || !identity?.startedAtUtc) return processSnapshot();
   await runPowerShell(`
-    $root = '${escapedRoot}'
-    Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.Path -and $_.Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) } |
+    $root = [IO.Path]::GetFullPath('${packagedRootPowerShell}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $expectedPath = [IO.Path]::GetFullPath('${packagedRootPowerShell}\\VRCForge.exe')
+    $expectedStart = [DateTime]::Parse('${String(identity.startedAtUtc).replaceAll("'", "''")}').ToUniversalTime()
+    $rootProcessId = [int]${Number(identity.id)}
+    $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+    if (-not $rootProcess) { exit 0 }
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { exit 0 }
+    if (-not $rootPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) { exit 0 }
+    if ($rootProcess.StartTime.ToUniversalTime() -ne $expectedStart) { exit 0 }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    @(foreach ($candidateId in $ids) {
+      $process = Get-Process -Id $candidateId -ErrorAction SilentlyContinue
+      if (-not $process) { continue }
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { continue }
+      if ($candidateId -eq $rootProcessId -or $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        $process
+      }
+    }) |
+      Sort-Object @{ Expression = { if ($_.Id -eq $rootProcessId) { 1 } else { 0 } } } |
       Stop-Process -Force -ErrorAction SilentlyContinue
   `);
-  await Promise.all([waitForPortReleased(8757), waitForPortReleased(cdpPort)]);
+  return waitForAppShutdown(30000);
 }
 
 async function waitForJson(url, timeoutMs = 30000) {
@@ -148,7 +263,11 @@ async function waitForEval(cdp, expression, timeoutMs = 30000) {
   throw new Error(`Timed out waiting for renderer state; last=${JSON.stringify(last)}`);
 }
 
+let activeLaunch = null;
+
 async function launchPackagedApp(requireComposerEnabled = true) {
+  await assertProbePreflightClear();
+  appSessionToken = "";
   const child = spawn(exe, [], {
     detached: false,
     stdio: "ignore",
@@ -158,12 +277,18 @@ async function launchPackagedApp(requireComposerEnabled = true) {
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort} --remote-allow-origins=*`,
     },
   });
+  activeLaunch = { child, identity: null, cdp: null };
+  activeLaunch.identity = await captureLaunchIdentity(child.pid);
   const targets = await waitForJson(`http://127.0.0.1:${cdpPort}/json/list`, 45000);
+  if (!(await listenerOwnedByLaunch(activeLaunch.identity))) {
+    throw new Error("Packaged probe CDP listener was not owned by the captured launch generation.");
+  }
   const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
   if (!page) {
     throw new Error("Packaged WebView2 page target was not found.");
   }
   const cdp = connectCdp(page.webSocketDebuggerUrl);
+  activeLaunch.cdp = cdp;
   await cdp.opened;
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
@@ -180,7 +305,47 @@ async function launchPackagedApp(requireComposerEnabled = true) {
     45000,
   );
   await waitForJson(`${appOrigin}/api/health`, 45000);
-  return { child, cdp };
+  return activeLaunch;
+}
+
+async function shutdownPackagedApp(app, report, label) {
+  if (!app) return null;
+  const lifecycle = {
+    label,
+    quitRequest: { accepted: false, error: "CDP was unavailable before cleanup." },
+    afterQuit: null,
+    forcedCleanupUsed: false,
+  };
+  if (app.cdp) {
+    const listenerOwned = await listenerOwnedByLaunch(app.identity).catch(() => false);
+    lifecycle.quitRequest = listenerOwned
+      ? await requestPackagedAppQuit(app.cdp).catch((error) => ({ accepted: false, error: String(error) }))
+      : { accepted: false, listenerOwnershipChanged: true, error: "Tracked packaged CDP listener changed owner; no Quit was attempted." };
+    app.cdp.close();
+    app.cdp = null;
+  }
+  lifecycle.afterQuit = await waitForAppShutdown(20000)
+    .catch((error) => ({ error: String(error), processes: [], ports: [] }));
+  lifecycle.ok = Boolean(lifecycle.quitRequest.accepted && !snapshotHasResidue(lifecycle.afterQuit));
+  if (!lifecycle.ok) {
+    report.assertions.push(`${label}: explicit packaged-app Quit was not accepted or left an owned process/port alive`);
+    if (snapshotHasResidue(lifecycle.afterQuit)) {
+      lifecycle.forcedCleanupUsed = true;
+      if (app.identity) {
+        lifecycle.afterForcedCleanup = await forceCloseTrackedLaunch(app.identity)
+          .catch((error) => ({ error: String(error) }));
+      } else {
+        lifecycle.identityCaptureFailed = true;
+        lifecycle.unverifiedProcessPreserved = true;
+        lifecycle.afterForcedCleanup = await waitForAppShutdown(20000)
+          .catch((error) => ({ error: String(error) }));
+      }
+      report.assertions.push(`${label}: failure cleanup required forced termination of the exact probe-owned launch`);
+    }
+  }
+  report.lifecycle.push(lifecycle);
+  if (activeLaunch === app) activeLaunch = null;
+  return lifecycle;
 }
 
 async function readAppToken() {
@@ -352,7 +517,7 @@ async function waitForGoalCompletion(goalId, timeoutMs = 120000) {
 
 async function main() {
   await mkdir(evidenceRoot, { recursive: true });
-  await closePackagedProcesses();
+  const beforeLaunch = await assertProbePreflightClear();
   const provider = createFakeProvider();
   const providerPort = await provider.listen();
   const report = {
@@ -361,8 +526,11 @@ async function main() {
     exe,
     userDataRoot,
     providerPort,
+    beforeLaunch,
     assertions: [],
+    lifecycle: [],
   };
+  finalReport = report;
   let app;
   try {
     app = await launchPackagedApp(false);
@@ -404,8 +572,8 @@ async function main() {
       body: { status: "active", wakeAt: new Date(Date.now() - 60_000).toISOString() },
     })).goal;
 
-    app.cdp.close();
-    await closePackagedProcesses();
+    await shutdownPackagedApp(app, report, "restart-for-goal-recovery");
+    app = null;
     app = await launchPackagedApp();
     const completedGoal = await waitForGoalCompletion(goal.goalId);
     await sleep(1500);
@@ -446,8 +614,8 @@ async function main() {
 
     const requestCountBeforeSecondRestart = provider.requests.length;
     const itemCountBeforeSecondRestart = completedChat?.items?.length || 0;
-    app.cdp.close();
-    await closePackagedProcesses();
+    await shutdownPackagedApp(app, report, "restart-for-idempotency-proof");
+    app = null;
     app = await launchPackagedApp();
     await sleep(8000);
     const finalGoal = findGoal(await appApi("/api/app/agent/goals?limit=100"));
@@ -468,8 +636,10 @@ async function main() {
     }
     report.providerRequests = provider.requests;
   } finally {
-    if (app?.cdp) app.cdp.close();
-    await closePackagedProcesses().catch(() => {});
+    const cleanupTarget = app || activeLaunch;
+    if (cleanupTarget) {
+      await shutdownPackagedApp(cleanupTarget, report, "final-probe-shutdown");
+    }
     await provider.close().catch(() => {});
     await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   }
@@ -480,11 +650,20 @@ async function main() {
   }
 }
 
+let finalReport = null;
+
 main().catch(async (error) => {
   await mkdir(dirname(reportPath), { recursive: true });
   await writeFile(
     reportPath,
-    `${JSON.stringify({ schema: "vrcforge.packaged_goal_delivery_probe.v1", marker, ok: false, error: String(error?.stack || error) }, null, 2)}\n`,
+    `${JSON.stringify({
+      schema: "vrcforge.packaged_goal_delivery_probe.v1",
+      marker,
+      ok: false,
+      error: String(error?.stack || error),
+      assertions: finalReport?.assertions || ["probe threw before lifecycle evidence could be initialized"],
+      lifecycle: finalReport?.lifecycle || [],
+    }, null, 2)}\n`,
     "utf8",
   ).catch(() => {});
   console.error(error);

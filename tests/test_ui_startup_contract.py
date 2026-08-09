@@ -158,7 +158,25 @@ def test_main_window_close_hides_to_tray_while_explicit_quit_stops_backend() -> 
     quit_start = source.index('"quit" => {')
     quit_end = source.index("_ => {}", quit_start)
     quit_handler = source[quit_start:quit_end]
-    assert quit_handler.index("shutdown_managed_backend(app)") < quit_handler.index("app.exit(0)")
+    assert "shutdown_and_exit_app(app)" in quit_handler
+    prepare_start = source.index("fn prepare_app_quit")
+    prepare_end = source.index("fn confirm_app_quit", prepare_start)
+    prepare_command = source[prepare_start:prepare_end]
+    assert "AppQuitReceipt { accepted: true }" in prepare_command
+    assert "shutdown_and_exit_app" not in prepare_command
+    confirm_start = prepare_end
+    confirm_end = source.index("fn shutdown_and_exit_app", confirm_start)
+    confirm_command = source[confirm_start:confirm_end]
+    assert "shutdown_and_exit_app(&app)" in confirm_command
+    lifecycle_start = source.index("fn shutdown_and_exit_app")
+    lifecycle_end = source.index("#[cfg(test)]", lifecycle_start)
+    lifecycle = source[lifecycle_start:lifecycle_end]
+    assert lifecycle.index("shutdown_managed_backend(app)") < lifecycle.index("app.exit(0)")
+    assert "prepare_app_quit," in source
+    assert "confirm_app_quit," in source
+    quit_commands = source[prepare_start:lifecycle_end]
+    assert "Duration::from_millis" not in quit_commands
+    assert "thread::sleep" not in quit_commands
 
 
 def test_startup_loads_app_and_locale_in_parallel_and_records_visible_shell() -> None:

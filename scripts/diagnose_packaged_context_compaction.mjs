@@ -12,6 +12,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, resolve } from "node:path";
+import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const allowUnpushed = process.argv.includes("--allow-unpushed");
@@ -220,11 +221,139 @@ async function snapshot() {
   return raw ? JSON.parse(raw) : { processes: [], ports: [] };
 }
 const clear = (value) => !(value?.processes?.length || value?.ports?.length);
+function requireClearLaunchSnapshot(value) {
+  if (clear(value)) return;
+  throw new Error(
+    `Preflight found an existing packaged-root process or occupied backend/probe CDP port; nothing was terminated: ${JSON.stringify(value)}`,
+  );
+}
+async function assertProbePreflightClear() {
+  requireClearLaunchSnapshot(await snapshot());
+}
 async function waitClear(timeout = 30000) {
   const end = Date.now() + timeout;
   let latest = await snapshot();
   while (Date.now() < end && !clear(latest)) { await sleep(250); latest = await snapshot(); }
   return latest;
+}
+
+async function captureLaunchIdentity(processId) {
+  const raw = await powershell(`
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+      $process = Get-Process -Id ${Number(processId)} -ErrorAction SilentlyContinue
+      if ($process) {
+        try { $candidatePath = [IO.Path]::GetFullPath([string]$process.Path) } catch { $candidatePath = '' }
+        if ($candidatePath) { break }
+      }
+      Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (-not $process) { throw 'Tracked packaged process exited before its identity could be captured.' }
+    try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { throw 'Tracked packaged process path was unavailable.' }
+    $expected = [IO.Path]::GetFullPath('${psLiteral(exe)}')
+    if (-not $path.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) { throw 'Tracked packaged PID did not resolve to the expected executable.' }
+    [pscustomobject]@{
+      id = [int]$process.Id
+      path = $path
+      startedAtUtc = $process.StartTime.ToUniversalTime().ToString('o')
+    } | ConvertTo-Json -Compress
+  `);
+  return JSON.parse(raw);
+}
+
+function launchIdentityValuesMatch(expected, actual) {
+  return Boolean(
+    expected?.id
+    && actual?.id
+    && Number(expected.id) === Number(actual.id)
+    && String(expected.path || "").toLowerCase() === String(actual.path || "").toLowerCase()
+    && String(expected.startedAtUtc || "") === String(actual.startedAtUtc || ""),
+  );
+}
+
+async function launchIdentityMatches(identity) {
+  if (!identity?.id || !identity?.startedAtUtc) return false;
+  const raw = await powershell(`
+    $process = Get-Process -Id ${Number(identity.id)} -ErrorAction SilentlyContinue
+    if (-not $process) { '{}'; exit 0 }
+    try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { '{}'; exit 0 }
+    [pscustomobject]@{
+      id = [int]$process.Id
+      path = $path
+      startedAtUtc = $process.StartTime.ToUniversalTime().ToString('o')
+    } | ConvertTo-Json -Compress
+  `);
+  return launchIdentityValuesMatch(identity, JSON.parse(raw || "{}"));
+}
+
+async function listenerOwnedByLaunch(identity, port) {
+  if (!identity?.id || !identity?.startedAtUtc) return false;
+  const raw = await powershell(`
+    $rootProcessId = [int]${Number(identity.id)}
+    $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+    if (-not $rootProcess) { 'false'; exit 0 }
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { 'false'; exit 0 }
+    $expectedPath = [IO.Path]::GetFullPath('${psLiteral(exe)}')
+    $expectedStart = [DateTime]::Parse('${psLiteral(String(identity.startedAtUtc))}').ToUniversalTime()
+    if (-not $rootPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) { 'false'; exit 0 }
+    if ($rootProcess.StartTime.ToUniversalTime() -ne $expectedStart) { 'false'; exit 0 }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ${Number(port)} -ErrorAction SilentlyContinue)
+    if ($listeners.Count -lt 1) { 'false'; exit 0 }
+    foreach ($listener in $listeners) {
+      if (-not $ids.Contains([int]$listener.OwningProcess)) { 'false'; exit 0 }
+    }
+    'true'
+  `);
+  return raw.trim().toLowerCase() === "true";
+}
+
+async function forceCloseTrackedLaunch(identity) {
+  if (!identity?.id || !identity?.startedAtUtc) return snapshot();
+  await powershell(`
+    $root = [IO.Path]::GetFullPath('${psLiteral(packageRoot)}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $expectedPath = [IO.Path]::GetFullPath('${psLiteral(exe)}')
+    $expectedStart = [DateTime]::Parse('${psLiteral(String(identity.startedAtUtc))}').ToUniversalTime()
+    $rootProcessId = [int]${Number(identity.id)}
+    $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+    if (-not $rootProcess) { exit 0 }
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { exit 0 }
+    if (-not $rootPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) { exit 0 }
+    if ($rootProcess.StartTime.ToUniversalTime() -ne $expectedStart) { exit 0 }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    @(foreach ($candidateId in $ids) {
+      $process = Get-Process -Id $candidateId -ErrorAction SilentlyContinue
+      if (-not $process) { continue }
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { continue }
+      if ($candidateId -eq $rootProcessId -or $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { $process }
+    }) |
+      Sort-Object @{ Expression = { if ($_.Id -eq $rootProcessId) { 1 } else { 0 } } } |
+      Stop-Process -Force -ErrorAction SilentlyContinue
+  `);
+  return waitClear(10_000);
 }
 
 function cdpConnection(url, openTimeoutMs = 15000) {
@@ -330,19 +459,28 @@ function isolatedEnvironment() {
   return env;
 }
 async function launch() {
+  await assertProbePreflightClear();
   const child = spawn(exe, [], { stdio: "ignore", env: isolatedEnvironment() });
+  child.unref();
+  let identity;
+  let cdp;
   try {
+    identity = await captureLaunchIdentity(child.pid);
     const targets = await waitJson(`http://127.0.0.1:${cdpPort}/json/list`);
+    if (!(await listenerOwnedByLaunch(identity, cdpPort))) {
+      throw new Error("Packaged probe CDP listener was not owned by the captured launch generation.");
+    }
     const page = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl);
     if (!page) throw new Error("Packaged WebView page target was not found.");
-    const cdp = cdpConnection(page.webSocketDebuggerUrl);
+    cdp = cdpConnection(page.webSocketDebuggerUrl);
     await cdp.opened;
     await cdp.send("Runtime.enable");
     await waitEval(cdp, `(() => ({ ok: Boolean(document.body?.innerText && window.__TAURI_INTERNALS__?.invoke), tauri: typeof window.__TAURI_INTERNALS__?.invoke }))()`);
     await waitJson(`${appOrigin}/api/health`);
-    return { child, cdp };
+    return { child, cdp, identity };
   } catch (error) {
-    await requestClose(child).catch(() => undefined);
+    try { cdp?.close(); } catch { /* failed launch */ }
+    if (identity) await forceCloseTrackedLaunch(identity).catch(() => undefined);
     throw error;
   }
 }
@@ -564,17 +702,30 @@ async function uiState(cdp) {
     text: document.body?.innerText?.slice(0, 20000) || ""
   }))()`);
 }
-async function requestClose(child) {
-  await powershell(`$p=Get-Process -Id ${Number(child.pid)} -ErrorAction SilentlyContinue; if($p){ [void]$p.CloseMainWindow() }`);
+async function requestQuit(launchInfo) {
+  if (!launchInfo?.child || !launchInfo?.cdp || !launchInfo?.identity) throw new Error("Packaged launch was unavailable for explicit Quit.");
+  if (!(await launchIdentityMatches(launchInfo.identity))) {
+    throw new Error("Tracked packaged launch identity changed; no Quit or forced termination was attempted.");
+  }
+  if (!(await listenerOwnedByLaunch(launchInfo.identity, cdpPort))) {
+    const final = await forceCloseTrackedLaunch(launchInfo.identity);
+    return {
+      quit: { accepted: false, listenerOwnershipChanged: true, error: "Tracked packaged CDP listener changed owner; no Quit was attempted." },
+      final,
+      graceful: false,
+      forced: true,
+      cleaned: clear(final),
+    };
+  }
+  const quit = await requestPackagedAppQuit(launchInfo.cdp);
   let final = await waitClear();
-  const graceful = clear(final);
+  const graceful = quit.accepted && clear(final);
   let forced = false;
   if (!graceful) {
     forced = true;
-    await powershell(`$p=Get-Process -Id ${Number(child.pid)} -ErrorAction SilentlyContinue; if($p){ Stop-Process -Id $p.Id -Force }`).catch(() => undefined);
-    final = await waitClear(10000);
+    final = await forceCloseTrackedLaunch(launchInfo.identity);
   }
-  return { final, graceful, forced, cleaned: clear(final) };
+  return { quit, final, graceful, forced, cleaned: clear(final) };
 }
 
 function createLoopbackProvider() {
@@ -799,7 +950,7 @@ async function main() {
     const providerPort = await provider.listen();
     report.provider = { transport: "isolated loopback chat-completions fixture", port: providerPort };
     launchInfo = await launch();
-    const { cdp, child } = launchInfo;
+    const { cdp } = launchInfo;
     report.renderer = await evaluate(cdp, `(() => ({ tauri: typeof window.__TAURI_INTERNALS__?.invoke, title: document.title }))()`);
     const authenticatedBootstrap = await api("/api/app/chats");
     const tauriHealth = await waitForTauriSession(cdp);
@@ -1010,8 +1161,8 @@ async function main() {
     report.phases.restartSeed = await saveProbeChats(cdp, [compactedAttachmentChat, interrupted]);
     await reload(cdp);
     report.phases.restartActivation = await activateProbeChat(cdp, interrupted.title);
-    report.phases.firstClose = await requestClose(child);
-    if (!report.phases.firstClose.graceful) assertion(report, "first packaged restart close did not release tracked processes/ports");
+    report.phases.firstClose = await requestQuit(launchInfo);
+    if (!report.phases.firstClose.graceful) assertion(report, "first packaged restart Quit did not release tracked processes/ports");
     launchInfo.cdp.close();
     token = "";
     launchInfo = await launch();
@@ -1069,9 +1220,12 @@ async function main() {
     assertion(report, "probe threw before all required acceptance phases completed");
   } finally {
     if (launchInfo) {
+      report.cleanup = await requestQuit(launchInfo).catch((error) => ({ graceful: false, error: String(error), final: null }));
       try { launchInfo.cdp.close(); } catch { /* closing renderer */ }
-      report.cleanup = await requestClose(launchInfo.child).catch((error) => ({ graceful: false, error: String(error), final: null }));
     } else report.cleanup = { graceful: false, reason: "packaged launch never completed" };
+    if (!report.cleanup.graceful || report.cleanup.forced) {
+      assertion(report, "final packaged cleanup did not complete through accepted explicit Quit without forced termination");
+    }
     if (provider) await provider.close().catch((error) => { assertion(report, `loopback provider did not close: ${String(error)}`); });
     const residue = await waitClear(20000).catch((error) => ({ error: String(error) }));
     report.cleanup.finalSnapshot = residue;
@@ -1096,6 +1250,24 @@ async function main() {
 }
 
 async function runSelfTest() {
+  requireClearLaunchSnapshot({ processes: [], ports: [] });
+  for (const occupied of [
+    { processes: [{ pid: 41, name: "foreign-packaged-app" }], ports: [] },
+    { processes: [], ports: [{ LocalPort: cdpPort, OwningProcess: 42 }] },
+  ]) {
+    let rejected = false;
+    try { requireClearLaunchSnapshot(occupied); } catch (error) {
+      rejected = /nothing was terminated/.test(String(error));
+    }
+    if (!rejected) throw new Error("self-test: launch preflight accepted an occupied process or CDP snapshot");
+  }
+  const capturedIdentity = { id: 73, path: exe, startedAtUtc: "2026-08-09T01:02:03.0000000Z" };
+  if (!launchIdentityValuesMatch(capturedIdentity, { ...capturedIdentity, path: exe.toUpperCase() })) {
+    throw new Error("self-test: exact packaged launch identity was rejected");
+  }
+  if (launchIdentityValuesMatch(capturedIdentity, { ...capturedIdentity, startedAtUtc: "2026-08-09T01:02:04.0000000Z" })) {
+    throw new Error("self-test: reused packaged PID with a different generation was accepted");
+  }
   const expected = { id: "seed", revision: 1, items: [{ id: "u1", text: "baseline" }] };
   const equivalent = { items: [{ text: "baseline", id: "u1" }], revision: 1, id: "seed" };
   const stale = { id: "seed", revision: 1, items: [{ id: "u1", text: "stale renderer write" }] };

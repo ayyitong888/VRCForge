@@ -15,6 +15,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const EXPECTED_VERSION = (await readFile(resolve(repoRoot, "VERSION"), "utf8"))
@@ -743,49 +744,26 @@ async function scopedCleanup() {
 }
 
 async function closePackagedApp(app) {
-  if (!app?.rootIdentity) throw new Error("Tracked package root was unavailable for close.");
-  const identityPayload = toBase64Json(app.rootIdentity);
-  const raw = await runPowerShell(`
-    $row = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${identityPayload}')) | ConvertFrom-Json
-    $item = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$row.pid)" -ErrorAction SilentlyContinue
-    $matched = $false
-    $windowHandle = 0
-    $requested = $false
-    if ($item -and $item.ExecutablePath) {
-      try {
-        $actualPath = [IO.Path]::GetFullPath([string]$item.ExecutablePath)
-        $expectedPath = [IO.Path]::GetFullPath([string]$row.path)
-        $matched = ([string]$item.CreationDate).Equals([string]$row.creationDate, [StringComparison]::Ordinal) -and
-          $actualPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)
-      } catch { $matched = $false }
-      if ($matched) {
-        $process = Get-Process -Id ([int]$row.pid) -ErrorAction SilentlyContinue
-        if ($process) {
-          $windowHandle = [int64]$process.MainWindowHandle
-          $requested = [bool]$process.CloseMainWindow()
-        }
-      }
-    }
-    [pscustomobject]@{ matched = $matched; mainWindowHandle = $windowHandle; closeRequested = $requested } |
-      ConvertTo-Json -Compress
-  `);
-  const request = raw ? JSON.parse(raw) : {};
-  const graceful = await waitForProcessClear(30_000);
-  if (graceful.ok) {
+  if (!app?.rootIdentity || !app?.cdp) throw new Error("Tracked package root was unavailable for explicit Quit.");
+  const current = await processSnapshot();
+  const identityMatched = normalizeProcessRows(current?.packageProcesses)
+    .some((item) => processIdentityMatches(item, app.rootIdentity));
+  if (!identityMatched) throw new Error("Tracked package root identity changed before explicit Quit.");
+  const quit = await requestPackagedAppQuit(app.cdp);
+  const cleared = await waitForProcessClear(30_000);
+  if (quit.accepted && cleared.ok) {
     return {
-      identityMatched: request.matched === true,
-      mainWindowPresent: Number(request.mainWindowHandle || 0) !== 0,
-      closeRequested: request.closeRequested === true,
-      graceful: request.matched === true && request.closeRequested === true,
+      identityMatched,
+      quit,
+      graceful: true,
       forced: false,
       clear: true,
     };
   }
   const forced = await scopedCleanup();
   return {
-    identityMatched: request.matched === true,
-    mainWindowPresent: Number(request.mainWindowHandle || 0) !== 0,
-    closeRequested: request.closeRequested === true,
+    identityMatched,
+    quit,
     graceful: false,
     forced: true,
     clear: forced.ok,
@@ -2188,8 +2166,7 @@ function identityChainsEqual(left, right) {
 
 function closureSucceeded(closure) {
   return closure?.identityMatched === true
-    && closure?.mainWindowPresent === true
-    && closure?.closeRequested === true
+    && closure?.quit?.accepted === true
     && closure?.graceful === true
     && closure?.forced === false
     && closure?.clear === true;
@@ -2973,9 +2950,9 @@ async function main() {
     report.logFiles.finalCanonicalBytesFirstLaunch = firstLogScan.totalBytes;
 
     stage = "first-close";
+    firstClosure = await closePackagedApp(app);
     app.cdp.close();
     app.cdp = null;
-    firstClosure = await closePackagedApp(app);
     report.cleanup.firstClosureGraceful = closureSucceeded(firstClosure);
     if (!report.cleanup.firstClosureGraceful) throw new Error("First packaged launch did not close gracefully.");
     app = undefined;
@@ -3108,9 +3085,9 @@ async function main() {
     }
 
     stage = "second-close";
+    secondClosure = await closePackagedApp(app);
     app.cdp.close();
     app.cdp = null;
-    secondClosure = await closePackagedApp(app);
     report.cleanup.secondClosureGraceful = closureSucceeded(secondClosure);
     if (!report.cleanup.secondClosureGraceful) throw new Error("Second packaged launch did not close gracefully.");
     app = undefined;
@@ -3178,13 +3155,11 @@ async function main() {
     report.failureStage = stage;
     addAssertion(report, `probe aborted during ${stage}`);
   } finally {
-    if (app?.cdp) {
-      try { app.cdp.close(); } catch { /* Renderer may already be gone. */ }
-      app.cdp = null;
-    }
     if (app) {
       try {
         const closure = await closePackagedApp(app);
+        try { app.cdp?.close(); } catch { /* Renderer may already be gone. */ }
+        app.cdp = null;
         if (!firstClosure) {
           firstClosure = closure;
           report.cleanup.firstClosureGraceful = closureSucceeded(closure);

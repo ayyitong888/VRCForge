@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const allowUnpushed = process.argv.includes("--allow-unpushed");
@@ -82,6 +83,39 @@ async function processIdentity(processId) {
       ConvertTo-Json -Compress
   `);
   return raw ? JSON.parse(raw) : null;
+}
+
+async function listenerOwnedByLaunch(identity) {
+  if (!identity?.id || !identity?.startedAt) return false;
+  const raw = await runPowerShell(`
+    $rootProcessId = [int]${Number(identity.id)}
+    $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+    if (-not $rootProcess) { 'false'; exit 0 }
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { 'false'; exit 0 }
+    $expectedPath = [IO.Path]::GetFullPath('${escapePowerShellLiteral(exe)}')
+    $expectedStart = [DateTime]::Parse('${escapePowerShellLiteral(String(identity.startedAt))}').ToUniversalTime()
+    if (-not $rootPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) { 'false'; exit 0 }
+    if ($rootProcess.StartTime.ToUniversalTime() -ne $expectedStart) { 'false'; exit 0 }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue)
+    if ($listeners.Count -lt 1) { 'false'; exit 0 }
+    foreach ($listener in $listeners) {
+      if (-not $ids.Contains([int]$listener.OwningProcess)) { 'false'; exit 0 }
+    }
+    'true'
+  `);
+  return raw.trim().toLowerCase() === "true";
 }
 
 async function stopTrackedExternalProcess(identity) {
@@ -475,20 +509,79 @@ async function resourceSnapshot() {
   return value ? JSON.parse(value) : { processes: [], appWorkingSetMB: 0, appPrivateMB: 0 };
 }
 
-async function requestMainWindowClose(processId) {
+async function requestMainWindowClose(processId, expectedStartedAt) {
   const value = await runPowerShell(`
     $expected = [IO.Path]::GetFullPath('${escapePowerShellLiteral(exe)}')
+    $expectedStart = '${escapePowerShellLiteral(expectedStartedAt)}'
     $process = Get-Process -Id ${Number(processId)} -ErrorAction SilentlyContinue
     if ($process) {
       try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { $path = '' }
-      if ($path.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
-        @([pscustomobject]@{ id = $process.Id; path = $path; closeRequested = $process.CloseMainWindow() }) | ConvertTo-Json -Compress
+      try { $startedAtUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch { $startedAtUtc = '' }
+      if ($path.Equals($expected, [StringComparison]::OrdinalIgnoreCase) -and
+          $startedAtUtc.Equals($expectedStart, [StringComparison]::Ordinal)) {
+        $windowHandle = [long]$process.MainWindowHandle
+        @([pscustomobject]@{
+          id = $process.Id
+          path = $path
+          startedAtUtc = $startedAtUtc
+          windowHandle = $windowHandle
+          closeRequested = $process.CloseMainWindow()
+        }) | ConvertTo-Json -Compress
       } else {
         throw 'Tracked PID no longer belongs to the extracted VRCForge executable.'
       }
     } else { '[]' }
   `);
   return value ? JSON.parse(value) : [];
+}
+
+async function waitForCloseToTray(processId, startedAtUtc, windowHandle, timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    const value = await runPowerShell(`
+      Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class VRCForgeProbeWindow {
+  [DllImport("user32.dll")]
+  public static extern bool IsWindowVisible(IntPtr hWnd);
+}
+'@
+      $expected = [IO.Path]::GetFullPath('${escapePowerShellLiteral(exe)}')
+      $expectedStart = [DateTime]::Parse('${escapePowerShellLiteral(startedAtUtc)}').ToUniversalTime()
+      $process = Get-Process -Id ${Number(processId)} -ErrorAction SilentlyContinue
+      $identityMatched = $false
+      if ($process) {
+        try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { $path = '' }
+        $identityMatched = $path.Equals($expected, [StringComparison]::OrdinalIgnoreCase) -and
+          $process.StartTime.ToUniversalTime() -eq $expectedStart
+      }
+      $windowVisible = [VRCForgeProbeWindow]::IsWindowVisible([IntPtr]${Number(windowHandle)})
+      $backendAlive = [bool](Get-NetTCPConnection -LocalPort 8757 -State Listen -ErrorAction SilentlyContinue)
+      [pscustomobject]@{
+        processAlive = [bool]$process
+        identityMatched = $identityMatched
+        windowVisible = $windowVisible
+        backendAlive = $backendAlive
+      } | ConvertTo-Json -Compress
+    `);
+    latest = value
+      ? JSON.parse(value)
+      : { processAlive: false, identityMatched: false, windowVisible: true, backendAlive: false };
+    latest.ok = Boolean(
+      latest.processAlive && latest.identityMatched && !latest.windowVisible && latest.backendAlive,
+    );
+    if (latest.ok) return latest;
+    await sleep(200);
+  }
+  return latest || {
+    ok: false,
+    processAlive: false,
+    identityMatched: false,
+    windowVisible: true,
+    backendAlive: false,
+  };
 }
 
 async function waitForAppShutdown(timeoutMs = 15000) {
@@ -504,13 +597,20 @@ async function waitForAppShutdown(timeoutMs = 15000) {
   return latest || processSnapshot();
 }
 
-async function forceCloseTrackedLaunch(processId) {
-  if (!processId) return processSnapshot();
+async function forceCloseTrackedLaunch(identity) {
+  if (!identity?.id || !identity?.startedAt) return processSnapshot();
   await runPowerShell(`
     $root = [IO.Path]::GetFullPath('${escapePowerShellLiteral(packagedRoot)}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $prefix = $root + [IO.Path]::DirectorySeparatorChar
     $exe = [IO.Path]::GetFullPath('${escapePowerShellLiteral(exe)}')
-    $rootProcessId = [int]${Number(processId)}
+    $rootProcessId = [int]${Number(identity.id)}
+    $expectedStart = '${escapePowerShellLiteral(identity.startedAt)}'
+    $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+    if (-not $rootProcess) { exit 0 }
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { exit 0 }
+    try { $rootStart = $rootProcess.StartTime.ToUniversalTime().ToString('o') } catch { exit 0 }
+    if (-not $rootPath.Equals($exe, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $rootStart.Equals($expectedStart, [StringComparison]::Ordinal)) { exit 0 }
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $ids = [Collections.Generic.HashSet[int]]::new()
     [void]$ids.Add($rootProcessId)
@@ -1007,6 +1107,7 @@ async function main() {
     resourceSnapshots: {},
   };
   let child = null;
+  let packagedProcessIdentity = null;
   let cdp = null;
   let launchedAppPid = 0;
   let launchedFixturePid = 0;
@@ -1079,6 +1180,13 @@ async function main() {
       stdio: "ignore",
       env: isolatedLaunchEnvironment(),
     });
+    packagedProcessIdentity = await processIdentity(child.pid);
+    if (
+      !packagedProcessIdentity?.startedAt ||
+      String(packagedProcessIdentity.path || "").toLowerCase() !== exe.toLowerCase()
+    ) {
+      throw new Error("Packaged app launch identity could not be bound before lifecycle checks.");
+    }
     const childTerminated = new Promise((resolveTerminated) => {
       child.once("error", (error) => resolveTerminated({ kind: "error", error }));
       child.once("exit", (code, signal) => resolveTerminated({ kind: "exit", code, signal }));
@@ -1093,6 +1201,9 @@ async function main() {
         : `Packaged app exited before WebView2 became ready: code=${cdpOutcome.code}, signal=${cdpOutcome.signal || "none"}`);
     }
     const page = cdpOutcome.page;
+    if (!(await listenerOwnedByLaunch(packagedProcessIdentity))) {
+      throw new Error("Packaged probe CDP listener was not owned by the captured launch generation.");
+    }
     cdp = connectCdp(page.webSocketDebuggerUrl);
     await cdp.opened;
     await cdp.send("Runtime.enable");
@@ -2111,20 +2222,36 @@ async function main() {
         launchedAppPid = 0;
       }
     }
+    output.closeRequest = await requestMainWindowClose(child.pid, packagedProcessIdentity.startedAt);
+    const closeRequest = Array.isArray(output.closeRequest)
+      ? output.closeRequest[0]
+      : output.closeRequest;
+    output.closeToTray = closeRequest
+      ? await waitForCloseToTray(child.pid, closeRequest.startedAtUtc, closeRequest.windowHandle)
+      : { ok: false, error: "The tracked packaged window was unavailable for the X-button check." };
+    if (!closeRequest?.closeRequested || !output.closeToTray?.ok) {
+      output.assertions.push("the packaged X button did not hide the main window while preserving the exact app process and backend listener");
+    }
+    gracefulShutdownAttempted = true;
+    const explicitQuitListenerOwned = await listenerOwnedByLaunch(packagedProcessIdentity).catch(() => false);
+    output.explicitQuit = explicitQuitListenerOwned
+      ? await requestPackagedAppQuit(cdp)
+      : { accepted: false, listenerOwnershipChanged: true, error: "Tracked packaged CDP listener changed owner; no Quit was attempted." };
+    if (!output.explicitQuit.accepted) {
+      output.assertions.push("the packaged app did not accept the explicit Tauri Quit request after the X-button check");
+    }
     if (cdp) {
       cdp.close();
       cdp = null;
     }
-    gracefulShutdownAttempted = true;
-    output.closeRequest = await requestMainWindowClose(child.pid);
     output.afterWindowClose = await waitForAppShutdown(20000);
     output.resourceSnapshots.afterWindowClose = await resourceSnapshot();
     if (snapshotHasResidue(output.afterWindowClose)) {
-      output.assertions.push("closing the packaged main window left VRCForge/backend or backend/CDP port alive");
+      output.assertions.push("explicit Quit left VRCForge/backend or backend/CDP port alive after the X-button check");
     }
     output.launchedFixtureSurvivedAppClose = launchedFixturePid > 0 && processExists(launchedFixturePid);
     if (!output.launchedFixtureSurvivedAppClose) {
-      output.assertions.push("closing VRCForge also terminated an external application launched by Computer Use");
+      output.assertions.push("explicitly quitting VRCForge also terminated an external application launched by Computer Use");
     }
     if (launchedFixturePid) {
       output.fixtureCleanup = await stopTrackedExternalProcess(uiaFixtureProcessIdentity);
@@ -2166,22 +2293,35 @@ async function main() {
         output.assertions.push("probe could not restore the original advanced settings during cleanup");
       }
     }
+    if (!gracefulShutdownAttempted && child?.pid) {
+      gracefulShutdownAttempted = true;
+      const finalQuitListenerOwned = cdp
+        ? await listenerOwnedByLaunch(packagedProcessIdentity).catch(() => false)
+        : false;
+      output.explicitQuitFinally = finalQuitListenerOwned
+        ? await requestPackagedAppQuit(cdp).catch((error) => ({ accepted: false, error: String(error) }))
+        : { accepted: false, listenerOwnershipChanged: true, error: "Tracked packaged CDP listener changed owner; no Quit was attempted." };
+      if (!output.explicitQuitFinally?.accepted) {
+        output.assertions.push("failure cleanup could not obtain an accepted explicit Tauri Quit request");
+      }
+      if (cdp) {
+        cdp.close();
+        cdp = null;
+      }
+      output.afterWindowCloseFinally = await waitForAppShutdown(20000).catch((error) => ({ error: String(error) }));
+      if (snapshotHasResidue(output.afterWindowCloseFinally)) {
+        output.assertions.push("failure cleanup explicit Quit left VRCForge/backend or backend/CDP port alive");
+      }
+    }
     if (cdp) {
       cdp.close();
       cdp = null;
     }
-    if (!gracefulShutdownAttempted && child?.pid) {
-      gracefulShutdownAttempted = true;
-      output.closeRequestFinally = await requestMainWindowClose(child.pid).catch((error) => ({ error: String(error) }));
-      output.afterWindowCloseFinally = await waitForAppShutdown(20000).catch((error) => ({ error: String(error) }));
-      if (snapshotHasResidue(output.afterWindowCloseFinally)) {
-        output.assertions.push("cleanup close request left VRCForge/backend or backend/CDP port alive");
-      }
-    }
     const residueBeforeForce = await processSnapshot().catch((error) => ({ error: String(error), processes: [], ports: [] }));
     output.forcedCleanupUsed = Boolean(child?.pid && snapshotHasResidue(residueBeforeForce));
     if (output.forcedCleanupUsed) {
-      await forceCloseTrackedLaunch(child.pid).catch((error) => {
+      output.assertions.push("failure cleanup required identity-bound forced termination");
+      await forceCloseTrackedLaunch(packagedProcessIdentity).catch((error) => {
         output.cleanupError = String(error);
       });
     }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const allowUnpushed = process.argv.includes("--allow-unpushed");
@@ -234,6 +235,25 @@ function isolatedLaunchEnvironment() {
   };
 }
 
+function sameLaunchIdentity(expected, observed) {
+  return Number(expected?.processId) > 0
+    && Number(observed?.processId) === Number(expected.processId)
+    && String(expected?.path || "").toLowerCase() === String(observed?.path || "").toLowerCase()
+    && Boolean(expected?.startedAtUtc)
+    && String(observed?.startedAtUtc || "") === String(expected.startedAtUtc)
+    && Boolean(expected?.creationDateUtc)
+    && String(observed?.creationDateUtc || "") === String(expected.creationDateUtc);
+}
+
+function cdpOwnershipAllowsAction(ownership) {
+  return ownership?.ok === true && ownership?.status === "owned";
+}
+
+function closeAuthorizationAction(identityCheck, cdpOwnership) {
+  if (identityCheck?.ok !== true) return "preserve";
+  return cdpOwnershipAllowsAction(cdpOwnership) ? "quit" : "force-own-root";
+}
+
 function runSelfTest() {
   const strict = normalizeBuildPolicy({
     buildPolicy: {
@@ -265,6 +285,36 @@ function runSelfTest() {
     || isLocalAcceptanceBuildPolicy({ ...local, allowUnpushed: false })
   ) {
     throw new Error("self-test: unsafe local-acceptance policy was accepted.");
+  }
+  const launchIdentity = {
+    processId: 731,
+    path: "C:\\probe\\VRCForge.exe",
+    startedAtUtc: "2026-08-09T01:02:03.0000000Z",
+    creationDateUtc: "2026-08-09T01:02:03.0000000Z",
+  };
+  if (
+    !sameLaunchIdentity(launchIdentity, { ...launchIdentity, path: "c:\\PROBE\\vrcforge.EXE" })
+    || sameLaunchIdentity(launchIdentity, { ...launchIdentity, startedAtUtc: "2026-08-09T01:02:04.0000000Z" })
+    || sameLaunchIdentity(launchIdentity, { ...launchIdentity, creationDateUtc: "2026-08-09T01:02:04.0000000Z" })
+  ) {
+    throw new Error("self-test: packaged PID generation identity was not fail-closed.");
+  }
+  if (
+    !cdpOwnershipAllowsAction({ ok: true, status: "owned" })
+    || cdpOwnershipAllowsAction({ ok: true, status: "foreign" })
+    || cdpOwnershipAllowsAction({ ok: false, status: "absent" })
+  ) {
+    throw new Error("self-test: foreign CDP listener ownership was accepted for an app action.");
+  }
+  const closeCalls = { quit: 0, force: 0 };
+  const closeAction = closeAuthorizationAction(
+    { ok: true },
+    { ok: false, status: "foreign" },
+  );
+  if (closeAction === "quit") closeCalls.quit += 1;
+  if (closeAction === "force-own-root") closeCalls.force += 1;
+  if (closeAction !== "force-own-root" || closeCalls.quit !== 0 || closeCalls.force !== 1) {
+    throw new Error("self-test: exact root with a foreign CDP listener did not fail through one owned force cleanup.");
   }
   const isolatedCredentialKeys = [
     "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY",
@@ -454,6 +504,125 @@ async function hostUnityProcesses() {
   return Array.isArray(parsed) ? parsed : [parsed];
 }
 
+async function readProcessIdentity(processId) {
+  const raw = await runPowerShell(`
+    $processId = [int]${Number(processId)}
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    $cim = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+    if (-not $process -or -not $cim) { '' ; exit 0 }
+    try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { $path = '' }
+    try { $startedAtUtc = $process.StartTime.ToUniversalTime().ToString('o') } catch { $startedAtUtc = '' }
+    try { $creationDateUtc = $cim.CreationDate.ToUniversalTime().ToString('o') } catch { $creationDateUtc = '' }
+    [pscustomobject]@{
+      processId = $processId
+      path = $path
+      startedAtUtc = $startedAtUtc
+      creationDateUtc = $creationDateUtc
+    } | ConvertTo-Json -Compress
+  `);
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function captureLaunchIdentity(processId, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let identity = null;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      identity = await readProcessIdentity(processId);
+    } catch (error) {
+      lastError = error;
+      identity = null;
+    }
+    if (
+      identity?.startedAtUtc
+      && identity?.creationDateUtc
+      && String(identity.path || "").toLowerCase() === exe.toLowerCase()
+    ) {
+      return identity;
+    }
+    await sleep(50);
+  }
+  throw new Error(
+    `Packaged launch PID generation could not be captured within ${timeoutMs}ms; no lifecycle action is authorized.${lastError ? ` Last read error: ${String(lastError?.message || lastError)}` : ""}`,
+  );
+}
+
+async function validateLaunchIdentity(launch) {
+  const observed = await readProcessIdentity(launch?.identity?.processId || launch?.childPid);
+  return {
+    ok: sameLaunchIdentity(launch?.identity, observed),
+    expected: launch?.identity || null,
+    observed,
+    error: sameLaunchIdentity(launch?.identity, observed)
+      ? ""
+      : "Tracked packaged PID generation changed; no Quit or forced termination is authorized.",
+  };
+}
+
+async function inspectCdpListenerOwnership(launch) {
+  const identityCheck = await validateLaunchIdentity(launch);
+  if (!identityCheck.ok) {
+    return { ok: false, status: "root-generation-mismatch", identityCheck, listenerCount: 0 };
+  }
+  const expected = launch.identity;
+  const raw = await runPowerShell(`
+    $rootPid = [int]${Number(expected.processId)}
+    $expectedPath = [IO.Path]::GetFullPath('${escapePowerShellLiteral(expected.path)}')
+    $expectedStartedAtUtc = '${escapePowerShellLiteral(expected.startedAtUtc)}'
+    $expectedCreationDateUtc = '${escapePowerShellLiteral(expected.creationDateUtc)}'
+    $rootProcess = Get-Process -Id $rootPid -ErrorAction SilentlyContinue
+    $rootCim = Get-CimInstance Win32_Process -Filter "ProcessId = $rootPid" -ErrorAction SilentlyContinue
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { $rootPath = '' }
+    try { $rootStartedAtUtc = $rootProcess.StartTime.ToUniversalTime().ToString('o') } catch { $rootStartedAtUtc = '' }
+    try { $rootCreationDateUtc = $rootCim.CreationDate.ToUniversalTime().ToString('o') } catch { $rootCreationDateUtc = '' }
+    $rootMatches = $rootProcess -and $rootCim -and
+      $rootPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase) -and
+      $rootStartedAtUtc.Equals($expectedStartedAtUtc, [StringComparison]::Ordinal) -and
+      $rootCreationDateUtc.Equals($expectedCreationDateUtc, [StringComparison]::Ordinal)
+    if (-not $rootMatches) {
+      [pscustomobject]@{ ok=$false; status='root-generation-mismatch'; listenerCount=0; owningProcess=0 } | ConvertTo-Json -Compress
+      exit 0
+    }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootPid)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    $listeners = @(Get-NetTCPConnection -LocalPort ${cdpPort} -State Listen -ErrorAction SilentlyContinue)
+    $owned = $listeners.Count -eq 1 -and $ids.Contains([int]$listeners[0].OwningProcess)
+    $status = if ($listeners.Count -eq 0) { 'absent' } elseif ($owned) { 'owned' } else { 'foreign' }
+    [pscustomobject]@{
+      ok = $owned
+      status = $status
+      listenerCount = $listeners.Count
+      owningProcess = if ($listeners.Count -eq 1) { [int]$listeners[0].OwningProcess } else { 0 }
+    } | ConvertTo-Json -Compress
+  `);
+  return { ...(raw ? JSON.parse(raw) : { ok: false, status: "absent", listenerCount: 0 }), identityCheck };
+}
+
+async function waitForOwnedCdpListener(launch, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await inspectCdpListenerOwnership(launch);
+    if (cdpOwnershipAllowsAction(latest)) return latest;
+    if (latest.status !== "absent") {
+      throw new Error(`Packaged CDP listener was not owned by the captured root generation; no page connection is authorized: ${JSON.stringify(latest)}`);
+    }
+    await sleep(100);
+  }
+  throw new Error(`Timed out waiting for a CDP listener owned by the captured root generation: ${JSON.stringify(latest)}`);
+}
+
 function snapshotIsClear(snapshot) {
   return (snapshot.vrcforgeProcesses || []).length === 0
     && (snapshot.packagedRootProcesses || []).length === 0
@@ -473,14 +642,44 @@ async function waitForPackagedClear(timeoutMs = 30000) {
 
 async function forceCloseLaunch(launch) {
   if (!launch?.childPid) return processSnapshot();
+  const beforeForce = await processSnapshot();
+  if (snapshotIsClear(beforeForce)) {
+    return beforeForce;
+  }
+  const identityCheck = await validateLaunchIdentity(launch);
+  if (!identityCheck.ok) {
+    throw new Error(identityCheck.error);
+  }
   const escapedRoot = escapePowerShellLiteral(packagedRoot);
   const escapedExe = escapePowerShellLiteral(exe);
+  const escapedStartedAtUtc = escapePowerShellLiteral(launch.identity.startedAtUtc);
+  const escapedCreationDateUtc = escapePowerShellLiteral(launch.identity.creationDateUtc);
   const rootPid = Number(launch.childPid);
   await runPowerShell(`
     $root = [IO.Path]::GetFullPath('${escapedRoot}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
     $prefix = $root + [IO.Path]::DirectorySeparatorChar
     $exe = [IO.Path]::GetFullPath('${escapedExe}')
     $rootProcessId = [int]${rootPid}
+    $expectedStartedAtUtc = '${escapedStartedAtUtc}'
+    $expectedCreationDateUtc = '${escapedCreationDateUtc}'
+    function Assert-TrackedRootIdentity {
+      $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+      $rootCim = Get-CimInstance Win32_Process -Filter "ProcessId = $rootProcessId" -ErrorAction SilentlyContinue
+      if (-not $rootProcess -or -not $rootCim) {
+        throw 'Tracked packaged PID generation is absent; no process was stopped.'
+      }
+      try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { $rootPath = '' }
+      try { $rootStartedAtUtc = $rootProcess.StartTime.ToUniversalTime().ToString('o') } catch { $rootStartedAtUtc = '' }
+      try { $rootCreationDateUtc = $rootCim.CreationDate.ToUniversalTime().ToString('o') } catch { $rootCreationDateUtc = '' }
+      if (
+        -not $rootPath.Equals($exe, [StringComparison]::OrdinalIgnoreCase) -or
+        -not $rootStartedAtUtc.Equals($expectedStartedAtUtc, [StringComparison]::Ordinal) -or
+        -not $rootCreationDateUtc.Equals($expectedCreationDateUtc, [StringComparison]::Ordinal)
+      ) {
+        throw 'Tracked packaged PID generation changed; no process was stopped.'
+      }
+    }
+    Assert-TrackedRootIdentity
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $ids = [Collections.Generic.HashSet[int]]::new()
     [void]$ids.Add($rootProcessId)
@@ -504,6 +703,7 @@ async function forceCloseLaunch(launch) {
       }
       if ($allowed) { $process }
     })
+    Assert-TrackedRootIdentity
     $targets |
       Sort-Object @{ Expression = { if ($_.Id -eq $rootProcessId) { 1 } else { 0 } } } |
       Stop-Process -Force -ErrorAction SilentlyContinue
@@ -516,43 +716,59 @@ async function forceCloseLaunch(launch) {
 }
 
 async function closePackagedApp(launch) {
-  if (!launch?.childPid) throw new Error("Tracked packaged launch was unavailable for close.");
-  const escapedExe = escapePowerShellLiteral(exe);
+  if (!launch?.childPid || !launch?.cdp) throw new Error("Tracked packaged launch was unavailable for explicit Quit.");
   const rootPid = Number(launch.childPid);
-  const requestedRaw = await runPowerShell(`
-    $exe = [IO.Path]::GetFullPath('${escapedExe}')
-    $targets = @(Get-Process -Id ${rootPid} -ErrorAction SilentlyContinue | Where-Object {
-      try { [IO.Path]::GetFullPath([string]$_.Path).Equals($exe, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
-    })
-    $results = @(foreach ($target in $targets) {
-      [pscustomobject]@{
-        pid = $target.Id
-        mainWindowHandle = [int64]$target.MainWindowHandle
-        closeRequested = [bool]$target.CloseMainWindow()
-      }
-    })
-    [pscustomobject]@{ targets = $results } | ConvertTo-Json -Depth 4 -Compress
-  `);
-  const requested = requestedRaw ? JSON.parse(requestedRaw) : { targets: [] };
-  const targets = Array.isArray(requested?.targets)
-    ? requested.targets
-    : requested?.targets
-      ? [requested.targets]
-      : [];
-  const closeAccepted = targets.length === 1
-    && Number(targets[0]?.pid) === rootPid
-    && Number(targets[0]?.mainWindowHandle) !== 0
-    && targets[0]?.closeRequested === true;
-  const graceful = await waitForPackagedClear();
-  if (graceful.ok) {
-    return { requested, trackedPid: rootPid, closeAccepted, graceful: closeAccepted, forced: false, finalSnapshot: graceful.snapshot };
+  const identityCheck = await validateLaunchIdentity(launch);
+  const cdpOwnership = identityCheck.ok
+    ? await inspectCdpListenerOwnership(launch)
+    : { ok: false, status: "root-generation-mismatch" };
+  const closeAction = closeAuthorizationAction(identityCheck, cdpOwnership);
+  if (closeAction === "preserve") {
+    try { launch.cdp.close(); } catch { /* Closing CDP is not a process lifecycle action. */ }
+    return {
+      quit: {
+        accepted: false,
+        error: identityCheck.error || "Packaged CDP listener ownership changed; no Quit is authorized.",
+      },
+      trackedPid: rootPid,
+      identityCheck,
+      cdpOwnership,
+      graceful: false,
+      forced: false,
+      finalSnapshot: await processSnapshot(),
+    };
   }
-  const beforeForce = graceful.snapshot;
+  if (closeAction === "force-own-root") {
+    try { launch.cdp.close(); } catch { /* Closing CDP is not a process lifecycle action. */ }
+    const beforeForce = await processSnapshot();
+    const forceCleanup = await forceCloseLaunch(launch)
+      .then((snapshot) => ({ ok: true, snapshot }))
+      .catch(async (error) => ({ ok: false, error: String(error?.stack || error), snapshot: await processSnapshot() }));
+    return {
+      quit: { accepted: false, error: "Packaged CDP listener was foreign or absent; Quit was not authorized." },
+      trackedPid: rootPid,
+      identityCheck,
+      cdpOwnership,
+      graceful: false,
+      forced: true,
+      evidenceFailure: true,
+      beforeForce,
+      forceCleanup,
+      finalSnapshot: forceCleanup.snapshot,
+    };
+  }
+  const quit = await requestPackagedAppQuit(launch.cdp);
+  const cleared = await waitForPackagedClear(30000);
+  if (quit.accepted && cleared.ok) {
+    return { quit, trackedPid: rootPid, identityCheck, cdpOwnership, graceful: true, forced: false, finalSnapshot: cleared.snapshot };
+  }
+  const beforeForce = cleared.snapshot;
   await forceCloseLaunch(launch);
   return {
-    requested,
+    quit,
     trackedPid: rootPid,
-    closeAccepted,
+    identityCheck,
+    cdpOwnership,
     graceful: false,
     forced: true,
     beforeForce,
@@ -561,14 +777,8 @@ async function closePackagedApp(launch) {
 }
 
 function assertGracefulClosure(report, closure, label) {
-  const targets = Array.isArray(closure?.requested?.targets)
-    ? closure.requested.targets
-    : closure?.requested?.targets
-      ? [closure.requested.targets]
-      : [];
-  if (!closure?.graceful) addAssertion(report, `packaged app did not complete an accepted graceful close ${label}`);
-  if (targets.length !== 1 || Number(targets[0]?.pid) !== Number(closure?.trackedPid)) {
-    addAssertion(report, `packaged app did not target exactly its tracked main process ${label}`);
+  if (closure?.quit?.accepted !== true || closure?.graceful !== true || closure?.forced === true) {
+    addAssertion(report, `packaged app did not complete an accepted explicit Quit ${label}`);
   }
   if (!snapshotIsClear(closure?.finalSnapshot || {})) {
     addAssertion(report, `packaged processes or probe ports remained ${label}`);
@@ -873,13 +1083,23 @@ async function seedAndActivateQuestionUiChat(cdp) {
 async function launchPackagedApp() {
   appSessionToken = "";
   const child = spawn(exe, [], { detached: false, stdio: "ignore", env: isolatedLaunchEnvironment() });
-  const launch = { childPid: child.pid, launchedAt: new Date().toISOString(), cdp: null };
+  const launch = { childPid: child.pid, launchedAt: new Date().toISOString(), identity: null, cdp: null };
   const spawnFailure = new Promise((_, rejectSpawn) => child.once("error", rejectSpawn));
   const childExit = new Promise((_, rejectExit) => child.once("exit", (code, signal) => {
     rejectExit(new Error(`Packaged app exited before launch completed: code=${code}, signal=${signal || "none"}.`));
   }));
   const attemptedCdpUrl = `http://127.0.0.1:${cdpPort}/json/list`;
   try {
+    launch.identity = await Promise.race([
+      captureLaunchIdentity(child.pid),
+      spawnFailure,
+      childExit,
+    ]);
+    launch.cdpListenerOwnership = await Promise.race([
+      waitForOwnedCdpListener(launch),
+      spawnFailure,
+      childExit,
+    ]);
     const targets = await Promise.race([
       waitForJson(attemptedCdpUrl),
       spawnFailure,
@@ -889,6 +1109,11 @@ async function launchPackagedApp() {
       ? targets.find((target) => target?.type === "page" && target?.webSocketDebuggerUrl)
       : undefined;
     if (!page) throw new Error("Packaged WebView2 page target was not found.");
+    const connectOwnership = await inspectCdpListenerOwnership(launch);
+    if (!cdpOwnershipAllowsAction(connectOwnership)) {
+      throw new Error("Packaged CDP listener ownership changed before page connection; no connection is authorized.");
+    }
+    launch.cdpListenerOwnership = connectOwnership;
     const cdp = connectCdp(page.webSocketDebuggerUrl);
     launch.cdp = cdp;
     await cdp.opened;
@@ -1430,9 +1655,9 @@ async function main() {
       addAssertion(report, "authenticated answer did not preserve one redacted non-empty answered Question");
     }
 
-    app.cdp.close();
     report.closures.first = await closePackagedApp(app);
     assertGracefulClosure(report, report.closures.first, "before restart");
+    app.cdp.close();
     app = undefined;
     report.beforeRestart = await processSnapshot();
     if (!snapshotIsClear(report.beforeRestart)) {
@@ -1462,9 +1687,9 @@ async function main() {
     }
     if (restartDisclosure) addAssertion(report, "restart projection echoed the sensitive Question answer");
 
-    app.cdp.close();
     report.closures.second = await closePackagedApp(app);
     assertGracefulClosure(report, report.closures.second, "after restart readback");
+    app.cdp.close();
     app = undefined;
     const questionLog = await readFile(questionLogPath, "utf8");
     const questionEvents = questionLog.split(/\r?\n/)
@@ -1505,9 +1730,9 @@ async function main() {
     addAssertion(report, "probe threw before the Question lifecycle completed");
   } finally {
     if (app) {
-      try { app.cdp?.close(); } catch { /* Renderer may already be gone. */ }
       try {
         report.closures.failureCleanup = await closePackagedApp(app);
+        try { app.cdp?.close(); } catch { /* Renderer may already be gone. */ }
       } catch (error) {
         report.cleanupError = String(error?.stack || error);
         await forceCloseLaunch(app).catch((forceError) => {

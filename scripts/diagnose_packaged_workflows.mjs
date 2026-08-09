@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 const packagedRoot = resolve(repoRoot, "dist", "VRCForge_Windows_x64");
@@ -40,44 +41,142 @@ function runPowerShell(script) {
   });
 }
 
-async function waitForPortReleased(timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let last = "";
-  while (Date.now() < deadline) {
-    last = await runPowerShell(`
-      $rows = Get-NetTCPConnection -LocalPort 8757 -ErrorAction SilentlyContinue |
-        Where-Object { $_.State -eq 'Listen' } |
-        Select-Object -First 5 LocalAddress,LocalPort,State,OwningProcess
-      if ($rows) { $rows | ConvertTo-Json -Compress } else { '' }
-    `);
-    if (!last) {
-      return;
-    }
-    await sleep(250);
-  }
-  throw new Error(`Port 8757 still has a listener before launch: ${last}`);
-}
-
-async function closeExistingVrcforgeProcesses() {
-  await runPowerShell(`
-    $packagedRoot = '${packagedRootPowerShell}'
-    Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
-      Stop-Process -Force -ErrorAction SilentlyContinue
-  `);
-  await waitForPortReleased(15000);
-}
-
 async function processSnapshot() {
   return runPowerShell(`
-    $packagedRoot = '${packagedRootPowerShell}'
-    $processes = Get-Process -ErrorAction SilentlyContinue |
-      Where-Object { $_.Path -and $_.Path.StartsWith($packagedRoot, [StringComparison]::OrdinalIgnoreCase) } |
-      Select-Object Id,ProcessName,Path
-    $ports = Get-NetTCPConnection -LocalPort 8757 -ErrorAction SilentlyContinue |
+    $root = [IO.Path]::GetFullPath('${packagedRootPowerShell}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $processes = @(foreach ($process in Get-Process -ErrorAction SilentlyContinue) {
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { continue }
+      if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        [pscustomobject]@{ Id=$process.Id; ProcessName=$process.ProcessName; Path=$path }
+      }
+    })
+    $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+      Where-Object { $_.LocalPort -eq 8757 -or $_.LocalPort -eq ${port} } |
       Select-Object LocalAddress,LocalPort,State,OwningProcess
     [pscustomobject]@{ processes = @($processes); ports = @($ports) } | ConvertTo-Json -Depth 4 -Compress
   `).then((value) => (value ? JSON.parse(value) : { processes: [], ports: [] }));
+}
+
+function snapshotHasResidue(snapshot) {
+  return Boolean((snapshot?.processes || []).length || (snapshot?.ports || []).length);
+}
+
+async function assertProbePreflightClear() {
+  const snapshot = await processSnapshot();
+  if (snapshotHasResidue(snapshot)) {
+    throw new Error(`Preflight found an existing packaged-root process or occupied 8757/probe CDP port; nothing was terminated: ${JSON.stringify(snapshot)}`);
+  }
+  return snapshot;
+}
+
+async function waitForAppShutdown(timeoutMs = 20000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await processSnapshot();
+    if (!snapshotHasResidue(latest)) return latest;
+    await sleep(200);
+  }
+  return latest || processSnapshot();
+}
+
+async function captureLaunchIdentity(processId) {
+  const value = await runPowerShell(`
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    do {
+      $process = Get-Process -Id ${Number(processId)} -ErrorAction SilentlyContinue
+      if ($process) {
+        try { $candidatePath = [IO.Path]::GetFullPath([string]$process.Path) } catch { $candidatePath = '' }
+        if ($candidatePath) { break }
+      }
+      Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if (-not $process) { throw 'Tracked packaged process exited before its identity could be captured.' }
+    try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { throw 'Tracked packaged process path was unavailable.' }
+    $expected = [IO.Path]::GetFullPath('${packagedRootPowerShell}\\VRCForge.exe')
+    if (-not $path.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+      throw 'Tracked packaged PID did not resolve to the expected executable.'
+    }
+    [pscustomobject]@{
+      id = [int]$process.Id
+      path = $path
+      startedAtUtc = $process.StartTime.ToUniversalTime().ToString('o')
+    } | ConvertTo-Json -Compress
+  `);
+  return JSON.parse(value);
+}
+
+async function listenerOwnedByLaunch(identity) {
+  if (!identity?.id || !identity?.startedAtUtc) return false;
+  const value = await runPowerShell(`
+    $rootProcessId = [int]${Number(identity.id)}
+    $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+    if (-not $rootProcess) { 'false'; exit 0 }
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { 'false'; exit 0 }
+    $expectedPath = [IO.Path]::GetFullPath('${packagedRootPowerShell}\\VRCForge.exe')
+    $expectedStart = [DateTime]::Parse('${String(identity.startedAtUtc).replaceAll("'", "''")}').ToUniversalTime()
+    if (-not $rootPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) { 'false'; exit 0 }
+    if ($rootProcess.StartTime.ToUniversalTime() -ne $expectedStart) { 'false'; exit 0 }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction SilentlyContinue)
+    if ($listeners.Count -lt 1) { 'false'; exit 0 }
+    foreach ($listener in $listeners) {
+      if (-not $ids.Contains([int]$listener.OwningProcess)) { 'false'; exit 0 }
+    }
+    'true'
+  `);
+  return value.trim().toLowerCase() === "true";
+}
+
+async function forceCloseTrackedLaunch(identity) {
+  if (!identity?.id || !identity?.startedAtUtc) return processSnapshot();
+  await runPowerShell(`
+    $root = [IO.Path]::GetFullPath('${packagedRootPowerShell}').TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $prefix = $root + [IO.Path]::DirectorySeparatorChar
+    $expectedPath = [IO.Path]::GetFullPath('${packagedRootPowerShell}\\VRCForge.exe')
+    $expectedStart = [DateTime]::Parse('${String(identity.startedAtUtc).replaceAll("'", "''")}').ToUniversalTime()
+    $rootProcessId = [int]${Number(identity.id)}
+    $rootProcess = Get-Process -Id $rootProcessId -ErrorAction SilentlyContinue
+    if (-not $rootProcess) { exit 0 }
+    try { $rootPath = [IO.Path]::GetFullPath([string]$rootProcess.Path) } catch { exit 0 }
+    if (-not $rootPath.Equals($expectedPath, [StringComparison]::OrdinalIgnoreCase)) { exit 0 }
+    if ($rootProcess.StartTime.ToUniversalTime() -ne $expectedStart) { exit 0 }
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    [void]$ids.Add($rootProcessId)
+    do {
+      $added = $false
+      foreach ($candidate in $all) {
+        if ($ids.Contains([int]$candidate.ParentProcessId) -and -not $ids.Contains([int]$candidate.ProcessId)) {
+          [void]$ids.Add([int]$candidate.ProcessId)
+          $added = $true
+        }
+      }
+    } while ($added)
+    @(foreach ($candidateId in $ids) {
+      $process = Get-Process -Id $candidateId -ErrorAction SilentlyContinue
+      if (-not $process) { continue }
+      try { $path = [IO.Path]::GetFullPath([string]$process.Path) } catch { continue }
+      if ($candidateId -eq $rootProcessId -or $path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        $process
+      }
+    }) |
+      Sort-Object @{ Expression = { if ($_.Id -eq $rootProcessId) { 1 } else { 0 } } } |
+      Stop-Process -Force -ErrorAction SilentlyContinue
+  `);
+  return waitForAppShutdown(30000);
 }
 
 async function jsonFetch(url) {
@@ -762,10 +861,14 @@ function validateWorkflowOutput(output, markers) {
   return failures;
 }
 
+let trackedChild = null;
+let trackedLaunchIdentity = null;
+let activeCdp = null;
+let gracefulQuitAttempted = false;
+
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
-  await closeExistingVrcforgeProcesses();
-  const beforeLaunch = await processSnapshot();
+  const beforeLaunch = await assertProbePreflightClear();
   const launchedAt = Date.now();
   const child = spawn(exe, [], {
     detached: false,
@@ -775,8 +878,14 @@ async function main() {
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port} --remote-allow-origins=*`,
     },
   });
+  trackedChild = child;
+  trackedLaunchIdentity = await captureLaunchIdentity(child.pid);
   const page = await waitForCdpTarget();
+  if (!(await listenerOwnedByLaunch(trackedLaunchIdentity))) {
+    throw new Error("Packaged probe CDP listener was not owned by the captured launch generation.");
+  }
   const cdp = connectCdp(page.webSocketDebuggerUrl);
+  activeCdp = cdp;
   await cdp.opened;
   await cdp.send("Runtime.enable");
   await cdp.send("Page.enable");
@@ -967,10 +1076,28 @@ async function main() {
   output.assertions = {
     failures: validateWorkflowOutput(output, { cancelMarker, visionMarker }),
   };
+  gracefulQuitAttempted = true;
+  const listenerOwned = await listenerOwnedByLaunch(trackedLaunchIdentity).catch(() => false);
+  const quitRequest = listenerOwned
+    ? await requestPackagedAppQuit(cdp)
+    : { accepted: false, listenerOwnershipChanged: true, error: "Tracked packaged CDP listener changed owner; no Quit was attempted." };
   cdp.close();
-  child.kill();
-  await sleep(500);
-  await closeExistingVrcforgeProcesses();
+  activeCdp = null;
+  const afterQuit = await waitForAppShutdown(20000);
+  output.lifecycle = {
+    quitRequest,
+    afterQuit,
+    forcedCleanupUsed: false,
+    ok: Boolean(quitRequest.accepted && !snapshotHasResidue(afterQuit)),
+  };
+  if (!output.lifecycle.ok) {
+    output.assertions.failures.push("packaged app explicit Quit was not accepted or left an owned process/port alive");
+    if (snapshotHasResidue(afterQuit)) {
+      output.lifecycle.forcedCleanupUsed = true;
+      output.lifecycle.afterForcedCleanup = await forceCloseTrackedLaunch(trackedLaunchIdentity);
+      output.assertions.failures.push("failure cleanup required forced termination of the exact probe-owned launch");
+    }
+  }
   output.afterCleanup = await processSnapshot();
   await writeFile(outPath, `${JSON.stringify(output, null, 2)}\n`, "utf8");
   console.log(outPath);
@@ -981,9 +1108,43 @@ async function main() {
 }
 
 main().catch(async (error) => {
-  await closeExistingVrcforgeProcesses().catch(() => {});
+  const cleanup = {
+    quitRequest: { accepted: false, error: "CDP was unavailable before cleanup." },
+    afterQuit: null,
+    forcedCleanupUsed: false,
+    afterForcedCleanup: null,
+  };
+  if (!gracefulQuitAttempted && activeCdp) {
+    gracefulQuitAttempted = true;
+    const listenerOwned = await listenerOwnedByLaunch(trackedLaunchIdentity).catch(() => false);
+    cleanup.quitRequest = listenerOwned
+      ? await requestPackagedAppQuit(activeCdp).catch((quitError) => ({ accepted: false, error: String(quitError) }))
+      : { accepted: false, listenerOwnershipChanged: true, error: "Tracked packaged CDP listener changed owner; no Quit was attempted." };
+  }
+  if (activeCdp) {
+    activeCdp.close();
+    activeCdp = null;
+  }
+  cleanup.afterQuit = trackedChild?.pid
+    ? await waitForAppShutdown(20000).catch((shutdownError) => ({ error: String(shutdownError), processes: [], ports: [] }))
+    : await processSnapshot().catch((snapshotError) => ({ error: String(snapshotError), processes: [], ports: [] }));
+  if (trackedChild?.pid && snapshotHasResidue(cleanup.afterQuit)) {
+    cleanup.forcedCleanupUsed = true;
+    if (trackedLaunchIdentity) {
+      cleanup.afterForcedCleanup = await forceCloseTrackedLaunch(trackedLaunchIdentity).catch((cleanupError) => ({ error: String(cleanupError) }));
+    } else {
+      cleanup.identityCaptureFailed = true;
+      cleanup.unverifiedProcessPreserved = true;
+      cleanup.afterForcedCleanup = await waitForAppShutdown(20000).catch((cleanupError) => ({ error: String(cleanupError) }));
+    }
+  }
   await mkdir(dirname(outPath), { recursive: true });
-  await writeFile(outPath, `${JSON.stringify({ ok: false, error: String(error && error.stack || error), marker }, null, 2)}\n`, "utf8").catch(() => {});
+  await writeFile(outPath, `${JSON.stringify({
+    ok: false,
+    error: String(error && error.stack || error),
+    marker,
+    lifecycle: cleanup,
+  }, null, 2)}\n`, "utf8").catch(() => {});
   console.error(error);
   process.exit(1);
 });

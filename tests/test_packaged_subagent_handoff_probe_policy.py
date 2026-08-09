@@ -40,6 +40,32 @@ def test_subagent_handoff_probe_has_explicit_local_acceptance_boundary() -> None
     assert "attempt === 0 && isChatStoreSnapshotChanged(error)" in source
     assert 'error?.payload?.detail?.code === "chat_store_snapshot_changed"' in source
     assert 'code: "chat_store_recovery_required"' in source
+    assert "function sameLaunchIdentity(expected, observed)" in source
+    assert "startedAtUtc" in source
+    assert "creationDateUtc" in source
+    assert "captureLaunchIdentity(child.pid)" in source
+    assert "function cdpOwnershipAllowsAction(ownership)" in source
+    assert "function closeAuthorizationAction(identityCheck, cdpOwnership)" in source
+    assert "closeCalls.quit !== 0 || closeCalls.force !== 1" in source
+    assert "waitForOwnedCdpListener(launch)" in source
+    assert "$ids.Contains([int]$listeners[0].OwningProcess)" in source
+    assert "captureLaunchIdentity(processId, timeoutMs = 5000)" in source
+    assert "await sleep(50)" in source
+    assert "Tracked packaged PID generation changed; no Quit or forced termination is authorized" in source
+    close = source[source.index("async function closePackagedApp(launch)") : source.index("async function waitForJson")]
+    assert close.index("validateLaunchIdentity(launch)") < close.index("requestPackagedAppQuit(launch.cdp)")
+    assert close.index("inspectCdpListenerOwnership(launch)") < close.index("requestPackagedAppQuit(launch.cdp)")
+    assert close.index('if (closeAction === "force-own-root")') < close.index("requestPackagedAppQuit(launch.cdp)")
+    assert "forced: true" in close
+    assert "evidenceFailure: true" in close
+    assert "forceCloseLaunch(launch)" in close
+    force = source[source.index("async function forceCloseLaunch(launch)") : source.index("async function closePackagedApp(launch)")]
+    assert force.count("Assert-TrackedRootIdentity") == 3
+    assert force.rindex("Assert-TrackedRootIdentity") < force.index("Stop-Process -Force")
+    launch = source[source.index("async function launchPackagedApp(requireComposerEnabled = true)") : source.index("async function waitForComposer")]
+    assert launch.index("waitForOwnedCdpListener(launch)") < launch.index("waitForJson(`http://127.0.0.1:${cdpPort}/json/list`)")
+    assert launch.index("waitForJson(`http://127.0.0.1:${cdpPort}/json/list`)") < launch.index("const connectOwnership")
+    assert launch.index("const connectOwnership") < launch.index("connectCdp(page.webSocketDebuggerUrl)")
 
 
 def test_subagent_handoff_probe_self_test_is_side_effect_free() -> None:
@@ -54,6 +80,9 @@ def test_subagent_handoff_probe_self_test_is_side_effect_free() -> None:
 
     assert result.returncode == 0, result.stderr
     assert "sub-agent handoff probe self-test passed" in result.stdout
+    assert "PID generation identity was not fail-closed" not in result.stderr
+    assert "foreign CDP listener ownership was accepted" not in result.stderr
+    assert "did not fail through one owned force cleanup" not in result.stderr
 
 
 def test_subagent_handoff_probe_rejects_unknown_cli_options_before_package_access() -> None:

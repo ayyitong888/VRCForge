@@ -64,7 +64,11 @@ def test_desktop_probe_isolates_runtime_credentials_and_owned_lifetimes() -> Non
     assert "Launch preflight found an existing VRCForge process or occupied backend/CDP port; nothing was terminated" in source
     assert "$_ .LocalPort" not in source
     assert "$_.LocalPort -eq 8757 -or $_.LocalPort -eq ${port}" in source
-    assert "async function forceCloseTrackedLaunch(processId)" in source
+    assert "async function forceCloseTrackedLaunch(identity)" in source
+    assert "identity?.id" in source
+    assert "identity?.startedAt" in source
+    assert "$rootStart.Equals($expectedStart" in source
+    assert "forceCloseTrackedLaunch(packagedProcessIdentity)" in source
     assert "$ids.Contains([int]$candidate.ParentProcessId)" in source
     assert "$path.Equals($exe, [StringComparison]::OrdinalIgnoreCase)" in source
     assert "$path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)" in source

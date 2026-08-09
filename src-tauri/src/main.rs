@@ -113,8 +113,7 @@ fn main() {
                     }
                     "show" => show_main_window(app),
                     "quit" => {
-                        shutdown_managed_backend(app);
-                        app.exit(0);
+                        shutdown_and_exit_app(app);
                     }
                     _ => {}
                 })
@@ -261,6 +260,8 @@ fn main() {
             update_diagnostics,
             update_external_agent_gateway,
             update_permission_mode,
+            prepare_app_quit,
+            confirm_app_quit,
             update_vision_config,
             update_skill,
             save_project_prefs,
@@ -294,6 +295,33 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Acknowledge an app-local Quit request without starting shutdown yet.
+///
+/// Permission is limited to the local Tauri WebView IPC command registry; no
+/// network endpoint or ambient process handle is added. The caller must first
+/// receive this acknowledgement, then invoke `confirm_app_quit`; the confirmed
+/// command owns the remaining app lifetime and reuses the tray Quit sequence.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppQuitReceipt {
+    accepted: bool,
+}
+
+#[tauri::command]
+fn prepare_app_quit() -> AppQuitReceipt {
+    AppQuitReceipt { accepted: true }
+}
+
+#[tauri::command]
+fn confirm_app_quit(app: tauri::AppHandle) {
+    shutdown_and_exit_app(&app);
+}
+
+fn shutdown_and_exit_app(app: &tauri::AppHandle) {
+    shutdown_managed_backend(app);
+    app.exit(0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -301,18 +329,19 @@ mod tests {
         app_session_challenge_signature_matches, app_window_title, approval_revision_body,
         approval_scope_body, developer_options_challenge_path, diagnostics_update_body,
         extract_challenge_signature, force_child_exit, hmac_sha256_hex,
-        percent_encode_query_component, prepare_runtime_files, primitive_live_bootstrap_requested,
-        provider_config_body, resolve_logs_folder, runtime_session_verification_error,
-        sanitize_backend_event, sanitize_text_for_webview, sanitize_webview_response,
-        send_backend_graceful_shutdown_request_to, stop_managed_backend_child,
-        tauri_ipc_bridge_proof, try_ensure_agent_notes_file, validate_local_folder_to_open,
-        validate_primitive_live_bootstrap, validate_project_folder_to_open, wait_for_child_exit,
-        webview2_args_with_accessibility, webview_error_message, BackendState,
-        DesktopAdvancedSettingsUpdateRequest, DesktopApprovalRevisionRequest,
-        DesktopApprovalScopeRequest, DesktopDiagnosticsUpdateRequest,
-        BACKEND_GRACEFUL_SHUTDOWN_METHOD, BACKEND_GRACEFUL_SHUTDOWN_PATH,
-        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS, PRIMITIVE_LIVE_BOOTSTRAP_MAGIC,
-        PRIMITIVE_LIVE_BOOTSTRAP_SIZE, TRUSTED_LIVE_BOOTSTRAP_MAGIC, TRUSTED_LIVE_BOOTSTRAP_SIZE,
+        percent_encode_query_component, prepare_app_quit, prepare_runtime_files,
+        primitive_live_bootstrap_requested, provider_config_body, resolve_logs_folder,
+        runtime_session_verification_error, sanitize_backend_event, sanitize_text_for_webview,
+        sanitize_webview_response, send_backend_graceful_shutdown_request_to,
+        stop_managed_backend_child, tauri_ipc_bridge_proof, try_ensure_agent_notes_file,
+        validate_local_folder_to_open, validate_primitive_live_bootstrap,
+        validate_project_folder_to_open, wait_for_child_exit, webview2_args_with_accessibility,
+        webview_error_message, BackendState, DesktopAdvancedSettingsUpdateRequest,
+        DesktopApprovalRevisionRequest, DesktopApprovalScopeRequest,
+        DesktopDiagnosticsUpdateRequest, BACKEND_GRACEFUL_SHUTDOWN_METHOD,
+        BACKEND_GRACEFUL_SHUTDOWN_PATH, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
+        PRIMITIVE_LIVE_BOOTSTRAP_MAGIC, PRIMITIVE_LIVE_BOOTSTRAP_SIZE,
+        TRUSTED_LIVE_BOOTSTRAP_MAGIC, TRUSTED_LIVE_BOOTSTRAP_SIZE,
     };
     use std::{
         env, fs,
@@ -338,6 +367,11 @@ mod tests {
             app_window_title(env!("CARGO_PKG_VERSION")),
             format!("VRCForge {}", env!("CARGO_PKG_VERSION")),
         );
+    }
+
+    #[test]
+    fn app_quit_prepare_returns_before_shutdown_confirmation() {
+        assert!(prepare_app_quit().accepted);
     }
 
     fn create_dashboard(root: &Path) {

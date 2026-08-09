@@ -140,6 +140,45 @@ assert.match(source, /eligibleCount/);
 assert.match(source, /candidateCount/);
 assert.match(source, /conflictExplanation/);
 assert.match(source, /assertGracefulClosure/);
+assert.match(source, /requestPackagedAppQuit/);
+assert.match(source, /quit\.accepted/);
+assert.match(source, /function sameLaunchIdentity\(expected, observed\)/);
+assert.match(source, /startedAtUtc/);
+assert.match(source, /creationDateUtc/);
+assert.match(source, /captureLaunchIdentity\(child\.pid\)/);
+assert.match(source, /function cdpOwnershipAllowsAction\(ownership\)/);
+assert.match(source, /function closeAuthorizationAction\(identityCheck, cdpOwnership\)/);
+assert.match(source, /closeCalls\.quit !== 0 \|\| closeCalls\.force !== 1/);
+assert.match(source, /waitForOwnedCdpListener\(launch\)/);
+assert.match(source, /\$ids\.Contains\(\[int\]\$listeners\[0\]\.OwningProcess\)/);
+assert.match(source, /captureLaunchIdentity\(processId, timeoutMs = 5000\)/);
+assert.match(source, /await sleep\(50\)/);
+assert.match(source, /Tracked packaged PID generation changed; no Quit or forced termination is authorized/);
+const memoryClose = source.slice(
+  source.indexOf("async function closePackagedApp(launch)"),
+  source.indexOf("function assertGracefulClosure", source.indexOf("async function closePackagedApp(launch)")),
+);
+assert.ok(memoryClose.indexOf("validateLaunchIdentity(launch)") < memoryClose.indexOf("requestPackagedAppQuit(launch.cdp)"));
+assert.ok(memoryClose.indexOf("inspectCdpListenerOwnership(launch)") < memoryClose.indexOf("requestPackagedAppQuit(launch.cdp)"));
+assert.ok(memoryClose.indexOf('if (closeAction === "force-own-root")') < memoryClose.indexOf("requestPackagedAppQuit(launch.cdp)"));
+assert.match(memoryClose, /forced: true,[\s\S]*evidenceFailure: true/);
+assert.match(memoryClose, /forceCloseLaunch\(launch\)/);
+const memoryForce = source.slice(
+  source.indexOf("async function forceCloseLaunch(launch)"),
+  source.indexOf("async function closePackagedApp(launch)"),
+);
+assert.equal((memoryForce.match(/Assert-TrackedRootIdentity/g) || []).length, 3);
+assert.ok(memoryForce.lastIndexOf("Assert-TrackedRootIdentity") < memoryForce.indexOf("Stop-Process -Force"));
+const memoryLaunch = source.slice(
+  source.indexOf("async function launchPackagedApp()"),
+  source.indexOf("async function readAppToken", source.indexOf("async function launchPackagedApp()")),
+);
+assert.ok(memoryLaunch.indexOf("waitForOwnedCdpListener(launch)") < memoryLaunch.indexOf("waitForCdpPage(45000)"));
+assert.ok(memoryLaunch.indexOf("waitForCdpPage(45000)") < memoryLaunch.indexOf("const connectOwnership"));
+assert.ok(memoryLaunch.indexOf("const connectOwnership") < memoryLaunch.indexOf("connectCdp(page.webSocketDebuggerUrl)"));
+assert.doesNotMatch(source, /CloseMainWindow/);
+assert.doesNotMatch(source, /requestManagedBackendShutdown/);
+assert.match(source, /waitForPackagedClear\(30000\)/);
 assert.match(source, /snapshotIsClear\(report\.finalCleanup\)/);
 
 console.log("memory review packaged probe contract ok");
