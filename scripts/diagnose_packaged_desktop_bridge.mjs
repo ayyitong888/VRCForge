@@ -937,7 +937,9 @@ function createFakeProvider(token) {
       })}\n\n`);
     }
     const pending = {
+      entry,
       response,
+      finish,
       timer: setTimeout(finish, 60000),
     };
     pending.timer.unref?.();
@@ -953,6 +955,13 @@ function createFakeProvider(token) {
     requests,
     get chatRequests() {
       return requests.filter((request) => request.method === "POST" && request.url === "/v1/chat/completions");
+    },
+    finishRequest(entry) {
+      const pending = [...pendingResponses].find((candidate) => candidate.entry === entry);
+      if (!pending || entry.providerFinished || entry.responseClosed) return false;
+      clearTimeout(pending.timer);
+      pending.finish();
+      return true;
     },
     async listen() {
       await new Promise((resolveListen, rejectListen) => {
@@ -990,7 +999,7 @@ async function waitForFakeProviderRequest(provider, text, timeoutMs = 15000) {
   throw new Error(`Fake provider request containing ${text} was not observed.`);
 }
 
-async function waitForFakeProviderCancellation(entry, timeoutMs = 5000) {
+async function waitForFakeProviderResponseClosed(entry, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (entry?.responseClosed) {
@@ -1240,6 +1249,20 @@ async function waitForRuntimeRun(predicate, timeoutMs = 15000) {
     await sleep(150);
   }
   return { listing: latest, run: null };
+}
+
+async function waitForRuntimeEvent(predicate, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await appApi("/api/app/agent/runs?limit=80");
+    const event = (latest?.payload?.events || []).find(predicate);
+    if (event) {
+      return { listing: latest, event };
+    }
+    await sleep(150);
+  }
+  return { listing: latest, event: null };
 }
 
 async function readActionResult(actionId) {
@@ -1594,14 +1617,21 @@ async function main() {
         return { ok: true };
       })()`,
     );
-    await sleep(150);
-    const disabledPlusEntry = await evalValue(
+    const disabledPlusEntry = await waitForEval(
+      cdp,
+      `(() => {
+        const action = document.querySelector('[data-composer-action="desktop"]');
+        return { ok: !action, hasDesktopAction: Boolean(action) };
+      })()`,
+      5000,
+    );
+    await evalValue(
       cdp,
       `(() => {
         const menu = document.querySelector("[data-composer-action-menu]");
-        const action = document.querySelector('[data-composer-action="desktop"]');
-        if (menu instanceof HTMLButtonElement) menu.click();
-        return { ok: !action, hasDesktopAction: Boolean(action) };
+        if (!(menu instanceof HTMLButtonElement)) return false;
+        menu.click();
+        return true;
       })()`,
     );
     await evalValue(
@@ -1615,13 +1645,13 @@ async function main() {
         return true;
       })()`,
     );
-    await sleep(200);
-    const disabledSlashEntry = await evalValue(
+    const disabledSlashEntry = await waitForEval(
       cdp,
       `(() => ({
         ok: !document.querySelector('[data-composer-slash-command="desktop"]'),
         count: document.querySelectorAll('[data-composer-slash-command="desktop"]').length,
       }))()`,
+      5000,
     );
     output.desktopEntryDisabled = {
       ok: Boolean(disabledPlusOpen?.ok && disabledPlusEntry?.ok && disabledSlashEntry?.ok),
@@ -1658,8 +1688,7 @@ async function main() {
         return true;
       })()`,
     );
-    await sleep(200);
-    output.desktopSlashEnabled = await evalValue(
+    output.desktopSlashEnabled = await waitForEval(
       cdp,
       `(() => ({
         ok: document.querySelectorAll('[data-composer-slash-command="desktop"]').length === 1 &&
@@ -1667,6 +1696,7 @@ async function main() {
         desktopCount: document.querySelectorAll('[data-composer-slash-command="desktop"]').length,
         hasDesktopRescue: Boolean(document.querySelector('[data-composer-slash-command="desktop-rescue"]')),
       }))()`,
+      30000,
     );
     if (!output.desktopSlashEnabled?.ok) {
       output.assertions.push("enabled Computer Use must expose exactly one /desktop command");
@@ -1682,7 +1712,14 @@ async function main() {
         return true;
       })()`,
     );
-    await sleep(100);
+    await waitForEval(
+      cdp,
+      `(() => {
+        const textarea = document.querySelector("textarea");
+        return { ok: textarea instanceof HTMLTextAreaElement && textarea.value === "" };
+      })()`,
+      5000,
+    );
     const actionIdsBeforeComposer = new Set(
       ((await appApi("/api/app/agent/desktop-actions?limit=50"))?.payload?.actions || []).map((item) => item.actionId),
     );
@@ -1695,7 +1732,13 @@ async function main() {
         return { ok: true };
       })()`,
     );
-    await sleep(150);
+    const enabledPlusReady = await waitForEval(
+      cdp,
+      `(() => ({
+        ok: document.querySelector('[data-composer-action="desktop"]') instanceof HTMLButtonElement,
+      }))()`,
+      5000,
+    ).catch((error) => ({ ok: false, error: String(error) }));
     const enabledPlusClick = await evalValue(
       cdp,
       `(() => {
@@ -1719,8 +1762,9 @@ async function main() {
         ).catch((error) => ({ ok: false, error: String(error) }))
       : { ok: false, reason: enabledPlusClick?.reason || "plus action click failed" };
     output.desktopEntryEnabled = {
-      ok: Boolean(enabledPlusOpen?.ok && enabledPlusClick?.ok && enabledComposerValue?.ok),
+      ok: Boolean(enabledPlusOpen?.ok && enabledPlusReady?.ok && enabledPlusClick?.ok && enabledComposerValue?.ok),
       open: enabledPlusOpen,
+      ready: enabledPlusReady,
       click: enabledPlusClick,
       composer: enabledComposerValue,
     };
@@ -1743,7 +1787,14 @@ async function main() {
         return { ok: true, theme: document.documentElement.dataset.theme || "" };
       })()`,
     );
-    await sleep(150);
+    output.frontendDesktopGateReady = await waitForEval(
+      cdp,
+      `(() => {
+        const button = document.querySelector("[data-composer-send]");
+        return { ok: button instanceof HTMLButtonElement && !button.disabled };
+      })()`,
+      5000,
+    ).catch((error) => ({ ok: false, error: String(error) }));
     output.frontendDesktopGateClick = await evalValue(
       cdp,
       `(() => {
@@ -1792,19 +1843,68 @@ async function main() {
       })()`,
       5000,
     ).catch((error) => ({ ok: false, error: String(error) }));
-    output.providerCancellationAfterStop = await waitForFakeProviderCancellation(observedProviderRequest);
-    if (!output.frontendDesktopGateSetup?.ok || !output.frontendDesktopGateClick?.ok || !output.frontendDesktopGate?.ok) {
+    const frontendClientTurnId = String(frontendGateRun?.clientTurnId || "");
+    output.frontendCancelRequested = await waitForRuntimeEvent(
+      (event) =>
+        event.event === "runtime_turn_cancel_requested" &&
+        event.status === "cancel_requested" &&
+        event.reason === "user_stop" &&
+        event.clientTurnId === frontendClientTurnId,
+      15000,
+    );
+    output.frontendRecoveredAfterStop = await waitForEval(
+      cdp,
+      `(() => {
+        const textarea = document.querySelector("textarea");
+        const send = document.querySelector("[data-composer-send]");
+        const stop = document.querySelector("[data-composer-stop]");
+        const streaming = Array.from(document.querySelectorAll("[data-conversation-streaming-turn]"))
+          .some((item) => item.getAttribute("data-conversation-streaming-turn") === ${JSON.stringify(frontendClientTurnId)});
+        return {
+          ok: textarea instanceof HTMLTextAreaElement && !textarea.disabled &&
+            send instanceof HTMLButtonElement && !stop && !streaming,
+          streaming,
+          stopVisible: Boolean(stop),
+        };
+      })()`,
+      15000,
+    ).catch((error) => ({ ok: false, error: String(error) }));
+    output.providerReleaseAfterStop = {
+      released: fakeProvider.finishRequest(observedProviderRequest),
+    };
+    output.providerReleaseAfterStop.response = await waitForFakeProviderResponseClosed(observedProviderRequest);
+    output.frontendCancelledRun = await waitForRuntimeRun(
+      (run) =>
+        run.clientTurnId === frontendClientTurnId &&
+        run.status === "cancelled" &&
+        run.lastEvent === "runtime_turn_completed",
+      30000,
+    );
+    if (
+      !output.frontendDesktopGateSetup?.ok ||
+      !output.frontendDesktopGateReady?.ok ||
+      !output.frontendDesktopGateClick?.ok ||
+      !output.frontendDesktopGate?.ok
+    ) {
       output.assertions.push("real composer /desktop submission did not set the turn-scoped Computer Use and theme flags");
     }
     if (!output.frontendDesktopStop?.ok) {
       output.assertions.push("real composer Computer Use turn did not expose a cancellable Stop control");
     }
     if (
-      !output.providerCancellationAfterStop.responseClosed ||
-      !output.providerCancellationAfterStop.closedByClient ||
-      output.providerCancellationAfterStop.providerFinished
+      !frontendClientTurnId ||
+      !output.frontendCancelRequested?.event ||
+      !output.frontendRecoveredAfterStop?.ok
     ) {
-      output.assertions.push("real composer Stop did not cancel the still-pending fake Provider request");
+      output.assertions.push("real composer Stop did not restore the frontend and record the exact cancel request");
+    }
+    if (
+      !output.providerReleaseAfterStop.released ||
+      !output.providerReleaseAfterStop.response?.responseClosed ||
+      !output.providerReleaseAfterStop.response?.providerFinished ||
+      !output.frontendCancelledRun?.run
+    ) {
+      output.assertions.push("the released fake Provider turn did not settle through the existing Gateway cancellation contract");
     }
     await evalValue(
       cdp,

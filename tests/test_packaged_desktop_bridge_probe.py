@@ -155,14 +155,26 @@ def test_desktop_probe_owns_an_authenticated_fake_provider_before_real_composer_
     assert 'send instanceof HTMLButtonElement,' in source
     assert 'output.providerComposerReady.sendDisabled !== true' in source
     assert 'the empty Provider-backed composer unexpectedly enabled submission without input' in source
+    assert "output.desktopSlashEnabled = await waitForEval(" in source
+    assert "const enabledPlusReady = await waitForEval(" in source
+    assert "output.frontendDesktopGateReady = await waitForEval(" in source
     assert "waitForFakeProviderRequest(fakeProvider, `${marker} frontend gate probe`)" in source
-    assert "waitForFakeProviderCancellation(observedProviderRequest)" in source
+    assert "waitForRuntimeEvent(" in source
+    assert 'event.event === "runtime_turn_cancel_requested"' in source
+    assert 'event.status === "cancel_requested"' in source
+    assert 'event.reason === "user_stop"' in source
+    assert "event.clientTurnId === frontendClientTurnId" in source
+    assert "output.frontendRecoveredAfterStop = await waitForEval(" in source
+    assert "fakeProvider.finishRequest(observedProviderRequest)" in source
+    assert "waitForFakeProviderResponseClosed(observedProviderRequest)" in source
+    assert 'run.status === "cancelled"' in source
+    assert 'run.lastEvent === "runtime_turn_completed"' in source
     assert "currentUserMarkerObserved" in source
     assert "observedProviderRequest.authorized === true" in source
     assert "!observedProviderRequest.providerFinished && !observedProviderRequest.responseClosed" in source
     assert "the fake Provider request completed before the real Stop path was exercised" in source
-    assert "output.providerCancellationAfterStop.providerFinished" in source
-    assert "real composer Stop did not cancel the still-pending fake Provider request" in source
+    assert "real composer Stop did not restore the frontend and record the exact cancel request" in source
+    assert "the released fake Provider turn did not settle through the existing Gateway cancellation contract" in source
     assert "server.closeAllConnections?.()" in source
     assert "await fakeProvider.close()" in source
     assert "proveLoopbackPortReleased(fakeProviderPort)" in source
@@ -175,6 +187,15 @@ def test_desktop_probe_owns_an_authenticated_fake_provider_before_real_composer_
     )
     assert source.index("output.frontendDesktopGateClick = await evalValue(") < source.index(
         "waitForFakeProviderRequest(fakeProvider, `${marker} frontend gate probe`)"
+    )
+    assert source.index("output.frontendDesktopStop = await waitForEval(") < source.index(
+        "output.frontendCancelRequested = await waitForRuntimeEvent("
+    )
+    assert source.index("output.frontendCancelRequested = await waitForRuntimeEvent(") < source.index(
+        "released: fakeProvider.finishRequest(observedProviderRequest)"
+    )
+    assert source.index("released: fakeProvider.finishRequest(observedProviderRequest)") < source.index(
+        "output.frontendCancelledRun = await waitForRuntimeRun("
     )
 
 
