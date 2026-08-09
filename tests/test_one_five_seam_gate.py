@@ -269,6 +269,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.goal-root-owner" not in groups
     assert "dashboard.memory-review-root-graph" not in groups
     assert "dashboard.sub-agent-collaboration-root-owner" not in groups
+    assert "dashboard.question-root-owner" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
     assert {item["id"] for item in manifest["publicApiAllowlist"]["contracts"]} == {
         "fastapi-route-request-response-openapi",
@@ -359,6 +360,39 @@ def test_sub_agent_collaboration_has_one_stable_typed_owner_construction() -> No
     assert owner_assignments[0].value is constructions[0]
     assert "_SUB_AGENT_COLLABORATION" not in {
         node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+
+
+def test_question_owner_is_constructed_once_inside_gateway_without_dashboard_alias() -> None:
+    gateway_tree = ast.parse((REPO_ROOT / "agent_gateway.py").read_text(encoding="utf-8"))
+    dashboard_tree = ast.parse((REPO_ROOT / "dashboard_server.py").read_text(encoding="utf-8"))
+    gateway_class = next(
+        node
+        for node in gateway_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AgentGateway"
+    )
+    constructions = [
+        node
+        for node in ast.walk(gateway_class)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "AgentQuestionService"
+    ]
+
+    assert len(constructions) == 1
+    assert any(
+        isinstance(node, ast.FunctionDef)
+        and node.name == "questions"
+        and any(
+            isinstance(child, ast.Return)
+            and isinstance(child.value, ast.Attribute)
+            and child.value.attr == "_questions"
+            for child in ast.walk(node)
+        )
+        for node in gateway_class.body
+    )
+    assert "AGENT_QUESTIONS" not in {
+        node.id for node in ast.walk(dashboard_tree) if isinstance(node, ast.Name)
     }
 
 

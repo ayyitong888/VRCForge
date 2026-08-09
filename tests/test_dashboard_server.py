@@ -2445,18 +2445,23 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(listing["actions"][0]["actionId"], action_id)
         self.assertEqual(listing["actions"][0]["status"], "completed")
 
-    def test_goal_composition_uses_gateway_singleton_without_dashboard_alias(self) -> None:
+    def test_goal_and_question_composition_use_gateway_singletons_without_dashboard_aliases(self) -> None:
         goal = dashboard_server.AGENT_GATEWAY.goal
 
         self.assertFalse(hasattr(dashboard_server, "AGENT_GOALS"))
+        self.assertFalse(hasattr(dashboard_server, "AGENT_QUESTIONS"))
         self.assertIs(dashboard_server.BACKGROUND_GOAL_COORDINATOR._goal, goal)
         self.assertIs(dashboard_server.BACKGROUND_GOAL_COORDINATOR._approval, goal)
+        self.assertIs(
+            dashboard_server.AGENT_GATEWAY.questions._persistence.shared_state_lock,
+            dashboard_server.AGENT_GATEWAY._lock,
+        )
         with patch.object(
             goal,
             "resolve_agent_goal_question",
             return_value={"ok": True, "resolved": True},
         ) as resolve:
-            payload = dashboard_server.AGENT_QUESTIONS._goal_resolution.resolve(
+            payload = dashboard_server.AGENT_GATEWAY.questions._goal_resolution.resolve(
                 "question-singleton",
                 "Continue the same goal.",
             )
@@ -3210,7 +3215,7 @@ class DashboardServerTests(unittest.TestCase):
                 json={"sessionId": "scope-b", "projectRoot": "ProjectB", "items": [{"id": "step-1", "title": "B"}]},
             )
             dashboard_server.AGENT_GATEWAY.create_agent_progress({"title": "legacy unscoped"})
-            dashboard_server.AGENT_QUESTIONS.create(
+            dashboard_server.AGENT_GATEWAY.questions.create(
                 {"question": "Unscoped?", "options": ["A", "B"]}
             )
             progress_a = client.get("/api/app/agent/progress", params={"sessionId": "scope-a", "projectRoot": "ProjectA"})

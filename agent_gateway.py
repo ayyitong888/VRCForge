@@ -44,6 +44,13 @@ from agent_goal_service import (
     GoalEventPorts,
     GoalStorePorts,
 )
+from agent_question_service import (
+    AgentQuestionPersistence,
+    AgentQuestionPersistencePorts,
+    AgentQuestionScopePorts,
+    AgentQuestionService,
+    GoalQuestionResolutionPort,
+)
 from desktop_computer_use_service import DesktopComputerUsePorts, DesktopComputerUseService
 from desktop_worker import DesktopActionBrokerError
 from optimization_service import (
@@ -1721,6 +1728,26 @@ class AgentGateway:
                 summarize=summarize_text,
             ),
         )
+        self._questions = AgentQuestionService(
+            AgentQuestionPersistence(
+                AgentQuestionPersistencePorts(
+                    log_path=lambda: self.audit_dir / "agent-questions.jsonl",
+                    shared_state_lock=self._lock,
+                    redact=redact_sensitive,
+                )
+            ),
+            AgentQuestionScopePorts(
+                normalize_path=command_safety.normalize_filesystem_path,
+                summarize=summarize_text,
+                redact_goal_persistence=redact_background_goal_persistence,
+            ),
+            GoalQuestionResolutionPort(
+                resolve=lambda question_id, continuation_prompt: self._goal.resolve_agent_goal_question(
+                    question_id,
+                    continuation_prompt=continuation_prompt,
+                )
+            ),
+        )
         # In-progress approved writes, keyed by approval id. This is a global,
         # deliberately conservative lane: even writes for different projects
         # remain serialized until per-project and shared-storage locking has its
@@ -1960,6 +1987,10 @@ class AgentGateway:
         if planner is None:
             raise RuntimeError("runtime planner is not bound")
         return planner
+
+    @property
+    def questions(self) -> AgentQuestionService:
+        return self._questions
 
     def bind_runtime_planner(self, planner: RuntimePlannerService) -> None:
         if not isinstance(planner, RuntimePlannerService):

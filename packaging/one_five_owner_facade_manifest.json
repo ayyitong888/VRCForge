@@ -135,15 +135,6 @@
       ]
     },
     {
-      "id": "dashboard.question-root-owner",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "AGENT_QUESTIONS"}
-      ],
-      "markers": [
-        {"source": "dashboard_server.py", "text": "# STOPGAP(1.5): this app-lifetime owner shares the established durable state"}
-      ]
-    },
-    {
       "id": "dashboard.wardrobe-outfit-root-owners",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "SETUP_OUTFIT_PREVIEW"},
