@@ -2163,7 +2163,7 @@ DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
         package_doctor_check=lambda *args, **kwargs: _package_doctor_check(*args, **kwargs),
         status_from_counts=lambda errors, warnings: _status_from_counts(errors, warnings),
         check_skill_registry=lambda: AGENT_GATEWAY.skills.check_skill_registry(),
-        list_checkpoints=lambda params: AGENT_GATEWAY.list_checkpoints(params),
+        list_checkpoints=lambda params: AGENT_GATEWAY.checkpoint_recovery.list_checkpoints(params),
         checkpoint_paths=lambda: (str(AGENT_GATEWAY.checkpoint_log_path), str(AGENT_GATEWAY.checkpoint_store_dir)),
         package_manager_status=lambda params: PACKAGE_INSTALL_WORKFLOWS.package_manager_status(params),
         merge_registered_checks=lambda checks: _merge_registered_doctor_checks(checks),
@@ -2187,7 +2187,7 @@ KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
         normalize_path=lambda value: normalize_path_string(value),
         build_tool_registry=lambda: AGENT_GATEWAY.build_tool_registry(),
         build_skill_registry=lambda: AGENT_GATEWAY.skills.build_skill_registry(),
-        permission_state=lambda: AGENT_GATEWAY.permission_state(),
+        permission_state=lambda: AGENT_GATEWAY.approval_transactions.permission_state(),
         ensure_dict=lambda value: ensure_dict(value),
         normalize_bool=lambda value, default: normalize_bool(value, default),
     )
@@ -2287,7 +2287,7 @@ def _notify_mcp_pending_approval(_approval: dict[str, Any]) -> None:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    loop.create_task(EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()}))
+    loop.create_task(EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()}))
 
 
 async def initialize_agent_mcp_mount() -> None:
@@ -2901,7 +2901,7 @@ def read_app_runtime_snapshot(
         questions = {"ok": True, "schema": "vrcforge.agent_questions.v1", "questions": [], "count": 0}
         memory = {"ok": True, "schema": "vrcforge.agent_memory_list.v1", "memories": [], "count": 0}
     memory_review_summary = MEMORY_REVIEW.runtime_summary(projectRoot)
-    approval_items = AGENT_GATEWAY.list_approvals()
+    approval_items = AGENT_GATEWAY.approval_transactions.list_approvals()
     return {
         "ok": True,
         "schema": "vrcforge.desktop_runtime_snapshot.v1",
@@ -2944,14 +2944,14 @@ async def refresh_app_unity_readiness() -> dict[str, Any]:
 
 @app.get("/api/app/permission")
 def read_agentic_app_permission() -> dict[str, Any]:
-    return {"ok": True, "permission": AGENT_GATEWAY.permission_state()}
+    return {"ok": True, "permission": AGENT_GATEWAY.approval_transactions.permission_state()}
 
 
 @app.post("/api/app/permission")
 async def update_agentic_app_permission(request: AgentPermissionRequest) -> dict[str, Any]:
-    before = permission_security_state(AGENT_GATEWAY.permission_state())
+    before = permission_security_state(AGENT_GATEWAY.approval_transactions.permission_state())
     try:
-        payload = AGENT_GATEWAY.update_permission_state(
+        payload = AGENT_GATEWAY.approval_transactions.update_permission_state(
             request.execution_mode,
             acknowledge_roslyn_risk=request.acknowledge_roslyn_risk,
         )
@@ -3106,7 +3106,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
             session_id=payload.get("sessionId") or payload.get("session_id") or "",
         ),
     )
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     if runtime_request.goal_delivery_id:
         await broadcast_background_goal_state({})
     return payload
@@ -3714,8 +3714,8 @@ MEMORY_REVIEW: MemoryReviewComposition = build_memory_review_composition(
             limit=limit,
             project_root=project_root,
         ),
-        acquire_background_project_read=AGENT_GATEWAY.try_acquire_background_project_read,
-        release_background_project_read=AGENT_GATEWAY.release_background_project_read,
+        acquire_background_project_read=AGENT_GATEWAY.approval_transactions.try_acquire_background_project_read,
+        release_background_project_read=AGENT_GATEWAY.approval_transactions.release_background_project_read,
         idle_gate=memory_review_idle_gate,
         lane_budget=RUNTIME_LANE_BUDGET,
         preflight=BACKGROUND_GOAL_PREFLIGHT,
@@ -3820,23 +3820,23 @@ async def app_clear_agent_memory(request: AgentMemoryClearRequest) -> dict[str, 
 
 @app.get("/api/app/agent/approvals")
 def app_agent_approvals(projectRoot: str = "", globalOnly: bool = False) -> dict[str, Any]:
-    approvals = AGENT_GATEWAY.list_approvals(project_root=projectRoot, global_only=globalOnly)
+    approvals = AGENT_GATEWAY.approval_transactions.list_approvals(project_root=projectRoot, global_only=globalOnly)
     return {"ok": True, "approvals": approvals, "count": len(approvals)}
 
 
 @app.get("/api/app/checkpoints")
 def app_list_checkpoints(projectRoot: str = "", limit: int = 50) -> dict[str, Any]:
-    return AGENT_GATEWAY.list_checkpoints({"projectRoot": projectRoot, "limit": limit})
+    return AGENT_GATEWAY.checkpoint_recovery.list_checkpoints({"projectRoot": projectRoot, "limit": limit})
 
 
 @app.post("/api/app/checkpoints/{checkpoint_id}/preview")
 def app_preview_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
-    return AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+    return AGENT_GATEWAY.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint_id})
 
 
 @app.post("/api/app/checkpoints/{checkpoint_id}/restore")
 async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
-    preview = AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+    preview = AGENT_GATEWAY.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint_id})
     if not preview.get("ok"):
         raise HTTPException(status_code=400, detail=preview.get("error") or "Checkpoint is not restorable.")
     checkpoint = ensure_dict(preview.get("checkpoint"))
@@ -3846,7 +3846,7 @@ async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
     if checkpoint.get("projectRoot"):
         arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
     try:
-        payload = AGENT_GATEWAY.create_apply_request(
+        payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_restore_checkpoint",
                 "arguments": arguments,
@@ -3857,7 +3857,7 @@ async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
@@ -3890,7 +3890,7 @@ async def app_readback_primitive_basis_model_part_live() -> dict[str, Any]:
         payload = await asyncio.to_thread(runtime.readback_and_request_restore)
     except PrimitiveBasisLiveRuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
@@ -3914,14 +3914,14 @@ async def app_finalize_primitive_basis_model_part_live() -> dict[str, Any]:
 
 @app.get("/api/app/recoveries")
 def app_list_interrupted_apply_recoveries(projectRoot: str = "", limit: int = 50, includeResolved: bool = False) -> dict[str, Any]:
-    return AGENT_GATEWAY.list_interrupted_apply_recoveries(
+    return AGENT_GATEWAY.checkpoint_recovery.list_interrupted_apply_recoveries(
         {"projectRoot": projectRoot, "limit": limit, "includeResolved": includeResolved}
     )
 
 
 @app.post("/api/app/recoveries/{recovery_id}/preview")
 def app_preview_interrupted_apply_recovery(recovery_id: str) -> dict[str, Any]:
-    payload = AGENT_GATEWAY.preview_interrupted_apply_recovery({"recoveryId": recovery_id})
+    payload = AGENT_GATEWAY.checkpoint_recovery.preview_interrupted_apply_recovery({"recoveryId": recovery_id})
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Interrupted apply recovery was not found.")
     return payload
@@ -3929,7 +3929,7 @@ def app_preview_interrupted_apply_recovery(recovery_id: str) -> dict[str, Any]:
 
 @app.post("/api/app/recoveries/{recovery_id}/restore")
 async def app_request_restore_interrupted_apply_recovery(recovery_id: str) -> dict[str, Any]:
-    preview = AGENT_GATEWAY.preview_interrupted_apply_recovery({"recoveryId": recovery_id})
+    preview = AGENT_GATEWAY.checkpoint_recovery.preview_interrupted_apply_recovery({"recoveryId": recovery_id})
     if not preview.get("ok"):
         raise HTTPException(status_code=404, detail=preview.get("error") or "Interrupted apply recovery was not found.")
     checkpoint = ensure_dict(ensure_dict(preview.get("checkpointPreview")).get("checkpoint"))
@@ -3945,7 +3945,7 @@ async def app_request_restore_interrupted_apply_recovery(recovery_id: str) -> di
     if checkpoint.get("projectRoot"):
         arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
     try:
-        payload = AGENT_GATEWAY.create_apply_request(
+        payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_restore_checkpoint",
                 "arguments": arguments,
@@ -3957,7 +3957,7 @@ async def app_request_restore_interrupted_apply_recovery(recovery_id: str) -> di
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     denied_goal = payload.get("goalDelivery")
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     if denied_goal is not None:
         await broadcast_background_goal_state({})
     return payload
@@ -3973,24 +3973,24 @@ async def app_request_resolve_interrupted_apply_recovery(
     if arguments.get("confirmResolved") is not True:
         raise HTTPException(status_code=400, detail="confirmResolved=true is required.")
     try:
-        payload = AGENT_GATEWAY.create_apply_request(
+        payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_resolve_interrupted_apply_recovery",
                 "arguments": arguments,
                 "reason": "Mark an interrupted approved write as manually resolved.",
-                "preview": AGENT_GATEWAY.preview_interrupted_apply_recovery({"recoveryId": recovery_id}),
+                "preview": AGENT_GATEWAY.checkpoint_recovery.preview_interrupted_apply_recovery({"recoveryId": recovery_id}),
                 "agent_name": "desktop-agent",
             }
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
 @app.post("/api/app/recoveries/{recovery_id}/incident-bundle")
 def app_export_interrupted_apply_incident_bundle(recovery_id: str) -> dict[str, Any]:
-    payload = AGENT_GATEWAY.export_interrupted_apply_incident_bundle({"recoveryId": recovery_id})
+    payload = AGENT_GATEWAY.checkpoint_recovery.export_interrupted_apply_incident_bundle({"recoveryId": recovery_id})
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Interrupted apply recovery was not found.")
     return payload
@@ -4004,7 +4004,7 @@ def app_list_adjustment_checkpoints(
     limit: int = 50,
     includeDeleted: bool = False,
 ) -> dict[str, Any]:
-    return AGENT_GATEWAY.list_adjustment_checkpoints(
+    return AGENT_GATEWAY.checkpoint_recovery.list_adjustment_checkpoints(
         {
             "kind": kind,
             "projectRoot": projectRoot,
@@ -4018,7 +4018,7 @@ def app_list_adjustment_checkpoints(
 @app.post("/api/app/adjustment-checkpoints")
 def app_create_adjustment_checkpoint(request: AdjustmentCheckpointCreateRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.create_adjustment_checkpoint(request.model_dump(by_alias=True, exclude_none=True))
+        payload = AGENT_GATEWAY.checkpoint_recovery.create_adjustment_checkpoint(request.model_dump(by_alias=True, exclude_none=True))
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if not payload.get("ok"):
@@ -4028,12 +4028,12 @@ def app_create_adjustment_checkpoint(request: AdjustmentCheckpointCreateRequest)
 
 @app.get("/api/app/adjustment-checkpoints/selection")
 def app_get_selected_adjustment_checkpoints(kind: str = "", compareGroup: str = "") -> dict[str, Any]:
-    return AGENT_GATEWAY.get_selected_adjustment_checkpoints({"kind": kind, "compareGroup": compareGroup})
+    return AGENT_GATEWAY.checkpoint_recovery.get_selected_adjustment_checkpoints({"kind": kind, "compareGroup": compareGroup})
 
 
 @app.get("/api/app/adjustment-checkpoints/{entry_id}")
 def app_get_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
-    payload = AGENT_GATEWAY.get_adjustment_checkpoint(entry_id)
+    payload = AGENT_GATEWAY.checkpoint_recovery.get_adjustment_checkpoint(entry_id)
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Adjustment checkpoint was not found.")
     return payload
@@ -4042,7 +4042,7 @@ def app_get_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
 @app.put("/api/app/adjustment-checkpoints/{entry_id}")
 def app_update_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpointUpdateRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.update_adjustment_checkpoint(
+        payload = AGENT_GATEWAY.checkpoint_recovery.update_adjustment_checkpoint(
             entry_id,
             request.model_dump(by_alias=True, exclude_none=True),
         )
@@ -4055,7 +4055,7 @@ def app_update_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpoin
 
 @app.delete("/api/app/adjustment-checkpoints/{entry_id}")
 def app_delete_adjustment_checkpoint(entry_id: str, hardDelete: bool = False) -> dict[str, Any]:
-    payload = AGENT_GATEWAY.delete_adjustment_checkpoint(entry_id, {"hardDelete": hardDelete})
+    payload = AGENT_GATEWAY.checkpoint_recovery.delete_adjustment_checkpoint(entry_id, {"hardDelete": hardDelete})
     if not payload.get("ok"):
         raise HTTPException(status_code=404, detail=payload.get("error") or "Adjustment checkpoint was not found.")
     return payload
@@ -4064,7 +4064,7 @@ def app_delete_adjustment_checkpoint(entry_id: str, hardDelete: bool = False) ->
 @app.post("/api/app/adjustment-checkpoints/{entry_id}/select")
 def app_select_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpointSelectRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.select_adjustment_checkpoint(
+        payload = AGENT_GATEWAY.checkpoint_recovery.select_adjustment_checkpoint(
             entry_id,
             request.model_dump(by_alias=True, exclude_none=True),
         )
@@ -4078,7 +4078,7 @@ def app_select_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpoin
 @app.post("/api/app/adjustment-checkpoints/{entry_id}/overwrite")
 def app_overwrite_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckpointOverwriteRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.overwrite_adjustment_checkpoint(
+        payload = AGENT_GATEWAY.checkpoint_recovery.overwrite_adjustment_checkpoint(
             entry_id,
             request.model_dump(by_alias=True, exclude_none=True),
         )
@@ -4091,7 +4091,7 @@ def app_overwrite_adjustment_checkpoint(entry_id: str, request: AdjustmentCheckp
 
 @app.post("/api/app/adjustment-checkpoints/{entry_id}/apply")
 async def app_apply_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
-    preview = AGENT_GATEWAY.preview_restore_adjustment_checkpoint(entry_id)
+    preview = AGENT_GATEWAY.checkpoint_recovery.preview_restore_adjustment_checkpoint(entry_id)
     if not preview.get("ok"):
         raise HTTPException(status_code=400, detail=preview.get("error") or "Adjustment checkpoint is not restorable.")
     checkpoint = ensure_dict(preview.get("checkpoint"))
@@ -4100,7 +4100,7 @@ async def app_apply_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
     if checkpoint.get("projectRoot"):
         arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
     try:
-        payload = AGENT_GATEWAY.create_apply_request(
+        payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_restore_checkpoint",
                 "arguments": arguments,
@@ -4111,13 +4111,13 @@ async def app_apply_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
 @app.post("/api/app/adjustment-checkpoints/{entry_id}/preview")
 def app_preview_adjustment_checkpoint_restore(entry_id: str) -> dict[str, Any]:
-    payload = AGENT_GATEWAY.preview_restore_adjustment_checkpoint(entry_id)
+    payload = AGENT_GATEWAY.checkpoint_recovery.preview_restore_adjustment_checkpoint(entry_id)
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=payload.get("error") or "Adjustment checkpoint is not restorable.")
     return payload
@@ -4125,7 +4125,7 @@ def app_preview_adjustment_checkpoint_restore(entry_id: str) -> dict[str, Any]:
 
 @app.post("/api/app/adjustment-checkpoints/{entry_id}/restore")
 async def app_request_restore_adjustment_checkpoint(entry_id: str) -> dict[str, Any]:
-    preview = AGENT_GATEWAY.preview_restore_adjustment_checkpoint(entry_id)
+    preview = AGENT_GATEWAY.checkpoint_recovery.preview_restore_adjustment_checkpoint(entry_id)
     if not preview.get("ok"):
         raise HTTPException(status_code=400, detail=preview.get("error") or "Adjustment checkpoint is not restorable.")
     checkpoint = ensure_dict(preview.get("checkpoint"))
@@ -4134,7 +4134,7 @@ async def app_request_restore_adjustment_checkpoint(entry_id: str) -> dict[str, 
     if checkpoint.get("projectRoot"):
         arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
     try:
-        payload = AGENT_GATEWAY.create_apply_request(
+        payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_restore_checkpoint",
                 "arguments": arguments,
@@ -4145,7 +4145,7 @@ async def app_request_restore_adjustment_checkpoint(entry_id: str) -> dict[str, 
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
@@ -4159,12 +4159,12 @@ async def app_agent_approve_and_execute(
 
     def approve() -> dict[str, Any]:
         if request and request.allow_future_category:
-            return AGENT_GATEWAY.approve_with_project_category_rule(
+            return AGENT_GATEWAY.approval_transactions.approve_with_project_category_rule(
                 approval_id,
                 expected_project_root=expected_project_root,
                 global_only=global_only,
             )
-        return AGENT_GATEWAY.approve(
+        return AGENT_GATEWAY.approval_transactions.approve(
             approval_id,
             expected_project_root=expected_project_root,
             global_only=global_only,
@@ -4176,7 +4176,7 @@ async def app_agent_approve_and_execute(
             return {}
         if approval.get("targetTool") == "vrcforge_shell_execute":
             return AGENT_GATEWAY.shell.execute_approved({"approval_id": approval_id})
-        return AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
+        return AGENT_GATEWAY.approval_transactions.apply_approved({"approval_id": approval_id})
 
     linked = await asyncio.to_thread(AGENT_GATEWAY.goal.agent_goal_delivery_for_approval, approval_id)
     linked_delivery = ensure_dict((linked or {}).get("delivery"))
@@ -4214,7 +4214,7 @@ async def app_agent_approve_and_execute(
             payload = await asyncio.to_thread(approve_and_execute)
         except AgentGatewayError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     if linked_delivery_id:
         await broadcast_background_goal_state({})
     return payload
@@ -4226,7 +4226,7 @@ async def app_agent_reject(
     request: AgentApprovalScopeRequest | None = None,
 ) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.reject(
+        payload = AGENT_GATEWAY.approval_transactions.reject(
             approval_id,
             expected_project_root=((request.expected_project_root if request else "") or ""),
             global_only=bool(request.global_only if request else True),
@@ -4234,7 +4234,7 @@ async def app_agent_reject(
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     denied_goal = payload.get("goalDelivery")
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     if denied_goal is not None:
         await broadcast_background_goal_state({})
     return payload
@@ -4243,7 +4243,7 @@ async def app_agent_reject(
 @app.post("/api/app/agent/approvals/{approval_id}/revision")
 async def app_agent_request_approval_revision(approval_id: str, request: AgentApprovalRevisionRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.request_approval_revision(
+        payload = AGENT_GATEWAY.approval_transactions.request_approval_revision(
             approval_id,
             reason=request.reason,
             note=request.note,
@@ -4253,7 +4253,7 @@ async def app_agent_request_approval_revision(approval_id: str, request: AgentAp
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     denied_goal = payload.get("goalDelivery")
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     if denied_goal is not None:
         await broadcast_background_goal_state({})
     return payload
@@ -4283,7 +4283,7 @@ async def write_agent_notes(request: AgentNotesRequest) -> dict[str, Any]:
     return {"ok": True, "path": str(path), "bytes": len(request.content.encode("utf-8"))}
 
 
-AGENT_GATEWAY.bind_project_chat_checkpoint_lock(CHAT_TRANSCRIPTS_LOCK)
+AGENT_GATEWAY.checkpoint_recovery.bind_project_chat_checkpoint_lock(CHAT_TRANSCRIPTS_LOCK)
 
 
 def chat_transcripts_path() -> Path:
@@ -5353,7 +5353,7 @@ async def app_request_chat_attachment_import(request: ChatAttachmentImportReques
                         "targetFolder": request.target_folder or "Assets/VRCForge/Imports",
                     },
                 }
-            payload = AGENT_GATEWAY.create_apply_request(
+            payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_import_chat_archive",
                     "arguments": params,
@@ -5379,7 +5379,7 @@ async def app_request_chat_attachment_import(request: ChatAttachmentImportReques
                     "targetFolder": request.target_folder or "Assets/VRCForge/Imports",
                 },
             }
-            payload = AGENT_GATEWAY.create_apply_request(
+            payload = AGENT_GATEWAY.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_import_chat_image",
                     "arguments": {
@@ -5394,7 +5394,7 @@ async def app_request_chat_attachment_import(request: ChatAttachmentImportReques
             )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
@@ -5903,7 +5903,7 @@ def request_supervised_unity_write(
 
     arguments = build_supervised_unity_write_arguments(request, extra_arguments)
     try:
-        created = AGENT_GATEWAY.create_apply_request(
+        created = AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": target_tool,
                 "arguments": arguments,
@@ -5948,7 +5948,7 @@ def request_supervised_vision_capture(
 ) -> dict[str, Any]:
     """Create a capture approval without exposing its approved execution handler."""
 
-    return AGENT_GATEWAY.create_apply_request(
+    return AGENT_GATEWAY.approval_transactions.create_apply_request(
         {
             "target_tool": target_tool,
             "arguments": request.model_dump(),
@@ -6313,7 +6313,7 @@ def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any
 
 def summarize_external_agent_audit(limit: int = 25) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
-    for entry in AGENT_GATEWAY.recent_audit_logs(limit=limit * 3):
+    for entry in AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=limit * 3):
         event = str(entry.get("event") or "")
         if not any(marker in event for marker in ("approval", "checkpoint", "agent")):
             continue
@@ -6367,7 +6367,7 @@ def external_agent_status_sync(project_path: str | None = None, generic_config_p
             "restUrl": health.get("restUrl"),
             "pendingApprovalCount": health.get("pendingApprovalCount"),
             "checkpointArchiveMaxSizeMb": int(config.checkpoint_archive_max_size_mb),
-            "checkpointArchiveUsage": AGENT_GATEWAY.checkpoint_archive_usage(config),
+            "checkpointArchiveUsage": AGENT_GATEWAY.checkpoint_recovery.checkpoint_archive_usage(config),
         },
         "advertisedTools": [
             {"name": tool.get("name"), "category": tool.get("category"), "write": bool(tool.get("write"))}
@@ -6401,7 +6401,7 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
         config.token_rotated_at = rotated_at
     AGENT_GATEWAY.save_config(config)
     if checkpoint_limit is not None:
-        prune_summary = AGENT_GATEWAY.prune_checkpoint_archives(config.checkpoint_archive_max_size_mb)
+        prune_summary = AGENT_GATEWAY.checkpoint_recovery.prune_checkpoint_archives(config.checkpoint_archive_max_size_mb)
 
     delete_ids = params.get("deleteCheckpointArchiveIds")
     if delete_ids is None:
@@ -6409,7 +6409,7 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     delete_summary: dict[str, Any] | None = None
     if delete_ids:
         try:
-            delete_summary = AGENT_GATEWAY.delete_checkpoint_archives(delete_ids)
+            delete_summary = AGENT_GATEWAY.checkpoint_recovery.delete_checkpoint_archives(delete_ids)
         except Exception as exc:  # noqa: BLE001
             delete_summary = {"ok": False, "error": str(exc)}
 
@@ -6419,7 +6419,7 @@ def update_external_agent_gateway_sync(params: dict[str, Any]) -> dict[str, Any]
     relocate_summary: dict[str, Any] | None = None
     if isinstance(relocate_dir, str) and relocate_dir.strip():
         try:
-            relocate_summary = AGENT_GATEWAY.relocate_checkpoint_archives(relocate_dir)
+            relocate_summary = AGENT_GATEWAY.checkpoint_recovery.relocate_checkpoint_archives(relocate_dir)
         except Exception as exc:  # noqa: BLE001
             relocate_summary = {"ok": False, "error": str(exc)}
 
@@ -6705,7 +6705,7 @@ async def app_optimization_apply_request(request: OptimizationApplyRequest) -> d
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=payload)
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
@@ -6779,7 +6779,7 @@ async def app_request_outfit_import(request: OutfitImportPlanRequest) -> dict[st
         )
     except (AgentGatewayError, WardrobeOutfitWorkflowError) as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
@@ -6801,7 +6801,7 @@ async def app_package_install_request(request: PackageInstallPlanRequest) -> dic
     )
     if not payload.get("ok"):
         raise HTTPException(status_code=400, detail=payload)
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
@@ -7097,7 +7097,7 @@ def safe_agent_health() -> dict[str, Any]:
 
 def safe_permission_state() -> dict[str, Any]:
     try:
-        return AGENT_GATEWAY.permission_state()
+        return AGENT_GATEWAY.approval_transactions.permission_state()
     except Exception as exc:  # noqa: BLE001
         return {
             "executionMode": "approval",
@@ -7110,7 +7110,7 @@ def safe_permission_state() -> dict[str, Any]:
 
 def safe_approval_list(project_root: str = "") -> list[dict[str, Any]]:
     try:
-        return AGENT_GATEWAY.list_approvals(include_expired=False, project_root=project_root)
+        return AGENT_GATEWAY.approval_transactions.list_approvals(include_expired=False, project_root=project_root)
     except Exception:  # noqa: BLE001
         return []
 
@@ -7161,7 +7161,7 @@ def developer_options_enabled_for_diagnostics() -> bool:
 
 def safety_posture_state() -> dict[str, Any]:
     try:
-        permission = AGENT_GATEWAY.permission_state()
+        permission = AGENT_GATEWAY.approval_transactions.permission_state()
     except Exception:  # noqa: BLE001 - posture uses safe defaults, never raw exception text.
         permission = {}
     try:
@@ -7407,7 +7407,7 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         doctor = {"ok": False, "error": str(exc)}
     try:
-        checkpoints = AGENT_GATEWAY.list_checkpoints({"limit": 50})
+        checkpoints = AGENT_GATEWAY.checkpoint_recovery.list_checkpoints({"limit": 50})
     except Exception as exc:  # noqa: BLE001
         checkpoints = {"ok": False, "error": str(exc)}
     diagnostics = diagnostics_state()
@@ -7420,7 +7420,7 @@ def build_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
         write_support_bundle_member(bundle, "diagnostics.json", diagnostics, request.include_full_paths)
         write_support_bundle_member(bundle, "safety-posture.json", safety_posture, request.include_full_paths)
         write_support_bundle_text_member(bundle, "diagnostic-log.txt", DIAGNOSTIC_LOGGER.tail_lines(log_limit))
-        write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.recent_audit_logs(limit=log_limit), request.include_full_paths)
+        write_support_bundle_member(bundle, "agent-audit.json", AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "sub-agent-events.json", SUB_AGENT_COLLABORATION.recent_events(limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "sub-agent-tasks.json", SUB_AGENT_COLLABORATION.list_tasks(include_events=False, limit=log_limit), request.include_full_paths)
         write_support_bundle_member(bundle, "checkpoints.json", checkpoints, request.include_full_paths)
@@ -7769,7 +7769,7 @@ def _doctor_component_detect(component_key: str) -> Callable[[dict[str, Any]], d
 
 
 def _detect_checkpoint_doctor(_context: dict[str, Any]) -> dict[str, Any]:
-    inspection = AGENT_GATEWAY.inspect_checkpoint_storage()
+    inspection = AGENT_GATEWAY.checkpoint_recovery.inspect_checkpoint_storage()
     status = str(inspection.get("status") or "unknown")
     message = {
         "ok": "Checkpoint storage and its JSONL projection are healthy.",
@@ -7780,9 +7780,9 @@ def _detect_checkpoint_doctor(_context: dict[str, Any]) -> dict[str, Any]:
 
 
 def _repair_checkpoint_doctor(_context: dict[str, Any], _mode: str, phases: PhaseLog) -> dict[str, Any]:
-    before = AGENT_GATEWAY.inspect_checkpoint_storage()
+    before = AGENT_GATEWAY.checkpoint_recovery.inspect_checkpoint_storage()
     phases.add("inspect", "ok" if before.get("fixable") else "warning", "Checkpoint storage was inspected under its writer lock.")
-    result = AGENT_GATEWAY.repair_checkpoint_storage(expected_snapshot=str(before.get("snapshot") or ""))
+    result = AGENT_GATEWAY.checkpoint_recovery.repair_checkpoint_storage(expected_snapshot=str(before.get("snapshot") or ""))
     status = str(result.get("status") or "failed")
     phases.add(
         "repair",
@@ -8232,7 +8232,7 @@ def _repair_session_storage_doctor(context: dict[str, Any], _mode: str, phases: 
                 pending = next(
                     (
                         approval
-                        for approval in AGENT_GATEWAY.list_approvals(include_expired=False)
+                        for approval in AGENT_GATEWAY.approval_transactions.list_approvals(include_expired=False)
                         if approval.get("status") == "pending"
                         and approval.get("targetTool") == "vrcforge_repair_project_chat_store"
                         and ensure_dict(approval.get("arguments")).get("storeId") == target.store_id
@@ -8240,7 +8240,7 @@ def _repair_session_storage_doctor(context: dict[str, Any], _mode: str, phases: 
                     ),
                     None,
                 )
-                request = {"ok": True, "status": "pending", "approval": pending} if pending else AGENT_GATEWAY.create_apply_request(
+                request = {"ok": True, "status": "pending", "approval": pending} if pending else AGENT_GATEWAY.approval_transactions.create_apply_request(
                     {
                         "target_tool": "vrcforge_repair_project_chat_store",
                         "arguments": {
@@ -8877,7 +8877,7 @@ async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentT
     elif tool_name == "vrcforge_agent_desktop_action":
         await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30, session_id=session_id, project_root=project_root))
     elif tool_name == "vrcforge_apply_approved":
-        await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+        await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
         if isinstance(payload, dict) and payload.get("goalDelivery") is not None:
             await broadcast_background_goal_state({})
     return payload
@@ -8886,7 +8886,7 @@ async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentT
 @app.get("/api/agent/approvals")
 def read_agent_approvals(request: Request) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=False)
-    approvals = AGENT_GATEWAY.list_approvals()
+    approvals = AGENT_GATEWAY.approval_transactions.list_approvals()
     return {"ok": True, "approvals": approvals, "count": len(approvals)}
 
 
@@ -8894,10 +8894,10 @@ def read_agent_approvals(request: Request) -> dict[str, Any]:
 async def approve_agent_approval(approval_id: str, request: Request) -> dict[str, Any]:
     authenticate_agent_approval_request(request)
     try:
-        payload = AGENT_GATEWAY.approve(approval_id)
+        payload = AGENT_GATEWAY.approval_transactions.approve(approval_id)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     return payload
 
 
@@ -8905,10 +8905,10 @@ async def approve_agent_approval(approval_id: str, request: Request) -> dict[str
 async def reject_agent_approval(approval_id: str, request: Request) -> dict[str, Any]:
     authenticate_agent_approval_request(request)
     try:
-        payload = AGENT_GATEWAY.reject(approval_id)
+        payload = AGENT_GATEWAY.approval_transactions.reject(approval_id)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
+    await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     if payload.get("goalDelivery") is not None:
         await broadcast_background_goal_state({})
     return payload
@@ -8917,7 +8917,7 @@ async def reject_agent_approval(approval_id: str, request: Request) -> dict[str,
 @app.get("/api/agent/logs")
 def read_agent_logs(request: Request, limit: int = 100) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=False)
-    logs = AGENT_GATEWAY.recent_audit_logs(limit=limit)
+    logs = AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=limit)
     return {"ok": True, "logs": logs, "count": len(logs)}
 
 
@@ -11025,7 +11025,7 @@ def request_avatar_encryption_apply_sync(
             "A configured private Avatar Encryption addon is required for execution.",
         ],
     }
-    return AGENT_GATEWAY.create_apply_request(
+    return AGENT_GATEWAY.approval_transactions.create_apply_request(
         {
             "target_tool": AVATAR_ENCRYPTION_ADDON_APPLY_TOOL,
             "arguments": apply_arguments,
@@ -11097,7 +11097,7 @@ def request_avatar_encryption_remove_sync(params: dict[str, Any], agent_name: st
             "checkpointStillAvailable": True,
         },
     }
-    return AGENT_GATEWAY.create_apply_request(
+    return AGENT_GATEWAY.approval_transactions.create_apply_request(
         {
             "target_tool": AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL,
             "arguments": arguments,
@@ -14703,13 +14703,13 @@ def memory_review_background_blocker() -> str:
         return "not_backend_owner"
     if any(
         str(item.get("status") or "") == "pending"
-        for item in AGENT_GATEWAY.list_approvals(include_expired=False)
+        for item in AGENT_GATEWAY.approval_transactions.list_approvals(include_expired=False)
         if isinstance(item, dict)
     ):
         return "pending_approval"
-    if AGENT_GATEWAY.has_in_flight_project_write():
+    if AGENT_GATEWAY.approval_transactions.has_in_flight_project_write():
         return "active_project_write"
-    if AGENT_GATEWAY._active_apply_recoveries():
+    if AGENT_GATEWAY.checkpoint_recovery._active_apply_recoveries():
         return "active_project_recovery"
     active_desktop = AGENT_GATEWAY.desktop.list_active_desktop_actions(limit=1)
     if int(active_desktop.get("count") or len(active_desktop.get("actions") or [])) > 0:
@@ -15958,7 +15958,7 @@ def authenticate_agent_request(request: Request, allow_disabled: bool = False):
 
 def authenticate_agent_approval_request(request: Request):
     try:
-        return AGENT_GATEWAY.authenticate_approval(
+        return AGENT_GATEWAY.approval_transactions.authenticate_approval(
             headers=dict(request.headers),
             query_params=dict(request.query_params),
             client_host=request.client.host if request.client else "",
@@ -16166,7 +16166,7 @@ def request_agent_restore_last_backup(params: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("kind must be shader or blendshape.")
     arguments.pop("kind", None)
     arguments.pop("restoreKind", None)
-    return AGENT_GATEWAY.create_apply_request(
+    return AGENT_GATEWAY.approval_transactions.create_apply_request(
         {
             "target_tool": target_tool,
             "arguments": arguments,
@@ -17296,7 +17296,7 @@ def inspect_primitive_basis_fixture_sync(params: dict[str, Any]) -> dict[str, An
 
 
 def create_primitive_basis_restore_request_sync(checkpoint_id: str) -> dict[str, Any]:
-    preview = AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+    preview = AGENT_GATEWAY.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint_id})
     if preview.get("ok") is not True:
         raise PrimitiveBasisLiveRuntimeError("The fixed checkpoint is not restorable.")
     checkpoint = ensure_dict(preview.get("checkpoint"))
@@ -17306,7 +17306,7 @@ def create_primitive_basis_restore_request_sync(checkpoint_id: str) -> dict[str,
     }
     if checkpoint.get("projectRoot"):
         arguments["projectRoot"] = str(checkpoint["projectRoot"])
-    return AGENT_GATEWAY.create_apply_request(
+    return AGENT_GATEWAY.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_restore_checkpoint",
             "arguments": arguments,
@@ -19164,6 +19164,46 @@ def _expected_prefab_assets(plan_payload: dict[str, Any]) -> list[str]:
 
 
 def register_agent_gateway_tools() -> None:
+    def register_write_handler(
+        name: str,
+        description: str,
+        risk_level: str,
+        handler: Callable[[dict[str, Any]], Any],
+        **metadata: Any,
+    ) -> None:
+        if name in VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS:
+            metadata["requires_approved_execution_context"] = True
+            metadata["checkpoint_prepare_handler"] = prepare_authoritative_unity_checkpoint_sync
+        if name in SCENE_EXECUTION_PLAN_TARGETS:
+            metadata["approved_execution_plan_builder"] = (
+                lambda arguments, exact_target=name: build_scene_execution_plan(
+                    exact_target,
+                    arguments,
+                )
+            )
+        if name in TUNING_EXECUTION_PLAN_TARGETS:
+            metadata["request_preparer"] = prepare_avatar_scoped_tuning_write_request
+            metadata["approved_execution_plan_builder"] = (
+                lambda arguments, exact_target=name: build_tuning_execution_plan(
+                    exact_target,
+                    arguments,
+                )
+            )
+        if name in WORKFLOW_EXECUTION_PLAN_TARGETS:
+            metadata["approved_execution_plan_builder"] = (
+                lambda arguments, exact_target=name: build_workflow_execution_plan(
+                    exact_target,
+                    arguments,
+                )
+            )
+        AGENT_GATEWAY.approval_transactions.register_write_handler(
+            name,
+            description,
+            risk_level,
+            handler,
+            **metadata,
+        )
+
     AGENT_GATEWAY.register_tool(
         "vrcforge_agent_observe",
         "Observe VRCForge agent runtime state.",
@@ -19353,15 +19393,15 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_manage_wardrobe", "Preview destructive or structural wardrobe management actions (remove/rename/reorder outfits, set default value, delete wardrobe) without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_manage_wardrobe)
     AGENT_GATEWAY.register_tool("vrcforge_preview_create_wardrobe", "Preview creating an empty int-exclusive wardrobe skeleton (Int parameter, FX layer/default state, and menu), without writing.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_create_wardrobe)
     AGENT_GATEWAY.register_tool("vrcforge_preview_add_outfit", "Preview the full add-outfit workflow: resolve prefab, instantiate under avatar, run Setup Outfit, scan/create wardrobe if needed, and add the outfit to it.", "plan/preview", WARDROBE_OUTFIT_WORKFLOWS.preview_add_outfit)
-    AGENT_GATEWAY.register_tool("vrcforge_list_checkpoints", "List pre-write git checkpoints created by VRCForge.", "read/debug", lambda params: AGENT_GATEWAY.list_checkpoints(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_preview_restore_checkpoint", "Preview restoring Assets/Packages/ProjectSettings from a VRCForge checkpoint.", "plan/preview", lambda params: AGENT_GATEWAY.preview_restore_checkpoint(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_list_interrupted_apply_recoveries", "List interrupted or unfinished approved writes that must be restored or resolved before new writes.", "read/debug", lambda params: AGENT_GATEWAY.list_interrupted_apply_recoveries(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_preview_interrupted_apply_recovery", "Preview the checkpoint restore path for an interrupted approved write.", "plan/preview", lambda params: AGENT_GATEWAY.preview_interrupted_apply_recovery(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_export_interrupted_apply_incident_bundle", "Export a local incident bundle for an interrupted approved write.", "read/debug", lambda params: AGENT_GATEWAY.export_interrupted_apply_incident_bundle(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_list_checkpoints", "List pre-write git checkpoints created by VRCForge.", "read/debug", lambda params: AGENT_GATEWAY.checkpoint_recovery.list_checkpoints(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_restore_checkpoint", "Preview restoring Assets/Packages/ProjectSettings from a VRCForge checkpoint.", "plan/preview", lambda params: AGENT_GATEWAY.checkpoint_recovery.preview_restore_checkpoint(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_list_interrupted_apply_recoveries", "List interrupted or unfinished approved writes that must be restored or resolved before new writes.", "read/debug", lambda params: AGENT_GATEWAY.checkpoint_recovery.list_interrupted_apply_recoveries(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_preview_interrupted_apply_recovery", "Preview the checkpoint restore path for an interrupted approved write.", "plan/preview", lambda params: AGENT_GATEWAY.checkpoint_recovery.preview_interrupted_apply_recovery(params or {}))
+    AGENT_GATEWAY.register_tool("vrcforge_export_interrupted_apply_incident_bundle", "Export a local incident bundle for an interrupted approved write.", "read/debug", lambda params: AGENT_GATEWAY.checkpoint_recovery.export_interrupted_apply_incident_bundle(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: SHADER_VISION_PROTECTION.read_vision_capture_status(VisionCaptureStatusRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: SHADER_VISION_PROTECTION.audit_avatar_screenshot(VisionAuditRequest(**params)))
     AGENT_GATEWAY.register_tool("vrcforge_scan_thry_avatar_performance", "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for an avatar.", "read/debug", scan_thry_avatar_performance_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.recent_audit_logs(limit=int(params.get("limit", 80)))})
+    AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=int(params.get("limit", 80)))})
     AGENT_GATEWAY.register_tool("vrcforge_get_compile_errors", "Read C# compile errors from the last Unity compilation pass.", "read/debug", read_agent_compile_errors)
     AGENT_GATEWAY.register_tool("vrcforge_get_property", "Read a single field/property value from a component on a scene GameObject.", "read/debug", read_component_property_sync)
     AGENT_GATEWAY.register_tool("vrcforge_get_gameobject", "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components.", "read/debug", get_gameobject_sync)
@@ -19419,20 +19459,20 @@ def register_agent_gateway_tools() -> None:
         "plan/preview",
         preview_atomic_reference_rename_sync,
     )
-    AGENT_GATEWAY.register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", SKILL_PACKAGE_CONTROLLER.import_package)
-    AGENT_GATEWAY.register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
-    AGENT_GATEWAY.register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", SKILL_PACKAGE_CONTROLLER.set_enabled)
-    AGENT_GATEWAY.register_write_handler("vrcforge_uninstall_skill_package", "Uninstall an installed .vsk skill package and optionally remove its projected user skill.", "medium", SKILL_PACKAGE_CONTROLLER.uninstall)
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler("vrcforge_import_skill_package", "Import a verified .vsk skill package into the user skill store.", "medium", SKILL_PACKAGE_CONTROLLER.import_package)
+    register_write_handler("vrcforge_export_skill_package", "Export a user skill as a shareable .vsk package.", "medium", export_skill_package_sync)
+    register_write_handler("vrcforge_set_skill_package_enabled", "Enable or disable an installed .vsk skill package and its projected user skill.", "medium", SKILL_PACKAGE_CONTROLLER.set_enabled)
+    register_write_handler("vrcforge_uninstall_skill_package", "Uninstall an installed .vsk skill package and optionally remove its projected user skill.", "medium", SKILL_PACKAGE_CONTROLLER.uninstall)
+    register_write_handler(
         "vrcforge_repair_project_chat_store",
         "Repair a digest-bound project chat transcript store after explicit approval.",
         "medium",
         repair_project_chat_store_sync,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.create_apply_request, write=True)
-    AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.apply_approved, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_request_apply", "Request user approval for a write operation.", "supervised-write", AGENT_GATEWAY.approval_transactions.create_apply_request, write=True)
+    AGENT_GATEWAY.register_tool("vrcforge_apply_approved", "Apply a previously approved write operation.", "supervised-write", AGENT_GATEWAY.approval_transactions.apply_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_restore_last_backup", "Request approval to restore the last face or shader backup.", "supervised-write", request_agent_restore_last_backup, write=True)
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_create_safe_backup",
         "Create a project-owned safe backup snapshot through VRCForge approval and checkpoint controls.",
         "medium",
@@ -19440,7 +19480,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_safe_backup_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_capture_screenshot",
         "Capture one fixed dashboard scene-view artifact through VRCForge approval and checkpoint controls.",
         "medium",
@@ -19449,7 +19489,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_capture_multi_screenshot",
         "Capture up to four fixed-angle dashboard scene-view artifacts through VRCForge approval and checkpoint controls.",
         "medium",
@@ -19458,7 +19498,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_apply_blendshapes",
         "Apply validated Blendshape adjustments through VRCForge.",
         "medium",
@@ -19467,7 +19507,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_run_face_tuning",
         "Run and apply a generated face tuning plan through VRCForge.",
         "high",
@@ -19476,7 +19516,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_apply_shader_tuning",
         "Apply validated shader/material tuning changes through VRCForge.",
         "high",
@@ -19485,7 +19525,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_restore_shader_tuning",
         "Restore the last shader/material tuning undo point.",
         "medium",
@@ -19494,7 +19534,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_reapply_tuning_history",
         "Reapply one saved face-tuning history record through VRCForge.",
         "high",
@@ -19503,7 +19543,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_apply_tuning_preset",
         "Apply one saved face-tuning preset through VRCForge.",
         "high",
@@ -19512,7 +19552,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_reapply_shader_tuning_history",
         "Reapply one saved shader-tuning history record through VRCForge.",
         "high",
@@ -19521,7 +19561,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_apply_shader_tuning_preset",
         "Apply one saved shader-tuning preset through VRCForge.",
         "high",
@@ -19530,19 +19570,19 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         AVATAR_ENCRYPTION_ADDON_APPLY_TOOL,
         "Hand off approved Avatar Encryption apply requests to a configured private addon connector.",
         "high",
         apply_avatar_encryption_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL,
         "Hand off approved Avatar Encryption remove requests to a configured private addon connector.",
         "high",
         remove_avatar_encryption_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_undo_blendshapes",
         "Undo the last Blendshape apply snapshot for an avatar.",
         "medium",
@@ -19551,19 +19591,19 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_apply_clothing_fx",
         "Apply generated clothing FX assets through VRCForge.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.apply_clothing_fx,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_apply_parameter_optimization",
         "Apply avatar parameter optimization through VRCForge.",
         "high",
         lambda params: apply_parameter_optimization_sync(ParameterApplyOptimizationRequest(**params)),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_rollback_parameters",
         "Rollback avatar parameter optimization through VRCForge.",
         "medium",
@@ -19572,91 +19612,91 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_setup_outfit",
         "Run Modular Avatar Setup Outfit on an outfit object through VRCForge.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.setup_outfit,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_add_wardrobe_outfit",
         "Add one outfit to an existing int-exclusive wardrobe (assign next int value, set new objects scene-default off, author an on/off clip, add an FX Any-State Equals state, and a menu toggle) through VRCForge.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.add_wardrobe_outfit,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_manage_wardrobe",
         "Manage an existing int-exclusive wardrobe: remove/rename/reorder outfits, set default value, or delete wardrobe bindings through VRCForge.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.manage_wardrobe,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_add_outfit_part",
         "Add an int-gated part toggle (e.g. a hat) to one outfit value of an existing int-exclusive wardrobe: create a Bool parameter, author a dedicated FX layer gated on (int Equals N AND bool), set the part scene-default off, and add a menu toggle through VRCForge.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.add_outfit_part,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_add_modular_avatar_component",
         "Add a common Modular Avatar component (MergeArmature, BoneProxy, MenuInstaller, MergeAnimator, Parameters) to a scene object, resolving AvatarObjectReference/asset references and scalar fields, through VRCForge.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_create_wardrobe",
         "Create an empty int-exclusive wardrobe skeleton (expression Int parameter, FX layer/default state, and wardrobe menu) through VRCForge.",
         "high",
         WARDROBE_OUTFIT_APPROVED_WRITES.create_wardrobe,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_ensure_expression_parameter",
         "Create or update an avatar expression parameter through VRCForge.",
         "medium",
         lambda params: ensure_expression_parameter_sync(params, preview=False),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_ensure_expression_menu_control",
         "Create or update an avatar expression menu control through VRCForge.",
         "medium",
         lambda params: ensure_expression_menu_control_sync(params, preview=False),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_ensure_animator_state",
         "Create or update an FX animator layer/state/transition through VRCForge.",
         "high",
         lambda params: ensure_animator_state_sync(params, preview=False),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_write_avatar_descriptor",
         "Update selected VRCAvatarDescriptor fields through VRCForge.",
         "high",
         lambda params: write_avatar_descriptor_sync(params, preview=False),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_write_animation_curve",
         "Create, replace, or delete one AnimationClip curve binding through VRCForge.",
         "high",
         lambda params: write_animation_curve_sync(params, preview=False),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_manage_expression_parameters",
         "Delete, rename, reorder, or update existing expression parameters through VRCForge.",
         "high",
         lambda params: manage_expression_parameters_sync(params, preview=False),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_manage_expression_menu",
         "Create, update, delete, or reorder expression menu controls through VRCForge.",
         "high",
         lambda params: manage_expression_menu_sync(params, preview=False),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_manage_fx_animator",
         "Create, update, or delete FX AnimatorController layers, states, and Any-State transitions through VRCForge.",
         "high",
         lambda params: manage_fx_animator_sync(params, preview=False),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_add_outfit",
         "Run the approval-bound add-outfit workflow against one existing verified wardrobe: instantiate an exact prefab, optionally unpack it, run Modular Avatar Setup Outfit, and bind the exact approved wardrobe value.",
         "high",
@@ -19665,7 +19705,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_import_outfit_package",
         "Import a direct UnityPackage or copy loose outfit prefab/material/texture assets into the Unity project through VRCForge.",
         "high",
@@ -19674,7 +19714,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_import_chat_image",
         "Copy a vault-stored chat image attachment into the Unity project's Assets/VRCForge/Imports folder through VRCForge.",
         "high",
@@ -19683,7 +19723,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_import_chat_archive",
         "Re-verify and import a vault-stored chat archive through the supervised outfit lane or conservative managed ZIP extraction.",
         "high",
@@ -19692,25 +19732,25 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_add_component",
         "Add a component of a given type to a scene GameObject through VRCForge.",
         "medium",
         add_component_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_remove_component",
         "Remove a component of a given type from a scene GameObject through VRCForge.",
         "high",
         remove_component_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_set_property",
         "Set a single field/property on a component of a scene GameObject through VRCForge.",
         "medium",
         set_component_property_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_create_gameobject",
         "Create a new empty GameObject in the scene through VRCForge.",
         "medium",
@@ -19718,50 +19758,50 @@ def register_agent_gateway_tools() -> None:
         approval_category="scene-object-create",
         allow_future_category=True,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_rename_gameobject",
         "Rename a scene GameObject through VRCForge.",
         "low",
         rename_gameobject_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_reparent_gameobject",
         "Move a scene GameObject under a new parent (or to the scene root) through VRCForge.",
         "medium",
         reparent_gameobject_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_delete_gameobject",
         "Delete a scene GameObject and its children through VRCForge.",
         "high",
         delete_gameobject_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_set_gameobject_active",
         "Set a scene GameObject's active-self state through VRCForge.",
         "low",
         set_gameobject_active_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_instantiate_prefab",
         "Instantiate a prefab asset into the active scene (optionally under a parent) through VRCForge.",
         "medium",
         instantiate_prefab_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_unpack_prefab",
         "Unpack a prefab instance in the scene so its contents become plain GameObjects through VRCForge.",
         "high",
         unpack_prefab_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_install_vpm_package",
         "Install a VPM package through the VRCForge package manager strategy: ALCOM/VCC UI handoff for humans, VCC vpm or vrc-get CLI for supervised non-interactive installs.",
         "medium",
         PACKAGE_INSTALL_APPROVED_WRITE.execute,
         request_preparer=PACKAGE_INSTALL_APPROVED_WRITE.prepare,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_configure_optimizer_component",
         "Configure one delegated optimizer component on an avatar after approval; no external agent direct apply is exposed.",
         "high",
@@ -19770,25 +19810,25 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_restore_safe_backup",
         "Restore files from a safe backup snapshot through VRCForge.",
         "high",
         restore_safe_backup_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_restore_checkpoint",
         "Restore Unity project files from a pre-write VRCForge checkpoint.",
         "high",
-        lambda params: AGENT_GATEWAY.restore_checkpoint(params or {}),
+        lambda params: AGENT_GATEWAY.checkpoint_recovery.restore_checkpoint(params or {}),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_resolve_interrupted_apply_recovery",
         "Mark an interrupted approved write as manually resolved after explicit confirmation.",
         "medium",
-        lambda params: AGENT_GATEWAY.resolve_interrupted_apply_recovery(params or {}),
+        lambda params: AGENT_GATEWAY.checkpoint_recovery.resolve_interrupted_apply_recovery(params or {}),
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_unity_mcp_write",
         "Run an allowlisted VRCForge static Unity MCP write tool through the approval and rollback checkpoint boundary.",
         "high",
@@ -19799,7 +19839,7 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_unity_mcp_write_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_export_vrm",
         "Export one selected humanoid scene avatar as validated VRM 1.0 through an installed compatible UniVRM package. Requires author metadata, confirmRights=true, approval, and a pre-write checkpoint.",
         "medium",
@@ -19808,54 +19848,25 @@ def register_agent_gateway_tools() -> None:
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_export_vrm_execution_plan,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_toggle_scene_object",
         "Toggle a scene object's active state (for example wardrobe items) through VRCForge.",
         "medium",
         toggle_scene_object_sync,
     )
-    AGENT_GATEWAY.register_write_handler(
+    register_write_handler(
         "vrcforge_shell_execute",
         "Execute an approved high-risk shell command.",
         "high",
         AGENT_GATEWAY.shell.execute_payload,
     )
     missing_core_targets = VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS.difference(
-        AGENT_GATEWAY._write_handlers
+        AGENT_GATEWAY.approval_transactions.registered_write_target_names()
     )
     if missing_core_targets:
         raise RuntimeError(
             "VRCForge Unity write registry is incomplete: "
             + ", ".join(sorted(missing_core_targets))
-        )
-    for target_name in VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS:
-        handler = AGENT_GATEWAY._write_handlers[target_name]
-        handler.requires_approved_execution_context = True
-        handler.checkpoint_prepare_handler = prepare_authoritative_unity_checkpoint_sync
-    for target_name in SCENE_EXECUTION_PLAN_TARGETS:
-        handler = AGENT_GATEWAY._write_handlers[target_name]
-        handler.approved_execution_plan_builder = (
-            lambda arguments, exact_target=target_name: build_scene_execution_plan(
-                exact_target,
-                arguments,
-            )
-        )
-    for target_name in TUNING_EXECUTION_PLAN_TARGETS:
-        handler = AGENT_GATEWAY._write_handlers[target_name]
-        handler.request_preparer = prepare_avatar_scoped_tuning_write_request
-        handler.approved_execution_plan_builder = (
-            lambda arguments, exact_target=target_name: build_tuning_execution_plan(
-                exact_target,
-                arguments,
-            )
-        )
-    for target_name in WORKFLOW_EXECUTION_PLAN_TARGETS:
-        handler = AGENT_GATEWAY._write_handlers[target_name]
-        handler.approved_execution_plan_builder = (
-            lambda arguments, exact_target=target_name: build_workflow_execution_plan(
-                exact_target,
-                arguments,
-            )
         )
 
 
@@ -20210,7 +20221,7 @@ WARDROBE_OUTFIT_WORKFLOWS = WardrobeOutfitWorkflowService(
         ),
         inspect_package=outfit_package_inspector_domain.inspect_outfit_package,
         build_import_plan=outfit_import_planner_domain.build_outfit_import_plan,
-        create_apply_request=AGENT_GATEWAY.create_apply_request,
+        create_apply_request=AGENT_GATEWAY.approval_transactions.create_apply_request,
         request_supervised_write=request_supervised_unity_write,
         scan_avatar_items=WARDROBE_ARTIFACT_READ.scan_avatar_items,
         scan_avatar_controls=WARDROBE_ARTIFACT_READ.scan_avatar_controls,
@@ -20356,7 +20367,7 @@ PACKAGE_INSTALL_WORKFLOWS = PackageInstallWorkflowService(
         summarize_debug=summarize_debug_payload,
         read_compile_errors=read_agent_compile_errors,
         redact_support=redact_support_payload,
-        create_apply_request=AGENT_GATEWAY.create_apply_request,
+        create_apply_request=AGENT_GATEWAY.approval_transactions.create_apply_request,
     )
 )
 VPM_PACKAGE_INSTALL_PREPARER = VpmPackageInstallPreparer(
@@ -20514,7 +20525,7 @@ OPTIMIZATION = OptimizationWorkflowService(
             )
         ).build,
         build_validation_delta=build_optimization_validation_delta,
-        create_apply_request=AGENT_GATEWAY.create_apply_request,
+        create_apply_request=AGENT_GATEWAY.approval_transactions.create_apply_request,
         proofs=OptimizerProofStore(
             OptimizerProofStorePorts(
                 artifact_root=ARTIFACTS_DIR,
@@ -20561,11 +20572,11 @@ SHADER_VISION_PROTECTION = ShaderVisionProtectionService(
     ),
 )
 
-AGENT_GATEWAY.checkpoint_project_root_resolver = lambda: DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
-AGENT_GATEWAY.checkpoint_prepare_handler = prepare_unity_checkpoint_sync
-AGENT_GATEWAY.checkpoint_restore_prepare_handler = prepare_unity_checkpoint_restore_sync
-AGENT_GATEWAY.checkpoint_restore_handler = reload_unity_checkpoint_sync
-AGENT_GATEWAY.scoped_approval_reviewer_fn = _review_saved_project_category_approval
+AGENT_GATEWAY.checkpoint_recovery.checkpoint_project_root_resolver = lambda: DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
+AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = prepare_unity_checkpoint_sync
+AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = prepare_unity_checkpoint_restore_sync
+AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = reload_unity_checkpoint_sync
+AGENT_GATEWAY.approval_transactions.scoped_approval_reviewer = _review_saved_project_category_approval
 
 register_agent_gateway_tools()
 
@@ -20593,13 +20604,13 @@ def create_primitive_basis_live_runtime(
             reload_fixture=connection.reload_fixture,
             inspect_component=connection.inspect_component,
             preview_component=connection.preview_component,
-            create_apply_request=lambda params: AGENT_GATEWAY.create_apply_request(
+            create_apply_request=lambda params: AGENT_GATEWAY.approval_transactions.create_apply_request(
                 params,
                 include_arguments_digest=True,
             ),
             read_compile_status=connection.read_compile_status,
             create_restore_request=create_primitive_basis_restore_request_sync,
-            preview_checkpoint=lambda checkpoint_id: AGENT_GATEWAY.preview_restore_checkpoint(
+            preview_checkpoint=lambda checkpoint_id: AGENT_GATEWAY.checkpoint_recovery.preview_restore_checkpoint(
                 {"checkpointId": checkpoint_id}
             ),
         ),
@@ -20915,7 +20926,7 @@ def install_primitive_basis_live_runtime(
         PRIMITIVE_BASIS_LIVE_SESSION = None
         PRIMITIVE_BASIS_LIVE_CONNECTION = None
         PRIMITIVE_BASIS_LIVE_RUNTIME = None
-        AGENT_GATEWAY.apply_lifecycle_observer_fn = None
+        AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer = None
         return None
 
     connection = PrimitiveBasisLiveUnityConnection()
@@ -20923,7 +20934,7 @@ def install_primitive_basis_live_runtime(
     PRIMITIVE_BASIS_LIVE_SESSION = session
     PRIMITIVE_BASIS_LIVE_CONNECTION = connection
     PRIMITIVE_BASIS_LIVE_RUNTIME = runtime
-    AGENT_GATEWAY.apply_lifecycle_observer_fn = runtime.observe_apply_lifecycle
+    AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer = runtime.observe_apply_lifecycle
     return runtime
 
 

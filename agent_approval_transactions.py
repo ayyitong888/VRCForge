@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from contextlib import AbstractContextManager
 from typing import Any, Callable, Mapping
 
 from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
@@ -69,33 +70,126 @@ class ApprovalGoalPorts:
     reconcile_missing_approvals: Callable[[set[str]], list[dict[str, Any]]]
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalCheckpointRecoveryPorts:
+    """Checkpoint capabilities consumed by approved-write transactions."""
+
+    active_apply_recoveries: Callable[[], list[dict[str, Any]]]
+    append_apply_recovery_entry: Callable[[dict[str, Any]], dict[str, Any]]
+    append_checkpoint: Callable[[dict[str, Any]], None]
+    build_checkpoint_rollback_coverage_audit: Callable[..., dict[str, Any]]
+    classify_apply_recovery_incident: Callable[[str, str], str]
+    create_archive_checkpoint: Callable[[Path, dict[str, Any]], dict[str, Any]]
+    create_local_state_checkpoint: Callable[[dict[str, Any]], dict[str, Any]]
+    create_project_chat_checkpoint: Callable[[Path, dict[str, Any]], dict[str, Any]]
+    resolve_checkpoint_project_root: Callable[[dict[str, Any]], Path | None]
+    prune_checkpoint_archives: Callable[..., dict[str, Any]]
+    project_chat_checkpoint_lock: Callable[[], AbstractContextManager[object]]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalSkillsPort:
+    write_lock: AbstractContextManager[object]
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalTransactionState:
+    shared_state_lock: AbstractContextManager[object]
+    approvals: dict[str, dict[str, Any]]
+    write_handlers: dict[str, AgentWriteHandler]
+    in_flight_apply_writes: dict[str, dict[str, Any]]
+    background_project_read_leases: set[str]
+    checkpoint_storage_lock: AbstractContextManager[object]
+    skill_package_write_lock: AbstractContextManager[object]
+    skill_package_write_lock_bound: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalTransactionPorts:
+    """Exact state, callbacks, and peer capabilities required by approval flow."""
+
+    state: ApprovalTransactionState
+    checkpoint: ApprovalCheckpointRecoveryPorts
+    audit_log_path: Callable[[], Path]
+    skills: ApprovalSkillsPort
+    shell_manual_approval_reason: Callable[[dict[str, Any]], str]
+    shell_execute_payload: Callable[[dict[str, Any]], dict[str, Any]]
+    checkpoint_pathspecs: Callable[[Path, Path], list[str]]
+    is_unity_project_root: Callable[[Path], bool]
+    normalize_project_category_allow_rules: Callable[[Any], list[dict[str, str]]]
+    run_git: Callable[..., dict[str, Any]]
+    signal_background_activity: Callable[[str], None]
+    tool_params_audit: Callable[[str, dict[str, Any]], dict[str, Any]]
+    validated_memory_evidence_for_applied_write: Callable[..., dict[str, Any] | None]
+    with_user_constraints: Callable[..., Any]
+    write_handler_allows_future_category: Callable[[AgentWriteHandler, dict[str, Any]], bool]
+    write_handler_visible: Callable[..., bool]
+    append_audit: Callable[[dict[str, Any]], None]
+    authenticate: Callable[..., AgentGatewayConfig]
+    call_tool: Callable[..., dict[str, Any]]
+    ensure_config: Callable[[], AgentGatewayConfig]
+    read_user_constraints: Callable[[], UserConstraintsSnapshot]
+    roslyn_available: Callable[[AgentGatewayConfig | None], bool]
+    save_config: Callable[[AgentGatewayConfig], None]
+
+
 class AgentApprovalTransactionService:
     """Own supervised write requests, approvals, apply, and recovery handoff.
 
-    The host gateway remains the only owner of registries, approval state,
-    locks, checkpoint hooks, persistence paths, and runtime callbacks. Attribute
-    access is late-bound so facade monkeypatches and handler replacement remain
-    authoritative after construction. This service creates no process, task,
+    The gateway supplies its existing registries, state, locks, and narrow peer
+    capabilities through typed ports. This owner keeps only the three app-level
+    approval hooks that belong to its lifecycle. It creates no process, task,
     lock, file handle, authorization identity, or communication endpoint.
     """
 
-    __slots__ = ("_goal", "_host", "_runtime_run_append")
+    __slots__ = (
+        "_apply_lifecycle_observer",
+        "_checkpoint_prepare_handler",
+        "_goal",
+        "_ports",
+        "_runtime_run_append",
+        "_scoped_approval_reviewer",
+    )
 
     def __init__(
         self,
-        host: Any,
+        ports: ApprovalTransactionPorts,
         goal: ApprovalGoalPorts,
         *,
         runtime_run_append: Callable[[dict[str, Any]], None],
     ) -> None:
-        self._host = host
+        self._ports = ports
         self._goal = goal
         self._runtime_run_append = runtime_run_append
+        self._apply_lifecycle_observer: Callable[[str, dict[str, Any]], Any] | None = None
+        self._checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
+        self._scoped_approval_reviewer: Callable[[dict[str, Any]], str] | None = None
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._host, name)
+    @property
+    def apply_lifecycle_observer(self) -> Callable[[str, dict[str, Any]], Any] | None:
+        return self._apply_lifecycle_observer
 
-    def _impl__observe_apply_lifecycle(
+    @apply_lifecycle_observer.setter
+    def apply_lifecycle_observer(self, callback: Callable[[str, dict[str, Any]], Any] | None) -> None:
+        self._apply_lifecycle_observer = callback
+
+    @property
+    def checkpoint_prepare_handler(self) -> Callable[[Path], dict[str, Any]] | None:
+        return self._checkpoint_prepare_handler
+
+    @checkpoint_prepare_handler.setter
+    def checkpoint_prepare_handler(self, callback: Callable[[Path], dict[str, Any]] | None) -> None:
+        self._checkpoint_prepare_handler = callback
+
+    @property
+    def scoped_approval_reviewer(self) -> Callable[[dict[str, Any]], str] | None:
+        return self._scoped_approval_reviewer
+
+    @scoped_approval_reviewer.setter
+    def scoped_approval_reviewer(self, callback: Callable[[dict[str, Any]], str] | None) -> None:
+        self._scoped_approval_reviewer = callback
+
+    def _observe_apply_lifecycle(
         self,
         stage: str,
         approval: dict[str, Any],
@@ -104,7 +198,7 @@ class AgentApprovalTransactionService:
         result: Any = None,
         arguments_digest: str = "",
     ) -> None:
-        callback = self.apply_lifecycle_observer_fn
+        callback = self._apply_lifecycle_observer
         if callback is None:
             return
         payload = {
@@ -116,7 +210,7 @@ class AgentApprovalTransactionService:
             payload["argumentsDigest"] = arguments_digest
         callback(stage, payload)
 
-    def _impl_register_write_handler(
+    def register_write_handler(
         self,
         name: str,
         description: str,
@@ -132,7 +226,7 @@ class AgentApprovalTransactionService:
         approval_category: str = "",
         allow_future_category: bool = False,
     ) -> None:
-        self._write_handlers[name] = AgentWriteHandler(
+        self._ports.state.write_handlers[name] = AgentWriteHandler(
             name=name,
             description=description,
             risk_level=risk_level,
@@ -148,13 +242,17 @@ class AgentApprovalTransactionService:
             allow_future_category=bool(allow_future_category),
         )
 
-    def _impl_authenticate_approval(
+    def registered_write_target_names(self) -> set[str]:
+        with self._ports.state.shared_state_lock:
+            return set(self._ports.state.write_handlers)
+
+    def authenticate_approval(
         self,
         headers: dict[str, str],
         query_params: dict[str, str],
         client_host: str | None,
     ) -> AgentGatewayConfig:
-        config = self.authenticate(headers, query_params, client_host, allow_disabled=False)
+        config = self._ports.authenticate(headers, query_params, client_host, allow_disabled=False)
         supplied = (
             headers.get("x-vrcforge-approval-token")
             or headers.get("X-VRCForge-Approval-Token")
@@ -165,12 +263,12 @@ class AgentApprovalTransactionService:
             raise AgentGatewayError("Approval token is missing or invalid.", status_code=401)
         return config
 
-    def _impl_auto_approval_enabled(self, config: AgentGatewayConfig | None = None) -> bool:
-        config = config or self.ensure_config()
+    def auto_approval_enabled(self, config: AgentGatewayConfig | None = None) -> bool:
+        config = config or self._ports.ensure_config()
         return normalize_execution_mode(config.execution_mode) in {"auto", "roslyn_full_auto"}
 
-    def _impl_permission_audit_context(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
-        config = config or self.ensure_config()
+    def permission_audit_context(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self._ports.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
         full_permission = mode == "roslyn_full_auto"
         return {
@@ -182,8 +280,8 @@ class AgentApprovalTransactionService:
             "autoApproveDangerousRequiresApproval": mode == "auto",
         }
 
-    def _impl__auto_approval_block_reason(self, approval: dict[str, Any], config: AgentGatewayConfig | None = None) -> str:
-        config = config or self.ensure_config()
+    def _auto_approval_block_reason(self, approval: dict[str, Any], config: AgentGatewayConfig | None = None) -> str:
+        config = config or self._ports.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
         if mode == "roslyn_full_auto":
             return ""
@@ -195,11 +293,11 @@ class AgentApprovalTransactionService:
         if str(approval.get("targetTool") or "") == "vrcforge_shell_execute":
             arguments = ensure_dict(approval.get("arguments"))
             classification = ensure_dict(arguments.get("classification_snapshot") or approval.get("preview"))
-            return self.shell.manual_approval_reason(classification)
+            return self._ports.shell_manual_approval_reason(classification)
         return ""
 
-    def _impl_permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
-        config = config or self.ensure_config()
+    def permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self._ports.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
         permission_context = self.permission_audit_context(config)
         return {
@@ -213,17 +311,17 @@ class AgentApprovalTransactionService:
             "roslynRiskAcknowledged": bool(config.roslyn_risk_acknowledged),
             "roslynFullAutoEverEnabled": bool(config.roslyn_risk_acknowledged),
             "allowWriteRequests": bool(config.allow_write_requests),
-            "allowRoslynAdvanced": self.roslyn_available(config),
+            "allowRoslynAdvanced": self._ports.roslyn_available(config),
             "legacyRoslynEnvEnabled": False,
         }
 
-    def _impl_update_permission_state(
+    def update_permission_state(
         self,
         execution_mode: str,
         acknowledge_roslyn_risk: bool = False,
     ) -> dict[str, Any]:
-        with self._lock:
-            config = self.ensure_config()
+        with self._ports.state.shared_state_lock:
+            config = self._ports.ensure_config()
             mode = normalize_execution_mode(execution_mode)
             entering_full_permission = mode == "roslyn_full_auto"
 
@@ -232,9 +330,9 @@ class AgentApprovalTransactionService:
             if acknowledge_roslyn_risk and entering_full_permission:
                 config.roslyn_risk_acknowledged = True
             config.allow_roslyn_advanced = False
-            self.save_config(config)
+            self._ports.save_config(config)
             updated = self.permission_state(config)
-            self.append_audit(
+            self._ports.append_audit(
                 {
                     "event": "permission_mode_updated",
                     "previous": previous,
@@ -244,7 +342,7 @@ class AgentApprovalTransactionService:
             )
             return {"ok": True, "permission": updated}
 
-    def _impl__execute_write_request(
+    def _execute_write_request(
         self,
         tool_name: str,
         params: dict[str, Any],
@@ -263,9 +361,9 @@ class AgentApprovalTransactionService:
         """
         if not tool_name:
             return {"ok": False, "status": "blocked", "tool": "", "error": "No write tool was resolved."}
-        params_summary = self._tool_params_audit(tool_name, params)
+        params_summary = self._ports.tool_params_audit(tool_name, params)
         try:
-            if tool_name in self._write_handlers:
+            if tool_name in self._ports.state.write_handlers:
                 outcome = self.create_apply_request(
                     {
                         "target_tool": tool_name,
@@ -285,7 +383,7 @@ class AgentApprovalTransactionService:
                     }
                 )
             else:
-                outcome = self.call_tool(tool_name, params, agent_name=agent_name)
+                outcome = self._ports.call_tool(tool_name, params, agent_name=agent_name)
         except AgentGatewayError as exc:
             return {
                 "ok": False,
@@ -321,14 +419,14 @@ class AgentApprovalTransactionService:
             payload["error"] = outcome["error"]
         return payload
 
-    def _impl_create_apply_request(
+    def create_apply_request(
         self,
         params: dict[str, Any],
         *,
         internal_wrapper: bool = False,
         include_arguments_digest: bool = False,
     ) -> dict[str, Any]:
-        config = self.ensure_config()
+        config = self._ports.ensure_config()
         if not config.allow_write_requests:
             raise AgentGatewayError("Agent Gateway write requests are disabled.", status_code=403)
 
@@ -341,12 +439,12 @@ class AgentApprovalTransactionService:
                 status_code=403,
             )
 
-        write_handler = self._write_handlers.get(target_tool)
-        if not write_handler or not self._write_handler_visible(write_handler, config):
+        write_handler = self._ports.state.write_handlers.get(target_tool)
+        if not write_handler or not self._ports.write_handler_visible(write_handler, config):
             raise AgentGatewayError(f"Unknown or unavailable write target: {target_tool}", status_code=404)
 
         arguments = ensure_dict(params.get("arguments") or params.get("params") or {})
-        user_constraints = self.read_user_constraints()
+        user_constraints = self._ports.read_user_constraints()
         arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
         preview = params.get("preview")
         if write_handler.request_preparer is not None:
@@ -470,7 +568,7 @@ class AgentApprovalTransactionService:
             explicit_approval_reason=explicit_approval_reason,
             goal_delivery_id=str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or "").strip(),
             approved_execution_plan=approved_execution_plan,
-            allow_future_eligible=self._write_handler_allows_future_category(
+            allow_future_eligible=self._ports.write_handler_allows_future_category(
                 write_handler,
                 {
                     "targetTool": target_tool,
@@ -491,7 +589,7 @@ class AgentApprovalTransactionService:
         if full_permission_auto and not never_auto_approve and (
             requires_explicit_approval or auto_policy_reason or risk_escalation_reason
         ):
-            self.append_audit(
+            self._ports.append_audit(
                 {
                     "event": "approval_explicit_requirement_overridden_by_full_permission",
                     "approvalId": approval.get("id"),
@@ -506,7 +604,7 @@ class AgentApprovalTransactionService:
             if auto_payload is not None:
                 return auto_payload
         if self.auto_approval_enabled(config) and requires_explicit_for_mode:
-            self.append_audit(
+            self._ports.append_audit(
                 {
                     "event": "approval_auto_approval_suppressed",
                     "approvalId": approval.get("id"),
@@ -517,10 +615,10 @@ class AgentApprovalTransactionService:
                 }
             )
         if execution_mode == "approval" and not requires_explicit_for_mode:
-            stored_approval = self._approvals.get(str(approval.get("id") or ""), approval)
+            stored_approval = self._ports.state.approvals.get(str(approval.get("id") or ""), approval)
             scoped_rule = self._matching_project_category_allow_rule(stored_approval, write_handler, config)
             if scoped_rule is not None:
-                reviewer = self.scoped_approval_reviewer_fn
+                reviewer = self._scoped_approval_reviewer
                 decision = "manual"
                 if reviewer is not None:
                     try:
@@ -531,7 +629,7 @@ class AgentApprovalTransactionService:
                     auto_payload = self._scoped_rule_execute_approval(stored_approval, scoped_rule)
                     if auto_payload is not None:
                         return auto_payload
-                self.append_audit(
+                self._ports.append_audit(
                     {
                         "event": "approval_scoped_rule_manual",
                         "approvalId": approval.get("id"),
@@ -552,7 +650,7 @@ class AgentApprovalTransactionService:
             ),
         }
 
-    def _impl__auto_execute_approval(self, approval: dict[str, Any]) -> dict[str, Any] | None:
+    def _auto_execute_approval(self, approval: dict[str, Any]) -> dict[str, Any] | None:
         """Auto-approve and apply an approval under the auto / full-permission tiers.
 
         Returns the execution payload, or None when auto-approval could not
@@ -566,7 +664,7 @@ class AgentApprovalTransactionService:
         block_reason = self._auto_approval_block_reason(approval)
         permission_context = self.permission_audit_context()
         if block_reason:
-            self.append_audit(
+            self._ports.append_audit(
                 {
                     "event": "approval_auto_approval_suppressed",
                     "approvalId": approval_id,
@@ -580,7 +678,7 @@ class AgentApprovalTransactionService:
         approved = self.approve(approval_id)
         if not approved.get("ok"):
             return None
-        self.append_audit(
+        self._ports.append_audit(
             {
                 "event": "approval_auto_approved",
                 "approvalId": approval_id,
@@ -610,13 +708,13 @@ class AgentApprovalTransactionService:
             payload["error"] = str(applied.get("error") or "Auto-approved execution failed.")
         return payload
 
-    def _impl__matching_project_category_allow_rule(
+    def _matching_project_category_allow_rule(
         self,
         approval: dict[str, Any],
         write_handler: AgentWriteHandler,
         config: AgentGatewayConfig | None = None,
     ) -> dict[str, str] | None:
-        if not self._write_handler_allows_future_category(write_handler, approval):
+        if not self._ports.write_handler_allows_future_category(write_handler, approval):
             return None
         if bool(approval.get("requiresExplicitApproval")):
             return None
@@ -624,7 +722,7 @@ class AgentApprovalTransactionService:
         project_key = normalize_filesystem_path(project_root) if project_root else ""
         if not project_key:
             return None
-        active = config or self.ensure_config()
+        active = config or self._ports.ensure_config()
         for rule in active.project_category_allow_rules:
             if (
                 rule.get("projectRoot") == project_key
@@ -633,7 +731,7 @@ class AgentApprovalTransactionService:
                 return {"projectRoot": project_key, "category": write_handler.approval_category}
         return None
 
-    def _impl__scoped_rule_execute_approval(
+    def _scoped_rule_execute_approval(
         self, approval: dict[str, Any], rule: dict[str, str]
     ) -> dict[str, Any] | None:
         approval_id = str(approval.get("id") or "").strip()
@@ -642,7 +740,7 @@ class AgentApprovalTransactionService:
         approved = self.approve(approval_id)
         if not approved.get("ok"):
             return None
-        self.append_audit(
+        self._ports.append_audit(
             {
                 "event": "approval_scoped_rule_auto_approved",
                 "approvalId": approval_id,
@@ -667,14 +765,14 @@ class AgentApprovalTransactionService:
             payload["error"] = str(applied.get("error") or "Scoped-rule execution failed.")
         return payload
 
-    def _impl_apply_approved(self, params: dict[str, Any]) -> dict[str, Any]:
+    def apply_approved(self, params: dict[str, Any]) -> dict[str, Any]:
         approval_id = str(params.get("approval_id") or params.get("approvalId") or "").strip()
         if not approval_id:
             raise AgentGatewayError("approval_id is required.")
-        self._signal_background_activity("approved_write")
+        self._ports.signal_background_activity("approved_write")
 
-        with self._lock:
-            approval = self._approvals.get(approval_id)
+        with self._ports.state.shared_state_lock:
+            approval = self._ports.state.approvals.get(approval_id)
             if not approval:
                 approval = self._load_approval_from_audit(approval_id)
             if not approval:
@@ -700,20 +798,20 @@ class AgentApprovalTransactionService:
                     "vrcforge_shell_execute",
                     "Execute an approved high-risk shell command.",
                     "high",
-                    self.shell.execute_payload,
+                    self._ports.shell_execute_payload,
                 )
             else:
-                write_handler = self._write_handlers.get(target_tool)
+                write_handler = self._ports.state.write_handlers.get(target_tool)
             if not write_handler:
                 raise AgentGatewayError(f"Write target is no longer available: {target_tool}", status_code=404)
 
-            if self._background_project_read_leases:
-                self.append_audit(
+            if self._ports.state.background_project_read_leases:
+                self._ports.append_audit(
                     {
                         "event": "approval_blocked_by_background_project_read",
                         "approvalId": approval_id,
                         "targetTool": target_tool,
-                        "activeReadCount": len(self._background_project_read_leases),
+                        "activeReadCount": len(self._ports.state.background_project_read_leases),
                     }
                 )
                 return {
@@ -723,9 +821,9 @@ class AgentApprovalTransactionService:
                     "error": "A background project read is active. Retry this approved write after it finishes.",
                 }
 
-            in_flight_writes = [dict(entry) for entry in self._in_flight_apply_writes.values()]
+            in_flight_writes = [dict(entry) for entry in self._ports.state.in_flight_apply_writes.values()]
             if in_flight_writes:
-                self.append_audit(
+                self._ports.append_audit(
                     {
                         "event": "approval_blocked_by_in_flight_write",
                         "approvalId": approval_id,
@@ -741,9 +839,9 @@ class AgentApprovalTransactionService:
                     "error": "Another approved write is still applying. Wait for it to finish (or fail into recovery) before running this write.",
                 }
 
-            active_recoveries = self._active_apply_recoveries()
+            active_recoveries = self._ports.checkpoint.active_apply_recoveries()
             if active_recoveries and target_tool not in APPLY_RECOVERY_EXEMPT_WRITE_TARGETS:
-                self.append_audit(
+                self._ports.append_audit(
                     {
                         "event": "approval_blocked_by_interrupted_apply_recovery",
                         "approvalId": approval_id,
@@ -760,7 +858,7 @@ class AgentApprovalTransactionService:
                     "error": "A previous write did not finish cleanly. Restore or resolve the interrupted apply recovery before running another write.",
                 }
 
-            self._in_flight_apply_writes[approval_id] = {
+            self._ports.state.in_flight_apply_writes[approval_id] = {
                 "approvalId": approval_id,
                 "targetTool": target_tool,
                 "projectRoot": ensure_dict(approval.get("arguments")).get("projectRoot") or "",
@@ -768,9 +866,9 @@ class AgentApprovalTransactionService:
             }
             try:
                 approval["status"] = "applying"
-                self._approvals[approval_id] = approval
+                self._ports.state.approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
-                self.append_audit({"event": "approval_applying", "approval": approval, **permission_context})
+                self._ports.append_audit({"event": "approval_applying", "approval": approval, **permission_context})
                 self._runtime_run_append(
                     {
                         "event": "approval_applying",
@@ -786,10 +884,10 @@ class AgentApprovalTransactionService:
                 self._observe_apply_lifecycle("approval_started", approval)
             except Exception as exc:  # noqa: BLE001 - restore a retryable approval on transition I/O failure.
                 approval["status"] = "approved"
-                self._approvals[approval_id] = approval
-                self._in_flight_apply_writes.pop(approval_id, None)
+                self._ports.state.approvals[approval_id] = approval
+                self._ports.state.in_flight_apply_writes.pop(approval_id, None)
                 try:
-                    self.append_audit(
+                    self._ports.append_audit(
                         {
                             "event": "approval_apply_transition_failed",
                             "approval": approval,
@@ -809,7 +907,7 @@ class AgentApprovalTransactionService:
         execution_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
         request_trace: dict[str, Any] | None = None
         try:
-            user_constraints = self.read_user_constraints()
+            user_constraints = self._ports.read_user_constraints()
             arguments = self._inject_user_constraints_for_apply(
                 ensure_dict(approval.get("arguments") or {}),
                 user_constraints,
@@ -831,8 +929,8 @@ class AgentApprovalTransactionService:
                 # one writer-locked critical section. This prevents a newer
                 # chat save from landing between snapshot verification and
                 # quarantine, while preserving storage -> chat lock order.
-                with self._checkpoint_storage_lock:
-                    with self._project_chat_checkpoint_lock:
+                with self._ports.state.checkpoint_storage_lock:
+                    with self._ports.checkpoint.project_chat_checkpoint_lock():
                         checkpoint = self._create_pre_write_checkpoint(approval, arguments)
                         if checkpoint:
                             approval["checkpoint"] = checkpoint
@@ -867,7 +965,7 @@ class AgentApprovalTransactionService:
                                 ensure_dict(approval.get("approvedUnityExecutionPlan")),
                             )
             elif requires_checkpoint and target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
-                if not self._skill_package_write_lock_bound:
+                if not self._ports.state.skill_package_write_lock_bound:
                     raise AgentGatewayError(
                         "Local-state approved writes require the shared skill-package lock.",
                         status_code=503,
@@ -876,9 +974,9 @@ class AgentApprovalTransactionService:
                 # one storage -> package -> user critical section. The
                 # package and user locks are re-entrant because the typed
                 # Controller/Projection owners enforce the same order.
-                with self._checkpoint_storage_lock:
-                    with self._skill_package_write_lock:
-                        with self.skills.write_lock:
+                with self._ports.state.checkpoint_storage_lock:
+                    with self._ports.state.skill_package_write_lock:
+                        with self._ports.skills.write_lock:
                             checkpoint = self._create_pre_write_checkpoint(
                                 approval,
                                 arguments,
@@ -930,7 +1028,7 @@ class AgentApprovalTransactionService:
                                 )
             else:
                 if requires_checkpoint:
-                    with self._checkpoint_storage_lock:
+                    with self._ports.state.checkpoint_storage_lock:
                         checkpoint = self._create_pre_write_checkpoint(approval, arguments)
                         if checkpoint:
                             approval["checkpoint"] = checkpoint
@@ -987,18 +1085,18 @@ class AgentApprovalTransactionService:
             self._observe_apply_lifecycle(
                 "handler_returned", approval, checkpoint=checkpoint, result=result
             )
-            with self._lock:
+            with self._ports.state.shared_state_lock:
                 approval["status"] = "applied"
                 approval["appliedAt"] = utc_now_iso()
                 approval["resultSummary"] = summarize_params(result if isinstance(result, dict) else {"result": result})
-                self._approvals[approval_id] = approval
+                self._ports.state.approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
                 applied_audit = {
                     "event": "approval_applied",
                     "approval": approval,
                     **permission_context,
                 }
-                memory_evidence = self._validated_memory_evidence_for_applied_write(
+                memory_evidence = self._ports.validated_memory_evidence_for_applied_write(
                     approval,
                     arguments,
                     result,
@@ -1007,7 +1105,7 @@ class AgentApprovalTransactionService:
                     applied_audit["memoryEvidence"] = memory_evidence
                 if request_trace is not None:
                     applied_audit["requestTrace"] = request_trace
-                self.append_audit(applied_audit)
+                self._ports.append_audit(applied_audit)
                 self._runtime_run_append(
                     {
                         "event": "approval_applied",
@@ -1044,16 +1142,16 @@ class AgentApprovalTransactionService:
                     "executionId": execution_id,
                     "unityCoreCallAudits": [dict(audit) for audit in core_call_audits],
                 }
-            with self._lock:
+            with self._ports.state.shared_state_lock:
                 approval["status"] = "failed"
                 approval["failedAt"] = utc_now_iso()
                 approval["error"] = str(exc)
-                self._approvals[approval_id] = approval
+                self._ports.state.approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
                 failed_audit = {"event": "approval_failed", "approval": approval, **permission_context}
                 if request_trace is not None:
                     failed_audit["requestTrace"] = request_trace
-                self.append_audit(failed_audit)
+                self._ports.append_audit(failed_audit)
                 self._runtime_run_append(
                     {
                         "event": "approval_failed",
@@ -1083,10 +1181,10 @@ class AgentApprovalTransactionService:
                 payload["checkpoint"] = checkpoint
             return self._goal.attach_terminal_resolution(payload, approval)
         finally:
-            with self._lock:
-                self._in_flight_apply_writes.pop(approval_id, None)
+            with self._ports.state.shared_state_lock:
+                self._ports.state.in_flight_apply_writes.pop(approval_id, None)
 
-    def _impl_list_approvals(
+    def list_approvals(
         self,
         include_expired: bool = True,
         project_root: str = "",
@@ -1104,10 +1202,10 @@ class AgentApprovalTransactionService:
                 return True
             return normalize_filesystem_path(candidate) == normalized_project_root
 
-        with self._lock:
+        with self._ports.state.shared_state_lock:
             approvals = [
                 self._refresh_approval_expiry(dict(item))
-                for item in self._approvals.values()
+                for item in self._ports.state.approvals.values()
                 if project_matches(dict(item))
             ]
             if include_expired:
@@ -1122,7 +1220,7 @@ class AgentApprovalTransactionService:
             ]
             return [redact_sensitive(item) for item in filtered]
 
-    def _impl_approve(
+    def approve(
         self,
         approval_id: str,
         *,
@@ -1136,7 +1234,7 @@ class AgentApprovalTransactionService:
             global_only=global_only,
         )
 
-    def _impl_approve_with_project_category_rule(
+    def approve_with_project_category_rule(
         self,
         approval_id: str,
         *,
@@ -1149,8 +1247,8 @@ class AgentApprovalTransactionService:
         endpoint.  Automatic executions never create or widen remembered
         permissions, and every unsuitable write remains a normal pending item.
         """
-        with self._lock:
-            approval = self._approvals.get(approval_id)
+        with self._ports.state.shared_state_lock:
+            approval = self._ports.state.approvals.get(approval_id)
             if not approval:
                 raise AgentGatewayError(f"Approval was not found: {approval_id}", status_code=404)
             self._ensure_approval_scope(
@@ -1162,10 +1260,10 @@ class AgentApprovalTransactionService:
             if approval.get("status") != "pending":
                 return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {approval.get('status')}."}
             target_tool = str(approval.get("targetTool") or "")
-            write_handler = self._write_handlers.get(target_tool)
-            config = self.ensure_config()
+            write_handler = self._ports.state.write_handlers.get(target_tool)
+            config = self._ports.ensure_config()
             rule = self._matching_project_category_allow_rule(approval, write_handler, config) if write_handler else None
-            if write_handler is None or not self._write_handler_allows_future_category(write_handler, approval):
+            if write_handler is None or not self._ports.write_handler_allows_future_category(write_handler, approval):
                 raise AgentGatewayError("This write target cannot be remembered for future approvals.", status_code=409)
             project_root = self._approval_project_root(approval)
             project_key = normalize_filesystem_path(project_root) if project_root else ""
@@ -1175,11 +1273,11 @@ class AgentApprovalTransactionService:
                 config.project_category_allow_rules.append(
                     {"projectRoot": project_key, "category": write_handler.approval_category}
                 )
-                config.project_category_allow_rules = self._normalize_project_category_allow_rules(
+                config.project_category_allow_rules = self._ports.normalize_project_category_allow_rules(
                     config.project_category_allow_rules
                 )
-                self.save_config(config)
-                self.append_audit(
+                self._ports.save_config(config)
+                self._ports.append_audit(
                     {
                         "event": "approval_scoped_rule_granted",
                         "approvalId": approval_id,
@@ -1195,7 +1293,7 @@ class AgentApprovalTransactionService:
                 global_only=global_only,
             )
 
-    def _impl_reject(
+    def reject(
         self,
         approval_id: str,
         *,
@@ -1209,18 +1307,18 @@ class AgentApprovalTransactionService:
             global_only=global_only,
         )
 
-    def _impl_recent_audit_logs(self, limit: int = 100) -> list[dict[str, Any]]:
-        if not self.audit_log_path.exists():
+    def recent_audit_logs(self, limit: int = 100) -> list[dict[str, Any]]:
+        if not self._ports.audit_log_path().exists():
             return []
         entries: list[dict[str, Any]] = []
-        for line in self.audit_log_path.read_text(encoding="utf-8").splitlines()[-max(1, min(limit, 500)):]:
+        for line in self._ports.audit_log_path().read_text(encoding="utf-8").splitlines()[-max(1, min(limit, 500)):]:
             try:
                 entries.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
         return entries
 
-    def _impl__call_write_handler(
+    def _call_write_handler(
         self,
         write_handler: AgentWriteHandler,
         target_tool: str,
@@ -1295,11 +1393,11 @@ class AgentApprovalTransactionService:
             )
         return result
 
-    def _impl__create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
-        with self._checkpoint_storage_lock:
+    def _create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
+        with self._ports.state.checkpoint_storage_lock:
             return self._create_pre_write_checkpoint_locked(approval, arguments)
 
-    def _impl__create_pre_write_checkpoint_locked(
+    def _create_pre_write_checkpoint_locked(
         self,
         approval: dict[str, Any],
         arguments: dict[str, Any],
@@ -1317,8 +1415,8 @@ class AgentApprovalTransactionService:
             "status": "unavailable",
         }
         if target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
-            return self._create_local_state_checkpoint(base_record)
-        project_root = self._resolve_checkpoint_project_root(arguments)
+            return self._ports.checkpoint.create_local_state_checkpoint(base_record)
+        project_root = self._ports.checkpoint.resolve_checkpoint_project_root(arguments)
         if project_root is None:
             record = {
                 **base_record,
@@ -1327,11 +1425,11 @@ class AgentApprovalTransactionService:
                 "status": "failed",
                 "error": "No Unity project root was available for checkpointing.",
             }
-            self._append_checkpoint(record)
+            self._ports.checkpoint.append_checkpoint(record)
             return record
         project_root = project_root.resolve()
         record = {**base_record, "projectRoot": str(project_root)}
-        if not self._is_unity_project_root(project_root):
+        if not self._ports.is_unity_project_root(project_root):
             record.update(
                 {
                     "ok": False,
@@ -1340,13 +1438,13 @@ class AgentApprovalTransactionService:
                     "error": "Resolved checkpoint root is not a Unity project.",
                 }
             )
-            self._append_checkpoint(record)
+            self._ports.checkpoint.append_checkpoint(record)
             return record
         if target_tool == PROJECT_CHAT_CHECKPOINT_TARGET:
             record["expectedSourceDigest"] = str(arguments.get("expectedDigest") or "").strip().lower()
-            return self._create_project_chat_checkpoint(project_root, record)
+            return self._ports.checkpoint.create_project_chat_checkpoint(project_root, record)
 
-        write_handler = self._write_handlers.get(target_tool)
+        write_handler = self._ports.state.write_handlers.get(target_tool)
         dedicated_checkpoint_prepare = (
             write_handler.checkpoint_prepare_handler
             if write_handler is not None
@@ -1375,11 +1473,11 @@ class AgentApprovalTransactionService:
                         ),
                     }
                 )
-                self._append_checkpoint(record)
+                self._ports.checkpoint.append_checkpoint(record)
                 return record
-        elif self.checkpoint_prepare_handler is not None:
+        elif self._checkpoint_prepare_handler is not None:
             try:
-                prepare_result = ensure_dict(self.checkpoint_prepare_handler(project_root))
+                prepare_result = ensure_dict(self._checkpoint_prepare_handler(project_root))
             except Exception as exc:  # noqa: BLE001
                 prepare_result = {"ok": False, "error": str(exc)}
             record["unityPrepare"] = prepare_result
@@ -1398,7 +1496,7 @@ class AgentApprovalTransactionService:
                             "error": warning,
                         }
                     )
-                    self._append_checkpoint(record)
+                    self._ports.checkpoint.append_checkpoint(record)
                     return record
                 record["unityPrepareWarning"] = warning
                 record["warnings"] = [
@@ -1406,16 +1504,16 @@ class AgentApprovalTransactionService:
                     "Unity prepare checkpoint failed; using file-level checkpoint fallback.",
                 ]
 
-        git_root_result = self._run_git(project_root, ["rev-parse", "--show-toplevel"])
+        git_root_result = self._ports.run_git(project_root, ["rev-parse", "--show-toplevel"])
         if not git_root_result["ok"]:
-            return self._create_archive_checkpoint(project_root, record)
+            return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
         git_root = Path(git_root_result["stdout"].strip()).resolve()
-        pathspecs = self._checkpoint_pathspecs(git_root, project_root)
-        base_commit_result = self._run_git(git_root, ["rev-parse", "HEAD"])
+        pathspecs = self._ports.checkpoint_pathspecs(git_root, project_root)
+        base_commit_result = self._ports.run_git(git_root, ["rev-parse", "HEAD"])
         base_commit = base_commit_result["stdout"].strip() if base_commit_result["ok"] else ""
 
-        status_before = self._run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
-        add_result = self._run_git(git_root, ["add", "-A", "--", *pathspecs], timeout_seconds=120)
+        status_before = self._ports.run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
+        add_result = self._ports.run_git(git_root, ["add", "-A", "--", *pathspecs], timeout_seconds=120)
         if not add_result["ok"]:
             record.update(
                 {
@@ -1428,15 +1526,15 @@ class AgentApprovalTransactionService:
                     "error": add_result["error"] or "git add failed while creating checkpoint.",
                 }
             )
-            self._append_checkpoint(record)
+            self._ports.checkpoint.append_checkpoint(record)
             return record
 
-        staged_diff = self._run_git(git_root, ["diff", "--cached", "--quiet", "--", *pathspecs])
+        staged_diff = self._ports.run_git(git_root, ["diff", "--cached", "--quiet", "--", *pathspecs])
         created_commit = False
         checkpoint_ref = base_commit
         if staged_diff["returncode"] == 1:
             message = f"chore(vrcforge): checkpoint before {target_tool} {checkpoint_id}"
-            commit_result = self._run_git(
+            commit_result = self._ports.run_git(
                 git_root,
                 [
                     "-c",
@@ -1464,10 +1562,10 @@ class AgentApprovalTransactionService:
                         "stderr": commit_result["stderr"],
                     }
                 )
-                self._append_checkpoint(record)
+                self._ports.checkpoint.append_checkpoint(record)
                 return record
             created_commit = True
-            head_result = self._run_git(git_root, ["rev-parse", "HEAD"])
+            head_result = self._ports.run_git(git_root, ["rev-parse", "HEAD"])
             checkpoint_ref = head_result["stdout"].strip() if head_result["ok"] else base_commit
         elif staged_diff["returncode"] not in {0, 1}:
             record.update(
@@ -1481,7 +1579,7 @@ class AgentApprovalTransactionService:
                     "error": staged_diff["error"] or "git diff failed while creating checkpoint.",
                 }
             )
-            self._append_checkpoint(record)
+            self._ports.checkpoint.append_checkpoint(record)
             return record
 
         record.update(
@@ -1497,48 +1595,48 @@ class AgentApprovalTransactionService:
                 "statusBefore": [line for line in status_before["stdout"].splitlines() if line.strip()] if status_before["ok"] else [],
             }
         )
-        record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
-        self._append_checkpoint(record)
-        self.append_audit({"event": "checkpoint_created", "checkpoint": record})
-        self.prune_checkpoint_archives(protected_checkpoint_ids={checkpoint_id})
+        record["rollbackCoverageAudit"] = self._ports.checkpoint.build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
+        self._ports.checkpoint.append_checkpoint(record)
+        self._ports.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        self._ports.checkpoint.prune_checkpoint_archives(protected_checkpoint_ids={checkpoint_id})
         return record
 
-    def _impl_has_in_flight_project_write(self) -> bool:
+    def has_in_flight_project_write(self) -> bool:
         """Return whether an approved project write is currently applying."""
 
-        with self._lock:
-            if self._in_flight_apply_writes:
+        with self._ports.state.shared_state_lock:
+            if self._ports.state.in_flight_apply_writes:
                 return True
             return any(
                 str(approval.get("status") or "").strip().casefold() == "applying"
-                for approval in self._approvals.values()
+                for approval in self._ports.state.approvals.values()
                 if isinstance(approval, dict)
             )
 
-    def _impl_try_acquire_background_project_read(self, token: str) -> bool:
+    def try_acquire_background_project_read(self, token: str) -> bool:
         normalized = str(token or "").strip()
         if not normalized:
             return False
-        with self._lock:
-            if self.has_in_flight_project_write() or self._background_project_read_leases:
+        with self._ports.state.shared_state_lock:
+            if self.has_in_flight_project_write() or self._ports.state.background_project_read_leases:
                 return False
-            self._background_project_read_leases.add(normalized)
+            self._ports.state.background_project_read_leases.add(normalized)
             return True
 
-    def _impl_release_background_project_read(self, token: str) -> bool:
+    def release_background_project_read(self, token: str) -> bool:
         normalized = str(token or "").strip()
         if not normalized:
             return False
-        with self._lock:
-            if normalized not in self._background_project_read_leases:
+        with self._ports.state.shared_state_lock:
+            if normalized not in self._ports.state.background_project_read_leases:
                 return False
-            self._background_project_read_leases.remove(normalized)
+            self._ports.state.background_project_read_leases.remove(normalized)
             return True
 
-    def _impl__apply_recovery_blocks_writes(self, recovery: dict[str, Any]) -> bool:
+    def _apply_recovery_blocks_writes(self, recovery: dict[str, Any]) -> bool:
         return str(recovery.get("status") or "") in APPLY_RECOVERY_ACTIVE_STATUSES
 
-    def _impl__start_apply_recovery(
+    def _start_apply_recovery(
         self,
         approval: dict[str, Any],
         arguments: dict[str, Any],
@@ -1568,16 +1666,16 @@ class AgentApprovalTransactionService:
             "checkpointId": str(checkpoint.get("id") or ""),
             "checkpoint": checkpoint,
             "argumentsSummary": summarize_params(arguments),
-            "incidentKind": self._classify_apply_recovery_incident(error_text, target_tool),
+            "incidentKind": self._ports.checkpoint.classify_apply_recovery_incident(error_text, target_tool),
             "restoreTool": "vrcforge_restore_checkpoint",
             "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
             "blockingWrites": True,
         }
-        saved = self._append_apply_recovery_entry(record)
-        self.append_audit({"event": "apply_recovery_started", "recovery": saved})
+        saved = self._ports.checkpoint.append_apply_recovery_entry(record)
+        self._ports.append_audit({"event": "apply_recovery_started", "recovery": saved})
         return saved
 
-    def _impl__finish_apply_recovery(
+    def _finish_apply_recovery(
         self,
         recovery: dict[str, Any],
         *,
@@ -1599,7 +1697,7 @@ class AgentApprovalTransactionService:
             "avatarPath": str(recovery.get("avatarPath") or ""),
             "checkpointId": str(recovery.get("checkpointId") or ""),
             "checkpoint": ensure_dict(recovery.get("checkpoint")),
-            "incidentKind": self._classify_apply_recovery_incident(text, str(recovery.get("targetTool") or "")),
+            "incidentKind": self._ports.checkpoint.classify_apply_recovery_incident(text, str(recovery.get("targetTool") or "")),
             "restoreTool": "vrcforge_restore_checkpoint",
             "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
             "blockingWrites": status in APPLY_RECOVERY_ACTIVE_STATUSES,
@@ -1610,11 +1708,11 @@ class AgentApprovalTransactionService:
             record["note"] = note
         if result_summary is not None:
             record["resultSummary"] = result_summary
-        saved = self._append_apply_recovery_entry(record)
-        self.append_audit({"event": "apply_recovery_updated", "recovery": saved})
+        saved = self._ports.checkpoint.append_apply_recovery_entry(record)
+        self._ports.append_audit({"event": "apply_recovery_updated", "recovery": saved})
         return saved
 
-    def _impl__resolve_apply_recoveries_for_checkpoint(
+    def _resolve_apply_recoveries_for_checkpoint(
         self,
         checkpoint_id: str,
         *,
@@ -1624,7 +1722,7 @@ class AgentApprovalTransactionService:
         if not checkpoint_id:
             return []
         resolved: list[dict[str, Any]] = []
-        for recovery in self._active_apply_recoveries():
+        for recovery in self._ports.checkpoint.active_apply_recoveries():
             if str(recovery.get("checkpointId") or "") != checkpoint_id:
                 continue
             resolved.append(
@@ -1637,12 +1735,12 @@ class AgentApprovalTransactionService:
             )
         return resolved
 
-    def _impl_visible_write_targets(
+    def visible_write_targets(
         self,
         config: AgentGatewayConfig | None = None,
         exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
     ) -> list[dict[str, Any]]:
-        config = config or self.ensure_config()
+        config = config or self._ports.ensure_config()
         exposure_layer = normalize_exposure_layer(exposure_layer)
         return [
             {
@@ -1652,12 +1750,12 @@ class AgentApprovalTransactionService:
                 "advanced": handler.advanced,
                 "rollbackPolicy": self._write_handler_rollback_policy(handler),
             }
-            for handler in self._write_handlers.values()
-            if self._write_handler_visible(handler, config, exposure_layer)
+            for handler in self._ports.state.write_handlers.values()
+            if self._ports.write_handler_visible(handler, config, exposure_layer)
             and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
         ]
 
-    def _impl__write_handler_rollback_policy(self, handler: AgentWriteHandler) -> dict[str, Any]:
+    def _write_handler_rollback_policy(self, handler: AgentWriteHandler) -> dict[str, Any]:
         if handler.name == "vrcforge_restore_checkpoint":
             return {
                 "schema": ROLLBACK_POLICY_SCHEMA,
@@ -1727,16 +1825,16 @@ class AgentApprovalTransactionService:
             "note": "Every Unity project write must be restorable through the approval-time checkpoint boundary.",
         }
 
-    def _impl__inject_user_constraints_for_apply(
+    def _inject_user_constraints_for_apply(
         self,
         params: dict[str, Any],
         snapshot: UserConstraintsSnapshot,
     ) -> dict[str, Any]:
         if not snapshot.content:
             return dict(params)
-        return self._with_user_constraints(params, snapshot, include_content=False, append_instruction=False)
+        return self._ports.with_user_constraints(params, snapshot, include_content=False, append_instruction=False)
 
-    def _impl__write_auto_manual_approval_reason(self, target_tool: str, arguments: dict[str, Any], preview: Any = None) -> str:
+    def _write_auto_manual_approval_reason(self, target_tool: str, arguments: dict[str, Any], preview: Any = None) -> str:
         target_lower = str(target_tool or "").lower()
         if target_lower == "vrcforge_export_vrm":
             return "VRM export requires manual confirmation of content rights in Auto Approve mode."
@@ -1776,7 +1874,7 @@ class AgentApprovalTransactionService:
                         return "Write requests that reference paths outside the selected project require manual approval in Auto Approve mode."
         return ""
 
-    def _impl__new_approval(
+    def _new_approval(
         self,
         agent_name: str,
         target_tool: str,
@@ -1791,9 +1889,9 @@ class AgentApprovalTransactionService:
         approved_execution_plan: dict[str, Any] | None = None,
         allow_future_eligible: bool = False,
     ) -> dict[str, Any]:
-        self._signal_background_activity("pending_approval")
+        self._ports.signal_background_activity("pending_approval")
         now = datetime.now(timezone.utc)
-        config = self.ensure_config()
+        config = self._ports.ensure_config()
         permission_context = self.permission_audit_context(config)
         approval = {
             "id": f"appr_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}",
@@ -1827,12 +1925,12 @@ class AgentApprovalTransactionService:
         if user_constraints and user_constraints.content:
             approval["userConstraintsApplied"] = True
             approval["userConstraintsPath"] = str(user_constraints.path)
-        with self._lock:
-            self._approvals[approval["id"]] = approval
-            self.append_audit({"event": "approval_requested", "approval": approval, **permission_context})
+        with self._ports.state.shared_state_lock:
+            self._ports.state.approvals[approval["id"]] = approval
+            self._ports.append_audit({"event": "approval_requested", "approval": approval, **permission_context})
         return redact_sensitive(dict(approval))
 
-    def _impl__approval_project_root(self, approval: dict[str, Any]) -> str:
+    def _approval_project_root(self, approval: dict[str, Any]) -> str:
         arguments = ensure_dict(approval.get("arguments"))
         for key in ("projectRoot", "project_root", "projectPath", "project_path"):
             value = str(arguments.get(key) or approval.get(key) or "").strip()
@@ -1840,7 +1938,7 @@ class AgentApprovalTransactionService:
                 return value
         return ""
 
-    def _impl__ensure_approval_scope(
+    def _ensure_approval_scope(
         self,
         approval: dict[str, Any],
         *,
@@ -1854,7 +1952,7 @@ class AgentApprovalTransactionService:
         if expected_key and candidate and normalize_filesystem_path(candidate) != expected_key:
             raise AgentGatewayError("Approval belongs to a different project.", status_code=409)
 
-    def _impl__set_approval_status(
+    def _set_approval_status(
         self,
         approval_id: str,
         status: str,
@@ -1862,9 +1960,9 @@ class AgentApprovalTransactionService:
         expected_project_root: str = "",
         global_only: bool = False,
     ) -> dict[str, Any]:
-        self._signal_background_activity("approval_transition")
-        with self._lock:
-            approval = self._approvals.get(approval_id)
+        self._ports.signal_background_activity("approval_transition")
+        with self._ports.state.shared_state_lock:
+            approval = self._ports.state.approvals.get(approval_id)
             if not approval:
                 approval = self._load_approval_from_audit(approval_id)
             if not approval:
@@ -1888,9 +1986,9 @@ class AgentApprovalTransactionService:
                 return {"ok": False, "approval": approval, "message": "Approval has expired."}
             approval["status"] = status
             approval[f"{status}At"] = utc_now_iso()
-            self._approvals[approval_id] = approval
+            self._ports.state.approvals[approval_id] = approval
             permission_context = self.permission_audit_context()
-            self.append_audit({"event": f"approval_{status}", "approval": approval, **permission_context})
+            self._ports.append_audit({"event": f"approval_{status}", "approval": approval, **permission_context})
             self._runtime_run_append(
                 {
                     "event": f"approval_{status}",
@@ -1911,7 +2009,7 @@ class AgentApprovalTransactionService:
                     payload["goalDelivery"] = denied
             return payload
 
-    def _impl_request_approval_revision(
+    def request_approval_revision(
         self,
         approval_id: str,
         *,
@@ -1920,9 +2018,9 @@ class AgentApprovalTransactionService:
         expected_project_root: str = "",
         global_only: bool = False,
     ) -> dict[str, Any]:
-        self._signal_background_activity("approval_transition")
-        with self._lock:
-            approval = self._approvals.get(approval_id)
+        self._ports.signal_background_activity("approval_transition")
+        with self._ports.state.shared_state_lock:
+            approval = self._ports.state.approvals.get(approval_id)
             if not approval:
                 approval = self._load_approval_from_audit(approval_id)
             if not approval:
@@ -1940,8 +2038,8 @@ class AgentApprovalTransactionService:
             approval["revisionRequestedAt"] = utc_now_iso()
             approval["revisionReason"] = reason.strip()
             approval["revisionNote"] = note.strip()
-            self._approvals[approval_id] = approval
-            self.append_audit({"event": "approval_revision_requested", "approval": approval})
+            self._ports.state.approvals[approval_id] = approval
+            self._ports.append_audit({"event": "approval_revision_requested", "approval": approval})
             self._runtime_run_append(
                 {
                     "event": "approval_revision_requested",
@@ -1961,21 +2059,21 @@ class AgentApprovalTransactionService:
                     payload["goalDelivery"] = denied
             return payload
 
-    def _impl__refresh_approval_expiry(self, approval: dict[str, Any]) -> dict[str, Any]:
+    def _refresh_approval_expiry(self, approval: dict[str, Any]) -> dict[str, Any]:
         if approval.get("status") != "pending":
             return approval
         expires_at = parse_iso_datetime(str(approval.get("expiresAt") or ""))
         if expires_at and expires_at < datetime.now(timezone.utc):
             approval["status"] = "expired"
-            self._approvals[str(approval.get("id"))] = approval
+            self._ports.state.approvals[str(approval.get("id"))] = approval
         return approval
 
-    def _impl__load_approval_from_audit(self, approval_id: str) -> dict[str, Any] | None:
+    def _load_approval_from_audit(self, approval_id: str) -> dict[str, Any] | None:
         return None
 
-    def _impl__reconcile_unrecoverable_linked_approval(self, approval_id: str) -> bool:
+    def _reconcile_unrecoverable_linked_approval(self, approval_id: str) -> bool:
         linked = self._goal.delivery_for_approval(approval_id)
         if linked is None:
             return False
-        self._goal.reconcile_missing_approvals(set(self._approvals))
+        self._goal.reconcile_missing_approvals(set(self._ports.state.approvals))
         return True

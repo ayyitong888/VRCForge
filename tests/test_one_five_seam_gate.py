@@ -172,8 +172,8 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         if group_id.startswith("dashboard.") and group.get("hostProxy")
     )
     assert dashboard_host_proxy_count == 0
-    assert len(groups["gateway.approval-transaction-host-proxy"]["facades"][0]["methods"]) == 41
-    assert len(groups["gateway.checkpoint-recovery-host-proxy"]["facades"][0]["methods"]) == 87
+    assert "gateway.approval-transaction-host-proxy" not in groups
+    assert "gateway.checkpoint-recovery-host-proxy" not in groups
     assert "gateway.skill-registry-host-proxy" not in groups
     assert "dashboard.know-yourself-root-facade" not in groups
     assert "dashboard.doctor-readiness-root-facade" not in groups

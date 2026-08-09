@@ -1270,7 +1270,7 @@ def test_dashboard_fastapi_preview_request_approval_and_apply_are_one_bound_chai
         tmp_path / "gateway" / "config.json",
         tmp_path / "gateway" / "audit",
     )
-    gateway.checkpoint_prepare_handler = lambda _root: {"ok": True}
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
     monkeypatch.setattr(dashboard_server, "AGENT_GATEWAY", gateway)
     dashboard_server.register_agent_gateway_tools()
     config = gateway.ensure_config()

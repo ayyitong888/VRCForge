@@ -10,9 +10,11 @@ import shutil
 import stat
 import zipfile
 import zlib
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Callable
 
 from agent_command_safety import (
     is_path_within,
@@ -60,29 +62,112 @@ class _LocalStateRestoreRecoveryError(RuntimeError):
         super().__init__(f"{message}; recovery data remains at: {rendered}")
 
 
+@dataclass(frozen=True, slots=True)
+class CheckpointApprovalRecoveryPorts:
+    apply_recovery_blocks_writes: Callable[[dict[str, Any]], bool]
+    create_pre_write_checkpoint: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any] | None]
+    finish_apply_recovery: Callable[..., dict[str, Any]]
+    resolve_apply_recoveries_for_checkpoint: Callable[..., list[dict[str, Any]]]
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointSkillsPort:
+    write_lock: AbstractContextManager[object]
+    user_skills_dir: Callable[[], Path]
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointRecoveryState:
+    checkpoint_storage_lock: AbstractContextManager[object]
+    skill_package_write_lock: AbstractContextManager[object]
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointRecoveryPorts:
+    state: CheckpointRecoveryState
+    approval: CheckpointApprovalRecoveryPorts
+    project_chat_checkpoint_lock: AbstractContextManager[object]
+    checkpoint_log_path: Callable[[], Path]
+    adjustment_checkpoint_log_path: Callable[[], Path]
+    apply_recovery_log_path: Callable[[], Path]
+    checkpoint_store_dir: Callable[[], Path]
+    default_checkpoint_store_dir: Callable[[], Path]
+    audit_dir: Callable[[], Path]
+    user_constraints_path: Callable[[], Path]
+    skills: CheckpointSkillsPort
+    ensure_config: Callable[[], AgentGatewayConfig]
+    save_config: Callable[[AgentGatewayConfig], None]
+    append_audit: Callable[[dict[str, Any]], None]
+    recent_audit_logs: Callable[..., list[dict[str, Any]]]
+    run_git: Callable[..., dict[str, Any]]
+    ensure_jsonl_append_boundary_locked: Callable[[Path], None]
+
+
 class AgentCheckpointRecoveryService:
     """Own checkpoint, recovery, and adjustment-timeline behavior.
 
-    The host remains authoritative for paths, locks, audit/config persistence,
-    Unity restore callbacks, and approval/write state. Attribute access is
-    intentionally late-bound so facade monkeypatches and handler replacement
-    remain visible after service construction. This service creates no process,
-    task, file handle, lock, or communication endpoint of its own.
+    The gateway supplies existing paths, locks, audit/config persistence, and
+    narrow approval callbacks through typed ports. This owner keeps the
+    project-chat lock binding and Unity restore hooks that belong to checkpoint
+    lifecycle. It creates no process, task, file handle, lock, or communication
+    endpoint of its own.
     """
 
-    __slots__ = ("_host",)
+    __slots__ = (
+        "_checkpoint_project_root_resolver",
+        "_checkpoint_restore_handler",
+        "_checkpoint_restore_prepare_handler",
+        "_ports",
+        "_project_chat_checkpoint_lock",
+    )
 
-    def __init__(self, host: Any) -> None:
-        self._host = host
+    def __init__(self, ports: CheckpointRecoveryPorts) -> None:
+        self._ports = ports
+        self._project_chat_checkpoint_lock = ports.project_chat_checkpoint_lock
+        self._checkpoint_project_root_resolver: Callable[[], str] | None = None
+        self._checkpoint_restore_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
+        self._checkpoint_restore_handler: Callable[[Path, dict[str, Any]], dict[str, Any]] | None = None
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._host, name)
+    @property
+    def project_chat_checkpoint_lock(self) -> AbstractContextManager[object]:
+        return self._project_chat_checkpoint_lock
 
-    def _impl_list_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        with self._checkpoint_storage_lock:
+    def bind_project_chat_checkpoint_lock(self, lock: AbstractContextManager[object]) -> None:
+        if lock is None or not hasattr(lock, "__enter__") or not hasattr(lock, "__exit__"):
+            raise ValueError("project chat checkpoint lock must be a context manager")
+        self._project_chat_checkpoint_lock = lock
+
+    @property
+    def checkpoint_project_root_resolver(self) -> Callable[[], str] | None:
+        return self._checkpoint_project_root_resolver
+
+    @checkpoint_project_root_resolver.setter
+    def checkpoint_project_root_resolver(self, callback: Callable[[], str] | None) -> None:
+        self._checkpoint_project_root_resolver = callback
+
+    @property
+    def checkpoint_restore_prepare_handler(self) -> Callable[[Path], dict[str, Any]] | None:
+        return self._checkpoint_restore_prepare_handler
+
+    @checkpoint_restore_prepare_handler.setter
+    def checkpoint_restore_prepare_handler(self, callback: Callable[[Path], dict[str, Any]] | None) -> None:
+        self._checkpoint_restore_prepare_handler = callback
+
+    @property
+    def checkpoint_restore_handler(self) -> Callable[[Path, dict[str, Any]], dict[str, Any]] | None:
+        return self._checkpoint_restore_handler
+
+    @checkpoint_restore_handler.setter
+    def checkpoint_restore_handler(
+        self, callback: Callable[[Path, dict[str, Any]], dict[str, Any]] | None
+    ) -> None:
+        self._checkpoint_restore_handler = callback
+
+    def list_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._ports.state.checkpoint_storage_lock:
             return self._list_checkpoints_locked(params)
 
-    def _impl_inspect_checkpoint_storage(self) -> dict[str, Any]:
+    def inspect_checkpoint_storage(self) -> dict[str, Any]:
         """Inspect checkpoint persistence without mutating it.
 
         Doctor uses this instead of ``list_checkpoints`` because the normal
@@ -91,12 +176,12 @@ class AgentCheckpointRecoveryService:
         in the local quarantine evidence, never in diagnostics/UI payloads.
         """
 
-        with self._checkpoint_storage_lock:
+        with self._ports.state.checkpoint_storage_lock:
             return self._inspect_checkpoint_storage_locked()
 
-    def _impl__inspect_checkpoint_storage_locked(self) -> dict[str, Any]:
-        store_dir = self.checkpoint_store_dir
-        log_path = self.checkpoint_log_path
+    def _inspect_checkpoint_storage_locked(self) -> dict[str, Any]:
+        store_dir = self._ports.checkpoint_store_dir()
+        log_path = self._ports.checkpoint_log_path()
         issues: list[str] = []
 
         try:
@@ -158,7 +243,7 @@ class AgentCheckpointRecoveryService:
             "fixable": not any(issue.startswith("unsafe_") or issue.startswith("unreadable_") for issue in issues),
         }
 
-    def _impl_repair_checkpoint_storage(self, *, expected_snapshot: str = "") -> dict[str, Any]:
+    def repair_checkpoint_storage(self, *, expected_snapshot: str = "") -> dict[str, Any]:
         """Repair app-owned checkpoint persistence under its consistency lock.
 
         Missing directories are recreated.  Malformed rows are copied to a
@@ -167,7 +252,7 @@ class AgentCheckpointRecoveryService:
         snapshot fails closed.
         """
 
-        with self._checkpoint_storage_lock:
+        with self._ports.state.checkpoint_storage_lock:
             before = self._inspect_checkpoint_storage_locked()
             if expected_snapshot and not hmac.compare_digest(str(before["snapshot"]), str(expected_snapshot)):
                 return {
@@ -191,13 +276,13 @@ class AgentCheckpointRecoveryService:
                 }
 
             changed = False
-            store_dir = self.checkpoint_store_dir
+            store_dir = self._ports.checkpoint_store_dir()
             if not store_dir.exists():
                 store_dir.mkdir(parents=True, exist_ok=False)
                 fsync_directory_best_effort(store_dir.parent)
                 changed = True
 
-            log_path = self.checkpoint_log_path
+            log_path = self._ports.checkpoint_log_path()
             raw = log_path.read_bytes() if log_path.exists() else b""
             valid_lines: list[bytes] = []
             invalid_lines: list[bytes] = []
@@ -220,7 +305,7 @@ class AgentCheckpointRecoveryService:
             if invalid_lines:
                 invalid_bytes = b"".join(invalid_lines)
                 quarantine_id = hashlib.sha256(invalid_bytes).hexdigest()[:16]
-                quarantine_dir = self.audit_dir / "quarantine"
+                quarantine_dir = self._ports.audit_dir() / "quarantine"
                 quarantine_dir.mkdir(parents=True, exist_ok=True)
                 quarantine_path = quarantine_dir / f"checkpoints.invalid.{quarantine_id}.jsonl"
                 if os.path.lexists(quarantine_path):
@@ -282,7 +367,7 @@ class AgentCheckpointRecoveryService:
                 "after": after,
             }
 
-    def _impl__list_checkpoints_locked(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _list_checkpoints_locked(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         limit = max(1, min(int(params.get("limit") or 50), 500))
         project_filter = str(params.get("project_root") or params.get("projectRoot") or "").strip()
@@ -293,12 +378,12 @@ class AgentCheckpointRecoveryService:
         entries = entries[:limit]
         return {"ok": True, "checkpoints": entries, "count": len(entries)}
 
-    def _impl_checkpoint_archive_usage(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
-        with self._checkpoint_storage_lock:
+    def checkpoint_archive_usage(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        with self._ports.state.checkpoint_storage_lock:
             return self._checkpoint_archive_usage_locked(config)
 
-    def _impl__checkpoint_archive_usage_locked(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
-        config = config or self.ensure_config()
+    def _checkpoint_archive_usage_locked(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
+        config = config or self._ports.ensure_config()
         archives = self._checkpoint_archive_files()
         total_bytes = sum(item["sizeBytes"] for item in archives)
         protected_ids = self._protected_checkpoint_archive_ids(include_recent=True)
@@ -318,8 +403,8 @@ class AgentCheckpointRecoveryService:
         return {
             "ok": True,
             "schema": "vrcforge.checkpoint_archive_storage.v2",
-            "directory": str(self.checkpoint_store_dir),
-            "defaultDirectory": str(self.default_checkpoint_store_dir),
+            "directory": str(self._ports.checkpoint_store_dir()),
+            "defaultDirectory": str(self._ports.default_checkpoint_store_dir()),
             "relocated": getattr(self, "_checkpoint_store_override", None) is not None,
             "sizeBytes": total_bytes,
             "sizeMb": round(total_bytes / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
@@ -329,7 +414,7 @@ class AgentCheckpointRecoveryService:
             "archives": items[:500],
         }
 
-    def _impl__checkpoint_archive_labels(self) -> dict[str, str]:
+    def _checkpoint_archive_labels(self) -> dict[str, str]:
         """checkpointId -> 简短标签，便于前端列表辨认存档来源。"""
         labels: dict[str, str] = {}
         for entry in self._read_checkpoint_entries(limit=1000):
@@ -346,11 +431,11 @@ class AgentCheckpointRecoveryService:
             labels[cid] = (f"{label} · {created}" if label and created else label or created)
         return labels
 
-    def _impl_delete_checkpoint_archives(self, checkpoint_ids: Any) -> dict[str, Any]:
-        with self._checkpoint_storage_lock:
+    def delete_checkpoint_archives(self, checkpoint_ids: Any) -> dict[str, Any]:
+        with self._ports.state.checkpoint_storage_lock:
             return self._delete_checkpoint_archives_locked(checkpoint_ids)
 
-    def _impl__delete_checkpoint_archives_locked(self, checkpoint_ids: Any) -> dict[str, Any]:
+    def _delete_checkpoint_archives_locked(self, checkpoint_ids: Any) -> dict[str, Any]:
         """删除用户在面板里勾选的存档；活跃恢复检查点强制保护，不会被删。"""
         requested = {
             str(cid).strip()
@@ -372,7 +457,7 @@ class AgentCheckpointRecoveryService:
             try:
                 path.unlink()
             except OSError as exc:
-                self.append_audit(
+                self._ports.append_audit(
                     {
                         "event": "checkpoint_archive_delete_failed",
                         "path": str(path),
@@ -389,7 +474,7 @@ class AgentCheckpointRecoveryService:
             )
             self._remove_empty_checkpoint_archive_parents(path.parent)
         if deleted:
-            self.append_audit(
+            self._ports.append_audit(
                 {
                     "event": "checkpoint_archive_deleted",
                     "deletedCount": len(deleted),
@@ -401,7 +486,7 @@ class AgentCheckpointRecoveryService:
         return {
             "ok": True,
             "schema": "vrcforge.checkpoint_archive_delete.v1",
-            "directory": str(self.checkpoint_store_dir),
+            "directory": str(self._ports.checkpoint_store_dir()),
             "requestedCount": len(requested),
             "deletedCount": len(deleted),
             "deletedBytes": sum(item["sizeBytes"] for item in deleted),
@@ -412,15 +497,15 @@ class AgentCheckpointRecoveryService:
             "archiveCount": usage["archiveCount"],
         }
 
-    def _impl_relocate_checkpoint_archives(self, target_directory: Any) -> dict[str, Any]:
-        with self._checkpoint_storage_lock:
+    def relocate_checkpoint_archives(self, target_directory: Any) -> dict[str, Any]:
+        with self._ports.state.checkpoint_storage_lock:
             return self._relocate_checkpoint_archives_locked(target_directory)
 
-    def _impl__relocate_checkpoint_archives_locked(self, target_directory: Any) -> dict[str, Any]:
+    def _relocate_checkpoint_archives_locked(self, target_directory: Any) -> dict[str, Any]:
         """把检查点存档目录迁到新位置：先复制 ZIP、改写 checkpoints.jsonl 中的
         archivePath、再切换配置、最后删除旧文件。任何一步崩溃都不会让回滚失效，
         因为旧目录在改写+切配置成功前始终保持可用。"""
-        config = self.ensure_config()
+        config = self._ports.ensure_config()
         raw = normalize_checkpoint_archive_dir(target_directory)
         if not raw:
             return {"ok": False, "code": "directory_required", "error": "checkpoint archive directory required"}
@@ -434,7 +519,7 @@ class AgentCheckpointRecoveryService:
         new_dir = Path(raw)
         if not new_dir.is_absolute():
             return {"ok": False, "code": "not_absolute", "error": "directory must be an absolute path"}
-        current_dir = self.checkpoint_store_dir
+        current_dir = self._ports.checkpoint_store_dir()
         try:
             current_resolved = current_dir.resolve()
         except OSError:
@@ -446,13 +531,13 @@ class AgentCheckpointRecoveryService:
         if new_resolved == current_resolved:
             # 目录没变，仅确保配置持久化。
             config.checkpoint_archive_dir = str(new_resolved)
-            self.save_config(config)
+            self._ports.save_config(config)
             usage = self.checkpoint_archive_usage(config)
             return {
                 "ok": True,
                 "schema": "vrcforge.checkpoint_archive_relocate.v1",
                 "unchanged": True,
-                "directory": str(self.checkpoint_store_dir),
+                "directory": str(self._ports.checkpoint_store_dir()),
                 "copiedCount": 0,
                 "rewrittenCount": 0,
                 "removedOldCount": 0,
@@ -486,7 +571,7 @@ class AgentCheckpointRecoveryService:
                     dst.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(src, dst)
                 except OSError as exc:
-                    self.append_audit(
+                    self._ports.append_audit(
                         {"event": "checkpoint_archive_relocate_copy_failed", "path": str(src), "error": str(exc)}
                     )
                     return {"ok": False, "code": "copy_failed", "error": f"{src}: {exc}"}
@@ -498,7 +583,7 @@ class AgentCheckpointRecoveryService:
 
         # 3) 切换配置 + 内存覆盖，从此 checkpoint_store_dir 指向新目录。
         config.checkpoint_archive_dir = str(new_resolved)
-        self.save_config(config)
+        self._ports.save_config(config)
 
         # 4) 复制与改写都成功后，再清理旧目录里的 ZIP（尽力而为）。
         removed_old = 0
@@ -516,7 +601,7 @@ class AgentCheckpointRecoveryService:
             except OSError:
                 pass
 
-        self.append_audit(
+        self._ports.append_audit(
             {
                 "event": "checkpoint_archive_relocated",
                 "from": str(current_resolved),
@@ -530,7 +615,7 @@ class AgentCheckpointRecoveryService:
         return {
             "ok": True,
             "schema": "vrcforge.checkpoint_archive_relocate.v1",
-            "directory": str(self.checkpoint_store_dir),
+            "directory": str(self._ports.checkpoint_store_dir()),
             "from": str(current_resolved),
             "to": str(new_resolved),
             "copiedCount": copied,
@@ -540,11 +625,11 @@ class AgentCheckpointRecoveryService:
             "archiveCount": usage["archiveCount"],
         }
 
-    def _impl__rewrite_checkpoint_archive_paths(self, id_to_new_path: dict[str, str]) -> int:
+    def _rewrite_checkpoint_archive_paths(self, id_to_new_path: dict[str, str]) -> int:
         """按 checkpointId 把 checkpoints.jsonl 里命中的 archivePath 改写成新路径。"""
         if not id_to_new_path:
             return 0
-        path = self.checkpoint_log_path
+        path = self._ports.checkpoint_log_path()
         if not path.exists():
             return 0
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -573,7 +658,7 @@ class AgentCheckpointRecoveryService:
             os.replace(tmp, path)
         return changed
 
-    def _impl__remove_old_relocate_parents(self, start: Path, root: Path) -> None:
+    def _remove_old_relocate_parents(self, start: Path, root: Path) -> None:
         current = start
         while True:
             try:
@@ -590,25 +675,25 @@ class AgentCheckpointRecoveryService:
                 break
             current = current.parent
 
-    def _impl_prune_checkpoint_archives(
+    def prune_checkpoint_archives(
         self,
         max_size_mb: int | None = None,
         *,
         protected_checkpoint_ids: set[str] | None = None,
     ) -> dict[str, Any]:
-        with self._checkpoint_storage_lock:
+        with self._ports.state.checkpoint_storage_lock:
             return self._prune_checkpoint_archives_locked(
                 max_size_mb,
                 protected_checkpoint_ids=protected_checkpoint_ids,
             )
 
-    def _impl__prune_checkpoint_archives_locked(
+    def _prune_checkpoint_archives_locked(
         self,
         max_size_mb: int | None = None,
         *,
         protected_checkpoint_ids: set[str] | None = None,
     ) -> dict[str, Any]:
-        config = self.ensure_config()
+        config = self._ports.ensure_config()
         normalized_max = normalize_checkpoint_archive_max_size_mb(
             config.checkpoint_archive_max_size_mb if max_size_mb is None else max_size_mb
         )
@@ -638,7 +723,7 @@ class AgentCheckpointRecoveryService:
             try:
                 path.unlink()
             except OSError as exc:
-                self.append_audit(
+                self._ports.append_audit(
                     {
                         "event": "checkpoint_archive_prune_failed",
                         "path": str(path),
@@ -653,7 +738,7 @@ class AgentCheckpointRecoveryService:
         summary = {
             "ok": True,
             "schema": "vrcforge.checkpoint_archive_prune.v1",
-            "directory": str(self.checkpoint_store_dir),
+            "directory": str(self._ports.checkpoint_store_dir()),
             "maxSizeMb": normalized_max,
             "limitEnabled": True,
             "initialBytes": total_bytes,
@@ -666,10 +751,10 @@ class AgentCheckpointRecoveryService:
             "deleted": deleted[:20],
         }
         if deleted:
-            self.append_audit({"event": "checkpoint_archives_pruned", **summary})
+            self._ports.append_audit({"event": "checkpoint_archives_pruned", **summary})
         return summary
 
-    def _impl_list_interrupted_apply_recoveries(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def list_interrupted_apply_recoveries(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         include_resolved = bool(params.get("includeResolved") or params.get("include_resolved"))
         limit = max(1, min(int(params.get("limit") or 50), 500))
@@ -682,7 +767,7 @@ class AgentCheckpointRecoveryService:
                 if normalize_filesystem_path(str(recovery.get("projectRoot") or "")) == normalized
             ]
         recoveries = recoveries[:limit]
-        active = [recovery for recovery in recoveries if self._apply_recovery_blocks_writes(recovery)]
+        active = [recovery for recovery in recoveries if self._ports.approval.apply_recovery_blocks_writes(recovery)]
         return {
             "ok": True,
             "schema": APPLY_RECOVERY_SCHEMA,
@@ -694,7 +779,7 @@ class AgentCheckpointRecoveryService:
             "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
         }
 
-    def _impl_preview_interrupted_apply_recovery(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def preview_interrupted_apply_recovery(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         recovery = self._select_apply_recovery(params, include_resolved=bool(params.get("includeResolved") or params.get("include_resolved")))
         if not recovery:
@@ -710,7 +795,7 @@ class AgentCheckpointRecoveryService:
             "schema": APPLY_RECOVERY_SCHEMA,
             "recovery": recovery,
             "checkpointPreview": checkpoint_preview,
-            "blockingWrites": self._apply_recovery_blocks_writes(recovery),
+            "blockingWrites": self._ports.approval.apply_recovery_blocks_writes(recovery),
             "restoreRequest": {
                 "targetTool": "vrcforge_restore_checkpoint",
                 "arguments": {
@@ -734,7 +819,7 @@ class AgentCheckpointRecoveryService:
         }
         return payload
 
-    def _impl_export_interrupted_apply_incident_bundle(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def export_interrupted_apply_incident_bundle(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         recovery = self._select_apply_recovery(params, include_resolved=True)
         if not recovery:
@@ -746,26 +831,26 @@ class AgentCheckpointRecoveryService:
             "generatedAt": generated_at,
             "recovery": recovery,
             "preview": preview,
-            "recentAuditLogs": self.recent_audit_logs(limit=80),
+            "recentAuditLogs": self._ports.recent_audit_logs(limit=80),
         }
-        bundle_dir = self.audit_dir / "incident-bundles"
+        bundle_dir = self._ports.audit_dir() / "incident-bundles"
         filename = f"{recovery.get('id') or 'recovery'}-{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
         bundle_path = bundle_dir / filename
         atomic_write_json(bundle_path, bundle)
-        self.append_audit({"event": "apply_recovery_incident_bundle_exported", "recoveryId": recovery.get("id"), "path": str(bundle_path)})
+        self._ports.append_audit({"event": "apply_recovery_incident_bundle_exported", "recoveryId": recovery.get("id"), "path": str(bundle_path)})
         return {"ok": True, "schema": bundle["schema"], "path": str(bundle_path), "bundle": bundle}
 
-    def _impl_resolve_interrupted_apply_recovery(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def resolve_interrupted_apply_recovery(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         if params.get("confirm_resolved") is not True and params.get("confirmResolved") is not True:
             return {"ok": False, "schema": APPLY_RECOVERY_SCHEMA, "error": "confirmResolved=true is required to resolve an interrupted apply recovery."}
         recovery = self._select_apply_recovery(params, include_resolved=True)
         if not recovery:
             return {"ok": False, "schema": APPLY_RECOVERY_SCHEMA, "error": "interrupted apply recovery was not found."}
-        if not self._apply_recovery_blocks_writes(recovery):
+        if not self._ports.approval.apply_recovery_blocks_writes(recovery):
             return {"ok": True, "schema": APPLY_RECOVERY_SCHEMA, "status": "already_resolved", "recovery": recovery}
         resolution_note = str(params.get("note") or params.get("reason") or "User confirmed the interrupted write was handled outside VRCForge.").strip()
-        resolved = self._finish_apply_recovery(
+        resolved = self._ports.approval.finish_apply_recovery(
             recovery,
             status="dismissed",
             resolution="manual_confirmed",
@@ -773,7 +858,7 @@ class AgentCheckpointRecoveryService:
         )
         return {"ok": True, "schema": APPLY_RECOVERY_SCHEMA, "status": "resolved", "recovery": resolved}
 
-    def _impl_list_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def list_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         limit = max(1, min(int(params.get("limit") or 50), 500))
         include_deleted = bool(params.get("includeDeleted") or params.get("include_deleted"))
@@ -796,13 +881,13 @@ class AgentCheckpointRecoveryService:
         entries = entries[:limit]
         return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoints": entries, "count": len(entries)}
 
-    def _impl_get_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any]:
+    def get_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any]:
         entry = self._load_adjustment_checkpoint(entry_id)
         if not entry:
             return {"ok": False, "error": "adjustment checkpoint was not found."}
         return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": entry}
 
-    def _impl_create_adjustment_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+    def create_adjustment_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
         kind = self._normalize_adjustment_checkpoint_kind(params.get("kind"), required=True)
         checkpoint = self._resolve_or_create_adjustment_base_checkpoint(params)
         if not checkpoint.get("ok"):
@@ -817,10 +902,10 @@ class AgentCheckpointRecoveryService:
             entries = [item for item in entries if item.get("id") != requested_id]
         entries.insert(0, entry)
         self._write_adjustment_checkpoint_entries(entries)
-        self.append_audit({"event": "adjustment_checkpoint_created", "checkpoint": entry})
+        self._ports.append_audit({"event": "adjustment_checkpoint_created", "checkpoint": entry})
         return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": entry, "baseCheckpoint": checkpoint}
 
-    def _impl_update_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    def update_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any]) -> dict[str, Any]:
         entries = self._read_adjustment_checkpoint_entries()
         for index, entry in enumerate(entries):
             if entry.get("id") != entry_id:
@@ -838,11 +923,11 @@ class AgentCheckpointRecoveryService:
             updated["updatedAt"] = utc_now_iso()
             entries[index] = updated
             self._write_adjustment_checkpoint_entries(entries)
-            self.append_audit({"event": "adjustment_checkpoint_updated", "checkpoint": updated})
+            self._ports.append_audit({"event": "adjustment_checkpoint_updated", "checkpoint": updated})
             return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": updated}
         return {"ok": False, "error": "adjustment checkpoint was not found."}
 
-    def _impl_delete_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def delete_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         hard_delete = bool(params.get("hardDelete") or params.get("hard_delete"))
         entries = self._read_adjustment_checkpoint_entries()
@@ -857,11 +942,11 @@ class AgentCheckpointRecoveryService:
                 deleted["updatedAt"] = deleted["deletedAt"]
                 entries[index] = deleted
             self._write_adjustment_checkpoint_entries(entries)
-            self.append_audit({"event": "adjustment_checkpoint_deleted", "checkpoint": deleted, "hardDelete": hard_delete})
+            self._ports.append_audit({"event": "adjustment_checkpoint_deleted", "checkpoint": deleted, "hardDelete": hard_delete})
             return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": deleted, "hardDelete": hard_delete}
         return {"ok": False, "error": "adjustment checkpoint was not found."}
 
-    def _impl_select_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def select_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         entries = self._read_adjustment_checkpoint_entries()
         selected_entry: dict[str, Any] | None = None
@@ -898,7 +983,7 @@ class AgentCheckpointRecoveryService:
             updated_entries.append(current)
         self._write_adjustment_checkpoint_entries(updated_entries)
         selected = self._load_adjustment_checkpoint(entry_id) or selected_entry
-        self.append_audit({"event": "adjustment_checkpoint_selected", "checkpoint": selected, "slot": slot})
+        self._ports.append_audit({"event": "adjustment_checkpoint_selected", "checkpoint": selected, "slot": slot})
         return {
             "ok": True,
             "schema": "vrcforge.adjustment_checkpoint_timeline.v1",
@@ -906,7 +991,7 @@ class AgentCheckpointRecoveryService:
             "selection": {"kind": kind, "compareGroup": compare_group, "slot": slot, "checkpointId": selected.get("checkpointId")},
         }
 
-    def _impl_overwrite_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    def overwrite_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any]) -> dict[str, Any]:
         entries = self._read_adjustment_checkpoint_entries()
         for index, entry in enumerate(entries):
             if entry.get("id") != entry_id:
@@ -933,11 +1018,11 @@ class AgentCheckpointRecoveryService:
             updated["overwriteCount"] = len(revisions)
             entries[index] = updated
             self._write_adjustment_checkpoint_entries(entries)
-            self.append_audit({"event": "adjustment_checkpoint_overwritten", "checkpoint": updated})
+            self._ports.append_audit({"event": "adjustment_checkpoint_overwritten", "checkpoint": updated})
             return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "checkpoint": updated, "baseCheckpoint": checkpoint}
         return {"ok": False, "error": "adjustment checkpoint was not found."}
 
-    def _impl_preview_restore_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any]:
+    def preview_restore_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any]:
         entry = self._load_adjustment_checkpoint(entry_id)
         if not entry or entry.get("deletedAt"):
             return {"ok": False, "error": "adjustment checkpoint was not found."}
@@ -945,7 +1030,7 @@ class AgentCheckpointRecoveryService:
         preview["adjustmentCheckpoint"] = entry
         return preview
 
-    def _impl_get_selected_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    def get_selected_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         kind_filter = self._normalize_adjustment_checkpoint_kind(params.get("kind"), required=False)
         compare_group = str(params.get("compareGroup") or params.get("compare_group") or "").strip()
@@ -964,17 +1049,17 @@ class AgentCheckpointRecoveryService:
                 selections[f"{key_base}:{slot.upper()}"] = entry
         return {"ok": True, "schema": "vrcforge.adjustment_checkpoint_timeline.v1", "selections": selections, "count": len(selections)}
 
-    def _impl__normalize_adjustment_selection_slot(self, value: Any) -> str:
+    def _normalize_adjustment_selection_slot(self, value: Any) -> str:
         slot = str(value or "current").strip().upper()
         if slot in {"A", "B", "CURRENT"}:
             return slot
         raise AgentGatewayError("selection slot must be A, B, or current.", status_code=400)
 
-    def _impl_preview_restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
-        with self._checkpoint_storage_lock:
+    def preview_restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._ports.state.checkpoint_storage_lock:
             return self._preview_restore_checkpoint_locked(params)
 
-    def _impl__preview_restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _preview_restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
         if not checkpoint:
             return {"ok": False, "error": "checkpoint_id was not found."}
@@ -990,8 +1075,8 @@ class AgentCheckpointRecoveryService:
         git_root = Path(str(checkpoint["gitRoot"]))
         ref = str(checkpoint["checkpointRef"])
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
-        diff = self._run_git(git_root, ["diff", "--name-status", ref, "--", *pathspecs])
-        status = self._run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
+        diff = self._ports.run_git(git_root, ["diff", "--name-status", ref, "--", *pathspecs])
+        status = self._ports.run_git(git_root, ["status", "--porcelain", "--", *pathspecs])
         payload = {
             "ok": diff["ok"] and status["ok"],
             "checkpoint": checkpoint,
@@ -1002,11 +1087,11 @@ class AgentCheckpointRecoveryService:
         payload["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(checkpoint, phase="preview")
         return payload
 
-    def _impl_restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
-        with self._checkpoint_storage_lock:
+    def restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+        with self._ports.state.checkpoint_storage_lock:
             return self._restore_checkpoint_locked(params)
 
-    def _impl__restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
         checkpoint = self._load_checkpoint(str(params.get("checkpoint_id") or params.get("checkpointId") or "").strip())
         if not checkpoint:
             return {"ok": False, "error": "checkpoint_id was not found."}
@@ -1018,8 +1103,8 @@ class AgentCheckpointRecoveryService:
         local_state_restore = checkpoint.get("strategy") in {"local_state_archive", "project_chat_archive"}
         project_root = Path(str(checkpoint.get("projectRoot") or ""))
         restore_prepare: dict[str, Any] = {}
-        if not local_state_restore and self.checkpoint_restore_prepare_handler is not None:
-            if self.checkpoint_restore_handler is None:
+        if not local_state_restore and self._checkpoint_restore_prepare_handler is not None:
+            if self._checkpoint_restore_handler is None:
                 return {
                     "ok": False,
                     "checkpoint": checkpoint,
@@ -1028,7 +1113,7 @@ class AgentCheckpointRecoveryService:
                 }
             try:
                 restore_prepare = ensure_dict(
-                    self.checkpoint_restore_prepare_handler(project_root)
+                    self._checkpoint_restore_prepare_handler(project_root)
                 )
             except Exception as exc:  # noqa: BLE001 - fail before touching project files.
                 restore_prepare = {"ok": False, "error": str(exc)}
@@ -1043,7 +1128,7 @@ class AgentCheckpointRecoveryService:
                         or "Unity did not close restored scenes before file recovery."
                     ),
                 }
-                self.append_audit({"event": "checkpoint_restore_prepare_failed", **payload})
+                self._ports.append_audit({"event": "checkpoint_restore_prepare_failed", **payload})
                 return payload
         if local_state_restore:
             payload = (
@@ -1064,7 +1149,7 @@ class AgentCheckpointRecoveryService:
             git_root = Path(str(checkpoint["gitRoot"]))
             ref = str(checkpoint["checkpointRef"])
             pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
-            restore = self._run_git(git_root, ["restore", "--source", ref, "--staged", "--worktree", "--", *pathspecs], timeout_seconds=120)
+            restore = self._ports.run_git(git_root, ["restore", "--source", ref, "--staged", "--worktree", "--", *pathspecs], timeout_seconds=120)
             if not restore["ok"]:
                 payload = {
                     "ok": False,
@@ -1074,7 +1159,7 @@ class AgentCheckpointRecoveryService:
                     "stderr": restore["stderr"],
                 }
             else:
-                clean = self._run_git(git_root, ["clean", "-fd", "--", *pathspecs], timeout_seconds=120)
+                clean = self._ports.run_git(git_root, ["clean", "-fd", "--", *pathspecs], timeout_seconds=120)
                 payload = {
                     "ok": clean["ok"],
                     "checkpoint": checkpoint,
@@ -1092,13 +1177,13 @@ class AgentCheckpointRecoveryService:
                 payload["unityCacheCleanupWarning"] = "; ".join(ensure_string_list(cache_cleanup.get("errors")))
         should_reload_unity = bool(
             not local_state_restore
-            and self.checkpoint_restore_handler is not None
+            and self._checkpoint_restore_handler is not None
             and (payload.get("ok") or restore_prepare.get("ok"))
         )
         if should_reload_unity:
             try:
                 reload_result = ensure_dict(
-                    self.checkpoint_restore_handler(project_root, restore_prepare)
+                    self._checkpoint_restore_handler(project_root, restore_prepare)
                 )
             except Exception as exc:  # noqa: BLE001
                 reload_result = {"ok": False, "error": str(exc)}
@@ -1128,27 +1213,27 @@ class AgentCheckpointRecoveryService:
                 phase="restore",
                 restore_payload=payload,
             )
-            resolved_recoveries = self._resolve_apply_recoveries_for_checkpoint(
+            resolved_recoveries = self._ports.approval.resolve_apply_recoveries_for_checkpoint(
                 str(checkpoint.get("id") or ""),
                 resolution="checkpoint_restored",
                 restore_payload=payload,
             )
             if resolved_recoveries:
                 payload["resolvedApplyRecoveries"] = resolved_recoveries
-        self.append_audit({"event": "checkpoint_restored", **payload})
+        self._ports.append_audit({"event": "checkpoint_restored", **payload})
         return payload
 
-    def _impl__create_project_chat_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    def _create_project_chat_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
         """Archive only the project-owned chat store, never the whole hidden directory."""
 
         with self._project_chat_checkpoint_lock:
             return self._create_project_chat_checkpoint_locked(project_root, record)
 
-    def _impl__create_project_chat_checkpoint_locked(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    def _create_project_chat_checkpoint_locked(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
         """Create a project-chat archive while holding the host writer lock."""
 
         checkpoint_id = str(record["id"])
-        archive_dir = self.checkpoint_store_dir / self._checkpoint_project_key(project_root)
+        archive_dir = self._ports.checkpoint_store_dir() / self._checkpoint_project_key(project_root)
         archive_path = archive_dir / f"{checkpoint_id}.zip"
         temp_path = archive_path.with_suffix(".zip.tmp")
         source = project_root / Path(*PurePosixPath(PROJECT_CHAT_CHECKPOINT_MEMBER).parts)
@@ -1212,14 +1297,14 @@ class AgentCheckpointRecoveryService:
         )
         record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
         self._append_checkpoint(record)
-        self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        self._ports.append_audit({"event": "checkpoint_created", "checkpoint": record})
         self.prune_checkpoint_archives(protected_checkpoint_ids={checkpoint_id})
         return record
 
-    def _impl__create_archive_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
+    def _create_archive_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
         checkpoint_id = str(record["id"])
         project_key = self._checkpoint_project_key(project_root)
-        archive_dir = self.checkpoint_store_dir / project_key
+        archive_dir = self._ports.checkpoint_store_dir() / project_key
         archive_path = archive_dir / f"{checkpoint_id}.zip"
         temp_path = archive_path.with_suffix(".zip.tmp")
         pathspecs = [name for name in ("Assets", "Packages", "ProjectSettings") if (project_root / name).is_dir()]
@@ -1275,17 +1360,17 @@ class AgentCheckpointRecoveryService:
         )
         record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
         self._append_checkpoint(record)
-        self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        self._ports.append_audit({"event": "checkpoint_created", "checkpoint": record})
         self.prune_checkpoint_archives(protected_checkpoint_ids={checkpoint_id})
         return record
 
-    def _impl__create_local_state_checkpoint(self, record: dict[str, Any]) -> dict[str, Any]:
-        with self._skill_package_write_lock, self.skills.write_lock:
+    def _create_local_state_checkpoint(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self._ports.state.skill_package_write_lock, self._ports.skills.write_lock:
             return self._create_local_state_checkpoint_locked(record)
 
     def _create_local_state_checkpoint_locked(self, record: dict[str, Any]) -> dict[str, Any]:
         checkpoint_id = str(record["id"])
-        archive_dir = self.checkpoint_store_dir / "local-state"
+        archive_dir = self._ports.checkpoint_store_dir() / "local-state"
         archive_path = archive_dir / f"{checkpoint_id}.zip"
         temp_path = archive_path.with_suffix(".zip.tmp")
         roots = self._local_state_checkpoint_roots()
@@ -1368,13 +1453,13 @@ class AgentCheckpointRecoveryService:
         )
         record["rollbackCoverageAudit"] = self._build_checkpoint_rollback_coverage_audit(record, phase="checkpoint")
         self._append_checkpoint(record)
-        self.append_audit({"event": "checkpoint_created", "checkpoint": record})
+        self._ports.append_audit({"event": "checkpoint_created", "checkpoint": record})
         return record
 
-    def _impl__checkpoint_project_key(self, project_root: Path) -> str:
+    def _checkpoint_project_key(self, project_root: Path) -> str:
         return hashlib.sha256(normalize_filesystem_path(str(project_root)).encode("utf-8")).hexdigest()[:16]
 
-    def _impl__resolve_checkpoint_archive_path(self, checkpoint: dict[str, Any], expected_strategy: str) -> Path:
+    def _resolve_checkpoint_archive_path(self, checkpoint: dict[str, Any], expected_strategy: str) -> Path:
         strategy = str(checkpoint.get("strategy") or "")
         if strategy != expected_strategy:
             raise ValueError("Checkpoint strategy does not match archive type.")
@@ -1386,7 +1471,7 @@ class AgentCheckpointRecoveryService:
             raise ValueError("Checkpoint archive path is missing.")
 
         archive_path = Path(raw_archive).resolve()
-        store_root = self.checkpoint_store_dir.resolve()
+        store_root = self._ports.checkpoint_store_dir().resolve()
         if not is_path_within(archive_path, store_root):
             raise ValueError("Checkpoint archive is outside configured storage.")
         if archive_path.name != f"{checkpoint_id}.zip":
@@ -1405,7 +1490,7 @@ class AgentCheckpointRecoveryService:
                 raise ValueError("Local state archive is outside its managed storage folder.")
         return archive_path
 
-    def _impl__normalize_project_archive_member(self, name: str, allowed_roots: set[str]) -> str:
+    def _normalize_project_archive_member(self, name: str, allowed_roots: set[str]) -> str:
         text = str(name or "").replace("\\", "/")
         member = PurePosixPath(text)
         parts = member.parts
@@ -1420,7 +1505,7 @@ class AgentCheckpointRecoveryService:
             raise ValueError(f"Unsafe archive member: {name}")
         return member.as_posix()
 
-    def _impl__project_chat_checkpoint_source(self, checkpoint: dict[str, Any]) -> Path:
+    def _project_chat_checkpoint_source(self, checkpoint: dict[str, Any]) -> Path:
         project_root = Path(str(checkpoint.get("projectRoot") or "")).resolve()
         hidden_root = project_root / ".vrcforge"
         raw_source = hidden_root / "chat-transcripts.json"
@@ -1433,7 +1518,7 @@ class AgentCheckpointRecoveryService:
             raise ValueError("Project chat checkpoint target is unsafe.")
         return source
 
-    def _impl__read_project_chat_checkpoint_bytes(self, checkpoint: dict[str, Any]) -> bytes | None:
+    def _read_project_chat_checkpoint_bytes(self, checkpoint: dict[str, Any]) -> bytes | None:
         archive_path = self._resolve_checkpoint_archive_path(checkpoint, "project_chat_archive")
         expected_exists = checkpoint.get("sourceExisted") is True
         with zipfile.ZipFile(archive_path, "r") as archive:
@@ -1451,11 +1536,11 @@ class AgentCheckpointRecoveryService:
             raise ValueError("Project chat checkpoint digest verification failed.")
         return data
 
-    def _impl__preview_project_chat_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _preview_project_chat_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         with self._project_chat_checkpoint_lock:
             return self._preview_project_chat_checkpoint_locked(checkpoint)
 
-    def _impl__preview_project_chat_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _preview_project_chat_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         try:
             source = self._project_chat_checkpoint_source(checkpoint)
             archived = self._read_project_chat_checkpoint_bytes(checkpoint)
@@ -1474,11 +1559,11 @@ class AgentCheckpointRecoveryService:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
 
-    def _impl__restore_project_chat_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _restore_project_chat_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         with self._project_chat_checkpoint_lock:
             return self._restore_project_chat_checkpoint_locked(checkpoint)
 
-    def _impl__restore_project_chat_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _restore_project_chat_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         try:
             source = self._project_chat_checkpoint_source(checkpoint)
             archived = self._read_project_chat_checkpoint_bytes(checkpoint)
@@ -1520,7 +1605,7 @@ class AgentCheckpointRecoveryService:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": f"Project chat restore failed: {exc}"}
 
-    def _impl__preview_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _preview_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         project_root = Path(str(checkpoint["projectRoot"])).resolve()
         archive_path = self._resolve_checkpoint_archive_path(checkpoint, "archive")
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
@@ -1563,8 +1648,8 @@ class AgentCheckpointRecoveryService:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
 
-    def _impl__preview_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        with self._skill_package_write_lock, self.skills.write_lock:
+    def _preview_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        with self._ports.state.skill_package_write_lock, self._ports.skills.write_lock:
             return self._preview_local_state_checkpoint_locked(checkpoint)
 
     def _preview_local_state_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -1595,7 +1680,7 @@ class AgentCheckpointRecoveryService:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
 
-    def _impl__restore_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _restore_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         project_root = Path(str(checkpoint["projectRoot"])).resolve()
         archive_path = self._resolve_checkpoint_archive_path(checkpoint, "archive")
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
@@ -1669,12 +1754,12 @@ class AgentCheckpointRecoveryService:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": f"Archive restore failed: {exc}"}
 
-    def _impl__restore_local_state_checkpoint(
+    def _restore_local_state_checkpoint(
         self,
         checkpoint: dict[str, Any],
         expected_current_state_digest: str = "",
     ) -> dict[str, Any]:
-        with self._skill_package_write_lock, self.skills.write_lock:
+        with self._ports.state.skill_package_write_lock, self._ports.skills.write_lock:
             return self._restore_local_state_checkpoint_locked(
                 checkpoint,
                 expected_current_state_digest=expected_current_state_digest,
@@ -2078,7 +2163,7 @@ class AgentCheckpointRecoveryService:
                     state_roots,
                 )
                 current = self._local_state_archive_contents()
-                app_state_root = self.user_constraints_path.parent.resolve()
+                app_state_root = self._ports.user_constraints_path().parent.resolve()
                 for scope, root in roots.items():
                     if os.path.lexists(root) and (_path_is_link_like(root) or not root.is_dir()):
                         raise ValueError(f"Local state restore root is not a regular directory: {root}")
@@ -2121,7 +2206,7 @@ class AgentCheckpointRecoveryService:
                 failure["recoveryPaths"] = [str(path) for path in recovery_paths]
             return failure
 
-    def _impl__build_checkpoint_rollback_coverage_audit(
+    def _build_checkpoint_rollback_coverage_audit(
         self,
         checkpoint: dict[str, Any],
         phase: str,
@@ -2231,14 +2316,14 @@ class AgentCheckpointRecoveryService:
 
         reload_result = ensure_dict(restore_payload.get("unityReload"))
         if phase == "restore":
-            if not self.checkpoint_restore_handler:
+            if not self._checkpoint_restore_handler:
                 reload_status = "missing"
             elif reload_result.get("ok"):
                 reload_status = "passed"
             else:
                 reload_status = "warning"
         else:
-            reload_status = "planned" if self.checkpoint_restore_handler else "missing"
+            reload_status = "planned" if self._checkpoint_restore_handler else "missing"
         add_check(
             "unity_reload_after_restore",
             "Unity reload after restore",
@@ -2298,7 +2383,7 @@ class AgentCheckpointRecoveryService:
             ],
         }
 
-    def _impl__build_local_state_rollback_coverage_audit(
+    def _build_local_state_rollback_coverage_audit(
         self,
         checkpoint: dict[str, Any],
         phase: str,
@@ -2361,7 +2446,7 @@ class AgentCheckpointRecoveryService:
             ],
         }
 
-    def _impl__build_project_chat_rollback_coverage_audit(
+    def _build_project_chat_rollback_coverage_audit(
         self,
         checkpoint: dict[str, Any],
         phase: str,
@@ -2415,7 +2500,7 @@ class AgentCheckpointRecoveryService:
             ],
         }
 
-    def _impl__checkpoint_framework_package_snapshot(self, project_root: Path | None) -> dict[str, Any]:
+    def _checkpoint_framework_package_snapshot(self, project_root: Path | None) -> dict[str, Any]:
         packages: dict[str, Any] = {
             key: {
                 "label": info["label"],
@@ -2458,7 +2543,7 @@ class AgentCheckpointRecoveryService:
             "packages": packages,
         }
 
-    def _impl__read_package_dependency_file(self, path: Path) -> tuple[dict[str, Any], str]:
+    def _read_package_dependency_file(self, path: Path) -> tuple[dict[str, Any], str]:
         if not path.is_file():
             return {}, ""
         try:
@@ -2476,21 +2561,21 @@ class AgentCheckpointRecoveryService:
                 result[str(key)] = value
         return result, ""
 
-    def _impl__stored_checkpoint_framework_package_snapshot(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _stored_checkpoint_framework_package_snapshot(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         audit = ensure_dict(checkpoint.get("rollbackCoverageAudit"))
         for item in audit.get("checks") or []:
             if isinstance(item, dict) and item.get("id") == "packages_manifest":
                 return ensure_dict(item.get("frameworkPackages"))
         return {}
 
-    def _impl__local_state_checkpoint_roots(self) -> dict[str, Path]:
-        app_state_root = self.user_constraints_path.parent
+    def _local_state_checkpoint_roots(self) -> dict[str, Path]:
+        app_state_root = self._ports.user_constraints_path().parent
         return {
             "skill-packages": app_state_root / "skill-packages",
-            "skills": self.skills.user_skills_dir,
+            "skills": self._ports.skills.user_skills_dir(),
         }
 
-    def _impl__local_state_archive_contents(self) -> dict[str, tuple[int, int]]:
+    def _local_state_archive_contents(self) -> dict[str, tuple[int, int]]:
         result: dict[str, tuple[int, int]] = {}
         for scope, root in self._local_state_checkpoint_roots().items():
             if os.path.lexists(root) and (_path_is_link_like(root) or not root.is_dir()):
@@ -2599,7 +2684,7 @@ class AgentCheckpointRecoveryService:
             ).encode("utf-8")
         ).hexdigest()
 
-    def _impl__validate_local_state_archive_member(self, name: str) -> None:
+    def _validate_local_state_archive_member(self, name: str) -> None:
         text = str(name or "").replace("\\", "/")
         if text.endswith("/"):
             text = text[:-1]
@@ -2619,7 +2704,7 @@ class AgentCheckpointRecoveryService:
         ):
             raise ValueError(f"Unsafe local state archive member: {name}")
 
-    def _impl__cleanup_checkpoint_restore_unity_caches(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _cleanup_checkpoint_restore_unity_caches(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         if not self._checkpoint_touches_packages(checkpoint):
             return {"ok": True, "skipped": True, "reason": "checkpoint does not restore Packages", "deleted": [], "errors": []}
         project_root = Path(str(checkpoint.get("projectRoot") or "")).resolve()
@@ -2650,17 +2735,17 @@ class AgentCheckpointRecoveryService:
             "errors": errors,
         }
 
-    def _impl__checkpoint_touches_packages(self, checkpoint: dict[str, Any]) -> bool:
+    def _checkpoint_touches_packages(self, checkpoint: dict[str, Any]) -> bool:
         return self._checkpoint_touches_top_level(checkpoint, "Packages")
 
-    def _impl__checkpoint_touches_top_level(self, checkpoint: dict[str, Any], top_level: str) -> bool:
+    def _checkpoint_touches_top_level(self, checkpoint: dict[str, Any], top_level: str) -> bool:
         for pathspec in ensure_string_list(checkpoint.get("pathspecs")):
             parts = Path(str(pathspec).replace("\\", "/")).parts
             if top_level in parts:
                 return True
         return False
 
-    def _impl__resolve_checkpoint_project_root(self, arguments: dict[str, Any]) -> Path | None:
+    def _resolve_checkpoint_project_root(self, arguments: dict[str, Any]) -> Path | None:
         for key in (
             "project_root",
             "projectRoot",
@@ -2680,13 +2765,13 @@ class AgentCheckpointRecoveryService:
             checkpoint = self._load_checkpoint(checkpoint_id)
             if checkpoint and checkpoint.get("projectRoot"):
                 return Path(str(checkpoint["projectRoot"]))
-        if self.checkpoint_project_root_resolver is not None:
-            value = str(self.checkpoint_project_root_resolver() or "").strip()
+        if self._checkpoint_project_root_resolver is not None:
+            value = str(self._checkpoint_project_root_resolver() or "").strip()
             if value:
                 return Path(value)
         return None
 
-    def _impl__checkpoint_available(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _checkpoint_available(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         if not checkpoint.get("ok"):
             return {"ok": False, "checkpoint": checkpoint, "error": str(checkpoint.get("error") or "Checkpoint is unavailable.")}
         if checkpoint.get("strategy") == "local_state_archive":
@@ -2741,22 +2826,22 @@ class AgentCheckpointRecoveryService:
         pathspecs = ensure_string_list(checkpoint.get("pathspecs"))
         if not git_root.exists() or not ref or not pathspecs:
             return {"ok": False, "checkpoint": checkpoint, "error": "Checkpoint metadata is incomplete."}
-        verify = self._run_git(git_root, ["cat-file", "-e", f"{ref}^{{commit}}"])
+        verify = self._ports.run_git(git_root, ["cat-file", "-e", f"{ref}^{{commit}}"])
         if not verify["ok"]:
             return {"ok": False, "checkpoint": checkpoint, "error": "Checkpoint git ref is no longer available."}
         return {"ok": True}
 
-    def _impl__append_checkpoint(self, record: dict[str, Any]) -> None:
-        with self._checkpoint_storage_lock:
-            self.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._ensure_jsonl_append_boundary_locked(self.checkpoint_log_path)
-            with self.checkpoint_log_path.open("a", encoding="utf-8") as handle:
+    def _append_checkpoint(self, record: dict[str, Any]) -> None:
+        with self._ports.state.checkpoint_storage_lock:
+            self._ports.checkpoint_log_path().parent.mkdir(parents=True, exist_ok=True)
+            self._ports.ensure_jsonl_append_boundary_locked(self._ports.checkpoint_log_path())
+            with self._ports.checkpoint_log_path().open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
                 flush_and_fsync(handle)
         self._maybe_record_adjustment_checkpoint(record)
 
-    def _impl__checkpoint_archive_files(self) -> list[dict[str, Any]]:
-        root = self.checkpoint_store_dir
+    def _checkpoint_archive_files(self) -> list[dict[str, Any]]:
+        root = self._ports.checkpoint_store_dir()
         if not root.is_dir():
             return []
         archives: list[dict[str, Any]] = []
@@ -2777,7 +2862,7 @@ class AgentCheckpointRecoveryService:
             )
         return archives
 
-    def _impl__protected_checkpoint_archive_ids(
+    def _protected_checkpoint_archive_ids(
         self,
         *,
         include_recent: bool = False,
@@ -2796,8 +2881,8 @@ class AgentCheckpointRecoveryService:
                 protected.add(str(archive["checkpointId"]))
         return protected
 
-    def _impl__remove_empty_checkpoint_archive_parents(self, start: Path) -> None:
-        root = self.checkpoint_store_dir.resolve()
+    def _remove_empty_checkpoint_archive_parents(self, start: Path) -> None:
+        root = self._ports.checkpoint_store_dir().resolve()
         current = start
         while True:
             try:
@@ -2812,12 +2897,12 @@ class AgentCheckpointRecoveryService:
                 break
             current = current.parent
 
-    def _impl__read_checkpoint_entries(self, limit: int = 500) -> list[dict[str, Any]]:
-        if not self.checkpoint_log_path.exists():
+    def _read_checkpoint_entries(self, limit: int = 500) -> list[dict[str, Any]]:
+        if not self._ports.checkpoint_log_path().exists():
             return []
         entries: list[dict[str, Any]] = []
         try:
-            lines = _split_lf_jsonl_lines(self.checkpoint_log_path.read_bytes())
+            lines = _split_lf_jsonl_lines(self._ports.checkpoint_log_path().read_bytes())
         except OSError:
             return []
         for index, raw_line in enumerate(lines):
@@ -2830,7 +2915,7 @@ class AgentCheckpointRecoveryService:
                 entries.append(payload)
         return list(reversed(entries[-max(1, min(limit, 1000)) :]))
 
-    def _impl__load_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
+    def _load_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
         if not checkpoint_id:
             return None
         for entry in self._read_checkpoint_entries(limit=1000):
@@ -2838,11 +2923,11 @@ class AgentCheckpointRecoveryService:
                 return entry
         return None
 
-    def _impl__read_apply_recovery_entries(self, limit: int = 1000) -> list[dict[str, Any]]:
-        if not self.apply_recovery_log_path.exists():
+    def _read_apply_recovery_entries(self, limit: int = 1000) -> list[dict[str, Any]]:
+        if not self._ports.apply_recovery_log_path().exists():
             return []
         entries: list[dict[str, Any]] = []
-        for line in self.apply_recovery_log_path.read_text(encoding="utf-8").splitlines()[-max(1, limit):]:
+        for line in self._ports.apply_recovery_log_path().read_text(encoding="utf-8").splitlines()[-max(1, limit):]:
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
@@ -2851,7 +2936,7 @@ class AgentCheckpointRecoveryService:
                 entries.append(payload)
         return entries
 
-    def _impl__append_apply_recovery_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
+    def _append_apply_recovery_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
         now = utc_now_iso()
         payload = redact_sensitive(
             {
@@ -2862,13 +2947,13 @@ class AgentCheckpointRecoveryService:
         )
         if not payload.get("createdAt"):
             payload["createdAt"] = now
-        self.apply_recovery_log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.apply_recovery_log_path.open("a", encoding="utf-8") as handle:
+        self._ports.apply_recovery_log_path().parent.mkdir(parents=True, exist_ok=True)
+        with self._ports.apply_recovery_log_path().open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
             flush_and_fsync(handle)
         return payload
 
-    def _impl__coalesced_apply_recoveries(self, *, include_resolved: bool = False) -> list[dict[str, Any]]:
+    def _coalesced_apply_recoveries(self, *, include_resolved: bool = False) -> list[dict[str, Any]]:
         states: dict[str, dict[str, Any]] = {}
         for entry in self._read_apply_recovery_entries(limit=2000):
             recovery_id = str(entry.get("id") or "").strip()
@@ -2876,21 +2961,21 @@ class AgentCheckpointRecoveryService:
                 continue
             previous = states.get(recovery_id, {})
             merged = {**previous, **entry}
-            merged["blockingWrites"] = self._apply_recovery_blocks_writes(merged)
+            merged["blockingWrites"] = self._ports.approval.apply_recovery_blocks_writes(merged)
             states[recovery_id] = merged
         recoveries = list(states.values())
         if not include_resolved:
-            recoveries = [recovery for recovery in recoveries if self._apply_recovery_blocks_writes(recovery)]
+            recoveries = [recovery for recovery in recoveries if self._ports.approval.apply_recovery_blocks_writes(recovery)]
         return sorted(
             recoveries,
             key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""),
             reverse=True,
         )
 
-    def _impl__active_apply_recoveries(self) -> list[dict[str, Any]]:
+    def _active_apply_recoveries(self) -> list[dict[str, Any]]:
         return self._coalesced_apply_recoveries(include_resolved=False)
 
-    def _impl__select_apply_recovery(self, params: dict[str, Any], *, include_resolved: bool = False) -> dict[str, Any] | None:
+    def _select_apply_recovery(self, params: dict[str, Any], *, include_resolved: bool = False) -> dict[str, Any] | None:
         requested_id = str(
             params.get("recovery_id")
             or params.get("recoveryId")
@@ -2911,7 +2996,7 @@ class AgentCheckpointRecoveryService:
             return None
         return recoveries[0] if recoveries else None
 
-    def _impl__classify_apply_recovery_incident(self, text: str, target_tool: str = "") -> str:
+    def _classify_apply_recovery_incident(self, text: str, target_tool: str = "") -> str:
         lowered = f"{text or ''} {target_tool or ''}".lower()
         if any(token in lowered for token in ("timeout", "timed out", "hang", "hung", "not responding")):
             return "unity_timeout_or_hang"
@@ -2925,11 +3010,11 @@ class AgentCheckpointRecoveryService:
             return "package_or_compile_conflict"
         return "write_interrupted"
 
-    def _impl__read_adjustment_checkpoint_entries(self) -> list[dict[str, Any]]:
-        if not self.adjustment_checkpoint_log_path.exists():
+    def _read_adjustment_checkpoint_entries(self) -> list[dict[str, Any]]:
+        if not self._ports.adjustment_checkpoint_log_path().exists():
             return []
         try:
-            payload = json.loads(self.adjustment_checkpoint_log_path.read_text(encoding="utf-8"))
+            payload = json.loads(self._ports.adjustment_checkpoint_log_path().read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return []
         raw_entries = payload.get("checkpoints") if isinstance(payload, dict) else []
@@ -2938,16 +3023,16 @@ class AgentCheckpointRecoveryService:
         entries = [item for item in raw_entries if isinstance(item, dict)]
         return sorted(entries, key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
 
-    def _impl__write_adjustment_checkpoint_entries(self, entries: list[dict[str, Any]]) -> None:
-        self.adjustment_checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
+    def _write_adjustment_checkpoint_entries(self, entries: list[dict[str, Any]]) -> None:
+        self._ports.adjustment_checkpoint_log_path().parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "schema": "vrcforge.adjustment_checkpoint_timeline.v1",
             "updatedAt": utc_now_iso(),
             "checkpoints": entries,
         }
-        self.adjustment_checkpoint_log_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._ports.adjustment_checkpoint_log_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _impl__load_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any] | None:
+    def _load_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any] | None:
         if not entry_id:
             return None
         for entry in self._read_adjustment_checkpoint_entries():
@@ -2955,7 +3040,7 @@ class AgentCheckpointRecoveryService:
                 return entry
         return None
 
-    def _impl__normalize_adjustment_checkpoint_kind(self, value: Any, *, required: bool) -> str:
+    def _normalize_adjustment_checkpoint_kind(self, value: Any, *, required: bool) -> str:
         kind = str(value or "").strip().lower().replace("_", "-")
         if kind in {"blendshape", "face-tuning", "facial", "face"}:
             return "face"
@@ -2965,7 +3050,7 @@ class AgentCheckpointRecoveryService:
             raise AgentGatewayError("kind must be one of: face, shader.", status_code=400)
         return ""
 
-    def _impl__resolve_or_create_adjustment_base_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _resolve_or_create_adjustment_base_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
         checkpoint_id = str(params.get("checkpointId") or params.get("checkpoint_id") or "").strip()
         if checkpoint_id:
             checkpoint = self._load_checkpoint(checkpoint_id)
@@ -2980,9 +3065,9 @@ class AgentCheckpointRecoveryService:
             "projectRoot": str(params.get("projectRoot") or params.get("project_root") or "").strip(),
             "avatarPath": str(params.get("avatarPath") or params.get("avatar_path") or "").strip(),
         }
-        return self._create_pre_write_checkpoint(fake_approval, arguments) or {"ok": False, "error": "checkpoint creation was skipped."}
+        return self._ports.approval.create_pre_write_checkpoint(fake_approval, arguments) or {"ok": False, "error": "checkpoint creation was skipped."}
 
-    def _impl__build_adjustment_checkpoint_entry(
+    def _build_adjustment_checkpoint_entry(
         self,
         params: dict[str, Any],
         checkpoint: dict[str, Any],
@@ -3022,7 +3107,7 @@ class AgentCheckpointRecoveryService:
             entry["overwriteCount"] = int(existing.get("overwriteCount") or len(entry["revisions"]))
         return entry
 
-    def _impl__apply_adjustment_checkpoint_metadata(self, entry: dict[str, Any], params: dict[str, Any]) -> None:
+    def _apply_adjustment_checkpoint_metadata(self, entry: dict[str, Any], params: dict[str, Any]) -> None:
         for source_key, target_key in (
             ("label", "label"),
             ("description", "description"),
@@ -3038,7 +3123,7 @@ class AgentCheckpointRecoveryService:
         if "tags" in params:
             entry["tags"] = self._normalize_tags(params.get("tags"))
 
-    def _impl__normalize_tags(self, value: Any) -> list[str]:
+    def _normalize_tags(self, value: Any) -> list[str]:
         if isinstance(value, list):
             raw = value
         elif isinstance(value, str):
@@ -3052,14 +3137,14 @@ class AgentCheckpointRecoveryService:
                 tags.append(tag[:48])
         return tags[:24]
 
-    def _impl__default_adjustment_checkpoint_label(self, kind: str, checkpoint: dict[str, Any]) -> str:
+    def _default_adjustment_checkpoint_label(self, kind: str, checkpoint: dict[str, Any]) -> str:
         target_tool = str(checkpoint.get("targetTool") or "")
         prefix = "Face" if kind == "face" else "Shader"
         if target_tool:
             return f"{prefix} checkpoint before {target_tool}"
         return f"{prefix} checkpoint"
 
-    def _impl__maybe_record_adjustment_checkpoint(self, record: dict[str, Any]) -> None:
+    def _maybe_record_adjustment_checkpoint(self, record: dict[str, Any]) -> None:
         target_tool = str(record.get("targetTool") or "")
         kind = ADJUSTMENT_CHECKPOINT_TARGETS.get(target_tool)
         if not kind or not record.get("ok") or not record.get("id"):

@@ -568,7 +568,7 @@ def test_gateway_composes_shell_owner_with_fake_process_and_nonrecoverable_v14_a
     assert process_owner.processes == []
 
     approval_id = pending["approval_id"]
-    assert gateway.approve(approval_id)["ok"] is True
+    assert gateway.approval_transactions.approve(approval_id)["ok"] is True
     applied = gateway.shell.execute_approved({"approval_id": approval_id})
     assert applied["ok"] is True
     assert process_owner.processes
@@ -611,8 +611,9 @@ def test_shell_owner_wiring_has_no_gateway_compatibility_surface() -> None:
     assert "AGENT_GATEWAY.shell.start()" in dashboard_source
     assert "AGENT_GATEWAY.shell.shutdown" in dashboard_source
     assert "AGENT_GATEWAY.shell.execute_payload" in dashboard_source
-    assert "self.shell.execute_payload" in approval_source
-    assert "self.shell.manual_approval_reason" in approval_source
+    assert "self._ports.shell_execute_payload" in approval_source
+    assert "self.shell" not in approval_source
+    assert "self._ports.shell_manual_approval_reason" in approval_source
     for legacy_global in (
         "summarize_shell_result",
         "normalize_filesystem_path",

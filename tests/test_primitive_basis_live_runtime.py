@@ -473,7 +473,7 @@ def test_real_gateway_apply_and_restore_satisfy_live_lifecycle_contract(
 ) -> None:
     project_root, bootstrap, fake, _coordinator = make_runtime(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.checkpoint_prepare_handler = lambda _path: {
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {
         "ok": True,
         **fake.unity_identity(),
     }
@@ -493,29 +493,29 @@ def test_real_gateway_apply_and_restore_satisfy_live_lifecycle_contract(
             "sceneDirty": False,
         }
 
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         live.MODEL_TARGET_TOOL,
         "Apply the fixed test component.",
         "high",
         apply_component,
     )
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         live.RESTORE_TARGET_TOOL,
         "Restore the fixed test checkpoint.",
         "high",
-        lambda params: gateway.restore_checkpoint(params or {}),
+        lambda params: gateway.checkpoint_recovery.restore_checkpoint(params or {}),
     )
 
     def create_real_apply_request(
         params: dict[str, object],
     ) -> dict[str, object]:
-        return gateway.create_apply_request(
+        return gateway.approval_transactions.create_apply_request(
             params,
             include_arguments_digest=True,
         )
 
     def create_real_restore_request(checkpoint_id: str) -> dict[str, object]:
-        return gateway.create_apply_request(
+        return gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": live.RESTORE_TARGET_TOOL,
                 "arguments": {
@@ -546,21 +546,21 @@ def test_real_gateway_apply_and_restore_satisfy_live_lifecycle_contract(
         fake.persisted_component_present = False
         return fake.reload_fixture({})
 
-    gateway.checkpoint_restore_handler = reload_restored_fixture
-    gateway.apply_lifecycle_observer_fn = coordinator.observe_apply_lifecycle
+    gateway.checkpoint_recovery.checkpoint_restore_handler = reload_restored_fixture
+    gateway.approval_transactions.apply_lifecycle_observer = coordinator.observe_apply_lifecycle
 
     apply_request = coordinator.start(str(project_root))
     apply_approval_id = str(apply_request["approvalId"])
-    gateway.approve(apply_approval_id)
-    apply_execution = gateway.apply_approved({"approval_id": apply_approval_id})
+    gateway.approval_transactions.approve(apply_approval_id)
+    apply_execution = gateway.approval_transactions.apply_approved({"approval_id": apply_approval_id})
 
     assert apply_execution["ok"] is True
     assert apply_execution["checkpoint"]["ok"] is True
     fake.checkpoint_id = str(apply_execution["checkpoint"]["id"])
     restore_request = coordinator.readback_and_request_restore()
     restore_approval_id = str(restore_request["approvalId"])
-    gateway.approve(restore_approval_id)
-    restore_execution = gateway.apply_approved({"approval_id": restore_approval_id})
+    gateway.approval_transactions.approve(restore_approval_id)
+    restore_execution = gateway.approval_transactions.apply_approved({"approval_id": restore_approval_id})
 
     assert restore_execution["ok"] is True
     assert restore_execution["result"]["restored"] is True

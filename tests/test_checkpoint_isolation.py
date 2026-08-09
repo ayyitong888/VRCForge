@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,19 +26,19 @@ def create_unity_project(root: Path, name: str = "UnityProject") -> Path:
 
 def create_gateway(root: Path) -> AgentGateway:
     gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
     return gateway
 
 
 def approved_apply_request(gateway: AgentGateway, target_tool: str, project: Path) -> str:
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": target_tool,
             "arguments": {"projectRoot": str(project)},
         }
     )
     approval_id = request["approval"]["id"]
-    gateway.approve(approval_id)
+    gateway.approval_transactions.approve(approval_id)
     return approval_id
 
 
@@ -66,8 +67,8 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                 Path(args["projectRoot"], "Assets", "fast-write.txt").write_text("fast", encoding="utf-8")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_slow_write", "Slow write", "high", slow_write)
-            gateway.register_write_handler("vrcforge_test_fast_write", "Fast write", "high", fast_write)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_slow_write", "Slow write", "high", slow_write)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_fast_write", "Fast write", "high", fast_write)
 
             slow_id = approved_apply_request(gateway, "vrcforge_test_slow_write", project)
             fast_id = approved_apply_request(gateway, "vrcforge_test_fast_write", project)
@@ -75,16 +76,16 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             slow_result: dict = {}
 
             def run_slow_apply() -> None:
-                slow_result.update(gateway.apply_approved({"approval_id": slow_id}))
+                slow_result.update(gateway.approval_transactions.apply_approved({"approval_id": slow_id}))
 
             worker = threading.Thread(target=run_slow_apply, daemon=True)
             worker.start()
             self.assertTrue(entered_write.wait(timeout=30), "slow write handler never started")
             self.assertFalse(
-                gateway.try_acquire_background_project_read("memory-review-background")
+                gateway.approval_transactions.try_acquire_background_project_read("memory-review-background")
             )
 
-            blocked = gateway.apply_approved({"approval_id": fast_id})
+            blocked = gateway.approval_transactions.apply_approved({"approval_id": fast_id})
             self.assertFalse(blocked["ok"])
             self.assertEqual(blocked["status"], "blocked_concurrent_write")
             self.assertEqual(fast_calls, [])
@@ -94,7 +95,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             self.assertEqual(in_flight[0]["targetTool"], "vrcforge_test_slow_write")
 
             # 只允许第一笔写产生检查点：并发写被拒之门外，不会追加第二条记录。
-            checkpoints = gateway.list_checkpoints({"projectRoot": str(project)})
+            checkpoints = gateway.checkpoint_recovery.list_checkpoints({"projectRoot": str(project)})
             self.assertEqual(checkpoints["count"], 1)
             self.assertEqual(checkpoints["checkpoints"][0]["approvalId"], slow_id)
 
@@ -105,11 +106,11 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             self.assertEqual(slow_result["status"], "applied")
 
             # 第一笔写收尾后，登记表已清空，被挡下的写可以重新执行。
-            unblocked = gateway.apply_approved({"approval_id": fast_id})
+            unblocked = gateway.approval_transactions.apply_approved({"approval_id": fast_id})
             self.assertTrue(unblocked["ok"])
             self.assertEqual(unblocked["status"], "applied")
             self.assertEqual(len(fast_calls), 1)
-            checkpoints = gateway.list_checkpoints({"projectRoot": str(project)})
+            checkpoints = gateway.checkpoint_recovery.list_checkpoints({"projectRoot": str(project)})
             self.assertEqual(checkpoints["count"], 2)
 
     def test_background_project_read_lease_blocks_write_registration_atomically(self) -> None:
@@ -118,7 +119,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             project = create_unity_project(root)
             gateway = create_gateway(root)
             calls: list[dict] = []
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_test_write",
                 "Test write",
                 "high",
@@ -127,17 +128,17 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             approval_id = approved_apply_request(gateway, "vrcforge_test_write", project)
 
             self.assertTrue(
-                gateway.try_acquire_background_project_read("memory-review-background")
+                gateway.approval_transactions.try_acquire_background_project_read("memory-review-background")
             )
-            blocked = gateway.apply_approved({"approval_id": approval_id})
+            blocked = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertFalse(blocked["ok"])
             self.assertEqual(blocked["status"], "blocked_background_read")
             self.assertEqual(calls, [])
 
             self.assertTrue(
-                gateway.release_background_project_read("memory-review-background")
+                gateway.approval_transactions.release_background_project_read("memory-review-background")
             )
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertTrue(applied["ok"])
             self.assertEqual(len(calls), 1)
 
@@ -146,7 +147,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             root = Path(tmp)
             project = create_unity_project(root)
             gateway = create_gateway(root)
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_set_gameobject_active",
                 "Set active",
                 "low",
@@ -157,7 +158,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                     "newActive": False,
                 },
             )
-            request = gateway.create_apply_request(
+            request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_set_gameobject_active",
                     "arguments": {
@@ -168,12 +169,12 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                 }
             )
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertTrue(applied["ok"])
             applied_event = next(
                 event
-                for event in reversed(gateway.recent_audit_logs(limit=20))
+                for event in reversed(gateway.approval_transactions.recent_audit_logs(limit=20))
                 if event.get("event") == "approval_applied"
             )
             evidence = applied_event["memoryEvidence"]
@@ -243,17 +244,17 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                 )
             )
 
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_test_unvalidated",
                 "Unvalidated write",
                 "low",
                 lambda _args: {"ok": True, "validated": True},
             )
             generic_id = approved_apply_request(gateway, "vrcforge_test_unvalidated", project)
-            self.assertTrue(gateway.apply_approved({"approval_id": generic_id})["ok"])
+            self.assertTrue(gateway.approval_transactions.apply_approved({"approval_id": generic_id})["ok"])
             generic_event = next(
                 event
-                for event in reversed(gateway.recent_audit_logs(limit=20))
+                for event in reversed(gateway.approval_transactions.recent_audit_logs(limit=20))
                 if event.get("event") == "approval_applied"
                 and event.get("approval", {}).get("id") == generic_id
             )
@@ -268,10 +269,10 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             def failing_write(args: dict) -> dict:
                 raise RuntimeError("Write handler crashed mid-apply.")
 
-            gateway.register_write_handler("vrcforge_test_failing_write", "Failing write", "high", failing_write)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_failing_write", "Failing write", "high", failing_write)
 
             approval_id = approved_apply_request(gateway, "vrcforge_test_failing_write", project)
-            failed = gateway.apply_approved({"approval_id": approval_id})
+            failed = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertFalse(failed["ok"])
             self.assertEqual(failed["status"], "failed")
 
@@ -280,7 +281,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             self.assertEqual(gateway._in_flight_apply_writes, {})
 
             retry_id = approved_apply_request(gateway, "vrcforge_test_failing_write", project)
-            blocked = gateway.apply_approved({"approval_id": retry_id})
+            blocked = gateway.approval_transactions.apply_approved({"approval_id": retry_id})
             self.assertFalse(blocked["ok"])
             self.assertEqual(blocked["status"], "blocked_recovery")
 
@@ -292,7 +293,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                 gateway = create_gateway(root)
                 calls: list[dict] = []
 
-                gateway.register_write_handler(
+                gateway.approval_transactions.register_write_handler(
                     "vrcforge_test_write",
                     "Test write",
                     "high",
@@ -302,18 +303,29 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                 def fail_transition(*_args: object, **_kwargs: object) -> None:
                     raise OSError(f"simulated {failing_method} failure")
 
-                patch_target = gateway if failing_method == "append_audit" else gateway._approval_transactions
-                patch_name = "append_audit" if failing_method == "append_audit" else "_runtime_run_append"
+                if failing_method == "append_audit":
+                    patch_target = gateway.approval_transactions
+                    patch_name = "_ports"
+                    patch_kwargs = {
+                        "new": replace(
+                            gateway.approval_transactions._ports,  # noqa: SLF001
+                            append_audit=fail_transition,
+                        )
+                    }
+                else:
+                    patch_target = gateway.approval_transactions
+                    patch_name = "_runtime_run_append"
+                    patch_kwargs = {"side_effect": fail_transition}
                 with (
-                    patch.object(patch_target, patch_name, side_effect=fail_transition),
+                    patch.object(patch_target, patch_name, **patch_kwargs),
                     self.assertRaises(AgentGatewayError) as raised,
                 ):
-                    gateway.apply_approved({"approval_id": approval_id})
+                    gateway.approval_transactions.apply_approved({"approval_id": approval_id})
                 self.assertEqual(raised.exception.status_code, 500)
                 self.assertEqual(gateway._approvals[approval_id]["status"], "approved")
                 self.assertEqual(gateway._in_flight_apply_writes, {})
                 self.assertEqual(calls, [])
-                retried = gateway.apply_approved({"approval_id": approval_id})
+                retried = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
                 self.assertTrue(retried["ok"])
                 self.assertEqual(retried["status"], "applied")
                 self.assertEqual(len(calls), 1)
@@ -334,8 +346,8 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                     raise RuntimeError("Test release event was never set.")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_slow_write", "Slow write", "high", slow_write)
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler("vrcforge_test_slow_write", "Slow write", "high", slow_write)
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_resolve_interrupted_apply_recovery",
                 "Resolve recovery",
                 "medium",
@@ -348,12 +360,12 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             )
 
             worker = threading.Thread(
-                target=lambda: gateway.apply_approved({"approval_id": slow_id}), daemon=True
+                target=lambda: gateway.approval_transactions.apply_approved({"approval_id": slow_id}), daemon=True
             )
             worker.start()
             self.assertTrue(entered_write.wait(timeout=30), "slow write handler never started")
 
-            blocked = gateway.apply_approved({"approval_id": exempt_id})
+            blocked = gateway.approval_transactions.apply_approved({"approval_id": exempt_id})
             self.assertFalse(blocked["ok"])
             self.assertEqual(blocked["status"], "blocked_concurrent_write")
             self.assertEqual(resolve_calls, [])
@@ -362,7 +374,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             worker.join(timeout=30)
             self.assertFalse(worker.is_alive())
 
-            exempt = gateway.apply_approved({"approval_id": exempt_id})
+            exempt = gateway.approval_transactions.apply_approved({"approval_id": exempt_id})
             self.assertTrue(exempt["ok"])
             self.assertEqual(len(resolve_calls), 1)
 
@@ -381,27 +393,27 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                     raise RuntimeError("Test release event was never set.")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_slow_write", "Slow write", "high", slow_write)
-            gateway.register_write_handler("vrcforge_test_fast_write", "Fast write", "high", lambda _args: {"ok": True})
+            gateway.approval_transactions.register_write_handler("vrcforge_test_slow_write", "Slow write", "high", slow_write)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_fast_write", "Fast write", "high", lambda _args: {"ok": True})
             slow_id = approved_apply_request(gateway, "vrcforge_test_slow_write", project_a)
             fast_id = approved_apply_request(gateway, "vrcforge_test_fast_write", project_b)
 
             worker = threading.Thread(
-                target=lambda: gateway.apply_approved({"approval_id": slow_id}),
+                target=lambda: gateway.approval_transactions.apply_approved({"approval_id": slow_id}),
                 daemon=True,
             )
             worker.start()
             self.assertTrue(entered_write.wait(timeout=30), "slow write handler never started")
 
-            blocked = gateway.apply_approved({"approval_id": fast_id})
+            blocked = gateway.approval_transactions.apply_approved({"approval_id": fast_id})
             self.assertFalse(blocked["ok"])
             self.assertEqual(blocked["status"], "blocked_concurrent_write")
-            self.assertEqual(gateway.list_checkpoints({"projectRoot": str(project_b)})["count"], 0)
+            self.assertEqual(gateway.checkpoint_recovery.list_checkpoints({"projectRoot": str(project_b)})["count"], 0)
 
             release_write.set()
             worker.join(timeout=30)
             self.assertFalse(worker.is_alive())
-            self.assertTrue(gateway.apply_approved({"approval_id": fast_id})["ok"])
+            self.assertTrue(gateway.approval_transactions.apply_approved({"approval_id": fast_id})["ok"])
 
 
 class CheckpointStorageIsolationTests(unittest.TestCase):
@@ -424,21 +436,27 @@ class CheckpointStorageIsolationTests(unittest.TestCase):
                     raise RuntimeError("Test release event was never set.")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_slow_write", "Slow write", "high", slow_write)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_slow_write", "Slow write", "high", slow_write)
             approval_id = approved_apply_request(gateway, "vrcforge_test_slow_write", project)
-            original_append = gateway._append_checkpoint
+            original_append = gateway.checkpoint_recovery._append_checkpoint
 
-            def pausing_append(record: dict) -> None:
+            def pausing_append(_service: object, record: dict) -> None:
                 if record.get("ok") and record.get("strategy") == "archive":
                     append_entered.set()
                     if not release_append.wait(timeout=30):
                         raise RuntimeError("Test checkpoint append was never released.")
                 original_append(record)
 
-            gateway._append_checkpoint = pausing_append  # type: ignore[method-assign]
+            append_patch = patch.object(
+                type(gateway.checkpoint_recovery),
+                "_append_checkpoint",
+                pausing_append,
+            )
+            append_patch.start()
+            self.addCleanup(append_patch.stop)
 
             apply_worker = threading.Thread(
-                target=lambda: apply_result.update(gateway.apply_approved({"approval_id": approval_id})),
+                target=lambda: apply_result.update(gateway.approval_transactions.apply_approved({"approval_id": approval_id})),
                 daemon=True,
             )
             apply_worker.start()
@@ -447,7 +465,7 @@ class CheckpointStorageIsolationTests(unittest.TestCase):
             target_dir = root / "relocated-checkpoints"
 
             def relocate() -> None:
-                relocate_result.update(gateway.relocate_checkpoint_archives(str(target_dir)))
+                relocate_result.update(gateway.checkpoint_recovery.relocate_checkpoint_archives(str(target_dir)))
                 relocate_finished.set()
 
             relocate_worker = threading.Thread(target=relocate, daemon=True)
@@ -470,7 +488,7 @@ class CheckpointStorageIsolationTests(unittest.TestCase):
             self.assertFalse(relocate_worker.is_alive())
             self.assertTrue(apply_result["ok"])
             checkpoint_id = apply_result["checkpoint"]["id"]
-            self.assertTrue(gateway.preview_restore_checkpoint({"checkpointId": checkpoint_id})["ok"])
+            self.assertTrue(gateway.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint_id})["ok"])
 
 
 class CrossProjectCheckpointIsolationTests(unittest.TestCase):
@@ -485,15 +503,15 @@ class CrossProjectCheckpointIsolationTests(unittest.TestCase):
                 Path(args["projectRoot"], "Assets", "marker.txt").write_text("written", encoding="utf-8")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_marker_write", "Marker write", "high", write_marker)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_marker_write", "Marker write", "high", write_marker)
 
             approval_a = approved_apply_request(gateway, "vrcforge_test_marker_write", project_a)
-            applied_a = gateway.apply_approved({"approval_id": approval_a})
+            applied_a = gateway.approval_transactions.apply_approved({"approval_id": approval_a})
             self.assertTrue(applied_a["ok"])
             checkpoint_a = applied_a["checkpoint"]
 
             approval_b = approved_apply_request(gateway, "vrcforge_test_marker_write", project_b)
-            applied_b = gateway.apply_approved({"approval_id": approval_b})
+            applied_b = gateway.approval_transactions.apply_approved({"approval_id": approval_b})
             self.assertTrue(applied_b["ok"])
             checkpoint_b = applied_b["checkpoint"]
 
@@ -504,16 +522,16 @@ class CrossProjectCheckpointIsolationTests(unittest.TestCase):
             if checkpoint_a.get("strategy") == "archive":
                 self.assertNotEqual(checkpoint_a["archivePath"], checkpoint_b["archivePath"])
 
-            only_a = gateway.list_checkpoints({"projectRoot": str(project_a)})
+            only_a = gateway.checkpoint_recovery.list_checkpoints({"projectRoot": str(project_a)})
             self.assertEqual(only_a["count"], 1)
             self.assertEqual(only_a["checkpoints"][0]["id"], checkpoint_a["id"])
-            only_b = gateway.list_checkpoints({"projectRoot": str(project_b)})
+            only_b = gateway.checkpoint_recovery.list_checkpoints({"projectRoot": str(project_b)})
             self.assertEqual(only_b["count"], 1)
             self.assertEqual(only_b["checkpoints"][0]["id"], checkpoint_b["id"])
 
             # 恢复 A 的检查点：A 回到写前状态，B 的写入结果原封不动。
             (project_b / "Assets" / "post-checkpoint.txt").write_text("keep-me", encoding="utf-8")
-            restored = gateway.restore_checkpoint(
+            restored = gateway.checkpoint_recovery.restore_checkpoint(
                 {"checkpointId": checkpoint_a["id"], "confirmRestore": True}
             )
             self.assertTrue(restored["ok"])

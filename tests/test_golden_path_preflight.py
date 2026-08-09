@@ -204,7 +204,7 @@ def test_sub_agent_endpoint_runs_project_index_worker(tmp_path: Path, monkeypatc
         roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
         handlers={
             "project_index_review": dashboard_server.build_sub_agent_role_handlers(
-                dashboard_server.AGENT_GATEWAY
+                dashboard_server.AGENT_GATEWAY.runtime_skills
             )["project_index_review"]
         },
     )
@@ -248,7 +248,7 @@ def test_sub_agent_endpoint_runs_selected_context_worker(tmp_path: Path, monkeyp
         roles=[SubAgentRole("selected_context_review", "Selection", "Review selected text.")],
         handlers={
             "selected_context_review": dashboard_server.build_sub_agent_role_handlers(
-                dashboard_server.AGENT_GATEWAY
+                dashboard_server.AGENT_GATEWAY.runtime_skills
             )["selected_context_review"]
         },
     )

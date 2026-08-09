@@ -1190,8 +1190,8 @@ class DashboardServerTests(unittest.TestCase):
         with (
             patch.object(dashboard_server.AGENT_GATEWAY, "build_manifest", side_effect=RuntimeError("manifest broken")),
             patch.object(dashboard_server.AGENT_GATEWAY, "build_health", side_effect=RuntimeError("health broken")),
-            patch.object(dashboard_server.AGENT_GATEWAY, "permission_state", side_effect=RuntimeError("permission broken")),
-            patch.object(dashboard_server.AGENT_GATEWAY, "list_approvals", side_effect=RuntimeError("approvals broken")),
+            patch.object(type(dashboard_server.AGENT_GATEWAY.approval_transactions), "permission_state", side_effect=RuntimeError("permission broken")),
+            patch.object(type(dashboard_server.AGENT_GATEWAY.approval_transactions), "list_approvals", side_effect=RuntimeError("approvals broken")),
         ):
             with TestClient(dashboard_server.app) as client:
                 response = client.get("/api/app/bootstrap")
@@ -2644,7 +2644,7 @@ class DashboardServerTests(unittest.TestCase):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 gateway = AgentGateway(root / "config.json", root / "audit")
-                gateway.register_write_handler(
+                gateway.approval_transactions.register_write_handler(
                     "vrcforge_test_linked_write",
                     "Test linked write.",
                     "high",
@@ -2664,7 +2664,7 @@ class DashboardServerTests(unittest.TestCase):
                     delivery_id,
                     {"clientTurnId": woken["delivery"]["clientTurnId"]},
                 )
-                request = gateway.create_apply_request(
+                request = gateway.approval_transactions.create_apply_request(
                     {
                         "target_tool": "vrcforge_test_linked_write",
                         "arguments": {},
@@ -2680,18 +2680,18 @@ class DashboardServerTests(unittest.TestCase):
                     response={"approvalId": approval_id},
                 )
                 if outcome == "rejected":
-                    terminal = gateway.reject(approval_id)["goalDelivery"]
+                    terminal = gateway.approval_transactions.reject(approval_id)["goalDelivery"]
                     expected_status = "denied"
                 elif outcome == "revision_requested":
-                    terminal = gateway.request_approval_revision(
+                    terminal = gateway.approval_transactions.request_approval_revision(
                         approval_id,
                         reason="change requested",
                     )["goalDelivery"]
                     expected_status = "denied"
                 else:
-                    gateway.approve(approval_id)
-                    with patch.object(gateway, "_create_pre_write_checkpoint", return_value=None):
-                        execution = gateway.apply_approved({"approvalId": approval_id})
+                    gateway.approval_transactions.approve(approval_id)
+                    with patch.object(type(gateway.approval_transactions), "_create_pre_write_checkpoint", return_value=None):
+                        execution = gateway.approval_transactions.apply_approved({"approvalId": approval_id})
                     terminal = execution["goalDelivery"]
                     expected_status = "completed" if outcome == "applied" else "failed"
                 self.assertEqual(terminal["delivery"]["status"], expected_status)
@@ -2715,7 +2715,7 @@ class DashboardServerTests(unittest.TestCase):
                     delivery_id,
                     {"clientTurnId": woken["delivery"]["clientTurnId"]},
                 )
-                approval = dashboard_server.AGENT_GATEWAY._new_approval(
+                approval = dashboard_server.AGENT_GATEWAY.approval_transactions._new_approval(
                     "test-agent",
                     "vrcforge_test_linked_write",
                     {"projectRoot": project_a},
@@ -2754,7 +2754,7 @@ class DashboardServerTests(unittest.TestCase):
             delivery_id,
             {"clientTurnId": woken["delivery"]["clientTurnId"]},
         )
-        approval = dashboard_server.AGENT_GATEWAY._new_approval(
+        approval = dashboard_server.AGENT_GATEWAY.approval_transactions._new_approval(
             "test-agent",
             "vrcforge_test_linked_write",
             {},
@@ -2806,7 +2806,7 @@ class DashboardServerTests(unittest.TestCase):
                 delivery_id,
                 {"clientTurnId": woken["delivery"]["clientTurnId"]},
             )
-            approval = gateway._new_approval(
+            approval = gateway.approval_transactions._new_approval(
                 "test-agent",
                 "vrcforge_test_linked_write",
                 {},
@@ -3547,16 +3547,16 @@ class DashboardServerTests(unittest.TestCase):
             project_b = root / "ProjectB"
             project_a.mkdir()
             project_b.mkdir()
-            gateway.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
-            gateway.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
-            approval_a = gateway.create_apply_request(
+            gateway.approval_transactions.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
+            gateway.approval_transactions.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
+            approval_a = gateway.approval_transactions.create_apply_request(
                 {"target_tool": "tool_a", "arguments": {"projectRoot": str(project_a).replace("/", "\\")}, "reason": "A"}
             )
-            gateway.create_apply_request(
+            gateway.approval_transactions.create_apply_request(
                 {"target_tool": "tool_b", "arguments": {"projectRoot": str(project_b)}, "reason": "B"}
             )
 
-            filtered = gateway.list_approvals(include_expired=False, project_root=str(project_a).replace("\\", "/"))
+            filtered = gateway.approval_transactions.list_approvals(include_expired=False, project_root=str(project_a).replace("\\", "/"))
 
         self.assertEqual([item["id"] for item in filtered], [approval_a["approval"]["id"]])
 
@@ -3566,12 +3566,12 @@ class DashboardServerTests(unittest.TestCase):
             gateway = AgentGateway(root / "config.json", root / "audit")
             project_a = root / "ProjectA"
             project_b = root / "ProjectB"
-            gateway.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
-            gateway.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
-            approval_a = gateway.create_apply_request(
+            gateway.approval_transactions.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
+            gateway.approval_transactions.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
+            approval_a = gateway.approval_transactions.create_apply_request(
                 {"target_tool": "tool_a", "arguments": {"projectRoot": str(project_a)}, "reason": "A"}
             )["approval"]
-            approval_b = gateway.create_apply_request(
+            approval_b = gateway.approval_transactions.create_apply_request(
                 {"target_tool": "tool_b", "arguments": {"projectRoot": str(project_b)}, "reason": "B"}
             )["approval"]
             original_gateway = dashboard_server.AGENT_GATEWAY
@@ -3628,24 +3628,24 @@ class DashboardServerTests(unittest.TestCase):
             project_b = root / "ProjectB"
             project_a.mkdir()
             project_b.mkdir()
-            gateway.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
-            gateway.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
-            approval_a = gateway.create_apply_request(
+            gateway.approval_transactions.register_write_handler("tool_a", "Tool A", "medium", lambda _args: {"ok": True})
+            gateway.approval_transactions.register_write_handler("tool_b", "Tool B", "medium", lambda _args: {"ok": True})
+            approval_a = gateway.approval_transactions.create_apply_request(
                 {"target_tool": "tool_a", "arguments": {"projectPath": str(project_a)}, "reason": "A"}
             )["approval"]
-            approval_b = gateway.create_apply_request(
+            approval_b = gateway.approval_transactions.create_apply_request(
                 {"target_tool": "tool_b", "arguments": {"project_path": str(project_b)}, "reason": "B"}
             )["approval"]
 
-            project_a_approvals = gateway.list_approvals(include_expired=False, project_root=str(project_a))
-            global_approvals = gateway.list_approvals(include_expired=False, global_only=True)
+            project_a_approvals = gateway.approval_transactions.list_approvals(include_expired=False, project_root=str(project_a))
+            global_approvals = gateway.approval_transactions.list_approvals(include_expired=False, global_only=True)
 
             with self.assertRaises(AgentGatewayError):
-                gateway.approve(approval_b["id"], expected_project_root=str(project_a))
+                gateway.approval_transactions.approve(approval_b["id"], expected_project_root=str(project_a))
             with self.assertRaises(AgentGatewayError):
-                gateway.reject(approval_a["id"], global_only=True)
+                gateway.approval_transactions.reject(approval_a["id"], global_only=True)
 
-            approved = gateway.approve(approval_a["id"], expected_project_root=str(project_a))
+            approved = gateway.approval_transactions.approve(approval_a["id"], expected_project_root=str(project_a))
 
         self.assertEqual([item["id"] for item in project_a_approvals], [approval_a["id"]])
         self.assertEqual(global_approvals, [])
@@ -4528,7 +4528,7 @@ class DashboardServerTests(unittest.TestCase):
             with (
                 patch("dashboard_server._session_store_targets", return_value=[target]),
                 patch.object(
-                    dashboard_server.AGENT_GATEWAY,
+                    type(dashboard_server.AGENT_GATEWAY.approval_transactions),
                     "create_apply_request",
                     return_value={"ok": True, "status": "pending"},
                 ) as create_request,
@@ -4627,8 +4627,8 @@ class DashboardServerTests(unittest.TestCase):
             }
             with (
                 patch("dashboard_server._session_store_targets", return_value=[target]),
-                patch.object(dashboard_server.AGENT_GATEWAY, "list_approvals", return_value=[pending]),
-                patch.object(dashboard_server.AGENT_GATEWAY, "create_apply_request") as create_request,
+                patch.object(type(dashboard_server.AGENT_GATEWAY.approval_transactions), "list_approvals", return_value=[pending]),
+                patch.object(type(dashboard_server.AGENT_GATEWAY.approval_transactions), "create_apply_request") as create_request,
             ):
                 result = dashboard_server._repair_session_storage_doctor({}, "safe", dashboard_server.PhaseLog())
 
@@ -4682,7 +4682,7 @@ class DashboardServerTests(unittest.TestCase):
             original = b'{"chats":['
             store_path.write_bytes(original)
             gateway = dashboard_server.AgentGateway(root / "config" / "gateway.json", root / "audit")
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_repair_project_chat_store",
                 "Repair project chat store.",
                 "medium",
@@ -4698,7 +4698,7 @@ class DashboardServerTests(unittest.TestCase):
             }
             with patch("dashboard_server.AGENT_GATEWAY", gateway):
                 requests = [
-                    gateway.create_apply_request(
+                    gateway.approval_transactions.create_apply_request(
                         {
                             "target_tool": "vrcforge_repair_project_chat_store",
                             "arguments": arguments,
@@ -4711,13 +4711,13 @@ class DashboardServerTests(unittest.TestCase):
                 executions = []
                 for request in requests:
                     approval_id = request["approval"]["id"]
-                    gateway.approve(approval_id)
-                    executions.append(gateway.apply_approved({"approvalId": approval_id}))
+                    gateway.approval_transactions.approve(approval_id)
+                    executions.append(gateway.approval_transactions.apply_approved({"approvalId": approval_id}))
 
             self.assertEqual([item["status"] for item in executions], ["applied", "failed"], executions)
             self.assertEqual(executions[0]["result"]["status"], "quarantined")
             self.assertIn("changed after the approval snapshot", executions[1]["error"])
-            active = gateway.list_interrupted_apply_recoveries({"includeResolved": False})
+            active = gateway.checkpoint_recovery.list_interrupted_apply_recoveries({"includeResolved": False})
             self.assertEqual(active["count"], 0)
             self.assertFalse(active["blockingWrites"])
 
@@ -4732,7 +4732,7 @@ class DashboardServerTests(unittest.TestCase):
             concurrent = b'{"chats":[{"id":"newer-save"}]}'
             store_path.write_bytes(original)
             gateway = dashboard_server.AgentGateway(root / "config" / "gateway.json", root / "audit")
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_repair_project_chat_store",
                 "Repair project chat store.",
                 "medium",
@@ -4746,7 +4746,7 @@ class DashboardServerTests(unittest.TestCase):
                 "expectedDigest": hashlib.sha256(original).hexdigest(),
                 "storeId": f"session.chat.project.{suffix}",
             }
-            request = gateway.create_apply_request(
+            request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_repair_project_chat_store",
                     "arguments": arguments,
@@ -4755,8 +4755,8 @@ class DashboardServerTests(unittest.TestCase):
                 internal_wrapper=True,
             )
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            create_checkpoint = gateway._create_pre_write_checkpoint
+            gateway.approval_transactions.approve(approval_id)
+            create_checkpoint = gateway.approval_transactions._create_pre_write_checkpoint
 
             def checkpoint_then_change(approval: dict, supplied: dict) -> dict | None:
                 checkpoint = create_checkpoint(approval, supplied)
@@ -4765,18 +4765,18 @@ class DashboardServerTests(unittest.TestCase):
 
             with (
                 patch("dashboard_server.AGENT_GATEWAY", gateway),
-                patch.object(gateway, "_create_pre_write_checkpoint", side_effect=checkpoint_then_change),
+                patch.object(type(gateway.approval_transactions), "_create_pre_write_checkpoint", side_effect=checkpoint_then_change),
             ):
-                execution = gateway.apply_approved({"approvalId": approval_id})
+                execution = gateway.approval_transactions.apply_approved({"approvalId": approval_id})
 
             self.assertFalse(execution["ok"])
             self.assertEqual(execution["status"], "failed")
             self.assertEqual(execution["error"], "snapshot_changed")
             self.assertEqual(store_path.read_bytes(), concurrent)
-            active = gateway.list_interrupted_apply_recoveries({"includeResolved": False})
+            active = gateway.checkpoint_recovery.list_interrupted_apply_recoveries({"includeResolved": False})
             self.assertEqual(active["count"], 0)
             self.assertFalse(active["blockingWrites"])
-            all_recoveries = gateway.list_interrupted_apply_recoveries({"includeResolved": True})
+            all_recoveries = gateway.checkpoint_recovery.list_interrupted_apply_recoveries({"includeResolved": True})
             no_write = [
                 item
                 for item in all_recoveries["recoveries"]
@@ -5663,20 +5663,20 @@ class DashboardServerTests(unittest.TestCase):
             (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.checkpoint_prepare_handler = lambda _root: {"ok": True}
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
 
             def delete_handler(args: dict) -> dict:
                 target = Path(args["assetPath"])
                 target.unlink(missing_ok=True)
                 return {"ok": True, "deleted": target.name}
 
-            gateway.register_write_handler("vrcforge_test_delete_asset", "Delete test asset.", "high", delete_handler)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_delete_asset", "Delete test asset.", "high", delete_handler)
             config = gateway.ensure_config()
             config.enabled = True
             config.execution_mode = "auto"
             gateway.save_config(config)
 
-            auto_request = gateway.create_apply_request(
+            auto_request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_delete_asset",
                     "arguments": {
@@ -5695,7 +5695,7 @@ class DashboardServerTests(unittest.TestCase):
             config.roslyn_risk_acknowledged = True
             config.allow_roslyn_advanced = True
             gateway.save_config(config)
-            full_request = gateway.create_apply_request(
+            full_request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_delete_asset",
                     "arguments": {
@@ -5712,7 +5712,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(full_request["approval"]["fullPermission"])
             self.assertEqual(full_request["approval"]["permissionMode"], "roslyn_full_auto")
             self.assertFalse((project / "Assets" / "target.txt").exists())
-            audit_logs = gateway.recent_audit_logs(limit=30)
+            audit_logs = gateway.approval_transactions.recent_audit_logs(limit=30)
             self.assertTrue(
                 any(
                     event.get("event") == "approval_auto_approved"
@@ -6923,8 +6923,8 @@ class DashboardServerTests(unittest.TestCase):
         (project / "ProjectSettings").mkdir()
         (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
         (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
-        original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
-        dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
+        original_prepare = dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler
+        dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
         self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY, "checkpoint_prepare_handler", original_prepare)
 
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -7173,7 +7173,7 @@ class DashboardServerTests(unittest.TestCase):
             config = gateway.ensure_config()
 
             self.assertEqual(config.checkpoint_archive_max_size_mb, CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
-            self.assertEqual(gateway.checkpoint_archive_usage(config)["maxSizeMb"], CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
+            self.assertEqual(gateway.checkpoint_recovery.checkpoint_archive_usage(config)["maxSizeMb"], CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
 
     def test_external_agent_gateway_checkpoint_ledgers_are_fsynced(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -7181,8 +7181,8 @@ class DashboardServerTests(unittest.TestCase):
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
 
             with patch("agent_gateway.os.fsync") as fsync:
-                gateway._append_checkpoint({"id": "ckpt_fsync", "ok": True})
-                gateway._append_apply_recovery_entry({"id": "rec_fsync", "checkpointId": "ckpt_fsync", "status": "applying"})
+                gateway.checkpoint_recovery._append_checkpoint({"id": "ckpt_fsync", "ok": True})
+                gateway.checkpoint_recovery._append_apply_recovery_entry({"id": "rec_fsync", "checkpointId": "ckpt_fsync", "status": "applying"})
 
             self.assertGreaterEqual(fsync.call_count, 2)
 
@@ -7264,12 +7264,12 @@ class DashboardServerTests(unittest.TestCase):
             old_dir.mkdir(parents=True)
             old_zip = old_dir / "ckpt_guard.zip"
             old_zip.write_bytes(b"x" * 1024)
-            gateway._append_apply_recovery_entry(
+            gateway.checkpoint_recovery._append_apply_recovery_entry(
                 {"id": "rec_1", "checkpointId": "ckpt_guard", "status": "needs_recovery"}
             )
             new_root = root / "moved-archives"
 
-            result = gateway.relocate_checkpoint_archives(str(new_root))
+            result = gateway.checkpoint_recovery.relocate_checkpoint_archives(str(new_root))
 
             self.assertFalse(result["ok"])
             self.assertEqual(result["code"], "active_recovery")
@@ -7293,7 +7293,7 @@ class DashboardServerTests(unittest.TestCase):
             os.utime(drop, (base_time, base_time))
             os.utime(keep, (base_time + 1, base_time + 1))
             os.utime(recent, (base_time + 2, base_time + 2))
-            gateway._append_apply_recovery_entry(
+            gateway.checkpoint_recovery._append_apply_recovery_entry(
                 {"id": "rec_2", "checkpointId": "ckpt_protected", "status": "applying"}
             )
 
@@ -8050,7 +8050,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertNotIn("vrcforge_request_roslyn_advanced", initial_tool_names)
             self.assertNotIn("roslyn-advanced-power", {skill["name"] for skill in initial["skills"]})
 
-            dashboard_server.AGENT_GATEWAY.update_permission_state("roslyn_full_auto", acknowledge_roslyn_risk=True)
+            dashboard_server.AGENT_GATEWAY.approval_transactions.update_permission_state("roslyn_full_auto", acknowledge_roslyn_risk=True)
             payload = client.get("/api/agent/manifest", headers=headers).json()
             tool_names = {tool["name"] for tool in payload["tools"]}
             self.assertNotIn("vrcforge_request_roslyn_advanced", tool_names)
@@ -9235,39 +9235,39 @@ class DashboardServerTests(unittest.TestCase):
                 return {"ok": True, "wrote": "Assets/generated.txt"}
 
             original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
-            original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
-            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler
-            original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler
+            original_prepare = dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler
+            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler
+            original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler
             try:
-                dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.register_write_handler(
+                dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.approval_transactions.register_write_handler(
                     "vrcforge_test_checkpoint_write",
                     "Test checkpoint write.",
                     "high",
                     write_handler,
                 )
-                request = dashboard_server.AGENT_GATEWAY.create_apply_request({
+                request = dashboard_server.AGENT_GATEWAY.approval_transactions.create_apply_request({
                     "target_tool": "vrcforge_test_checkpoint_write",
                     "arguments": {"projectRoot": str(project)},
                 })
                 approval_id = request["approval"]["id"]
-                dashboard_server.AGENT_GATEWAY.approve(approval_id)
-                applied = dashboard_server.AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
+                dashboard_server.AGENT_GATEWAY.approval_transactions.approve(approval_id)
+                applied = dashboard_server.AGENT_GATEWAY.approval_transactions.apply_approved({"approval_id": approval_id})
 
                 self.assertTrue(applied["ok"])
                 self.assertTrue(applied["checkpoint"]["ok"])
                 self.assertTrue((project / "Assets" / "generated.txt").exists())
 
-                listed = dashboard_server.AGENT_GATEWAY.list_checkpoints({"projectRoot": str(project)})
+                listed = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.list_checkpoints({"projectRoot": str(project)})
                 self.assertEqual(listed["count"], 1)
                 checkpoint_id = listed["checkpoints"][0]["id"]
-                preview = dashboard_server.AGENT_GATEWAY.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+                preview = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint_id})
                 self.assertTrue(preview["ok"])
                 self.assertTrue(any("generated.txt" in item for item in preview["workingTreeStatus"] + preview["changedFiles"]))
 
-                restored = dashboard_server.AGENT_GATEWAY.restore_checkpoint({
+                restored = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.restore_checkpoint({
                     "checkpointId": checkpoint_id,
                     "confirmRestore": True,
                 })
@@ -9275,9 +9275,9 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertFalse((project / "Assets" / "generated.txt").exists())
             finally:
                 dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
-                dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = original_restore_prepare
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = original_reload
+                dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = original_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = original_restore_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = original_reload
 
     def test_archive_checkpoint_restores_non_git_unity_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -9294,8 +9294,8 @@ class DashboardServerTests(unittest.TestCase):
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             prepared: list[Path] = []
             reloaded: list[Path] = []
-            gateway.checkpoint_prepare_handler = lambda path: prepared.append(path) or {"ok": True}
-            gateway.checkpoint_restore_handler = lambda path, _prepare: reloaded.append(path) or {"ok": True}
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda path: prepared.append(path) or {"ok": True}
+            gateway.checkpoint_recovery.checkpoint_restore_handler = lambda path, _prepare: reloaded.append(path) or {"ok": True}
 
             def write_handler(args: dict) -> dict:
                 project_root = Path(args["projectRoot"])
@@ -9303,14 +9303,14 @@ class DashboardServerTests(unittest.TestCase):
                 (project_root / "Assets" / "generated.txt").write_text("generated", encoding="utf-8")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_archive_write", "Archive write", "high", write_handler)
-            request = gateway.create_apply_request({
+            gateway.approval_transactions.register_write_handler("vrcforge_test_archive_write", "Archive write", "high", write_handler)
+            request = gateway.approval_transactions.create_apply_request({
                 "target_tool": "vrcforge_test_archive_write",
                 "arguments": {"projectRoot": str(project)},
             })
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
             self.assertTrue(applied["ok"])
             self.assertEqual(applied["checkpoint"]["strategy"], "archive")
@@ -9328,12 +9328,12 @@ class DashboardServerTests(unittest.TestCase):
             (package_cache / "stale-package").write_text("stale", encoding="utf-8")
 
             checkpoint_id = applied["checkpoint"]["id"]
-            preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint_id})
+            preview = gateway.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint_id})
             self.assertTrue(preview["ok"])
             self.assertTrue(any("existing.txt" in item for item in preview["changedFiles"]))
             self.assertTrue(any("generated.txt" in item for item in preview["changedFiles"]))
 
-            restored = gateway.restore_checkpoint({"checkpointId": checkpoint_id, "confirmRestore": True})
+            restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint_id, "confirmRestore": True})
             self.assertTrue(restored["ok"])
             self.assertEqual(existing.read_text(encoding="utf-8"), "before")
             self.assertFalse((project / "Assets" / "generated.txt").exists())
@@ -9380,30 +9380,30 @@ class DashboardServerTests(unittest.TestCase):
                 events.append(("reload", existing.read_text(encoding="utf-8")))
                 return {"ok": True}
 
-            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-            gateway.checkpoint_restore_prepare_handler = prepare_restore
-            gateway.checkpoint_restore_handler = reload_restore
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = prepare_restore
+            gateway.checkpoint_recovery.checkpoint_restore_handler = reload_restore
             def write_restore_transaction(_args: dict[str, object]) -> dict[str, object]:
                 existing.write_text("after", encoding="utf-8")
                 return {"ok": True}
 
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_test_restore_transaction",
                 "Restore transaction ordering test.",
                 "high",
                 write_restore_transaction,
             )
-            request = gateway.create_apply_request(
+            request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_restore_transaction",
                     "arguments": {"projectRoot": str(project)},
                 }
             )
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
-            restored = gateway.restore_checkpoint(
+            restored = gateway.checkpoint_recovery.restore_checkpoint(
                 {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
             )
 
@@ -9426,35 +9426,35 @@ class DashboardServerTests(unittest.TestCase):
             )
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-            gateway.checkpoint_restore_prepare_handler = lambda _path: {
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _path: {
                 "ok": False,
                 "error": "Unity scene close failed.",
             }
-            gateway.checkpoint_restore_handler = lambda _path, _prepare: self.fail(
+            gateway.checkpoint_recovery.checkpoint_restore_handler = lambda _path, _prepare: self.fail(
                 "Reload must not run when restore preparation fails."
             )
             def write_restore_prepare_failure(_args: dict[str, object]) -> dict[str, object]:
                 existing.write_text("after", encoding="utf-8")
                 return {"ok": True}
 
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_test_restore_prepare_failure",
                 "Restore prepare failure test.",
                 "high",
                 write_restore_prepare_failure,
             )
-            request = gateway.create_apply_request(
+            request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_restore_prepare_failure",
                     "arguments": {"projectRoot": str(project)},
                 }
             )
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
-            restored = gateway.restore_checkpoint(
+            restored = gateway.checkpoint_recovery.restore_checkpoint(
                 {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
             )
 
@@ -9474,7 +9474,7 @@ class DashboardServerTests(unittest.TestCase):
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            checkpoint = gateway._create_pre_write_checkpoint(  # noqa: SLF001 - regression covers checkpoint metadata handling.
+            checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(  # noqa: SLF001 - regression covers checkpoint metadata handling.
                 {"id": "approval-test", "targetTool": "vrcforge_test_archive_write"},
                 {"projectRoot": str(project)},
             )
@@ -9491,8 +9491,8 @@ class DashboardServerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
-            restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+            preview = gateway.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+            restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
 
             self.assertFalse(preview["ok"])
             self.assertIn("outside configured storage", preview["error"])
@@ -9507,7 +9507,7 @@ class DashboardServerTests(unittest.TestCase):
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text("before", encoding="utf-8")
 
-            checkpoint = gateway._create_pre_write_checkpoint(  # noqa: SLF001 - regression covers checkpoint metadata handling.
+            checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(  # noqa: SLF001 - regression covers checkpoint metadata handling.
                 {"id": "approval-local", "targetTool": "vrcforge_import_skill_package"},
                 {},
             )
@@ -9524,8 +9524,8 @@ class DashboardServerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
-            restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+            preview = gateway.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+            restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
 
             self.assertFalse(preview["ok"])
             self.assertIn("outside configured storage", preview["error"])
@@ -9574,8 +9574,8 @@ class DashboardServerTests(unittest.TestCase):
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-            gateway.checkpoint_restore_handler = lambda _path, _prepare: {"ok": True}
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_recovery.checkpoint_restore_handler = lambda _path, _prepare: {"ok": True}
 
             def write_handler(args: dict) -> dict:
                 project_root = Path(args["projectRoot"])
@@ -9598,14 +9598,14 @@ class DashboardServerTests(unittest.TestCase):
                 (script_cache / "Assembly-CSharp.dll").write_text("stale", encoding="utf-8")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_ma_vrcf_rollback", "MA/VRCF rollback", "high", write_handler)
-            request = gateway.create_apply_request({
+            gateway.approval_transactions.register_write_handler("vrcforge_test_ma_vrcf_rollback", "MA/VRCF rollback", "high", write_handler)
+            request = gateway.approval_transactions.create_apply_request({
                 "target_tool": "vrcforge_test_ma_vrcf_rollback",
                 "arguments": {"projectRoot": str(project)},
             })
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
             self.assertTrue(applied["ok"])
             checkpoint_audit = applied["checkpoint"]["rollbackCoverageAudit"]
@@ -9618,14 +9618,14 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(frameworks["vrcfury"]["detected"])
             self.assertTrue(frameworks["ndmf"]["detected"])
 
-            preview = gateway.preview_restore_checkpoint({"checkpointId": applied["checkpoint"]["id"]})
+            preview = gateway.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": applied["checkpoint"]["id"]})
             self.assertTrue(preview["ok"])
             self.assertEqual(preview["rollbackCoverageAudit"]["phase"], "preview")
             preview_checks = {item["id"]: item for item in preview["rollbackCoverageAudit"]["checks"]}
             preview_frameworks = preview_checks["packages_manifest"]["frameworkPackages"]["packages"]
             self.assertTrue(preview_frameworks["vrcfury"]["detected"])
 
-            restored = gateway.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
+            restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
 
             self.assertTrue(restored["ok"])
             self.assertEqual(scene.read_text(encoding="utf-8"), "before scene with MA component")
@@ -9733,20 +9733,20 @@ class DashboardServerTests(unittest.TestCase):
             production = dashboard_server.AGENT_GATEWAY._write_handlers[  # noqa: SLF001 - exact handler metadata fixture.
                 "vrcforge_import_skill_package"
             ]
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 production.name,
                 production.description,
                 production.risk_level,
                 controller.import_package,
             )
-            request = gateway.create_apply_request(
+            request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_import_skill_package",
                     "arguments": {"packagePath": str(package)},
                 }
             )
-            gateway.approve(request["approval"]["id"])
-            applied = gateway.apply_approved({"approval_id": request["approval"]["id"]})
+            gateway.approval_transactions.approve(request["approval"]["id"])
+            applied = gateway.approval_transactions.apply_approved({"approval_id": request["approval"]["id"]})
 
             self.assertTrue(applied["ok"])
             checkpoint = applied["checkpoint"]
@@ -9754,11 +9754,11 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(checkpoint["pathspecs"], ["skill-packages", "skills"])
             self.assertTrue((gateway.skills.user_skills_dir / "avatar-review" / "SKILL.md").is_file())
             self.assertTrue((gateway.user_constraints_path.parent / "skill-packages" / "community.avatar-review").is_dir())
-            preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+            preview = gateway.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
             self.assertTrue(preview["ok"])
             self.assertTrue(any("avatar-review" in item for item in preview["workingTreeStatus"] + preview["changedFiles"]))
 
-            restored = gateway.restore_checkpoint(
+            restored = gateway.checkpoint_recovery.restore_checkpoint(
                 {
                     "checkpointId": checkpoint["id"],
                     "confirmRestore": True,
@@ -9787,21 +9787,21 @@ class DashboardServerTests(unittest.TestCase):
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
 
             def failing_write(args: dict) -> dict:
                 project_root = Path(args["projectRoot"])
                 (project_root / "Assets" / "generated-before-fail.txt").write_text("generated", encoding="utf-8")
                 raise RuntimeError("Unity MCP disconnected after checkpoint")
 
-            gateway.register_write_handler("vrcforge_test_failing_write", "Failing write", "high", failing_write)
-            request = gateway.create_apply_request({
+            gateway.approval_transactions.register_write_handler("vrcforge_test_failing_write", "Failing write", "high", failing_write)
+            request = gateway.approval_transactions.create_apply_request({
                 "target_tool": "vrcforge_test_failing_write",
                 "arguments": {"projectRoot": str(project)},
             })
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
             self.assertFalse(applied["ok"])
             self.assertEqual(applied["status"], "failed")
@@ -9809,7 +9809,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(applied["checkpoint"]["ok"])
             self.assertEqual(applied["approval"]["checkpoint"]["id"], applied["checkpoint"]["id"])
 
-            restored = gateway.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
+            restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
             self.assertTrue(restored["ok"])
             self.assertFalse((project / "Assets" / "generated-before-fail.txt").exists())
 
@@ -9823,8 +9823,8 @@ class DashboardServerTests(unittest.TestCase):
                 called.append(args)
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_audit_write", "Audit write", "high", write_handler)
-            request = gateway.create_apply_request({
+            gateway.approval_transactions.register_write_handler("vrcforge_test_audit_write", "Audit write", "high", write_handler)
+            request = gateway.approval_transactions.create_apply_request({
                 "target_tool": "vrcforge_test_audit_write",
                 "arguments": {
                     "projectRoot": str(root / "UnityProject"),
@@ -9837,11 +9837,11 @@ class DashboardServerTests(unittest.TestCase):
             gateway._approvals.clear()
 
             with self.assertRaises(AgentGatewayError) as approve_error:
-                gateway.approve(approval_id)
+                gateway.approval_transactions.approve(approval_id)
             self.assertEqual(approve_error.exception.status_code, 404)
 
             with self.assertRaises(AgentGatewayError) as apply_error:
-                gateway.apply_approved({"approval_id": approval_id})
+                gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertEqual(apply_error.exception.status_code, 404)
             self.assertEqual(called, [])
 
@@ -9855,14 +9855,14 @@ class DashboardServerTests(unittest.TestCase):
                 called.append(args)
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_missing_root_write", "Missing root write", "high", write_handler)
-            request = gateway.create_apply_request({
+            gateway.approval_transactions.register_write_handler("vrcforge_test_missing_root_write", "Missing root write", "high", write_handler)
+            request = gateway.approval_transactions.create_apply_request({
                 "target_tool": "vrcforge_test_missing_root_write",
                 "arguments": {"avatar_path": "Scene/Avatar"},
             })
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
             self.assertFalse(applied["ok"])
             self.assertEqual(applied["status"], "failed")
@@ -9875,24 +9875,27 @@ class DashboardServerTests(unittest.TestCase):
             root = Path(tmp)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             called: list[dict] = []
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_test_failed_checkpoint",
                 "Failed checkpoint",
                 "high",
                 lambda args: called.append(args) or {"ok": True},
             )
-            request = gateway.create_apply_request(
+            request = gateway.approval_transactions.create_apply_request(
                 {"target_tool": "vrcforge_test_failed_checkpoint", "arguments": {"projectRoot": str(root)}}
             )
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            gateway._create_pre_write_checkpoint = lambda _approval, _arguments: {  # type: ignore[method-assign]  # noqa: SLF001
-                "id": "ckpt_failed_without_blocking",
-                "ok": False,
-                "error": "checkpoint backend returned an incomplete result",
-            }
-
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            with patch.object(
+                type(gateway.approval_transactions),
+                "_create_pre_write_checkpoint",
+                return_value={
+                    "id": "ckpt_failed_without_blocking",
+                    "ok": False,
+                    "error": "checkpoint backend returned an incomplete result",
+                },
+            ):
+                applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
         self.assertFalse(applied["ok"])
         self.assertEqual(applied["status"], "failed")
@@ -9907,7 +9910,7 @@ class DashboardServerTests(unittest.TestCase):
             non_unity.mkdir()
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
 
-            checkpoint = gateway._create_pre_write_checkpoint(  # noqa: SLF001
+            checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(  # noqa: SLF001
                 {"id": "approval-test", "targetTool": "vrcforge_test_non_unity_write"},
                 {"projectRoot": str(non_unity)},
             )
@@ -9930,8 +9933,8 @@ class DashboardServerTests(unittest.TestCase):
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
 
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-            gateway.checkpoint_restore_handler = lambda _path, _prepare: {"ok": False, "error": "Unity bridge unavailable"}
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.checkpoint_recovery.checkpoint_restore_handler = lambda _path, _prepare: {"ok": False, "error": "Unity bridge unavailable"}
 
             def write_handler(args: dict) -> dict:
                 project_root = Path(args["projectRoot"])
@@ -9939,17 +9942,17 @@ class DashboardServerTests(unittest.TestCase):
                 (project_root / "Assets" / "generated.txt").write_text("generated", encoding="utf-8")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_reload_warning", "Reload warning write", "high", write_handler)
-            request = gateway.create_apply_request({
+            gateway.approval_transactions.register_write_handler("vrcforge_test_reload_warning", "Reload warning write", "high", write_handler)
+            request = gateway.approval_transactions.create_apply_request({
                 "target_tool": "vrcforge_test_reload_warning",
                 "arguments": {"projectRoot": str(project)},
             })
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
             self.assertTrue(applied["ok"])
-            restored = gateway.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
+            restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True})
 
             self.assertFalse(restored["ok"])
             self.assertTrue(restored["restored"])
@@ -10466,8 +10469,8 @@ class DashboardServerTests(unittest.TestCase):
         (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
 
         original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
-        original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
-        dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
+        original_prepare = dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler
+        dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
         calls: list[dict] = []
 
         def write_handler(args: dict) -> dict:
@@ -10475,13 +10478,13 @@ class DashboardServerTests(unittest.TestCase):
             return {"ok": True, "wrote": args.get("name")}
 
         try:
-            dashboard_server.AGENT_GATEWAY.register_write_handler(
+            dashboard_server.AGENT_GATEWAY.approval_transactions.register_write_handler(
                 "vrcforge_test_app_write",
                 "Test app write.",
                 "high",
                 write_handler,
             )
-            request = dashboard_server.AGENT_GATEWAY.create_apply_request({
+            request = dashboard_server.AGENT_GATEWAY.approval_transactions.create_apply_request({
                 "target_tool": "vrcforge_test_app_write",
                 "arguments": {"projectRoot": str(project), "name": "value"},
             })
@@ -10499,7 +10502,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(calls, [{"projectRoot": str(project), "name": "value"}])
         finally:
             dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
-            dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
+            dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = original_prepare
 
     def test_app_checkpoint_restore_request_uses_approval_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -10522,31 +10525,31 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(proc.returncode, 0, proc.stderr)
 
             original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
-            original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
-            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler
-            original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler
+            original_prepare = dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler
+            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler
+            original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler
 
             def write_handler(args: dict) -> dict:
                 (Path(args["projectRoot"]) / "Assets" / "generated.txt").write_text("after", encoding="utf-8")
                 return {"ok": True}
 
             try:
-                dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.register_write_handler(
+                dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.approval_transactions.register_write_handler(
                     "vrcforge_test_checkpoint_write",
                     "Test checkpoint write.",
                     "high",
                     write_handler,
                 )
-                request = dashboard_server.AGENT_GATEWAY.create_apply_request({
+                request = dashboard_server.AGENT_GATEWAY.approval_transactions.create_apply_request({
                     "target_tool": "vrcforge_test_checkpoint_write",
                     "arguments": {"projectRoot": str(project)},
                 })
                 approval_id = request["approval"]["id"]
-                dashboard_server.AGENT_GATEWAY.approve(approval_id)
-                dashboard_server.AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
+                dashboard_server.AGENT_GATEWAY.approval_transactions.approve(approval_id)
+                dashboard_server.AGENT_GATEWAY.approval_transactions.apply_approved({"approval_id": approval_id})
 
                 with TestClient(dashboard_server.app) as client:
                     listed = client.get("/api/app/checkpoints", params={"projectRoot": str(project)}).json()
@@ -10568,9 +10571,9 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertFalse((project / "Assets" / "generated.txt").exists())
             finally:
                 dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
-                dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = original_restore_prepare
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = original_reload
+                dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = original_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = original_restore_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = original_reload
 
     def test_adjustment_checkpoint_timeline_supports_crud_select_apply_and_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -10582,13 +10585,13 @@ class DashboardServerTests(unittest.TestCase):
             (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
             (project / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3", encoding="utf-8")
 
-            original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
-            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler
-            original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler
+            original_prepare = dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler
+            original_restore_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler
+            original_reload = dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler
             try:
-                dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _root: {"ok": True, "scenes": []}
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = lambda _root, _prepare: {"ok": True}
                 with TestClient(dashboard_server.app) as client:
                     created = client.post(
                         "/api/app/adjustment-checkpoints",
@@ -10647,15 +10650,15 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(listed_after_delete["count"], 0)
                 self.assertEqual(listed_with_deleted["count"], 1)
             finally:
-                dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_prepare_handler = original_restore_prepare
-                dashboard_server.AGENT_GATEWAY.checkpoint_restore_handler = original_reload
+                dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = original_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = original_restore_prepare
+                dashboard_server.AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = original_reload
 
     def test_face_shader_checkpoint_records_auto_adjustment_timeline_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             gateway = AgentGateway(Path(tmp) / "config" / "agent_gateway.json", Path(tmp) / "audit")
 
-            gateway._append_checkpoint(  # noqa: SLF001 - unit test verifies checkpoint index side effect.
+            gateway.checkpoint_recovery._append_checkpoint(  # noqa: SLF001 - unit test verifies checkpoint index side effect.
                 {
                     "id": "ckpt_face_auto",
                     "createdAt": "2026-06-24T00:00:00+00:00",
@@ -10665,7 +10668,7 @@ class DashboardServerTests(unittest.TestCase):
                     "projectRoot": "D:/AvatarProject",
                 }
             )
-            gateway._append_checkpoint(  # noqa: SLF001 - unit test verifies checkpoint index side effect.
+            gateway.checkpoint_recovery._append_checkpoint(  # noqa: SLF001 - unit test verifies checkpoint index side effect.
                 {
                     "id": "ckpt_shader_auto",
                     "createdAt": "2026-06-24T00:00:01+00:00",
@@ -10676,8 +10679,8 @@ class DashboardServerTests(unittest.TestCase):
                 }
             )
 
-            face = gateway.list_adjustment_checkpoints({"kind": "face"})
-            shader = gateway.list_adjustment_checkpoints({"kind": "shader"})
+            face = gateway.checkpoint_recovery.list_adjustment_checkpoints({"kind": "face"})
+            shader = gateway.checkpoint_recovery.list_adjustment_checkpoints({"kind": "shader"})
 
             self.assertEqual(face["count"], 1)
             self.assertEqual(face["checkpoints"][0]["checkpointId"], "ckpt_face_auto")
@@ -13012,7 +13015,7 @@ namespace VRCForge.Editor
         )
 
         with patch.object(
-            dashboard_server.AGENT_GATEWAY,
+            type(dashboard_server.AGENT_GATEWAY.approval_transactions),
             "create_apply_request",
             return_value={"ok": True, "approval": {"id": "approval_blendshape", "targetTool": "vrcforge_apply_blendshapes"}},
         ) as create_request:
@@ -13108,7 +13111,7 @@ namespace VRCForge.Editor
         ]
 
         with patch.object(
-            dashboard_server.AGENT_GATEWAY,
+            type(dashboard_server.AGENT_GATEWAY.approval_transactions),
             "create_apply_request",
             return_value={"ok": True, "approval": {"id": "approval_pipeline", "targetTool": "vrcforge_run_face_tuning"}},
         ):
@@ -13950,7 +13953,7 @@ namespace VRCForge.Editor
         )
 
         with patch.object(
-            dashboard_server.AGENT_GATEWAY,
+            type(dashboard_server.AGENT_GATEWAY.approval_transactions),
             "create_apply_request",
             return_value={"ok": True, "approval": {"id": "approval_shader_preset", "targetTool": "vrcforge_apply_shader_tuning_preset"}},
         ):
@@ -13973,7 +13976,7 @@ namespace VRCForge.Editor
             return {"ok": True}
 
         with patch.object(
-            dashboard_server.AGENT_GATEWAY,
+            type(dashboard_server.AGENT_GATEWAY.approval_transactions),
             "create_apply_request",
             return_value={"ok": True, "approval": {"id": "approval_test"}},
         ):
@@ -14121,7 +14124,7 @@ namespace VRCForge.Editor
         self.assertEqual(tool_name, "vrc_scan_avatar_parameters")
         self.assertEqual(params["outputPath"], "")
 
-    @patch("dashboard_server.AGENT_GATEWAY.create_apply_request")
+    @patch("agent_approval_transactions.AgentApprovalTransactionService.create_apply_request")
     def test_vision_capture_requests_approved_scene_view_write(self, mock_create_apply_request) -> None:
         mock_create_apply_request.return_value = {"ok": True, "status": "pending", "approvalId": "approval_capture"}
 
@@ -14923,7 +14926,7 @@ namespace VRCForge.Editor
                     side_effect=invoke_side_effect,
                 ):
                     with patch.object(
-                        dashboard_server.AGENT_GATEWAY,
+                        type(dashboard_server.AGENT_GATEWAY.approval_transactions),
                         "create_apply_request",
                         return_value={"ok": True, "approval": {"id": "approval_parameters", "targetTool": "vrcforge_apply_parameter_optimization"}},
                     ):
@@ -14981,7 +14984,7 @@ namespace VRCForge.Editor
                     ),
                 ) as mock_invoke:
                     with patch.object(
-                        dashboard_server.AGENT_GATEWAY,
+                        type(dashboard_server.AGENT_GATEWAY.approval_transactions),
                         "create_apply_request",
                         return_value={"ok": True, "approval": {"id": "approval_rollback", "targetTool": "vrcforge_rollback_parameters"}},
                     ):
@@ -15003,7 +15006,7 @@ namespace VRCForge.Editor
     # ------------------------------------------------------------------
     # /api/vision/capture-multi (needs Unity — verify endpoint exists + 503)
     # ------------------------------------------------------------------
-    @patch("dashboard_server.AGENT_GATEWAY.create_apply_request")
+    @patch("agent_approval_transactions.AgentApprovalTransactionService.create_apply_request")
     def test_capture_multi_endpoint_requests_approval(self, mock_create_apply_request) -> None:
         mock_create_apply_request.return_value = {"ok": True, "status": "pending", "approvalId": "approval_multi_capture"}
         with TestClient(dashboard_server.app) as client:

@@ -259,7 +259,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
             "vrcforge_request_apply",
             "Request approval for one write.",
             "supervised-write",
-            gateway.create_apply_request,
+            gateway.approval_transactions.create_apply_request,
             write=True,
         )
         target_names = {str(case["target_tool"])}
@@ -269,7 +269,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
                 (project / "Assets" / "example.txt").write_text(f"changed by {_target}", encoding="utf-8")
                 return {"ok": True, "tool": _target}
 
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 target_name,
                 f"Example handler for {target_name}.",
                 "high",
@@ -340,7 +340,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
                     "newName": "Outfit_Casual",
                 },
             }
-        request = gateway.create_apply_request(
+        request = gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": target_tool,
                 "arguments": request_arguments,
@@ -348,15 +348,15 @@ def test_example_skill_package_trust_import_execute_and_audit(
             }
         )
         approval_id = request["approval"]["id"]
-        gateway.approve(approval_id)
-        applied = gateway.apply_approved({"approval_id": approval_id})
+        gateway.approval_transactions.approve(approval_id)
+        applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
         assert applied["ok"] is True
         assert applied["checkpoint"]["ok"] is True
         assert [call["tool"] for call in calls] == [target_tool]
         assert calls[0]["arguments"] == request_arguments
         assert (project / "Assets" / "example.txt").read_text(encoding="utf-8") == f"changed by {target_tool}"
-        restored = gateway.restore_checkpoint(
+        restored = gateway.checkpoint_recovery.restore_checkpoint(
             {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
         )
         assert restored["ok"] is True
@@ -366,7 +366,7 @@ def test_example_skill_package_trust_import_execute_and_audit(
         assert loaded["entrypointTool"] == case["entrypoint_tool"]
         assert [call["tool"] for call in calls] == [case["entrypoint_tool"]]
 
-    runtime_audit = gateway.recent_audit_logs(limit=50)
+    runtime_audit = gateway.approval_transactions.recent_audit_logs(limit=50)
     runtime_events = [entry["event"] for entry in runtime_audit]
     assert "runtime_skill_package_loaded" in runtime_events
     loaded_events = [entry for entry in runtime_audit if entry.get("event") == "runtime_skill_package_loaded"]
@@ -398,10 +398,10 @@ def test_signed_material_package_install_projection_and_runtime_support_are_comp
         "vrcforge_request_apply",
         "Request approval for one material write.",
         "supervised-write",
-        gateway.create_apply_request,
+        gateway.approval_transactions.create_apply_request,
         write=True,
     )
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_apply_shader_tuning",
         "Apply shader tuning.",
         "high",
@@ -431,7 +431,7 @@ def test_signed_material_package_install_projection_and_runtime_support_are_comp
     assert json.loads(support["workflows/material-preset-pack.json"])["steps"][0]["tool"] == "vrcforge_request_apply"
     assert json.loads(support["presets/material-presets.json"])["schema"] == "vrcforge.material-preset-pack.v1"
     package_events = [
-        event for event in gateway.recent_audit_logs(limit=20) if event.get("event") == "runtime_skill_package_loaded"
+        event for event in gateway.approval_transactions.recent_audit_logs(limit=20) if event.get("event") == "runtime_skill_package_loaded"
     ]
     assert package_events[-1]["packageId"] == "community.examples.material-preset-pack"
     assert package_events[-1]["signerFingerprint"] == key_pair.fingerprint

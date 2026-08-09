@@ -253,8 +253,8 @@ def _validate_manifest(repo_root: Path, manifest: dict[str, Any]) -> list[str]:
     except ValueError as exc:
         errors.append(str(exc))
     groups = manifest.get("seamGroups")
-    if not isinstance(groups, list) or not groups:
-        errors.append("manifest seamGroups must be a non-empty list")
+    if not isinstance(groups, list):
+        errors.append("manifest seamGroups must be a list")
         return errors
     seen_groups: set[str] = set()
     seen_facades: set[tuple[str, str, str, str]] = set()

@@ -669,7 +669,7 @@ def test_dashboard_adoption_skips_bind_probe_acks_then_runs_with_exact_socket() 
     original_session = dashboard_server.PRIMITIVE_BASIS_LIVE_SESSION
     original_connection = dashboard_server.PRIMITIVE_BASIS_LIVE_CONNECTION
     original_runtime = dashboard_server.PRIMITIVE_BASIS_LIVE_RUNTIME
-    original_observer = dashboard_server.AGENT_GATEWAY.apply_lifecycle_observer_fn
+    original_observer = dashboard_server.AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer
 
     def create_connection() -> object:
         events.append("connection")
@@ -690,8 +690,8 @@ def test_dashboard_adoption_skips_bind_probe_acks_then_runs_with_exact_socket() 
             "ok": True,
             "state": "adopted",
         }
-        assert dashboard_server.AGENT_GATEWAY.apply_lifecycle_observer_fn is live_observer
-        assert dashboard_server.AGENT_GATEWAY.apply_lifecycle_observer_fn(
+        assert dashboard_server.AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer is live_observer
+        assert dashboard_server.AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer(
             "applied", {"requestId": "request-1"}
         ) == {"ok": True, "observed": True}
 
@@ -725,12 +725,12 @@ def test_dashboard_adoption_skips_bind_probe_acks_then_runs_with_exact_socket() 
         assert dashboard_server.PRIMITIVE_BASIS_LIVE_SESSION is None
         assert dashboard_server.PRIMITIVE_BASIS_LIVE_CONNECTION is None
         assert dashboard_server.PRIMITIVE_BASIS_LIVE_RUNTIME is None
-        assert dashboard_server.AGENT_GATEWAY.apply_lifecycle_observer_fn is None
+        assert dashboard_server.AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer is None
     finally:
         dashboard_server.PRIMITIVE_BASIS_LIVE_SESSION = original_session
         dashboard_server.PRIMITIVE_BASIS_LIVE_CONNECTION = original_connection
         dashboard_server.PRIMITIVE_BASIS_LIVE_RUNTIME = original_runtime
-        dashboard_server.AGENT_GATEWAY.apply_lifecycle_observer_fn = original_observer
+        dashboard_server.AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer = original_observer
 
 
 def test_dashboard_adoption_ack_failure_closes_socket_releases_owner_and_never_runs() -> None:
@@ -791,7 +791,7 @@ def test_dashboard_runtime_install_failure_is_generic_and_releases_adoption() ->
     original_session = dashboard_server.PRIMITIVE_BASIS_LIVE_SESSION
     original_connection = dashboard_server.PRIMITIVE_BASIS_LIVE_CONNECTION
     original_runtime = dashboard_server.PRIMITIVE_BASIS_LIVE_RUNTIME
-    original_observer = dashboard_server.AGENT_GATEWAY.apply_lifecycle_observer_fn
+    original_observer = dashboard_server.AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer
     printed = Mock()
     try:
         with (
@@ -818,7 +818,7 @@ def test_dashboard_runtime_install_failure_is_generic_and_releases_adoption() ->
         assert dashboard_server.PRIMITIVE_BASIS_LIVE_SESSION is None
         assert dashboard_server.PRIMITIVE_BASIS_LIVE_CONNECTION is None
         assert dashboard_server.PRIMITIVE_BASIS_LIVE_RUNTIME is None
-        assert dashboard_server.AGENT_GATEWAY.apply_lifecycle_observer_fn is None
+        assert dashboard_server.AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer is None
         printed_text = " ".join(str(arg) for call in printed.call_args_list for arg in call.args)
         assert "protected listener adoption" in printed_text
         assert "private-runtime-detail" not in printed_text
@@ -826,7 +826,7 @@ def test_dashboard_runtime_install_failure_is_generic_and_releases_adoption() ->
         dashboard_server.PRIMITIVE_BASIS_LIVE_SESSION = original_session
         dashboard_server.PRIMITIVE_BASIS_LIVE_CONNECTION = original_connection
         dashboard_server.PRIMITIVE_BASIS_LIVE_RUNTIME = original_runtime
-        dashboard_server.AGENT_GATEWAY.apply_lifecycle_observer_fn = original_observer
+        dashboard_server.AGENT_GATEWAY.approval_transactions.apply_lifecycle_observer = original_observer
 
 
 def test_owned_uvicorn_server_passes_only_the_adopted_socket() -> None:

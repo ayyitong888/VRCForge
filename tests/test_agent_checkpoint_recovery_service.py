@@ -25,6 +25,43 @@ def _gateway(root: Path) -> AgentGateway:
     return AgentGateway(root / "config.json", root / "audit")
 
 
+def _bind_transaction_test_locks(
+    gateway: AgentGateway,
+    *,
+    storage_lock: object | None = None,
+    user_lock: object | None = None,
+) -> None:
+    if storage_lock is not None:
+        gateway._checkpoint_storage_lock = storage_lock  # noqa: SLF001 - exact lock fixture.
+        gateway.checkpoint_recovery._ports = replace(  # noqa: SLF001
+            gateway.checkpoint_recovery._ports,  # noqa: SLF001
+            state=replace(
+                gateway.checkpoint_recovery._ports.state,  # noqa: SLF001
+                checkpoint_storage_lock=storage_lock,
+            ),
+        )
+        gateway.approval_transactions._ports = replace(  # noqa: SLF001
+            gateway.approval_transactions._ports,  # noqa: SLF001
+            state=replace(
+                gateway.approval_transactions._ports.state,  # noqa: SLF001
+                checkpoint_storage_lock=storage_lock,
+            ),
+        )
+    if user_lock is not None:
+        gateway.skills._ports = replace(  # noqa: SLF001
+            gateway.skills._ports,  # noqa: SLF001
+            user_skill_lock=user_lock,
+        )
+        gateway.checkpoint_recovery._ports = replace(  # noqa: SLF001
+            gateway.checkpoint_recovery._ports,  # noqa: SLF001
+            skills=replace(gateway.checkpoint_recovery._ports.skills, write_lock=user_lock),  # noqa: SLF001
+        )
+        gateway.approval_transactions._ports = replace(  # noqa: SLF001
+            gateway.approval_transactions._ports,  # noqa: SLF001
+            skills=replace(gateway.approval_transactions._ports.skills, write_lock=user_lock),  # noqa: SLF001
+        )
+
+
 def _tree_bytes(root: Path) -> dict[str, bytes]:
     if not root.is_dir():
         return {}
@@ -39,7 +76,7 @@ def _create_persisted_local_state_checkpoint(
     gateway: AgentGateway,
     checkpoint_id: str,
 ) -> dict[str, object]:
-    return gateway._create_local_state_checkpoint(
+    return gateway.checkpoint_recovery._create_local_state_checkpoint(
         {
             "schema": "vrcforge.checkpoint.v1",
             "id": checkpoint_id,
@@ -55,7 +92,7 @@ def _local_state_restore_fixture(
     checkpoint_id: str,
 ) -> tuple[AgentGateway, dict[str, object], dict[str, Path], dict[str, dict[str, bytes]]]:
     gateway = _gateway(root)
-    roots = gateway._local_state_checkpoint_roots()
+    roots = gateway.checkpoint_recovery._local_state_checkpoint_roots()
     package_file = roots["skill-packages"] / "sample" / "installed.json"
     skill_file = roots["skills"] / "sample" / "SKILL.md"
     package_file.parent.mkdir(parents=True)
@@ -104,7 +141,7 @@ def _preview_local_state_digest(
     gateway: AgentGateway,
     checkpoint: dict[str, object],
 ) -> str:
-    preview = gateway.preview_restore_checkpoint(
+    preview = gateway.checkpoint_recovery.preview_restore_checkpoint(
         {"checkpointId": str(checkpoint["id"])}
     )
     assert preview["ok"] is True
@@ -117,7 +154,7 @@ def _preview_local_state_digest_direct(
     gateway: AgentGateway,
     checkpoint: dict[str, object],
 ) -> str:
-    preview = gateway._preview_local_state_checkpoint(checkpoint)
+    preview = gateway.checkpoint_recovery._preview_local_state_checkpoint(checkpoint)
     assert preview["ok"] is True
     digest = str(preview["currentStateDigest"])
     assert re.fullmatch(r"[0-9a-f]{64}", digest)
@@ -125,11 +162,11 @@ def _preview_local_state_digest_direct(
 
 
 def _register_checkpoint_restore_handler(gateway: AgentGateway) -> None:
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_restore_checkpoint",
         "Restore a frozen checkpoint state.",
         "high",
-        gateway.restore_checkpoint,
+        gateway.checkpoint_recovery.restore_checkpoint,
     )
 
 
@@ -145,13 +182,14 @@ def _class_definition(path: Path, class_name: str) -> ast.ClassDef:
 def test_checkpoint_recovery_service_owns_no_second_runtime_or_lock() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway = _gateway(Path(temp_dir))
-        service = gateway._checkpoint_recovery
+        service = gateway.checkpoint_recovery
 
         assert isinstance(service, AgentCheckpointRecoveryService)
-        assert service._host is gateway
-        assert AgentCheckpointRecoveryService.__slots__ == ("_host",)
-        assert service._checkpoint_storage_lock is gateway._checkpoint_storage_lock
-        assert service._project_chat_checkpoint_lock is gateway._project_chat_checkpoint_lock
+        assert not hasattr(service, "_host")
+        assert "__getattr__" not in AgentCheckpointRecoveryService.__dict__
+        assert service._ports.state.checkpoint_storage_lock is gateway._checkpoint_storage_lock
+        assert service._ports.state.skill_package_write_lock is gateway._skill_package_write_lock
+        assert service._ports.skills.write_lock is gateway.skills.write_lock
 
 
 def test_local_state_checkpoint_uses_package_then_exact_user_lock() -> None:
@@ -166,15 +204,12 @@ def test_local_state_checkpoint_uses_package_then_exact_user_lock() -> None:
             root / "audit",
             skill_package_write_lock=package_lock,
         )
-        gateway.skills._ports = replace(  # noqa: SLF001 - typed lock identity fixture.
-            gateway.skills._ports,  # noqa: SLF001
-            user_skill_lock=user_lock,
-        )
+        _bind_transaction_test_locks(gateway, user_lock=user_lock)
         skill_file = gateway.skills.user_skills_dir / "sample" / "SKILL.md"
         skill_file.parent.mkdir(parents=True)
         skill_file.write_text("sample\n", encoding="utf-8")
 
-        checkpoint = gateway._create_local_state_checkpoint({"id": "lock-order"})
+        checkpoint = gateway.checkpoint_recovery._create_local_state_checkpoint({"id": "lock-order"})
         assert checkpoint["ok"] is True
         assert events[:4] == [
             "package:enter",
@@ -184,7 +219,7 @@ def test_local_state_checkpoint_uses_package_then_exact_user_lock() -> None:
         ]
 
         events.clear()
-        preview = gateway._preview_local_state_checkpoint(checkpoint)
+        preview = gateway.checkpoint_recovery._preview_local_state_checkpoint(checkpoint)
         assert preview["ok"] is True
         digest = str(preview["currentStateDigest"])
         assert events == [
@@ -195,7 +230,7 @@ def test_local_state_checkpoint_uses_package_then_exact_user_lock() -> None:
         ]
 
         events.clear()
-        assert gateway._restore_local_state_checkpoint(checkpoint, digest)["ok"] is True
+        assert gateway.checkpoint_recovery._restore_local_state_checkpoint(checkpoint, digest)["ok"] is True
         assert events == [
             "package:enter",
             "user:enter",
@@ -218,10 +253,10 @@ def test_local_state_approved_write_holds_storage_package_and_user_locks_through
             root / "audit",
             skill_package_write_lock=package_lock,
         )
-        gateway._checkpoint_storage_lock = storage_lock  # noqa: SLF001 - exact transaction lock fixture.
-        gateway.skills._ports = replace(  # noqa: SLF001 - typed lock identity fixture.
-            gateway.skills._ports,  # noqa: SLF001
-            user_skill_lock=user_lock,
+        _bind_transaction_test_locks(
+            gateway,
+            storage_lock=storage_lock,
+            user_lock=user_lock,
         )
 
         def approved_handler(_arguments: dict[str, object]) -> dict[str, object]:
@@ -231,21 +266,21 @@ def test_local_state_approved_write_holds_storage_package_and_user_locks_through
             )
             return {"ok": True, "changed": False}
 
-        gateway.register_write_handler(
+        gateway.approval_transactions.register_write_handler(
             "vrcforge_import_skill_package",
             "Import an isolated skill package fixture.",
             "medium",
             approved_handler,
         )
-        request = gateway.create_apply_request(
+        request = gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_import_skill_package",
                 "arguments": {"packagePath": "fixture.vsk"},
             }
         )
-        gateway.approve(request["approval"]["id"])
+        gateway.approval_transactions.approve(request["approval"]["id"])
 
-        applied = gateway.apply_approved(
+        applied = gateway.approval_transactions.apply_approved(
             {"approval_id": request["approval"]["id"]}
         )
 
@@ -262,21 +297,21 @@ def test_local_state_approved_write_without_shared_package_lock_fails_closed() -
 
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway = _gateway(Path(temp_dir))
-        gateway.register_write_handler(
+        gateway.approval_transactions.register_write_handler(
             "vrcforge_import_skill_package",
             "Import an isolated skill package fixture.",
             "medium",
             lambda arguments: handler_calls.append(arguments) or {"ok": True},
         )
-        request = gateway.create_apply_request(
+        request = gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_import_skill_package",
                 "arguments": {"packagePath": "fixture.vsk"},
             }
         )
-        gateway.approve(request["approval"]["id"])
+        gateway.approval_transactions.approve(request["approval"]["id"])
 
-        applied = gateway.apply_approved(
+        applied = gateway.approval_transactions.apply_approved(
             {"approval_id": request["approval"]["id"]}
         )
 
@@ -299,7 +334,7 @@ def test_local_state_checkpoint_rejects_linked_root_and_nested_path_before_resto
         skill_file = gateway.skills.user_skills_dir / "sample" / "SKILL.md"
         skill_file.parent.mkdir(parents=True)
         skill_file.write_text("before\n", encoding="utf-8")
-        checkpoint = gateway._create_local_state_checkpoint({"id": "safe-state"})
+        checkpoint = gateway.checkpoint_recovery._create_local_state_checkpoint({"id": "safe-state"})
         assert checkpoint["ok"] is True
         skill_file.write_text("after\n", encoding="utf-8")
 
@@ -313,9 +348,9 @@ def test_local_state_checkpoint_rejects_linked_root_and_nested_path_before_resto
             ),
         )
 
-        preview = gateway._preview_local_state_checkpoint(checkpoint)
-        restored = gateway._restore_local_state_checkpoint(checkpoint, "0" * 64)
-        blocked = gateway._create_local_state_checkpoint({"id": "linked-state"})
+        preview = gateway.checkpoint_recovery._preview_local_state_checkpoint(checkpoint)
+        restored = gateway.checkpoint_recovery._restore_local_state_checkpoint(checkpoint, "0" * 64)
+        blocked = gateway.checkpoint_recovery._create_local_state_checkpoint({"id": "linked-state"})
 
         assert preview["ok"] is False
         assert restored["ok"] is False
@@ -338,7 +373,7 @@ def test_local_state_checkpoint_rejects_linked_root_and_nested_path_before_resto
             ),
         )
 
-        blocked = gateway._create_local_state_checkpoint({"id": "nested-link"})
+        blocked = gateway.checkpoint_recovery._create_local_state_checkpoint({"id": "nested-link"})
 
         assert blocked["ok"] is False
         assert "linked local state path" in blocked["error"]
@@ -362,7 +397,7 @@ def test_corrupt_local_state_archive_does_not_change_live_roots() -> None:
         archive_bytes[payload_offset] ^= 0xFF
         archive_path.write_bytes(archive_bytes)
 
-        result = gateway._restore_local_state_checkpoint(checkpoint, digest)
+        result = gateway.checkpoint_recovery._restore_local_state_checkpoint(checkpoint, digest)
 
         assert result["ok"] is False
         assert "restore failed" in str(result["error"]).lower()
@@ -390,7 +425,7 @@ def test_local_state_staging_failure_does_not_change_live_roots(
             fail_stage_copy,
         )
 
-        result = gateway._restore_local_state_checkpoint(checkpoint, digest)
+        result = gateway.checkpoint_recovery._restore_local_state_checkpoint(checkpoint, digest)
 
         assert result["ok"] is False
         assert "injected local state staging failure" in str(result["error"])
@@ -406,7 +441,7 @@ def test_local_state_restore_publishes_both_staged_roots_and_cleans_workspaces()
         )
         digest = _preview_local_state_digest_direct(gateway, checkpoint)
 
-        result = gateway._restore_local_state_checkpoint(checkpoint, digest)
+        result = gateway.checkpoint_recovery._restore_local_state_checkpoint(checkpoint, digest)
 
         assert result["ok"] is True
         assert _tree_bytes(roots["skill-packages"]) == {
@@ -441,7 +476,7 @@ def test_second_local_state_root_publish_failure_rolls_back_both_roots(
 
         monkeypatch.setattr(agent_checkpoint_recovery.os, "replace", fail_second_publish)
 
-        result = gateway._restore_local_state_checkpoint(checkpoint, digest)
+        result = gateway.checkpoint_recovery._restore_local_state_checkpoint(checkpoint, digest)
 
         assert result["ok"] is False
         assert "injected second local state publish failure" in str(result["error"])
@@ -488,7 +523,7 @@ def test_local_state_rollback_failure_preserves_named_backup_recovery_path(
             fail_publish_and_first_rollback,
         )
 
-        result = gateway._restore_local_state_checkpoint(checkpoint, digest)
+        result = gateway.checkpoint_recovery._restore_local_state_checkpoint(checkpoint, digest)
 
         assert result["ok"] is False
         assert "recovery data remains at" in str(result["error"])
@@ -510,7 +545,7 @@ def test_local_state_preview_digest_is_stable_and_covers_exact_tree_identity() -
             "digest-state-components",
         )
         assert checkpoint["ok"] is True
-        roots = gateway._local_state_checkpoint_roots()
+        roots = gateway.checkpoint_recovery._local_state_checkpoint_roots()
 
         absent_digest = _preview_local_state_digest(gateway, checkpoint)
         assert _preview_local_state_digest(gateway, checkpoint) == absent_digest
@@ -547,7 +582,7 @@ def test_local_state_preview_digest_is_stable_and_covers_exact_tree_identity() -
 def test_local_state_checkpoint_restores_empty_directories_exactly() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway = _gateway(Path(temp_dir))
-        roots = gateway._local_state_checkpoint_roots()
+        roots = gateway.checkpoint_recovery._local_state_checkpoint_roots()
         empty_directory = roots["skills"] / "empty-skill" / "support"
         empty_directory.mkdir(parents=True)
         checkpoint = _create_persisted_local_state_checkpoint(
@@ -559,7 +594,7 @@ def test_local_state_checkpoint_restores_empty_directories_exactly() -> None:
         empty_directory.rmdir()
         empty_directory.parent.rmdir()
         digest = _preview_local_state_digest_direct(gateway, checkpoint)
-        result = gateway._restore_local_state_checkpoint(checkpoint, digest)
+        result = gateway.checkpoint_recovery._restore_local_state_checkpoint(checkpoint, digest)
 
         assert result["ok"] is True
         assert empty_directory.is_dir()
@@ -586,7 +621,7 @@ def test_local_state_restore_rejects_missing_or_malformed_digest_without_writes(
         if supplied_digest is not None:
             params["currentStateDigest"] = supplied_digest
 
-        result = gateway.restore_checkpoint(params)
+        result = gateway.checkpoint_recovery.restore_checkpoint(params)
 
         assert result["ok"] is False
         assert "currentStateDigest" in str(result["error"])
@@ -605,7 +640,7 @@ def test_local_state_approved_restore_rejects_each_root_drift_after_preview(
         )
         _register_checkpoint_restore_handler(gateway)
         digest = _preview_local_state_digest(gateway, checkpoint)
-        request = gateway.create_apply_request(
+        request = gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_restore_checkpoint",
                 "arguments": {
@@ -616,12 +651,12 @@ def test_local_state_approved_restore_rejects_each_root_drift_after_preview(
             }
         )
         assert request["approval"]["arguments"]["currentStateDigest"] == digest
-        gateway.approve(request["approval"]["id"])
+        gateway.approval_transactions.approve(request["approval"]["id"])
         drift_file = roots[changed_scope] / "approval-drift.bin"
         drift_file.write_bytes(f"changed {changed_scope}".encode("utf-8"))
         drifted = {scope: _tree_bytes(path) for scope, path in roots.items()}
 
-        applied = gateway.apply_approved(
+        applied = gateway.approval_transactions.apply_approved(
             {"approval_id": request["approval"]["id"]}
         )
 
@@ -639,7 +674,7 @@ def test_local_state_restore_with_matching_preview_digest_restores_checkpoint() 
         )
         digest = _preview_local_state_digest(gateway, checkpoint)
 
-        result = gateway.restore_checkpoint(
+        result = gateway.checkpoint_recovery.restore_checkpoint(
             {
                 "checkpointId": checkpoint["id"],
                 "confirmRestore": True,
@@ -657,13 +692,12 @@ def test_local_state_restore_with_matching_preview_digest_restores_checkpoint() 
         assert _restore_workspaces(roots) == []
 
 
-def test_checkpoint_recovery_internal_calls_preserve_facade_monkeypatches() -> None:
+def test_checkpoint_recovery_internal_calls_stay_inside_the_owner() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway = _gateway(Path(temp_dir))
-        sentinel = {"ok": True, "checkpoints": [{"id": "patched"}], "count": 1}
-        gateway._list_checkpoints_locked = lambda _params: sentinel  # type: ignore[method-assign]
-
-        assert gateway.list_checkpoints() is sentinel
+        with gateway._checkpoint_storage_lock:
+            expected = gateway.checkpoint_recovery._list_checkpoints_locked(None)
+        assert gateway.checkpoint_recovery.list_checkpoints() == expected
 
 
 def test_checkpoint_recovery_hooks_remain_late_bound_after_construction() -> None:
@@ -676,14 +710,14 @@ def test_checkpoint_recovery_hooks_remain_late_bound_after_construction() -> Non
         def reload(_project_root: Path, _prepared: dict[str, object]) -> dict[str, str]:
             return {"status": "reloaded"}
 
-        gateway.checkpoint_restore_prepare_handler = prepare
-        gateway.checkpoint_restore_handler = reload
+        gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = prepare
+        gateway.checkpoint_recovery.checkpoint_restore_handler = reload
 
-        assert gateway._checkpoint_recovery.checkpoint_restore_prepare_handler is prepare
-        assert gateway._checkpoint_recovery.checkpoint_restore_handler is reload
+        assert gateway.checkpoint_recovery.checkpoint_restore_prepare_handler is prepare
+        assert gateway.checkpoint_recovery.checkpoint_restore_handler is reload
 
 
-def test_checkpoint_recovery_facade_is_delegate_only_and_keeps_transaction_boundary() -> None:
+def test_checkpoint_recovery_owner_retires_gateway_facades_and_impl_names() -> None:
     gateway_class = _class_definition(REPO_ROOT / "agent_gateway.py", "AgentGateway")
     service_class = _class_definition(
         REPO_ROOT / "agent_checkpoint_recovery.py",
@@ -694,32 +728,23 @@ def test_checkpoint_recovery_facade_is_delegate_only_and_keeps_transaction_bound
         for node in gateway_class.body
         if isinstance(node, ast.FunctionDef)
     }
-    implementation_methods = {
-        node.name.removeprefix("_impl_"): node
+    owner_methods = {
+        node.name: node
         for node in service_class.body
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("_impl_")
+        if isinstance(node, ast.FunctionDef)
+    }
+    representative_owner_methods = {
+        "list_checkpoints", "inspect_checkpoint_storage", "repair_checkpoint_storage",
+        "prune_checkpoint_archives", "list_interrupted_apply_recoveries",
+        "resolve_interrupted_apply_recovery", "list_adjustment_checkpoints",
+        "preview_restore_checkpoint", "restore_checkpoint", "_create_archive_checkpoint",
+        "_create_local_state_checkpoint", "_restore_local_state_checkpoint",
+        "_append_checkpoint", "_active_apply_recoveries",
     }
 
-    assert len(implementation_methods) == 87
-    assert {
-        "_call_write_handler",
-        "_create_pre_write_checkpoint",
-        "_create_pre_write_checkpoint_locked",
-        "_start_apply_recovery",
-        "_finish_apply_recovery",
-        "_resolve_apply_recoveries_for_checkpoint",
-        "has_in_flight_project_write",
-    }.isdisjoint(implementation_methods)
-
-    for method_name in implementation_methods:
-        facade = gateway_methods[method_name]
-        assert len(facade.body) == 1
-        statement = facade.body[0]
-        assert isinstance(statement, ast.Return)
-        call = statement.value
-        assert isinstance(call, ast.Call)
-        assert isinstance(call.func, ast.Attribute)
-        assert call.func.attr == f"_impl_{method_name}"
+    assert representative_owner_methods <= owner_methods.keys()
+    assert representative_owner_methods.isdisjoint(gateway_methods)
+    assert all(not name.startswith("_impl_") for name in owner_methods)
 
 
 def test_agent_gateway_facade_respects_the_monotonic_1_5_size_budget() -> None:

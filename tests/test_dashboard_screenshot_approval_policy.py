@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,9 +19,23 @@ def test_screenshot_tools_are_registered_as_approved_context_writes_not_direct_r
     assert "def capture_blendshape_visual_proof" not in SOURCE
     assert "Capture is deferred to a separately approved screenshot write." in SOURCE
     assert 'AGENT_GATEWAY.register_tool("vrcforge_capture_screenshot"' not in SOURCE
+    registry = next(
+        node
+        for node in ast.parse(SOURCE).body
+        if isinstance(node, ast.FunctionDef) and node.name == "register_agent_gateway_tools"
+    )
     for tool_name in ("vrcforge_capture_screenshot", "vrcforge_capture_multi_screenshot"):
-        registration = SOURCE.index(f'"{tool_name}",', SOURCE.index("AGENT_GATEWAY.register_write_handler"))
-        block = SOURCE[registration:SOURCE.index("AGENT_GATEWAY.register_write_handler", registration + 1)]
+        registration = next(
+            node
+            for node in ast.walk(registry)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "register_write_handler"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and node.args[0].value == tool_name
+        )
+        block = ast.get_source_segment(SOURCE, registration) or ""
         assert "request_preparer=" in block
         assert "requires_approved_execution_context=True" in block
         assert "approved_execution_plan_builder=build_prepared_execution_plan" in block

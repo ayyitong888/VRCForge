@@ -394,8 +394,8 @@ def memory_review_dashboard(tmp_path: Path):
                 limit=limit,
                 project_root=project_root,
             ),
-            acquire_background_project_read=gateway.try_acquire_background_project_read,
-            release_background_project_read=gateway.release_background_project_read,
+            acquire_background_project_read=gateway.approval_transactions.try_acquire_background_project_read,
+            release_background_project_read=gateway.approval_transactions.release_background_project_read,
             idle_gate=idle_gate,
             lane_budget=lane_budget,
             preflight=ProviderPreflightCache(lambda _provider, _url: True),
@@ -1594,8 +1594,8 @@ def test_project_read_lease_wraps_only_scan_and_commit_not_provider_wait(
     provider_started = threading.Event()
     provider_release = threading.Event()
     events: list[tuple[str, str]] = []
-    acquire = dashboard_server.AGENT_GATEWAY.try_acquire_background_project_read
-    release = dashboard_server.AGENT_GATEWAY.release_background_project_read
+    acquire = dashboard_server.AGENT_GATEWAY.approval_transactions.try_acquire_background_project_read
+    release = dashboard_server.AGENT_GATEWAY.approval_transactions.release_background_project_read
 
     def tracked_acquire(token: str) -> bool:
         events.append(("acquire", token))
@@ -2056,9 +2056,9 @@ def test_background_schedule_is_blocked_while_project_write_is_applying(
 
     monkeypatch.setattr(dashboard_server, "BACKEND_OWNER_LEASE", OwnedLease())
     monkeypatch.setattr(
-        dashboard_server.AGENT_GATEWAY,
+        type(dashboard_server.AGENT_GATEWAY.approval_transactions),
         "has_in_flight_project_write",
-        lambda: True,
+        lambda _owner: True,
     )
     assert dashboard_server.memory_review_background_blocker() == "active_project_write"
     assert asyncio.run(

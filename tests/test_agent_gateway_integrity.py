@@ -57,17 +57,17 @@ def test_runtime_memory_is_wrapped_as_quoted_data_not_runtime_authority(tmp_path
 def test_checkpoint_storage_repair_recreates_missing_store_without_deleting(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
 
-    before = gateway.inspect_checkpoint_storage()
+    before = gateway.checkpoint_recovery.inspect_checkpoint_storage()
     assert before["status"] == "warning"
     assert before["issues"] == ["missing_store_directory"]
 
-    repaired = gateway.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
+    repaired = gateway.checkpoint_recovery.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
     assert repaired["ok"] is True
     assert repaired["status"] == "repaired"
     assert repaired["changed"] is True
     assert gateway.checkpoint_store_dir.is_dir()
 
-    repeated = gateway.repair_checkpoint_storage(expected_snapshot=repaired["after"]["snapshot"])
+    repeated = gateway.checkpoint_recovery.repair_checkpoint_storage(expected_snapshot=repaired["after"]["snapshot"])
     assert repeated["status"] == "healthy"
     assert repeated["changed"] is False
 
@@ -81,9 +81,9 @@ def test_checkpoint_storage_repair_quarantines_bad_rows_and_preserves_valid_byte
     bad = b'{"id":"broken"\n'
     gateway.checkpoint_log_path.write_bytes(valid_one + b"\n" + bad + valid_two + b"\n")
 
-    before = gateway.inspect_checkpoint_storage()
+    before = gateway.checkpoint_recovery.inspect_checkpoint_storage()
     assert before["invalidRowCount"] == 1
-    result = gateway.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
+    result = gateway.checkpoint_recovery.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
 
     assert result["status"] == "repaired"
     assert result["quarantineId"]
@@ -99,10 +99,10 @@ def test_checkpoint_storage_repair_rejects_stale_snapshot(tmp_path: Path) -> Non
     gateway.checkpoint_store_dir.mkdir(parents=True)
     gateway.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
     gateway.checkpoint_log_path.write_text('{"id":"one"}\n', encoding="utf-8")
-    before = gateway.inspect_checkpoint_storage()
+    before = gateway.checkpoint_recovery.inspect_checkpoint_storage()
     gateway.checkpoint_log_path.write_text('{"id":"two"}\n', encoding="utf-8")
 
-    result = gateway.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
+    result = gateway.checkpoint_recovery.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
 
     assert result["ok"] is False
     assert result["status"] == "busy"
@@ -122,9 +122,9 @@ def test_checkpoint_storage_repair_rejects_quarantine_collision_before_rewrite(t
     quarantine = gateway.audit_dir / "quarantine" / f"checkpoints.invalid.{quarantine_id}.jsonl"
     quarantine.parent.mkdir(parents=True)
     quarantine.write_bytes(b"wrong-existing-bytes")
-    before = gateway.inspect_checkpoint_storage()
+    before = gateway.checkpoint_recovery.inspect_checkpoint_storage()
 
-    result = gateway.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
+    result = gateway.checkpoint_recovery.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
 
     assert result["ok"] is False
     assert result["status"] == "conflict"
@@ -169,17 +169,17 @@ def test_checkpoint_append_and_repair_preserve_event_after_truncated_tail(tmp_pa
     gateway.checkpoint_log_path.parent.mkdir(parents=True, exist_ok=True)
     gateway.checkpoint_log_path.write_bytes(b'{"schema":"broken"')
 
-    gateway._append_checkpoint(_checkpoint_record("ckpt_after_crash"))
+    gateway.checkpoint_recovery._append_checkpoint(_checkpoint_record("ckpt_after_crash"))
 
-    before = gateway.inspect_checkpoint_storage()
+    before = gateway.checkpoint_recovery.inspect_checkpoint_storage()
     assert before["invalidRowCount"] == 1
-    assert any(item.get("id") == "ckpt_after_crash" for item in gateway._read_checkpoint_entries())
+    assert any(item.get("id") == "ckpt_after_crash" for item in gateway.checkpoint_recovery._read_checkpoint_entries())
 
-    repaired = gateway.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
+    repaired = gateway.checkpoint_recovery.repair_checkpoint_storage(expected_snapshot=before["snapshot"])
 
     assert repaired["status"] == "repaired"
     assert repaired["after"]["invalidRowCount"] == 0
-    assert any(item.get("id") == "ckpt_after_crash" for item in gateway._read_checkpoint_entries())
+    assert any(item.get("id") == "ckpt_after_crash" for item in gateway.checkpoint_recovery._read_checkpoint_entries())
 
 
 def test_jsonl_reader_skips_only_invalid_utf8_line(tmp_path: Path) -> None:
@@ -196,7 +196,7 @@ def test_jsonl_reader_skips_only_invalid_utf8_line(tmp_path: Path) -> None:
 def test_never_auto_approve_survives_full_permission_mode(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     executed: list[dict] = []
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_manual_only",
         "Manual-only test write.",
         "low",
@@ -209,7 +209,7 @@ def test_never_auto_approve_survives_full_permission_mode(tmp_path: Path) -> Non
     config.allow_roslyn_advanced = True
     gateway.save_config(config)
 
-    result = gateway.create_apply_request(
+    result = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_manual_only",
             "arguments": {},
@@ -230,7 +230,7 @@ def test_handler_manual_approval_policy_cannot_be_disabled_by_the_caller(
 ) -> None:
     gateway = _gateway(tmp_path)
     executed: list[dict] = []
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_canonical_manual_only",
         "Canonical manual-only test write.",
         "low",
@@ -253,7 +253,7 @@ def test_handler_manual_approval_policy_cannot_be_disabled_by_the_caller(
     config.allow_write_requests = True
     gateway.save_config(config)
 
-    result = gateway.create_apply_request(
+    result = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_canonical_manual_only",
             "arguments": {"caller": "cannot-disable-policy"},
@@ -281,7 +281,7 @@ def test_dedicated_checkpoint_preflight_failure_blocks_without_global_fallback(
         (project / root).mkdir(parents=True, exist_ok=True)
     dedicated_calls: list[tuple[Path, dict]] = []
     global_calls: list[Path] = []
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_dedicated_checkpoint",
         "Dedicated checkpoint test write.",
         "high",
@@ -291,12 +291,12 @@ def test_dedicated_checkpoint_preflight_failure_blocks_without_global_fallback(
             or {"ok": False, "error": "Dedicated state changed."}
         ),
     )
-    gateway.checkpoint_prepare_handler = (
+    gateway.approval_transactions.checkpoint_prepare_handler = (
         lambda root: global_calls.append(root) or {"ok": True}
     )
     arguments = {"projectPath": str(project), "selector": "Avatar"}
 
-    checkpoint = gateway._create_pre_write_checkpoint(
+    checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(
         {"id": "approval-dedicated", "targetTool": "vrcforge_test_dedicated_checkpoint"},
         arguments,
     )
@@ -318,7 +318,7 @@ def test_project_chat_checkpoint_covers_exact_store_and_restores_it(tmp_path: Pa
     original = b'{"chats":['
     source.write_bytes(original)
 
-    checkpoint = gateway._create_pre_write_checkpoint(
+    checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(
         {"id": "approval-chat", "targetTool": "vrcforge_repair_project_chat_store"},
         {"projectRoot": str(project), "expectedDigest": hashlib.sha256(original).hexdigest()},
     )
@@ -333,8 +333,8 @@ def test_project_chat_checkpoint_covers_exact_store_and_restores_it(tmp_path: Pa
     )
     quarantine.write_bytes(original)
 
-    preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
-    restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+    preview = gateway.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+    restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
 
     assert preview["ok"] is True
     assert preview["changedFiles"] == ["D\t.vrcforge/chat-transcripts.json"]
@@ -352,15 +352,15 @@ def test_project_chat_checkpoint_restore_recreates_missing_parent(tmp_path: Path
     source = project / ".vrcforge" / "chat-transcripts.json"
     original = b'{"version":1,"chats":[]}'
     source.write_bytes(original)
-    checkpoint = gateway._create_pre_write_checkpoint(
+    checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(
         {"id": "approval-chat-parent", "targetTool": "vrcforge_repair_project_chat_store"},
         {"projectRoot": str(project), "expectedDigest": hashlib.sha256(original).hexdigest()},
     )
     assert checkpoint and checkpoint["ok"] is True
 
     shutil.rmtree(project / ".vrcforge")
-    preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
-    restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+    preview = gateway.checkpoint_recovery.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
+    restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
 
     assert preview["ok"] is True
     assert preview["changedFiles"] == ["D\t.vrcforge/chat-transcripts.json"]
@@ -371,13 +371,13 @@ def test_project_chat_checkpoint_restore_recreates_missing_parent(tmp_path: Path
 def test_project_chat_checkpoint_restore_uses_bound_writer_lock(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     writer_lock = threading.RLock()
-    gateway.bind_project_chat_checkpoint_lock(writer_lock)
+    gateway.checkpoint_recovery.bind_project_chat_checkpoint_lock(writer_lock)
     project = tmp_path / "AvatarProject"
     for name in ("Assets", "Packages", "ProjectSettings", ".vrcforge"):
         (project / name).mkdir(parents=True)
     source = project / ".vrcforge" / "chat-transcripts.json"
     source.write_bytes(b'{"version":1,"chats":[]}')
-    checkpoint = gateway._create_pre_write_checkpoint(
+    checkpoint = gateway.approval_transactions._create_pre_write_checkpoint(
         {"id": "approval-chat-lock", "targetTool": "vrcforge_repair_project_chat_store"},
         {
             "projectRoot": str(project),
@@ -391,7 +391,7 @@ def test_project_chat_checkpoint_restore_uses_bound_writer_lock(tmp_path: Path) 
     outcome: dict[str, object] = {}
 
     def restore() -> None:
-        outcome.update(gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True}))
+        outcome.update(gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True}))
         finished.set()
 
     with writer_lock:
@@ -431,11 +431,11 @@ def test_save_config_generates_token_and_age_metadata_together(tmp_path: Path) -
 
 def test_in_flight_project_write_query_covers_live_and_applying_state(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
-    assert gateway.has_in_flight_project_write() is False
+    assert gateway.approval_transactions.has_in_flight_project_write() is False
 
     with gateway._lock:
         gateway._in_flight_apply_writes["approval-live"] = {"approvalId": "approval-live"}
-    assert gateway.has_in_flight_project_write() is True
+    assert gateway.approval_transactions.has_in_flight_project_write() is True
 
     with gateway._lock:
         gateway._in_flight_apply_writes.clear()
@@ -443,4 +443,4 @@ def test_in_flight_project_write_query_covers_live_and_applying_state(tmp_path: 
             "id": "approval-applying",
             "status": "applying",
         }
-    assert gateway.has_in_flight_project_write() is True
+    assert gateway.approval_transactions.has_in_flight_project_write() is True

@@ -942,10 +942,10 @@ def test_skill_init_write_exports_installs_projects_and_loads_as_request_only(
         "vrcforge_request_apply",
         "Request approval for one write.",
         "supervised-write",
-        gateway.create_apply_request,
+        gateway.approval_transactions.create_apply_request,
         write=True,
     )
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_apply_shader_tuning",
         "Apply shader tuning after approval.",
         "high",
@@ -1004,7 +1004,7 @@ def test_skill_init_write_exports_installs_projects_and_loads_as_request_only(
     project = tmp_path / "UnityProject"
     for name in ("Assets", "Packages", "ProjectSettings"):
         (project / name).mkdir(parents=True, exist_ok=True)
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": workflow["steps"][0]["request"]["targetTool"],
             "arguments": {"projectRoot": str(project)},
@@ -1015,7 +1015,7 @@ def test_skill_init_write_exports_installs_projects_and_loads_as_request_only(
     assert target_calls == []
     package_events = [
         event
-        for event in gateway.recent_audit_logs(limit=20)
+        for event in gateway.approval_transactions.recent_audit_logs(limit=20)
         if event.get("event") == "runtime_skill_package_loaded"
     ]
     assert package_events[-1]["packageId"] == "community.example.request-only-writer"

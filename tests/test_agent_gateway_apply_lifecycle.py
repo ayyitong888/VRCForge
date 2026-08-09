@@ -31,22 +31,22 @@ def approved_write(
     *,
     handler,
 ) -> dict[str, object]:
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-    gateway.register_write_handler(
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_lifecycle_write",
         "Lifecycle write",
         "high",
         handler,
     )
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_lifecycle_write",
             "arguments": {"projectRoot": str(project)},
         }
     )
     approval_id = request["approval"]["id"]
-    gateway.approve(approval_id)
-    return gateway.apply_approved({"approval_id": approval_id})
+    gateway.approval_transactions.approve(approval_id)
+    return gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
 
 def _core_result(*, pending: bool = False) -> dict[str, object]:
@@ -62,8 +62,8 @@ def _core_result(*, pending: bool = False) -> dict[str, object]:
 
 
 def _approved_trace_write(gateway: AgentGateway, project: Path, handler) -> dict[str, object]:
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-    gateway.register_write_handler(
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_trace_write",
         (
             "When to use: Run the approved trace fixture.\n"
@@ -73,12 +73,12 @@ def _approved_trace_write(gateway: AgentGateway, project: Path, handler) -> dict
         "high",
         handler,
     )
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {"target_tool": "vrcforge_trace_write", "arguments": {"projectRoot": str(project)}}
     )
     approval_id = str(request["approval"]["id"])
-    gateway.approve(approval_id)
-    return gateway.apply_approved({"approval_id": approval_id})
+    gateway.approval_transactions.approve(approval_id)
+    return gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
 
 def test_approved_handler_trace_survives_stripped_core_meta(tmp_path: Path, monkeypatch) -> None:
@@ -100,7 +100,7 @@ def test_approved_handler_trace_survives_stripped_core_meta(tmp_path: Path, monk
     assert trace["executionId"].startswith("exec_")
     assert [audit["toolName"] for audit in trace["unityCoreCallAudits"]] == ["vrc_create_gameobject"]
     assert "trace-secret" not in json.dumps(trace)
-    applied = next(item for item in gateway.recent_audit_logs(100) if item.get("event") == "approval_applied")
+    applied = next(item for item in gateway.approval_transactions.recent_audit_logs(100) if item.get("event") == "approval_applied")
     assert applied["requestTrace"] == trace
 
 
@@ -124,7 +124,7 @@ def test_approved_handler_failure_keeps_core_error_trace(tmp_path: Path, monkeyp
     assert len(trace["unityCoreCallAudits"]) == 1
     assert trace["unityCoreCallAudits"][0]["resultSummary"] == "error"
     assert trace["unityCoreCallAudits"][0]["errorClass"] == "TimeoutError"
-    failed = next(item for item in gateway.recent_audit_logs(100) if item.get("event") == "approval_failed")
+    failed = next(item for item in gateway.approval_transactions.recent_audit_logs(100) if item.get("event") == "approval_failed")
     assert failed["requestTrace"] == trace
 
 
@@ -155,7 +155,7 @@ def test_approved_handler_preserves_ordered_unique_multi_core_trace_with_pending
 
 def test_argument_digest_requires_internal_opt_in(tmp_path: Path) -> None:
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_argument_binding",
         "Argument binding test.",
         "high",
@@ -166,13 +166,13 @@ def test_argument_digest_requires_internal_opt_in(tmp_path: Path) -> None:
         "references": {"mergeTarget": "FixtureAvatar/Armature"},
     }
 
-    ordinary = gateway.create_apply_request(
+    ordinary = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_argument_binding",
             "arguments": arguments,
         }
     )
-    bound = gateway.create_apply_request(
+    bound = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_argument_binding",
             "arguments": arguments,
@@ -196,7 +196,7 @@ def test_lifecycle_observer_runs_at_authoritative_write_boundaries(tmp_path: Pat
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     events: list[str] = []
-    gateway.apply_lifecycle_observer_fn = (
+    gateway.approval_transactions.apply_lifecycle_observer = (
         lambda stage, _payload: events.append(stage)
     )
 
@@ -219,7 +219,7 @@ def test_lifecycle_observer_runs_at_authoritative_write_boundaries(tmp_path: Pat
 def test_core_write_handler_receives_one_use_context_only_after_checkpoint(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
     observed: dict[str, object] = {}
     observed_context: dict[str, object] = {}
     observed_claim: dict[str, object] = {}
@@ -236,7 +236,7 @@ def test_core_write_handler_receives_one_use_context_only_after_checkpoint(tmp_p
         claim.complete()
         return {"ok": True}
 
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_unity_mcp_write",
         "Core write context test.",
         "high",
@@ -246,7 +246,7 @@ def test_core_write_handler_receives_one_use_context_only_after_checkpoint(tmp_p
             (str(arguments["toolName"]), dict(arguments["arguments"]))
         ],
     )
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_unity_mcp_write",
             "arguments": {
@@ -258,8 +258,8 @@ def test_core_write_handler_receives_one_use_context_only_after_checkpoint(tmp_p
     )
     approval_id = str(request["approval"]["id"])
     assert request["approval"]["approvedUnityExecutionPlan"]["calls"][0]["toolName"] == "vrc_create_gameobject"
-    gateway.approve(approval_id)
-    result = gateway.apply_approved({"approval_id": approval_id})
+    gateway.approval_transactions.approve(approval_id)
+    result = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
     assert result["ok"] is True
     context = observed_context
@@ -280,7 +280,7 @@ def test_core_write_handler_receives_one_use_context_only_after_checkpoint(tmp_p
 def test_core_write_handler_without_exact_plan_fails_before_approval(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_unplanned_core_write",
         "Unplanned Core write.",
         "high",
@@ -289,7 +289,7 @@ def test_core_write_handler_without_exact_plan_fails_before_approval(tmp_path: P
     )
 
     with pytest.raises(AgentGatewayError, match="exact Core execution plan"):
-        gateway.create_apply_request(
+        gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_unplanned_core_write",
                 "arguments": {"projectRoot": str(project)},
@@ -300,7 +300,7 @@ def test_core_write_handler_without_exact_plan_fails_before_approval(tmp_path: P
 def test_core_write_plan_drift_after_approval_blocks_handler(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
     handler_calls = 0
 
     def handler(_arguments: dict[str, object]) -> dict[str, object]:
@@ -308,7 +308,7 @@ def test_core_write_plan_drift_after_approval_blocks_handler(tmp_path: Path) -> 
         handler_calls += 1
         return {"ok": True}
 
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_planned_core_write",
         "Planned Core write.",
         "high",
@@ -316,7 +316,7 @@ def test_core_write_plan_drift_after_approval_blocks_handler(tmp_path: Path) -> 
         requires_approved_execution_context=True,
         approved_execution_plan_builder=lambda _arguments: [("vrc_create_gameobject", {"name": "before"})],
     )
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_planned_core_write",
             "arguments": {"projectRoot": str(project)},
@@ -326,9 +326,9 @@ def test_core_write_plan_drift_after_approval_blocks_handler(tmp_path: Path) -> 
     gateway._write_handlers["vrcforge_planned_core_write"].approved_execution_plan_builder = (  # noqa: SLF001
         lambda _arguments: [("vrc_create_gameobject", {"name": "after"})]
     )
-    gateway.approve(approval_id)
+    gateway.approval_transactions.approve(approval_id)
 
-    result = gateway.apply_approved({"approval_id": approval_id})
+    result = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
     assert result["ok"] is False
     assert "plan drifted" in result["error"]
@@ -338,8 +338,8 @@ def test_core_write_plan_drift_after_approval_blocks_handler(tmp_path: Path) -> 
 def test_core_write_handler_must_consume_the_whole_frozen_plan(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
-    gateway.register_write_handler(
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_incomplete_core_write",
         "Incomplete Core write.",
         "high",
@@ -347,16 +347,16 @@ def test_core_write_handler_must_consume_the_whole_frozen_plan(tmp_path: Path) -
         requires_approved_execution_context=True,
         approved_execution_plan_builder=lambda _arguments: [("vrc_create_gameobject", {"name": "never-called"})],
     )
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_incomplete_core_write",
             "arguments": {"projectRoot": str(project)},
         }
     )
     approval_id = str(request["approval"]["id"])
-    gateway.approve(approval_id)
+    gateway.approval_transactions.approve(approval_id)
 
-    result = gateway.apply_approved({"approval_id": approval_id})
+    result = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
     assert result["ok"] is False
     assert "not consumed exactly" in result["error"]
@@ -365,7 +365,7 @@ def test_core_write_handler_must_consume_the_whole_frozen_plan(tmp_path: Path) -
 def test_failed_handler_burns_leaked_execution_plan(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
     leaked = []
 
     def handler(_arguments: dict[str, object]) -> dict[str, object]:
@@ -374,7 +374,7 @@ def test_failed_handler_burns_leaked_execution_plan(tmp_path: Path) -> None:
         leaked.append(plan)
         raise RuntimeError("handler failed")
 
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_failed_core_write",
         "Failed Core write.",
         "high",
@@ -384,15 +384,15 @@ def test_failed_handler_burns_leaked_execution_plan(tmp_path: Path) -> None:
             ("vrc_create_gameobject", {"name": "must-not-run"})
         ],
     )
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_failed_core_write",
             "arguments": {"projectRoot": str(project)},
         }
     )
     approval_id = str(request["approval"]["id"])
-    gateway.approve(approval_id)
-    result = gateway.apply_approved({"approval_id": approval_id})
+    gateway.approval_transactions.approve(approval_id)
+    result = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
     assert result["ok"] is False
     assert len(leaked) == 1
@@ -418,14 +418,14 @@ def test_checkpoint_observer_failure_aborts_before_write(tmp_path: Path) -> None
         handler_calls += 1
         return {"ok": True, "sceneSaved": True}
 
-    gateway.apply_lifecycle_observer_fn = observer
+    gateway.approval_transactions.apply_lifecycle_observer = observer
     result = approved_write(gateway, project, handler=handler)
 
     assert result["ok"] is False
     assert result["status"] == "failed"
     assert result["checkpoint"]["ok"] is True
     assert handler_calls == 0
-    assert gateway.list_interrupted_apply_recoveries()["activeCount"] == 0
+    assert gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["activeCount"] == 0
 
 
 def test_post_write_observer_failure_enters_checkpoint_recovery(tmp_path: Path) -> None:
@@ -446,13 +446,13 @@ def test_post_write_observer_failure_enters_checkpoint_recovery(tmp_path: Path) 
         )
         return {"ok": True, "sceneSaved": True}
 
-    gateway.apply_lifecycle_observer_fn = observer
+    gateway.approval_transactions.apply_lifecycle_observer = observer
     result = approved_write(gateway, project, handler=handler)
 
     assert result["ok"] is False
     assert result["checkpoint"]["ok"] is True
     assert handler_calls == 1
-    recoveries = gateway.list_interrupted_apply_recoveries()
+    recoveries = gateway.checkpoint_recovery.list_interrupted_apply_recoveries()
     assert recoveries["blockingWrites"] is True
     assert recoveries["activeCount"] == 1
     assert recoveries["recoveries"][0]["checkpointId"] == result["checkpoint"]["id"]
@@ -472,14 +472,14 @@ def test_handler_starting_observer_failure_aborts_before_write(tmp_path: Path) -
         handler_calls += 1
         return {"ok": True, "sceneSaved": True}
 
-    gateway.apply_lifecycle_observer_fn = observer
+    gateway.approval_transactions.apply_lifecycle_observer = observer
     result = approved_write(gateway, project, handler=handler)
 
     assert result["ok"] is False
     assert result["status"] == "failed"
     assert result["checkpoint"]["ok"] is True
     assert handler_calls == 0
-    assert gateway.list_interrupted_apply_recoveries()["activeCount"] == 0
+    assert gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["activeCount"] == 0
 
 
 def test_final_handler_arguments_are_bound_after_constraint_refresh(
@@ -487,7 +487,7 @@ def test_final_handler_arguments_are_bound_after_constraint_refresh(
 ) -> None:
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
     handler_calls = 0
     observed_digest = ""
 
@@ -496,13 +496,13 @@ def test_final_handler_arguments_are_bound_after_constraint_refresh(
         handler_calls += 1
         return {"ok": True, "sceneSaved": True}
 
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_constraint_binding",
         "Constraint binding test.",
         "high",
         handler,
     )
-    request = gateway.create_apply_request(
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_constraint_binding",
             "arguments": {"projectRoot": str(project)},
@@ -523,10 +523,10 @@ def test_final_handler_arguments_are_bound_after_constraint_refresh(
         if observed_digest != expected_digest:
             raise RuntimeError("final handler arguments changed")
 
-    gateway.apply_lifecycle_observer_fn = observer
+    gateway.approval_transactions.apply_lifecycle_observer = observer
     approval_id = str(request["approval"]["id"])
-    gateway.approve(approval_id)
-    result = gateway.apply_approved({"approval_id": approval_id})
+    gateway.approval_transactions.approve(approval_id)
+    result = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
     assert result["ok"] is False
     assert observed_digest and observed_digest != expected_digest
@@ -537,7 +537,7 @@ def test_mixed_approval_and_rejection_are_isolated_and_auditable(tmp_path: Path)
     """One pending write may apply while a sibling rejection remains side-effect free."""
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
     calls: list[str] = []
 
     def approved_handler(_arguments: dict[str, object]) -> dict[str, object]:
@@ -548,16 +548,16 @@ def test_mixed_approval_and_rejection_are_isolated_and_auditable(tmp_path: Path)
         calls.append("rejected")
         return {"ok": True, "sceneSaved": True}
 
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_mixed_approved", "Mixed approved", "high", approved_handler
     )
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_mixed_rejected", "Mixed rejected", "high", rejected_handler
     )
-    approved_request = gateway.create_apply_request(
+    approved_request = gateway.approval_transactions.create_apply_request(
         {"target_tool": "vrcforge_test_mixed_approved", "arguments": {"projectRoot": str(project)}}
     )["approval"]
-    rejected_request = gateway.create_apply_request(
+    rejected_request = gateway.approval_transactions.create_apply_request(
         {"target_tool": "vrcforge_test_mixed_rejected", "arguments": {"projectRoot": str(project)}}
     )["approval"]
     approved_id = str(approved_request["id"])
@@ -567,23 +567,23 @@ def test_mixed_approval_and_rejection_are_isolated_and_auditable(tmp_path: Path)
     assert approved_request["status"] == rejected_request["status"] == "pending"
     assert approved_request["createdAt"] and rejected_request["createdAt"]
 
-    assert gateway.approve(approved_id)["ok"] is True
-    applied = gateway.apply_approved({"approval_id": approved_id})
+    assert gateway.approval_transactions.approve(approved_id)["ok"] is True
+    applied = gateway.approval_transactions.apply_approved({"approval_id": approved_id})
     assert applied["ok"] is True
     assert applied["status"] == "applied"
     assert applied["checkpoint"]["ok"] is True
     assert applied["checkpoint"]["id"]
     assert calls == ["approved"]
 
-    rejected = gateway.reject(rejected_id)
+    rejected = gateway.approval_transactions.reject(rejected_id)
     assert rejected["ok"] is True
     assert rejected["approval"]["status"] == "rejected"
-    rejected_apply = gateway.apply_approved({"approval_id": rejected_id})
+    rejected_apply = gateway.approval_transactions.apply_approved({"approval_id": rejected_id})
     assert rejected_apply["ok"] is False
     assert rejected_apply["status"] == "rejected"
     assert calls == ["approved"]
 
-    approvals = {item["id"]: item for item in gateway.list_approvals(include_expired=True)}
+    approvals = {item["id"]: item for item in gateway.approval_transactions.list_approvals(include_expired=True)}
     assert approvals[approved_id]["status"] == "applied"
     assert approvals[approved_id]["appliedAt"]
     assert approvals[approved_id]["checkpoint"]["id"] == applied["checkpoint"]["id"]
@@ -591,7 +591,7 @@ def test_mixed_approval_and_rejection_are_isolated_and_auditable(tmp_path: Path)
     assert approvals[rejected_id]["rejectedAt"]
     assert "checkpoint" not in approvals[rejected_id]
 
-    audit = gateway.recent_audit_logs(limit=100)
+    audit = gateway.approval_transactions.recent_audit_logs(limit=100)
     assert any(
         item.get("event") == "approval_applied"
         and item.get("approval", {}).get("id") == approved_id

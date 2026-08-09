@@ -37,6 +37,8 @@ from agent_shell_service import (
 )
 
 if TYPE_CHECKING:
+    from agent_approval_transactions import AgentApprovalTransactionService
+    from agent_checkpoint_recovery import AgentCheckpointRecoveryService
     from agent_skill_registry import AgentSkillRegistryService
 from agent_goal_service import (
     AgentGoalService,
@@ -1704,10 +1706,6 @@ class AgentGateway:
         self._approvals: dict[str, dict[str, Any]] = {}
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
-        self.checkpoint_project_root_resolver: Callable[[], str] | None = None
-        self.checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
-        self.checkpoint_restore_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
-        self.checkpoint_restore_handler: Callable[[Path, dict[str, Any]], dict[str, Any]] | None = None
         self._lock = threading.RLock()
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock)
@@ -1781,7 +1779,6 @@ class AgentGateway:
         if background_activity_started is not None and not callable(background_activity_started):
             raise TypeError("background_activity_started must be callable")
         self._background_activity_started = background_activity_started
-        self.apply_lifecycle_observer_fn: Callable[[str, dict[str, Any]], Any] | None = None
         self._runtime_planner: RuntimePlannerService | None = None
         # Optional vision-analysis hook injected by the host server. Receives
         # (message, image_attachments) and returns a dict:
@@ -1794,7 +1791,6 @@ class AgentGateway:
         self.vision_analyze_fn: Callable[[str, list[dict[str, Any]]], Any] | None = None
         # Host-owned and deliberately optional.  The gateway treats every
         # result other than the exact string ``allow_auto`` as manual review.
-        self.scoped_approval_reviewer_fn: Callable[[dict[str, Any]], str] | None = None
         # 审计 JSONL 追加锁：见 append_audit。
         self._audit_append_lock = threading.Lock()
         # User-authored Skill CRUD and Doctor quarantine operate on the same
@@ -1809,22 +1805,112 @@ class AgentGateway:
         # transcripts. Checkpoint operations always acquire storage first and
         # this lock second; chat writers must never enter checkpoint storage
         # while holding their writer lock.
-        self._project_chat_checkpoint_lock = threading.RLock()
+        project_chat_checkpoint_lock = threading.RLock()
         # 当用户把检查点存档目录迁出 C 盘后，这里缓存覆盖后的绝对路径，
         # 让 checkpoint_store_dir 走新位置；为空时回落到 audit_dir 下默认目录。
         self._checkpoint_store_override: Path | None = None
-        # Checkpoint/recovery owns no lifecycle resources; it resolves this
-        # facade late so host callback, path, and lock replacements remain visible.
-        from agent_checkpoint_recovery import AgentCheckpointRecoveryService
+        from agent_checkpoint_recovery import (
+            AgentCheckpointRecoveryService,
+            CheckpointApprovalRecoveryPorts,
+            CheckpointRecoveryPorts,
+            CheckpointRecoveryState,
+            CheckpointSkillsPort,
+        )
 
-        self._checkpoint_recovery = AgentCheckpointRecoveryService(self)
-        # Approval/write transactions likewise resolve the authoritative host
-        # registries, locks, hooks, and persistence paths late. The service
-        # creates no second approval state or lifecycle resource.
-        from agent_approval_transactions import AgentApprovalTransactionService, ApprovalGoalPorts
+        self._checkpoint_recovery_owner = AgentCheckpointRecoveryService(
+            CheckpointRecoveryPorts(
+                state=CheckpointRecoveryState(
+                    checkpoint_storage_lock=self._checkpoint_storage_lock,
+                    skill_package_write_lock=self._skill_package_write_lock,
+                ),
+                approval=CheckpointApprovalRecoveryPorts(
+                    apply_recovery_blocks_writes=lambda recovery: self.approval_transactions._apply_recovery_blocks_writes(recovery),
+                    create_pre_write_checkpoint=lambda approval, arguments: self.approval_transactions._create_pre_write_checkpoint(
+                        approval, arguments
+                    ),
+                    finish_apply_recovery=lambda recovery, **kwargs: self.approval_transactions._finish_apply_recovery(
+                        recovery, **kwargs
+                    ),
+                    resolve_apply_recoveries_for_checkpoint=lambda checkpoint_id, **kwargs: self.approval_transactions._resolve_apply_recoveries_for_checkpoint(
+                        checkpoint_id, **kwargs
+                    ),
+                ),
+                project_chat_checkpoint_lock=project_chat_checkpoint_lock,
+                checkpoint_log_path=lambda: self.audit_dir / "checkpoints.jsonl",
+                adjustment_checkpoint_log_path=lambda: self.audit_dir / "adjustment-checkpoints.json",
+                apply_recovery_log_path=lambda: self.audit_dir / "apply-recoveries.jsonl",
+                checkpoint_store_dir=lambda: self.checkpoint_store_dir,
+                default_checkpoint_store_dir=lambda: self.audit_dir / "checkpoint-archives",
+                audit_dir=lambda: self.audit_dir,
+                user_constraints_path=lambda: self.user_constraints_path,
+                skills=CheckpointSkillsPort(
+                    write_lock=user_skill_lock,
+                    user_skills_dir=lambda: self.skills.user_skills_dir,
+                ),
+                ensure_config=self.ensure_config,
+                save_config=self.save_config,
+                append_audit=self.append_audit,
+                recent_audit_logs=lambda limit=100: self.approval_transactions.recent_audit_logs(limit),
+                run_git=self._run_git,
+                ensure_jsonl_append_boundary_locked=self._ensure_jsonl_append_boundary_locked,
+            )
+        )
+        from agent_approval_transactions import (
+            AgentApprovalTransactionService,
+            ApprovalCheckpointRecoveryPorts,
+            ApprovalGoalPorts,
+            ApprovalSkillsPort,
+            ApprovalTransactionPorts,
+            ApprovalTransactionState,
+        )
 
-        self._approval_transactions = AgentApprovalTransactionService(
-            self,
+        self._approval_transaction_owner = AgentApprovalTransactionService(
+            ApprovalTransactionPorts(
+                state=ApprovalTransactionState(
+                    shared_state_lock=self._lock,
+                    approvals=self._approvals,
+                    write_handlers=self._write_handlers,
+                    in_flight_apply_writes=self._in_flight_apply_writes,
+                    background_project_read_leases=self._background_project_read_leases,
+                    checkpoint_storage_lock=self._checkpoint_storage_lock,
+                    skill_package_write_lock=self._skill_package_write_lock,
+                    skill_package_write_lock_bound=self._skill_package_write_lock_bound,
+                ),
+                checkpoint=ApprovalCheckpointRecoveryPorts(
+                    active_apply_recoveries=self._checkpoint_recovery_owner._active_apply_recoveries,
+                    append_apply_recovery_entry=self._checkpoint_recovery_owner._append_apply_recovery_entry,
+                    append_checkpoint=self._checkpoint_recovery_owner._append_checkpoint,
+                    build_checkpoint_rollback_coverage_audit=self._checkpoint_recovery_owner._build_checkpoint_rollback_coverage_audit,
+                    classify_apply_recovery_incident=self._checkpoint_recovery_owner._classify_apply_recovery_incident,
+                    create_archive_checkpoint=self._checkpoint_recovery_owner._create_archive_checkpoint,
+                    create_local_state_checkpoint=self._checkpoint_recovery_owner._create_local_state_checkpoint,
+                    create_project_chat_checkpoint=self._checkpoint_recovery_owner._create_project_chat_checkpoint,
+                    resolve_checkpoint_project_root=self._checkpoint_recovery_owner._resolve_checkpoint_project_root,
+                    prune_checkpoint_archives=self._checkpoint_recovery_owner.prune_checkpoint_archives,
+                    project_chat_checkpoint_lock=lambda: self._checkpoint_recovery_owner.project_chat_checkpoint_lock,
+                ),
+                audit_log_path=lambda: self.audit_dir / "approvals.jsonl",
+                skills=ApprovalSkillsPort(write_lock=user_skill_lock),
+                shell_manual_approval_reason=lambda classification: self.shell.manual_approval_reason(classification),
+                shell_execute_payload=lambda params: self.shell.execute_payload(params),
+                checkpoint_pathspecs=self._checkpoint_pathspecs,
+                is_unity_project_root=self._is_unity_project_root,
+                normalize_project_category_allow_rules=self._normalize_project_category_allow_rules,
+                run_git=self._run_git,
+                signal_background_activity=self._signal_background_activity,
+                tool_params_audit=self._tool_params_audit,
+                validated_memory_evidence_for_applied_write=self._validated_memory_evidence_for_applied_write,
+                with_user_constraints=self._with_user_constraints,
+                write_handler_allows_future_category=self._write_handler_allows_future_category,
+                write_handler_visible=self._write_handler_visible,
+                append_audit=self.append_audit,
+                authenticate=self.authenticate,
+                call_tool=self.call_tool,
+                ensure_config=self.ensure_config,
+                read_user_constraints=self.read_user_constraints,
+                roslyn_available=self.roslyn_available,
+                save_config=self.save_config,
+            ),
             ApprovalGoalPorts(
                 deny_approval=self._goal.deny_agent_goal_approval,
                 attach_terminal_resolution=self._goal.attach_linked_goal_resolution,
@@ -1849,7 +1935,7 @@ class AgentGateway:
                 )
 
         def create_shell_approval(request: ShellApprovalRequest) -> dict[str, Any]:
-            return self._new_approval(
+            return self.approval_transactions._new_approval(
                 agent_name=request.agent_name,
                 target_tool=request.target_tool,
                 arguments=request.arguments,
@@ -1871,7 +1957,7 @@ class AgentGateway:
         def find_shell_approval(approval_id: str) -> dict[str, Any] | None:
             with self._lock:
                 approval = self._approvals.get(approval_id)
-            return approval or self._load_approval_from_audit(approval_id)
+            return approval or self.approval_transactions._load_approval_from_audit(approval_id)
 
         def default_shell_workspace_root() -> Path:
             app_dir = os.environ.get("VRCFORGE_APP_DIR", "").strip()
@@ -1888,15 +1974,15 @@ class AgentGateway:
                     create=create_shell_approval,
                     update_metadata=update_shell_approval_metadata,
                     find=find_shell_approval,
-                    apply=lambda approval_id: self.apply_approved({"approval_id": approval_id}),
-                    auto_enabled=self.auto_approval_enabled,
-                    auto_execute=self._auto_execute_approval,
+                    apply=lambda approval_id: self.approval_transactions.apply_approved({"approval_id": approval_id}),
+                    auto_enabled=self.approval_transactions.auto_approval_enabled,
+                    auto_execute=self.approval_transactions._auto_execute_approval,
                     execution_mode=lambda: self.ensure_config().execution_mode,
                     read_user_constraints=self.read_user_constraints,
                     redact=redact_sensitive,
                 ),
                 append_audit=self.append_audit,
-                permission_audit_context=self.permission_audit_context,
+                permission_audit_context=self.approval_transactions.permission_audit_context,
                 cancellation_requested=(
                     lambda session_id, turn_id, client_turn_id: self._runtime_session_state.cancel_requested(
                         session_id=session_id,
@@ -2055,6 +2141,14 @@ class AgentGateway:
     def runtime_skills(self) -> AgentRuntimeSkillExecutor:
         return self._runtime_skill_executor
 
+    @property
+    def approval_transactions(self) -> AgentApprovalTransactionService:
+        return self._approval_transaction_owner
+
+    @property
+    def checkpoint_recovery(self) -> AgentCheckpointRecoveryService:
+        return self._checkpoint_recovery_owner
+
     def bind_runtime_planner(self, planner: RuntimePlannerService) -> None:
         if not isinstance(planner, RuntimePlannerService):
             raise TypeError("runtime planner must be a RuntimePlannerService")
@@ -2070,13 +2164,6 @@ class AgentGateway:
             self._runtime_session_state.clear()
             self._desktop.configure_paths(audit_dir)
 
-    def bind_project_chat_checkpoint_lock(self, lock: Any) -> None:
-        """Share the host's project-chat writer lock with checkpoint I/O."""
-
-        if lock is None or not hasattr(lock, "__enter__") or not hasattr(lock, "__exit__"):
-            raise ValueError("project chat checkpoint lock must be a context manager")
-        self._project_chat_checkpoint_lock = lock
-
     def _signal_background_activity(self, reason: str) -> None:
         callback = self._background_activity_started
         if callback is None:
@@ -2087,23 +2174,6 @@ class AgentGateway:
             # Optional background cancellation must never reject the
             # interactive operation that owns this boundary.
             pass
-
-    def _observe_apply_lifecycle(
-        self,
-        stage: str,
-        approval: dict[str, Any],
-        *,
-        checkpoint: dict[str, Any] | None = None,
-        result: Any = None,
-        arguments_digest: str = "",
-    ) -> None:
-        return self._approval_transactions._impl__observe_apply_lifecycle(
-            stage,
-            approval,
-            checkpoint=checkpoint,
-            result=result,
-            arguments_digest=arguments_digest,
-        )
 
     @property
     def agent_memory_log_path(self) -> Path:
@@ -2143,38 +2213,6 @@ class AgentGateway:
             write=write,
             advanced=advanced,
             requires_user_activation=requires_user_activation,
-        )
-
-    def register_write_handler(
-        self,
-        name: str,
-        description: str,
-        risk_level: str,
-        handler: ToolHandler,
-        advanced: bool = False,
-        risk_level_resolver: RiskLevelResolver | None = None,
-        request_preparer: WriteRequestPreparer | None = None,
-        manual_approval_resolver: ManualApprovalResolver | None = None,
-        checkpoint_prepare_handler: CheckpointPrepareHandler | None = None,
-        requires_approved_execution_context: bool = False,
-        approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None,
-        approval_category: str = "",
-        allow_future_category: bool = False,
-    ) -> None:
-        return self._approval_transactions._impl_register_write_handler(
-            name,
-            description,
-            risk_level,
-            handler,
-            advanced,
-            risk_level_resolver,
-            request_preparer,
-            manual_approval_resolver,
-            checkpoint_prepare_handler,
-            requires_approved_execution_context,
-            approved_execution_plan_builder,
-            approval_category,
-            allow_future_category,
         )
 
     def ensure_config(self) -> AgentGatewayConfig:
@@ -2344,22 +2382,10 @@ class AgentGateway:
 
         return config
 
-    def authenticate_approval(
-        self,
-        headers: dict[str, str],
-        query_params: dict[str, str],
-        client_host: str | None,
-    ) -> AgentGatewayConfig:
-        return self._approval_transactions._impl_authenticate_approval(
-            headers,
-            query_params,
-            client_host,
-        )
-
     def build_manifest(self, exposure_layer: str = EXPOSURE_LAYER_EXECUTION) -> dict[str, Any]:
         exposure_layer = normalize_exposure_layer(exposure_layer)
         config = self.ensure_config()
-        permission_context = self.permission_audit_context(config)
+        permission_context = self.approval_transactions.permission_audit_context(config)
         user_constraints = self.read_user_constraints()
         tools = [
             self._serialize_tool(tool, config)
@@ -2387,7 +2413,7 @@ class AgentGateway:
             "exposureLayer": exposure_layer,
             "tools": tools,
             "toolCount": len(tools),
-            "writeTargets": self.visible_write_targets(config, exposure_layer),
+            "writeTargets": self.approval_transactions.visible_write_targets(config, exposure_layer),
             "skills": self.skills.build_skill_registry(config, exposure_layer)["skills"],
             "userConstraints": self._serialize_user_constraints(user_constraints),
         }
@@ -2427,7 +2453,7 @@ class AgentGateway:
     def build_health(self) -> dict[str, Any]:
         config = self.ensure_config()
         user_constraints = self.read_user_constraints()
-        pending = [item for item in self.list_approvals(include_expired=False) if item.get("status") == "pending"]
+        pending = [item for item in self.approval_transactions.list_approvals(include_expired=False) if item.get("status") == "pending"]
         skills = self.skills.build_skill_registry(config)
         return {
             "ok": True,
@@ -2441,7 +2467,7 @@ class AgentGateway:
             "pendingApprovalCount": len(pending),
             "allowWriteRequests": config.allow_write_requests,
             "allowRoslynAdvanced": self.roslyn_available(config),
-            "permission": self.permission_state(config),
+            "permission": self.approval_transactions.permission_state(config),
             "userConstraints": self._serialize_user_constraints(user_constraints, include_error=True),
             "shellExecutor": {
                 "status": "ok",
@@ -2468,37 +2494,6 @@ class AgentGateway:
             },
             "runtimeSessions": self._runtime_session_state.session_count(),
         }
-
-    def auto_approval_enabled(self, config: AgentGatewayConfig | None = None) -> bool:
-        return self._approval_transactions._impl_auto_approval_enabled(
-            config,
-        )
-
-    def permission_audit_context(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
-        return self._approval_transactions._impl_permission_audit_context(
-            config,
-        )
-
-    def _auto_approval_block_reason(self, approval: dict[str, Any], config: AgentGatewayConfig | None = None) -> str:
-        return self._approval_transactions._impl__auto_approval_block_reason(
-            approval,
-            config,
-        )
-
-    def permission_state(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
-        return self._approval_transactions._impl_permission_state(
-            config,
-        )
-
-    def update_permission_state(
-        self,
-        execution_mode: str,
-        acknowledge_roslyn_risk: bool = False,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl_update_permission_state(
-            execution_mode,
-            acknowledge_roslyn_risk,
-        )
 
     def call_tool(
         self,
@@ -3040,7 +3035,7 @@ class AgentGateway:
                 )
             elif action_kind == "write":
                 step_tool = str(plan.get("writeTool") or "")
-                step_payload = self._execute_write_request(
+                step_payload = self.approval_transactions._execute_write_request(
                     step_tool,
                     ensure_dict(plan.get("writeParams")),
                     agent_name,
@@ -3340,21 +3335,6 @@ class AgentGateway:
         self._runtime_session_state.clear_stream_context()
         return payload
 
-    def _execute_write_request(
-        self,
-        tool_name: str,
-        params: dict[str, Any],
-        agent_name: str,
-        *,
-        goal_delivery_id: str = "",
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl__execute_write_request(
-            tool_name,
-            params,
-            agent_name,
-            goal_delivery_id=goal_delivery_id,
-        )
-
     def _summarize_loop_plan(
         self,
         message: str,
@@ -3391,7 +3371,7 @@ class AgentGateway:
         project_root = str(project_root or "").strip()
         pending = [
             item
-            for item in self.list_approvals(include_expired=False, project_root=project_root)
+            for item in self.approval_transactions.list_approvals(include_expired=False, project_root=project_root)
             if item.get("status") == "pending"
         ]
         goals = [
@@ -3797,36 +3777,6 @@ class AgentGateway:
         return {**payload, "memories": memories, "count": len(memories)}
 
 
-    def create_apply_request(
-        self,
-        params: dict[str, Any],
-        *,
-        internal_wrapper: bool = False,
-        include_arguments_digest: bool = False,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl_create_apply_request(
-            params,
-            internal_wrapper=internal_wrapper,
-            include_arguments_digest=include_arguments_digest,
-        )
-
-    def _auto_execute_approval(self, approval: dict[str, Any]) -> dict[str, Any] | None:
-        return self._approval_transactions._impl__auto_execute_approval(
-            approval,
-        )
-
-    def _matching_project_category_allow_rule(
-        self,
-        approval: dict[str, Any],
-        write_handler: AgentWriteHandler,
-        config: AgentGatewayConfig | None = None,
-    ) -> dict[str, str] | None:
-        return self._approval_transactions._impl__matching_project_category_allow_rule(
-            approval,
-            write_handler,
-            config,
-        )
-
     @staticmethod
     def _write_handler_allows_future_category(
         write_handler: AgentWriteHandler, approval: dict[str, Any]
@@ -3840,527 +3790,6 @@ class AgentGateway:
             return False
         return not bool(approval.get("requiresExplicitApproval"))
 
-    def _scoped_rule_execute_approval(
-        self, approval: dict[str, Any], rule: dict[str, str]
-    ) -> dict[str, Any] | None:
-        return self._approval_transactions._impl__scoped_rule_execute_approval(
-            approval,
-            rule,
-        )
-
-    def apply_approved(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._approval_transactions._impl_apply_approved(
-            params,
-        )
-
-    def list_approvals(
-        self,
-        include_expired: bool = True,
-        project_root: str = "",
-        global_only: bool = False,
-    ) -> list[dict[str, Any]]:
-        return self._approval_transactions._impl_list_approvals(
-            include_expired,
-            project_root,
-            global_only,
-        )
-
-    def approve(
-        self,
-        approval_id: str,
-        *,
-        expected_project_root: str = "",
-        global_only: bool = False,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl_approve(
-            approval_id,
-            expected_project_root=expected_project_root,
-            global_only=global_only,
-        )
-
-    def approve_with_project_category_rule(
-        self,
-        approval_id: str,
-        *,
-        expected_project_root: str = "",
-        global_only: bool = False,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl_approve_with_project_category_rule(
-            approval_id,
-            expected_project_root=expected_project_root,
-            global_only=global_only,
-        )
-
-    def reject(
-        self,
-        approval_id: str,
-        *,
-        expected_project_root: str = "",
-        global_only: bool = False,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl_reject(
-            approval_id,
-            expected_project_root=expected_project_root,
-            global_only=global_only,
-        )
-
-    def recent_audit_logs(self, limit: int = 100) -> list[dict[str, Any]]:
-        return self._approval_transactions._impl_recent_audit_logs(
-            limit,
-        )
-
-    def list_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_list_checkpoints(
-            params,
-        )
-
-    def inspect_checkpoint_storage(self) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_inspect_checkpoint_storage()
-
-    def _inspect_checkpoint_storage_locked(self) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__inspect_checkpoint_storage_locked()
-
-    def repair_checkpoint_storage(self, *, expected_snapshot: str = "") -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_repair_checkpoint_storage(
-            expected_snapshot=expected_snapshot,
-        )
-
-    def _list_checkpoints_locked(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__list_checkpoints_locked(
-            params,
-        )
-
-    def checkpoint_archive_usage(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_checkpoint_archive_usage(
-            config,
-        )
-
-    def _checkpoint_archive_usage_locked(self, config: AgentGatewayConfig | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__checkpoint_archive_usage_locked(
-            config,
-        )
-
-    def _checkpoint_archive_labels(self) -> dict[str, str]:
-        return self._checkpoint_recovery._impl__checkpoint_archive_labels()
-
-    def delete_checkpoint_archives(self, checkpoint_ids: Any) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_delete_checkpoint_archives(
-            checkpoint_ids,
-        )
-
-    def _delete_checkpoint_archives_locked(self, checkpoint_ids: Any) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__delete_checkpoint_archives_locked(
-            checkpoint_ids,
-        )
-
-    def relocate_checkpoint_archives(self, target_directory: Any) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_relocate_checkpoint_archives(
-            target_directory,
-        )
-
-    def _relocate_checkpoint_archives_locked(self, target_directory: Any) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__relocate_checkpoint_archives_locked(
-            target_directory,
-        )
-
-    def _rewrite_checkpoint_archive_paths(self, id_to_new_path: dict[str, str]) -> int:
-        return self._checkpoint_recovery._impl__rewrite_checkpoint_archive_paths(
-            id_to_new_path,
-        )
-
-    def _remove_old_relocate_parents(self, start: Path, root: Path) -> None:
-        return self._checkpoint_recovery._impl__remove_old_relocate_parents(
-            start,
-            root,
-        )
-
-    def prune_checkpoint_archives(
-        self,
-        max_size_mb: int | None = None,
-        *,
-        protected_checkpoint_ids: set[str] | None = None,
-    ) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_prune_checkpoint_archives(
-            max_size_mb,
-            protected_checkpoint_ids=protected_checkpoint_ids,
-        )
-
-    def _prune_checkpoint_archives_locked(
-        self,
-        max_size_mb: int | None = None,
-        *,
-        protected_checkpoint_ids: set[str] | None = None,
-    ) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__prune_checkpoint_archives_locked(
-            max_size_mb,
-            protected_checkpoint_ids=protected_checkpoint_ids,
-        )
-
-    def list_interrupted_apply_recoveries(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_list_interrupted_apply_recoveries(
-            params,
-        )
-
-    def preview_interrupted_apply_recovery(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_preview_interrupted_apply_recovery(
-            params,
-        )
-
-    def export_interrupted_apply_incident_bundle(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_export_interrupted_apply_incident_bundle(
-            params,
-        )
-
-    def resolve_interrupted_apply_recovery(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_resolve_interrupted_apply_recovery(
-            params,
-        )
-
-    def list_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_list_adjustment_checkpoints(
-            params,
-        )
-
-    def get_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_get_adjustment_checkpoint(
-            entry_id,
-        )
-
-    def create_adjustment_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_create_adjustment_checkpoint(
-            params,
-        )
-
-    def update_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_update_adjustment_checkpoint(
-            entry_id,
-            params,
-        )
-
-    def delete_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_delete_adjustment_checkpoint(
-            entry_id,
-            params,
-        )
-
-    def select_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_select_adjustment_checkpoint(
-            entry_id,
-            params,
-        )
-
-    def overwrite_adjustment_checkpoint(self, entry_id: str, params: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_overwrite_adjustment_checkpoint(
-            entry_id,
-            params,
-        )
-
-    def preview_restore_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_preview_restore_adjustment_checkpoint(
-            entry_id,
-        )
-
-    def get_selected_adjustment_checkpoints(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_get_selected_adjustment_checkpoints(
-            params,
-        )
-
-    def _normalize_adjustment_selection_slot(self, value: Any) -> str:
-        return self._checkpoint_recovery._impl__normalize_adjustment_selection_slot(
-            value,
-        )
-
-    def preview_restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_preview_restore_checkpoint(
-            params,
-        )
-
-    def _preview_restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__preview_restore_checkpoint_locked(
-            params,
-        )
-
-    def restore_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl_restore_checkpoint(
-            params,
-        )
-
-    def _restore_checkpoint_locked(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__restore_checkpoint_locked(
-            params,
-        )
-
-    def _call_write_handler(
-        self,
-        write_handler: AgentWriteHandler,
-        target_tool: str,
-        approval_id: str,
-        checkpoint: dict[str, Any] | None,
-        arguments: dict[str, Any],
-        handler_arguments_digest: str,
-        frozen_execution_plan: dict[str, Any],
-    ) -> Any:
-        return self._approval_transactions._impl__call_write_handler(
-            write_handler,
-            target_tool,
-            approval_id,
-            checkpoint,
-            arguments,
-            handler_arguments_digest,
-            frozen_execution_plan,
-        )
-
-    def _create_pre_write_checkpoint(self, approval: dict[str, Any], arguments: dict[str, Any]) -> dict[str, Any] | None:
-        return self._approval_transactions._impl__create_pre_write_checkpoint(
-            approval,
-            arguments,
-        )
-
-    def _create_pre_write_checkpoint_locked(
-        self,
-        approval: dict[str, Any],
-        arguments: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        return self._approval_transactions._impl__create_pre_write_checkpoint_locked(
-            approval,
-            arguments,
-        )
-
-    def _create_project_chat_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__create_project_chat_checkpoint(
-            project_root,
-            record,
-        )
-
-    def _create_project_chat_checkpoint_locked(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__create_project_chat_checkpoint_locked(
-            project_root,
-            record,
-        )
-
-    def _create_archive_checkpoint(self, project_root: Path, record: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__create_archive_checkpoint(
-            project_root,
-            record,
-        )
-
-    def _create_local_state_checkpoint(self, record: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__create_local_state_checkpoint(
-            record,
-        )
-
-    def _checkpoint_project_key(self, project_root: Path) -> str:
-        return self._checkpoint_recovery._impl__checkpoint_project_key(
-            project_root,
-        )
-
-    def _resolve_checkpoint_archive_path(self, checkpoint: dict[str, Any], expected_strategy: str) -> Path:
-        return self._checkpoint_recovery._impl__resolve_checkpoint_archive_path(
-            checkpoint,
-            expected_strategy,
-        )
-
-    def _normalize_project_archive_member(self, name: str, allowed_roots: set[str]) -> str:
-        return self._checkpoint_recovery._impl__normalize_project_archive_member(
-            name,
-            allowed_roots,
-        )
-
-    def _project_chat_checkpoint_source(self, checkpoint: dict[str, Any]) -> Path:
-        return self._checkpoint_recovery._impl__project_chat_checkpoint_source(
-            checkpoint,
-        )
-
-    def _read_project_chat_checkpoint_bytes(self, checkpoint: dict[str, Any]) -> bytes | None:
-        return self._checkpoint_recovery._impl__read_project_chat_checkpoint_bytes(
-            checkpoint,
-        )
-
-    def _preview_project_chat_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__preview_project_chat_checkpoint(
-            checkpoint,
-        )
-
-    def _preview_project_chat_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__preview_project_chat_checkpoint_locked(
-            checkpoint,
-        )
-
-    def _restore_project_chat_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__restore_project_chat_checkpoint(
-            checkpoint,
-        )
-
-    def _restore_project_chat_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__restore_project_chat_checkpoint_locked(
-            checkpoint,
-        )
-
-    def _preview_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__preview_archive_checkpoint(
-            checkpoint,
-        )
-
-    def _preview_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__preview_local_state_checkpoint(
-            checkpoint,
-        )
-
-    def _restore_archive_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__restore_archive_checkpoint(
-            checkpoint,
-        )
-
-    def _restore_local_state_checkpoint(
-        self,
-        checkpoint: dict[str, Any],
-        expected_current_state_digest: str = "",
-    ) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__restore_local_state_checkpoint(
-            checkpoint,
-            expected_current_state_digest,
-        )
-
-    def _build_checkpoint_rollback_coverage_audit(
-        self,
-        checkpoint: dict[str, Any],
-        phase: str,
-        restore_payload: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__build_checkpoint_rollback_coverage_audit(
-            checkpoint,
-            phase,
-            restore_payload,
-        )
-
-    def _build_local_state_rollback_coverage_audit(
-        self,
-        checkpoint: dict[str, Any],
-        phase: str,
-        restore_payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__build_local_state_rollback_coverage_audit(
-            checkpoint,
-            phase,
-            restore_payload,
-        )
-
-    def _build_project_chat_rollback_coverage_audit(
-        self,
-        checkpoint: dict[str, Any],
-        phase: str,
-        restore_payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__build_project_chat_rollback_coverage_audit(
-            checkpoint,
-            phase,
-            restore_payload,
-        )
-
-    def _checkpoint_framework_package_snapshot(self, project_root: Path | None) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__checkpoint_framework_package_snapshot(
-            project_root,
-        )
-
-    def _read_package_dependency_file(self, path: Path) -> tuple[dict[str, Any], str]:
-        return self._checkpoint_recovery._impl__read_package_dependency_file(
-            path,
-        )
-
-    def _stored_checkpoint_framework_package_snapshot(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__stored_checkpoint_framework_package_snapshot(
-            checkpoint,
-        )
-
-    def _local_state_checkpoint_roots(self) -> dict[str, Path]:
-        return self._checkpoint_recovery._impl__local_state_checkpoint_roots()
-
-    def _local_state_archive_contents(self) -> dict[str, tuple[int, int]]:
-        return self._checkpoint_recovery._impl__local_state_archive_contents()
-
-    def _validate_local_state_archive_member(self, name: str) -> None:
-        return self._checkpoint_recovery._impl__validate_local_state_archive_member(
-            name,
-        )
-
-    def _cleanup_checkpoint_restore_unity_caches(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__cleanup_checkpoint_restore_unity_caches(
-            checkpoint,
-        )
-
-    def _checkpoint_touches_packages(self, checkpoint: dict[str, Any]) -> bool:
-        return self._checkpoint_recovery._impl__checkpoint_touches_packages(
-            checkpoint,
-        )
-
-    def _checkpoint_touches_top_level(self, checkpoint: dict[str, Any], top_level: str) -> bool:
-        return self._checkpoint_recovery._impl__checkpoint_touches_top_level(
-            checkpoint,
-            top_level,
-        )
-
-    def _resolve_checkpoint_project_root(self, arguments: dict[str, Any]) -> Path | None:
-        return self._checkpoint_recovery._impl__resolve_checkpoint_project_root(
-            arguments,
-        )
-
-    def _checkpoint_available(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__checkpoint_available(
-            checkpoint,
-        )
-
-    def _append_checkpoint(self, record: dict[str, Any]) -> None:
-        return self._checkpoint_recovery._impl__append_checkpoint(
-            record,
-        )
-
-    def _checkpoint_archive_files(self) -> list[dict[str, Any]]:
-        return self._checkpoint_recovery._impl__checkpoint_archive_files()
-
-    def _protected_checkpoint_archive_ids(
-        self,
-        *,
-        include_recent: bool = False,
-        archives: list[dict[str, Any]] | None = None,
-    ) -> set[str]:
-        return self._checkpoint_recovery._impl__protected_checkpoint_archive_ids(
-            include_recent=include_recent,
-            archives=archives,
-        )
-
-    def _remove_empty_checkpoint_archive_parents(self, start: Path) -> None:
-        return self._checkpoint_recovery._impl__remove_empty_checkpoint_archive_parents(
-            start,
-        )
-
-    def _read_checkpoint_entries(self, limit: int = 500) -> list[dict[str, Any]]:
-        return self._checkpoint_recovery._impl__read_checkpoint_entries(
-            limit,
-        )
-
-    def _load_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
-        return self._checkpoint_recovery._impl__load_checkpoint(
-            checkpoint_id,
-        )
-
-    def _read_apply_recovery_entries(self, limit: int = 1000) -> list[dict[str, Any]]:
-        return self._checkpoint_recovery._impl__read_apply_recovery_entries(
-            limit,
-        )
-
-    def _append_apply_recovery_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__append_apply_recovery_entry(
-            entry,
-        )
-
-    def _coalesced_apply_recoveries(self, *, include_resolved: bool = False) -> list[dict[str, Any]]:
-        return self._checkpoint_recovery._impl__coalesced_apply_recoveries(
-            include_resolved=include_resolved,
-        )
-
-    def _active_apply_recoveries(self) -> list[dict[str, Any]]:
-        return self._checkpoint_recovery._impl__active_apply_recoveries()
-
     @contextmanager
     def local_state_write_guard(self) -> Iterator[None]:
         """Serialize direct local-state writes with checkpoint/recovery I/O."""
@@ -4368,7 +3797,7 @@ class AgentGateway:
         with self._checkpoint_storage_lock:
             active = [
                 recovery
-                for recovery in self._active_apply_recoveries()
+                for recovery in self.checkpoint_recovery._active_apply_recoveries()
                 if str(recovery.get("targetTool") or "")
                 in LOCAL_STATE_CHECKPOINT_TARGETS
             ]
@@ -4378,19 +3807,6 @@ class AgentGateway:
                     status_code=409,
                 )
             yield
-
-    def has_in_flight_project_write(self) -> bool:
-        return self._approval_transactions._impl_has_in_flight_project_write()
-
-    def try_acquire_background_project_read(self, token: str) -> bool:
-        return self._approval_transactions._impl_try_acquire_background_project_read(
-            token,
-        )
-
-    def release_background_project_read(self, token: str) -> bool:
-        return self._approval_transactions._impl_release_background_project_read(
-            token,
-        )
 
     @staticmethod
     def _validated_memory_evidence_for_applied_write(
@@ -4452,128 +3868,6 @@ class AgentGateway:
             "revision": completed_at,
             "completedAt": completed_at,
         }
-
-    def _apply_recovery_blocks_writes(self, recovery: dict[str, Any]) -> bool:
-        return self._approval_transactions._impl__apply_recovery_blocks_writes(
-            recovery,
-        )
-
-    def _select_apply_recovery(self, params: dict[str, Any], *, include_resolved: bool = False) -> dict[str, Any] | None:
-        return self._checkpoint_recovery._impl__select_apply_recovery(
-            params,
-            include_resolved=include_resolved,
-        )
-
-    def _start_apply_recovery(
-        self,
-        approval: dict[str, Any],
-        arguments: dict[str, Any],
-        checkpoint: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl__start_apply_recovery(
-            approval,
-            arguments,
-            checkpoint,
-        )
-
-    def _finish_apply_recovery(
-        self,
-        recovery: dict[str, Any],
-        *,
-        status: str,
-        resolution: str,
-        error: str = "",
-        note: str = "",
-        result_summary: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl__finish_apply_recovery(
-            recovery,
-            status=status,
-            resolution=resolution,
-            error=error,
-            note=note,
-            result_summary=result_summary,
-        )
-
-    def _resolve_apply_recoveries_for_checkpoint(
-        self,
-        checkpoint_id: str,
-        *,
-        resolution: str,
-        restore_payload: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
-        return self._approval_transactions._impl__resolve_apply_recoveries_for_checkpoint(
-            checkpoint_id,
-            resolution=resolution,
-            restore_payload=restore_payload,
-        )
-
-    def _classify_apply_recovery_incident(self, text: str, target_tool: str = "") -> str:
-        return self._checkpoint_recovery._impl__classify_apply_recovery_incident(
-            text,
-            target_tool,
-        )
-
-    def _read_adjustment_checkpoint_entries(self) -> list[dict[str, Any]]:
-        return self._checkpoint_recovery._impl__read_adjustment_checkpoint_entries()
-
-    def _write_adjustment_checkpoint_entries(self, entries: list[dict[str, Any]]) -> None:
-        return self._checkpoint_recovery._impl__write_adjustment_checkpoint_entries(
-            entries,
-        )
-
-    def _load_adjustment_checkpoint(self, entry_id: str) -> dict[str, Any] | None:
-        return self._checkpoint_recovery._impl__load_adjustment_checkpoint(
-            entry_id,
-        )
-
-    def _normalize_adjustment_checkpoint_kind(self, value: Any, *, required: bool) -> str:
-        return self._checkpoint_recovery._impl__normalize_adjustment_checkpoint_kind(
-            value,
-            required=required,
-        )
-
-    def _resolve_or_create_adjustment_base_checkpoint(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__resolve_or_create_adjustment_base_checkpoint(
-            params,
-        )
-
-    def _build_adjustment_checkpoint_entry(
-        self,
-        params: dict[str, Any],
-        checkpoint: dict[str, Any],
-        *,
-        kind: str,
-        existing: dict[str, Any],
-    ) -> dict[str, Any]:
-        return self._checkpoint_recovery._impl__build_adjustment_checkpoint_entry(
-            params,
-            checkpoint,
-            kind=kind,
-            existing=existing,
-        )
-
-    def _apply_adjustment_checkpoint_metadata(self, entry: dict[str, Any], params: dict[str, Any]) -> None:
-        return self._checkpoint_recovery._impl__apply_adjustment_checkpoint_metadata(
-            entry,
-            params,
-        )
-
-    def _normalize_tags(self, value: Any) -> list[str]:
-        return self._checkpoint_recovery._impl__normalize_tags(
-            value,
-        )
-
-    def _default_adjustment_checkpoint_label(self, kind: str, checkpoint: dict[str, Any]) -> str:
-        return self._checkpoint_recovery._impl__default_adjustment_checkpoint_label(
-            kind,
-            checkpoint,
-        )
-
-    def _maybe_record_adjustment_checkpoint(self, record: dict[str, Any]) -> None:
-        return self._checkpoint_recovery._impl__maybe_record_adjustment_checkpoint(
-            record,
-        )
 
     def _checkpoint_pathspecs(self, git_root: Path, project_root: Path) -> list[str]:
         try:
@@ -4670,21 +3964,6 @@ class AgentGateway:
         if user_data_dir:
             return Path(user_data_dir) / "AGENTS.md"
         return self.config_path.parent / "AGENTS.md"
-
-    def visible_write_targets(
-        self,
-        config: AgentGatewayConfig | None = None,
-        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
-    ) -> list[dict[str, Any]]:
-        return self._approval_transactions._impl_visible_write_targets(
-            config,
-            exposure_layer,
-        )
-
-    def _write_handler_rollback_policy(self, handler: AgentWriteHandler) -> dict[str, Any]:
-        return self._approval_transactions._impl__write_handler_rollback_policy(
-            handler,
-        )
 
     def roslyn_available(self, config: AgentGatewayConfig | None = None) -> bool:
         return False
@@ -4870,16 +4149,6 @@ class AgentGateway:
             return dict(params)
         return self._with_user_constraints(params, snapshot)
 
-    def _inject_user_constraints_for_apply(
-        self,
-        params: dict[str, Any],
-        snapshot: UserConstraintsSnapshot,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl__inject_user_constraints_for_apply(
-            params,
-            snapshot,
-        )
-
     def _with_user_constraints(
         self,
         params: dict[str, Any],
@@ -4950,31 +4219,6 @@ class AgentGateway:
             f"(sha256={content_hash}, characters={len(snapshot.content)}). "
             "The full text is kept out of tool parameters to avoid oversized Unity/MCP command lines."
         )
-
-
-    def _write_auto_manual_approval_reason(self, target_tool: str, arguments: dict[str, Any], preview: Any = None) -> str:
-        return self._approval_transactions._impl__write_auto_manual_approval_reason(
-            target_tool,
-            arguments,
-            preview,
-        )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
     def _runtime_skill_package_audit_context_locked(self, skill: dict[str, Any]) -> dict[str, Any]:
@@ -5076,7 +4320,7 @@ class AgentGateway:
             "risk": "advanced_write" if handler.advanced else "write_request",
             "requiresApproval": True,
             "requiresCheckpoint": True,
-            "rollbackPolicy": self._write_handler_rollback_policy(handler),
+            "rollbackPolicy": self.approval_transactions._write_handler_rollback_policy(handler),
             "availableInDesktop": visible,
             "availableInMcp": available,
             "availableInCli": visible,
@@ -5178,102 +4422,6 @@ class AgentGateway:
         if handler.advanced and not self.roslyn_available(config):
             return False
         return True
-
-    def _new_approval(
-        self,
-        agent_name: str,
-        target_tool: str,
-        arguments: dict[str, Any],
-        reason: str,
-        preview: Any,
-        risk_level: str,
-        user_constraints: UserConstraintsSnapshot | None = None,
-        requires_explicit_approval: bool = False,
-        explicit_approval_reason: str = "",
-        goal_delivery_id: str = "",
-        approved_execution_plan: dict[str, Any] | None = None,
-        allow_future_eligible: bool = False,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl__new_approval(
-            agent_name,
-            target_tool,
-            arguments,
-            reason,
-            preview,
-            risk_level,
-            user_constraints,
-            requires_explicit_approval,
-            explicit_approval_reason,
-            goal_delivery_id,
-            approved_execution_plan,
-            allow_future_eligible,
-        )
-
-    def _approval_project_root(self, approval: dict[str, Any]) -> str:
-        return self._approval_transactions._impl__approval_project_root(
-            approval,
-        )
-
-    def _ensure_approval_scope(
-        self,
-        approval: dict[str, Any],
-        *,
-        expected_project_root: str = "",
-        global_only: bool = False,
-    ) -> None:
-        return self._approval_transactions._impl__ensure_approval_scope(
-            approval,
-            expected_project_root=expected_project_root,
-            global_only=global_only,
-        )
-
-    def _set_approval_status(
-        self,
-        approval_id: str,
-        status: str,
-        *,
-        expected_project_root: str = "",
-        global_only: bool = False,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl__set_approval_status(
-            approval_id,
-            status,
-            expected_project_root=expected_project_root,
-            global_only=global_only,
-        )
-
-    def request_approval_revision(
-        self,
-        approval_id: str,
-        *,
-        reason: str = "",
-        note: str = "",
-        expected_project_root: str = "",
-        global_only: bool = False,
-    ) -> dict[str, Any]:
-        return self._approval_transactions._impl_request_approval_revision(
-            approval_id,
-            reason=reason,
-            note=note,
-            expected_project_root=expected_project_root,
-            global_only=global_only,
-        )
-
-    def _refresh_approval_expiry(self, approval: dict[str, Any]) -> dict[str, Any]:
-        return self._approval_transactions._impl__refresh_approval_expiry(
-            approval,
-        )
-
-    def _load_approval_from_audit(self, approval_id: str) -> dict[str, Any] | None:
-        return self._approval_transactions._impl__load_approval_from_audit(
-            approval_id,
-        )
-
-    def _reconcile_unrecoverable_linked_approval(self, approval_id: str) -> bool:
-        return self._approval_transactions._impl__reconcile_unrecoverable_linked_approval(
-            approval_id,
-        )
-
 
 def create_agent_mcp_app(
     gateway: AgentGateway,

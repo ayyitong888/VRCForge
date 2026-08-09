@@ -328,7 +328,7 @@ def test_dashboard_keeps_only_approved_execution_roots_and_raw_capture_request_p
         and node.name == "request_supervised_vision_capture"
     )
     capture_source = ast.get_source_segment(source, capture_adapter) or ""
-    assert "AGENT_GATEWAY.create_apply_request" in capture_source
+    assert "AGENT_GATEWAY.approval_transactions.create_apply_request" in capture_source
     assert '"target_tool": target_tool' in capture_source
     assert '"arguments": request.model_dump()' in capture_source
     assert '"reason": reason' in capture_source
@@ -366,8 +366,16 @@ def test_dashboard_keeps_only_approved_execution_roots_and_raw_capture_request_p
         ast.get_source_segment(source, node) or ""
         for node in ast.walk(registry)
         if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "register_write_handler"
+        and (
+            (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "register_write_handler"
+            )
+            or (
+                isinstance(node.func, ast.Name)
+                and node.func.id == "register_write_handler"
+            )
+        )
     )
     for executor in (
         "apply_shader_material_plan_approved_sync",

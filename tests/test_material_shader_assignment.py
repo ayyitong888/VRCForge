@@ -470,7 +470,7 @@ def test_gateway_replaces_caller_preview_with_live_verified_receipt(tmp_path: Pa
     project = tmp_path / "UnityProject"
     (project / "Assets").mkdir(parents=True)
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_unity_mcp_write",
         "Unity write",
         "high",
@@ -488,7 +488,7 @@ def test_gateway_replaces_caller_preview_with_live_verified_receipt(tmp_path: Pa
         patch("dashboard_server.load_dashboard_settings"),
         patch("dashboard_server.invoke_unity_mcp", return_value=result) as invoke,
     ):
-        requested = gateway.create_apply_request(
+        requested = gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_unity_mcp_write",
                 "arguments": wrapper_arguments(str(project)),
@@ -514,7 +514,7 @@ def test_gateway_preview_failure_creates_no_approval(tmp_path: Path) -> None:
     project = tmp_path / "UnityProject"
     (project / "Assets").mkdir(parents=True)
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_unity_mcp_write",
         "Unity write",
         "high",
@@ -528,7 +528,7 @@ def test_gateway_preview_failure_creates_no_approval(tmp_path: Path) -> None:
         patch("dashboard_server.invoke_unity_mcp", return_value=result),
         pytest.raises(AgentGatewayError, match="could not be verified"),
     ):
-        gateway.create_apply_request(
+        gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_unity_mcp_write",
                 "arguments": wrapper_arguments(str(project)),

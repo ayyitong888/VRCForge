@@ -91,7 +91,7 @@ def test_service_has_only_typed_ports_and_production_metadata_has_no_handlers() 
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway = _gateway(Path(temp_dir))
         gateway.register_tool("read-one", "Read one.", "read/debug", lambda _params: {"ok": True})
-        gateway.register_write_handler("write-one", "Write one.", "medium", lambda _params: {"ok": True})
+        gateway.approval_transactions.register_write_handler("write-one", "Write one.", "medium", lambda _params: {"ok": True})
 
         assert AgentSkillRegistryService.__slots__ == ("_ports",)
         assert not hasattr(gateway.skills, "_host")

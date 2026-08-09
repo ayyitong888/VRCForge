@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -18,14 +19,23 @@ def force_gateway_approval_mode():
         execution_mode="approval",
         allow_write_requests=True,
     )
+    gateway = dashboard_server.AGENT_GATEWAY
+    approval_owner = gateway.approval_transactions
     with (
-        patch.object(dashboard_server.AGENT_GATEWAY, "ensure_config", return_value=config),
-        patch.object(dashboard_server.AGENT_GATEWAY, "save_config") as save_config_mock,
-        patch.object(dashboard_server.AGENT_GATEWAY, "append_audit"),
+        patch.object(gateway, "ensure_config", return_value=config),
+        patch.object(gateway, "save_config") as save_config_mock,
+        patch.object(gateway, "append_audit") as append_audit_mock,
     ):
-        dashboard_server.AGENT_GATEWAY._approvals.clear()
-        yield save_config_mock
-        dashboard_server.AGENT_GATEWAY._approvals.clear()
+        approval_ports = replace(
+            approval_owner._ports,
+            ensure_config=lambda: config,
+            save_config=save_config_mock,
+            append_audit=append_audit_mock,
+        )
+        with patch.object(approval_owner, "_ports", approval_ports):
+            gateway._approvals.clear()
+            yield save_config_mock
+            gateway._approvals.clear()
 
 
 def make_encryption_inventory() -> dict:
@@ -638,7 +648,7 @@ def test_avatar_encryption_remove_request_normalizes_manifest_and_output_folder(
 
 def test_avatar_encryption_direct_internal_write_target_requires_wrapper() -> None:
     with pytest.raises(agent_gateway.AgentGatewayError, match="dedicated VRCForge request tool"):
-        dashboard_server.AGENT_GATEWAY.create_apply_request(
+        dashboard_server.AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": dashboard_server.AVATAR_ENCRYPTION_ADDON_APPLY_TOOL,
                 "arguments": {},
@@ -649,23 +659,27 @@ def test_avatar_encryption_direct_internal_write_target_requires_wrapper() -> No
 
 def test_write_handler_ok_false_marks_approval_failed(tmp_path, monkeypatch) -> None:
     gateway = agent_gateway.AgentGateway(tmp_path / "gateway.json", tmp_path / "audit")
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_test_avatar_encryption_failure",
         "Avatar encryption failure",
         "high",
         lambda _arguments: {"ok": False, "error": "BlendShape target is blocked."},
     )
-    monkeypatch.setattr(gateway, "_create_pre_write_checkpoint", lambda _approval, _arguments: {"ok": True, "id": "ckpt_test"})
-    request = gateway.create_apply_request(
+    monkeypatch.setattr(
+        type(gateway.approval_transactions),
+        "_create_pre_write_checkpoint",
+        lambda _owner, _approval, _arguments: {"ok": True, "id": "ckpt_test"},
+    )
+    request = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_test_avatar_encryption_failure",
             "arguments": {"projectPath": "E:/unity/Hero"},
         }
     )
     approval_id = request["approval"]["id"]
-    gateway.approve(approval_id)
+    gateway.approval_transactions.approve(approval_id)
 
-    applied = gateway.apply_approved({"approval_id": approval_id})
+    applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
     assert applied["ok"] is False
     assert applied["status"] == "failed"

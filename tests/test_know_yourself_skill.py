@@ -818,7 +818,11 @@ def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(
                     build_skill_registry=_skill_registry,
                 ),
             )
-            scoped.setattr(dashboard_server.AGENT_GATEWAY, "permission_state", _permission_state)
+            scoped.setattr(
+                type(dashboard_server.AGENT_GATEWAY.approval_transactions),
+                "permission_state",
+                lambda _owner, _config=None: _permission_state(),
+            )
             return dashboard_server.KNOW_YOURSELF_READINESS.know_yourself_sync({})
 
     missing = run_case(None)
@@ -890,7 +894,11 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
             build_skill_registry=_skill_registry,
         ),
     )
-    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "permission_state", _permission_state)
+    monkeypatch.setattr(
+        type(dashboard_server.AGENT_GATEWAY.approval_transactions),
+        "permission_state",
+        lambda _owner, _config=None: _permission_state(),
+    )
 
     report = dashboard_server.KNOW_YOURSELF_READINESS.know_yourself_sync({"editorFocusConfirmed": "true"})
     route = dashboard_server.AGENT_GATEWAY.runtime_planner._match_runtime_skill(

@@ -804,7 +804,7 @@ def test_generic_parameter_request_cannot_bypass_manual_approval(
         tmp_path / "gateway" / "audit",
     )
     executed: list[dict] = []
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_unity_mcp_write",
         "Test Unity wrapper.",
         "high",
@@ -820,7 +820,7 @@ def test_generic_parameter_request_cannot_bypass_manual_approval(
     config.allow_roslyn_advanced = execution_mode == "roslyn_full_auto"
     gateway.save_config(config)
 
-    result = gateway.create_apply_request(
+    result = gateway.approval_transactions.create_apply_request(
         {
             "target_tool": "vrcforge_unity_mcp_write",
             "arguments": {

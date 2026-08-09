@@ -27,7 +27,7 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             root = Path(tmp)
             project = create_unity_project(root)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
             successful_calls: list[dict] = []
 
             def failing_write(args: dict) -> dict:
@@ -40,57 +40,57 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
                 Path(args["projectRoot"], "Assets", "after-recovery.txt").write_text("ok", encoding="utf-8")
                 return {"ok": True}
 
-            gateway.register_write_handler("vrcforge_test_failing_write", "Failing write", "high", failing_write)
-            gateway.register_write_handler("vrcforge_test_successful_write", "Successful write", "high", successful_write)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_failing_write", "Failing write", "high", failing_write)
+            gateway.approval_transactions.register_write_handler("vrcforge_test_successful_write", "Successful write", "high", successful_write)
 
-            request = gateway.create_apply_request(
+            request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_failing_write",
                     "arguments": {"projectRoot": str(project)},
                 }
             )
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
             self.assertFalse(applied["ok"])
             self.assertEqual(applied["status"], "failed")
             checkpoint_id = applied["checkpoint"]["id"]
-            recoveries = gateway.list_interrupted_apply_recoveries()
+            recoveries = gateway.checkpoint_recovery.list_interrupted_apply_recoveries()
             self.assertTrue(recoveries["blockingWrites"])
             self.assertEqual(recoveries["activeCount"], 1)
             recovery = recoveries["recoveries"][0]
             self.assertEqual(recovery["status"], "needs_recovery")
             self.assertEqual(recovery["checkpointId"], checkpoint_id)
 
-            preview = gateway.preview_interrupted_apply_recovery({"recoveryId": recovery["id"]})
+            preview = gateway.checkpoint_recovery.preview_interrupted_apply_recovery({"recoveryId": recovery["id"]})
             self.assertTrue(preview["ok"])
             self.assertTrue(preview["checkpointPreview"]["ok"])
 
-            bundle = gateway.export_interrupted_apply_incident_bundle({"recoveryId": recovery["id"]})
+            bundle = gateway.checkpoint_recovery.export_interrupted_apply_incident_bundle({"recoveryId": recovery["id"]})
             self.assertTrue(bundle["ok"])
             self.assertTrue(Path(bundle["path"]).is_file())
 
-            blocked_request = gateway.create_apply_request(
+            blocked_request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_successful_write",
                     "arguments": {"projectRoot": str(project)},
                 }
             )
             blocked_id = blocked_request["approval"]["id"]
-            gateway.approve(blocked_id)
-            blocked = gateway.apply_approved({"approval_id": blocked_id})
+            gateway.approval_transactions.approve(blocked_id)
+            blocked = gateway.approval_transactions.apply_approved({"approval_id": blocked_id})
             self.assertFalse(blocked["ok"])
             self.assertEqual(blocked["status"], "blocked_recovery")
             self.assertEqual(successful_calls, [])
 
-            restored = gateway.restore_checkpoint({"checkpointId": checkpoint_id, "confirmRestore": True})
+            restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint_id, "confirmRestore": True})
             self.assertTrue(restored["ok"])
             self.assertIn("resolvedApplyRecoveries", restored)
             self.assertFalse((project / "Assets" / "generated-before-fail.txt").exists())
-            self.assertFalse(gateway.list_interrupted_apply_recoveries()["blockingWrites"])
+            self.assertFalse(gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["blockingWrites"])
 
-            unblocked = gateway.apply_approved({"approval_id": blocked_id})
+            unblocked = gateway.approval_transactions.apply_approved({"approval_id": blocked_id})
             self.assertTrue(unblocked["ok"])
             self.assertEqual(len(successful_calls), 1)
 
@@ -99,60 +99,60 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             root = Path(tmp)
             project = create_unity_project(root)
             first_gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            first_gateway.checkpoint_prepare_handler = lambda _path: {"ok": True}
+            first_gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
             approval = {"id": "approval-crash", "targetTool": "vrcforge_test_hanging_write", "riskLevel": "high"}
             arguments = {"projectRoot": str(project)}
-            checkpoint = first_gateway._create_pre_write_checkpoint(approval, arguments)
+            checkpoint = first_gateway.approval_transactions._create_pre_write_checkpoint(approval, arguments)
             self.assertIsNotNone(checkpoint)
             self.assertTrue(checkpoint["ok"])
-            recovery = first_gateway._start_apply_recovery(approval, arguments, checkpoint)
+            recovery = first_gateway.approval_transactions._start_apply_recovery(approval, arguments, checkpoint)
 
             restarted_gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             calls: list[dict] = []
-            restarted_gateway.register_write_handler(
+            restarted_gateway.approval_transactions.register_write_handler(
                 "vrcforge_test_after_restart",
                 "Write after restart",
                 "high",
                 lambda args: calls.append(args) or {"ok": True},
             )
-            restarted_gateway.register_write_handler(
+            restarted_gateway.approval_transactions.register_write_handler(
                 "vrcforge_resolve_interrupted_apply_recovery",
                 "Resolve recovery",
                 "medium",
-                lambda args: restarted_gateway.resolve_interrupted_apply_recovery(args),
+                lambda args: restarted_gateway.checkpoint_recovery.resolve_interrupted_apply_recovery(args),
             )
 
-            recoveries = restarted_gateway.list_interrupted_apply_recoveries()
+            recoveries = restarted_gateway.checkpoint_recovery.list_interrupted_apply_recoveries()
             self.assertTrue(recoveries["blockingWrites"])
             self.assertEqual(recoveries["recoveries"][0]["id"], recovery["id"])
             self.assertEqual(recoveries["recoveries"][0]["status"], "applying")
 
-            request = restarted_gateway.create_apply_request(
+            request = restarted_gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_after_restart",
                     "arguments": {"projectRoot": str(project)},
                 }
             )
             approval_id = request["approval"]["id"]
-            restarted_gateway.approve(approval_id)
-            blocked = restarted_gateway.apply_approved({"approval_id": approval_id})
+            restarted_gateway.approval_transactions.approve(approval_id)
+            blocked = restarted_gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertFalse(blocked["ok"])
             self.assertEqual(blocked["status"], "blocked_recovery")
             self.assertEqual(calls, [])
 
-            resolve_request = restarted_gateway.create_apply_request(
+            resolve_request = restarted_gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_resolve_interrupted_apply_recovery",
                     "arguments": {"recoveryId": recovery["id"], "confirmResolved": True},
                 }
             )
             resolve_id = resolve_request["approval"]["id"]
-            restarted_gateway.approve(resolve_id)
-            resolved = restarted_gateway.apply_approved({"approval_id": resolve_id})
+            restarted_gateway.approval_transactions.approve(resolve_id)
+            resolved = restarted_gateway.approval_transactions.apply_approved({"approval_id": resolve_id})
             self.assertTrue(resolved["ok"])
-            self.assertFalse(restarted_gateway.list_interrupted_apply_recoveries()["blockingWrites"])
+            self.assertFalse(restarted_gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["blockingWrites"])
 
-            unblocked = restarted_gateway.apply_approved({"approval_id": approval_id})
+            unblocked = restarted_gateway.approval_transactions.apply_approved({"approval_id": approval_id})
             self.assertTrue(unblocked["ok"])
             self.assertEqual(len(calls), 1)
 
@@ -161,23 +161,23 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             root = Path(tmp)
             project = create_unity_project(root)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.checkpoint_prepare_handler = lambda _path: {"ok": False, "error": "Unity MCP unavailable"}
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": False, "error": "Unity MCP unavailable"}
 
             def failing_write(args: dict) -> dict:
                 project_root = Path(args["projectRoot"])
                 (project_root / "Assets" / "generated-after-prepare-warning.txt").write_text("generated", encoding="utf-8")
                 raise RuntimeError("Unity crashed after file checkpoint")
 
-            gateway.register_write_handler("vrcforge_test_prepare_fallback", "Prepare fallback write", "high", failing_write)
-            request = gateway.create_apply_request(
+            gateway.approval_transactions.register_write_handler("vrcforge_test_prepare_fallback", "Prepare fallback write", "high", failing_write)
+            request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_prepare_fallback",
                     "arguments": {"projectRoot": str(project)},
                 }
             )
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
             self.assertFalse(applied["ok"])
             checkpoint = applied["checkpoint"]
@@ -186,9 +186,9 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             self.assertEqual(checkpoint["unityPrepare"]["error"], "Unity MCP unavailable")
             self.assertIn("Unity prepare checkpoint failed", " ".join(checkpoint.get("warnings") or []))
 
-            recoveries = gateway.list_interrupted_apply_recoveries()
+            recoveries = gateway.checkpoint_recovery.list_interrupted_apply_recoveries()
             self.assertTrue(recoveries["blockingWrites"])
-            restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+            restored = gateway.checkpoint_recovery.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
             self.assertTrue(restored["ok"])
             self.assertFalse((project / "Assets" / "generated-after-prepare-warning.txt").exists())
 
@@ -197,7 +197,7 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             root = Path(tmp)
             project = create_unity_project(root)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.checkpoint_prepare_handler = lambda _path: {
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {
                 "ok": False,
                 "blocking": True,
                 "code": "unsaved_open_scene",
@@ -205,21 +205,21 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             }
             calls: list[dict] = []
 
-            gateway.register_write_handler(
+            gateway.approval_transactions.register_write_handler(
                 "vrcforge_test_unsaved_scene_write",
                 "Unsaved scene write",
                 "high",
                 lambda arguments: calls.append(arguments) or {"ok": True},
             )
-            request = gateway.create_apply_request(
+            request = gateway.approval_transactions.create_apply_request(
                 {
                     "target_tool": "vrcforge_test_unsaved_scene_write",
                     "arguments": {"projectRoot": str(project)},
                 }
             )
             approval_id = request["approval"]["id"]
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
             self.assertFalse(applied["ok"])
             checkpoint = applied["checkpoint"]

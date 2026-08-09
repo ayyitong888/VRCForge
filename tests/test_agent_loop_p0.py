@@ -31,7 +31,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.original_paths = (self.gateway.config_path, self.gateway.audit_dir)
-        self.original_prepare = self.gateway.checkpoint_prepare_handler
+        self.original_prepare = self.gateway.approval_transactions.checkpoint_prepare_handler
         self.original_create_checkpoint_prepare = self.gateway._write_handlers[
             "vrcforge_create_gameobject"
         ].checkpoint_prepare_handler
@@ -41,13 +41,13 @@ class AgentLoopP0Tests(unittest.TestCase):
         config.allow_write_requests = True
         config.execution_mode = "approval"
         self.gateway.save_config(config)
-        self.gateway.checkpoint_prepare_handler = lambda _root: {"ok": True}
+        self.gateway.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
         self.gateway._write_handlers[
             "vrcforge_create_gameobject"
         ].checkpoint_prepare_handler = lambda _root, _arguments: {"ok": True}
 
     def tearDown(self) -> None:
-        self.gateway.checkpoint_prepare_handler = self.original_prepare
+        self.gateway.approval_transactions.checkpoint_prepare_handler = self.original_prepare
         self.gateway._write_handlers[
             "vrcforge_create_gameobject"
         ].checkpoint_prepare_handler = self.original_create_checkpoint_prepare
@@ -139,8 +139,8 @@ class AgentLoopP0Tests(unittest.TestCase):
             "dashboard_server.invoke_unity_mcp",
             side_effect=invoke_with_bound_execution,
         ) as mock_invoke:
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
         self.assertTrue(applied["ok"])
         self.assertEqual(applied["status"], "applied")
@@ -205,8 +205,8 @@ class AgentLoopP0Tests(unittest.TestCase):
             "dashboard_server.invoke_unity_mcp",
             side_effect=invoke_with_bound_execution,
         ) as mock_invoke:
-            gateway.approve(approval_id)
-            applied = gateway.apply_approved({"approval_id": approval_id})
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
         self.assertTrue(applied["ok"])
         self.assertEqual(applied["status"], "applied")

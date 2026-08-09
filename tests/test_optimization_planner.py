@@ -39,6 +39,20 @@ def make_unity_project(root: Path) -> None:
     (root / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1", encoding="utf-8")
 
 
+def set_gateway_approval_config(
+    monkeypatch: pytest.MonkeyPatch,
+    gateway: AgentGateway,
+    config: AgentGatewayConfig,
+) -> None:
+    monkeypatch.setattr(gateway, "ensure_config", lambda: config)
+    owner = gateway.approval_transactions
+    monkeypatch.setattr(
+        owner,
+        "_ports",
+        replace(owner._ports, ensure_config=lambda: config),
+    )
+
+
 def test_dashboard_composes_one_typed_optimization_owner() -> None:
     owner = dashboard_server.OPTIMIZATION
 
@@ -547,11 +561,7 @@ def test_mcp_projection_exposes_read_plan_without_direct_apply(
         dashboard_server.AGENT_GATEWAY.ensure_config(),
         allow_write_requests=True,
     )
-    monkeypatch.setattr(
-        dashboard_server.AGENT_GATEWAY,
-        "ensure_config",
-        lambda: config,
-    )
+    set_gateway_approval_config(monkeypatch, dashboard_server.AGENT_GATEWAY, config)
     manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
     tool_names = {tool["name"] for tool in manifest["tools"]}
     write_targets = {target["name"] for target in manifest["writeTargets"]}
@@ -600,11 +610,7 @@ def test_optimizer_apply_requests_are_stable_request_tools_without_direct_apply(
         dashboard_server.AGENT_GATEWAY.ensure_config(),
         allow_write_requests=True,
     )
-    monkeypatch.setattr(
-        dashboard_server.AGENT_GATEWAY,
-        "ensure_config",
-        lambda: config,
-    )
+    set_gateway_approval_config(monkeypatch, dashboard_server.AGENT_GATEWAY, config)
     manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
     tool_names = {tool["name"] for tool in manifest["tools"]}
     unstable = set(OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) - set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES)
@@ -736,13 +742,13 @@ def test_optimization_validation_delta_flags_regression_and_rollback_drift() -> 
 
 
 def test_wrapper_only_optimizer_targets_reject_generic_apply_request(monkeypatch) -> None:
-    monkeypatch.setattr(
+    set_gateway_approval_config(
+        monkeypatch,
         dashboard_server.AGENT_GATEWAY,
-        "ensure_config",
-        lambda: AgentGatewayConfig(enabled=True, allow_write_requests=True),
+        AgentGatewayConfig(enabled=True, allow_write_requests=True),
     )
     with pytest.raises(dashboard_server.AgentGatewayError, match="dedicated VRCForge request tool"):
-        dashboard_server.AGENT_GATEWAY.create_apply_request(
+        dashboard_server.AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_configure_optimizer_component",
                 "arguments": {},
@@ -758,10 +764,10 @@ def test_optimizer_apply_request_requires_explicit_approval_even_in_auto_mode(mo
     install_package(project, "dev.limitex.avatar-compressor", "0.8.0")
     original_approvals = dict(dashboard_server.AGENT_GATEWAY._approvals)
     dashboard_server.AGENT_GATEWAY._approvals.clear()
-    monkeypatch.setattr(
+    set_gateway_approval_config(
+        monkeypatch,
         dashboard_server.AGENT_GATEWAY,
-        "ensure_config",
-        lambda: AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
+        AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
     )
     monkeypatch.setattr(
         dashboard_server,
@@ -798,8 +804,8 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch, tmp_pat
     make_unity_project(project)
     original_approvals = dict(dashboard_server.AGENT_GATEWAY._approvals)
     original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
-    original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
-    dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = lambda _root: {"ok": True}
+    original_prepare = dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler
+    dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
     dashboard_server.AGENT_GATEWAY._approvals.clear()
     calls: list[dict] = []
 
@@ -807,19 +813,19 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch, tmp_pat
         calls.append(args)
         return {"ok": True, "value": args.get("value")}
 
-    monkeypatch.setattr(
+    set_gateway_approval_config(
+        monkeypatch,
         dashboard_server.AGENT_GATEWAY,
-        "ensure_config",
-        lambda: AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
+        AgentGatewayConfig(enabled=True, allow_write_requests=True, execution_mode="auto"),
     )
     try:
-        dashboard_server.AGENT_GATEWAY.register_write_handler(
+        dashboard_server.AGENT_GATEWAY.approval_transactions.register_write_handler(
             "vrcforge_test_auto_write",
             "Test auto write.",
             "high",
             write_handler,
         )
-        payload = dashboard_server.AGENT_GATEWAY.create_apply_request(
+        payload = dashboard_server.AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_test_auto_write",
                 "arguments": {"projectRoot": str(project), "value": "kept"},
@@ -838,7 +844,7 @@ def test_non_optimizer_apply_request_can_still_auto_approve(monkeypatch, tmp_pat
         dashboard_server.AGENT_GATEWAY._approvals.clear()
         dashboard_server.AGENT_GATEWAY._approvals.update(original_approvals)
         dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
-        dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
+        dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = original_prepare
 
 
 def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch, tmp_path: Path) -> None:
@@ -846,7 +852,7 @@ def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch
     make_unity_project(project)
     original_approvals = dict(dashboard_server.AGENT_GATEWAY._approvals)
     original_handlers = dict(dashboard_server.AGENT_GATEWAY._write_handlers)
-    original_prepare = dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler
+    original_prepare = dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler
     prepared_roots: list[Path] = []
     dashboard_server.AGENT_GATEWAY._approvals.clear()
     calls: list[dict] = []
@@ -859,24 +865,24 @@ def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch
         calls.append(args)
         return {"ok": True, "value": args.get("value")}
 
-    dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = prepare_checkpoint
-    monkeypatch.setattr(
+    dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = prepare_checkpoint
+    set_gateway_approval_config(
+        monkeypatch,
         dashboard_server.AGENT_GATEWAY,
-        "ensure_config",
-        lambda: AgentGatewayConfig(
+        AgentGatewayConfig(
             enabled=True,
             allow_write_requests=True,
             execution_mode="roslyn_full_auto",
         ),
     )
     try:
-        dashboard_server.AGENT_GATEWAY.register_write_handler(
+        dashboard_server.AGENT_GATEWAY.approval_transactions.register_write_handler(
             "vrcforge_test_full_permission_write",
             "Test full permission write.",
             "critical",
             write_handler,
         )
-        payload = dashboard_server.AGENT_GATEWAY.create_apply_request(
+        payload = dashboard_server.AGENT_GATEWAY.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_test_full_permission_write",
                 "arguments": {"projectRoot": str(project), "value": "kept"},
@@ -899,7 +905,7 @@ def test_full_permission_overrides_explicit_approval_with_checkpoint(monkeypatch
         dashboard_server.AGENT_GATEWAY._approvals.clear()
         dashboard_server.AGENT_GATEWAY._approvals.update(original_approvals)
         dashboard_server.AGENT_GATEWAY._write_handlers = original_handlers
-        dashboard_server.AGENT_GATEWAY.checkpoint_prepare_handler = original_prepare
+        dashboard_server.AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = original_prepare
 
 
 def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dependency(tmp_path: Path) -> None:
@@ -1248,14 +1254,14 @@ def test_parameter_optimizer_entry_reprepares_then_runs_the_approved_canonical_w
             "previewDigest": "a" * 64,
         }
 
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_unity_mcp_write",
         "Test authoritative Unity write lane.",
         "high",
         lambda arguments: executed.append(copy.deepcopy(arguments)) or {"ok": True},
         request_preparer=prepare,
     )
-    gateway.checkpoint_prepare_handler = (
+    gateway.approval_transactions.checkpoint_prepare_handler = (
         lambda root: checkpoint_roots.append(root) or {"ok": True}
     )
     config = gateway.ensure_config()
@@ -1281,7 +1287,7 @@ def test_parameter_optimizer_entry_reprepares_then_runs_the_approved_canonical_w
     owner = OptimizationWorkflowService(
         replace(
             dashboard_server.OPTIMIZATION._ports,
-            create_apply_request=gateway.create_apply_request,
+            create_apply_request=gateway.approval_transactions.create_apply_request,
         )
     )
     requested = owner.request_apply(
@@ -1312,8 +1318,8 @@ def test_parameter_optimizer_entry_reprepares_then_runs_the_approved_canonical_w
     assert caller_preview["authoritativePreview"]["previewDigest"] == "0" * 64
 
     approval_id = approval["id"]
-    assert gateway.approve(approval_id)["ok"] is True
-    applied = gateway.apply_approved({"approval_id": approval_id})
+    assert gateway.approval_transactions.approve(approval_id)["ok"] is True
+    applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
     assert applied["ok"] is True
     assert checkpoint_roots == [project.resolve()]

@@ -93,7 +93,7 @@ def test_missing_package_path_preserves_supervised_request_400(
     tmp_path: Path,
 ) -> None:
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
-    gateway.register_write_handler(
+    gateway.approval_transactions.register_write_handler(
         "vrcforge_import_outfit_package",
         "Import an outfit package.",
         "high",
@@ -102,7 +102,7 @@ def test_missing_package_path_preserves_supervised_request_400(
     )
 
     with pytest.raises(AgentGatewayError) as exc_info:
-        gateway.create_apply_request(
+        gateway.approval_transactions.create_apply_request(
             {
                 "target_tool": "vrcforge_import_outfit_package",
                 "arguments": {},
