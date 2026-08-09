@@ -171,7 +171,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         for group_id, group in groups.items()
         if group_id.startswith("dashboard.") and group.get("hostProxy")
     )
-    assert dashboard_host_proxy_count == 6
+    assert dashboard_host_proxy_count == 0
     assert groups["dashboard.skill-package-projection-typed-root-owner"][
         "rootSymbols"
     ] == [
@@ -270,6 +270,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.memory-review-root-graph" not in groups
     assert "dashboard.sub-agent-collaboration-root-owner" not in groups
     assert "dashboard.question-root-owner" not in groups
+    assert "dashboard.provider-vision-host-proxy" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
     assert {item["id"] for item in manifest["publicApiAllowlist"]["contracts"]} == {
         "fastapi-route-request-response-openapi",
