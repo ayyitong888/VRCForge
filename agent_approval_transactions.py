@@ -79,11 +79,18 @@ class AgentApprovalTransactionService:
     lock, file handle, authorization identity, or communication endpoint.
     """
 
-    __slots__ = ("_goal", "_host")
+    __slots__ = ("_goal", "_host", "_runtime_run_append")
 
-    def __init__(self, host: Any, goal: ApprovalGoalPorts) -> None:
+    def __init__(
+        self,
+        host: Any,
+        goal: ApprovalGoalPorts,
+        *,
+        runtime_run_append: Callable[[dict[str, Any]], None],
+    ) -> None:
         self._host = host
         self._goal = goal
+        self._runtime_run_append = runtime_run_append
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._host, name)
@@ -764,7 +771,7 @@ class AgentApprovalTransactionService:
                 self._approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
                 self.append_audit({"event": "approval_applying", "approval": approval, **permission_context})
-                self._append_runtime_run(
+                self._runtime_run_append(
                     {
                         "event": "approval_applying",
                         "status": "applying",
@@ -1001,7 +1008,7 @@ class AgentApprovalTransactionService:
                 if request_trace is not None:
                     applied_audit["requestTrace"] = request_trace
                 self.append_audit(applied_audit)
-                self._append_runtime_run(
+                self._runtime_run_append(
                     {
                         "event": "approval_applied",
                         "status": "applied",
@@ -1047,7 +1054,7 @@ class AgentApprovalTransactionService:
                 if request_trace is not None:
                     failed_audit["requestTrace"] = request_trace
                 self.append_audit(failed_audit)
-                self._append_runtime_run(
+                self._runtime_run_append(
                     {
                         "event": "approval_failed",
                         "status": "failed",
@@ -1884,7 +1891,7 @@ class AgentApprovalTransactionService:
             self._approvals[approval_id] = approval
             permission_context = self.permission_audit_context()
             self.append_audit({"event": f"approval_{status}", "approval": approval, **permission_context})
-            self._append_runtime_run(
+            self._runtime_run_append(
                 {
                     "event": f"approval_{status}",
                     "status": status,
@@ -1935,7 +1942,7 @@ class AgentApprovalTransactionService:
             approval["revisionNote"] = note.strip()
             self._approvals[approval_id] = approval
             self.append_audit({"event": "approval_revision_requested", "approval": approval})
-            self._append_runtime_run(
+            self._runtime_run_append(
                 {
                     "event": "approval_revision_requested",
                     "status": "revision_requested",

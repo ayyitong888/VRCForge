@@ -228,28 +228,18 @@
           "source": "agent_gateway.py",
           "scope": "class",
           "class": "AgentGateway",
-          "methods": [
-            "_signal_background_activity",
-            "_normalize_computer_use_accent",
-            "runtime_message",
-            "_runtime_message_impl",
-            "_summarize_loop_plan",
-            "runtime_observe",
-            "get_runtime_session",
-            "_runtime_run_from_turn",
-            "_runtime_turn_run_status",
-            "request_runtime_cancel",
-            "record_runtime_queue_event",
-            "list_runtime_runs",
-            "runtime_run_log_path",
-            "_append_runtime_run",
-            "_read_runtime_run_events",
-            "_find_registry_skill",
-            "execute_runtime_skill",
-            "_execute_runtime_skill",
-            "_execute_skill_package",
-            "_runtime_skill_package_audit_context",
-            "_execute_skill_entrypoint"
+            "methods": [
+              "_signal_background_activity",
+              "runtime_message",
+              "_runtime_message_impl",
+              "_summarize_loop_plan",
+              "runtime_observe",
+              "get_runtime_session",
+              "request_runtime_cancel",
+              "execute_runtime_skill",
+              "_execute_runtime_skill",
+              "_execute_skill_package",
+              "_execute_skill_entrypoint"
           ]
         }
       ]

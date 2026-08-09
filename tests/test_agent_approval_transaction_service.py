@@ -33,7 +33,8 @@ def test_approval_transaction_service_owns_no_second_state_or_runtime_resource()
 
         assert isinstance(service, AgentApprovalTransactionService)
         assert service._host is gateway
-        assert AgentApprovalTransactionService.__slots__ == ("_goal", "_host")
+        assert AgentApprovalTransactionService.__slots__ == ("_goal", "_host", "_runtime_run_append")
+        assert service._runtime_run_append.__self__ is gateway.runtime_runs
         assert isinstance(service._goal, ApprovalGoalPorts)
         assert service._goal.deny_approval.__self__ is gateway.goal
         assert service._goal.attach_terminal_resolution.__self__ is gateway.goal

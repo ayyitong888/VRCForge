@@ -4,6 +4,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent_gateway import AgentGateway, AgentGatewayError
 
@@ -284,7 +285,7 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
             self.assertEqual(blocked["status"], "blocked_recovery")
 
     def test_apply_transition_io_failure_restores_retryable_approval(self) -> None:
-        for failing_method in ("append_audit", "_append_runtime_run"):
+        for failing_method in ("append_audit", "runtime_runs.append"):
             with self.subTest(failing_method=failing_method), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 project = create_unity_project(root)
@@ -298,20 +299,20 @@ class ConcurrentApplyWriteGuardTests(unittest.TestCase):
                     lambda args: calls.append(args) or {"ok": True},
                 )
                 approval_id = approved_apply_request(gateway, "vrcforge_test_write", project)
-                original = getattr(gateway, failing_method)
-
                 def fail_transition(*_args: object, **_kwargs: object) -> None:
                     raise OSError(f"simulated {failing_method} failure")
 
-                setattr(gateway, failing_method, fail_transition)
-                with self.assertRaises(AgentGatewayError) as raised:
+                patch_target = gateway if failing_method == "append_audit" else gateway._approval_transactions
+                patch_name = "append_audit" if failing_method == "append_audit" else "_runtime_run_append"
+                with (
+                    patch.object(patch_target, patch_name, side_effect=fail_transition),
+                    self.assertRaises(AgentGatewayError) as raised,
+                ):
                     gateway.apply_approved({"approval_id": approval_id})
                 self.assertEqual(raised.exception.status_code, 500)
                 self.assertEqual(gateway._approvals[approval_id]["status"], "approved")
                 self.assertEqual(gateway._in_flight_apply_writes, {})
                 self.assertEqual(calls, [])
-
-                setattr(gateway, failing_method, original)
                 retried = gateway.apply_approved({"approval_id": approval_id})
                 self.assertTrue(retried["ok"])
                 self.assertEqual(retried["status"], "applied")

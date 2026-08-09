@@ -59,10 +59,10 @@ from optimization_service import (
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from runtime_planner_service import RuntimePlannerService
 from background_goal_runtime import (
     RepeatedFailureGuard,
-    classify_runtime_plan_outcome,
     classify_runtime_step_failure,
 )
 from approved_unity_execution import (
@@ -1711,6 +1711,20 @@ class AgentGateway:
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock)
         )
+        self._runtime_run_ledger = AgentRuntimeRunLedger(
+            AgentRuntimeRunLedgerPorts(
+                log_path=lambda: self.audit_dir / "runtime-runs.jsonl",
+                shared_state_lock=self._lock,
+                now=utc_now_iso,
+                normalize_path=command_safety.normalize_filesystem_path,
+                normalize_visual_accent=DesktopComputerUseService.normalize_visual_accent,
+                summarize_text=summarize_text,
+                redact=redact_sensitive,
+                ensure_append_boundary=self._ensure_jsonl_append_boundary_locked,
+                flush_and_fsync=flush_and_fsync,
+                error_factory=lambda detail, status: AgentGatewayError(detail, status_code=status),
+            )
+        )
         self._agent_memory_store = AgentMemoryStore(
             lambda: self.agent_memory_log_path,
             lambda: self.audit_dir / "memory-review" / "accepted-audit.jsonl",
@@ -1816,6 +1830,7 @@ class AgentGateway:
                 delivery_for_approval=self._goal.raw_delivery_for_approval,
                 reconcile_missing_approvals=self._goal.reconcile_missing_approvals,
             ),
+            runtime_run_append=self._runtime_run_ledger.append,
         )
 
         def find_pending_shell_approval(session_id: str, turn_id: str) -> dict[str, Any] | None:
@@ -2009,6 +2024,10 @@ class AgentGateway:
     @property
     def runtime_sessions(self) -> AgentRuntimeSessionState:
         return self._runtime_session_state
+
+    @property
+    def runtime_runs(self) -> AgentRuntimeRunLedger:
+        return self._runtime_run_ledger
 
     def bind_runtime_planner(self, planner: RuntimePlannerService) -> None:
         if not isinstance(planner, RuntimePlannerService):
@@ -2618,10 +2637,6 @@ class AgentGateway:
             ),
         }
 
-    @staticmethod
-    def _normalize_computer_use_accent(value: Any) -> str:
-        return DesktopComputerUseService.normalize_visual_accent(value)
-
     def runtime_message(
         self,
         params: dict[str, Any] | None = None,
@@ -2686,7 +2701,7 @@ class AgentGateway:
                 "clientTurnId": client_turn_id,
             }
         )
-        self._append_runtime_run(
+        self._runtime_run_ledger.append(
             {
                 "event": "runtime_turn_started",
                 "status": "running",
@@ -2703,7 +2718,9 @@ class AgentGateway:
                 "projectRoot": project_root,
                 "computerUseRequested": bool(params.get("_computerUseRequested")),
                 "computerUseVisualTheme": str(params.get("_computerUseVisualTheme") or "light"),
-                "computerUseVisualAccent": self._normalize_computer_use_accent(params.get("_computerUseVisualAccent")),
+                "computerUseVisualAccent": self._runtime_run_ledger.normalize_visual_accent(
+                    params.get("_computerUseVisualAccent")
+                ),
             }
         )
 
@@ -3226,10 +3243,10 @@ class AgentGateway:
                 "goalDeliveryId": goal_delivery_id,
             }
         )
-        self._append_runtime_run(
-            self._runtime_run_from_turn(
+        self._runtime_run_ledger.append(
+            self._runtime_run_ledger.build_run_from_turn(
                 event="runtime_turn_completed",
-                status=self._runtime_turn_run_status(
+                status=self._runtime_run_ledger.turn_run_status(
                     top_plan=top_plan,
                     shell_payload=shell_payload,
                     skill_payload=skill_payload,
@@ -3431,123 +3448,6 @@ class AgentGateway:
             raise AgentGatewayError(f"Runtime session was not found: {session_id}", status_code=404)
         return {"ok": True, "session": session}
 
-    def _runtime_run_from_turn(
-        self,
-        *,
-        event: str,
-        status: str,
-        agent_name: str,
-        session_id: str,
-        turn_id: str,
-        client_turn_id: str,
-        message: str,
-        attachments: list[dict[str, Any]],
-        params: dict[str, Any],
-        top_plan: dict[str, Any],
-        steps: list[dict[str, Any]],
-        shell_payload: dict[str, Any] | None,
-        skill_payload: dict[str, Any] | None,
-        write_payload: dict[str, Any] | None,
-        approval_id: str,
-        context_usage: dict[str, Any] | None = None,
-        context_compaction: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        approval_ids = []
-        if approval_id:
-            approval_ids.append(approval_id)
-        for payload in (shell_payload, skill_payload, write_payload):
-            record = ensure_dict(payload)
-            extracted = str(record.get("approval_id") or record.get("approvalId") or "").strip()
-            if extracted and extracted not in approval_ids:
-                approval_ids.append(extracted)
-            nested = ensure_dict(record.get("approval"))
-            nested_id = str(nested.get("id") or "").strip()
-            if nested_id and nested_id not in approval_ids:
-                approval_ids.append(nested_id)
-        record = {
-            "event": event,
-            "status": status,
-            "agent": agent_name,
-            "sessionId": session_id,
-            "turnId": turn_id,
-            "clientTurnId": client_turn_id,
-            "goalDeliveryId": str(params.get("goalDeliveryId") or params.get("goal_delivery_id") or ""),
-            "messageSummary": summarize_text(message),
-            "attachmentCount": len(attachments),
-            "provider": params.get("provider") or "",
-            "providerLabel": params.get("providerLabel") or params.get("provider_label") or "",
-            "model": params.get("model") or "",
-            "projectRoot": params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "",
-            "computerUseRequested": bool(params.get("_computerUseRequested")),
-            "computerUseVisualTheme": str(params.get("_computerUseVisualTheme") or "light"),
-            "computerUseVisualAccent": self._normalize_computer_use_accent(params.get("_computerUseVisualAccent")),
-            "planSummary": summarize_text(str(top_plan.get("summary") or top_plan.get("reply") or "")),
-            "planner": top_plan.get("planner") or "",
-            "nextStep": top_plan.get("nextStep") or "",
-            "stepCount": len(steps),
-            "steps": steps,
-            "approvalIds": approval_ids,
-            "shellStatus": shell_payload.get("status") if shell_payload else "none",
-            "skillStatus": skill_payload.get("status") if skill_payload else "none",
-            "skillTool": skill_payload.get("tool") if skill_payload else "",
-            "writeStatus": write_payload.get("status") if write_payload else "none",
-            "writeTool": write_payload.get("tool") if write_payload else "",
-        }
-        if context_usage:
-            record["contextUsage"] = context_usage
-        if context_compaction:
-            record["contextCompaction"] = context_compaction
-        return record
-
-    @staticmethod
-    def _runtime_turn_run_status(
-        *,
-        top_plan: dict[str, Any],
-        shell_payload: dict[str, Any] | None,
-        skill_payload: dict[str, Any] | None,
-        write_payload: dict[str, Any] | None,
-        approval_id: str,
-    ) -> str:
-        plan_outcome, _plan_label = classify_runtime_plan_outcome(top_plan)
-        if plan_outcome == "cancelled":
-            return "cancelled"
-        payloads = [
-            ensure_dict(payload)
-            for payload in (shell_payload, skill_payload, write_payload)
-            if isinstance(payload, dict)
-        ]
-        statuses = {
-            str(payload.get("status") or "").strip().lower().replace("-", "_")
-            for payload in payloads
-        }
-        failure_classes = {classify_runtime_step_failure(payload) for payload in payloads}
-        if "permission_denied" in failure_classes:
-            return "denied"
-        if statuses & {"denied", "rejected", "permission_denied"}:
-            return "denied"
-        if statuses & {"failed", "failure", "error", "unavailable", "timeout", "timed_out"}:
-            return "failed"
-        if any(payload.get("ok") is False for payload in payloads):
-            return "failed"
-        blocked_statuses = {
-            "blocked",
-            "pending",
-            "pending_approval",
-            "approval_required",
-            "needs_input",
-            "waiting_for_approval",
-            "waiting_for_answer",
-        }
-        if statuses & blocked_statuses:
-            return "blocked"
-        if approval_id and not statuses & {"applied", "executed", "completed", "success"}:
-            return "blocked"
-        if plan_outcome == "failed":
-            return "failed"
-        if plan_outcome == "parked":
-            return "blocked"
-        return "completed"
-
     def request_runtime_cancel(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
         turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
@@ -3576,7 +3476,7 @@ class AgentGateway:
             matching_run = next(
                 (
                     run
-                    for run in self.list_runtime_runs(limit=200).get("runs", [])
+                    for run in self._runtime_run_ledger.list_runs(limit=200).get("runs", [])
                     if str(run.get("turnId") or "") == turn_id
                 ),
                 None,
@@ -3602,101 +3502,12 @@ class AgentGateway:
                 continue
         if cancelled_desktop_action_ids:
             event["cancelledDesktopActionIds"] = cancelled_desktop_action_ids
-        self._append_runtime_run(event)
+        self._runtime_run_ledger.append(event)
         return {
             "ok": True,
             "status": "cancel_requested",
             "event": event,
             "cancelledDesktopActionIds": cancelled_desktop_action_ids,
-        }
-
-    def record_runtime_queue_event(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        params = params or {}
-        client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
-        if not client_turn_id:
-            raise AgentGatewayError("clientTurnId is required.", status_code=400)
-        event = {
-            "event": "runtime_turn_queued",
-            "status": "queued",
-            "sessionId": str(params.get("session_id") or params.get("sessionId") or "").strip(),
-            "clientTurnId": client_turn_id,
-            "messageSummary": summarize_text(str(params.get("message") or "")),
-            "attachmentCount": len(ensure_list(params.get("attachments"))),
-            "provider": params.get("provider") or "",
-            "providerLabel": params.get("providerLabel") or params.get("provider_label") or "",
-            "model": params.get("model") or "",
-            "projectRoot": params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "",
-        }
-        self._append_runtime_run(event)
-        return {"ok": True, "status": "queued", "event": event}
-
-    def list_runtime_runs(
-        self,
-        *,
-        limit: int = 50,
-        session_id: str = "",
-        project_root: str = "",
-        client_turn_id: str = "",
-    ) -> dict[str, Any]:
-        events = self._read_runtime_run_events(limit=max(limit * 8, 100))
-        session_id = session_id.strip()
-        project_root = project_root.strip()
-        client_turn_id = client_turn_id.strip()
-        normalized_project_root = command_safety.normalize_filesystem_path(project_root) if project_root else ""
-
-        def project_matches(value: str) -> bool:
-            if not normalized_project_root:
-                return True
-            candidate = str(value or "").strip()
-            if not candidate:
-                return True
-            return command_safety.normalize_filesystem_path(candidate) == normalized_project_root
-
-        def event_approval_ids(event: dict[str, Any]) -> set[str]:
-            ids = {str(event.get("approvalId") or "").strip()}
-            ids.update(str(item).strip() for item in ensure_list(event.get("approvalIds")))
-            return {item for item in ids if item}
-
-        related_approval_ids: set[str] = set()
-        if session_id:
-            for event in events:
-                if str(event.get("sessionId") or "") == session_id:
-                    related_approval_ids.update(event_approval_ids(event))
-
-        runs_by_key: dict[str, dict[str, Any]] = {}
-        event_count_by_key: dict[str, int] = {}
-        filtered_events: list[dict[str, Any]] = []
-        for event in events:
-            related_by_approval = bool(related_approval_ids.intersection(event_approval_ids(event)))
-            if session_id and str(event.get("sessionId") or "") != session_id and not related_by_approval:
-                continue
-            if client_turn_id and str(event.get("clientTurnId") or "") != client_turn_id:
-                continue
-            if not project_matches(str(event.get("projectRoot") or "")):
-                continue
-            filtered_events.append(event)
-            key = (
-                str(event.get("clientTurnId") or "").strip()
-                or str(event.get("turnId") or "").strip()
-                or f"event:{event.get('id') or len(filtered_events)}"
-            )
-            event_count_by_key[key] = event_count_by_key.get(key, 0) + 1
-            previous = runs_by_key.get(key, {})
-            merged = {**previous, **event}
-            merged["eventCount"] = event_count_by_key[key]
-            merged["lastEvent"] = event.get("event") or ""
-            runs_by_key[key] = merged
-        runs = sorted(
-            runs_by_key.values(),
-            key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or item.get("timestamp") or ""),
-            reverse=True,
-        )[: max(1, min(limit, 200))]
-        return {
-            "ok": True,
-            "schema": "vrcforge.runtime_runs.v1",
-            "runs": [redact_sensitive(item) for item in runs],
-            "events": [redact_sensitive(item) for item in filtered_events[-max(1, min(limit, 200)):]],
-            "count": len(runs),
         }
 
     @staticmethod
@@ -4803,10 +4614,6 @@ class AgentGateway:
         return self.audit_dir / "approvals.jsonl"
 
     @property
-    def runtime_run_log_path(self) -> Path:
-        return self.audit_dir / "runtime-runs.jsonl"
-
-    @property
     def checkpoint_log_path(self) -> Path:
         return self.audit_dir / "checkpoints.jsonl"
 
@@ -4867,23 +4674,6 @@ class AgentGateway:
             self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
             with self.audit_log_path.open("a", encoding="utf-8") as log_file:
                 log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
-
-    def _append_runtime_run(self, entry: dict[str, Any]) -> None:
-        safe_entry = redact_sensitive(
-            {
-                "schema": "vrcforge.runtime_run.v1",
-                "id": f"runevt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
-                "createdAt": utc_now_iso(),
-                "updatedAt": utc_now_iso(),
-                **entry,
-            }
-        )
-        with self._lock:
-            self.runtime_run_log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._ensure_jsonl_append_boundary_locked(self.runtime_run_log_path)
-            with self.runtime_run_log_path.open("a", encoding="utf-8") as log_file:
-                log_file.write(json.dumps(safe_entry, ensure_ascii=False, sort_keys=True) + "\n")
-                flush_and_fsync(log_file)
 
     def _append_jsonl(self, path: Path, schema: str, entry: dict[str, Any]) -> dict[str, Any]:
         safe_entry = redact_sensitive(
@@ -5016,23 +4806,6 @@ class AgentGateway:
 
     def _project_agent_memory(self, *, include_deleted: bool = False) -> dict[str, dict[str, Any]]:
         return self._agent_memory_store.project(include_deleted=include_deleted)
-
-    def _read_runtime_run_events(self, *, limit: int = 400) -> list[dict[str, Any]]:
-        if not self.runtime_run_log_path.exists():
-            return []
-        try:
-            lines = self.runtime_run_log_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-        events: list[dict[str, Any]] = []
-        for line in lines[-max(1, min(limit, 2000)):]:
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                events.append(payload)
-        return events
 
     def _read_config_payload(self) -> dict[str, Any]:
         if not self.config_path.exists():

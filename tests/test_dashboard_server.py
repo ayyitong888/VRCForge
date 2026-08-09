@@ -56,6 +56,7 @@ from agent_question_service import (
     GoalQuestionResolutionPort,
 )
 from agent_goal_service import AgentGoalServiceError
+from agent_runtime_run_ledger import AgentRuntimeRunLedger
 from optimization_workflow_service import (
     OptimizationWorkflowService,
     OptimizerProofStore,
@@ -1621,7 +1622,9 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            gateway.record_runtime_queue_event({"clientTurnId": "turn-a", "sessionId": "session-a", "message": "queued"})
+            gateway.runtime_runs.record_queue_event(
+                {"clientTurnId": "turn-a", "sessionId": "session-a", "message": "queued"}
+            )
             gateway.desktop.request_desktop_action({"action": "browser", "sessionId": "session-a", "message": "open"})
             gateway.goal.create_agent_goal({"title": "Scoped goal", "sessionId": "session-a"})
             gateway.create_agent_memory({"scope": "user", "text": "user memory", "kind": "preference"})
@@ -2500,7 +2503,7 @@ class DashboardServerTests(unittest.TestCase):
             ("done", "completed"),
         ):
             with self.subTest(next_step=next_step):
-                status = AgentGateway._runtime_turn_run_status(
+                status = AgentRuntimeRunLedger.turn_run_status(
                     top_plan={"nextStep": next_step},
                     shell_payload=None,
                     skill_payload=None,
@@ -2508,7 +2511,7 @@ class DashboardServerTests(unittest.TestCase):
                     approval_id="",
                 )
                 self.assertEqual(status, expected)
-        failed_before_pause = AgentGateway._runtime_turn_run_status(
+        failed_before_pause = AgentRuntimeRunLedger.turn_run_status(
             top_plan={"nextStep": "paused"},
             shell_payload=None,
             skill_payload={"ok": False, "status": "failed"},
@@ -3507,12 +3510,14 @@ class DashboardServerTests(unittest.TestCase):
             project.mkdir()
             stored_project = str(project).replace("/", "\\")
             query_project = str(project).replace("\\", "/")
-            gateway.record_runtime_queue_event({"clientTurnId": "turn-path", "message": "queued", "projectRoot": stored_project})
+            gateway.runtime_runs.record_queue_event(
+                {"clientTurnId": "turn-path", "message": "queued", "projectRoot": stored_project}
+            )
             gateway.desktop.request_desktop_action({"action": "computer_use", "prompt": "inspect", "projectRoot": stored_project})
             gateway.goal.create_agent_goal({"title": "Path scoped goal", "projectRoot": stored_project})
             gateway.create_agent_memory({"scope": "project", "text": "Path scoped memory", "projectRoot": stored_project})
 
-            runs = gateway.list_runtime_runs(project_root=query_project, limit=10)
+            runs = gateway.runtime_runs.list_runs(project_root=query_project, limit=10)
             actions = gateway.desktop.list_desktop_actions(project_root=query_project, limit=10)
             goals = gateway.goal.list_agent_goals(project_root=query_project, limit=10)
             memories = gateway.list_agent_memory(project_root=query_project, limit=10)
@@ -3769,8 +3774,8 @@ class DashboardServerTests(unittest.TestCase):
                 }
             )
             audit_text = gateway.audit_log_path.read_text(encoding="utf-8")
-            runtime_run_text = gateway.runtime_run_log_path.read_text(encoding="utf-8")
-            runtime_runs = gateway.list_runtime_runs(session_id="sess-mid-turn-compaction")
+            runtime_run_text = gateway.runtime_runs.log_path.read_text(encoding="utf-8")
+            runtime_runs = gateway.runtime_runs.list_runs(session_id="sess-mid-turn-compaction")
 
         self.assertEqual(len(compact_calls), 1)
         self.assertEqual(compact_calls[0][1]["phase"], "mid_turn")
@@ -5717,7 +5722,7 @@ class DashboardServerTests(unittest.TestCase):
                     for event in audit_logs
                 )
             )
-            runtime_events = gateway.list_runtime_runs(limit=30)["events"]
+            runtime_events = gateway.runtime_runs.list_runs(limit=30)["events"]
             self.assertTrue(
                 any(
                     event.get("event") == "approval_applied"

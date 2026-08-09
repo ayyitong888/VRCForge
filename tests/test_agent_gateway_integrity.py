@@ -150,11 +150,11 @@ def test_jsonl_append_survives_crash_truncated_tail(tmp_path: Path) -> None:
 
 def test_runtime_run_append_survives_crash_truncated_tail(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
-    path = gateway.runtime_run_log_path
+    path = gateway.runtime_runs.log_path
     path.parent.mkdir(parents=True)
     path.write_bytes(b'{"schema":"broken"')
 
-    gateway._append_runtime_run({"event": "runtime_started"})
+    gateway.runtime_runs.append({"event": "runtime_started"})
 
     lines = path.read_text(encoding="utf-8").splitlines()
     assert lines[0] == '{"schema":"broken"'

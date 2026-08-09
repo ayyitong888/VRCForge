@@ -2887,7 +2887,7 @@ def read_app_runtime_snapshot(
     scoped_ledgers = bool(str(sessionId or "").strip() or str(projectRoot or "").strip())
     workspace_diff = build_workspace_diff_summary(projectRoot, include_patch=includePatch)
     if scoped_ledgers:
-        runs = AGENT_GATEWAY.list_runtime_runs(limit=40, session_id=sessionId, project_root=projectRoot)
+        runs = AGENT_GATEWAY.runtime_runs.list_runs(limit=40, session_id=sessionId, project_root=projectRoot)
         desktop_actions = AGENT_GATEWAY.desktop.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)
         goals = AGENT_GATEWAY.goal.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot)
         progress = AGENT_GATEWAY.list_agent_progress(limit=12, session_id=sessionId, project_root=projectRoot)
@@ -3099,7 +3099,13 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
-    await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=payload.get("sessionId") or payload.get("session_id") or ""))
+    await EVENT_BUS.broadcast(
+        "agentRuntimeRuns",
+        AGENT_GATEWAY.runtime_runs.list_runs(
+            limit=30,
+            session_id=payload.get("sessionId") or payload.get("session_id") or "",
+        ),
+    )
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
     if runtime_request.goal_delivery_id:
         await broadcast_background_goal_state({})
@@ -3209,7 +3215,7 @@ def app_agent_runtime_runs(
     projectRoot: str = "",
     clientTurnId: str = "",
 ) -> dict[str, Any]:
-    return AGENT_GATEWAY.list_runtime_runs(
+    return AGENT_GATEWAY.runtime_runs.list_runs(
         limit=limit,
         session_id=sessionId,
         project_root=projectRoot,
@@ -3231,14 +3237,17 @@ async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) ->
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentRuntimeCancel", payload)
-    await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=cancel_request.session_id or ""))
+    await EVENT_BUS.broadcast(
+        "agentRuntimeRuns",
+        AGENT_GATEWAY.runtime_runs.list_runs(limit=30, session_id=cancel_request.session_id or ""),
+    )
     return payload
 
 
 @app.post("/api/app/agent/runs/queue")
 async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GATEWAY.record_runtime_queue_event(
+        payload = AGENT_GATEWAY.runtime_runs.record_queue_event(
             {
                 "session_id": queue_request.session_id,
                 "clientTurnId": queue_request.client_turn_id,
@@ -3254,7 +3263,10 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentRuntimeQueue", payload)
-    await EVENT_BUS.broadcast("agentRuntimeRuns", AGENT_GATEWAY.list_runtime_runs(limit=30, session_id=queue_request.session_id or ""))
+    await EVENT_BUS.broadcast(
+        "agentRuntimeRuns",
+        AGENT_GATEWAY.runtime_runs.list_runs(limit=30, session_id=queue_request.session_id or ""),
+    )
     return payload
 
 
@@ -8028,13 +8040,13 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
         ),
         SessionStoreTarget(
             "session.runtime-runs",
-            AGENT_GATEWAY.runtime_run_log_path,
+            AGENT_GATEWAY.runtime_runs.log_path,
             "app_owned",
             "jsonl",
             ("vrcforge.runtime_run.v1",),
             schema_required=True,
             required_string_fields=("id", "createdAt", "event"),
-            guard_root=AGENT_GATEWAY.runtime_run_log_path.parent,
+            guard_root=AGENT_GATEWAY.runtime_runs.log_path.parent,
         ),
         SessionStoreTarget(
             "session.agent-goals",
@@ -14704,7 +14716,7 @@ def memory_review_background_blocker() -> str:
         return "active_desktop_action"
     if int(RUNTIME_LANE_BUDGET.snapshot().get("interactive") or 0) > 0:
         return "interactive_lane_active"
-    runs = AGENT_GATEWAY.list_runtime_runs(limit=100).get("runs") or []
+    runs = AGENT_GATEWAY.runtime_runs.list_runs(limit=100).get("runs") or []
     if any(
         str(item.get("status") or "").strip().casefold() in {"running", "applying"}
         for item in runs
