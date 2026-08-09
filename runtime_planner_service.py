@@ -505,6 +505,25 @@ def tool_usage_description(name: str, summary: str, *, write: bool) -> str:
     )
     return f"When to use: {text}\nWhen NOT to use: {when_not}\nNegative example: {negative}"
 
+
+def planner_tool_usage_description(name: str, summary: str, *, write: bool) -> str:
+    """Keep all three trigger sections visible while bounding prompt growth."""
+
+    contract = tool_usage_description(name, summary, write=write)
+    labels = ("When to use:", "When NOT to use:", "Negative example:")
+    sections: list[str] = []
+    for index, label in enumerate(labels):
+        start = contract.find(label)
+        if start < 0:
+            continue
+        content_start = start + len(label)
+        next_starts = [contract.find(next_label, content_start) for next_label in labels[index + 1 :]]
+        next_starts = [position for position in next_starts if position >= 0]
+        end = min(next_starts) if next_starts else len(contract)
+        content = summarize_text(contract[content_start:end].strip(), 110)
+        sections.append(f"{label} {content}")
+    return " | ".join(sections)
+
 def summarize_params(value: object) -> dict[str, object]:
     if isinstance(value, dict):
         return {
@@ -1634,6 +1653,23 @@ class RuntimePlannerService:
     def _llm_loop_step_observation(self, step: dict[str, object]) -> str:
             result = step.get("result")
             fields: list[str] = []
+            outcome = ensure_dict(step.get("outcome"))
+            if outcome:
+                fields.append(
+                    "outcomeStatus="
+                    + sanitize_planner_observation_text(outcome.get("status"), 80)
+                )
+                if outcome.get("summary"):
+                    fields.append(
+                        "outcomeSummary="
+                        + sanitize_planner_observation_text(outcome.get("summary"), 300)
+                    )
+                verification = ensure_dict(outcome.get("verification"))
+                if verification.get("state"):
+                    fields.append(
+                        "verificationState="
+                        + sanitize_planner_observation_text(verification.get("state"), 80)
+                    )
             if str(step.get("tool") or "") == "vrcforge_agent_desktop_action":
                 desktop_observation = self._desktop_action_observation(result)
                 if desktop_observation:
@@ -1698,7 +1734,7 @@ class RuntimePlannerService:
                     flags.append("advanced")
                 suffix = f"（{','.join(flags)}）" if flags else ""
                 tool_lines.append(
-                    f"- {tool.name}{suffix}: {summarize_text(tool_usage_description(tool.name, tool.description, write=tool.write), 280)}"
+                    f"- {tool.name}{suffix}: {planner_tool_usage_description(tool.name, tool.description, write=tool.write)}"
                 )
             history_lines: list[str] = []
             for entry in history:
@@ -1885,7 +1921,37 @@ class RuntimePlannerService:
                     return self._runtime_skill_route("vrcforge_unity_tools", skill_params, "unity tool list")
             if has_any(lowered, text, ["health", "健康"]):
                 return self._runtime_skill_route("vrcforge_health", skill_params, "runtime health")
-            if has_any(lowered, text, ["unity", "mcp", "连接", "连上", "实例"]):
+            if has_any(lowered, text, ["compile error", "compiler error", "c# error", "compilation", "编译错误"]):
+                return self._runtime_skill_route("vrcforge_get_compile_errors", skill_params, "unity compile errors")
+            if has_any(lowered, text, ["blendshape", "blend shape", "形态键", "表情键", "脸部", "面部"]):
+                if has_any(lowered, text, ["plan", "方案", "调整", "调脸", "优化"]):
+                    return self._runtime_skill_route("vrcforge_plan_face_tuning", skill_params, "face tuning plan")
+                return self._runtime_skill_route("vrcforge_scan_blendshapes", skill_params, "blendshape scan")
+            if has_any(lowered, text, ["shader", "material", "materials", "材质", "着色器"]):
+                if has_any(lowered, text, ["plan", "方案", "调整", "优化"]):
+                    return self._runtime_skill_route("vrcforge_plan_shader_tuning", skill_params, "shader tuning plan")
+                return self._runtime_skill_route("vrcforge_scan_materials", skill_params, "material scan")
+            if has_any(lowered, text, ["expression parameters", "expression parameter", "parameter usage", "参数使用"]):
+                return self._runtime_skill_route("vrcforge_scan_parameters", skill_params, "avatar parameter scan")
+            if has_any(lowered, text, ["fx animator", "fx layer", "fx controller"]):
+                return self._runtime_skill_route("vrcforge_scan_fx_animator", skill_params, "fx animator scan")
+            if has_any(lowered, text, ["expression menu", "menu controls", "menu control"]):
+                return self._runtime_skill_route("vrcforge_scan_avatar_controls", skill_params, "avatar controls scan")
+            if has_any(lowered, text, ["thry", "vram", "mesh memory"]):
+                return self._runtime_skill_route("vrcforge_scan_thry_avatar_performance", skill_params, "thry avatar performance scan")
+            if has_any(lowered, text, ["performance rank", "performance rating", "sdk performance", "性能等级"]):
+                return self._runtime_skill_route("vrcforge_scan_avatar_performance", skill_params, "avatar performance scan")
+            if has_any(lowered, text, ["vrcavatardescriptor", "avatar descriptor", "playable layers"]):
+                return self._runtime_skill_route("vrcforge_read_avatar_descriptor", skill_params, "avatar descriptor read")
+            if (
+                has_any(lowered, text, ["hierarchy", "层级"])
+                and has_any(lowered, text, ["object", "objects", "component", "components", "对象", "组件"])
+            ):
+                return self._runtime_skill_route("vrcforge_scan_avatar_items", skill_params, "avatar item scan")
+            if (
+                has_any(lowered, text, ["unity", "mcp"])
+                and has_any(lowered, text, ["status", "connection", "connected", "instance", "ready", "连接", "连上", "实例", "状态"])
+            ):
                 return self._runtime_skill_route("vrcforge_unity_status", skill_params, "unity status")
             if has_any(lowered, text, ["avatar encryption", "shader encryption", "anti-rip", "antirip", "encrypt", "encryption"]):
                 if has_any(lowered, text, ["research", "report", "notes"]):
@@ -1895,19 +1961,17 @@ class RuntimePlannerService:
                 if has_any(lowered, text, ["preview", "would write", "rollback"]):
                     return self._runtime_skill_route("vrcforge_avatar_encryption_preview", skill_params, "avatar encryption preview")
                 return self._runtime_skill_route("vrcforge_avatar_encryption_plan", skill_params, "avatar encryption plan")
-            if has_any(lowered, text, ["avatar", "avatars", "角色", "模型", "工程刷新", "刷新列表"]):
+            if (
+                has_any(lowered, text, ["avatar", "avatars", "角色", "模型"])
+                and has_any(lowered, text, ["list", "enumerate", "show all", "refresh", "all avatars", "列出", "列表", "枚举", "刷新", "所有"])
+            ):
                 return self._runtime_skill_route("vrcforge_list_avatars", skill_params, "avatar list")
-            if has_any(lowered, text, ["blendshape", "blend shape", "形态键", "表情键", "脸部", "面部"]):
-                if has_any(lowered, text, ["plan", "方案", "调整", "调脸", "优化"]):
-                    return self._runtime_skill_route("vrcforge_plan_face_tuning", skill_params, "face tuning plan")
-                return self._runtime_skill_route("vrcforge_scan_blendshapes", skill_params, "blendshape scan")
-            if has_any(lowered, text, ["shader", "material", "materials", "材质", "着色器"]):
-                if has_any(lowered, text, ["plan", "方案", "调整", "优化"]):
-                    return self._runtime_skill_route("vrcforge_plan_shader_tuning", skill_params, "shader tuning plan")
-                return self._runtime_skill_route("vrcforge_scan_materials", skill_params, "material scan")
             if has_any(lowered, text, ["logs", "log", "日志"]):
                 return self._runtime_skill_route("vrcforge_read_recent_logs", {"limit": 80, **skill_params}, "recent logs")
-            if has_any(lowered, text, ["diagnostic", "诊断", "状态"]):
+            if (
+                has_any(lowered, text, ["diagnostic", "diagnose", "status", "诊断", "状态"])
+                and has_any(lowered, text, ["backend", "runtime", "component", "service", "vrcforge", "后端", "组件", "服务"])
+            ):
                 return self._runtime_skill_route("vrcforge_health", skill_params, "runtime health")
             return None
 

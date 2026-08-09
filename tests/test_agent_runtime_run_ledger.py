@@ -211,6 +211,20 @@ def test_run_builder_and_terminal_status_contract_are_preserved(tmp_path: Path) 
     assert ledger.turn_run_status(
         top_plan={"nextStep": "done"},
         shell_payload=None,
+        skill_payload={
+            "ok": True,
+            "status": "needs_user_action",
+            "outcome": {
+                "status": "needs_user_action",
+                "verification": {"state": "needs_user_action"},
+            },
+        },
+        write_payload=None,
+        approval_id="",
+    ) == "blocked"
+    assert ledger.turn_run_status(
+        top_plan={"nextStep": "done"},
+        shell_payload=None,
         skill_payload=None,
         write_payload=None,
         approval_id="",

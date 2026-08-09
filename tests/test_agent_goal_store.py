@@ -774,6 +774,28 @@ class AgentGoalStoreTests(unittest.TestCase):
         self.assertEqual(failed["retryAt"], "")
         self.assertEqual(store.project_goals()[goal["goalId"]]["wakeCount"], 1)
 
+    def test_unverified_approved_write_cannot_complete_goal_delivery(self) -> None:
+        store = self.make_store()
+        _goal, delivery = self.start_delivery(store)
+        store.block_delivery_for_approval(
+            delivery["deliveryId"],
+            "approval-unverified",
+            response={"turnId": "pending"},
+        )
+
+        failed = store.resolve_delivery_approval(
+            "approval-unverified",
+            {
+                "ok": False,
+                "status": "needs_user_action",
+                "error": "Exact readback did not pass.",
+            },
+        )
+
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["failureClass"], "apply_failed")
+        self.assertEqual(failed["error"], "Exact readback did not pass.")
+
     def test_incomplete_plan_can_be_parked_without_false_completion(self) -> None:
         store = self.make_store()
         goal, delivery = self.start_delivery(store)

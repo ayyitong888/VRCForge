@@ -134,18 +134,23 @@ export function useApprovalExecution({
       const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
       const executionResult = payload.execution?.result;
       const shellResult = isAgentShellResult(executionResult) ? executionResult : undefined;
-      if (activeChatId && (shellResult || payload.execution?.error)) {
+      const executionRecord = asRecord(payload.execution);
+      const completionNotice =
+        payload.execution?.status === "needs_user_action"
+        && typeof payload.execution.outcome?.summary === "string"
+          ? payload.execution.outcome.summary
+          : "";
+      if (activeChatId && (shellResult || payload.execution?.error || completionNotice)) {
         appendToChat(activeChatId, {
           id: `result-${approvalId}-${Date.now()}`,
           type: "result",
           approvalId,
           result: shellResult,
-          error: payload.execution?.error,
+          error: payload.execution?.error || completionNotice,
         });
       }
       await refresh();
       await refreshRuntimeRuns(false);
-      const executionRecord = asRecord(payload.execution);
       const executionApproval = asRecord(executionRecord?.approval);
       const executionTargetTool =
         (typeof executionRecord?.targetTool === "string" ? executionRecord.targetTool : "")

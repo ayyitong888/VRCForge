@@ -27,6 +27,41 @@ def _checkpoint_record(checkpoint_id: str) -> dict[str, str]:
     }
 
 
+def test_gateway_projects_nested_failure_and_unverified_write_without_false_success(
+    tmp_path: Path,
+) -> None:
+    gateway = _gateway(tmp_path)
+    config = gateway.ensure_config()
+    config.enabled = True
+    gateway.save_config(config)
+    gateway.register_tool(
+        "nested-failure",
+        "Read a nested result.",
+        "read/debug",
+        lambda _params: {
+            "ok": True,
+            "result": {"ok": False, "status": "failed", "error": "inner failed"},
+        },
+    )
+    gateway.register_tool(
+        "unverified-write",
+        "Apply and verify a change.",
+        "supervised-write",
+        lambda _params: {"ok": True, "readbackVerified": False},
+        write=True,
+    )
+
+    failed = gateway.call_tool("nested-failure")
+    unverified = gateway.call_tool("unverified-write")
+
+    assert failed["ok"] is False
+    assert failed["status"] == "failed"
+    assert failed["outcome"]["summary"] == "inner failed"
+    assert unverified["ok"] is True
+    assert unverified["status"] == "needs_user_action"
+    assert unverified["outcome"]["verification"]["state"] == "needs_user_action"
+
+
 def test_runtime_memory_is_wrapped_as_quoted_data_not_runtime_authority(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     gateway.bind_runtime_planner(

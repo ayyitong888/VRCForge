@@ -11,6 +11,7 @@ from contextlib import AbstractContextManager
 from typing import Any, Callable, Mapping
 
 from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
+from agent_tool_result_contract import normalize_agent_tool_result
 from agent_gateway import (
     APPLY_RECOVERY_ACTIVE_STATUSES,
     APPLY_RECOVERY_EXEMPT_WRITE_TARGETS,
@@ -417,6 +418,16 @@ class AgentApprovalTransactionService:
             "paramsSummary": params_summary,
             "result": outcome.get("result") if "result" in outcome else outcome,
         }
+        nested_outcome = outcome.get("outcome")
+        payload["outcome"] = (
+            dict(nested_outcome)
+            if isinstance(nested_outcome, Mapping)
+            else normalize_agent_tool_result(
+                outcome,
+                fallback_summary=f"{tool_name} did not complete.",
+                write=True,
+            )
+        )
         if approval:
             payload["approval_id"] = approval
             payload["approvalId"] = approval
@@ -696,9 +707,14 @@ class AgentApprovalTransactionService:
             }
         )
         applied = self.apply_approved({"approval_id": approval_id})
+        applied_status = str(applied.get("status") or "").strip()
         payload: dict[str, Any] = {
             "ok": bool(applied.get("ok")),
-            "status": "executed" if applied.get("ok") else "failed",
+            "status": (
+                "needs_user_action"
+                if applied_status == "needs_user_action"
+                else "executed" if applied.get("ok") else "failed"
+            ),
             "autoApproved": True,
             "fullPermission": permission_context["fullPermission"],
             "permissionMode": permission_context["permissionMode"],
@@ -710,6 +726,8 @@ class AgentApprovalTransactionService:
         }
         if applied.get("result") is not None:
             payload["result"] = applied.get("result")
+        if applied.get("outcome") is not None:
+            payload["outcome"] = applied.get("outcome")
         if not applied.get("ok"):
             payload["error"] = str(applied.get("error") or "Auto-approved execution failed.")
         return payload
@@ -756,9 +774,14 @@ class AgentApprovalTransactionService:
             }
         )
         applied = self.apply_approved({"approval_id": approval_id})
+        applied_status = str(applied.get("status") or "").strip()
         payload: dict[str, Any] = {
             "ok": bool(applied.get("ok")),
-            "status": "executed" if applied.get("ok") else "failed",
+            "status": (
+                "needs_user_action"
+                if applied_status == "needs_user_action"
+                else "executed" if applied.get("ok") else "failed"
+            ),
             "scopedRuleAutoApproved": True,
             "approval": applied.get("approval") or approved.get("approval") or approval,
             "approval_id": approval_id,
@@ -767,6 +790,8 @@ class AgentApprovalTransactionService:
         }
         if applied.get("result") is not None:
             payload["result"] = applied.get("result")
+        if applied.get("outcome") is not None:
+            payload["outcome"] = applied.get("outcome")
         if not applied.get("ok"):
             payload["error"] = str(applied.get("error") or "Scoped-rule execution failed.")
         return payload
@@ -1088,18 +1113,32 @@ class AgentApprovalTransactionService:
                     or f"{target_tool} returned ok=false."
                 )
                 raise AgentGatewayError(str(message))
+            completion_outcome = ensure_dict(
+                redact_sensitive(
+                    normalize_agent_tool_result(
+                        result,
+                        fallback_summary=write_handler.description,
+                        write=True,
+                    )
+                )
+            )
+            completion_status = str(completion_outcome["status"])
+            if completion_status == "failed":
+                raise AgentGatewayError(str(completion_outcome["summary"]))
             self._observe_apply_lifecycle(
                 "handler_returned", approval, checkpoint=checkpoint, result=result
             )
             with self._ports.state.shared_state_lock:
                 approval["status"] = "applied"
                 approval["appliedAt"] = utc_now_iso()
+                approval["completionOutcome"] = completion_outcome
                 approval["resultSummary"] = summarize_params(result if isinstance(result, dict) else {"result": result})
                 self._ports.state.approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
                 applied_audit = {
                     "event": "approval_applied",
                     "approval": approval,
+                    "completionStatus": completion_status,
                     **permission_context,
                 }
                 memory_evidence = self._ports.validated_memory_evidence_for_applied_write(
@@ -1115,7 +1154,13 @@ class AgentApprovalTransactionService:
                 self._runtime_run_append(
                     {
                         "event": "approval_applied",
-                        "status": "applied",
+                        "status": (
+                            "needs_user_action"
+                            if completion_status == "needs_user_action"
+                            else "applied"
+                        ),
+                        "transactionStatus": "applied",
+                        "completionStatus": completion_status,
                         "approvalId": approval_id,
                         "approvalIds": [approval_id],
                         **permission_context,
@@ -1134,7 +1179,13 @@ class AgentApprovalTransactionService:
                     resolution="write_completed",
                     result_summary=summarize_params(result if isinstance(result, dict) else {"result": result}),
                 )
-            payload = {"ok": True, "status": "applied", "approval": approval, "result": result}
+            payload = {
+                "ok": True,
+                "status": "needs_user_action" if completion_status == "needs_user_action" else "applied",
+                "approval": approval,
+                "result": result,
+                "outcome": completion_outcome,
+            }
             if request_trace is not None:
                 payload["requestTrace"] = request_trace
             if checkpoint:

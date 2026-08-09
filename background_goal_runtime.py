@@ -63,10 +63,14 @@ def classify_runtime_step_failure(payload: Any) -> str:
     if not isinstance(payload, dict):
         return "tool_error"
     result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    outcome = payload.get("outcome") if isinstance(payload.get("outcome"), dict) else {}
     statuses = {
         str(payload.get("status") or "").strip().casefold().replace("-", "_"),
         str(result.get("status") or "").strip().casefold().replace("-", "_"),
+        str(outcome.get("status") or "").strip().casefold().replace("-", "_"),
     }
+    if "needs_user_action" in statuses:
+        return "needs_user_action"
     bad_statuses = {
         "blocked",
         "cancelled",
@@ -103,6 +107,8 @@ def classify_runtime_step_failure(payload: Any) -> str:
             result.get("reason"),
             result.get("error"),
             result.get("message"),
+            outcome.get("status"),
+            outcome.get("summary"),
         )
     )
     if result.get("timedOut") is True or any(
@@ -143,6 +149,10 @@ def classify_runtime_plan_outcome(plan: Any) -> tuple[str, str]:
         return "failed", "loop_suppressed"
     if next_step == "planner_failed":
         return "failed", "planner_failed"
+    if next_step == "tool_failed":
+        return "failed", "tool_failed"
+    if next_step == "needs_user_action":
+        return "parked", "needs_user_action"
     if next_step == "context_compaction_required":
         return "parked", "context_compaction_required"
     if next_step == "await_user_instruction":

@@ -406,6 +406,295 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertEqual(completed[0]["status"], "failed")
 
+    def test_model_cannot_claim_completion_after_canonical_tool_failure(self) -> None:
+        gateway = self.gateway
+        llm_results = iter(
+            [
+                SimpleNamespace(
+                    text='{"action":"skill","skill_tool":"vrcforge_scan_materials","skill_params":{}}',
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text='{"action":"reply","reply":"完成了。","summary":"done"}',
+                    usage={},
+                    reasoning={},
+                ),
+            ]
+        )
+
+        def fake_skill(_owner, tool, params, agent_name=None, owner_id=""):
+            return {
+                "ok": False,
+                "tool": tool,
+                "status": "failed",
+                "result": {"ok": False, "error": "material scan failed"},
+                "outcome": {
+                    "schema": "vrcforge.tool_result.v1",
+                    "status": "failed",
+                    "summary": "material scan failed",
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=lambda *_args, **_kwargs: next(llm_results),
+        ):
+            with patch.object(
+                type(gateway.runtime_skills),
+                "execute",
+                autospec=True,
+                side_effect=fake_skill,
+            ):
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/agent/message",
+                        json={
+                            "message": "检查材质并确认完成",
+                            "provider": "deepseek",
+                            "providerLabel": "DeepSeek",
+                            "model": "fixture-model",
+                            "sessionId": "failed-completion-session",
+                            "clientTurnId": "failed-completion-turn",
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["plan"]["nextStep"], "tool_failed")
+        self.assertEqual(payload["plan"]["reply"], "material scan failed")
+        self.assertNotIn("完成了", payload["plan"]["reply"])
+        completed = [
+            event
+            for event in gateway.runtime_runs.read_events()
+            if event.get("event") == "runtime_turn_completed"
+        ]
+        self.assertEqual(completed[-1]["status"], "failed")
+
+    def test_model_cannot_claim_completion_after_shell_failure(self) -> None:
+        gateway = self.gateway
+        llm_results = iter(
+            [
+                SimpleNamespace(
+                    text='{"action":"shell","shell_command":"python missing.py"}',
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text='{"action":"reply","reply":"done","summary":"done"}',
+                    usage={},
+                    reasoning={},
+                ),
+            ]
+        )
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=lambda *_args, **_kwargs: next(llm_results),
+        ):
+            with patch.object(
+                gateway.shell,
+                "execute",
+                return_value={
+                    "ok": False,
+                    "status": "failed",
+                    "result": {"ok": False, "error": "shell failed"},
+                },
+            ):
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/agent/message",
+                        json={
+                            "message": "执行这个主机检查",
+                            "provider": "deepseek",
+                            "providerLabel": "DeepSeek",
+                            "model": "fixture-model",
+                            "sessionId": "failed-shell-session",
+                            "clientTurnId": "failed-shell-turn",
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["plan"]["nextStep"], "tool_failed")
+        self.assertEqual(payload["plan"]["reply"], "shell failed")
+        self.assertEqual(payload["shell"]["outcome"]["status"], "failed")
+        completed = [
+            event
+            for event in gateway.runtime_runs.read_events()
+            if event.get("event") == "runtime_turn_completed"
+        ]
+        self.assertEqual(completed[-1]["status"], "failed")
+
+    def test_unrelated_success_cannot_clear_an_unresolved_tool_failure(self) -> None:
+        gateway = self.gateway
+        llm_results = iter(
+            [
+                SimpleNamespace(
+                    text='{"action":"skill","skill_tool":"vrcforge_scan_materials","skill_params":{}}',
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text='{"action":"skill","skill_tool":"vrcforge_health","skill_params":{}}',
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text='{"action":"reply","reply":"done","summary":"done"}',
+                    usage={},
+                    reasoning={},
+                ),
+            ]
+        )
+
+        def fake_skill(_owner, tool, params, agent_name=None, owner_id=""):
+            if tool == "vrcforge_scan_materials":
+                return {
+                    "ok": False,
+                    "tool": tool,
+                    "status": "failed",
+                    "result": {"ok": False, "error": "material scan failed"},
+                    "outcome": {
+                        "status": "failed",
+                        "summary": "material scan failed",
+                        "verification": {"state": "not_required", "checks": []},
+                    },
+                }
+            return {
+                "ok": True,
+                "tool": tool,
+                "status": "executed",
+                "result": {"ok": True},
+                "outcome": {
+                    "status": "ok",
+                    "summary": "runtime healthy",
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=lambda *_args, **_kwargs: next(llm_results),
+        ):
+            with patch.object(
+                type(gateway.runtime_skills),
+                "execute",
+                autospec=True,
+                side_effect=fake_skill,
+            ):
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/agent/message",
+                        json={
+                            "message": "完成这个复杂检查",
+                            "provider": "deepseek",
+                            "providerLabel": "DeepSeek",
+                            "model": "fixture-model",
+                            "sessionId": "unrelated-success-session",
+                            "clientTurnId": "unrelated-success-turn",
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual([step["tool"] for step in payload["steps"]], [
+            "vrcforge_scan_materials",
+            "vrcforge_health",
+        ])
+        self.assertEqual(payload["plan"]["nextStep"], "tool_failed")
+        self.assertEqual(payload["plan"]["reply"], "material scan failed")
+        completed = [
+            event
+            for event in gateway.runtime_runs.read_events()
+            if event.get("event") == "runtime_turn_completed"
+        ]
+        self.assertEqual(completed[-1]["status"], "failed")
+
+    def test_retrying_one_failed_action_cannot_erase_another_unresolved_failure(self) -> None:
+        gateway = self.gateway
+        llm_results = iter(
+            [
+                SimpleNamespace(
+                    text='{"action":"skill","skill_tool":"vrcforge_scan_materials","skill_params":{"avatarPath":"A"}}',
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text='{"action":"skill","skill_tool":"vrcforge_health","skill_params":{"scope":"B"}}',
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text='{"action":"skill","skill_tool":"vrcforge_health","skill_params":{"scope":"B"}}',
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text='{"action":"reply","reply":"done","summary":"done"}',
+                    usage={},
+                    reasoning={},
+                ),
+            ]
+        )
+        health_attempts = 0
+
+        def fake_skill(_owner, tool, params, agent_name=None, owner_id=""):
+            nonlocal health_attempts
+            if tool == "vrcforge_scan_materials":
+                summary = "material scan failed"
+                status = "failed"
+            else:
+                health_attempts += 1
+                summary = "health failed" if health_attempts == 1 else "health recovered"
+                status = "failed" if health_attempts == 1 else "ok"
+            return {
+                "ok": status == "ok",
+                "tool": tool,
+                "status": "executed" if status == "ok" else "failed",
+                "result": {"ok": status == "ok"},
+                "outcome": {
+                    "status": status,
+                    "summary": summary,
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=lambda *_args, **_kwargs: next(llm_results),
+        ):
+            with patch.object(
+                type(gateway.runtime_skills),
+                "execute",
+                autospec=True,
+                side_effect=fake_skill,
+            ):
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/agent/message",
+                        json={
+                            "message": "完成多项检查",
+                            "provider": "deepseek",
+                            "providerLabel": "DeepSeek",
+                            "model": "fixture-model",
+                            "sessionId": "multiple-failure-session",
+                            "clientTurnId": "multiple-failure-turn",
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["plan"]["nextStep"], "tool_failed")
+        self.assertEqual(payload["plan"]["reply"], "material scan failed")
+        completed = [
+            event
+            for event in gateway.runtime_runs.read_events()
+            if event.get("event") == "runtime_turn_completed"
+        ]
+        self.assertEqual(completed[-1]["status"], "failed")
+
     def test_provider_model_followup_replies_without_tooling(self) -> None:
         gateway = self.gateway
         with patch.object(type(gateway.runtime_skills), "execute", autospec=True) as execute_skill:

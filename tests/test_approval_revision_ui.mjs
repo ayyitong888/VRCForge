@@ -19,6 +19,9 @@ assert.ok(hook.indexOf("const payload = await requestApprovalRevision") < hook.i
 assert.doesNotMatch(hook, /approval\.arguments|approval\.paramsSummary|approval\.preview/);
 assert.match(hook, /type: "approval_revision"/);
 assert.match(hook, /status: "awaiting_user_input"/);
+assert.match(hook, /payload\.execution\?\.status === "needs_user_action"/);
+assert.match(hook, /payload\.execution\.outcome\?\.summary/);
+assert.match(hook, /error: payload\.execution\?\.error \|\| completionNotice/);
 assert.match(types, /type: "approval_revision"/);
 assert.match(types, /approvalId: string;\s*targetTool: string;\s*requestedAt: string;\s*reason: string;\s*note: string;\s*status: "awaiting_user_input";/s);
 assert.doesNotMatch(history.slice(history.indexOf("export function buildChatHistory"), history.indexOf("export function visibleAgentDialogueText")), /approval_revision/);

@@ -163,6 +163,107 @@ def test_local_shell_meta_and_disconnected_paths_preserve_runtime_contract() -> 
     assert hidden_health["skillCategory"] == "read/debug"
 
 
+@pytest.mark.parametrize(
+    ("message", "expected_tool", "forbidden_tools"),
+    [
+        ("检查 Unity 当前的 C# 编译错误。", "vrcforge_get_compile_errors", {"vrcforge_unity_status"}),
+        ("扫描这个 avatar 的材质，并列出 shader。", "vrcforge_scan_materials", {"vrcforge_list_avatars"}),
+        ("扫描 avatar 的 blendshape 名称。", "vrcforge_scan_blendshapes", {"vrcforge_list_avatars"}),
+        ("检查这个 avatar 的 Expression Parameters 使用情况。", "vrcforge_scan_parameters", {"vrcforge_list_avatars"}),
+        ("读取 FX Animator 的层、状态和参数。", "vrcforge_scan_fx_animator", {"vrcforge_health"}),
+        ("扫描这个 avatar 的 expression menu controls 及关联参数。", "vrcforge_scan_avatar_controls", {"vrcforge_list_avatars"}),
+        (
+            "计算这个 VRChat avatar 的 SDK performance rating。",
+            "vrcforge_scan_avatar_performance",
+            {"vrcforge_list_avatars", "vrcforge_scan_thry_avatar_performance"},
+        ),
+        (
+            "计算这个 avatar 的 Thry VRAM 和 mesh memory。",
+            "vrcforge_scan_thry_avatar_performance",
+            {"vrcforge_list_avatars", "vrcforge_scan_avatar_performance"},
+        ),
+        ("读取这个 avatar 的 VRCAvatarDescriptor 视点和 playable layers。", "vrcforge_read_avatar_descriptor", {"vrcforge_list_avatars"}),
+        (
+            "列出 avatar hierarchy 里的对象和组件类型。",
+            "vrcforge_scan_avatar_items",
+            {"vrcforge_list_avatars", "vrcforge_get_gameobject"},
+        ),
+    ],
+)
+def test_runtime_routes_specific_unity_reads_before_broad_status_and_avatar_rules(
+    message: str,
+    expected_tool: str,
+    forbidden_tools: set[str],
+) -> None:
+    plan = service().plan_agent_turn(message, {}, {})
+
+    assert plan["skillTool"] == expected_tool
+    assert plan["skillTool"] not in forbidden_tools
+    assert plan["nextStep"] == "call_skill"
+
+
+@pytest.mark.parametrize(
+    ("message", "expected_tool"),
+    [
+        ("检查 Unity MCP 是否已连接。", "vrcforge_unity_status"),
+        ("列出当前 Unity 项目里的所有 avatar。", "vrcforge_list_avatars"),
+        ("检查 VRCForge 后端健康状态。", "vrcforge_health"),
+    ],
+)
+def test_runtime_keeps_intent_bound_broad_routes(message: str, expected_tool: str) -> None:
+    plan = service().plan_agent_turn(message, {}, {})
+
+    assert plan["skillTool"] == expected_tool
+    assert plan["nextStep"] == "call_skill"
+
+
+def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_scan_materials",
+            "status": "failed",
+            "result": {"ok": True, "privateDump": "must-not-enter-model-context"},
+            "outcome": {
+                "status": "failed",
+                "summary": "Material inventory could not be read.",
+                "verification": {"state": "not_required"},
+            },
+        }
+    )
+
+    assert "outcomeStatus=failed" in observation
+    assert "outcomeSummary=Material inventory could not be read." in observation
+    assert "verificationState=not_required" in observation
+    assert "privateDump" not in observation
+
+
+def test_model_prompt_keeps_all_trigger_sections_for_long_tool_descriptions() -> None:
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(
+                PlannerTool(
+                    name="vrcforge_long_contract",
+                    description=(
+                        "When to use: " + "use-detail " * 40
+                        + "\nWhen NOT to use: " + "avoid-detail " * 40
+                        + "\nNegative example: " + "negative-detail " * 40
+                    ),
+                    category="read/debug",
+                    write=False,
+                ),
+            ),
+        )
+    )
+
+    prompt = service(catalog=catalog)._build_llm_plan_prompt("inspect", [])
+
+    tool_line = next(line for line in prompt.splitlines() if "vrcforge_long_contract" in line)
+    assert "When to use:" in tool_line
+    assert "When NOT to use:" in tool_line
+    assert "Negative example:" in tool_line
+    assert len(tool_line) < 500
+
+
 def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() -> None:
     catalog = FakeCatalog(
         planning=PlannerCatalogSnapshot(

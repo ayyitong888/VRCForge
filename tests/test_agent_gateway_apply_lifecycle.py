@@ -153,6 +153,126 @@ def test_approved_handler_preserves_ordered_unique_multi_core_trace_with_pending
     assert [audit["resultSummary"] for audit in audits] == ["complete", "pending"]
 
 
+def test_approved_write_rejects_nested_failure_instead_of_marking_it_applied(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+
+    execution = approved_write(
+        gateway,
+        project,
+        handler=lambda _arguments: {
+            "ok": True,
+            "result": {"ok": False, "status": "failed", "error": "exact readback failed"},
+        },
+    )
+
+    assert execution["ok"] is False
+    assert execution["approval"]["status"] == "failed"
+    assert "exact readback failed" in execution["error"]
+
+
+def test_approved_write_keeps_commit_applied_but_requires_action_when_readback_is_unverified(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+
+    execution = approved_write(
+        gateway,
+        project,
+        handler=lambda _arguments: {
+            "ok": True,
+            "committed": True,
+            "readbackVerified": False,
+        },
+    )
+
+    assert execution["ok"] is True
+    assert execution["status"] == "needs_user_action"
+    assert execution["approval"]["status"] == "applied"
+    assert execution["outcome"]["status"] == "needs_user_action"
+    assert execution["approval"]["completionOutcome"] == execution["outcome"]
+    runtime_event = next(
+        event
+        for event in reversed(gateway.runtime_runs.read_events())
+        if event.get("event") == "approval_applied"
+    )
+    assert runtime_event["status"] == "needs_user_action"
+    assert runtime_event["transactionStatus"] == "applied"
+    assert runtime_event["completionStatus"] == "needs_user_action"
+
+
+def test_unverified_approved_write_cannot_complete_linked_background_goal(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_test_goal_write",
+        "Goal-linked write.",
+        "high",
+        lambda _arguments: {"ok": True, "committed": True, "readbackVerified": False},
+    )
+    goal = gateway.goal.create_agent_goal(
+        {
+            "title": "Verify approved write",
+            "chatId": "goal-chat",
+            "wakeAt": "2026-01-01T00:00:00+00:00",
+        }
+    )["goal"]
+    delivery = gateway.goal.wake_agent_goal(goal["goalId"], {"chatId": "goal-chat"})["delivery"]
+    gateway.goal.begin_agent_goal_delivery(
+        delivery["deliveryId"],
+        {"clientTurnId": delivery["clientTurnId"]},
+    )
+    request = gateway.approval_transactions.create_apply_request(
+        {
+            "target_tool": "vrcforge_test_goal_write",
+            "arguments": {"projectRoot": str(project)},
+            "goalDeliveryId": delivery["deliveryId"],
+        }
+    )
+    approval_id = request["approval"]["id"]
+    gateway.goal.block_agent_goal_delivery(
+        delivery["deliveryId"],
+        kind="approval",
+        reference=approval_id,
+        response={"turnId": "pending"},
+    )
+    gateway.approval_transactions.approve(approval_id)
+
+    execution = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+
+    assert execution["status"] == "needs_user_action"
+    assert execution["approval"]["status"] == "applied"
+    assert execution["goalDelivery"]["delivery"]["status"] == "failed"
+    assert execution["goalDelivery"]["delivery"]["failureClass"] == "apply_failed"
+
+
+def test_approved_write_does_not_require_deferred_visual_proof_unless_declared(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+
+    execution = approved_write(
+        gateway,
+        project,
+        handler=lambda _arguments: {
+            "ok": True,
+            "readbackVerified": True,
+            "visualProof": {"status": "unavailable", "reason": "captured later"},
+        },
+    )
+
+    assert execution["ok"] is True
+    assert execution["status"] == "applied"
+    assert execution["outcome"]["status"] == "ok"
+
+
 def test_argument_digest_requires_internal_opt_in(tmp_path: Path) -> None:
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     gateway.approval_transactions.register_write_handler(

@@ -65,6 +65,7 @@ from optimization_service import (
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
+from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
 from runtime_planner_service import RuntimePlannerService
 from background_goal_runtime import (
     RepeatedFailureGuard,
@@ -2632,6 +2633,12 @@ class AgentGateway:
                     self._tool_owner_context.reset(owner_token)
                     self._tool_agent_context.reset(agent_token)
             duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+            outcome = normalize_agent_tool_result(
+                result,
+                fallback_summary=tool.description,
+                write=tool.write,
+            )
+            outcome_status = str(outcome["status"])
             result_summary = summarize_params(result if isinstance(result, dict) else {"result": result})
             request_trace = (
                 {"gatewayRequestId": request_id, "unityCoreCallAudits": core_call_audits}
@@ -2646,20 +2653,24 @@ class AgentGateway:
                 "paramsSummary": params_summary,
                 "resultSummary": result_summary,
                 "durationMs": duration_ms,
-                "status": "ok",
+                "status": outcome_status,
             }
             if request_trace is not None:
                 audit_event["requestTrace"] = request_trace
             self.append_audit(audit_event)
             response = {
-                "ok": True,
+                "ok": outcome_status != "failed",
+                "status": outcome_status,
                 "requestId": request_id,
                 "tool": name,
                 "agent": agent_name,
                 "result": result,
                 "resultSummary": result_summary,
                 "durationMs": duration_ms,
+                "outcome": outcome,
             }
+            if outcome_status == "failed":
+                response["error"] = outcome["summary"]
             if request_trace is not None:
                 response["requestTrace"] = request_trace
             return response
@@ -2900,6 +2911,7 @@ class AgentGateway:
         runtime_compaction: dict[str, Any] | None = None
         runtime_compaction_attempted = False
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
+        unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
 
         def discard_runtime_compaction_for_cancel() -> None:
             nonlocal runtime_compaction
@@ -2940,6 +2952,7 @@ class AgentGateway:
                 "kind": "skill",
                 "status": bootstrap_payload.get("status"),
                 "result": bootstrap_payload.get("result"),
+                "outcome": bootstrap_payload.get("outcome"),
             }
             bootstrap_vision = self._desktop_action_vision_analysis(message, bootstrap_payload.get("result"))
             if bootstrap_vision is not None:
@@ -3168,6 +3181,12 @@ class AgentGateway:
                 # external control capability is unnecessary here and must
                 # not enter model context or durable chat/run projections.
                 step_payload.pop("controlToken", None)
+                if not isinstance(step_payload.get("outcome"), dict):
+                    step_payload["outcome"] = normalize_agent_tool_result(
+                        step_payload,
+                        fallback_summary="Shell command did not complete successfully.",
+                        write=False,
+                    )
                 shell_payload = step_payload
                 shell_observation = (
                     summarize_owned_shell_result(step_payload.get("result"))
@@ -3184,6 +3203,7 @@ class AgentGateway:
                         "kind": "shell",
                         "status": step_payload.get("status"),
                         "result": shell_observation,
+                        "outcome": step_payload.get("outcome"),
                     }
                 )
             elif action_kind == "write":
@@ -3201,6 +3221,7 @@ class AgentGateway:
                         "kind": "write",
                         "status": step_payload.get("status"),
                         "result": step_payload.get("result"),
+                        "outcome": step_payload.get("outcome"),
                     }
                 )
             else:  # skill
@@ -3238,6 +3259,7 @@ class AgentGateway:
                     "kind": "skill",
                     "status": step_payload.get("status"),
                     "result": step_payload.get("result"),
+                    "outcome": step_payload.get("outcome"),
                 }
                 if step_tool == "vrcforge_agent_desktop_action":
                     desktop_vision = self._desktop_action_vision_analysis(message, step_payload.get("result"))
@@ -3271,7 +3293,24 @@ class AgentGateway:
                 }
             )
 
+            step_approval = str(
+                step_payload.get("approval_id") or step_payload.get("approvalId") or ""
+            ).strip()
+            if step_approval:
+                approval_id = approval_id or step_approval
             step_failure_class = runtime_step_failure_class(step_payload)
+            step_outcome = ensure_dict(step_payload.get("outcome"))
+            step_outcome_status = str(step_outcome.get("status") or "").strip()
+            if step_outcome_status == "needs_user_action":
+                unresolved_completion_outcomes[action_key] = step_outcome
+                gated_plan = completion_gate_plan(plan, step_outcome)
+                if gated_plan is not None:
+                    last_plan = gated_plan
+                    break
+            elif step_outcome_status == "failed":
+                unresolved_completion_outcomes[action_key] = step_outcome
+            elif not step_failure_class:
+                unresolved_completion_outcomes.pop(action_key, None)
             if step_failure_class:
                 if action_kind == "shell":
                     failure_arguments: Any = {
@@ -3307,11 +3346,7 @@ class AgentGateway:
                 repeated_failure_guard.record_success()
                 successful_actions.add(action_key)
 
-            step_approval = str(
-                step_payload.get("approval_id") or step_payload.get("approvalId") or ""
-            ).strip()
             if step_approval:
-                approval_id = approval_id or step_approval
                 break  # 进入审批等待 → 本轮收尾。
             if action_kind == "write":
                 break  # 写入提议是本轮的终点（等审批/检查点/回滚）。
@@ -3359,6 +3394,18 @@ class AgentGateway:
                 f"尚未执行：{remaining_label}。需要的话再说一声，我接着往下做。）"
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
+
+        terminal_status = str(top_plan.get("nextStep") or "").strip()
+        if unresolved_completion_outcomes and terminal_status not in {
+            "cancelled",
+            "context_compaction_required",
+        }:
+            gated_plan = completion_gate_plan(
+                top_plan,
+                next(iter(unresolved_completion_outcomes.values())),
+            )
+            if gated_plan is not None:
+                top_plan = gated_plan
 
         # Non-analyzed image state is rendered by the structured vision step.
         if (

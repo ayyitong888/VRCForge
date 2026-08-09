@@ -428,6 +428,18 @@ class AgentGoalService:
                 "approvalId": resolved_approval_id,
             }
             if status == "applied":
+                completion_outcome = _mapping(approval.get("completionOutcome"))
+                completion_status = str(completion_outcome.get("status") or "").strip().lower()
+                if completion_status == "needs_user_action":
+                    execution["ok"] = False
+                    execution["status"] = "needs_user_action"
+                    execution["error"] = self._events.summarize(
+                        str(
+                            completion_outcome.get("summary")
+                            or "Approved action was committed but required verification did not pass."
+                        ),
+                        500,
+                    )
                 execution["summary"] = self._events.summarize(
                     str(approval.get("resultSummary") or ""),
                     500,

@@ -295,6 +295,7 @@ class AgentRuntimeRunLedger:
             "needs_input",
             "waiting_for_approval",
             "waiting_for_answer",
+            "needs_user_action",
         }
         if statuses & blocked_statuses:
             return "blocked"

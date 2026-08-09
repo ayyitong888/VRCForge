@@ -126,6 +126,15 @@ def test_direct_tool_allowlist_injection_audit_and_failure_shapes() -> None:
         "summary": "Tool description",
         "paramsSummary": {"tool": "read-tool", "keys": ["value"]},
         "result": {"redacted": "secret-result"},
+        "outcome": {
+            "schema": "vrcforge.tool_result.v1",
+            "status": "ok",
+            "summary": "Tool description",
+            "data": {},
+            "error": None,
+            "evidence": [],
+            "verification": {"state": "not_required", "checks": []},
+        },
     }
     assert calls == [{"value": 1, "constraint": "constraints"}]
     assert events[-1][0] == "audit"
@@ -138,6 +147,65 @@ def test_direct_tool_allowlist_injection_audit_and_failure_shapes() -> None:
     assert failed["status"] == "failed"
     assert failed["error"] == "boom"
     assert failed_events[-1][1]["status"] == "error"
+
+
+def test_direct_tool_result_contract_rejects_inner_failure_and_unverified_completion() -> None:
+    inner_failure = FakeTool(
+        name="inner-failure",
+        handler=lambda _params: {
+            "ok": True,
+            "result": {"ok": False, "status": "failed", "error": "inner failed"},
+        },
+    )
+    failed_executor, failed_events = make_executor(tools={inner_failure.name: inner_failure})
+
+    failed = failed_executor.execute(inner_failure.name, {}, "agent")
+
+    assert failed["ok"] is False
+    assert failed["status"] == "failed"
+    assert failed["outcome"]["status"] == "failed"
+    assert failed["error"] == "inner failed"
+    assert failed_events[-1][1]["status"] == "failed"
+
+    unverified = FakeTool(
+        name="unverified-write",
+        category="supervised-write",
+        write=True,
+        requires_user_activation=True,
+        handler=lambda _params: {
+            "ok": True,
+            "summary": "Applied, but readback was not exact.",
+            "readbackVerified": False,
+        },
+    )
+    needs_action_executor, needs_action_events = make_executor(
+        tools={unverified.name: unverified},
+        model_invocable=True,
+    )
+
+    needs_action = needs_action_executor.execute(unverified.name, {}, "agent")
+
+    assert needs_action["ok"] is True
+    assert needs_action["status"] == "needs_user_action"
+    assert needs_action["outcome"]["verification"]["state"] == "needs_user_action"
+    assert needs_action_events[-1][1]["status"] == "needs_user_action"
+
+    pending = FakeTool(
+        name="request-change",
+        category="plan/preview",
+        handler=lambda _params: {
+            "ok": True,
+            "status": "pending",
+            "approval": {"id": "approval-1"},
+        },
+    )
+    pending_executor, _pending_events = make_executor(tools={pending.name: pending})
+
+    requested = pending_executor.execute(pending.name, {}, "agent")
+
+    assert requested["status"] == "needs_user_action"
+    assert requested["outcome"]["status"] == "needs_user_action"
+    assert requested["approvalId"] == "approval-1"
 
 
 def test_blocked_invisible_and_user_activated_tools_keep_existing_policy() -> None:
@@ -205,3 +273,60 @@ def test_projected_skill_load_and_entrypoint_share_fixed_tool_policy() -> None:
     assert result["entrypoint"]["result"] == {"done": True}
     assert entrypoint_calls == [{"value": 1, "constraint": "constraints"}]
     assert events[-1][1]["event"] == "runtime_skill_package_loaded"
+
+
+def test_projected_skill_propagates_entrypoint_failure_outcome_to_package_result() -> None:
+    entrypoint = FakeTool(
+        name="entrypoint",
+        handler=lambda _params: {
+            "ok": True,
+            "result": {"ok": False, "status": "failed", "error": "entrypoint failed"},
+        },
+    )
+    snapshot = SimpleNamespace(
+        skill={
+            "name": "package-skill",
+            "title": "Package Skill",
+            "category": "read/debug",
+            "entrypointTool": "entrypoint",
+            "allowedTools": ["entrypoint"],
+        },
+        package_audit_context={"packageId": "package.id"},
+        validation={"reasons": []},
+        loaded=True,
+        support_files=[],
+    )
+    executor, _events = make_executor(tools={entrypoint.name: entrypoint}, snapshot=snapshot)
+
+    result = executor.execute("package-skill", {}, "agent")
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["outcome"]["status"] == "failed"
+    assert result["entrypoint"]["outcome"] == result["outcome"]
+    assert result["error"] == "entrypoint failed"
+
+
+def test_projected_skill_blocked_entrypoint_has_canonical_non_success_outcome() -> None:
+    entrypoint = FakeTool(name="entrypoint")
+    snapshot = SimpleNamespace(
+        skill={
+            "name": "package-skill",
+            "title": "Package Skill",
+            "category": "read/debug",
+            "entrypointTool": "entrypoint",
+            "allowedTools": ["different-tool"],
+        },
+        package_audit_context={"packageId": "package.id"},
+        validation={"reasons": []},
+        loaded=True,
+        support_files=[],
+    )
+    executor, _events = make_executor(tools={entrypoint.name: entrypoint}, snapshot=snapshot)
+
+    result = executor.execute("package-skill", {}, "agent")
+
+    assert result["ok"] is False
+    assert result["status"] == "blocked"
+    assert result["outcome"]["status"] == "needs_user_action"
+    assert "not allowed" in result["outcome"]["summary"]

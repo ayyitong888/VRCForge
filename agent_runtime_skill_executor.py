@@ -4,6 +4,20 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
+from agent_tool_result_contract import normalize_agent_tool_result
+
+
+def _result_approval_id(result: Any) -> str:
+    if not isinstance(result, dict):
+        return ""
+    direct = str(result.get("approvalId") or result.get("approval_id") or "").strip()
+    if direct:
+        return direct
+    approval = result.get("approval")
+    if isinstance(approval, dict):
+        return str(approval.get("id") or "").strip()
+    return ""
+
 
 class RuntimeSkillTool(Protocol):
     name: str
@@ -61,6 +75,31 @@ class AgentRuntimeSkillExecutor:
         agent_name: str,
         owner_id: str = "",
     ) -> dict[str, Any]:
+        payload = self._execute(tool_name, params, agent_name, owner_id)
+        if not isinstance(payload.get("outcome"), dict):
+            outcome = normalize_agent_tool_result(
+                payload,
+                fallback_summary=str(
+                    payload.get("error")
+                    or payload.get("summary")
+                    or f"{tool_name} did not complete."
+                ),
+                write=bool(payload.get("write")),
+            )
+            payload["outcome"] = outcome
+            if outcome["status"] == "failed":
+                payload["ok"] = False
+                payload["status"] = "failed"
+                payload.setdefault("error", outcome["summary"])
+        return payload
+
+    def _execute(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        agent_name: str,
+        owner_id: str,
+    ) -> dict[str, Any]:
         config = self._ports.ensure_config()
         tool = self._ports.tool_for_name(tool_name)
         if not tool:
@@ -115,25 +154,40 @@ class AgentRuntimeSkillExecutor:
         user_constraints = self._ports.read_user_constraints()
         tool_params = self._ports.inject_user_constraints(params, tool, user_constraints)
         try:
-            result = self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
+            result = self._ports.redact(
+                self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
+            )
+            outcome = normalize_agent_tool_result(
+                result,
+                fallback_summary=tool.description,
+                write=tool.write,
+            )
+            outcome_status = str(outcome["status"])
+            approval_id = _result_approval_id(result)
             payload = {
-                "ok": True,
-                "status": "executed",
+                "ok": outcome_status != "failed",
+                "status": "executed" if outcome_status == "ok" else outcome_status,
                 "tool": tool.name,
                 "category": tool.category,
                 "write": tool.write,
                 "advanced": tool.advanced,
                 "summary": tool.description,
                 "paramsSummary": params_summary,
-                "result": self._ports.redact(result),
+                "result": result,
+                "outcome": outcome,
             }
+            if outcome_status == "failed":
+                payload["error"] = outcome["summary"]
+            if approval_id:
+                payload["approvalId"] = approval_id
+                payload["approval_id"] = approval_id
             self._ports.append_audit(
                 {
                     "event": "runtime_skill_executed",
                     "tool": tool.name,
                     "agent": agent_name,
                     "paramsSummary": params_summary,
-                    "status": "ok",
+                    "status": outcome_status,
                 }
             )
             return payload
@@ -217,13 +271,24 @@ class AgentRuntimeSkillExecutor:
             )
             payload["entrypointTool"] = entrypoint
             payload["entrypoint"] = entrypoint_result
+            if isinstance(entrypoint_result.get("outcome"), dict):
+                payload["outcome"] = entrypoint_result["outcome"]
+            entrypoint_approval_id = str(
+                entrypoint_result.get("approvalId")
+                or entrypoint_result.get("approval_id")
+                or ""
+            ).strip()
+            if entrypoint_approval_id:
+                payload["approvalId"] = entrypoint_approval_id
+                payload["approval_id"] = entrypoint_approval_id
             if entrypoint_result.get("status") == "executed":
                 payload["status"] = "executed"
                 payload["ok"] = True
-            elif entrypoint_result.get("status") in {"blocked", "failed"}:
+            elif entrypoint_result.get("status") in {"blocked", "failed", "needs_user_action"}:
                 payload["status"] = entrypoint_result.get("status")
-                payload["ok"] = False
-                payload["error"] = entrypoint_result.get("error")
+                payload["ok"] = entrypoint_result.get("status") == "needs_user_action"
+                if entrypoint_result.get("error"):
+                    payload["error"] = entrypoint_result.get("error")
 
         self._ports.append_audit(
             {
@@ -298,23 +363,39 @@ class AgentRuntimeSkillExecutor:
         user_constraints = self._ports.read_user_constraints()
         tool_params = self._ports.inject_user_constraints(tool_params, tool, user_constraints)
         try:
-            result = self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
+            result = self._ports.redact(
+                self._ports.invoke_tool(tool, tool_params, agent_name, owner_id)
+            )
+            outcome = normalize_agent_tool_result(
+                result,
+                fallback_summary=tool.description,
+                write=tool.write,
+            )
+            outcome_status = str(outcome["status"])
+            approval_id = _result_approval_id(result)
             self._ports.append_audit(
                 {
                     "event": "runtime_skill_entrypoint_executed",
                     "skill": skill.get("name"),
                     "tool": entrypoint,
                     "agent": agent_name,
-                    "status": "ok",
+                    "status": outcome_status,
                     **(package_audit_context or {}),
                 }
             )
             return {
-                "ok": True,
-                "status": "executed",
+                "ok": outcome_status != "failed",
+                "status": "executed" if outcome_status == "ok" else outcome_status,
                 "tool": entrypoint,
                 "category": tool.category,
-                "result": self._ports.redact(result),
+                "result": result,
+                "outcome": outcome,
+                **({"error": outcome["summary"]} if outcome_status == "failed" else {}),
+                **(
+                    {"approvalId": approval_id, "approval_id": approval_id}
+                    if approval_id
+                    else {}
+                ),
             }
         except Exception as exc:  # noqa: BLE001 - keep the agent loop alive.
             return {

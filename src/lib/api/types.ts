@@ -384,6 +384,11 @@ export type AdjustmentCheckpoint = {
 export type AgentApprovalExecution = {
   status?: string;
   result?: AgentShellResult | Record<string, unknown>;
+  outcome?: {
+    status?: string;
+    summary?: string;
+    verification?: { state?: string } & Record<string, unknown>;
+  } & Record<string, unknown>;
   error?: string;
   checkpoint?: AgentCheckpoint;
 };
@@ -596,6 +601,8 @@ export type AgentRuntimeRun = {
   event?: string;
   lastEvent?: string;
   status?: string;
+  transactionStatus?: string;
+  completionStatus?: string;
   sessionId?: string;
   turnId?: string;
   clientTurnId?: string;
