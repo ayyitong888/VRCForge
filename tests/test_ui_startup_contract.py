@@ -260,6 +260,21 @@ def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously()
     assert "bootstrap.approvalsState?.ok !== false" in app
 
 
+def test_native_setup_starts_the_owned_backend_before_webview_hydration() -> None:
+    main_rs = (ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
+    helper = main_rs[
+        main_rs.index("fn start_managed_backend_early") : main_rs.index("fn main()")
+    ]
+    setup = main_rs[main_rs.index(".setup(|app|") : main_rs.index(".invoke_handler(")]
+
+    assert "app.state::<BackendState>()" in helper
+    assert "begin_backend_start(&state)?" in helper
+    assert "thread::spawn(move || run_backend_start_worker(app_handle))" in helper
+    assert setup.index("start_managed_backend_early(app.handle())") < setup.index(
+        'app.get_webview_window("main")'
+    )
+
+
 def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerless() -> None:
     source = _read("scripts/diagnose_packaged_latency.mjs")
 

@@ -69,6 +69,22 @@ fn configure_webview2_accessibility() {
     env::set_var(KEY, webview2_args_with_accessibility(existing.as_deref()));
 }
 
+/// Start the one managed backend while the WebView and React shell initialize.
+///
+/// Authority stays on the existing `BackendState`: it owns the exact child,
+/// session token, and Windows Job for the full app lifetime. This worker only
+/// performs the already-authenticated startup handshake and exits after
+/// emitting readiness; the frontend may safely join the same in-flight start.
+fn start_managed_backend_early(app: &tauri::AppHandle) -> Result<bool, String> {
+    let state = app.state::<BackendState>();
+    let started = begin_backend_start(&state)?;
+    if started {
+        let app_handle = app.clone();
+        thread::spawn(move || run_backend_start_worker(app_handle));
+    }
+    Ok(started)
+}
+
 fn main() {
     #[cfg(windows)]
     if let Some(exit_code) = capture_helper::try_run_from_args() {
@@ -92,6 +108,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .manage(backend_state)
         .setup(|app| {
+            start_managed_backend_early(app.handle()).map_err(std::io::Error::other)?;
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(&app_window_title(&app.package_info().version.to_string()))?;
             }
@@ -327,8 +344,8 @@ mod tests {
     use super::{
         advanced_settings_update_body, app_session_challenge_signature,
         app_session_challenge_signature_matches, app_window_title, approval_revision_body,
-        approval_scope_body, developer_options_challenge_path, diagnostics_update_body,
-        extract_challenge_signature, force_child_exit, hmac_sha256_hex,
+        approval_scope_body, begin_backend_start, developer_options_challenge_path,
+        diagnostics_update_body, extract_challenge_signature, force_child_exit, hmac_sha256_hex,
         percent_encode_query_component, prepare_app_quit, prepare_runtime_files,
         primitive_live_bootstrap_requested, provider_config_body, resolve_logs_folder,
         runtime_session_verification_error, sanitize_backend_event, sanitize_text_for_webview,
@@ -372,6 +389,14 @@ mod tests {
     #[test]
     fn app_quit_prepare_returns_before_shutdown_confirmation() {
         assert!(prepare_app_quit().accepted);
+    }
+
+    #[test]
+    fn early_backend_start_claims_the_single_managed_worker() {
+        let state = BackendState::new();
+
+        assert!(begin_backend_start(&state).expect("first backend start should claim ownership"));
+        assert!(!begin_backend_start(&state).expect("second backend start should join ownership"));
     }
 
     fn create_dashboard(root: &Path) {
