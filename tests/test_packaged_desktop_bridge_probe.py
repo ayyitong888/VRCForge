@@ -139,6 +139,45 @@ def test_desktop_probe_completes_isolated_first_run_before_waiting_for_the_compo
     )
 
 
+def test_desktop_probe_owns_an_authenticated_fake_provider_before_real_composer_use() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert 'import { createServer } from "node:http";' in source
+    assert 'server.listen(0, "127.0.0.1", resolveListen)' in source
+    assert 'String(request?.headers?.authorization || "") === `Bearer ${token}`' in source
+    assert "fakeProviderRequestIsAuthorized(request, token)" in source
+    assert 'response.writeHead(401, { "Content-Type": "application/json" })' in source
+    assert 'provider: "custom"' in source
+    assert 'base_url: `http://127.0.0.1:${fakeProviderPort}/v1`' in source
+    assert 'model: "vrcforge-desktop-probe"' in source
+    assert 'const send = document.querySelector("[data-composer-send]");' in source
+    assert 'textarea instanceof HTMLTextAreaElement && !textarea.disabled' in source
+    assert 'send instanceof HTMLButtonElement,' in source
+    assert 'output.providerComposerReady.sendDisabled !== true' in source
+    assert 'the empty Provider-backed composer unexpectedly enabled submission without input' in source
+    assert "waitForFakeProviderRequest(fakeProvider, `${marker} frontend gate probe`)" in source
+    assert "waitForFakeProviderCancellation(observedProviderRequest)" in source
+    assert "currentUserMarkerObserved" in source
+    assert "observedProviderRequest.authorized === true" in source
+    assert "!observedProviderRequest.providerFinished && !observedProviderRequest.responseClosed" in source
+    assert "the fake Provider request completed before the real Stop path was exercised" in source
+    assert "output.providerCancellationAfterStop.providerFinished" in source
+    assert "real composer Stop did not cancel the still-pending fake Provider request" in source
+    assert "server.closeAllConnections?.()" in source
+    assert "await fakeProvider.close()" in source
+    assert "proveLoopbackPortReleased(fakeProviderPort)" in source
+    assert 'protectedSecrets.add(fakeProviderToken)' in source
+    first_run_ready = source.index("output.ready = await prepareComposerAfterFirstRun(cdp);")
+    production_provider = source.index('fakeProvider = createFakeProvider(fakeProviderToken);', first_run_ready)
+    assert first_run_ready < production_provider
+    assert source.index("output.providerComposerReady = await waitForEval(") < source.index(
+        "output.frontendDesktopGateSetup = await evalValue("
+    )
+    assert source.index("output.frontendDesktopGateClick = await evalValue(") < source.index(
+        "waitForFakeProviderRequest(fakeProvider, `${marker} frontend gate probe`)"
+    )
+
+
 def test_desktop_probe_self_test_and_unknown_option_are_side_effect_free() -> None:
     self_test = subprocess.run(
         ["node", str(SCRIPT), "--self-test"],
@@ -163,5 +202,11 @@ def test_desktop_probe_self_test_and_unknown_option_are_side_effect_free() -> No
     assert "Unknown packaged Desktop/Computer Use probe option." in unknown.stderr
 
     source = SCRIPT.read_text(encoding="utf-8")
+    self_test_body = source[
+        source.index("function runSelfTest()") : source.index("if (selfTest)")
+    ]
+    assert "createFakeProvider(" not in self_test_body
+    assert ".listen(" not in self_test_body
+    assert "fetch(" not in self_test_body
     assert source.index("if (selfTest)") < source.index("async function prepareManifestBoundPackage")
     assert source.index("if (selfTest)") < source.index("async function main()")

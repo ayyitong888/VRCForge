@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { createConnection } from "node:net";
 import { dirname, resolve } from "node:path";
 import { requestPackagedAppQuit } from "./lib/packaged_app_lifecycle.mjs";
 
@@ -346,12 +348,23 @@ function runSelfTest() {
   } finally {
     protectedSecrets.delete(selfTestSecret);
   }
+  const fakeProviderToken = "desktop-self-test-provider-token";
+  const fakeRequest = {
+    headers: { authorization: `Bearer ${fakeProviderToken}` },
+    body: { messages: [{ role: "user", content: `self-test ${marker}` }] },
+  };
+  if (
+    !fakeProviderRequestIsAuthorized(fakeRequest, fakeProviderToken) ||
+    fakeProviderRequestIsAuthorized(fakeRequest, `${fakeProviderToken}-wrong`) ||
+    !currentUserTurnContains(fakeRequest, marker)
+  ) {
+    throw new Error("self-test: fake Provider authentication or marker predicates failed.");
+  }
   console.log("Desktop/Computer Use probe self-test passed");
 }
 
 if (selfTest) {
   runSelfTest();
-  process.exit(0);
 }
 
 async function prepareManifestBoundPackage(sourceVersion) {
@@ -825,6 +838,205 @@ async function prepareComposerAfterFirstRun(cdp, timeoutMs = 30000) {
   throw new Error(`Timed out preparing the isolated first-run composer; last=${JSON.stringify(lastState)}`);
 }
 
+function currentUserTurnContains(request, text) {
+  const messages = Array.isArray(request?.body?.messages) ? request.body.messages : [];
+  const currentUser = [...messages].reverse().find((message) => String(message?.role || "") === "user");
+  return JSON.stringify(currentUser?.content ?? currentUser ?? "").includes(text);
+}
+
+function fakeProviderRequestIsAuthorized(request, token) {
+  return String(request?.headers?.authorization || "") === `Bearer ${token}`;
+}
+
+function createFakeProvider(token) {
+  const requests = [];
+  const pendingResponses = new Set();
+  let completionCount = 0;
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const rawBody = Buffer.concat(chunks).toString("utf8");
+    let body = {};
+    try { body = rawBody ? JSON.parse(rawBody) : {}; } catch { body = {}; }
+    const authorized = fakeProviderRequestIsAuthorized(request, token);
+    const entry = {
+      index: requests.length,
+      method: request.method,
+      url: request.url,
+      authorized,
+      stream: body.stream === true,
+      model: String(body.model || ""),
+      body,
+      providerFinished: false,
+      responseClosed: false,
+      closedByClient: false,
+    };
+    requests.push(entry);
+    if (!authorized) {
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "unauthorized probe provider request" } }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ object: "list", data: [{ id: "vrcforge-desktop-probe", object: "model" }] }));
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "not found" } }));
+      return;
+    }
+    completionCount += 1;
+    const replyText = `PACKAGED_DESKTOP_PROVIDER_REPLY_${completionCount}_${marker}`;
+    const content = JSON.stringify({ action: "reply", summary: replyText, reply: replyText });
+    const finish = () => {
+      if (response.destroyed || response.writableEnded) return;
+      entry.providerFinished = true;
+      if (body.stream === true) {
+        response.write(`data: ${JSON.stringify({
+          id: `chatcmpl-desktop-probe-${completionCount}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: body.model || "vrcforge-desktop-probe",
+          choices: [{ index: 0, delta: { content }, finish_reason: null }],
+        })}\n\n`);
+        response.write(`data: ${JSON.stringify({
+          id: `chatcmpl-desktop-probe-${completionCount}`,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model: body.model || "vrcforge-desktop-probe",
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
+        })}\n\n`);
+        response.end("data: [DONE]\n\n");
+      } else {
+        response.end(JSON.stringify({
+          id: `chatcmpl-desktop-probe-${completionCount}`,
+          object: "chat.completion",
+          created: Math.floor(Date.now() / 1000),
+          model: body.model || "vrcforge-desktop-probe",
+          choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
+        }));
+      }
+    };
+    response.writeHead(200, {
+      "Content-Type": body.stream === true ? "text/event-stream" : "application/json",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    });
+    response.flushHeaders?.();
+    if (body.stream === true) {
+      response.write(`data: ${JSON.stringify({
+        id: `chatcmpl-desktop-probe-${completionCount}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: body.model || "vrcforge-desktop-probe",
+        choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
+      })}\n\n`);
+    }
+    const pending = {
+      response,
+      timer: setTimeout(finish, 60000),
+    };
+    pending.timer.unref?.();
+    pendingResponses.add(pending);
+    response.once("close", () => {
+      clearTimeout(pending.timer);
+      pendingResponses.delete(pending);
+      entry.responseClosed = true;
+      entry.closedByClient = !entry.providerFinished;
+    });
+  });
+  return {
+    requests,
+    get chatRequests() {
+      return requests.filter((request) => request.method === "POST" && request.url === "/v1/chat/completions");
+    },
+    async listen() {
+      await new Promise((resolveListen, rejectListen) => {
+        server.once("error", rejectListen);
+        server.listen(0, "127.0.0.1", resolveListen);
+      });
+      return server.address().port;
+    },
+    close() {
+      for (const pending of pendingResponses) {
+        clearTimeout(pending.timer);
+        pending.response.destroy();
+      }
+      pendingResponses.clear();
+      return new Promise((resolveClose, rejectClose) => {
+        if (!server.listening) {
+          resolveClose();
+          return;
+        }
+        server.close((error) => error ? rejectClose(error) : resolveClose());
+        server.closeAllConnections?.();
+      });
+    },
+  };
+}
+
+async function waitForFakeProviderRequest(provider, text, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const matches = provider.chatRequests.filter((entry) => currentUserTurnContains(entry, text));
+    if (matches.length > 1) throw new Error(`Fake provider observed duplicate current-user turns containing ${text}.`);
+    if (matches.length === 1) return matches[0];
+    await sleep(100);
+  }
+  throw new Error(`Fake provider request containing ${text} was not observed.`);
+}
+
+async function waitForFakeProviderCancellation(entry, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (entry?.responseClosed) {
+      return {
+        responseClosed: true,
+        closedByClient: entry.closedByClient === true,
+        providerFinished: entry.providerFinished === true,
+      };
+    }
+    await sleep(50);
+  }
+  return {
+    responseClosed: entry?.responseClosed === true,
+    closedByClient: entry?.closedByClient === true,
+    providerFinished: entry?.providerFinished === true,
+    timedOut: true,
+  };
+}
+
+function loopbackPortAcceptsConnections(port, timeoutMs = 1000) {
+  return new Promise((resolveProbe) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+    const settle = (accepted) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolveProbe(accepted);
+    };
+    const timer = setTimeout(() => settle(false), timeoutMs);
+    timer.unref?.();
+    socket.once("connect", () => settle(true));
+    socket.once("error", () => settle(false));
+  });
+}
+
+async function proveLoopbackPortReleased(port, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await loopbackPortAcceptsConnections(port))) return true;
+    await sleep(100);
+  }
+  return false;
+}
+
 async function reloadAppPage(cdp) {
   const priorTimeOrigin = Number(await evalValue(cdp, "performance.timeOrigin"));
   await cdp.send("Page.reload", { ignoreCache: true });
@@ -1160,6 +1372,7 @@ async function main() {
     ownership: {
       process: "one tracked extracted VRCForge.exe PID and its extracted-package descendants",
       worker: "the embedded Desktop worker is owned by the packaged backend lifetime and authenticated by the isolated app session",
+      provider: "one probe-owned ephemeral 127.0.0.1 listener authenticated by a per-run bearer token and closed in finally",
       externalFixtures: "only launch_app-returned Notepad and the compiled marker fixture PIDs are targeted and then stopped",
       powershell: "each hidden PowerShell child and its pipe handles are owned until its close event",
       ports: `loopback backend 8757 and WebView2 CDP ${port}; both must be unused before launch and released after close`,
@@ -1191,6 +1404,9 @@ async function main() {
   let previousAdvancedSettings = null;
   let advancedSettingsRestoreNeeded = false;
   let gracefulShutdownAttempted = false;
+  let fakeProvider = null;
+  let fakeProviderPort = 0;
+  let fakeProviderToken = "";
   try {
     if (!Number.isInteger(port) || port < 1024 || port > 65535 || port === 8757) {
       throw new Error(`Invalid VRCFORGE_DESKTOP_PROBE_CDP_PORT: ${process.env.VRCFORGE_DESKTOP_PROBE_CDP_PORT || port}`);
@@ -1284,6 +1500,64 @@ async function main() {
     await cdp.send("Network.enable");
     await waitForEval(cdp, "document.readyState === 'complete' || document.readyState === 'interactive'");
     output.ready = await prepareComposerAfterFirstRun(cdp);
+    if (output.ready.composerDisabled !== true) {
+      output.assertions.push("the isolated first-run composer unexpectedly inherited an enabled Provider");
+    }
+    fakeProviderToken = `desktop-probe-${randomBytes(24).toString("hex")}`;
+    protectedSecrets.add(fakeProviderToken);
+    fakeProvider = createFakeProvider(fakeProviderToken);
+    fakeProviderPort = await fakeProvider.listen();
+    output.provider = {
+      loopback: true,
+      port: fakeProviderPort,
+      model: "vrcforge-desktop-probe",
+      authenticated: true,
+      bounded: true,
+    };
+    const configuredProvider = await appApi("/api/config", {
+      method: "POST",
+      body: {
+        provider: "custom",
+        api_key: fakeProviderToken,
+        base_url: `http://127.0.0.1:${fakeProviderPort}/v1`,
+        model: "vrcforge-desktop-probe",
+      },
+    });
+    const configuredApi = configuredProvider?.payload?.apiConfig || {};
+    output.providerConfig = {
+      ok: configuredProvider?.ok === true,
+      status: configuredProvider?.status || 0,
+      provider: configuredApi.provider || "",
+      model: configuredApi.model || "",
+      isolatedBaseUrlConfigured: String(configuredApi.base_url || configuredApi.baseUrl || "") ===
+        `http://127.0.0.1:${fakeProviderPort}/v1`,
+    };
+    if (
+      !output.providerConfig.ok ||
+      output.providerConfig.provider !== "custom" ||
+      output.providerConfig.model !== "vrcforge-desktop-probe" ||
+      !output.providerConfig.isolatedBaseUrlConfigured
+    ) {
+      throw new Error(`Isolated fake Provider configuration failed: ${JSON.stringify(output.providerConfig)}`);
+    }
+    output.reloadAfterProviderConfig = await reloadAppPage(cdp);
+    output.providerComposerReady = await waitForEval(
+      cdp,
+      `(() => {
+        const textarea = document.querySelector("textarea");
+        const send = document.querySelector("[data-composer-send]");
+        return {
+          ok: textarea instanceof HTMLTextAreaElement && !textarea.disabled &&
+            send instanceof HTMLButtonElement,
+          textareaDisabled: textarea?.disabled ?? null,
+          sendDisabled: send?.disabled ?? null,
+        };
+      })()`,
+      30000,
+    );
+    if (output.providerComposerReady.sendDisabled !== true) {
+      output.assertions.push("the empty Provider-backed composer unexpectedly enabled submission without input");
+    }
     output.restoredTransientPlaceholders = await evalValue(
       cdp,
       `(() => {
@@ -1483,6 +1757,26 @@ async function main() {
       (run) => String(run.messageSummary || "").includes(`${marker} frontend gate probe`),
       10000,
     );
+    const observedProviderRequest = await waitForFakeProviderRequest(fakeProvider, `${marker} frontend gate probe`);
+    output.providerRequest = {
+      index: observedProviderRequest.index,
+      method: observedProviderRequest.method,
+      url: observedProviderRequest.url,
+      authorized: observedProviderRequest.authorized === true,
+      model: observedProviderRequest.model,
+      currentUserMarkerObserved: currentUserTurnContains(observedProviderRequest, `${marker} frontend gate probe`),
+    };
+    if (!output.providerRequest.authorized || !output.providerRequest.currentUserMarkerObserved) {
+      output.assertions.push("the isolated fake Provider did not receive the authenticated /desktop marker request");
+    }
+    output.providerPendingBeforeStop = {
+      pending: !observedProviderRequest.providerFinished && !observedProviderRequest.responseClosed,
+      providerFinished: observedProviderRequest.providerFinished === true,
+      responseClosed: observedProviderRequest.responseClosed === true,
+    };
+    if (!output.providerPendingBeforeStop.pending) {
+      output.assertions.push("the fake Provider request completed before the real Stop path was exercised");
+    }
     const frontendGateRun = output.frontendDesktopGate?.run;
     output.frontendDesktopGate.ok = Boolean(
       frontendGateRun?.computerUseRequested === true &&
@@ -1498,11 +1792,19 @@ async function main() {
       })()`,
       5000,
     ).catch((error) => ({ ok: false, error: String(error) }));
+    output.providerCancellationAfterStop = await waitForFakeProviderCancellation(observedProviderRequest);
     if (!output.frontendDesktopGateSetup?.ok || !output.frontendDesktopGateClick?.ok || !output.frontendDesktopGate?.ok) {
       output.assertions.push("real composer /desktop submission did not set the turn-scoped Computer Use and theme flags");
     }
     if (!output.frontendDesktopStop?.ok) {
       output.assertions.push("real composer Computer Use turn did not expose a cancellable Stop control");
+    }
+    if (
+      !output.providerCancellationAfterStop.responseClosed ||
+      !output.providerCancellationAfterStop.closedByClient ||
+      output.providerCancellationAfterStop.providerFinished
+    ) {
+      output.assertions.push("real composer Stop did not cancel the still-pending fake Provider request");
     }
     await evalValue(
       cdp,
@@ -2390,6 +2692,18 @@ async function main() {
         output.cleanupError = String(error);
       });
     }
+    if (fakeProvider) {
+      output.providerCleanup = await fakeProvider.close()
+        .then(() => ({ ok: true }))
+        .catch((error) => ({ ok: false, error: String(error) }));
+      fakeProvider = null;
+      output.providerPortReleased = fakeProviderPort > 0
+        ? await proveLoopbackPortReleased(fakeProviderPort)
+        : false;
+      if (!output.providerCleanup.ok || !output.providerPortReleased) {
+        output.assertions.push("the isolated fake Provider did not release its owned loopback listener cleanly");
+      }
+    }
     output.afterCleanup = await processSnapshot().catch((error) => ({ error: String(error) }));
     output.resourceSnapshots.afterCleanup = await resourceSnapshot().catch((error) => ({ error: String(error) }));
     if (snapshotHasResidue(output.afterCleanup)) {
@@ -2415,7 +2729,7 @@ async function main() {
       logSecretScan.truncated || artifactSecretScan.truncated ||
       logSecretScan.readErrors.length || artifactSecretScan.readErrors.length
     ) {
-      output.assertions.push("the bounded exact app-session-token log/audit scan was incomplete");
+      output.assertions.push("the bounded exact protected-secret log/audit scan was incomplete");
     }
     output.ok = output.assertions.length === 0;
     output.releaseEvidence = output.ok
@@ -2434,4 +2748,6 @@ async function main() {
   }
 }
 
-main();
+if (!selfTest) {
+  main();
+}
