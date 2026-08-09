@@ -8,6 +8,7 @@ from optimization_apply_preview import (
     OptimizationApplyPreviewError,
     OptimizationApplyPreviewPorts,
     OptimizationApplyPreviewService,
+    invoke_authoritative_optimization_preview,
 )
 
 
@@ -82,6 +83,38 @@ def build_service(
             preview_parameter_bit_packing=preview_parameter,
         )
     )
+
+
+def test_authoritative_preview_adapter_maps_only_declared_errors() -> None:
+    class DeclaredBoundaryError(RuntimeError):
+        pass
+
+    params = {"projectPath": "P"}
+
+    def fail_declared(observed: dict) -> dict:
+        assert observed is params
+        raise DeclaredBoundaryError("preview unavailable")
+
+    with pytest.raises(
+        OptimizationApplyPreviewError,
+        match="preview unavailable",
+    ) as mapped:
+        invoke_authoritative_optimization_preview(
+            fail_declared,
+            params,
+            handled_errors=(DeclaredBoundaryError,),
+        )
+    assert isinstance(mapped.value.__cause__, DeclaredBoundaryError)
+
+    def fail_unhandled(_observed: dict) -> dict:
+        raise KeyError("programming error")
+
+    with pytest.raises(KeyError, match="programming error"):
+        invoke_authoritative_optimization_preview(
+            fail_unhandled,
+            params,
+            handled_errors=(DeclaredBoundaryError,),
+        )
 
 
 def test_lac_preview_is_ready_without_install_plan_when_dependency_exists(

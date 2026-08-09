@@ -14399,7 +14399,7 @@ namespace VRCForge.Editor
     def test_optimizer_proof_index_detail_and_screenshot_are_read_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             original_artifacts_dir = dashboard_server.ARTIFACTS_DIR
-            original_workflows = dashboard_server.OPTIMIZATION_WORKFLOWS
+            original_workflows = dashboard_server.OPTIMIZATION
             temp_artifacts = Path(temp_dir) / "artifacts"
             dashboard_server.ARTIFACTS_DIR = temp_artifacts
             proofs = OptimizerProofStore(
@@ -14409,7 +14409,7 @@ namespace VRCForge.Editor
                     to_runtime_artifact_url=dashboard_server.to_runtime_artifact_url,
                 )
             )
-            dashboard_server.OPTIMIZATION_WORKFLOWS = OptimizationWorkflowService(
+            dashboard_server.OPTIMIZATION = OptimizationWorkflowService(
                 replace(original_workflows._ports, proofs=proofs)
             )
             proof_root = temp_artifacts / "optimizer-apply-smoke"
@@ -14485,13 +14485,13 @@ namespace VRCForge.Editor
                 self.assertEqual(screenshot_response.status_code, 200)
                 self.assertEqual(screenshot_response.content, b"proof image")
             finally:
-                dashboard_server.OPTIMIZATION_WORKFLOWS = original_workflows
+                dashboard_server.OPTIMIZATION = original_workflows
                 dashboard_server.ARTIFACTS_DIR = original_artifacts_dir
 
     def test_optimizer_proof_screenshot_rejects_paths_outside_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             original_artifacts_dir = dashboard_server.ARTIFACTS_DIR
-            original_workflows = dashboard_server.OPTIMIZATION_WORKFLOWS
+            original_workflows = dashboard_server.OPTIMIZATION
             temp_path = Path(temp_dir)
             temp_artifacts = temp_path / "artifacts"
             dashboard_server.ARTIFACTS_DIR = temp_artifacts
@@ -14502,7 +14502,7 @@ namespace VRCForge.Editor
                     to_runtime_artifact_url=dashboard_server.to_runtime_artifact_url,
                 )
             )
-            dashboard_server.OPTIMIZATION_WORKFLOWS = OptimizationWorkflowService(
+            dashboard_server.OPTIMIZATION = OptimizationWorkflowService(
                 replace(original_workflows._ports, proofs=proofs)
             )
             proof_root = temp_artifacts / "optimizer-apply-smoke"
@@ -14530,7 +14530,7 @@ namespace VRCForge.Editor
 
                 self.assertEqual(response.status_code, 403)
             finally:
-                dashboard_server.OPTIMIZATION_WORKFLOWS = original_workflows
+                dashboard_server.OPTIMIZATION = original_workflows
                 dashboard_server.ARTIFACTS_DIR = original_artifacts_dir
 
     # ------------------------------------------------------------------

@@ -15,6 +15,20 @@ class OptimizationApplyPreviewError(RuntimeError):
     """A bounded authoritative-preview failure surfaced as a blocked preview."""
 
 
+def invoke_authoritative_optimization_preview(
+    preview: Callable[[dict[str, Any]], dict[str, Any]],
+    params: dict[str, Any],
+    *,
+    handled_errors: tuple[type[Exception], ...],
+) -> dict[str, Any]:
+    """Translate only declared app-boundary errors into a blocked preview."""
+
+    try:
+        return preview(params)
+    except handled_errors as exc:
+        raise OptimizationApplyPreviewError(str(exc)) from exc
+
+
 @dataclass(frozen=True)
 class OptimizationApplyPreviewPorts:
     resolve_project_path: Callable[[dict[str, Any]], str]

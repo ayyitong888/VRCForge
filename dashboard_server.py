@@ -252,10 +252,10 @@ from optimization_service import (
     normalize_tool_name,
 )
 from optimization_apply_preview import (
-    OptimizationApplyPreviewError,
     OptimizationApplyPreviewPorts,
     OptimizationApplyPreviewService,
     confirmed_ttt_material_paths,
+    invoke_authoritative_optimization_preview,
     meshia_relative_vertex_count,
     normalize_optimizer_profile_id,
 )
@@ -6705,21 +6705,21 @@ def app_list_avatars(request: DashboardStateRequest) -> dict[str, Any]:
 
 @app.post("/api/app/optimization/plan")
 def app_optimization_plan(request: OptimizationPlanRequest) -> dict[str, Any]:
-    return OPTIMIZATION_WORKFLOWS.build_plan(request.model_dump(by_alias=True))
+    return OPTIMIZATION.build_plan(request.model_dump(by_alias=True))
 
 
 @app.post("/api/app/optimization/tool")
 def app_optimization_tool(request: OptimizationToolRequest) -> dict[str, Any]:
     params = request.model_dump(by_alias=True)
     tool_name = str(params.pop("tool", "") or "")
-    return OPTIMIZATION_WORKFLOWS.build_tool(tool_name, params)
+    return OPTIMIZATION.build_tool(tool_name, params)
 
 
 @app.post("/api/app/optimization/apply-request")
 async def app_optimization_apply_request(request: OptimizationApplyRequest) -> dict[str, Any]:
     params = request.model_dump(by_alias=True)
     try:
-        payload = OPTIMIZATION_WORKFLOWS.request_apply(
+        payload = OPTIMIZATION.request_apply(
             params,
             agent_name="desktop-agent",
         )
@@ -6734,20 +6734,20 @@ async def app_optimization_apply_request(request: OptimizationApplyRequest) -> d
 
 @app.post("/api/app/optimization/validation-delta")
 def app_optimization_validation_delta(request: OptimizationValidationDeltaRequest) -> dict[str, Any]:
-    return OPTIMIZATION_WORKFLOWS.build_validation_delta(
+    return OPTIMIZATION.build_validation_delta(
         request.model_dump(by_alias=True)
     )
 
 
 @app.get("/api/app/optimization/proofs")
 def app_optimization_proof_index(limit: int = 10) -> dict[str, Any]:
-    return OPTIMIZATION_WORKFLOWS.list_proofs(limit=limit)
+    return OPTIMIZATION.list_proofs(limit=limit)
 
 
 @app.get("/api/app/optimization/proofs/{run_id}")
 def app_optimization_proof_detail(run_id: str) -> dict[str, Any]:
     try:
-        return OPTIMIZATION_WORKFLOWS.read_proof(run_id)
+        return OPTIMIZATION.read_proof(run_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Optimizer proof was not found.") from exc
     except ValueError as exc:
@@ -6757,7 +6757,7 @@ def app_optimization_proof_detail(run_id: str) -> dict[str, Any]:
 @app.get("/api/app/optimization/proofs/{run_id}/screenshots/{stage}")
 def app_optimization_proof_screenshot(run_id: str, stage: str) -> FileResponse:
     try:
-        path = OPTIMIZATION_WORKFLOWS.proof_screenshot_path(run_id, stage)
+        path = OPTIMIZATION.proof_screenshot_path(run_id, stage)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Optimizer proof screenshot was not found.") from exc
     except PermissionError as exc:
@@ -19265,8 +19265,8 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
     AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, SDK, avatar, hierarchy, parameters, menu, FX, bindings, materials, performance, plugin, MCP, package, and residue checks.", "read/debug", build_validation_report_sync)
     AGENT_GATEWAY.register_tool("vrcforge_build_test_readiness", "Run the read-only Build & Test readiness gate without building, publishing, or repairing automatically.", "read/debug", build_test_readiness_sync)
-    AGENT_GATEWAY.register_tool("vrcforge_optimization_plan", "Build the read-only vrcforge.optimization.v1 model optimization dashboard plan and recommended step order without modifying the Unity project.", "plan/preview", OPTIMIZATION_WORKFLOWS.build_plan)
-    AGENT_GATEWAY.register_tool("vrcforge_optimization_validation_delta", "Compare before/after/rollback vrcforge.validation.v1 reports for one optimizer step without writing project files.", "read/debug", OPTIMIZATION_WORKFLOWS.build_validation_delta)
+    AGENT_GATEWAY.register_tool("vrcforge_optimization_plan", "Build the read-only vrcforge.optimization.v1 model optimization dashboard plan and recommended step order without modifying the Unity project.", "plan/preview", OPTIMIZATION.build_plan)
+    AGENT_GATEWAY.register_tool("vrcforge_optimization_validation_delta", "Compare before/after/rollback vrcforge.validation.v1 reports for one optimizer step without writing project files.", "read/debug", OPTIMIZATION.build_validation_delta)
     for definition in OPTIMIZATION_TOOL_DEFINITIONS:
         gateway_tool = definition["gatewayName"]
         external_tool = definition["externalName"]
@@ -19274,7 +19274,7 @@ def register_agent_gateway_tools() -> None:
             gateway_tool,
             definition["description"],
             definition["category"],
-            lambda params, _tool=external_tool: OPTIMIZATION_WORKFLOWS.build_tool(
+            lambda params, _tool=external_tool: OPTIMIZATION.build_tool(
                 _tool,
                 params or {},
             ),
@@ -19286,7 +19286,7 @@ def register_agent_gateway_tools() -> None:
             gateway_tool,
             str(definition["description"]),
             "supervised-write",
-            lambda params, _tool=external_tool: OPTIMIZATION_WORKFLOWS.request_apply(
+            lambda params, _tool=external_tool: OPTIMIZATION.request_apply(
                 {**ensure_dict(params or {}), "tool": _tool},
                 agent_name=str(ensure_dict(params or {}).get("agent_name") or ensure_dict(params or {}).get("agentName") or "external-agent"),
             ),
@@ -20503,36 +20503,7 @@ AVATAR_TUNING_APPROVED_WRITES = AvatarTuningApprovedWriteHandlers(
 )
 
 
-def _preview_optimizer_parameter_bit_packing(
-    params: dict[str, Any],
-) -> dict[str, Any]:
-    try:
-        return preview_parameter_bit_packing_sync(params)
-    except (AgentGatewayError, AuthoritativeUnityWriteError) as exc:
-        raise OptimizationApplyPreviewError(str(exc)) from exc
-
-
-OPTIMIZATION_APPLY_PREVIEWS = OptimizationApplyPreviewService(
-    OptimizationApplyPreviewPorts(
-        resolve_project_path=lambda params: resolve_project_path(
-            params,
-            DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else "",
-        ),
-        package_install_plan=PACKAGE_INSTALL_WORKFLOWS.plan_install,
-        build_parameter_bit_packing_arguments=(
-            build_parameter_bit_packing_wrapper_arguments
-        ),
-        preview_parameter_bit_packing=_preview_optimizer_parameter_bit_packing,
-    )
-)
-OPTIMIZER_PROOFS = OptimizerProofStore(
-    OptimizerProofStorePorts(
-        artifact_root=ARTIFACTS_DIR,
-        to_artifact_url=to_artifact_url,
-        to_runtime_artifact_url=to_runtime_artifact_url,
-    )
-)
-OPTIMIZATION_WORKFLOWS = OptimizationWorkflowService(
+OPTIMIZATION = OptimizationWorkflowService(
     OptimizationWorkflowPorts(
         selected_project_path=lambda: (
             DASHBOARD_STATE.selected_project_path if DASHBOARD_STATE else ""
@@ -20541,10 +20512,39 @@ OPTIMIZATION_WORKFLOWS = OptimizationWorkflowService(
         build_report=build_optimization_report,
         normalize_tool_name=normalize_tool_name,
         build_tool_result=build_optimization_tool_result,
-        build_apply_preview=OPTIMIZATION_APPLY_PREVIEWS.build,
+        build_apply_preview=OptimizationApplyPreviewService(
+            OptimizationApplyPreviewPorts(
+                resolve_project_path=lambda params: resolve_project_path(
+                    params,
+                    DASHBOARD_STATE.selected_project_path
+                    if DASHBOARD_STATE
+                    else "",
+                ),
+                package_install_plan=PACKAGE_INSTALL_WORKFLOWS.plan_install,
+                build_parameter_bit_packing_arguments=(
+                    build_parameter_bit_packing_wrapper_arguments
+                ),
+                preview_parameter_bit_packing=lambda params: (
+                    invoke_authoritative_optimization_preview(
+                        preview_parameter_bit_packing_sync,
+                        params,
+                        handled_errors=(
+                            AgentGatewayError,
+                            AuthoritativeUnityWriteError,
+                        ),
+                    )
+                ),
+            )
+        ).build,
         build_validation_delta=build_optimization_validation_delta,
         create_apply_request=AGENT_GATEWAY.create_apply_request,
-        proofs=OPTIMIZER_PROOFS,
+        proofs=OptimizerProofStore(
+            OptimizerProofStorePorts(
+                artifact_root=ARTIFACTS_DIR,
+                to_artifact_url=to_artifact_url,
+                to_runtime_artifact_url=to_runtime_artifact_url,
+            )
+        ),
         parameter_bit_packing_tool=PARAMETER_BIT_PACKING_TOOL,
     )
 )

@@ -106,12 +106,18 @@ class OptimizationWorkflowService:
             or normalized.get("install_missing_dependencies")
         )
         dependency = _ensure_dict(preview.get("dependency"))
+        dependency_status = str(dependency.get("status") or "unknown")
         package_ids = [
             str(item)
             for item in dependency.get("packageIds") or []
             if str(item or "").strip()
         ]
-        if preview.get("blockedReasons") and install_missing and package_ids:
+        if (
+            preview.get("blockedReasons")
+            and install_missing
+            and dependency_status == "missing"
+            and package_ids
+        ):
             install_plan = _ensure_dict(preview.get("dependencyInstallPlan"))
             if not install_plan.get("canExecuteCommandInstall"):
                 return {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 from dataclasses import replace
 from pathlib import Path
@@ -8,15 +9,20 @@ import pytest
 
 import dashboard_server
 from agent_gateway import AgentGateway, AgentGatewayConfig
+from optimization_apply_preview import OptimizationApplyPreviewService
 from optimization_service import (
     OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
     OPTIMIZATION_TOOL_DEFINITIONS,
+    STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS,
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
     build_dependency_doctor,
     build_optimization_report,
     build_optimization_tool_result,
 )
-from optimization_workflow_service import OptimizationWorkflowService
+from optimization_workflow_service import (
+    OptimizationWorkflowService,
+    OptimizerProofStore,
+)
 from package_install_workflow_service import (
     PackageInstallWorkflowPorts,
     PackageInstallWorkflowService,
@@ -31,6 +37,106 @@ def make_unity_project(root: Path) -> None:
     (root / "ProjectSettings").mkdir()
     (root / "Packages" / "manifest.json").write_text('{"dependencies":{}}', encoding="utf-8")
     (root / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1", encoding="utf-8")
+
+
+def test_dashboard_composes_one_typed_optimization_owner() -> None:
+    owner = dashboard_server.OPTIMIZATION
+
+    assert isinstance(owner, OptimizationWorkflowService)
+    assert isinstance(
+        owner._ports.build_apply_preview.__self__,
+        OptimizationApplyPreviewService,
+    )
+    assert isinstance(owner._ports.proofs, OptimizerProofStore)
+    for retired in (
+        "OPTIMIZATION_APPLY_PREVIEWS",
+        "OPTIMIZER_PROOFS",
+        "OPTIMIZATION_WORKFLOWS",
+        "_preview_optimizer_parameter_bit_packing",
+    ):
+        assert not hasattr(dashboard_server, retired)
+
+
+def test_optimization_routes_and_gateway_handlers_bind_exact_owner_methods() -> None:
+    owner = dashboard_server.OPTIMIZATION
+    source = Path(dashboard_server.__file__).read_text(encoding="utf-8-sig")
+    functions = {
+        node.name: node
+        for node in ast.parse(source).body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    route_methods = {
+        "app_optimization_plan": "build_plan",
+        "app_optimization_tool": "build_tool",
+        "app_optimization_apply_request": "request_apply",
+        "app_optimization_validation_delta": "build_validation_delta",
+        "app_optimization_proof_index": "list_proofs",
+        "app_optimization_proof_detail": "read_proof",
+        "app_optimization_proof_screenshot": "proof_screenshot_path",
+    }
+    for route_name, method_name in route_methods.items():
+        owner_calls = [
+            node.attr
+            for node in ast.walk(functions[route_name])
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "OPTIMIZATION"
+        ]
+        assert owner_calls == [method_name]
+
+    for tool_name, method_name, category in (
+        ("vrcforge_optimization_plan", "build_plan", "plan/preview"),
+        (
+            "vrcforge_optimization_validation_delta",
+            "build_validation_delta",
+            "read/debug",
+        ),
+    ):
+        tool = dashboard_server.AGENT_GATEWAY._tools[tool_name]
+        assert tool.handler.__self__ is owner
+        assert tool.handler.__func__ is getattr(OptimizationWorkflowService, method_name)
+        assert tool.category == category
+        assert tool.write is False
+
+    calls: list[tuple] = []
+
+    class FakeOptimization:
+        def build_tool(self, tool_name: str, params: dict) -> dict:
+            calls.append(("read", tool_name, params))
+            return {"ok": True}
+
+        def request_apply(self, params: dict, agent_name: str) -> dict:
+            calls.append(("apply", params["tool"], params, agent_name))
+            return {"ok": True}
+
+    original = dashboard_server.OPTIMIZATION
+    dashboard_server.OPTIMIZATION = FakeOptimization()
+    try:
+        for definition in OPTIMIZATION_TOOL_DEFINITIONS:
+            tool = dashboard_server.AGENT_GATEWAY._tools[definition["gatewayName"]]
+            assert tool.category == definition["category"]
+            assert tool.write is False
+            assert tool.handler({"probe": True}) == {"ok": True}
+            assert calls.pop(0) == (
+                "read",
+                definition["externalName"],
+                {"probe": True},
+            )
+        for definition in STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS:
+            tool = dashboard_server.AGENT_GATEWAY._tools[definition["gatewayName"]]
+            assert tool.category == "supervised-write"
+            assert tool.write is True
+            assert tool.handler({"probe": True, "agentName": "probe-agent"}) == {
+                "ok": True
+            }
+            call = calls.pop(0)
+            assert call[0:2] == ("apply", definition["externalName"])
+            assert call[2]["probe"] is True
+            assert call[2]["tool"] == definition["externalName"]
+            assert call[3] == "probe-agent"
+        assert calls == []
+    finally:
+        dashboard_server.OPTIMIZATION = original
 
 
 def install_package(root: Path, package_id: str, version: str = "1.0.0") -> None:
@@ -564,7 +670,7 @@ def test_optimization_validation_delta_reports_improvement_and_rollback_match() 
         ],
     }
 
-    delta = dashboard_server.OPTIMIZATION_WORKFLOWS.build_validation_delta(
+    delta = dashboard_server.OPTIMIZATION.build_validation_delta(
         {
             "optimizerTool": "optimization.lac.apply-request",
             "checkpointId": "ckpt_test",
@@ -614,7 +720,7 @@ def test_optimization_validation_delta_flags_regression_and_rollback_drift() -> 
         "findings": [{"section": "Materials", "severity": "Warning", "title": "New rollback warning", "source": "materials"}],
     }
 
-    delta = dashboard_server.OPTIMIZATION_WORKFLOWS.build_validation_delta(
+    delta = dashboard_server.OPTIMIZATION.build_validation_delta(
         {
             "optimizerTool": "optimization.meshia.simplify-apply-request",
             "beforeValidation": before,
@@ -663,7 +769,7 @@ def test_optimizer_apply_request_requires_explicit_approval_even_in_auto_mode(mo
         lambda _params: {"ok": True, "components": [{"type": "AvatarOptimizer"}]},
     )
     try:
-        payload = dashboard_server.OPTIMIZATION_WORKFLOWS.request_apply(
+        payload = dashboard_server.OPTIMIZATION.request_apply(
             {
                 "tool": "optimization.lac.apply-request",
                 "projectPath": str(project),
@@ -801,7 +907,7 @@ def test_stable_apply_request_preview_is_lightweight_and_ready_for_installed_dep
     make_unity_project(project)
     install_package(project, "dev.limitex.avatar-compressor", "0.8.0")
 
-    payload = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    payload = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.lac.apply-request",
             "projectPath": str(project),
@@ -822,7 +928,7 @@ def test_ttt_apply_request_is_stable_but_requires_confirmed_material_paths(tmp_p
     make_unity_project(project)
     install_package(project, "net.rs64.tex-trans-tool", "1.1.0-beta.8")
 
-    blocked = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    blocked = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.ttt.atlas-apply-request",
             "projectPath": str(project),
@@ -836,7 +942,7 @@ def test_ttt_apply_request_is_stable_but_requires_confirmed_material_paths(tmp_p
     assert blocked["readyToRequest"] is False
     assert any("material asset paths" in reason for reason in blocked["blockedReasons"])
 
-    ready = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    ready = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.ttt.atlas-apply-request",
             "projectPath": str(project),
@@ -856,7 +962,7 @@ def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_
     make_unity_project(project)
     install_package(project, "com.ramtype0.meshia.mesh-simplification", "3.2.0")
 
-    missing_renderer = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    missing_renderer = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.meshia.simplify-apply-request",
             "projectPath": str(project),
@@ -868,7 +974,7 @@ def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_
     assert missing_renderer["readyToRequest"] is False
     assert any("rendererPath" in reason for reason in missing_renderer["blockedReasons"])
 
-    aggressive = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    aggressive = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.meshia.simplify-apply-request",
             "projectPath": str(project),
@@ -880,7 +986,7 @@ def test_meshia_apply_request_targets_renderer_and_blocks_aggressive_ratios(tmp_
     assert aggressive["readyToRequest"] is False
     assert any("experimental" in reason for reason in aggressive["blockedReasons"])
 
-    ready = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    ready = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.meshia.simplify-apply-request",
             "projectPath": str(project),
@@ -1009,7 +1115,7 @@ def test_vrcfury_parameter_request_uses_authoritative_clone_writer(
         lambda params: observed.append(params) or {"ok": True, "preview": {"schema": "vrcforge.parameter_bit_packing_approval.v1"}},
     )
 
-    payload = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    payload = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.vrcfury.parameter-compressor-apply-request",
             "projectPath": str(project),
@@ -1075,7 +1181,7 @@ def test_parameter_request_with_missing_selector_returns_a_blocked_preview(
     }
     params.pop(missing_field)
 
-    payload = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(params)
+    payload = dashboard_server.OPTIMIZATION.build_apply_preview(params)
 
     assert payload["readyToRequest"] is False
     assert payload["hardGate"]["status"] == "blocked"
@@ -1096,7 +1202,7 @@ def test_parameter_authoritative_preview_error_is_returned_as_a_blocker(
 
     monkeypatch.setattr(dashboard_server, "preview_parameter_bit_packing_sync", fail_preview)
 
-    payload = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    payload = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.vrcfury.parameter-compressor-apply-request",
             "projectPath": str(project),
@@ -1174,7 +1280,7 @@ def test_parameter_optimizer_entry_reprepares_then_runs_the_approved_canonical_w
 
     owner = OptimizationWorkflowService(
         replace(
-            dashboard_server.OPTIMIZATION_WORKFLOWS._ports,
+            dashboard_server.OPTIMIZATION._ports,
             create_apply_request=gateway.create_apply_request,
         )
     )
@@ -1220,7 +1326,7 @@ def test_hidden_body_and_physbone_apply_surfaces_are_blocked_with_hard_gates(tmp
     make_unity_project(project)
     install_package(project, "com.anatawa12.avatar-optimizer", "1.8.0")
 
-    hidden_body = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    hidden_body = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.aao.hidden-body-cut-apply-request",
             "projectPath": str(project),
@@ -1228,7 +1334,7 @@ def test_hidden_body_and_physbone_apply_surfaces_are_blocked_with_hard_gates(tmp
             "targetProfile": "pc_conservative",
         }
     )
-    physbone = dashboard_server.OPTIMIZATION_APPLY_PREVIEWS.build(
+    physbone = dashboard_server.OPTIMIZATION.build_apply_preview(
         {
             "tool": "optimization.aao.physbone-cleanup-apply-request",
             "projectPath": str(project),

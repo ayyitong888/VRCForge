@@ -159,23 +159,6 @@
       ]
     },
     {
-      "id": "dashboard.optimization-root-owners",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "OPTIMIZATION_APPLY_PREVIEWS"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "OPTIMIZER_PROOFS"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "OPTIMIZATION_WORKFLOWS"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "_preview_optimizer_parameter_bit_packing"
-          ]
-        }
-      ]
-    },
-    {
       "id": "dashboard.wardrobe-outfit-root-owners",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "SETUP_OUTFIT_PREVIEW"},

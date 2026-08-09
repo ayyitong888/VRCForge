@@ -143,6 +143,7 @@ def test_missing_dependency_queues_only_supported_install_request() -> None:
             "targetTool": "vrcforge_configure_optimizer_component",
             "applyArguments": {"projectPath": "P"},
             "dependency": {
+                "status": "missing",
                 "packageIds": ["dev.limitex.avatar-compressor"],
                 "vpmRepository": "https://example.invalid/index.json",
             },
@@ -168,6 +169,30 @@ def test_missing_dependency_queues_only_supported_install_request() -> None:
         "includePrerelease": True,
     }
     assert request["requires_explicit_approval"] is True
+
+
+@pytest.mark.parametrize("dependency_status", ["installed", "unknown"])
+def test_nonmissing_dependency_with_other_blockers_never_queues_install(
+    dependency_status: str,
+) -> None:
+    calls: dict[str, list[Any]] = {}
+    owner = build_owner(
+        calls=calls,
+        preview={
+            "readyToRequest": False,
+            "blockedReasons": ["avatarPath is required"],
+            "dependency": {
+                "status": dependency_status,
+                "packageIds": ["dev.limitex.avatar-compressor"],
+            },
+        },
+    )
+
+    result = owner.request_apply({"installMissingDependencies": True})
+
+    assert result["status"] == "blocked"
+    assert result["error"] == "avatarPath is required"
+    assert calls.get("apply") is None
 
 
 def test_blocked_preview_never_creates_an_approval() -> None:
