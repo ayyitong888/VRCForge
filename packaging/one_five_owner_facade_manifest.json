@@ -153,12 +153,6 @@
       ]
     },
     {
-      "id": "dashboard.goal-root-owner",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "AGENT_GOALS"}
-      ]
-    },
-    {
       "id": "dashboard.wardrobe-outfit-root-owners",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "SETUP_OUTFIT_PREVIEW"},

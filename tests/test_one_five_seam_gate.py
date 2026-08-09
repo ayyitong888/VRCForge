@@ -266,6 +266,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.project-snapshot-root-facades" not in groups
     assert "dashboard.late-bound-composition-context" not in groups
     assert "dashboard.optimization-root-owners" not in groups
+    assert "dashboard.goal-root-owner" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
     assert {item["id"] for item in manifest["publicApiAllowlist"]["contracts"]} == {
         "fastapi-route-request-response-openapi",

@@ -1236,7 +1236,7 @@ class DashboardServerTests(unittest.TestCase):
                         SimpleNamespace(reconcile_startup=reconcile_sub_agents),
                     ),
                     patch.object(
-                        dashboard_server.AGENT_GOALS,
+                        dashboard_server.AGENT_GATEWAY.goal,
                         "reconcile_stale_agent_goal_deliveries",
                         return_value={"ok": True, "deliveries": [], "count": 0},
                     ) as reconcile_goal_deliveries,
@@ -1289,7 +1289,7 @@ class DashboardServerTests(unittest.TestCase):
                         SimpleNamespace(reconcile_startup=reconcile_sub_agents),
                     ),
                     patch.object(
-                        dashboard_server.AGENT_GOALS,
+                        dashboard_server.AGENT_GATEWAY.goal,
                         "reconcile_stale_agent_goal_deliveries",
                         side_effect=AssertionError("a non-owner must not reconcile goal deliveries"),
                     ) as reconcile_goal_deliveries,
@@ -1342,7 +1342,7 @@ class DashboardServerTests(unittest.TestCase):
                         SimpleNamespace(reconcile_startup=reconcile_sub_agents),
                     ),
                     patch.object(
-                        dashboard_server.AGENT_GOALS,
+                        dashboard_server.AGENT_GATEWAY.goal,
                         "reconcile_stale_agent_goal_deliveries",
                         side_effect=goal_error,
                     ) as reconcile_goal_deliveries,
@@ -2445,6 +2445,28 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(listing["actions"][0]["actionId"], action_id)
         self.assertEqual(listing["actions"][0]["status"], "completed")
 
+    def test_goal_composition_uses_gateway_singleton_without_dashboard_alias(self) -> None:
+        goal = dashboard_server.AGENT_GATEWAY.goal
+
+        self.assertFalse(hasattr(dashboard_server, "AGENT_GOALS"))
+        self.assertIs(dashboard_server.BACKGROUND_GOAL_COORDINATOR._goal, goal)
+        self.assertIs(dashboard_server.BACKGROUND_GOAL_COORDINATOR._approval, goal)
+        with patch.object(
+            goal,
+            "resolve_agent_goal_question",
+            return_value={"ok": True, "resolved": True},
+        ) as resolve:
+            payload = dashboard_server.AGENT_QUESTIONS._goal_resolution.resolve(
+                "question-singleton",
+                "Continue the same goal.",
+            )
+
+        self.assertEqual(payload, {"ok": True, "resolved": True})
+        resolve.assert_called_once_with(
+            "question-singleton",
+            continuation_prompt="Continue the same goal.",
+        )
+
     def test_agent_goals_are_durable_and_statused(self) -> None:
         with TestClient(dashboard_server.app) as client:
             created = client.post(
@@ -2561,14 +2583,14 @@ class DashboardServerTests(unittest.TestCase):
                 "/api/app/agent/goals",
                 json={"title": "Slow wake", "chatId": "chat-slow-wake", "wakeAt": past},
             ).json()["goal"]
-            original_wake = dashboard_server.AGENT_GOALS.wake_agent_goal
+            original_wake = dashboard_server.AGENT_GATEWAY.goal.wake_agent_goal
 
             def slow_wake(*args, **kwargs):
                 time.sleep(0.05)
                 return original_wake(*args, **kwargs)
 
             with (
-                patch.object(dashboard_server.AGENT_GOALS, "wake_agent_goal", side_effect=slow_wake),
+                patch.object(dashboard_server.AGENT_GATEWAY.goal, "wake_agent_goal", side_effect=slow_wake),
                 patch("dashboard_server.PHASE_TIMEOUT_SECONDS", {"wake": 0.01}),
             ):
                 response = client.post(
@@ -2578,7 +2600,7 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 504)
                 time.sleep(0.15)
 
-            deliveries = dashboard_server.AGENT_GOALS.project_deliveries()
+            deliveries = dashboard_server.AGENT_GATEWAY.goal.project_deliveries()
             delivery = next(
                 item for item in deliveries.values() if item.get("chatId") == "chat-slow-wake"
             )
@@ -2671,7 +2693,7 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as project_a, tempfile.TemporaryDirectory() as project_b:
             past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
             with TestClient(dashboard_server.app) as client:
-                goal = dashboard_server.AGENT_GOALS.create_agent_goal(
+                goal = dashboard_server.AGENT_GATEWAY.goal.create_agent_goal(
                     {
                         "title": "Approval scope retry",
                         "chatId": "chat-approval-scope",
@@ -2679,9 +2701,9 @@ class DashboardServerTests(unittest.TestCase):
                         "wakeAt": past,
                     }
                 )["goal"]
-                woken = dashboard_server.AGENT_GOALS.wake_agent_goal(goal["goalId"])
+                woken = dashboard_server.AGENT_GATEWAY.goal.wake_agent_goal(goal["goalId"])
                 delivery_id = woken["delivery"]["deliveryId"]
-                dashboard_server.AGENT_GOALS.begin_agent_goal_delivery(
+                dashboard_server.AGENT_GATEWAY.goal.begin_agent_goal_delivery(
                     delivery_id,
                     {"clientTurnId": woken["delivery"]["clientTurnId"]},
                 )
@@ -2694,7 +2716,7 @@ class DashboardServerTests(unittest.TestCase):
                     "high",
                     goal_delivery_id=delivery_id,
                 )
-                dashboard_server.AGENT_GOALS.block_agent_goal_delivery(
+                dashboard_server.AGENT_GATEWAY.goal.block_agent_goal_delivery(
                     delivery_id,
                     kind="approval",
                     reference=approval["id"],
@@ -2707,7 +2729,7 @@ class DashboardServerTests(unittest.TestCase):
                 )
 
             self.assertEqual(rejected.status_code, 409)
-            current = dashboard_server.AGENT_GOALS.project_deliveries()[delivery_id]
+            current = dashboard_server.AGENT_GATEWAY.goal.project_deliveries()[delivery_id]
             self.assertEqual(current["status"], "blocked")
             self.assertFalse(current["approvalPendingResolution"])
             self.assertEqual(dashboard_server.AGENT_GATEWAY._approvals[approval["id"]]["status"], "pending")
@@ -2715,12 +2737,12 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_linked_approval_revision_broadcasts_terminal_background_state(self) -> None:
         past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
-        goal = dashboard_server.AGENT_GOALS.create_agent_goal(
+        goal = dashboard_server.AGENT_GATEWAY.goal.create_agent_goal(
             {"title": "Approval revision", "chatId": "chat-approval-revision", "wakeAt": past}
         )["goal"]
-        woken = dashboard_server.AGENT_GOALS.wake_agent_goal(goal["goalId"])
+        woken = dashboard_server.AGENT_GATEWAY.goal.wake_agent_goal(goal["goalId"])
         delivery_id = woken["delivery"]["deliveryId"]
-        dashboard_server.AGENT_GOALS.begin_agent_goal_delivery(
+        dashboard_server.AGENT_GATEWAY.goal.begin_agent_goal_delivery(
             delivery_id,
             {"clientTurnId": woken["delivery"]["clientTurnId"]},
         )
@@ -2733,7 +2755,7 @@ class DashboardServerTests(unittest.TestCase):
             "high",
             goal_delivery_id=delivery_id,
         )
-        dashboard_server.AGENT_GOALS.block_agent_goal_delivery(
+        dashboard_server.AGENT_GATEWAY.goal.block_agent_goal_delivery(
             delivery_id,
             kind="approval",
             reference=approval["id"],
@@ -2752,7 +2774,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["approval"]["status"], "revision_requested")
         self.assertEqual(payload["goalDelivery"]["delivery"]["status"], "denied")
         self.assertEqual(
-            dashboard_server.AGENT_GOALS.project_deliveries()[delivery_id]["status"],
+            dashboard_server.AGENT_GATEWAY.goal.project_deliveries()[delivery_id]["status"],
             "denied",
         )
         broadcast.assert_awaited_once_with({})

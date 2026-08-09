@@ -76,7 +76,7 @@ from agent_question_service import (
     AgentQuestionServiceError,
     GoalQuestionResolutionPort,
 )
-from agent_goal_service import AgentGoalService, AgentGoalServiceError
+from agent_goal_service import AgentGoalServiceError
 from approval_auto_review import review_saved_project_category_approval
 from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
 from authoritative_unity_writes import (
@@ -2216,7 +2216,6 @@ AGENT_GATEWAY = AgentGateway(
         {"changed": True},
     ),
 )
-AGENT_GOALS: AgentGoalService = AGENT_GATEWAY.goal
 # STOPGAP(1.5): this app-lifetime owner shares the established durable state
 # lock and Goal resolver without a Gateway forwarding layer. The final typed
 # app composition must inject it into routes/tools and remove this root symbol.
@@ -2234,7 +2233,7 @@ AGENT_QUESTIONS = AgentQuestionService(
         redact_goal_persistence=redact_background_goal_persistence,
     ),
     GoalQuestionResolutionPort(
-        resolve=lambda question_id, continuation_prompt: AGENT_GOALS.resolve_agent_goal_question(
+        resolve=lambda question_id, continuation_prompt: AGENT_GATEWAY.goal.resolve_agent_goal_question(
             question_id,
             continuation_prompt=continuation_prompt,
         )
@@ -2247,13 +2246,13 @@ BACKGROUND_GOAL_PREFLIGHT = ProviderPreflightCache(
 
 
 async def broadcast_background_goal_state(_state: dict[str, Any]) -> None:
-    await EVENT_BUS.broadcast("agentGoals", AGENT_GOALS.list_agent_goals())
-    await EVENT_BUS.broadcast("agentGoalBackground", AGENT_GOALS.agent_goal_background_state())
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals())
+    await EVENT_BUS.broadcast("agentGoalBackground", AGENT_GATEWAY.goal.agent_goal_background_state())
 
 
 BACKGROUND_GOAL_COORDINATOR = BackgroundGoalDeliveryCoordinator(
-    goal=AGENT_GOALS,
-    approval=AGENT_GOALS,
+    goal=AGENT_GATEWAY.goal,
+    approval=AGENT_GATEWAY.goal,
     runtime=RuntimeExecutionPort(
         execute=AGENT_GATEWAY.runtime_message,
         request_cancel=AGENT_GATEWAY.request_runtime_cancel,
@@ -2277,7 +2276,7 @@ async def drain_timed_out_goal_wake(worker: asyncio.Task[dict[str, Any]]) -> Non
         return
     try:
         state = await asyncio.to_thread(
-            AGENT_GOALS.defer_agent_goal_delivery_wake_timeout,
+            AGENT_GATEWAY.goal.defer_agent_goal_delivery_wake_timeout,
             delivery_id,
         )
         await broadcast_background_goal_state(state)
@@ -2450,9 +2449,9 @@ async def on_startup() -> None:
         except Exception as exc:  # noqa: BLE001 - optional user-data recovery must not block startup.
             emit_log("warn", "subagent", "Sub-agent startup reconciliation had a warning.", {"error": str(exc)})
         try:
-            await asyncio.to_thread(AGENT_GOALS.reconcile_stale_agent_goal_deliveries)
+            await asyncio.to_thread(AGENT_GATEWAY.goal.reconcile_stale_agent_goal_deliveries)
             await asyncio.to_thread(
-                AGENT_GOALS.reconcile_agent_goal_watchdogs,
+                AGENT_GATEWAY.goal.reconcile_agent_goal_watchdogs,
                 finalize_orphans=True,
             )
         except Exception as exc:  # noqa: BLE001 - optional user-data recovery must not block startup.
@@ -2917,7 +2916,7 @@ def read_app_runtime_snapshot(
     if scoped_ledgers:
         runs = AGENT_GATEWAY.list_runtime_runs(limit=40, session_id=sessionId, project_root=projectRoot)
         desktop_actions = AGENT_GATEWAY.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)
-        goals = AGENT_GOALS.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot)
+        goals = AGENT_GATEWAY.goal.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot)
         progress = AGENT_GATEWAY.list_agent_progress(limit=12, session_id=sessionId, project_root=projectRoot)
         questions = AGENT_QUESTIONS.list(limit=6, session_id=sessionId, project_root=projectRoot)
         memory = AGENT_GATEWAY.list_agent_memory(limit=8, project_root=projectRoot)
@@ -3414,12 +3413,12 @@ async def app_agent_desktop_action_cancel(action_id: str, request: DesktopAction
 
 @app.get("/api/app/agent/goals")
 def app_agent_goals(limit: int = 50, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
-    return AGENT_GOALS.list_agent_goals(limit=limit, session_id=sessionId, project_root=projectRoot)
+    return AGENT_GATEWAY.goal.list_agent_goals(limit=limit, session_id=sessionId, project_root=projectRoot)
 
 
 @app.get("/api/app/agent/goals/due")
 def app_due_agent_goals(limit: int = 20, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
-    return AGENT_GOALS.list_due_agent_goals(limit=limit, session_id=sessionId, project_root=projectRoot)
+    return AGENT_GATEWAY.goal.list_due_agent_goals(limit=limit, session_id=sessionId, project_root=projectRoot)
 
 
 @app.post("/api/app/agent/goals")
@@ -3439,10 +3438,10 @@ async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, An
     if "wake_every_minutes" in request.model_fields_set:
         params["wakeEveryMinutes"] = request.wake_every_minutes
     try:
-        payload = AGENT_GOALS.create_agent_goal(params)
+        payload = AGENT_GATEWAY.goal.create_agent_goal(params)
     except AgentGoalServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentGoals", AGENT_GOALS.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals(limit=30, session_id=request.session_id or ""))
     return payload
 
 
@@ -3450,7 +3449,7 @@ async def app_create_agent_goal(request: AgentGoalCreateRequest) -> dict[str, An
 async def app_wake_agent_goal(goal_id: str, request: AgentGoalWakeRequest) -> dict[str, Any]:
     worker = asyncio.create_task(
         asyncio.to_thread(
-            AGENT_GOALS.wake_agent_goal,
+            AGENT_GATEWAY.goal.wake_agent_goal,
             goal_id,
             {
                 "sessionId": request.session_id,
@@ -3472,14 +3471,14 @@ async def app_wake_agent_goal(goal_id: str, request: AgentGoalWakeRequest) -> di
         raise
     except AgentGoalServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentGoals", AGENT_GOALS.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals(limit=30, session_id=request.session_id or ""))
     return payload
 
 
 @app.post("/api/app/agent/goals/{goal_id}/bind-owner")
 async def app_bind_agent_goal_owner(goal_id: str, request: AgentGoalOwnerBindRequest) -> dict[str, Any]:
     try:
-        payload = AGENT_GOALS.bind_agent_goal_owner(
+        payload = AGENT_GATEWAY.goal.bind_agent_goal_owner(
             goal_id,
             {
                 "sessionId": request.session_id,
@@ -3489,18 +3488,18 @@ async def app_bind_agent_goal_owner(goal_id: str, request: AgentGoalOwnerBindReq
         )
     except AgentGoalServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentGoals", AGENT_GOALS.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals(limit=30, session_id=request.session_id or ""))
     return payload
 
 
 @app.get("/api/app/agent/goals/deliveries/recoverable")
 def app_recoverable_agent_goal_deliveries(limit: int = 20, chatId: str = "") -> dict[str, Any]:
-    return AGENT_GOALS.list_recoverable_agent_goal_deliveries(limit=limit, chat_id=chatId)
+    return AGENT_GATEWAY.goal.list_recoverable_agent_goal_deliveries(limit=limit, chat_id=chatId)
 
 
 @app.get("/api/app/agent/goals/background")
 def app_agent_goal_background_state(chatId: str = "") -> dict[str, Any]:
-    return AGENT_GOALS.agent_goal_background_state(chat_id=chatId)
+    return AGENT_GATEWAY.goal.agent_goal_background_state(chat_id=chatId)
 
 
 @app.post("/api/app/agent/goals/background/ack")
@@ -3508,7 +3507,7 @@ async def app_acknowledge_agent_goal_background_state(
     request: AgentGoalBackgroundAcknowledgeRequest,
 ) -> dict[str, Any]:
     try:
-        payload = AGENT_GOALS.acknowledge_agent_goal_background_state(
+        payload = AGENT_GATEWAY.goal.acknowledge_agent_goal_background_state(
             chat_id=request.chat_id,
             delivery_ids=[
                 {
@@ -3532,7 +3531,7 @@ async def app_materialize_agent_goal_delivery(
     request: AgentGoalDeliveryMaterializeRequest,
 ) -> dict[str, Any]:
     try:
-        payload = AGENT_GOALS.materialize_agent_goal_delivery(
+        payload = AGENT_GATEWAY.goal.materialize_agent_goal_delivery(
             delivery_id,
             {"chatId": request.chat_id, "expectedRevision": request.expected_revision},
         )
@@ -3547,7 +3546,7 @@ async def app_defer_agent_goal_delivery(
     request: AgentGoalDeliveryDeferRequest,
 ) -> dict[str, Any]:
     try:
-        payload = AGENT_GOALS.defer_agent_goal_delivery_handoff(
+        payload = AGENT_GATEWAY.goal.defer_agent_goal_delivery_handoff(
             delivery_id,
             expected_revision=request.expected_revision,
         )
@@ -3572,10 +3571,10 @@ async def app_update_agent_goal(goal_id: str, request: AgentGoalUpdateRequest) -
     if "wake_every_minutes" in request.model_fields_set:
         params["wakeEveryMinutes"] = request.wake_every_minutes
     try:
-        payload = AGENT_GOALS.update_agent_goal(goal_id, params)
+        payload = AGENT_GATEWAY.goal.update_agent_goal(goal_id, params)
     except AgentGoalServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentGoals", AGENT_GOALS.list_agent_goals(limit=30, session_id=request.session_id or ""))
+    await EVENT_BUS.broadcast("agentGoals", AGENT_GATEWAY.goal.list_agent_goals(limit=30, session_id=request.session_id or ""))
     return payload
 
 
@@ -4201,7 +4200,7 @@ async def app_agent_approve_and_execute(
             return AGENT_GATEWAY.shell.execute_approved({"approval_id": approval_id})
         return AGENT_GATEWAY.apply_approved({"approval_id": approval_id})
 
-    linked = await asyncio.to_thread(AGENT_GOALS.agent_goal_delivery_for_approval, approval_id)
+    linked = await asyncio.to_thread(AGENT_GATEWAY.goal.agent_goal_delivery_for_approval, approval_id)
     linked_delivery = ensure_dict((linked or {}).get("delivery"))
     linked_delivery_id = str(linked_delivery.get("deliveryId") or "")
 
@@ -8073,13 +8072,13 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
         ),
         SessionStoreTarget(
             "session.agent-goals",
-            AGENT_GOALS.log_path,
+            AGENT_GATEWAY.goal.log_path,
             "app_owned",
             "jsonl",
             ("vrcforge.agent_goal.v1", "vrcforge.agent_goal.v2"),
             schema_required=True,
             required_string_fields=("event",),
-            guard_root=AGENT_GOALS.log_path.parent,
+            guard_root=AGENT_GATEWAY.goal.log_path.parent,
         ),
         SessionStoreTarget(
             "session.agent-progress",
@@ -8144,7 +8143,7 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
                 max_list_items=CHAT_TRANSCRIPTS_MAX_CHATS,
             )
         )
-    for result_path in sorted(AGENT_GOALS.result_dir.glob("*.json")):
+    for result_path in sorted(AGENT_GATEWAY.goal.result_dir.glob("*.json")):
         suffix = hashlib.sha256(result_path.name.encode()).hexdigest()[:16]
         targets.append(
             SessionStoreTarget(
@@ -8156,7 +8155,7 @@ def _session_store_targets(context: dict[str, Any]) -> list[SessionStoreTarget]:
                 schema_required=True,
                 required_string_fields=("deliveryId", "goalId", "clientTurnId", "completedAt"),
                 required_object_fields=("response",),
-                guard_root=AGENT_GOALS.result_dir,
+                guard_root=AGENT_GATEWAY.goal.result_dir,
             )
         )
     subagent_results = subagent_targets.result_dir
@@ -14752,7 +14751,7 @@ def memory_review_background_blocker() -> str:
 async def background_goal_monitor_loop() -> None:
     while True:
         try:
-            payload = await asyncio.to_thread(AGENT_GOALS.reconcile_agent_goal_watchdogs)
+            payload = await asyncio.to_thread(AGENT_GATEWAY.goal.reconcile_agent_goal_watchdogs)
             if payload.get("deliveries") or payload.get("reminders"):
                 await broadcast_background_goal_state({})
         except Exception as exc:  # noqa: BLE001 - monitoring must not interrupt the core runtime.
