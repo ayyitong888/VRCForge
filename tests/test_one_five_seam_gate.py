@@ -212,24 +212,6 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     ]
     assert {
         item["name"]
-        for item in groups["dashboard.provider-typed-root-owners"]["rootSymbols"]
-    } == {
-        "PROVIDER_MODEL_CATALOG",
-        "PROVIDER_CONFIGURATION",
-        "PROVIDER_TEXT_PROBE",
-        "PROVIDER_TESTS",
-    }
-    assert groups["dashboard.shader-vision-protection-typed-root-owner"][
-        "rootSymbols"
-    ] == [
-        {
-            "source": "dashboard_server.py",
-            "scope": "module",
-            "name": "SHADER_VISION_PROTECTION",
-        }
-    ]
-    assert {
-        item["name"]
         for item in groups["dashboard.wardrobe-outfit-root-owners"]["rootSymbols"]
     } == {
         "WARDROBE_ARTIFACT_READ",
@@ -271,6 +253,9 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.sub-agent-collaboration-root-owner" not in groups
     assert "dashboard.question-root-owner" not in groups
     assert "dashboard.provider-vision-host-proxy" not in groups
+    assert "dashboard.provider-typed-root-owners" not in groups
+    assert "dashboard.provider-vision-typed-root-owner" not in groups
+    assert "dashboard.shader-vision-protection-typed-root-owner" not in groups
     assert "dashboard.package-install-root-owners" not in groups
     assert "gateway.shell-policy-execution-owner" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
