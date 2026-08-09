@@ -6,8 +6,6 @@ import hashlib
 import json
 from collections import Counter
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import dashboard_server
 
@@ -61,32 +59,6 @@ def _observed_literal_event_types() -> list[str]:
             if isinstance(first_argument, ast.Constant) and isinstance(first_argument.value, str):
                 event_types.add(first_argument.value)
     return sorted(event_types)
-
-
-def test_composition_context_resolves_the_existing_facade_owners_late() -> None:
-    context = dashboard_server.DASHBOARD_COMPOSITION_CONTEXT
-
-    assert context.dashboard_state() is dashboard_server.DASHBOARD_STATE
-    assert context.runtime_state() is dashboard_server.DASHBOARD_RUNTIME
-    assert context.event_bus() is dashboard_server.EVENT_BUS
-    assert context.agent_gateway() is dashboard_server.AGENT_GATEWAY
-
-    replacements = {
-        "DASHBOARD_STATE": SimpleNamespace(owner="state"),
-        "DASHBOARD_RUNTIME": SimpleNamespace(owner="runtime"),
-        "EVENT_BUS": SimpleNamespace(owner="events"),
-        "AGENT_GATEWAY": SimpleNamespace(owner="gateway"),
-    }
-    with (
-        patch("dashboard_server.DASHBOARD_STATE", replacements["DASHBOARD_STATE"]),
-        patch("dashboard_server.DASHBOARD_RUNTIME", replacements["DASHBOARD_RUNTIME"]),
-        patch("dashboard_server.EVENT_BUS", replacements["EVENT_BUS"]),
-        patch("dashboard_server.AGENT_GATEWAY", replacements["AGENT_GATEWAY"]),
-    ):
-        assert context.dashboard_state() is replacements["DASHBOARD_STATE"]
-        assert context.runtime_state() is replacements["DASHBOARD_RUNTIME"]
-        assert context.event_bus() is replacements["EVENT_BUS"]
-        assert context.agent_gateway() is replacements["AGENT_GATEWAY"]
 
 
 def test_route_and_openapi_contract_match_the_1_5_entry_baseline() -> None:

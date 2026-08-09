@@ -143,7 +143,6 @@ from texture_import_settings import (
     build_wrapper_arguments as build_texture_import_settings_wrapper_arguments,
 )
 from context_compaction import ContextCompactionInputError, compact_context
-from dashboard_composition import DashboardCompositionContext
 from developer_options_guard import DeveloperOptionsChallengeError, DeveloperOptionsGuard
 from diagnostic_logging import (
     DiagnosticLogManager,
@@ -2240,15 +2239,6 @@ AGENT_QUESTIONS = AgentQuestionService(
             continuation_prompt=continuation_prompt,
         )
     ),
-)
-# 1.5 strangler seam: keep the existing facade globals authoritative until
-# each consumer migrates. Late-bound providers preserve test/host monkeypatches
-# and prevent an extracted domain from accidentally creating a second runtime.
-DASHBOARD_COMPOSITION_CONTEXT = DashboardCompositionContext(
-    dashboard_state=lambda: DASHBOARD_STATE,
-    runtime_state=lambda: DASHBOARD_RUNTIME,
-    event_bus=lambda: EVENT_BUS,
-    agent_gateway=lambda: AGENT_GATEWAY,
 )
 RUNTIME_LANE_BUDGET = RuntimeLaneBudget()
 BACKGROUND_GOAL_PREFLIGHT = ProviderPreflightCache(

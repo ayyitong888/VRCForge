@@ -298,16 +298,6 @@
       ]
     },
     {
-      "id": "dashboard.late-bound-composition-context",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "DASHBOARD_COMPOSITION_CONTEXT"}
-      ],
-      "classSymbol": {"source": "dashboard_composition.py", "class": "DashboardCompositionContext"},
-      "markers": [
-        {"source": "dashboard_server.py", "text": "# 1.5 strangler seam: keep the existing facade globals authoritative until"}
-      ]
-    },
-    {
       "id": "gateway.approval-transaction-host-proxy",
       "rootSymbols": [
         {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_approval_transactions"}
