@@ -1,4 +1,4 @@
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { TFunction } from "i18next";
 import type { ActiveView } from "../lib/app-view";
 import {
@@ -29,6 +29,7 @@ import type {
   SkillPackageEntry,
 } from "../lib/api";
 import type { PathToSkillDraftSeed, PathToSkillOperationSummary } from "../lib/path-to-skill-context";
+import { LatestForegroundRequestGate } from "../lib/request-priority";
 import { emptySkillDraft } from "../lib/skill-draft";
 
 type UseSkillsWorkspaceControllerParams = {
@@ -42,6 +43,8 @@ type UseSkillsWorkspaceControllerParams = {
   setError: (message: string) => void;
   t: TFunction;
 };
+
+const SKILL_REGISTRY_BACKGROUND_REFRESH_MS = 30_000;
 
 export function useSkillsWorkspaceController({
   endpoint,
@@ -66,11 +69,41 @@ export function useSkillsWorkspaceController({
   const [skillPackageMessage, setSkillPackageMessage] = useState("");
   const [skillPackageError, setSkillPackageError] = useState("");
   const [pathToSkillDraftSeed, setPathToSkillDraftSeed] = useState<PathToSkillDraftSeed | null>(null);
+  const skillRegistryRequestGateRef = useRef(new LatestForegroundRequestGate());
 
   const skills = useMemo(() => skillRegistry?.skills ?? bootstrapSkills, [bootstrapSkills, skillRegistry]);
   const skillCount = skillRegistry?.count ?? skills.length;
 
+  useEffect(() => {
+    if (!runtimeConnected) {
+      return;
+    }
+    let active = true;
+    const refreshRegistry = () => {
+      const token = skillRegistryRequestGateRef.current.beginBackground();
+      if (token === null) {
+        return;
+      }
+      void fetchSkills(endpoint)
+        .then((payload) => {
+          if (active && skillRegistryRequestGateRef.current.isCurrent(token)) {
+            setSkillRegistry(payload);
+          }
+        })
+        .catch(() => {
+          // Startup keeps the chat surface usable; opening Skills retries visibly.
+        });
+    };
+    refreshRegistry();
+    const timer = window.setInterval(refreshRegistry, SKILL_REGISTRY_BACKGROUND_REFRESH_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [endpoint, runtimeConnected]);
+
   async function openSkills(options?: { preserveCapturedPath?: boolean }) {
+    const registryToken = skillRegistryRequestGateRef.current.beginForeground();
     if (!options?.preserveCapturedPath) {
       setPathToSkillDraftSeed(null);
     }
@@ -85,15 +118,24 @@ export function useSkillsWorkspaceController({
         }
         targetEndpoint = readyEndpoint;
       }
-      const [payload] = await Promise.all([fetchSkills(targetEndpoint), loadSkillPackages(targetEndpoint)]);
+      const [payload, , check] = await Promise.all([
+        fetchSkills(targetEndpoint),
+        loadSkillPackages(targetEndpoint),
+        checkSkills(targetEndpoint),
+      ]);
+      if (!skillRegistryRequestGateRef.current.isCurrent(registryToken)) {
+        return;
+      }
       setSkillRegistry(payload);
-      setSkillCheck(await checkSkills(targetEndpoint));
+      setSkillCheck(check);
       if (!selectedSkillName && payload.skills.length > 0) {
         const firstUserSkill = payload.skills.find((skill) => skill.source === "user") || payload.skills[0];
         selectSkill(firstUserSkill);
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      skillRegistryRequestGateRef.current.endForeground(registryToken);
     }
   }
 
@@ -140,6 +182,7 @@ export function useSkillsWorkspaceController({
   }
 
   async function importVskPackage(packagePath: string) {
+    const registryToken = skillRegistryRequestGateRef.current.beginAuthoritative();
     setLoadingSkillPackages(true);
     setSkillPackageMessage("");
     setSkillPackageError("");
@@ -147,8 +190,14 @@ export function useSkillsWorkspaceController({
       const payload = await importSkillPackage(endpoint, { packagePath });
       setSkillPackageMessage(payload.changed === false ? "Package already installed" : t("package.messages.packageImported"));
       const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
-      setSkillRegistry(skillsPayload);
-      setSkillCheck(await checkSkills(endpoint));
+      const committedRevision = skillRegistryRequestGateRef.current.commitAuthoritative(registryToken);
+      if (committedRevision !== null) {
+        setSkillRegistry(skillsPayload);
+      }
+      const check = await checkSkills(endpoint);
+      if (committedRevision !== null && skillRegistryRequestGateRef.current.isCurrent(committedRevision)) {
+        setSkillCheck(check);
+      }
       await refresh(endpoint);
       return payload;
     } catch (cause) {
@@ -156,6 +205,7 @@ export function useSkillsWorkspaceController({
       setSkillPackageError(message);
       throw cause;
     } finally {
+      skillRegistryRequestGateRef.current.endForeground(registryToken);
       setLoadingSkillPackages(false);
     }
   }
@@ -202,6 +252,7 @@ export function useSkillsWorkspaceController({
   }
 
   async function setVskPackageEnabled(skillPackageId: string, enabled: boolean) {
+    const registryToken = skillRegistryRequestGateRef.current.beginAuthoritative();
     setLoadingSkillPackages(true);
     setSkillPackageMessage("");
     setSkillPackageError("");
@@ -209,8 +260,14 @@ export function useSkillsWorkspaceController({
       const payload = await setSkillPackageEnabled(endpoint, skillPackageId, { enabled, syncProjectedSkill: true });
       setSkillPackageMessage(enabled ? t("package.messages.packageEnabled") : t("package.messages.packageDisabled"));
       const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
-      setSkillRegistry(skillsPayload);
-      setSkillCheck(await checkSkills(endpoint));
+      const committedRevision = skillRegistryRequestGateRef.current.commitAuthoritative(registryToken);
+      if (committedRevision !== null) {
+        setSkillRegistry(skillsPayload);
+      }
+      const check = await checkSkills(endpoint);
+      if (committedRevision !== null && skillRegistryRequestGateRef.current.isCurrent(committedRevision)) {
+        setSkillCheck(check);
+      }
       await refresh(endpoint);
       return payload;
     } catch (cause) {
@@ -218,11 +275,13 @@ export function useSkillsWorkspaceController({
       setSkillPackageError(message);
       throw cause;
     } finally {
+      skillRegistryRequestGateRef.current.endForeground(registryToken);
       setLoadingSkillPackages(false);
     }
   }
 
   async function uninstallVskPackage(skillPackageId: string) {
+    const registryToken = skillRegistryRequestGateRef.current.beginAuthoritative();
     setLoadingSkillPackages(true);
     setSkillPackageMessage("");
     setSkillPackageError("");
@@ -230,8 +289,14 @@ export function useSkillsWorkspaceController({
       const payload = await uninstallSkillPackage(endpoint, skillPackageId, { removeProjectedSkill: true });
       setSkillPackageMessage(t("package.messages.packageUninstalled"));
       const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
-      setSkillRegistry(skillsPayload);
-      setSkillCheck(await checkSkills(endpoint));
+      const committedRevision = skillRegistryRequestGateRef.current.commitAuthoritative(registryToken);
+      if (committedRevision !== null) {
+        setSkillRegistry(skillsPayload);
+      }
+      const check = await checkSkills(endpoint);
+      if (committedRevision !== null && skillRegistryRequestGateRef.current.isCurrent(committedRevision)) {
+        setSkillCheck(check);
+      }
       await refresh(endpoint);
       return payload;
     } catch (cause) {
@@ -239,15 +304,27 @@ export function useSkillsWorkspaceController({
       setSkillPackageError(message);
       throw cause;
     } finally {
+      skillRegistryRequestGateRef.current.endForeground(registryToken);
       setLoadingSkillPackages(false);
     }
   }
 
   async function refreshSkillWorkspaceState() {
-    const [skillsPayload] = await Promise.all([fetchSkills(endpoint), loadSkillPackages(endpoint)]);
-    setSkillRegistry(skillsPayload);
-    setSkillCheck(await checkSkills(endpoint));
-    await refresh(endpoint);
+    const registryToken = skillRegistryRequestGateRef.current.beginForeground();
+    try {
+      const [skillsPayload, , check] = await Promise.all([
+        fetchSkills(endpoint),
+        loadSkillPackages(endpoint),
+        checkSkills(endpoint),
+      ]);
+      if (skillRegistryRequestGateRef.current.isCurrent(registryToken)) {
+        setSkillRegistry(skillsPayload);
+        setSkillCheck(check);
+      }
+      await refresh(endpoint);
+    } finally {
+      skillRegistryRequestGateRef.current.endForeground(registryToken);
+    }
   }
 
   async function setVskPackageSafeMode(enabled: boolean, reason?: string) {
@@ -355,6 +432,7 @@ export function useSkillsWorkspaceController({
       return;
     }
     setSavingSkill(true);
+    const registryToken = skillRegistryRequestGateRef.current.beginAuthoritative();
     setError("");
     try {
       let targetEndpoint = endpoint;
@@ -368,14 +446,21 @@ export function useSkillsWorkspaceController({
       const payload = selectedSkillName
         ? await updateSkill(targetEndpoint, selectedSkillName, skillDraft)
         : await createSkill(targetEndpoint, skillDraft);
-      setSkillRegistry(payload);
-      setSkillCheck(await checkSkills(targetEndpoint));
-      setSelectedSkillName(payload.skill.name);
-      setSkillDraft({ ...payload.skill });
+      const committedRevision = skillRegistryRequestGateRef.current.commitAuthoritative(registryToken);
+      if (committedRevision !== null) {
+        setSkillRegistry(payload);
+      }
+      const check = await checkSkills(targetEndpoint);
+      if (committedRevision !== null && skillRegistryRequestGateRef.current.isCurrent(committedRevision)) {
+        setSkillCheck(check);
+        setSelectedSkillName(payload.skill.name);
+        setSkillDraft({ ...payload.skill });
+      }
       await refresh(targetEndpoint);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      skillRegistryRequestGateRef.current.endForeground(registryToken);
       setSavingSkill(false);
     }
   }
@@ -385,17 +470,25 @@ export function useSkillsWorkspaceController({
       return;
     }
     setSavingSkill(true);
+    const registryToken = skillRegistryRequestGateRef.current.beginAuthoritative();
     setError("");
     try {
       const payload = await deleteSkill(endpoint, selectedSkillName);
-      setSkillRegistry(payload);
-      setSkillCheck(await checkSkills(endpoint));
-      setSelectedSkillName("");
-      setSkillDraft(emptySkillDraft());
+      const committedRevision = skillRegistryRequestGateRef.current.commitAuthoritative(registryToken);
+      if (committedRevision !== null) {
+        setSkillRegistry(payload);
+      }
+      const check = await checkSkills(endpoint);
+      if (committedRevision !== null && skillRegistryRequestGateRef.current.isCurrent(committedRevision)) {
+        setSkillCheck(check);
+        setSelectedSkillName("");
+        setSkillDraft(emptySkillDraft());
+      }
       await refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
+      skillRegistryRequestGateRef.current.endForeground(registryToken);
       setSavingSkill(false);
     }
   }

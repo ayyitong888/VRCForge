@@ -79,7 +79,8 @@ def test_project_without_a_session_does_not_load_or_poll_historical_runtime_acti
     assert no_session < fetch_snapshot
     assert "setAgentApprovals(null)" not in source[no_session:fetch_snapshot]
     assert "setAgentApprovals(null);\n  }, [activeRuntimeProjectPath]" not in app
-    assert "setAgentApprovals(runtimeConnected && bootstrap ? bootstrap.approvals ?? [] : null)" in app
+    assert "bootstrap.approvalsState?.ok !== false" in app
+    assert "? bootstrap.approvals ?? []" in app
     assert "clearScopedRuntimeProjection();" in source
     clear_definition = source.index("function clearScopedRuntimeProjection()")
     clear_end = source.index("useEffect(() =>", clear_definition)
@@ -214,6 +215,49 @@ def test_startup_loads_app_and_locale_in_parallel_and_records_visible_shell() ->
     assert "metrics.centerUsableMs <= metrics.sidebarsRequestedMs" in probe_source
     assert "metrics.sidebarsRequestedMs <= metrics.sidebarsMountedMs" in probe_source
     assert "process.exitCode = 1" in probe_source
+
+
+def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously() -> None:
+    app = _read("src/App.tsx")
+    api = _read("src/lib/api/app.ts")
+    skills = _read("src/hooks/use-skills-workspace-controller.ts")
+    commands = _read("src-tauri/src/commands.rs")
+
+    assert "{ ...options, deferAgentCatalog: true }" in app
+    assert 'fetchBootstrap(target, { deferAgentCatalog: true })' in app
+    assert "bootstrap?.agentManifest?.skills ?? []" in app
+    assert "const bootstrapRequestSequenceRef = useRef(0)" in app
+    assert "const bootstrapForegroundRequestRef = useRef(0)" in app
+    assert app.count("const sequence = ++bootstrapRequestSequenceRef.current") >= 2
+    assert app.count("sequence !== bootstrapRequestSequenceRef.current") >= 2
+    refresh_start = app.index("async function refresh(target = endpoint")
+    silent_start = app.index("async function refreshSilently", refresh_start)
+    refresh_body = app[refresh_start:silent_start]
+    assert "bootstrapForegroundRequestRef.current = sequence" in refresh_body
+    assert "bootstrapForegroundRequestRef.current === sequence" in refresh_body
+    silent_end = app.index("async function refreshFullHealth", silent_start)
+    silent_body = app[silent_start:silent_end]
+    assert silent_body.index("if (bootstrapForegroundRequestRef.current !== 0)") < silent_body.index(
+        "fetchBootstrap(target"
+    )
+    assert "deferAgentCatalog: Boolean(options.deferAgentCatalog)" in api
+    assert 'url.searchParams.set("deferAgentCatalog", "true")' in api
+    assert "defer_agent_catalog: Option<bool>" in commands
+    assert 'query.push("deferAgentCatalog=true")' in commands
+    assert "useEffect(() =>" in skills
+    assert "SKILL_REGISTRY_BACKGROUND_REFRESH_MS = 30_000" in skills
+    assert "const refreshRegistry = () =>" in skills
+    assert "void fetchSkills(endpoint)" in skills
+    assert "setSkillRegistry(payload)" in skills
+    assert "window.setInterval(refreshRegistry, SKILL_REGISTRY_BACKGROUND_REFRESH_MS)" in skills
+    assert "new LatestForegroundRequestGate()" in skills
+    assert "skillRegistryRequestGateRef.current.beginBackground()" in skills
+    assert skills.count("skillRegistryRequestGateRef.current.beginForeground()") == 2
+    assert skills.count("skillRegistryRequestGateRef.current.beginAuthoritative()") == 5
+    assert skills.count("skillRegistryRequestGateRef.current.commitAuthoritative(registryToken)") == 5
+    assert "skillRegistryRequestGateRef.current.isCurrent" in skills
+    assert "skillRegistryRequestGateRef.current.endForeground" in skills
+    assert "bootstrap.approvalsState?.ok !== false" in app
 
 
 def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerless() -> None:

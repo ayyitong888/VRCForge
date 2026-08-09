@@ -339,6 +339,8 @@ export default function App() {
     }>
   >([]);
   const healthRefreshInFlightRef = useRef(false);
+  const bootstrapRequestSequenceRef = useRef(0);
+  const bootstrapForegroundRequestRef = useRef(0);
   const desktopEventBootstrapTimerRef = useRef<number | null>(null);
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
@@ -501,7 +503,7 @@ export default function App() {
   } = useSkillsWorkspaceController({
     endpoint,
     runtimeConnected,
-    bootstrapSkills: bootstrap?.agentManifest.skills ?? [],
+    bootstrapSkills: bootstrap?.agentManifest?.skills ?? [],
     activeView,
     setActiveView,
     startRuntime,
@@ -585,7 +587,6 @@ export default function App() {
         .join("|")}`;
   const showDoctorStartupPrompt =
     activeView !== "doctor" && dismissedDoctorPromptSignature !== doctorPromptSignature && (hasStartupIssue || hasEnvironmentAttention);
-  const toolCount = bootstrap?.agentManifest.toolCount ?? 0;
   const slashCommands = useMemo(() => {
     const list: Array<{ name: string; title: string }> = [
       { name: "compact", title: t("chat.slashCompact") },
@@ -1424,8 +1425,12 @@ export default function App() {
   }, [bootstrap?.advancedSettings]);
 
   useEffect(() => {
-    setAgentApprovals(runtimeConnected && bootstrap ? bootstrap.approvals ?? [] : null);
-  }, [bootstrap?.approvals, runtimeConnected]);
+    setAgentApprovals(
+      runtimeConnected && bootstrap && bootstrap.approvalsState?.ok !== false
+        ? bootstrap.approvals ?? []
+        : null,
+    );
+  }, [bootstrap?.approvals, bootstrap?.approvalsState?.ok, runtimeConnected]);
 
   useEffect(() => {
     if (initialOnboardingState.migrateLanguageGateCompletion) {
@@ -1771,6 +1776,8 @@ export default function App() {
   }
 
   function handleRuntimeSessionFailure(message: string) {
+    bootstrapRequestSequenceRef.current += 1;
+    bootstrapForegroundRequestRef.current = 0;
     setAppSessionToken("");
     setBootstrap(null);
     setStartupIssue(message);
@@ -1854,18 +1861,44 @@ export default function App() {
 
   async function refresh(target = endpoint, options: { refreshProjects?: boolean } = {}) {
     setError("");
-    const payload = await fetchBootstrap(target, options);
-    setBootstrap(payload);
-    setStartupIssue("");
+    const sequence = ++bootstrapRequestSequenceRef.current;
+    bootstrapForegroundRequestRef.current = sequence;
+    try {
+      const payload = await fetchBootstrap(target, { ...options, deferAgentCatalog: true });
+      if (sequence !== bootstrapRequestSequenceRef.current) {
+        return;
+      }
+      setBootstrap(payload);
+      setStartupIssue("");
+    } catch (cause) {
+      if (sequence !== bootstrapRequestSequenceRef.current) {
+        return;
+      }
+      throw cause;
+    } finally {
+      if (bootstrapForegroundRequestRef.current === sequence) {
+        bootstrapForegroundRequestRef.current = 0;
+      }
+    }
   }
 
   async function refreshSilently(target = endpoint) {
+    if (bootstrapForegroundRequestRef.current !== 0) {
+      return;
+    }
+    const sequence = ++bootstrapRequestSequenceRef.current;
     try {
-      const payload = await fetchBootstrap(target);
+      const payload = await fetchBootstrap(target, { deferAgentCatalog: true });
+      if (sequence !== bootstrapRequestSequenceRef.current) {
+        return;
+      }
       setBootstrap(payload);
       setStartupIssue("");
       setError((current) => (current.toLowerCase().includes("fetch") ? "" : current));
     } catch (cause) {
+      if (sequence !== bootstrapRequestSequenceRef.current) {
+        return;
+      }
       const message = cause instanceof Error ? cause.message : String(cause);
       if (isRuntimeSessionVerificationError(message)) {
         handleRuntimeSessionFailure(message);

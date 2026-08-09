@@ -1043,10 +1043,11 @@ export type AppBootstrap = {
     projects?: ProjectSnapshot;
     state?: ProjectSelectionState;
   };
-  agentManifest: AgentManifest;
+  agentManifest?: AgentManifest;
+  agentCatalogDeferred?: boolean;
   apiConfig?: ApiConfig;
   visionConfig?: VisionConfig;
-  agentHealth: {
+  agentHealth?: {
     ok: boolean;
     enabled: boolean;
     pendingApprovalCount: number;
@@ -1054,6 +1055,10 @@ export type AppBootstrap = {
   permission: PermissionState;
   advancedSettings?: AdvancedSettingsState;
   approvals: AgentApproval[];
+  approvalsState?: {
+    ok: boolean;
+    error?: string;
+  };
 };
 
 export type AppHealth = AppBootstrap["health"];

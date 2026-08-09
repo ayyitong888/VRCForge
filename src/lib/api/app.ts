@@ -1,15 +1,25 @@
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import type { AdvancedSettingsState, ApiConfig, AppBootstrap, AppHealth, AppSessionHandshake, DeveloperOptionsChallenge, DiagnosticLogLevel, DiagnosticsStatus, DoctorFixMode, DoctorFixResult, DoctorReport, PermissionState, ProjectSelectionState, ProjectSnapshot, ProviderApiType, ProviderCapabilityKey, ProviderModelInfo, SupportBundleResult, UnityMcpRepairResult, UnityReadinessRefresh, VisionConfig, WorkspaceDiffSummary } from "./types";
 
-export async function fetchBootstrap(endpoint: string, options: { refreshProjects?: boolean } = {}): Promise<AppBootstrap> {
+export async function fetchBootstrap(
+  endpoint: string,
+  options: { refreshProjects?: boolean; deferAgentCatalog?: boolean } = {},
+): Promise<AppBootstrap> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<AppBootstrap>("fetch_app_bootstrap", {
-      request: { refreshProjects: Boolean(options.refreshProjects), timeoutMs: 30000 },
+      request: {
+        refreshProjects: Boolean(options.refreshProjects),
+        deferAgentCatalog: Boolean(options.deferAgentCatalog),
+        timeoutMs: 30000,
+      },
     });
   }
   const url = new URL(`${endpoint}/api/app/bootstrap`);
   if (options.refreshProjects) {
     url.searchParams.set("refreshProjects", "true");
+  }
+  if (options.deferAgentCatalog) {
+    url.searchParams.set("deferAgentCatalog", "true");
   }
   return requestJson<AppBootstrap>(url.toString(), { preferTauriIpc: true });
 }

@@ -1204,6 +1204,51 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(payload["agentHealth"]["ok"])
         self.assertEqual(payload["permission"]["executionMode"], "approval")
         self.assertEqual(payload["approvals"], [])
+        self.assertFalse(payload["approvalsState"]["ok"])
+        self.assertEqual(payload["health"]["components"]["agentGateway"]["status"], "error")
+
+    def test_app_bootstrap_can_defer_heavy_agent_catalog_without_losing_status(self) -> None:
+        with (
+            patch.object(dashboard_server.AGENT_GATEWAY, "build_manifest", side_effect=AssertionError("manifest scanned")) as manifest,
+            patch.object(dashboard_server.AGENT_GATEWAY, "build_health", side_effect=AssertionError("agent health scanned")) as health,
+            TestClient(dashboard_server.app) as client,
+        ):
+            response = client.get("/api/app/bootstrap", params={"deferAgentCatalog": "true"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["agentCatalogDeferred"])
+        self.assertNotIn("agentManifest", payload)
+        self.assertNotIn("agentHealth", payload)
+        self.assertTrue(payload["approvalsState"]["ok"])
+        self.assertIn(payload["health"]["components"]["agentGateway"]["status"], {"ok", "warning"})
+        self.assertIn("pendingApprovalCount", payload["health"]["components"]["agentGateway"]["detail"])
+        manifest.assert_not_called()
+        health.assert_not_called()
+
+    def test_deferred_bootstrap_marks_gateway_unknown_when_approvals_cannot_load(self) -> None:
+        with (
+            patch.object(
+                type(dashboard_server.AGENT_GATEWAY.approval_transactions),
+                "list_approvals",
+                side_effect=RuntimeError("approval store unavailable"),
+            ),
+            patch.object(dashboard_server.AGENT_GATEWAY, "build_manifest") as manifest,
+            patch.object(dashboard_server.AGENT_GATEWAY, "build_health") as health,
+            TestClient(dashboard_server.app) as client,
+        ):
+            response = client.get("/api/app/bootstrap", params={"deferAgentCatalog": "true"})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["approvalsState"]["ok"])
+        self.assertEqual(payload["approvals"], [])
+        gateway = payload["health"]["components"]["agentGateway"]
+        self.assertEqual(gateway["status"], "error")
+        self.assertIsNone(gateway["detail"]["pendingApprovalCount"])
+        manifest.assert_not_called()
+        health.assert_not_called()
 
     def test_mcp_startup_failure_does_not_block_app_bootstrap(self) -> None:
         with patch("dashboard_server.create_agent_mcp_app", side_effect=RuntimeError("mcp broken")):

@@ -2689,12 +2689,34 @@ def request_internal_runtime_shutdown(request: Request, background_tasks: Backgr
 
 
 @app.get("/api/app/bootstrap")
-def read_agentic_app_bootstrap(refreshProjects: bool = False) -> dict[str, Any]:  # noqa: N803 - query param is camelCase for the app API.
-    return build_agentic_app_bootstrap_payload(refresh_projects=refreshProjects)
+def read_agentic_app_bootstrap(
+    refreshProjects: bool = False,  # noqa: N803 - query param is camelCase for the app API.
+    deferAgentCatalog: bool = False,  # noqa: N803 - query param is camelCase for the app API.
+) -> dict[str, Any]:
+    return build_agentic_app_bootstrap_payload(
+        refresh_projects=refreshProjects,
+        defer_agent_catalog=deferAgentCatalog,
+    )
 
 
-def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> dict[str, Any]:
-    return {
+def build_agentic_app_bootstrap_payload(
+    *,
+    refresh_projects: bool = False,
+    defer_agent_catalog: bool = False,
+) -> dict[str, Any]:
+    approval_snapshot = safe_approval_snapshot()
+    approvals = approval_snapshot["approvals"]
+    agent_manifest = None if defer_agent_catalog else safe_agent_manifest()
+    agent_health = (
+        safe_startup_agent_health(
+            approvals,
+            approvals_ok=bool(approval_snapshot["state"].get("ok")),
+            approvals_error=str(approval_snapshot["state"].get("error") or ""),
+        )
+        if defer_agent_catalog
+        else safe_agent_health()
+    )
+    payload = {
         "ok": True,
         "app": {
             "name": "VRCForge",
@@ -2703,17 +2725,26 @@ def build_agentic_app_bootstrap_payload(*, refresh_projects: bool = False) -> di
             "browserRequired": False,
             "legacyDashboardDebugOnly": True,
         },
-        "health": build_bootstrap_app_health(refresh_projects=refresh_projects),
+        "health": build_bootstrap_app_health(
+            refresh_projects=refresh_projects,
+            agent_health=agent_health,
+            agent_manifest=agent_manifest,
+        ),
         "apiConfig": PROVIDER_CONFIGURATION.serialize_app_api_config(),
         "visionConfig": PROVIDER_CONFIGURATION.serialize_app_vision_config(),
-        "agentManifest": safe_agent_manifest(),
-        "agentHealth": safe_agent_health(),
         "permission": safe_permission_state(),
         "advancedSettings": AGENT_GATEWAY.advanced_settings_state(),
         # Pending writes form one App-wide inbox. Each decision still rechecks
         # the approval's own exact projectRoot before execution.
-        "approvals": safe_approval_list(),
+        "approvals": approvals,
+        "approvalsState": approval_snapshot["state"],
     }
+    if defer_agent_catalog:
+        payload["agentCatalogDeferred"] = True
+    else:
+        payload["agentManifest"] = agent_manifest
+        payload["agentHealth"] = agent_health
+    return payload
 
 
 def run_workspace_git(root: Path, args: list[str], timeout_seconds: int = 10) -> dict[str, Any]:
@@ -6955,9 +6986,14 @@ def build_agentic_app_health() -> dict[str, Any]:
     return payload
 
 
-def build_bootstrap_app_health(*, refresh_projects: bool = False) -> dict[str, Any]:
+def build_bootstrap_app_health(
+    *,
+    refresh_projects: bool = False,
+    agent_health: dict[str, Any] | None = None,
+    agent_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     api_config = PROVIDER_CONFIGURATION.serialize_app_api_config()
-    agent_health = safe_agent_health()
+    agent_health = agent_health if agent_health is not None else safe_agent_health()
     unity_status = CURRENT_UNITY_STATUS
     projects = PROJECT_SNAPSHOT_SELECTION.bootstrap_project_snapshot_payload() if refresh_projects else PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False)
     dashboard_index = DASHBOARD_DIR / "index.html"
@@ -6992,13 +7028,24 @@ def build_bootstrap_app_health(*, refresh_projects: bool = False) -> dict[str, A
             {"provider": api_config.get("provider"), "model": api_config.get("model")},
         ),
         "agentGateway": health_component(
-            "ok" if agent_health.get("enabled") else "warning",
-            "Agent Gateway is enabled." if agent_health.get("enabled") else "Agent Gateway is disabled until enabled in the Launcher.",
+            "error"
+            if agent_health.get("ok") is False or (agent_manifest is not None and agent_manifest.get("ok") is False)
+            else "ok"
+            if agent_health.get("enabled")
+            else "warning",
+            "Agent Gateway status could not be loaded."
+            if agent_health.get("ok") is False
+            else "Agent catalog could not be loaded."
+            if agent_manifest is not None and agent_manifest.get("ok") is False
+            else "Agent Gateway is enabled."
+            if agent_health.get("enabled")
+            else "Agent Gateway is disabled until enabled in the Launcher.",
             {
                 "mcpUrl": agent_health.get("mcpUrl"),
                 "restUrl": agent_health.get("restUrl"),
                 "pendingApprovalCount": agent_health.get("pendingApprovalCount"),
                 "allowRoslynAdvanced": agent_health.get("allowRoslynAdvanced"),
+                "error": agent_health.get("error") or (agent_manifest or {}).get("error"),
             },
         ),
     }
@@ -7102,6 +7149,39 @@ def safe_agent_health() -> dict[str, Any]:
         }
 
 
+def safe_startup_agent_health(
+    approvals: list[dict[str, Any]],
+    *,
+    approvals_ok: bool = True,
+    approvals_error: str = "",
+) -> dict[str, Any]:
+    """Build the status-light subset without scanning tools or Skill storage."""
+
+    try:
+        config = AGENT_GATEWAY.ensure_config()
+        pending_count = sum(1 for item in approvals if item.get("status") == "pending")
+        return {
+            "ok": approvals_ok,
+            "runtimeAlive": True,
+            "enabled": config.enabled,
+            "requiresToken": config.require_token,
+            "mcpUrl": f"{AGENT_GATEWAY.public_base_url}/mcp",
+            "restUrl": f"{AGENT_GATEWAY.public_base_url}/api/agent",
+            "pendingApprovalCount": pending_count if approvals_ok else None,
+            "allowWriteRequests": config.allow_write_requests,
+            "allowRoslynAdvanced": AGENT_GATEWAY.roslyn_available(config),
+            **({"error": approvals_error or "Approval state could not be loaded."} if not approvals_ok else {}),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "enabled": False,
+            "pendingApprovalCount": 0,
+            "allowRoslynAdvanced": False,
+            "error": str(exc),
+        }
+
+
 def safe_permission_state() -> dict[str, Any]:
     try:
         return AGENT_GATEWAY.approval_transactions.permission_state()
@@ -7115,11 +7195,21 @@ def safe_permission_state() -> dict[str, Any]:
         }
 
 
-def safe_approval_list(project_root: str = "") -> list[dict[str, Any]]:
+def safe_approval_snapshot(project_root: str = "") -> dict[str, Any]:
     try:
-        return AGENT_GATEWAY.approval_transactions.list_approvals(include_expired=False, project_root=project_root)
-    except Exception:  # noqa: BLE001
-        return []
+        return {
+            "approvals": AGENT_GATEWAY.approval_transactions.list_approvals(
+                include_expired=False,
+                project_root=project_root,
+            ),
+            "state": {"ok": True},
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"approvals": [], "state": {"ok": False, "error": str(exc)}}
+
+
+def safe_approval_list(project_root: str = "") -> list[dict[str, Any]]:
+    return safe_approval_snapshot(project_root)["approvals"]
 
 
 def load_diagnostics_config() -> dict[str, Any]:

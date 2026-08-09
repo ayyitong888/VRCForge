@@ -270,6 +270,7 @@ pub(crate) struct DesktopExternalAgentConnectorActionRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopBootstrapRequest {
     refresh_projects: Option<bool>,
+    defer_agent_catalog: Option<bool>,
     timeout_ms: Option<u64>,
 }
 
@@ -1086,20 +1087,50 @@ pub async fn fetch_app_bootstrap(
     request: DesktopBootstrapRequest,
 ) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
-        let suffix = if request.refresh_projects.unwrap_or(false) {
-            "?refreshProjects=true"
-        } else {
-            ""
-        };
         backend_json_request(
             "GET",
-            format!("/api/app/bootstrap{suffix}"),
+            format!("/api/app/bootstrap{}", bootstrap_query(&request)),
             None,
             request.timeout_ms.or(Some(30_000)),
         )
         .map(sanitize_webview_response)
     })
     .await
+}
+
+pub(crate) fn bootstrap_query(request: &DesktopBootstrapRequest) -> String {
+    let mut query = Vec::new();
+    if request.refresh_projects.unwrap_or(false) {
+        query.push("refreshProjects=true");
+    }
+    if request.defer_agent_catalog.unwrap_or(false) {
+        query.push("deferAgentCatalog=true");
+    }
+    if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", query.join("&"))
+    }
+}
+
+#[cfg(test)]
+mod bootstrap_transport_tests {
+    use super::{bootstrap_query, DesktopBootstrapRequest};
+
+    #[test]
+    fn deferred_catalog_deserializes_and_reaches_the_backend_query() {
+        let request: DesktopBootstrapRequest = serde_json::from_value(serde_json::json!({
+            "refreshProjects": true,
+            "deferAgentCatalog": true,
+            "timeoutMs": 30000
+        }))
+        .expect("bootstrap request should deserialize");
+
+        assert_eq!(
+            bootstrap_query(&request),
+            "?refreshProjects=true&deferAgentCatalog=true"
+        );
+    }
 }
 
 #[tauri::command]
