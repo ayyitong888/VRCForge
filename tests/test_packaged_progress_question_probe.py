@@ -85,8 +85,7 @@ def test_question_probe_contract_covers_auth_scope_redaction_and_restart() -> No
     assert "no chat write was attempted" in source
     assert source.index("foreignProjectSources.length > 0") < source.index('tauriInvoke(cdp, "save_chats", {')
     assert 'id: `${marker}-ui-chat`' in source
-    assert 'sessionId: ""' in source
-    assert 'sessionId: `${marker}-ui-session`' not in source
+    assert 'sessionId: `${marker}-ui-session`' in source
     assert "projectPath: projectARoot" in source
     assert 'const sidebar = document.querySelector("aside")' in source
     assert "await reloadRenderer(cdp)" in source
@@ -97,7 +96,9 @@ def test_question_probe_contract_covers_auth_scope_redaction_and_restart() -> No
     assert 'appApi("/api/app/agent/progress/replace", {' in source
     assert "Array.from({ length: 8 }" in source
     assert "optionScroller.scrollHeight > optionScroller.clientHeight" in source
-    assert "progressInRightRail" in source
+    assert "progressInActivityPanel" in source
+    assert 'document.querySelector("[data-vrcforge-runtime-activity-panel]")' in source
+    assert "environmentPanelFound && activityPanelFound && !activityInsideEnvironment" in source
     assert "questionInRightRail" in source
     assert "recommendedVisible" in source
     assert "phase.clickOption = await evalValue" in source

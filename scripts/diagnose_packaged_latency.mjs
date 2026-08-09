@@ -211,6 +211,40 @@ function summarizeNetwork(events) {
     }));
 }
 
+const STARTUP_SHELL_BUDGET_MS = 100;
+const BACKEND_INVOKE_BUDGET_MS = 100;
+const CACHED_BOOTSTRAP_BUDGET_MS = 100;
+
+function evaluateStartupBudget(snapshot) {
+  const metrics = snapshot?.vrcforge || {};
+  const checks = {
+    startupShellPainted: Number.isFinite(metrics.startupShellPaintedMs)
+      && metrics.startupShellPaintedMs <= STARTUP_SHELL_BUDGET_MS,
+    backendInvoke: Number.isFinite(metrics.startBackendInvokeMs)
+      && metrics.startBackendInvokeMs <= BACKEND_INVOKE_BUDGET_MS,
+    cachedBootstrap: Number.isFinite(metrics.bootstrapRefreshMs)
+      && metrics.bootstrapRefreshMs <= CACHED_BOOTSTRAP_BUDGET_MS,
+    startupBeforeCenter: Number.isFinite(metrics.startupShellPaintedMs)
+      && Number.isFinite(metrics.shellPaintedMs)
+      && metrics.startupShellPaintedMs <= metrics.shellPaintedMs,
+    centerBeforeSidebars: Number.isFinite(metrics.centerUsableMs)
+      && Number.isFinite(metrics.sidebarsRequestedMs)
+      && Number.isFinite(metrics.sidebarsMountedMs)
+      && metrics.centerUsableMs <= metrics.sidebarsRequestedMs
+      && metrics.sidebarsRequestedMs <= metrics.sidebarsMountedMs,
+  };
+  return {
+    ok: Object.values(checks).every(Boolean),
+    budgetsMs: {
+      startupShellPainted: STARTUP_SHELL_BUDGET_MS,
+      backendInvoke: BACKEND_INVOKE_BUDGET_MS,
+      cachedBootstrap: CACHED_BOOTSTRAP_BUDGET_MS,
+    },
+    checks,
+    coldBackendReadyEventMs: Number.isFinite(metrics.backendReadyEventMs) ? metrics.backendReadyEventMs : null,
+  };
+}
+
 async function main() {
   await mkdir(dirname(outPath), { recursive: true });
   await closeExistingVrcforgeProcesses();
@@ -301,6 +335,23 @@ async function main() {
     30000,
   );
 
+  await waitForEval(
+    cdp,
+    `(() => {
+      const metrics = window.__vrcforgeStartupMetrics || {};
+      return { ok: [
+        metrics.startupShellPaintedMs,
+        metrics.shellPaintedMs,
+        metrics.centerUsableMs,
+        metrics.sidebarsRequestedMs,
+        metrics.sidebarsMountedMs,
+        metrics.startBackendInvokeMs,
+        metrics.bootstrapRefreshMs,
+      ].every(Number.isFinite) };
+    })()`,
+    30000,
+  );
+
   const startupMetrics = await evalValue(
     cdp,
     `(() => ({
@@ -308,11 +359,21 @@ async function main() {
       bodyLength: document.body.innerText.length,
       textTail: document.body.innerText.slice(-500),
       perfNow: performance.now(),
+      timeOrigin: performance.timeOrigin,
+      vrcforge: window.__vrcforgeStartupMetrics || {},
+      shellReady: document.documentElement.dataset.vrcforgeShell || "",
+      centerReady: document.documentElement.dataset.vrcforgeCenter || "",
+      sidebarsReady: document.documentElement.dataset.vrcforgeSidebars || "",
       navigation: performance.getEntriesByType("navigation").map((entry) => ({
         startTime: entry.startTime,
         domInteractive: entry.domInteractive,
         domContentLoadedEventEnd: entry.domContentLoadedEventEnd,
         loadEventEnd: entry.loadEventEnd,
+        duration: entry.duration,
+      })),
+      paint: performance.getEntriesByType("paint").map((entry) => ({
+        name: entry.name,
+        startTime: entry.startTime,
         duration: entry.duration,
       })),
     }))()`,
@@ -445,6 +506,7 @@ async function main() {
   const network = summarizeNetwork(cdp.events).filter((entry) =>
     /ipc\.localhost|tauri\.localhost|127\.0\.0\.1|localhost/.test(entry.url || ""),
   );
+  const startupBudget = evaluateStartupBudget(startupMetrics);
   const output = {
     schema: "vrcforge.packaged_latency_probe.v1",
     marker,
@@ -456,6 +518,7 @@ async function main() {
     attachMs: attachedAt - launchedAt,
     readyProbe,
     startupMetrics,
+    startupBudget,
     composerReady,
     inputResult,
     submitReady,
@@ -479,6 +542,10 @@ async function main() {
     await closeExistingVrcforgeProcesses();
   }
   console.log(outPath);
+  if (!startupBudget.ok) {
+    console.error(`Packaged startup budget failed: ${JSON.stringify(startupBudget)}`);
+    process.exitCode = 1;
+  }
 }
 
 main().catch(async (error) => {

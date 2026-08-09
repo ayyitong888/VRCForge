@@ -2056,6 +2056,29 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("windows", owner_row["resultSummary"]["steps"][0]["result"])
         self.assertEqual(after_snapshot["activeDesktopActions"]["actions"], [])
 
+    def test_active_desktop_action_query_does_not_load_historical_actions(self) -> None:
+        active = {
+            "ok": True,
+            "schema": "vrcforge.desktop_active_actions.v1",
+            "actions": [{"actionId": "active-only", "status": "claimed"}],
+            "count": 1,
+        }
+        with (
+            patch.object(dashboard_server.AGENT_GATEWAY.desktop, "list_active_desktop_actions", return_value=active) as list_active,
+            patch.object(
+                dashboard_server.AGENT_GATEWAY.desktop,
+                "list_desktop_actions",
+                side_effect=AssertionError("historical desktop actions must not be loaded"),
+            ) as list_history,
+            TestClient(dashboard_server.app) as client,
+        ):
+            response = client.get("/api/app/agent/desktop-actions", params={"activeOnly": "true", "limit": 8})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), active)
+        list_active.assert_called_once_with(limit=8)
+        list_history.assert_not_called()
+
     def test_desktop_bridge_stale_heartbeat_blocks_claim_and_requests(self) -> None:
         with TestClient(dashboard_server.app) as client:
             registered = client.post(

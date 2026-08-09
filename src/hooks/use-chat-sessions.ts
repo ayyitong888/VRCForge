@@ -340,14 +340,6 @@ export function useChatSessions({
         chatsLoadedRef.current = true;
         if (outcome.chats.length > 0) {
           const initialSaveVersion = chatsSaveVersionRef.current;
-          if (!activeChatId && activeProjectPath) {
-            const activeProjectKey = normalizeProjectPathKey(activeProjectPath);
-            const latest = outcome.chats.find((chat) => normalizeProjectPathKey(chat.projectPath) === activeProjectKey && !chat.archived);
-            if (latest) {
-              setActiveChatId(latest.id);
-              expandProjectGroup(latest.projectPath);
-            }
-          }
           if (outcome.shouldPersist && !chatPersistenceBlockedRef.current) {
             if (chatTimestampCacheTimerRef.current) {
               window.clearTimeout(chatTimestampCacheTimerRef.current);
@@ -374,7 +366,7 @@ export function useChatSessions({
     return () => {
       restoreCancelled = true;
     };
-  }, [runtimeConnected, endpoint, projectPaths, customProjectPaths, projectPrefsReady, activeChatId, activeProjectPath, expandProjectGroup, setError, t]);
+  }, [runtimeConnected, endpoint, projectPaths, customProjectPaths, projectPrefsReady, activeProjectPath, setError, t]);
 
   const reloadChatStorageState = useCallback(async (): Promise<boolean> => {
     if (!runtimeConnected || !projectPrefsReady) {

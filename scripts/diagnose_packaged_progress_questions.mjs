@@ -816,7 +816,7 @@ async function seedAndActivateQuestionUiChat(cdp) {
   const now = new Date().toISOString();
   const chat = {
     id: `${marker}-ui-chat`,
-    sessionId: "",
+    sessionId: `${marker}-ui-session`,
     title: `${marker} Question UI`,
     projectPath: projectARoot,
     createdAt: now,
@@ -1125,10 +1125,15 @@ async function runPackagedProgressQuestionUiGate(report, cdp) {
       cdp,
       `(() => {
         const bodyText = document.body.innerText;
-        const asides = Array.from(document.querySelectorAll("aside")).map((node) => node.innerText || "");
-        const rightRailText = asides[asides.length - 1] || "";
+        const environmentPanel = document.querySelector("[data-vrcforge-environment-status]");
+        const activityPanel = document.querySelector("[data-vrcforge-runtime-activity-panel]");
+        const environmentPanelFound = Boolean(environmentPanel);
+        const activityPanelFound = Boolean(activityPanel);
+        const activityInsideEnvironment = Boolean(environmentPanel && activityPanel && environmentPanel.contains(activityPanel));
+        const rightRailText = environmentPanel?.innerText || "";
+        const activityPanelText = activityPanel?.innerText || "";
         const questionInRightRail = rightRailText.includes(${JSON.stringify(questionText)});
-        const progressInRightRail = rightRailText.includes(${JSON.stringify(progressTitle)});
+        const progressInActivityPanel = activityPanelText.includes(${JSON.stringify(progressTitle)});
         const questionVisible = bodyText.includes(${JSON.stringify(questionText)}) && bodyText.includes(${JSON.stringify(optionLabel)});
         const secondOptionVisible = bodyText.includes(${JSON.stringify(secondOptionLabel)});
         const eighthOptionVisible = bodyText.includes(${JSON.stringify(eighthOptionLabel)});
@@ -1145,8 +1150,9 @@ async function runPackagedProgressQuestionUiGate(report, cdp) {
         const hasSkip = /Skip|跳过|跳過|スキップ/.test(bodyText);
         const hasAwaitingRail = /待回答|Questions/.test(rightRailText);
         return {
-          ok: questionVisible && secondOptionVisible && eighthOptionVisible && recommendedVisible &&
-            explanationTitle && optionsAreScrollable && !questionInRightRail && progressInRightRail &&
+          ok: environmentPanelFound && activityPanelFound && !activityInsideEnvironment &&
+            questionVisible && secondOptionVisible && eighthOptionVisible && recommendedVisible &&
+            explanationTitle && optionsAreScrollable && !questionInRightRail && progressInActivityPanel &&
             hasSomethingElse && hasSkip && !hasAwaitingRail,
           questionVisible,
           secondOptionVisible,
@@ -1156,8 +1162,11 @@ async function runPackagedProgressQuestionUiGate(report, cdp) {
           optionsAreScrollable,
           optionScrollerClientHeight: optionScroller?.clientHeight || 0,
           optionScrollerScrollHeight: optionScroller?.scrollHeight || 0,
+          environmentPanelFound,
+          activityPanelFound,
+          activityInsideEnvironment,
           questionInRightRail,
-          progressInRightRail,
+          progressInActivityPanel,
           hasSomethingElse,
           hasSkip,
           hasAwaitingRail,

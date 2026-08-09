@@ -22,6 +22,10 @@ import i18n, { setLocale, type LocaleCode } from "./i18n";
 import {
   FormEvent,
   PointerEvent as ReactPointerEvent,
+  type ReactNode,
+  Suspense,
+  lazy,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -36,10 +40,9 @@ import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { OptimizationWorkspace } from "./components/optimization/optimization-workspace";
 import { ProtectionWorkspace } from "./components/protection/protection-workspace";
 import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
-import { RightRuntimeSidebar } from "./components/runtime/runtime-sidebar";
+import { RuntimeActivityPanel } from "./components/runtime/runtime-activity-panel";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
-import { AppSidebar } from "./components/sidebar/app-sidebar";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
 import { OnboardingLanguageGate } from "./components/onboarding/onboarding-language-gate";
@@ -82,7 +85,6 @@ import {
   MIN_RIGHT_PANE_WIDTH,
   ONBOARDING_FLAG_KEY,
   RESIZE_HANDLE_WIDTH,
-  RIGHT_RUNTIME_SECTION_COLLAPSED_KEY,
   RIGHT_SIDEBAR_COLLAPSED_KEY,
   THEME_STORAGE_KEY,
   clampNumber,
@@ -117,9 +119,8 @@ import { resolveComputerUseAccentHex } from "./lib/computer-use-visuals";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
 import { sortSidebarProjects } from "./lib/sidebar-project-order";
 import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
-import { buildRuntimeSchedule } from "./lib/runtime-schedule";
 import { buildEmptyProjectState } from "./lib/sidebar-view";
-import { buildRuntimeWorkspaceViewModel } from "./lib/runtime-workspace-view";
+import { localizeRuntimeHealthMessage } from "./lib/runtime-workspace-view";
 import { parseApprovalNotificationAction, showApprovalNotification } from "./lib/approval-notifications";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
 import {
@@ -204,6 +205,31 @@ type EditingMessageDraft = {
 
 const MAX_ATTACHMENTS_PER_TURN = 8;
 const STARTUP_BACKGROUND_REFRESH_DELAY_MS = 1200;
+const AsyncAppSidebar = lazy(() =>
+  import("./components/sidebar/app-sidebar").then((module) => ({ default: module.AppSidebar })),
+);
+const AsyncRightRuntimeSidebar = lazy(() =>
+  import("./components/runtime/runtime-sidebar").then((module) => ({ default: module.RightRuntimeSidebar })),
+);
+
+function SidebarPlaceholder({ side }: { side: "left" | "right" }) {
+  return (
+    <aside
+      className={side === "left" ? "h-screen border-r border-border/70 bg-sidebar" : "h-screen border-l border-border/70 bg-sidebar"}
+      data-vrcforge-sidebar-placeholder={side}
+      aria-hidden="true"
+    />
+  );
+}
+
+function SidebarMountTracker({ side, onMounted, children }: { side: "left" | "right"; onMounted: () => void; children: ReactNode }) {
+  useLayoutEffect(() => {
+    const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+    metrics[side === "left" ? "leftSidebarMountedMs" : "rightSidebarMountedMs"] ??= Math.round(performance.now());
+    onMounted();
+  }, [onMounted, side]);
+  return <>{children}</>;
+}
 
 export default function App() {
   const { t } = useTranslation();
@@ -248,15 +274,9 @@ export default function App() {
     }
   });
   const [layoutPaneWidths, setLayoutPaneWidths] = useState<LayoutPaneWidths>(() => loadLayoutPaneWidths());
-  const [rightRuntimeSectionsCollapsed, setRightRuntimeSectionsCollapsed] = useState<Record<string, boolean>>(() => {
-    try {
-      const raw = window.localStorage.getItem(RIGHT_RUNTIME_SECTION_COLLAPSED_KEY);
-      const parsed = raw ? JSON.parse(raw) : {};
-      return parsed && typeof parsed === "object" ? (parsed as Record<string, boolean>) : {};
-    } catch {
-      return {};
-    }
-  });
+  const [sidebarsVisible, setSidebarsVisible] = useState(false);
+  const [leftSidebarMounted, setLeftSidebarMounted] = useState(false);
+  const [rightSidebarMounted, setRightSidebarMounted] = useState(false);
   const [messageFeedback, setMessageFeedback] = useState<Record<string, MessageFeedback>>({});
   const [showOnboarding, setShowOnboarding] = useState(initialOnboardingState.showOnboarding);
   const [showOnboardingLanguageGate, setShowOnboardingLanguageGate] = useState(
@@ -337,10 +357,16 @@ export default function App() {
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
   const healthWarnings = Object.values(healthComponents).filter((item) => item.status === "warning").length;
   const runtimeConnected = Boolean(bootstrap?.ok);
+  const authoritativeSelectedProjectPath = (
+    bootstrap?.health.state?.selectedProjectPath
+    || bootstrap?.health.projects?.selectedProjectPath
+    || ""
+  ).trim();
   useDashboardProjectSelection({
     endpoint,
     runtimeConnected,
     projectPath: activeProjectPath,
+    confirmedProjectPath: authoritativeSelectedProjectPath,
     setBootstrap,
     setError,
   });
@@ -579,11 +605,6 @@ export default function App() {
     return list;
   }, [computerUseEnabled, developerOptionsEnabled, skills, t]);
   const projects = bootstrap?.health.projects?.projects ?? [];
-  const authoritativeSelectedProjectPath = (
-    bootstrap?.health.state?.selectedProjectPath
-    || bootstrap?.health.projects?.selectedProjectPath
-    || ""
-  ).trim();
   const onboardingSelectedProjectReady = Boolean(
     activeProjectPath
     && projects.some(
@@ -772,7 +793,6 @@ export default function App() {
     sending: chatRunSending,
     queued,
     currentTurn,
-    stopRequested,
     isRunning: isChatRunActive,
     submitTurn,
     runTurnNow,
@@ -839,7 +859,6 @@ export default function App() {
     sessionId,
     activeRuntimeProjectPath,
     activeProjectPath,
-    rightSidebarCollapsed,
     sending,
     pendingApprovals,
     setBootstrap,
@@ -1145,11 +1164,6 @@ export default function App() {
     const parentChatId = activeChat?.id || "";
     return parentChatId ? subAgentTasks.filter((task) => task.parentChatId === parentChatId) : [];
   }, [activeChat?.id, subAgentTasks]);
-  const visibleSubAgentTasks = activeSubAgentTasks;
-  const runtimeSchedule = useMemo(
-    () => buildRuntimeSchedule({ currentTurn, stopRequested, queued, activeSubAgentTasks }),
-    [activeSubAgentTasks, currentTurn, i18n.language, queued, stopRequested],
-  );
   const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
   const activeProjectName =
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
@@ -1218,69 +1232,24 @@ export default function App() {
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
   };
+  const selectedProjectComponent = healthComponents.selectedUnityProject;
   const backendComponent = healthComponents.backend;
+  const mcpPackageComponent = healthComponents.mcpPackageConfigured;
   const unityBridgeComponent = healthComponents.unityMcpBridgeReachable;
+  const unityInstanceComponent = healthComponents.unityMcpInstance;
   const unityToolsComponent = healthComponents.vrcForgeUnityTools;
-  const providerComponent = healthComponents.providerConfigPresent;
-  const runtimeWorkspaceView = useMemo(
-    () =>
-      buildRuntimeWorkspaceViewModel({
-        t,
-        conversation,
-        workspaceDiff,
-        pendingApprovalItems,
-        runtimeRuns,
-        workspaceProjectLabel: activeProjectPath ? activeProjectName || shortPath(activeProjectPath) : t("sidebar.tempChat"),
-        runtimeConnected,
-        unityBridgeComponent,
-        unityToolsComponent,
-        vrcForgeToolsReady,
-        vrcForgeToolsCount,
-        providerLabel: providerSnapshot.providerLabel,
-        model: providerSnapshot.model,
-        pendingApprovals,
-        loadingWorkspaceDiff,
-        workspaceDiffError,
-        onOpenCheckpoints: () => setActiveView("checkpoints"),
-        onToggleWorkspaceDiffReview: toggleWorkspaceDiffReview,
-      }),
-    [
-      activeProjectName,
-      activeProjectPath,
-      conversation,
-      loadingWorkspaceDiff,
-      pendingApprovalItems,
-      pendingApprovals,
-      providerSnapshot.model,
-      providerSnapshot.providerLabel,
-      runtimeConnected,
-      runtimeRuns,
-      t,
-      toggleWorkspaceDiffReview,
-      unityBridgeComponent,
-      unityToolsComponent,
-      vrcForgeToolsCount,
-      vrcForgeToolsReady,
-      workspaceDiff,
-      workspaceDiffError,
-    ],
+  const localizeHealthMessage = useCallback(
+    (message?: string) => localizeRuntimeHealthMessage(t, message),
+    [t],
   );
-  const {
-    workspaceDiffFiles,
-    workspaceDiffChanged,
-    runtimeFileReferences,
-    runtimeReviewEvidence,
-    localizeHealthMessage,
-    workspaceProjectLabel,
-    unityBridgeLabel,
-    unityToolsLabel,
-    providerCompactLabel,
-    reviewSummaryLabel,
-    changeSummaryLabel,
-  } = runtimeWorkspaceView;
-  const hasRightSidebarProjectContext = Boolean(activeRuntimeProjectPath);
-  const showRightSidebarStatusSummary = !hasRightSidebarProjectContext && !activeChat;
-  const showRightSidebarWorkspaceArtifacts = hasRightSidebarProjectContext;
+  const authoritativeProjectName = projectDisplayName(
+    projectItems.find(
+      (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(authoritativeSelectedProjectPath),
+    ),
+  );
+  const workspaceProjectLabel = authoritativeSelectedProjectPath
+    ? authoritativeProjectName || shortPath(authoritativeSelectedProjectPath)
+    : t("workspace.noProjectSelected");
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
     try {
@@ -1308,6 +1277,56 @@ export default function App() {
       }),
     [error, hasStartupIssue, loading, projectItems.length, runtimeConnected, t],
   );
+  const markLeftSidebarMounted = useCallback(() => setLeftSidebarMounted(true), []);
+  const markRightSidebarMounted = useCallback(() => setRightSidebarMounted(true), []);
+
+  useLayoutEffect(() => {
+    const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+    metrics.shellCommittedMs ??= Math.round(performance.now());
+    document.documentElement.dataset.vrcforgeShell = "ready";
+    let paintedFrame = 0;
+    const committedFrame = window.requestAnimationFrame(() => {
+      paintedFrame = window.requestAnimationFrame(() => {
+        metrics.shellPaintedMs ??= Math.round(performance.now());
+        if (document.querySelector("[data-chat-composer-dock], [data-empty-chat-content]")) {
+          metrics.centerUsableMs ??= Math.round(performance.now());
+          document.documentElement.dataset.vrcforgeCenter = "ready";
+        }
+        metrics.sidebarsRequestedMs ??= Math.round(performance.now());
+        setSidebarsVisible(true);
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(committedFrame);
+      if (paintedFrame) {
+        window.cancelAnimationFrame(paintedFrame);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!sidebarsVisible || !leftSidebarMounted || (!rightSidebarCollapsed && !rightSidebarMounted)) {
+      return;
+    }
+    const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+    metrics.sidebarsMountedMs ??= Math.round(performance.now());
+    document.documentElement.dataset.vrcforgeSidebars = "mounted";
+  }, [leftSidebarMounted, rightSidebarCollapsed, rightSidebarMounted, sidebarsVisible]);
+
+  useEffect(() => {
+    if (
+      !bootstrap
+      || !projectPrefsReady
+      || !sidebarsVisible
+      || !leftSidebarMounted
+      || (!rightSidebarCollapsed && !rightSidebarMounted)
+    ) {
+      return;
+    }
+    const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+    metrics.sidebarsHydratedMs ??= Math.round(performance.now());
+    document.documentElement.dataset.vrcforgeSidebars = "ready";
+  }, [bootstrap, leftSidebarMounted, projectPrefsReady, rightSidebarCollapsed, rightSidebarMounted, sidebarsVisible]);
 
   useLayoutEffect(() => {
     const isDark = theme === "dark";
@@ -1386,14 +1405,6 @@ export default function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(RIGHT_RUNTIME_SECTION_COLLAPSED_KEY, JSON.stringify(rightRuntimeSectionsCollapsed));
-    } catch {
-      // Runtime section layout is best-effort local UI state.
-    }
-  }, [rightRuntimeSectionsCollapsed]);
-
-  useEffect(() => {
-    try {
       window.localStorage.setItem(DEVELOPER_OPTIONS_ENABLED_KEY, String(developerOptionsEnabled));
     } catch {
       // The backend is authoritative; this only avoids a startup flash before bootstrap.
@@ -1411,6 +1422,10 @@ export default function App() {
     setComputerUseEverEnabled(settings.computerUseEverEnabled);
     setBackgroundGoalNotificationsEnabled(settings.backgroundGoalNotificationsEnabled !== false);
   }, [bootstrap?.advancedSettings]);
+
+  useEffect(() => {
+    setAgentApprovals(runtimeConnected && bootstrap ? bootstrap.approvals ?? [] : null);
+  }, [bootstrap?.approvals, runtimeConnected]);
 
   useEffect(() => {
     if (initialOnboardingState.migrateLanguageGateCompletion) {
@@ -1471,17 +1486,6 @@ export default function App() {
   }, [activeProjectPath, authoritativeSelectedProjectPath]);
 
   useEffect(() => {
-    if (projectInitRef.current || activeProjectPath) {
-      return;
-    }
-    const activeMcpProjects = projectItems.filter((project) => Boolean(project.activeMcp && projectKey(project)));
-    if (activeMcpProjects.length === 1) {
-      projectInitRef.current = true;
-      setActiveProjectPath(projectKey(activeMcpProjects[0]));
-    }
-  }, [activeProjectPath, projectItems]);
-
-  useEffect(() => {
     const intervalMs = isTauriRuntime() ? 30000 : 5000;
     const timer = window.setInterval(() => {
       void refreshSilently();
@@ -1511,7 +1515,7 @@ export default function App() {
       "agentRuntimeRuns",
       "agentRuntimeTurn",
     ]);
-    const bootstrapEvents = new Set(["advancedSettings", "agentPermission", "hello", "projects", "unity_status"]);
+    const bootstrapEvents = new Set(["advancedSettings", "agentApprovals", "agentPermission", "hello", "projects", "unity_status"]);
     const scheduleBootstrapRefresh = () => {
       if (desktopEventBootstrapTimerRef.current !== null) {
         window.clearTimeout(desktopEventBootstrapTimerRef.current);
@@ -1686,22 +1690,22 @@ export default function App() {
     }
   }, [activeView, runtimeConnected, endpoint, activeProjectPath]);
 
-  useEffect(() => {
-    setAgentApprovals(null);
-  }, [activeRuntimeProjectPath]);
-
   function refreshStartupInBackground(target: string, options: { refreshProjects?: boolean } = {}) {
-    const startedAt = performance.now();
-    void refreshWithRetry(target, options)
-      .then(() => {
-        const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
-        metrics.bootstrapRefreshMs = Math.round(performance.now() - startedAt);
-      })
-      .catch((cause) => {
+    void refreshStartupWithMetrics(target, options).catch((cause) => {
         const message = cause instanceof Error ? cause.message : String(cause);
         setError(message);
         setStartupIssue(message);
       });
+  }
+
+  async function refreshStartupWithMetrics(target: string, options: { refreshProjects?: boolean } = {}) {
+    const startedAt = performance.now();
+    try {
+      await refreshWithRetry(target, options);
+    } finally {
+      const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
+      metrics.bootstrapRefreshMs ??= Math.round(performance.now() - startedAt);
+    }
   }
 
   function resolveBackendReady(target: string, status?: string) {
@@ -1779,7 +1783,7 @@ export default function App() {
       if (options.waitForBootstrap ?? true) {
         try {
           const readyEndpoint = await waitForBackendReady();
-          await refreshWithRetry(readyEndpoint, { refreshProjects: true });
+          await refreshStartupWithMetrics(readyEndpoint, { refreshProjects: true });
           return readyEndpoint;
         } catch (cause) {
           const message = cause instanceof Error ? cause.message : String(cause);
@@ -1816,11 +1820,11 @@ export default function App() {
           setStartupIssue("");
           if (waitForBootstrap) {
             await waitForBackendReady(targetEndpoint);
-            await refreshWithRetry(targetEndpoint, { refreshProjects: true });
+            await refreshStartupWithMetrics(targetEndpoint, { refreshProjects: true });
           }
         } else {
           resolveBackendReady(targetEndpoint, result.mode);
-          await refreshWithRetry(targetEndpoint, { refreshProjects: true });
+          await refreshStartupWithMetrics(targetEndpoint, { refreshProjects: true });
         }
       } else {
         setBackendMessage("dev");
@@ -1830,7 +1834,7 @@ export default function App() {
         } catch {
           setAppSessionToken("");
         }
-        await refreshWithRetry(targetEndpoint, { refreshProjects: true });
+        await refreshStartupWithMetrics(targetEndpoint, { refreshProjects: true });
       }
       return targetEndpoint;
     } catch (cause) {
@@ -2146,10 +2150,6 @@ export default function App() {
       baseItems: chat.items.slice(0, userIndex),
       sessionId: "",
     });
-  }
-
-  function toggleRightRuntimeSection(section: string) {
-    setRightRuntimeSectionsCollapsed((current) => ({ ...current, [section]: !current[section] }));
   }
 
   async function runExplicitWorkspaceAction(actionId: ComposerActionId) {
@@ -2564,10 +2564,8 @@ export default function App() {
           ...(skillArguments?.trim() ? { skillArguments: skillArguments.trim() } : {}),
         },
       });
-      setRightSidebarCollapsed(false);
       setSelectedSubAgent(payload.task);
       setSelectedSubAgentPanelOpen(true);
-      setRightRuntimeSectionsCollapsed((current) => ({ ...current, subagents: false }));
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
       void loadSubAgents(false);
     } catch (cause) {
@@ -2596,9 +2594,7 @@ export default function App() {
   async function inspectSubAgentTask(taskId: string) {
     try {
       const payload = await fetchSubAgent(endpoint, taskId);
-      setRightSidebarCollapsed(false);
       setSelectedSubAgentPanelOpen(true);
-      setRightRuntimeSectionsCollapsed((current) => ({ ...current, subagents: false }));
       setSelectedSubAgent(payload.task);
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
     } catch (cause) {
@@ -2688,9 +2684,7 @@ export default function App() {
     const agentName = pickSubAgentName();
     setActiveView("chat");
     clearSelectionMenu();
-    setRightSidebarCollapsed(false);
     setSelectedSubAgentPanelOpen(true);
-    setRightRuntimeSectionsCollapsed((current) => ({ ...current, subagents: false }));
     setSubAgentError("");
     try {
       let targetEndpoint = endpoint;
@@ -2850,7 +2844,10 @@ export default function App() {
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
       <div className="grid h-screen" style={{ gridTemplateColumns: workspaceGridColumns }}>
-        <AppSidebar
+        {sidebarsVisible ? (
+          <Suspense fallback={<SidebarPlaceholder side="left" />}>
+            <SidebarMountTracker side="left" onMounted={markLeftSidebarMounted}>
+              <AsyncAppSidebar
           collapsed={leftSidebarCollapsed}
           activeView={activeView}
           activeSettingsSection={activeSettingsSection}
@@ -2904,8 +2901,13 @@ export default function App() {
             setChatMenu({ chatId, x: event.clientX, y: event.clientY });
           }}
           onChatRenameChange={setRenameDraft}
-          onChatRenameCommit={commitRenameChat}
-        />
+                onChatRenameCommit={commitRenameChat}
+              />
+            </SidebarMountTracker>
+          </Suspense>
+        ) : (
+          <SidebarPlaceholder side="left" />
+        )}
 
         <LayoutSplitter
           side="left"
@@ -3257,6 +3259,36 @@ export default function App() {
               onImportAttachment={(attachment) => void importVaultAttachment(attachment)}
               onOpenSettings={() => openSettingsSection("models")}
               onOpenDoctor={() => void openDoctor()}
+              activityPanel={
+                sessionId ? (
+                  <RuntimeActivityPanel
+                    progress={agentProgress}
+                    runs={runtimeRuns}
+                    error={runtimeRunsError}
+                    onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
+                  />
+                ) : null
+              }
+              subAgentPanel={
+                <SubAgentPanel
+                  tasks={activeSubAgentTasks}
+                  loading={loadingSubAgents}
+                  error={subAgentError}
+                  selected={
+                    selectedSubAgentPanelOpen
+                    && selectedSubAgent
+                    && activeSubAgentTasks.some((task) => task.id === selectedSubAgent.id)
+                      ? selectedSubAgent
+                      : null
+                  }
+                  onInspect={(taskId) => void inspectSubAgentTask(taskId)}
+                  onCancel={(taskId) => void cancelSubAgentTask(taskId)}
+                  onRetry={(taskId) => void retrySubAgentTask(taskId)}
+                  onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
+                  onAdoptNextAction={adoptSubAgentNextAction}
+                  onCloseInspect={() => setSelectedSubAgentPanelOpen(false)}
+                />
+              }
             />
           )}
           {activeView !== "chat" ? (
@@ -3277,68 +3309,32 @@ export default function App() {
           title={t("workspace.resizeRightPane")}
           onPointerDown={(event) => startLayoutResize("right", event)}
         />
-        {rightSidebarCollapsed ? null : (
-          <RightRuntimeSidebar
+        {rightSidebarCollapsed ? null : sidebarsVisible ? (
+          <Suspense fallback={<SidebarPlaceholder side="right" />}>
+            <SidebarMountTracker side="right" onMounted={markRightSidebarMounted}>
+              <AsyncRightRuntimeSidebar
               runtimeConnected={runtimeConnected}
               loadingUnityStatus={loadingUnityStatus}
               hasEnvironmentAttention={hasEnvironmentAttention}
               hasStartupIssue={hasStartupIssue}
               workspaceProjectLabel={workspaceProjectLabel}
+              selectedProjectComponent={selectedProjectComponent}
               backendComponent={backendComponent}
-              unityBridgeLabel={unityBridgeLabel}
+              mcpPackageComponent={mcpPackageComponent}
               unityBridgeComponent={unityBridgeComponent}
-              unityToolsLabel={unityToolsLabel}
+              unityInstanceComponent={unityInstanceComponent}
               unityToolsComponent={unityToolsComponent}
-              providerCompactLabel={providerCompactLabel}
-              providerComponent={providerComponent}
-              reviewSummaryLabel={reviewSummaryLabel}
-              changeSummaryLabel={changeSummaryLabel}
-              showStatusSummary={showRightSidebarStatusSummary}
-              showWorkspaceArtifacts={showRightSidebarWorkspaceArtifacts}
-              workspaceDiffChanged={workspaceDiffChanged}
-              workspaceDiff={workspaceDiff}
-              runtimeNotice={runtimeNotice}
-              pendingApprovalItems={pendingApprovalItems}
-              runtimeRuns={runtimeRuns}
-              runtimeRunsError={runtimeRunsError}
-              rightRuntimeSectionsCollapsed={rightRuntimeSectionsCollapsed}
-              agentGoals={agentGoals}
-              agentProgress={hasAgentRuntimeScope ? agentProgress : []}
-              agentMemory={agentMemory}
-              memoryReviewUnreadCount={memoryReviewUnreadCount}
-              memoryReviewNeedsAttention={memoryReviewNeedsAttention}
-              desktopActions={desktopActions}
-              desktopBridge={desktopBridge}
-              workspaceStateError={workspaceStateError}
-              runtimeReviewEvidence={runtimeReviewEvidence}
-              runtimeFileReferences={runtimeFileReferences}
-              workspaceDiffFiles={workspaceDiffFiles}
-              workspaceDiffError={workspaceDiffError}
-              loadingWorkspaceDiff={loadingWorkspaceDiff}
-              workspaceDiffReviewOpen={workspaceDiffReviewOpen}
-              loadingWorkspaceDiffPatch={loadingWorkspaceDiffPatch}
-              runtimeSchedule={runtimeSchedule}
-              visibleSubAgentTasks={visibleSubAgentTasks}
-              selectedSubAgent={selectedSubAgent}
-              selectedSubAgentPanelOpen={selectedSubAgentPanelOpen}
+              approvalsLoaded={agentApprovals !== null}
+              pendingApprovals={pendingApprovals}
               refreshUnityStatus={refreshUnityStatus}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
               openDoctor={openDoctor}
               localizeHealthMessage={localizeHealthMessage}
-              toggleRightRuntimeSection={toggleRightRuntimeSection}
-              refreshWorkspaceDiff={refreshWorkspaceDiff}
-              toggleWorkspaceDiffReview={toggleWorkspaceDiffReview}
-              onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
-              inspectSubAgentTask={inspectSubAgentTask}
-              onCloseSelectedSubAgentPanel={() => setSelectedSubAgentPanelOpen(false)}
-              onOpenSelectedSubAgentPanel={() => setSelectedSubAgentPanelOpen(true)}
-              onMergeSubAgent={mergeSubAgentTask}
-              onAdoptSubAgentNextAction={adoptSubAgentNextAction}
-              subAgentRoleLabel={subAgentRoleLabel}
-              subAgentStatusTone={subAgentStatusTone}
-              displaySubAgentStatus={displaySubAgentStatus}
-              formatPayload={formatPayload}
-          />
+              />
+            </SidebarMountTracker>
+          </Suspense>
+        ) : (
+          <SidebarPlaceholder side="right" />
         )}
       </div>
 

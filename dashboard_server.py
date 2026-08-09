@@ -3271,7 +3271,14 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
 
 
 @app.get("/api/app/agent/desktop-actions")
-def app_agent_desktop_actions(limit: int = 50, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
+def app_agent_desktop_actions(
+    limit: int = 50,
+    sessionId: str = "",
+    projectRoot: str = "",
+    activeOnly: bool = False,
+) -> dict[str, Any]:
+    if activeOnly:
+        return AGENT_GATEWAY.desktop.list_active_desktop_actions(limit=limit)
     return AGENT_GATEWAY.desktop.list_desktop_actions(limit=limit, session_id=sessionId, project_root=projectRoot)
 
 

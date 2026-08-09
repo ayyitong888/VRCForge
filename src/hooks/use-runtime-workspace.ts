@@ -13,6 +13,7 @@ import {
   DesktopRuntimeSnapshot,
   WorkspaceDiffSummary,
   cancelAgentDesktopAction,
+  fetchActiveAgentDesktopActions,
   fetchDesktopRuntimeSnapshot,
   fetchWorkspaceDiff,
   refreshUnityReadiness,
@@ -26,7 +27,6 @@ type UseRuntimeWorkspaceParams = {
   sessionId: string;
   activeRuntimeProjectPath: string;
   activeProjectPath: string;
-  rightSidebarCollapsed: boolean;
   sending: boolean;
   pendingApprovals: number;
   setBootstrap: Dispatch<SetStateAction<AppBootstrap | null>>;
@@ -40,7 +40,6 @@ export function useRuntimeWorkspace({
   sessionId,
   activeRuntimeProjectPath,
   activeProjectPath,
-  rightSidebarCollapsed,
   sending,
   pendingApprovals,
   setBootstrap,
@@ -69,6 +68,7 @@ export function useRuntimeWorkspace({
   const [workspaceStateError, setWorkspaceStateError] = useState("");
   const [runtimeNotice, setRuntimeNotice] = useState("");
   const runtimeRefreshSeqRef = useRef(0);
+  const activeDesktopRefreshSeqRef = useRef(0);
   const runtimeScopeToken = useMemo(
     () => Symbol("runtime-workspace-scope"),
     [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath],
@@ -81,6 +81,20 @@ export function useRuntimeWorkspace({
     projectRoot: activeRuntimeProjectPath || "",
   });
   const runtimeSnapshotInFlightRef = useRef(new Map<string, Promise<DesktopRuntimeSnapshot>>());
+
+  function clearScopedRuntimeProjection() {
+    setRuntimeRuns([]);
+    setRuntimeRunsError("");
+    setDesktopActions([]);
+    setDesktopBridge(null);
+    setAgentGoals([]);
+    setAgentProgress([]);
+    setAgentQuestions([]);
+    setAgentMemory([]);
+    setMemoryReviewUnreadCount(0);
+    setMemoryReviewNeedsAttention(false);
+    setWorkspaceStateError("");
+  }
 
   useEffect(() => {
     if (!runtimeConnected) {
@@ -101,16 +115,21 @@ export function useRuntimeWorkspace({
       projectRoot: activeRuntimeProjectPath || "",
     };
     runtimeRefreshSeqRef.current += 1;
-    setRuntimeRuns([]);
-    setRuntimeRunsError("");
+    clearScopedRuntimeProjection();
     if (!runtimeConnected) {
+      activeDesktopRefreshSeqRef.current += 1;
+      setActiveDesktopActions([]);
+      return;
+    }
+    if (!sessionId.trim()) {
+      void refreshActiveDesktopActionState();
       return;
     }
     void refreshRuntimeRuns(false);
   }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath]);
 
   useEffect(() => {
-    if (!runtimeConnected || rightSidebarCollapsed) {
+    if (!runtimeConnected || !sessionId.trim()) {
       return;
     }
     const intervalMs = isTauriRuntime() ? (sending || pendingApprovals > 0 ? 5000 : 15000) : sending || pendingApprovals > 0 ? 2500 : 5000;
@@ -118,7 +137,7 @@ export function useRuntimeWorkspace({
       void refreshRuntimeRuns(false);
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, rightSidebarCollapsed, sending, pendingApprovals]);
+  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, sending, pendingApprovals]);
 
   async function refreshUnityStatus(target = endpoint) {
     if (!runtimeConnected || loadingUnityStatus) {
@@ -183,6 +202,36 @@ export function useRuntimeWorkspace({
     return request;
   }
 
+  async function refreshActiveDesktopActionState(showError = false, target = endpoint) {
+    const requestScopeToken = runtimeScopeToken;
+    const requestEndpoint = endpoint;
+    const refreshSeq = activeDesktopRefreshSeqRef.current + 1;
+    activeDesktopRefreshSeqRef.current = refreshSeq;
+    if (!runtimeConnected || target !== requestEndpoint) {
+      return;
+    }
+    try {
+      // Active Computer Use actions are App-wide safety state, not session
+      // history. Keep the stop surface available in a fresh conversation
+      // without loading the full historical runtime snapshot.
+      const payload = await fetchActiveAgentDesktopActions(target);
+      const latestScope = runtimeScopeRef.current;
+      if (
+        activeDesktopRefreshSeqRef.current !== refreshSeq
+        || latestScope.token !== requestScopeToken
+        || latestScope.endpoint !== requestEndpoint
+        || !latestScope.runtimeConnected
+      ) {
+        return;
+      }
+      setActiveDesktopActions(payload.actions ?? []);
+    } catch (cause) {
+      if (showError && activeDesktopRefreshSeqRef.current === refreshSeq) {
+        setRuntimeNotice(cause instanceof Error ? cause.message : String(cause));
+      }
+    }
+  }
+
   async function refreshRuntimeRuns(showError = false, target = endpoint) {
     const requestScopeToken = runtimeScopeToken;
     const requestEndpoint = endpoint;
@@ -212,19 +261,15 @@ export function useRuntimeWorkspace({
         && latestScope.projectRoot === requestProjectRoot;
     };
     if (!requestRuntimeConnected) {
-      setRuntimeRuns([]);
-      setRuntimeRunsError("");
-      setDesktopActions([]);
+      clearScopedRuntimeProjection();
+      activeDesktopRefreshSeqRef.current += 1;
       setActiveDesktopActions([]);
-      setDesktopBridge(null);
-      setAgentGoals([]);
-      setAgentProgress([]);
-      setAgentQuestions([]);
-      setAgentMemory([]);
-      setMemoryReviewUnreadCount(0);
-      setMemoryReviewNeedsAttention(false);
       setAgentApprovals(null);
-      setWorkspaceStateError("");
+      return;
+    }
+    if (!requestSessionId.trim()) {
+      clearScopedRuntimeProjection();
+      await refreshActiveDesktopActionState(showError, target);
       return;
     }
     try {

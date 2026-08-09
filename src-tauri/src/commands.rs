@@ -426,6 +426,7 @@ pub(crate) struct DesktopAgentListRequest {
     scope: Option<String>,
     include_events: Option<bool>,
     global_only: Option<bool>,
+    active_only: Option<bool>,
     timeout_ms: Option<u64>,
 }
 
@@ -1593,10 +1594,30 @@ pub(crate) fn agent_list_query(request: &DesktopAgentListRequest) -> String {
     if request.global_only.unwrap_or(false) {
         query.push("globalOnly=1".to_string());
     }
+    if request.active_only.unwrap_or(false) {
+        query.push("activeOnly=true".to_string());
+    }
     if query.is_empty() {
         String::new()
     } else {
         format!("?{}", query.join("&"))
+    }
+}
+
+#[cfg(test)]
+mod agent_list_transport_tests {
+    use super::{agent_list_query, DesktopAgentListRequest};
+
+    #[test]
+    fn active_only_deserializes_and_reaches_the_backend_query() {
+        let request: DesktopAgentListRequest = serde_json::from_value(serde_json::json!({
+            "limit": 8,
+            "activeOnly": true,
+            "timeoutMs": 30000
+        }))
+        .expect("active-only desktop action request should deserialize");
+
+        assert_eq!(agent_list_query(&request), "?limit=8&activeOnly=true");
     }
 }
 

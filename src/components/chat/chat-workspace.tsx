@@ -1,5 +1,5 @@
 import { AlertTriangle, Loader2, MonitorUp, X } from "lucide-react";
-import { useMemo, type FormEvent, type Ref } from "react";
+import { useMemo, type FormEvent, type ReactNode, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentApproval, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, PermissionState } from "../../lib/api";
 import type {
@@ -78,6 +78,8 @@ export function ChatWorkspace({
   onImportAttachment,
   onOpenSettings,
   onOpenDoctor,
+  activityPanel,
+  subAgentPanel,
 }: {
   projectPromptTitle: string;
   input: string;
@@ -131,6 +133,8 @@ export function ChatWorkspace({
   onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenSettings: () => void;
   onOpenDoctor: () => void;
+  activityPanel?: ReactNode;
+  subAgentPanel?: ReactNode;
 }) {
   const { t } = useTranslation();
   const pendingAgentQuestions = useMemo(
@@ -198,6 +202,8 @@ export function ChatWorkspace({
               />
             </div>
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
+            {activityPanel}
+            {subAgentPanel}
             {!approvalComposer ? composer(false) : null}
           </div>
         </div>
@@ -277,6 +283,8 @@ export function ChatWorkspace({
               </div>
             );
           })}
+          {activityPanel}
+          {subAgentPanel}
           <div ref={conversationEndRef} />
         </div>
       </div>

@@ -207,7 +207,7 @@ export async function recordAgentRunQueued(
 
 export async function fetchAgentDesktopActions(
   endpoint: string,
-  params: { limit?: number; sessionId?: string; projectRoot?: string } = {},
+  params: { limit?: number; sessionId?: string; projectRoot?: string; activeOnly?: boolean } = {},
 ): Promise<{ ok: boolean; schema?: string; actions: AgentDesktopAction[]; count: number; activeActions?: AgentDesktopAction[]; activeCount?: number }> {
   const query = new URLSearchParams();
   if (params.limit) {
@@ -219,6 +219,9 @@ export async function fetchAgentDesktopActions(
   if (params.projectRoot) {
     query.set("projectRoot", params.projectRoot);
   }
+  if (params.activeOnly) {
+    query.set("activeOnly", "true");
+  }
   const suffix = query.toString() ? `?${query.toString()}` : "";
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("fetch_agent_desktop_actions", {
@@ -226,6 +229,12 @@ export async function fetchAgentDesktopActions(
     });
   }
   return requestJson(`${endpoint}/api/app/agent/desktop-actions${suffix}`, { preferTauriIpc: true });
+}
+
+export async function fetchActiveAgentDesktopActions(
+  endpoint: string,
+): Promise<{ ok: boolean; schema?: string; actions: AgentDesktopAction[]; count: number }> {
+  return fetchAgentDesktopActions(endpoint, { limit: 8, activeOnly: true });
 }
 
 export async function requestAgentDesktopAction(

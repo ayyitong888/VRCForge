@@ -7,6 +7,7 @@ type UseDashboardProjectSelectionParams = {
   endpoint: string;
   runtimeConnected: boolean;
   projectPath: string;
+  confirmedProjectPath: string;
   setBootstrap: Dispatch<SetStateAction<AppBootstrap | null>>;
   setError: Dispatch<SetStateAction<string>>;
 };
@@ -15,6 +16,7 @@ export function useDashboardProjectSelection({
   endpoint,
   runtimeConnected,
   projectPath,
+  confirmedProjectPath,
   setBootstrap,
   setError,
 }: UseDashboardProjectSelectionParams) {
@@ -22,7 +24,11 @@ export function useDashboardProjectSelection({
   const selectionQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
-    if (!runtimeConnected || !projectPath.trim()) {
+    if (
+      !runtimeConnected
+      || !projectPath.trim()
+      || normalizeProjectPathKey(confirmedProjectPath) === normalizeProjectPathKey(projectPath)
+    ) {
       return;
     }
 
@@ -61,5 +67,5 @@ export function useDashboardProjectSelection({
     return () => {
       active = false;
     };
-  }, [endpoint, projectPath, runtimeConnected, setBootstrap, setError]);
+  }, [confirmedProjectPath, endpoint, projectPath, runtimeConnected, setBootstrap, setError]);
 }

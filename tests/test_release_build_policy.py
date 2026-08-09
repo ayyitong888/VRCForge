@@ -49,6 +49,8 @@ def test_desktop_project_selection_is_confirmed_before_unity_readiness() -> None
     )
     assert "state.selectedProjectPath" in hook
     assert "!projectPath.trim()" in hook
+    assert "confirmedProjectPath" in hook
+    assert "normalizeProjectPathKey(confirmedProjectPath) === normalizeProjectPathKey(projectPath)" in hook
 
 
 def test_desktop_restores_authoritative_project_without_guessing_first_item() -> None:
@@ -57,8 +59,8 @@ def test_desktop_restores_authoritative_project_without_guessing_first_item() ->
 
     restored = app.index("bootstrap?.health.state?.selectedProjectPath")
     applied = app.index("setActiveProjectPath(authoritativeSelectedProjectPath)")
-    unique_active = app.index("activeMcpProjects.length === 1")
-    assert restored < applied < unique_active
+    assert restored < applied
+    assert "activeMcpProjects.length === 1" not in app
     assert "setActiveProjectPath(projectKey(projectItems[0]))" not in app
     assert "state?: ProjectSelectionState" in types
 

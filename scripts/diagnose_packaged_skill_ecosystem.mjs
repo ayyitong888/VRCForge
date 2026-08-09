@@ -2020,6 +2020,18 @@ async function tauriInvoke(cdp, command, args) {
   return envelope.value;
 }
 
+async function reloadRenderer(cdp) {
+  await cdp.send("Page.reload", { ignoreCache: true }).catch((error) => {
+    if (!/Promise was collected/i.test(String(error))) throw error;
+  });
+  await waitForEval(
+    cdp,
+    `(() => ({ ok: Boolean(document.querySelector("textarea") && document.documentElement.dataset.vrcforgeShell === "ready") }))()`,
+    45000,
+  );
+  await sleep(500);
+}
+
 function normalizedPath(value) {
   return String(value || "").replaceAll("\\", "/").replace(/\/+$/, "").toLowerCase();
 }
@@ -4673,6 +4685,54 @@ async function selectPackagedFixtureProject(report, cdp) {
   }
 }
 
+async function seedAndActivateContextualRuntimeChat(cdp) {
+  const now = new Date().toISOString();
+  const chat = {
+    id: `${marker}-contextual-chat`,
+    sessionId: `${marker}-contextual-session`,
+    title: `${marker} Contextual Skill`,
+    projectPath: projectRoot,
+    createdAt: now,
+    updatedAt: now,
+    revision: 1,
+    items: [],
+  };
+  const current = await appApi("/api/app/chats");
+  if (current?.writeBlocked === true || (Array.isArray(current?.recoveries) && current.recoveries.length > 0)) {
+    throw new Error("Contextual Path-to-Skill chat storage was not writable; no seed was attempted.");
+  }
+  const chats = (Array.isArray(current?.chats) ? current.chats : [])
+    .filter((candidate) => String(candidate?.id || "") !== chat.id);
+  await tauriInvoke(cdp, "save_chats", {
+    request: {
+      body: {
+        chats: [...chats, chat],
+        sourceRevisions: Array.isArray(current?.sources) ? current.sources : [],
+      },
+      timeoutMs: 60000,
+    },
+  });
+  await reloadRenderer(cdp);
+  const activation = await waitForEval(
+    cdp,
+    `(() => {
+      const wanted = ${JSON.stringify(chat.title)};
+      const sidebar = document.querySelector("aside");
+      const leaf = Array.from((sidebar || document).querySelectorAll("*"))
+        .find((node) => node.children.length === 0 && String(node.textContent || "").trim() === wanted);
+      const target = leaf?.closest("button, [role='button'], a, li, div");
+      if (!target) return { ok: false, reason: "contextual chat was not rendered" };
+      target.click();
+      return { ok: true };
+    })()`,
+    45000,
+  );
+  if (activation?.ok !== true) {
+    throw new Error("Contextual Path-to-Skill chat could not be activated.");
+  }
+  return chat;
+}
+
 async function exerciseFirstRunLanguageGate(report, cdp) {
   const result = await evalValue(
     cdp,
@@ -4797,11 +4857,12 @@ async function exerciseFirstRunLanguageGate(report, cdp) {
   };
 }
 
-async function invokeContextualReadinessRuntime() {
+async function invokeContextualReadinessRuntime(sessionId) {
   const payload = await appApi("/api/app/agent/message", {
     method: "POST",
     body: {
       agent_name: "packaged-skill-context-probe",
+      session_id: sessionId,
       clientTurnId: `contextual-skill-${Date.now()}`,
       message: "Contextual Path-to-Skill readiness capture.",
       skill_tool: "vrcforge_build_test_readiness",
@@ -4821,6 +4882,10 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
       const sleep = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
       const deadline = Date.now() + 60000;
       const checks = {
+        activityPanelFound: false,
+        activityPanelOpened: false,
+        environmentPanelFound: false,
+        operationOutsideEnvironmentPanel: false,
         saveOperationButtonFound: false,
         prefillBadgeFound: false,
         operationTextareaFound: false,
@@ -4830,15 +4895,29 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
         structuredSummary: false,
       };
       let target;
+      let activityPanelOpened = false;
       while (Date.now() < deadline) {
+        const activityPanel = document.querySelector('[data-vrcforge-runtime-activity-panel]');
+        const environmentPanel = document.querySelector('[data-vrcforge-environment-status]');
+        checks.activityPanelFound = Boolean(activityPanel);
+        checks.environmentPanelFound = Boolean(environmentPanel);
+        if (activityPanel && !activityPanelOpened) {
+          activityPanel.querySelector(':scope > button')?.click();
+          activityPanelOpened = true;
+          checks.activityPanelOpened = true;
+          await sleep(100);
+        }
         target = document.querySelector(
           'button[data-vrcforge-save-operation-as-skill][data-vrcforge-save-operation-tool="vrcforge_build_test_readiness"]',
         );
-        if (target) break;
+        if (target) {
+          checks.operationOutsideEnvironmentPanel = Boolean(environmentPanel && !environmentPanel.contains(target));
+          if (checks.operationOutsideEnvironmentPanel) break;
+        }
         await sleep(200);
       }
-      checks.saveOperationButtonFound = Boolean(target);
-      if (!target) {
+      checks.saveOperationButtonFound = Boolean(target && checks.operationOutsideEnvironmentPanel);
+      if (!checks.saveOperationButtonFound) {
         const observedTools = [...document.querySelectorAll('button[data-vrcforge-save-operation-as-skill]')]
           .map((button) => button.getAttribute("data-vrcforge-save-operation-tool") || "")
           .filter((value) => /^vrcforge_[a-z0-9_]+$/.test(value))
@@ -5207,8 +5286,11 @@ async function runUiAcceptance(report, cdp, signerFingerprint, records) {
   console.log(`[skill-probe] ${new Date().toISOString()} ui.fixture-project:start`);
   await selectPackagedFixtureProject(report, cdp);
   console.log(`[skill-probe] ${new Date().toISOString()} ui.fixture-project:done`);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-chat:start`);
+  const contextualChat = await seedAndActivateContextualRuntimeChat(cdp);
+  console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-chat:done`);
   console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-runtime:start`);
-  const contextualRuntime = await invokeContextualReadinessRuntime();
+  const contextualRuntime = await invokeContextualReadinessRuntime(contextualChat.sessionId);
   console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-runtime:done`);
   const contextualReadiness = contextualRuntime?.result;
   if (

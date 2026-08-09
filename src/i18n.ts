@@ -27,14 +27,25 @@ async function ensureLocaleLoaded(code: string): Promise<LocaleCode> {
 
 export async function initializeI18n(): Promise<typeof i18n> {
   if (!i18n.isInitialized) {
-    const fallback = await loadLocaleMessages(DEFAULT_LOCALE);
+    const initialLocale = detectInitialLocale();
+    const fallbackPromise = loadLocaleMessages(DEFAULT_LOCALE);
+    const initialPromise = initialLocale === DEFAULT_LOCALE
+      ? fallbackPromise
+      : loadLocaleMessages(initialLocale);
+    const [fallback, initial] = await Promise.all([fallbackPromise, initialPromise]);
     loadedLocales.add(fallback.code);
+    loadedLocales.add(initial.code);
+    const resources: Record<string, { translation: Record<string, unknown> }> = {
+      [fallback.code]: { translation: fallback.messages },
+    };
+    resources[initial.code] = { translation: initial.messages };
     await i18n.use(initReactI18next).init({
       fallbackLng: DEFAULT_LOCALE,
       interpolation: { escapeValue: false },
-      resources: { [fallback.code]: { translation: fallback.messages } },
-      lng: DEFAULT_LOCALE,
+      resources,
+      lng: initial.code,
     });
+    return i18n;
   }
 
   const initial = await ensureLocaleLoaded(detectInitialLocale());

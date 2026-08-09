@@ -9,6 +9,10 @@ const runtimeSource = await readFile(
   new URL("../src/components/runtime/runtime-sidebar-ui.tsx", import.meta.url),
   "utf8",
 );
+const runtimeActivitySource = await readFile(
+  new URL("../src/components/runtime/runtime-activity-panel.tsx", import.meta.url),
+  "utf8",
+);
 const sidebarSource = await readFile(
   new URL("../src/components/sidebar/app-sidebar.tsx", import.meta.url),
   "utf8",
@@ -38,6 +42,8 @@ for (const marker of [
 }
 
 assert.ok(runtimeSource.includes("data-vrcforge-save-operation-tool="));
+assert.ok(runtimeActivitySource.includes("RuntimeRunRow"));
+assert.ok(runtimeActivitySource.includes("data-vrcforge-runtime-activity-panel"));
 assert.ok(sidebarSource.includes('semanticId="skills"'));
 assert.ok(sidebarSource.includes("data-vrcforge-sidebar-nav={semanticId}"));
 for (const marker of [
@@ -61,5 +67,9 @@ for (const selector of [
 ]) {
   assert.ok(probeSource.includes(selector), `packaged probe is missing semantic selector: ${selector}`);
 }
+assert.ok(probeSource.includes("seedAndActivateContextualRuntimeChat"));
+assert.ok(probeSource.includes("session_id: sessionId"));
+assert.ok(probeSource.includes("activityPanel.querySelector(':scope > button')?.click()"));
+assert.ok(probeSource.includes("operationOutsideEnvironmentPanel"));
 
 console.log("skill package audit and Path-to-Skill semantic UI contract passed");
