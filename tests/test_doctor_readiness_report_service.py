@@ -80,7 +80,7 @@ def _ports(*, calls: list[dict[str, Any]]) -> DoctorReadinessReportPorts:
     )
 
 
-def test_doctor_readiness_service_has_frozen_ports_and_single_root_facade() -> None:
+def test_doctor_readiness_service_has_frozen_ports_and_no_root_facade() -> None:
     source = (ROOT / "doctor_readiness_report_service.py").read_text(encoding="utf-8")
     dashboard_source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
     service = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name == "DoctorReadinessReportService")
@@ -100,14 +100,12 @@ def test_doctor_readiness_service_has_frozen_ports_and_single_root_facade() -> N
     assert DoctorReadinessReportService.__slots__ == ("_ports",)
 
     tree = ast.parse(dashboard_source)
-    facade = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build_app_doctor_report")
-    assert len(facade.body) == 1
-    assert isinstance(facade.body[0], ast.Return)
-    returned = facade.body[0].value
-    assert isinstance(returned, ast.Call)
-    assert isinstance(returned.func, ast.Attribute)
-    assert returned.func.attr == "build_app_doctor_report"
-    assert "STOPGAP: Migration-only owner for the root Doctor report facade below." in dashboard_source
+    assert not any(
+        isinstance(node, ast.FunctionDef) and node.name == "build_app_doctor_report"
+        for node in tree.body
+    )
+    assert "_DOCTOR_READINESS_REPORT" not in dashboard_source
+    assert "STOPGAP: Migration-only owner for the root Doctor report facade below." not in dashboard_source
 
 
 def test_doctor_readiness_service_projects_existing_schema_from_fake_ports() -> None:
@@ -133,4 +131,4 @@ def test_doctor_readiness_service_projects_existing_schema_from_fake_ports() -> 
 
 
 def test_dashboard_constructs_doctor_report_service_with_frozen_ports() -> None:
-    assert isinstance(dashboard_server._DOCTOR_READINESS_REPORT, DoctorReadinessReportService)
+    assert isinstance(dashboard_server.DOCTOR_READINESS_REPORT, DoctorReadinessReportService)

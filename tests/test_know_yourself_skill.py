@@ -792,7 +792,11 @@ def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(
             scoped.setattr(dashboard_server, "build_agent_connection_request", lambda _params: object())
             scoped.setattr(dashboard_server, "load_dashboard_settings", lambda _request: object())
             scoped.setattr(dashboard_server, "build_unity_status_snapshot", lambda _settings: _unity())
-            scoped.setattr(dashboard_server, "build_app_doctor_report", _doctor)
+            scoped.setattr(
+                dashboard_server,
+                "DOCTOR_READINESS_REPORT",
+                SimpleNamespace(build_app_doctor_report=_doctor),
+            )
             scoped.setattr(dashboard_server, "read_agent_compile_errors", lambda _params: _compile_clean())
             scoped.setattr(dashboard_server, "parse_editor_version", lambda _path: "2022.3.22f1")
             scoped.setattr(
@@ -855,7 +859,11 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
     monkeypatch.setattr(dashboard_server, "build_agent_connection_request", lambda _params: object())
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: object())
     monkeypatch.setattr(dashboard_server, "build_unity_status_snapshot", lambda _settings: _unity())
-    monkeypatch.setattr(dashboard_server, "build_app_doctor_report", _doctor)
+    monkeypatch.setattr(
+        dashboard_server,
+        "DOCTOR_READINESS_REPORT",
+        SimpleNamespace(build_app_doctor_report=_doctor),
+    )
     monkeypatch.setattr(dashboard_server, "read_agent_compile_errors", lambda _params: _compile_clean())
     monkeypatch.setattr(dashboard_server, "parse_editor_version", lambda _path: "2022.3.22f1")
     monkeypatch.setattr(

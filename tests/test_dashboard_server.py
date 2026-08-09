@@ -4867,9 +4867,13 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_app_doctor_degrades_when_diagnostics_fail(self) -> None:
         with patch(
-            "dashboard_server.build_app_doctor_report",
-            side_effect=RuntimeError(
-                "doctor exploded at https://alice:cleartext@example.invalid/v1?token=query-secret afterwards"
+            "dashboard_server.DOCTOR_READINESS_REPORT",
+            SimpleNamespace(
+                build_app_doctor_report=Mock(
+                    side_effect=RuntimeError(
+                        "doctor exploded at https://alice:cleartext@example.invalid/v1?token=query-secret afterwards"
+                    )
+                )
             ),
         ):
             with TestClient(dashboard_server.app) as client:

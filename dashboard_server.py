@@ -2158,9 +2158,7 @@ _UNITY_STATUS = UnityStatusService(
         required_tools=tuple(REQUIRED_VRCFORGE_UNITY_TOOLS),
     )
 )
-# STOPGAP: Migration-only owner for the root Doctor report facade below.
-# Remove it in the final 1.5 typed-composition seam-retirement gate.
-_DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
+DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
     DoctorReadinessReportPorts(
         build_health=lambda: build_agentic_app_health(),
         serialize_api_config=PROVIDER_CONFIGURATION.serialize_app_api_config,
@@ -2187,7 +2185,7 @@ KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
     KnowYourselfReadinessPorts(
         load_settings_for_params=lambda params: load_dashboard_settings(build_agent_connection_request(params)),
         build_unity_status=lambda settings: build_unity_status_snapshot(settings),
-        build_doctor_report=lambda: build_app_doctor_report(),
+        build_doctor_report=lambda: DOCTOR_READINESS_REPORT.build_app_doctor_report(),
         selected_project_path=lambda: DASHBOARD_STATE.selected_project_path,
         unity_editor_path=lambda: DASHBOARD_STATE.unity_editor_path,
         parse_editor_version=lambda version_file: parse_editor_version(version_file),
@@ -8652,14 +8650,10 @@ def _merge_registered_doctor_checks(checks: list[dict[str, Any]]) -> list[dict[s
     return [merged[check_id] for check_id in ordered_ids if check_id in merged] + [merged[check_id] for check_id in extras]
 
 
-def build_app_doctor_report() -> dict[str, Any]:
-    return _DOCTOR_READINESS_REPORT.build_app_doctor_report()
-
-
 @app.get("/api/app/doctor")
 def read_agentic_app_doctor() -> dict[str, Any]:
     try:
-        return build_app_doctor_report()
+        return DOCTOR_READINESS_REPORT.build_app_doctor_report()
     except Exception as exc:  # noqa: BLE001 - doctor must not break first-run desktop startup.
         checks = [
             _doctor_check(
