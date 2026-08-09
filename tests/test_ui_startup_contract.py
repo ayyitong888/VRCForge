@@ -262,10 +262,14 @@ def test_app_bootstrap_defers_heavy_catalog_and_hydrates_skills_asynchronously()
 
 def test_native_setup_starts_the_owned_backend_before_webview_hydration() -> None:
     main_rs = (ROOT / "src-tauri" / "src" / "main.rs").read_text(encoding="utf-8")
+    backend_rs = (ROOT / "src-tauri" / "src" / "backend.rs").read_text(encoding="utf-8")
     helper = main_rs[
         main_rs.index("fn start_managed_backend_early") : main_rs.index("fn main()")
     ]
     setup = main_rs[main_rs.index(".setup(|app|") : main_rs.index(".invoke_handler(")]
+    start_command = backend_rs[
+        backend_rs.index("pub fn start_backend(") : backend_rs.index("pub(crate) fn begin_backend_start")
+    ]
 
     assert "app.state::<BackendState>()" in helper
     assert "begin_backend_start(&state)?" in helper
@@ -273,6 +277,10 @@ def test_native_setup_starts_the_owned_backend_before_webview_hydration() -> Non
     assert setup.index("start_managed_backend_early(app.handle())") < setup.index(
         'app.get_webview_window("main")'
     )
+    assert start_command.index("ready_backend_start_result(") < start_command.index(
+        "begin_backend_start(&state)?"
+    )
+    assert "backend_session_verify_cache_valid()" in start_command
 
 
 def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerless() -> None:

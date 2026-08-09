@@ -192,6 +192,22 @@ pub(crate) struct BackendStartResult {
     message: String,
 }
 
+fn ready_backend_start_result(
+    already_running: bool,
+    session_verified: bool,
+) -> Option<BackendStartResult> {
+    if !already_running || !session_verified {
+        return None;
+    }
+    Some(BackendStartResult {
+        endpoint: BACKEND_ENDPOINT.to_string(),
+        started: false,
+        already_running: true,
+        mode: "ready".to_string(),
+        message: "VRCForge runtime is ready.".to_string(),
+    })
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppApiResponse {
@@ -569,6 +585,11 @@ pub fn start_backend(
     state: State<'_, BackendState>,
 ) -> Result<BackendStartResult, String> {
     let already_running = backend_port_open();
+    if let Some(result) =
+        ready_backend_start_result(already_running, backend_session_verify_cache_valid())
+    {
+        return Ok(result);
+    }
     let started_background = begin_backend_start(&state)?;
     if started_background {
         thread::spawn(move || run_backend_start_worker(app_handle));
@@ -584,6 +605,23 @@ pub fn start_backend(
             "VRCForge runtime startup is already in progress.".to_string()
         },
     })
+}
+
+#[cfg(test)]
+mod backend_start_result_tests {
+    use super::ready_backend_start_result;
+
+    #[test]
+    fn verified_early_backend_is_returned_without_starting_a_second_worker() {
+        assert!(ready_backend_start_result(false, true).is_none());
+        assert!(ready_backend_start_result(true, false).is_none());
+
+        let result = ready_backend_start_result(true, true)
+            .expect("the verified early backend should be returned as ready");
+        assert_eq!(result.mode, "ready");
+        assert!(result.already_running);
+        assert!(!result.started);
+    }
 }
 
 pub(crate) fn begin_backend_start(state: &BackendState) -> Result<bool, String> {
