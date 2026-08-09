@@ -7,6 +7,9 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from agent_gateway import AgentGateway
 from agent_memory_store import AgentMemoryStore
 from background_goal_runtime import ProviderPreflightCache, RuntimeLaneBudget
 from memory_review_composition import (
@@ -14,7 +17,7 @@ from memory_review_composition import (
     build_memory_review_composition,
 )
 from memory_review_dashboard_adapter import MemoryReviewDashboardAdapter
-from memory_review_runtime import MemoryReviewRuntimeCoordinator
+from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
 
 
 def _adapter(root: Path) -> MemoryReviewDashboardAdapter:
@@ -40,6 +43,27 @@ def _adapter(root: Path) -> MemoryReviewDashboardAdapter:
         provider_display_name=lambda value: str(value or ""),
         provider_requires_api_key=lambda _provider: False,
     )
+
+
+def test_gateway_runtime_and_desktop_activity_use_constructor_bound_signal(tmp_path: Path) -> None:
+    reasons: list[str] = []
+    gateway = AgentGateway(
+        tmp_path / "config.json",
+        tmp_path / "audit",
+        background_activity_started=reasons.append,
+    )
+
+    with pytest.raises(RuntimeError, match="runtime planner is not bound"):
+        gateway.runtime_message({"message": "Trigger the interactive lane."})
+    assert reasons == ["runtime_message"]
+
+    gateway.request_desktop_action(
+        {
+            "action": "annotation",
+            "prompt": "Record a local annotation.",
+        }
+    )
+    assert reasons == ["runtime_message", "desktop_action"]
 
 
 def test_memory_review_composition_has_no_reverse_root_or_host_proxy() -> None:
@@ -81,7 +105,7 @@ def test_memory_review_composition_owns_one_graph_with_narrow_ports(tmp_path: Pa
         lock=shared_lock,
     )
     events: list[tuple[str, Any]] = []
-    bound_activity: list[Any] = []
+    idle_gate = MemoryReviewIdleGate()
 
     async def broadcast(event_type: str, payload: Any) -> None:
         events.append((event_type, payload))
@@ -101,7 +125,7 @@ def test_memory_review_composition_owns_one_graph_with_narrow_ports(tmp_path: Pa
         },
         acquire_background_project_read=lambda _token: True,
         release_background_project_read=lambda _token: True,
-        bind_background_activity=bound_activity.append,
+        idle_gate=idle_gate,
         lane_budget=lane_budget,
         preflight=ProviderPreflightCache(lambda _provider, _url: True),
         build_runtime=lambda budget, preflight, on_state: MemoryReviewRuntimeCoordinator(
@@ -131,6 +155,7 @@ def test_memory_review_composition_owns_one_graph_with_narrow_ports(tmp_path: Pa
         task_lock,
         audit_lock,
     )
-    assert bound_activity == [composition.idle_gate.signal_activity]
+    assert composition.idle_gate is idle_gate
+    assert lane_budget._interactive_acquire_callback == idle_gate.signal_activity  # noqa: SLF001
     asyncio.run(composition.notify_review_changed())
     assert events == [("agentMemoryReview", {"changed": True})]

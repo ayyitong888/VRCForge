@@ -29,7 +29,7 @@ from memory_review_host import (
     build_memory_review_router,
 )
 from memory_consolidation_sources import resolve_memory_scope
-from memory_review_runtime import MemoryReviewRuntimeCoordinator
+from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
 from vrchat_blendshape_agent import Settings
 
 
@@ -99,6 +99,27 @@ class DashboardMemoryReviewHarness:
                 if path.is_file():
                     chunks.append(path.read_text(encoding="utf-8", errors="replace"))
         return "\n".join(chunks)
+
+
+def test_production_memory_review_activity_signal_is_constructor_bound() -> None:
+    gateway = dashboard_server.AGENT_GATEWAY
+    gate = dashboard_server.MEMORY_REVIEW.idle_gate
+
+    assert not hasattr(gateway, "background_activity_started_fn")
+    assert gateway._background_activity_started.__self__ is gate  # noqa: SLF001
+    assert gateway._background_activity_started.__func__ is gate.signal_activity.__func__  # noqa: SLF001
+    lane_callback = dashboard_server.RUNTIME_LANE_BUDGET._interactive_acquire_callback  # noqa: SLF001
+    assert lane_callback.__self__ is gate
+    assert lane_callback.__func__ is gate.signal_activity.__func__
+
+    revoked: list[str] = []
+    assert gate.try_acquire(lambda: "", lambda: revoked.append("runtime")) is not None
+    gateway._signal_background_activity("runtime_message")  # noqa: SLF001
+    assert revoked == ["runtime"]
+
+    assert gate.try_acquire(lambda: "", lambda: revoked.append("desktop")) is not None
+    gateway.desktop._ports.signal_background_activity("desktop_action")  # noqa: SLF001
+    assert revoked == ["runtime", "desktop"]
 
 
 def _settings(
@@ -270,7 +291,6 @@ def test_large_audit_tail_scan_is_bounded_and_does_not_take_gateway_state_lock(
 def memory_review_dashboard(tmp_path: Path):
     gateway = dashboard_server.AGENT_GATEWAY
     original_paths = (gateway.config_path, gateway.audit_dir)
-    original_background_activity = gateway.background_activity_started_fn
     project = tmp_path / "AuthorizedProject"
     other_project = tmp_path / "OtherProject"
     unauthorized_project = tmp_path / "UnauthorizedProject"
@@ -325,6 +345,7 @@ def memory_review_dashboard(tmp_path: Path):
         return None
 
     lane_budget = RuntimeLaneBudget()
+    idle_gate = MemoryReviewIdleGate()
     class TestAdapter:
         def authorized_project_roots(self) -> list[str]:
             return [str(project), str(other_project)]
@@ -375,11 +396,7 @@ def memory_review_dashboard(tmp_path: Path):
             ),
             acquire_background_project_read=gateway.try_acquire_background_project_read,
             release_background_project_read=gateway.release_background_project_read,
-            bind_background_activity=lambda callback: setattr(
-                gateway,
-                "background_activity_started_fn",
-                callback,
-            ),
+            idle_gate=idle_gate,
             lane_budget=lane_budget,
             preflight=ProviderPreflightCache(lambda _provider, _url: True),
             build_runtime=lambda budget, preflight, on_state: MemoryReviewRuntimeCoordinator(
@@ -445,7 +462,6 @@ def memory_review_dashboard(tmp_path: Path):
         yield harness
     finally:
         client.close()
-        gateway.background_activity_started_fn = original_background_activity
         gateway.configure_paths(*original_paths)
 
 
@@ -779,7 +795,10 @@ def test_suggest_accept_is_the_only_path_into_memory_and_runtime_prompt(
 
     before = env.client.get("/api/app/agent/memory", params={"scope": "user"}).json()
     before_observe = dashboard_server.AGENT_GATEWAY.runtime_observe()
-    before_prompt = dashboard_server.AGENT_GATEWAY._message_with_runtime_context("continue", before_observe)  # noqa: SLF001
+    before_prompt = dashboard_server.AGENT_GATEWAY.runtime_planner._message_with_runtime_context(  # noqa: SLF001
+        "continue",
+        before_observe,
+    )
     assert before["count"] == 0
     assert candidate["proposedText"] not in before_prompt
 
@@ -793,7 +812,10 @@ def test_suggest_accept_is_the_only_path_into_memory_and_runtime_prompt(
     assert listed["memories"][0]["source"] == "consolidation_review"
     assert listed["memories"][0]["text"] == candidate["proposedText"]
     observe = dashboard_server.AGENT_GATEWAY.runtime_observe()
-    prompt = dashboard_server.AGENT_GATEWAY._message_with_runtime_context("continue", observe)  # noqa: SLF001
+    prompt = dashboard_server.AGENT_GATEWAY.runtime_planner._message_with_runtime_context(  # noqa: SLF001
+        "continue",
+        observe,
+    )
     assert candidate["proposedText"] in prompt
 
 
@@ -880,7 +902,7 @@ def test_reject_and_defer_never_enter_memory(
     )
     assert response.status_code == 200, response.text
     assert env.client.get("/api/app/agent/memory", params={"scope": "user"}).json()["count"] == 0
-    prompt = dashboard_server.AGENT_GATEWAY._message_with_runtime_context(  # noqa: SLF001
+    prompt = dashboard_server.AGENT_GATEWAY.runtime_planner._message_with_runtime_context(  # noqa: SLF001
         "continue",
         dashboard_server.AGENT_GATEWAY.runtime_observe(),
     )

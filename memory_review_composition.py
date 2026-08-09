@@ -43,7 +43,7 @@ class MemoryReviewCompositionPorts:
     list_memory: Callable[[int, str], dict[str, Any]]
     acquire_background_project_read: Callable[[str], bool]
     release_background_project_read: Callable[[str], bool]
-    bind_background_activity: Callable[[Callable[[str], Any]], None]
+    idle_gate: MemoryReviewIdleGate
     lane_budget: RuntimeLaneBudget
     preflight: ProviderPreflightCache
     build_runtime: Callable[[RuntimeLaneBudget, ProviderPreflightCache, Callable[..., Any]], MemoryReviewRuntimeCoordinator]
@@ -123,7 +123,7 @@ def build_memory_review_composition(ports: MemoryReviewCompositionPorts) -> Memo
         lock=ports.shared_state_lock,
     )
     adapter = ports.adapter
-    idle_gate = MemoryReviewIdleGate()
+    idle_gate = ports.idle_gate
 
     async def on_changed(_state: dict[str, Any] | None = None) -> None:
         await ports.broadcast("agentMemoryReview", {"changed": True})
@@ -176,7 +176,6 @@ def build_memory_review_composition(ports: MemoryReviewCompositionPorts) -> Memo
         idle_gate=idle_gate,
     )
     ports.lane_budget.set_interactive_acquire_callback(idle_gate.signal_activity)
-    ports.bind_background_activity(idle_gate.signal_activity)
     return MemoryReviewComposition(
         service=service,
         adapter=adapter,

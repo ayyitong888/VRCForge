@@ -240,7 +240,7 @@ from memory_consolidation_sources import MemoryScope, project_scope_key
 from memory_review_composition import MemoryReviewComposition, MemoryReviewCompositionPorts, build_memory_review_composition
 from memory_review_host import build_memory_review_router
 from memory_review_provider import invoke_memory_review_provider
-from memory_review_runtime import MemoryReviewRuntimeCoordinator
+from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
 from optimization_service import (
     OPTIMIZATION_APPLY_REQUEST_DEFINITIONS,
     OPTIMIZATION_GATEWAY_TOOL_NAMES,
@@ -2206,6 +2206,7 @@ BACKGROUND_GOAL_WAKE_DRAIN_TASKS: set[asyncio.Task[None]] = set()
 AGENT_MCP_INIT_TASK: asyncio.Task[None] | None = None
 DASHBOARD_STATE: DashboardState | None = None
 DASHBOARD_RUNTIME = DashboardRuntimeState()
+memory_review_idle_gate = MemoryReviewIdleGate()
 AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
@@ -2215,6 +2216,7 @@ AGENT_GATEWAY = AgentGateway(
         "agentDesktopActions",
         {"changed": True},
     ),
+    background_activity_started=memory_review_idle_gate.signal_activity,
 )
 # STOPGAP(1.5): this app-lifetime owner shares the established durable state
 # lock and Goal resolver without a Gateway forwarding layer. The final typed
@@ -3719,10 +3721,6 @@ CHAT_REQUESTED_PROJECT_PATH_LIMIT = 100
 CHAT_REQUESTED_PROJECT_PATHS: dict[str, str] = {}
 
 
-# STOPGAP: keep one app-lifetime Memory Review graph while the remaining 1.5
-# domains move to typed composition.  The final 1.5 seam-retirement gate must
-# inject this graph into lifecycle/controllers and remove this root lookup and
-# Gateway callback binding before the version bump.
 MEMORY_REVIEW: MemoryReviewComposition = build_memory_review_composition(
     MemoryReviewCompositionPorts(
         accepted_memory_store=AGENT_GATEWAY.agent_memory_store,
@@ -3735,11 +3733,7 @@ MEMORY_REVIEW: MemoryReviewComposition = build_memory_review_composition(
         ),
         acquire_background_project_read=AGENT_GATEWAY.try_acquire_background_project_read,
         release_background_project_read=AGENT_GATEWAY.release_background_project_read,
-        bind_background_activity=lambda callback: setattr(
-            AGENT_GATEWAY,
-            "background_activity_started_fn",
-            callback,
-        ),
+        idle_gate=memory_review_idle_gate,
         lane_budget=RUNTIME_LANE_BUDGET,
         preflight=BACKGROUND_GOAL_PREFLIGHT,
         build_runtime=lambda lane_budget, preflight, on_state: MemoryReviewRuntimeCoordinator(
@@ -3788,6 +3782,7 @@ MEMORY_REVIEW: MemoryReviewComposition = build_memory_review_composition(
         sub_agent_source_commit_lock=_SUB_AGENT_COLLABORATION.source_commit_lock,
     )
 )
+del memory_review_idle_gate
 app.include_router(build_memory_review_router(MEMORY_REVIEW.host))
 
 

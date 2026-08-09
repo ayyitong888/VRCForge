@@ -266,15 +266,6 @@
       ]
     },
     {
-      "id": "dashboard.memory-review-root-graph",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "MEMORY_REVIEW"}
-      ],
-      "markers": [
-        {"source": "dashboard_server.py", "text": "# STOPGAP: keep one app-lifetime Memory Review graph while the remaining 1.5"}
-      ]
-    },
-    {
       "id": "gateway.approval-transaction-host-proxy",
       "rootSymbols": [
         {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_approval_transactions"}
@@ -458,8 +449,7 @@
       "rootSymbols": [
         {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_runtime_sessions"},
         {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_cancelled_runtime_turns"},
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_runtime_stream_context"},
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "background_activity_started_fn"}
+        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_runtime_stream_context"}
       ],
       "facades": [
         {

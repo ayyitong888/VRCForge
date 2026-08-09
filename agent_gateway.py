@@ -1678,6 +1678,7 @@ class AgentGateway:
         desktop_controller_factory: Callable[[Path], Any] | None = None,
         shell_process_ports: ShellProcessPorts | None = None,
         skill_package_write_lock: AbstractContextManager[object] | None = None,
+        background_activity_started: Callable[[str], Any] | None = None,
     ) -> None:
         self.config_path = config_path
         self.audit_dir = audit_dir
@@ -1726,7 +1727,9 @@ class AgentGateway:
         # own proof. It closes the gap before durable apply recovery exists.
         self._in_flight_apply_writes: dict[str, dict[str, Any]] = {}
         self._background_project_read_leases: set[str] = set()
-        self.background_activity_started_fn: Callable[[str], Any] | None = None
+        if background_activity_started is not None and not callable(background_activity_started):
+            raise TypeError("background_activity_started must be callable")
+        self._background_activity_started = background_activity_started
         self.apply_lifecycle_observer_fn: Callable[[str, dict[str, Any]], Any] | None = None
         self._runtime_planner: RuntimePlannerService | None = None
         # Optional vision-analysis hook injected by the host server. Receives
@@ -1982,7 +1985,7 @@ class AgentGateway:
         self._project_chat_checkpoint_lock = lock
 
     def _signal_background_activity(self, reason: str) -> None:
-        callback = self.background_activity_started_fn
+        callback = self._background_activity_started
         if callback is None:
             return
         try:
