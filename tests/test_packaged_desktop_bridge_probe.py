@@ -115,6 +115,23 @@ def test_desktop_probe_fails_closed_before_input_and_binds_each_input_step() -> 
     )
 
 
+def test_desktop_probe_completes_isolated_first_run_before_waiting_for_the_composer() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+
+    assert "async function prepareComposerAfterFirstRun(cdp, timeoutMs = 30000)" in source
+    assert "[data-vrcforge-onboarding-language-gate='true']" in source
+    assert "button[data-vrcforge-onboarding-language-option][aria-pressed='true']" in source
+    assert "button[data-vrcforge-onboarding-language-continue]" in source
+    assert "[data-vrcforge-onboarding='true']" in source
+    assert "button[data-vrcforge-onboarding-skip]" in source
+    assert 'actions.push("language-continue")' in source
+    assert 'actions.push("onboarding-skip")' in source
+    assert "output.ready = await prepareComposerAfterFirstRun(cdp);" in source
+    assert source.index("output.ready = await prepareComposerAfterFirstRun(cdp);") < source.index(
+        'output.bootstrap = await appApi("/api/app/bootstrap")'
+    )
+
+
 def test_desktop_probe_self_test_and_unknown_option_are_side_effect_free() -> None:
     self_test = subprocess.run(
         ["node", str(SCRIPT), "--self-test"],

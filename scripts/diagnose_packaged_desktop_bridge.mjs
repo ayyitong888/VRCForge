@@ -752,6 +752,62 @@ async function waitForEval(cdp, expression, timeoutMs = 20000) {
   throw new Error(`Timed out waiting for expression: ${expression}; last=${JSON.stringify(lastValue)}`);
 }
 
+async function prepareComposerAfterFirstRun(cdp, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  const actions = [];
+  let lastState = null;
+  while (Date.now() < deadline) {
+    lastState = await evalValue(
+      cdp,
+      `(() => ({
+        composerReady: Boolean(
+          document.querySelector("textarea") &&
+          document.querySelector("button[type='submit']") &&
+          !document.querySelector("textarea").disabled
+        ),
+        languageGate: Boolean(document.querySelector("[data-vrcforge-onboarding-language-gate='true']")),
+        onboarding: Boolean(document.querySelector("[data-vrcforge-onboarding='true']")),
+        bodyLength: document.body.innerText.length,
+      }))()`,
+      5000,
+    ).catch((error) => ({ error: String(error) }));
+    if (lastState?.composerReady) {
+      return { ok: true, actions, bodyLength: lastState.bodyLength };
+    }
+    if (lastState?.languageGate && !actions.includes("language-continue")) {
+      const clicked = await evalValue(
+        cdp,
+        `(() => {
+          const selected = document.querySelector(
+            "button[data-vrcforge-onboarding-language-option][aria-pressed='true']"
+          );
+          const button = document.querySelector("button[data-vrcforge-onboarding-language-continue]");
+          if (!selected || !button) return false;
+          selected.click();
+          button.click();
+          return true;
+        })()`,
+        5000,
+      );
+      if (clicked) actions.push("language-continue");
+    } else if (lastState?.onboarding && !actions.includes("onboarding-skip")) {
+      const clicked = await evalValue(
+        cdp,
+        `(() => {
+          const button = document.querySelector("button[data-vrcforge-onboarding-skip]");
+          if (!button) return false;
+          button.click();
+          return true;
+        })()`,
+        5000,
+      );
+      if (clicked) actions.push("onboarding-skip");
+    }
+    await sleep(200);
+  }
+  throw new Error(`Timed out preparing the isolated first-run composer; last=${JSON.stringify(lastState)}`);
+}
+
 async function reloadAppPage(cdp) {
   const priorTimeOrigin = Number(await evalValue(cdp, "performance.timeOrigin"));
   await cdp.send("Page.reload", { ignoreCache: true });
@@ -1210,15 +1266,7 @@ async function main() {
     await cdp.send("Page.enable");
     await cdp.send("Network.enable");
     await waitForEval(cdp, "document.readyState === 'complete' || document.readyState === 'interactive'");
-    output.ready = await waitForEval(
-      cdp,
-      `(() => {
-        const textarea = document.querySelector("textarea");
-        const submit = document.querySelector("button[type='submit']");
-        return { ok: Boolean(textarea && submit && !textarea.disabled), bodyLength: document.body.innerText.length };
-      })()`,
-      30000,
-    );
+    output.ready = await prepareComposerAfterFirstRun(cdp);
     output.restoredTransientPlaceholders = await evalValue(
       cdp,
       `(() => {
