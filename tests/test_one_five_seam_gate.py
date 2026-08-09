@@ -172,44 +172,6 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
         if group_id.startswith("dashboard.") and group.get("hostProxy")
     )
     assert dashboard_host_proxy_count == 0
-    assert groups["dashboard.skill-package-projection-typed-root-owner"][
-        "rootSymbols"
-    ] == [
-        {
-            "source": "dashboard_server.py",
-            "scope": "module",
-            "name": "SKILL_PACKAGE_PROJECTION",
-        }
-    ]
-    assert groups["dashboard.skill-package-controller-typed-root-owner"][
-        "rootSymbols"
-    ] == [
-        {
-            "source": "dashboard_server.py",
-            "scope": "module",
-            "name": "SKILL_PACKAGE_CONTROLLER",
-        }
-    ]
-    assert groups["dashboard.skill-package-governance-typed-root-owner"][
-        "rootSymbols"
-    ] == [
-        {
-            "source": "dashboard_server.py",
-            "scope": "module",
-            "name": "SKILL_PACKAGE_GOVERNANCE",
-        }
-    ]
-    assert {
-        item["name"]
-        for item in groups["dashboard.path-to-skill-typed-root-owners"]["rootSymbols"]
-    } == {"PATH_TO_SKILL_PREVIEW", "PATH_TO_SKILL_WRITE"}
-    assert groups["dashboard.project-catalog-typed-root-owner"]["rootSymbols"] == [
-        {
-            "source": "dashboard_server.py",
-            "scope": "module",
-            "name": "PROJECT_CATALOG_DISCOVERY",
-        }
-    ]
     assert {
         item["name"]
         for item in groups["dashboard.wardrobe-outfit-root-owners"]["rootSymbols"]
@@ -258,6 +220,11 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.shader-vision-protection-typed-root-owner" not in groups
     assert "dashboard.package-install-root-owners" not in groups
     assert "gateway.shell-policy-execution-owner" not in groups
+    assert "dashboard.skill-package-projection-typed-root-owner" not in groups
+    assert "dashboard.skill-package-controller-typed-root-owner" not in groups
+    assert "dashboard.skill-package-governance-typed-root-owner" not in groups
+    assert "dashboard.path-to-skill-typed-root-owners" not in groups
+    assert "dashboard.project-catalog-typed-root-owner" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
     assert {item["id"] for item in manifest["publicApiAllowlist"]["contracts"]} == {
         "fastapi-route-request-response-openapi",
