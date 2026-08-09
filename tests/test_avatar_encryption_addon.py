@@ -440,7 +440,7 @@ def test_avatar_encryption_tools_are_projected_as_request_only_writes() -> None:
     assert dashboard_server.AVATAR_ENCRYPTION_ADDON_APPLY_TOOL not in write_targets
     assert dashboard_server.AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL not in write_targets
 
-    skills = dashboard_server.AGENT_GATEWAY.build_skill_registry()["skills"]
+    skills = dashboard_server.AGENT_GATEWAY.skills.build_skill_registry()["skills"]
     groups = {skill["name"]: skill for skill in skills if skill["source"] == "builtin" and skill["skillType"] == "group"}
     expected_groups = {
         "avatar-encryption-research-scan",

@@ -16,10 +16,11 @@ import threading
 import time
 import zipfile
 import zlib
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Sequence
 
 from agent_memory_store import AgentMemoryStore
 import agent_command_safety as command_safety
@@ -34,6 +35,9 @@ from agent_shell_service import (
     ShellProcessPorts,
     summarize_shell_result as summarize_owned_shell_result,
 )
+
+if TYPE_CHECKING:
+    from agent_skill_registry import AgentSkillRegistryService, RuntimeSkillSnapshot
 from agent_goal_service import (
     AgentGoalService,
     GoalApprovalStatePorts,
@@ -81,7 +85,8 @@ RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES = 64 * 1024
 RUNTIME_SKILL_SUPPORT_MAX_TOTAL_BYTES = 256 * 1024
 PROJECTED_SKILL_STATE_NAME = ".vrcforge-package-state.json"
 PROJECTED_SKILL_STATE_MAX_BYTES = 4 * 1024
-PROJECTED_SKILL_STATE_SCHEMA = "vrcforge.projected-skill-state.v1"
+LEGACY_PROJECTED_SKILL_STATE_SCHEMA = "vrcforge.projected-skill-state.v1"
+PROJECTED_SKILL_STATE_SCHEMA = "vrcforge.projected-skill-state.v2"
 
 ROLLBACK_POLICY_SCHEMA = "vrcforge.write_rollback_policy.v1"
 ROLLBACK_COVERAGE_AUDIT_SCHEMA = "vrcforge.rollback_coverage_audit.v1"
@@ -1672,6 +1677,7 @@ class AgentGateway:
         desktop_actions_changed: Callable[[], None] | None = None,
         desktop_controller_factory: Callable[[Path], Any] | None = None,
         shell_process_ports: ShellProcessPorts | None = None,
+        skill_package_write_lock: AbstractContextManager[object] | None = None,
     ) -> None:
         self.config_path = config_path
         self.audit_dir = audit_dir
@@ -1681,6 +1687,8 @@ class AgentGateway:
         self._approvals: dict[str, dict[str, Any]] = {}
         self._runtime_sessions: dict[str, dict[str, Any]] = {}
         self._cancelled_runtime_turns: set[str] = set()
+        self._skill_package_write_lock_bound = skill_package_write_lock is not None
+        self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self.checkpoint_project_root_resolver: Callable[[], str] | None = None
         self.checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
         self.checkpoint_restore_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
@@ -1739,7 +1747,7 @@ class AgentGateway:
         # User-authored Skill CRUD and Doctor quarantine operate on the same
         # directory tree.  Keep that domain separate from the broad gateway
         # state lock so a repair cannot act on a stale manifest snapshot.
-        self._user_skill_lock = threading.RLock()
+        user_skill_lock = threading.RLock()
         # Checkpoint archives, their JSONL projection, and storage relocation
         # form one consistency domain. Creation calls pruning recursively, so
         # this must be re-entrant.
@@ -1845,9 +1853,57 @@ class AgentGateway:
             ),
             process_ports=shell_process_ports,
         )
-        from agent_skill_registry import AgentSkillRegistryService
+        from agent_skill_registry import (
+            AgentSkillRegistryPorts,
+            AgentSkillRegistryService,
+            SkillToolDescriptor,
+            SkillWriteHandlerDescriptor,
+        )
 
-        self._skill_registry = AgentSkillRegistryService(self)
+        def skill_tools() -> tuple[SkillToolDescriptor, ...]:
+            return tuple(
+                SkillToolDescriptor(
+                    name=tool.name,
+                    description=tool.description,
+                    category=tool.category,
+                    write=tool.write,
+                    advanced=tool.advanced,
+                    requires_user_activation=tool.requires_user_activation,
+                )
+                for tool in self._tools.values()
+            )
+
+        def skill_write_handlers() -> tuple[SkillWriteHandlerDescriptor, ...]:
+            return tuple(
+                SkillWriteHandlerDescriptor(
+                    name=handler.name,
+                    description=handler.description,
+                    risk_level=handler.risk_level,
+                    advanced=handler.advanced,
+                )
+                for handler in self._write_handlers.values()
+            )
+
+        self._skills = AgentSkillRegistryService(
+            AgentSkillRegistryPorts(
+                config_path=lambda: self.config_path,
+                ensure_config=self.ensure_config,
+                list_tools=skill_tools,
+                list_write_handlers=skill_write_handlers,
+                tool_visible=lambda name, config: bool(
+                    (tool := self._tools.get(name)) is not None
+                    and self._tool_visible(tool, config)
+                ),
+                write_handler_visible=lambda name, config: bool(
+                    (handler := self._write_handlers.get(name)) is not None
+                    and self._write_handler_visible(handler, config)
+                ),
+                computer_use_model_invocable=lambda config: self._desktop.computer_use_model_invocable(config),
+                append_audit=self.append_audit,
+                user_skill_lock=user_skill_lock,
+                local_state_write_guard=self.local_state_write_guard,
+            )
+        )
         self._desktop = DesktopComputerUseService(
             audit_dir,
             desktop_capture_dir or audit_dir / "desktop-captures",
@@ -1886,6 +1942,10 @@ class AgentGateway:
     @property
     def shell(self) -> AgentShellService:
         return self._shell
+
+    @property
+    def skills(self) -> AgentSkillRegistryService:
+        return self._skills
 
     @property
     def goal(self) -> AgentGoalService:
@@ -2232,7 +2292,7 @@ class AgentGateway:
             "tools": tools,
             "toolCount": len(tools),
             "writeTargets": self.visible_write_targets(config, exposure_layer),
-            "skills": self.build_skill_registry(config, exposure_layer)["skills"],
+            "skills": self.skills.build_skill_registry(config, exposure_layer)["skills"],
             "userConstraints": self._serialize_user_constraints(user_constraints),
         }
 
@@ -2268,40 +2328,11 @@ class AgentGateway:
             "tools": tools,
         }
 
-    def build_skill_registry(
-        self,
-        config: AgentGatewayConfig | None = None,
-        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
-    ) -> dict[str, Any]:
-        return self._skill_registry._impl_build_skill_registry(config, exposure_layer)
-
-    def check_skill_registry(
-        self,
-        config: AgentGatewayConfig | None = None,
-        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
-    ) -> dict[str, Any]:
-        return self._skill_registry._impl_check_skill_registry(config, exposure_layer)
-
-    def create_user_skill(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._skill_registry._impl_create_user_skill(payload)
-
-    def update_user_skill(self, skill_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._skill_registry._impl_update_user_skill(skill_id, payload)
-
-    def delete_user_skill(self, skill_id: str) -> dict[str, Any]:
-        return self._skill_registry._impl_delete_user_skill(skill_id)
-
-    @property
-    def user_skill_lock(self) -> threading.RLock:
-        """Shared lock for host-owned Skill maintenance transactions."""
-
-        return self._user_skill_lock
-
     def build_health(self) -> dict[str, Any]:
         config = self.ensure_config()
         user_constraints = self.read_user_constraints()
         pending = [item for item in self.list_approvals(include_expired=False) if item.get("status") == "pending"]
-        skills = self.build_skill_registry(config)
+        skills = self.skills.build_skill_registry(config)
         return {
             "ok": True,
             "runtimeAlive": True,
@@ -3368,7 +3399,7 @@ class AgentGateway:
             "tools": {
                 "count": len(self.build_manifest().get("tools", [])),
             },
-            "skills": summarize_skill_registry(self.build_skill_registry()),
+            "skills": summarize_skill_registry(self.skills.build_skill_registry()),
             "goals": {
                 "count": len(goals),
                 "items": [
@@ -4492,9 +4523,14 @@ class AgentGateway:
             checkpoint,
         )
 
-    def _restore_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _restore_local_state_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        expected_current_state_digest: str = "",
+    ) -> dict[str, Any]:
         return self._checkpoint_recovery._impl__restore_local_state_checkpoint(
             checkpoint,
+            expected_current_state_digest,
         )
 
     def _build_checkpoint_rollback_coverage_audit(
@@ -4636,6 +4672,24 @@ class AgentGateway:
 
     def _active_apply_recoveries(self) -> list[dict[str, Any]]:
         return self._checkpoint_recovery._impl__active_apply_recoveries()
+
+    @contextmanager
+    def local_state_write_guard(self) -> Iterator[None]:
+        """Serialize direct local-state writes with checkpoint/recovery I/O."""
+
+        with self._checkpoint_storage_lock:
+            active = [
+                recovery
+                for recovery in self._active_apply_recoveries()
+                if str(recovery.get("targetTool") or "")
+                in LOCAL_STATE_CHECKPOINT_TARGETS
+            ]
+            if active:
+                raise AgentGatewayError(
+                    "A skill-package recovery is active. Restore or resolve it before changing local skill state.",
+                    status_code=409,
+                )
+            yield
 
     def has_in_flight_project_write(self) -> bool:
         return self._approval_transactions._impl_has_in_flight_project_write()
@@ -4893,30 +4947,6 @@ class AgentGateway:
             message="User constraints are active." if content else "User AGENTS.md is empty.",
         )
 
-    def _builtin_skill_definitions(self, config: AgentGatewayConfig) -> list[dict[str, Any]]:
-        return self._skill_registry._impl_builtin_skill_definitions(config)
-
-    def _skill_from_builtin_group(self, group: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
-        return self._skill_registry._impl_skill_from_builtin_group(group, config)
-
-    def _skill_from_tool(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
-        return self._skill_registry._impl_skill_from_tool(tool, config)
-
-    def _skill_from_write_handler(self, handler: AgentWriteHandler, config: AgentGatewayConfig) -> dict[str, Any]:
-        return self._skill_registry._impl_skill_from_write_handler(handler, config)
-
-    def _permission_mode_for_tool(self, tool: AgentTool) -> str:
-        if tool.advanced:
-            return "advanced_power_mode"
-        if tool.write:
-            return "approval_required"
-        if tool.category == "plan/preview":
-            return "preview"
-        return "read_only"
-
-    def _skill_dependency_visible(self, tool_name: str, config: AgentGatewayConfig) -> bool:
-        return self._skill_registry._impl_skill_dependency_visible(tool_name, config)
-
     @property
     def audit_log_path(self) -> Path:
         return self.audit_dir / "approvals.jsonl"
@@ -4956,40 +4986,6 @@ class AgentGateway:
         if user_data_dir:
             return Path(user_data_dir) / "AGENTS.md"
         return self.config_path.parent / "AGENTS.md"
-
-    @property
-    def user_skills_dir(self) -> Path:
-        return self._skill_registry._impl_user_skills_dir()
-
-    def _load_user_skills(self) -> list[dict[str, Any]]:
-        return self._skill_registry._impl_load_user_skills()
-
-    def _load_projected_skill_state(self, skill_file: Path) -> bool | None:
-        return self._skill_registry._impl_load_projected_skill_state(skill_file)
-
-    def _find_user_skill(self, skill_id: str) -> dict[str, Any] | None:
-        return self._skill_registry._impl_find_user_skill(skill_id)
-
-    def _save_user_skills(self, skills: list[dict[str, Any]]) -> None:
-        return self._skill_registry._impl_save_user_skills(skills)
-
-    def _save_user_skill(self, skill: dict[str, Any]) -> None:
-        return self._skill_registry._impl_save_user_skill(skill)
-
-    def _normalize_user_skill(self, payload: dict[str, Any], existing_id: str | None = None) -> dict[str, Any]:
-        return self._skill_registry._impl_normalize_user_skill(payload, existing_id)
-
-    def _ensure_user_skill_can_use_id(self, skill_id: str, skills: list[dict[str, Any]]) -> None:
-        return self._skill_registry._impl_ensure_user_skill_can_use_id(skill_id, skills)
-
-    def _decorate_skill_validation(self, skill: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
-        return self._skill_registry._impl_decorate_skill_validation(skill, config)
-
-    def _validate_skill(self, skill: dict[str, Any], config: AgentGatewayConfig) -> dict[str, Any]:
-        return self._skill_registry._impl_validate_skill(skill, config)
-
-    def _load_runtime_skill_support_files(self, skill: dict[str, Any]) -> list[dict[str, str]]:
-        return self._skill_registry._impl_load_runtime_skill_support_files(skill)
 
     def visible_write_targets(
         self,
@@ -5331,13 +5327,6 @@ class AgentGateway:
 
 
 
-    def _find_registry_skill(self, skill_id: str, config: AgentGatewayConfig | None = None) -> dict[str, Any] | None:
-        skill_id = normalize_skill_id(skill_id)
-        for skill in ensure_list(self.build_skill_registry(config).get("skills")):
-            if isinstance(skill, dict) and normalize_skill_id(str(skill.get("name") or "")) == skill_id:
-                return skill
-        return None
-
     def execute_runtime_skill(
         self,
         tool_name: str,
@@ -5361,9 +5350,14 @@ class AgentGateway:
         config = self.ensure_config()
         tool = self._tools.get(tool_name)
         if not tool:
-            registry_skill = self._find_registry_skill(tool_name, config)
-            if registry_skill:
-                return self._execute_skill_package(registry_skill, params, agent_name, config)
+            with self._skill_package_write_lock:
+                snapshot = self.skills.prepare_runtime_skill(
+                    tool_name,
+                    config,
+                    self._runtime_skill_package_audit_context_locked,
+                )
+            if snapshot:
+                return self._execute_skill_package(snapshot, params, agent_name, config)
             return {
                 "ok": False,
                 "status": "blocked",
@@ -5447,21 +5441,16 @@ class AgentGateway:
 
     def _execute_skill_package(
         self,
-        skill: dict[str, Any],
+        snapshot: RuntimeSkillSnapshot,
         params: dict[str, Any],
         agent_name: str,
         config: AgentGatewayConfig,
     ) -> dict[str, Any]:
-        package_audit_context = self._runtime_skill_package_audit_context(skill)
-        validation = ensure_dict(skill.get("validation")) or self._validate_skill(skill, config)
-        status = "loaded" if skill.get("enabled", True) and validation.get("status") != "error" else "blocked"
-        support_files: list[dict[str, str]] = []
-        if status == "loaded":
-            try:
-                support_files = self._load_runtime_skill_support_files(skill)
-            except AgentGatewayError as exc:
-                status = "blocked"
-                validation = {"status": "error", "reasons": [str(exc)]}
+        skill = snapshot.skill
+        package_audit_context = snapshot.package_audit_context
+        validation = snapshot.validation
+        status = "loaded" if snapshot.loaded else "blocked"
+        support_files = list(snapshot.support_files)
         result = redact_sensitive(build_runtime_skill_payload(skill, params, support_files=support_files))
         payload = {
             "ok": status == "loaded",
@@ -5520,7 +5509,7 @@ class AgentGateway:
         )
         return payload
 
-    def _runtime_skill_package_audit_context(self, skill: dict[str, Any]) -> dict[str, Any]:
+    def _runtime_skill_package_audit_context_locked(self, skill: dict[str, Any]) -> dict[str, Any]:
         """Resolve immutable installed-package identity for a projected skill.
 
         Projected user skills intentionally remain plain ``SKILL.md`` files, so
@@ -5548,7 +5537,7 @@ class AgentGateway:
 
             storage_path = Path(storage_value)
             storage_resolved = storage_path.resolve(strict=True)
-            skills_root = self.user_skills_dir.resolve(strict=True)
+            skills_root = self.skills.user_skills_dir.resolve(strict=True)
             storage_resolved.relative_to(skills_root)
             if not storage_path.is_file() or storage_path.is_symlink():
                 return {}
@@ -6475,8 +6464,18 @@ def tool_usage_description(name: str, summary: str, *, write: bool) -> str:
     return f"When to use: {text}\nWhen NOT to use: {when_not}\nNegative example: {negative}"
 
 
-def parse_skill_markdown(path: Path) -> dict[str, Any]:
-    text = path.read_text(encoding="utf-8-sig")
+def parse_skill_markdown(path: Path, *, max_bytes: int | None = None) -> dict[str, Any]:
+    if max_bytes is None:
+        text = path.read_text(encoding="utf-8-sig")
+    else:
+        with path.open("rb") as stream:
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise AgentGatewayError(
+                f"Skill manifest exceeds the {max_bytes}-byte limit.",
+                status_code=400,
+            )
+        text = data.decode("utf-8-sig")
     metadata: dict[str, Any] = {}
     body = text
     if text.startswith("---"):

@@ -60,11 +60,13 @@ from agent_gateway import (
     normalize_bool,
     normalize_checkpoint_archive_max_size_mb,
     normalize_exposure_layer,
+    normalize_skill_id,
     parse_skill_markdown,
     redact_background_goal_persistence,
     redact_sensitive,
     summarize_text,
 )
+from agent_skill_registry import USER_SKILL_MANIFEST_MAX_BYTES
 from desktop_computer_use_service import DESKTOP_BRIDGE_ACTION_TYPES
 from agent_question_service import (
     AgentQuestionPersistence,
@@ -2032,7 +2034,7 @@ LOCAL_LOG_LOCK = DIAGNOSTIC_LOGGER.lock
 ADVANCED_SETTINGS_TRANSITION_LOCK = Lock()
 TUNING_STORE_LOCK = Lock()
 UNITY_MCP_REPAIR_LOCK = Lock()
-SKILL_PACKAGE_WRITE_LOCK = Lock()
+SKILL_PACKAGE_WRITE_LOCK = RLock()
 PROJECT_CATALOG_DISCOVERY = ProjectCatalogDiscovery(
     ProjectCatalogDiscoveryPorts(
         appdata_path=lambda: Path(os.environ.get("APPDATA", "")),
@@ -2170,7 +2172,7 @@ _DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
         doctor_check_from_component=lambda *args, **kwargs: _doctor_check_from_component(*args, **kwargs),
         package_doctor_check=lambda *args, **kwargs: _package_doctor_check(*args, **kwargs),
         status_from_counts=lambda errors, warnings: _status_from_counts(errors, warnings),
-        check_skill_registry=lambda: AGENT_GATEWAY.check_skill_registry(),
+        check_skill_registry=lambda: AGENT_GATEWAY.skills.check_skill_registry(),
         list_checkpoints=lambda params: AGENT_GATEWAY.list_checkpoints(params),
         checkpoint_paths=lambda: (str(AGENT_GATEWAY.checkpoint_log_path), str(AGENT_GATEWAY.checkpoint_store_dir)),
         package_manager_status=lambda params: PACKAGE_INSTALL_WORKFLOWS.package_manager_status(params),
@@ -2196,7 +2198,7 @@ _KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
         read_compile_errors=lambda params: read_agent_compile_errors(params),
         normalize_path=lambda value: normalize_path_string(value),
         build_tool_registry=lambda: AGENT_GATEWAY.build_tool_registry(),
-        build_skill_registry=lambda: AGENT_GATEWAY.build_skill_registry(),
+        build_skill_registry=lambda: AGENT_GATEWAY.skills.build_skill_registry(),
         permission_state=lambda: AGENT_GATEWAY.permission_state(),
         ensure_dict=lambda value: ensure_dict(value),
         normalize_bool=lambda value, default: normalize_bool(value, default),
@@ -2214,6 +2216,7 @@ DASHBOARD_RUNTIME = DashboardRuntimeState()
 AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
+    skill_package_write_lock=SKILL_PACKAGE_WRITE_LOCK,
     desktop_capture_dir=AGENT_GATEWAY_AUDIT_DIR / "desktop-captures",
     desktop_actions_changed=lambda: EVENT_BUS.broadcast_from_sync(
         "agentDesktopActions",
@@ -3877,6 +3880,8 @@ async def app_request_restore_checkpoint(checkpoint_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=preview.get("error") or "Checkpoint is not restorable.")
     checkpoint = ensure_dict(preview.get("checkpoint"))
     arguments = {"checkpointId": checkpoint_id, "confirmRestore": True}
+    if preview.get("currentStateDigest"):
+        arguments["currentStateDigest"] = str(preview["currentStateDigest"])
     if checkpoint.get("projectRoot"):
         arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
     try:
@@ -3971,6 +3976,11 @@ async def app_request_restore_interrupted_apply_recovery(recovery_id: str) -> di
     if not checkpoint_id:
         raise HTTPException(status_code=400, detail="Interrupted apply recovery has no restorable checkpoint.")
     arguments = {"checkpointId": checkpoint_id, "confirmRestore": True}
+    checkpoint_preview = ensure_dict(preview.get("checkpointPreview"))
+    if checkpoint_preview.get("currentStateDigest"):
+        arguments["currentStateDigest"] = str(
+            checkpoint_preview["currentStateDigest"]
+        )
     if checkpoint.get("projectRoot"):
         arguments["projectRoot"] = str(checkpoint.get("projectRoot"))
     try:
@@ -5824,18 +5834,18 @@ async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
 
 @app.get("/api/app/skills")
 def app_agent_skills() -> dict[str, Any]:
-    return AGENT_GATEWAY.build_skill_registry()
+    return AGENT_GATEWAY.skills.build_skill_registry()
 
 
 @app.get("/api/app/skills/check")
 def app_agent_skills_check() -> dict[str, Any]:
-    return AGENT_GATEWAY.check_skill_registry()
+    return AGENT_GATEWAY.skills.check_skill_registry()
 
 
 @app.post("/api/app/skills")
 def app_create_agent_skill(payload: dict[str, Any]) -> dict[str, Any]:
     try:
-        return AGENT_GATEWAY.create_user_skill(payload)
+        return AGENT_GATEWAY.skills.create_user_skill(payload)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -5843,7 +5853,7 @@ def app_create_agent_skill(payload: dict[str, Any]) -> dict[str, Any]:
 @app.put("/api/app/skills/{skill_id}")
 def app_update_agent_skill(skill_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     try:
-        return AGENT_GATEWAY.update_user_skill(skill_id, payload)
+        return AGENT_GATEWAY.skills.update_user_skill(skill_id, payload)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -5851,7 +5861,7 @@ def app_update_agent_skill(skill_id: str, payload: dict[str, Any]) -> dict[str, 
 @app.delete("/api/app/skills/{skill_id}")
 def app_delete_agent_skill(skill_id: str) -> dict[str, Any]:
     try:
-        return AGENT_GATEWAY.delete_user_skill(skill_id)
+        return AGENT_GATEWAY.skills.delete_user_skill(skill_id)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -6015,7 +6025,10 @@ PATH_TO_SKILL_WRITE = PathToSkillWriteService(
 
 
 def skill_package_error_response(exc: Exception) -> HTTPException:
-    status = 400 if isinstance(exc, SkillPackageError) else 500
+    if isinstance(exc, AgentGatewayError):
+        status = exc.status_code
+    else:
+        status = 400 if isinstance(exc, SkillPackageError) else 500
     return HTTPException(status_code=status, detail=str(exc))
 
 
@@ -6044,12 +6057,18 @@ def preflight_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
 
 SKILL_PACKAGE_PROJECTION = SkillPackageProjectionService(
     SkillPackageProjectionPorts(
-        user_skills_dir=lambda gateway=AGENT_GATEWAY: gateway.user_skills_dir,
-        user_skill_lock=AGENT_GATEWAY.user_skill_lock,
+        user_skills_dir=lambda skills=AGENT_GATEWAY.skills: skills.user_skills_dir,
+        user_skill_lock=AGENT_GATEWAY.skills.write_lock,
         find_user_skill=lambda name,
-        gateway=AGENT_GATEWAY: gateway._find_user_skill(name),  # noqa: SLF001 - fixed runtime read projection.
+        skills=AGENT_GATEWAY.skills: skills.find_user_skill(name),
+        validate_projection_name=AGENT_GATEWAY.skills.validate_projection_name,
+        make_conflict_error=lambda message: AgentGatewayError(
+            message,
+            status_code=409,
+        ),
         parse_skill=parse_skill_markdown,
         parse_error_types=(AgentGatewayError,),
+        installed_package_candidates=skill_package_service().projection_candidates,
         state_name=PROJECTED_SKILL_STATE_NAME,
         state_schema=PROJECTED_SKILL_STATE_SCHEMA,
         state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
@@ -6096,12 +6115,26 @@ SKILL_PACKAGE_GOVERNANCE = SkillPackageGovernanceService(
 
 
 def _exportable_user_skill(skill_name: str) -> tuple[dict[str, Any], Path]:
-    skill = AGENT_GATEWAY._find_user_skill(skill_name)  # noqa: SLF001 - package export is a host-level integration.
+    skill = AGENT_GATEWAY.skills.find_user_skill(skill_name)
     if not skill:
         raise AgentGatewayError(f"User skill was not found: {skill_name}", status_code=404)
-    storage_path = Path(str(skill.get("storagePath") or ""))
-    if not storage_path.is_file():
-        raise AgentGatewayError(f"User skill file was not found: {skill_name}", status_code=404)
+    if skill.get("loadError"):
+        raise AgentGatewayError(
+            f"User skill is invalid and cannot be exported: {skill_name}",
+            status_code=400,
+        )
+    storage_path = AGENT_GATEWAY.skills.validated_user_skill_source(skill)
+    parsed = parse_skill_markdown(
+        storage_path,
+        max_bytes=USER_SKILL_MANIFEST_MAX_BYTES,
+    )
+    if normalize_skill_id(str(parsed.get("name") or "")) != normalize_skill_id(
+        str(skill.get("name") or "")
+    ):
+        raise AgentGatewayError(
+            f"User skill manifest identity does not match its export name: {skill_name}",
+            status_code=400,
+        )
     return skill, storage_path
 
 
@@ -6169,6 +6202,26 @@ def _copy_manifest_user_skill_export_source(
     )
     if not os.path.samefile(loaded_resolved, manifest_skill_resolved):
         raise SkillPackageError("User skill manifest skill entrypoint does not resolve to the loaded SKILL.md.")
+    try:
+        loaded_skill = parse_skill_markdown(
+            loaded_resolved,
+            max_bytes=USER_SKILL_MANIFEST_MAX_BYTES,
+        )
+    except Exception as exc:  # noqa: BLE001 - export must fail before staging invalid identity.
+        raise SkillPackageError("The selected SKILL.md cannot be parsed for export.") from exc
+    manifest_skill_name = normalize_skill_id(
+        str(
+            manifest.get("skill_name")
+            or manifest.get("skillName")
+            or manifest.get("id")
+            or ""
+        )
+    )
+    loaded_skill_name = normalize_skill_id(str(loaded_skill.get("name") or ""))
+    if not loaded_skill_name or loaded_skill_name != manifest_skill_name:
+        raise SkillPackageError(
+            "User skill manifest projected name does not match its loaded SKILL.md."
+        )
 
     selected: dict[str, bytes] = {"manifest.json": manifest_bytes}
     entrypoint_paths: dict[str, str] = {}
@@ -6236,26 +6289,27 @@ def export_skill_package_sync(params: dict[str, Any]) -> dict[str, Any]:
     if not skill_name or not output_text:
         raise AgentGatewayError("skillName and outputPath are required.", status_code=400)
     output_path = Path(output_text)
-    skill, skill_file = _exportable_user_skill(skill_name)
     service = skill_package_service()
     with tempfile.TemporaryDirectory(prefix="vrcforge-skill-export-") as temp_dir:
         source = Path(temp_dir)
-        if not _copy_manifest_user_skill_export_source(skill_file, source, service):
-            shutil.copy2(skill_file, source / "SKILL.md")
-            package_id = f"community.{str(skill.get('name') or skill_name).lower()}"
-            package_id = re.sub(r"[^a-z0-9_.-]+", "-", package_id).strip("-._")
-            manifest = {
-                "id": package_id,
-                "name": str(skill.get("title") or skill.get("name") or skill_name)[:160],
-                "skill_name": str(skill.get("name") or skill_name),
-                "version": "1.0.0",
-                "author": "VRCForge User",
-                "description": str(skill.get("description") or "Exported VRCForge skill.")[:4000],
-                "min_vrcforge_version": DEFAULT_MIN_VRCFORGE_VERSION,
-                "permissions": ["read_project"],
-                "entrypoints": {"skill": "SKILL.md"},
-            }
-            (source / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        with AGENT_GATEWAY.skills.write_lock:
+            skill, skill_file = _exportable_user_skill(skill_name)
+            if not _copy_manifest_user_skill_export_source(skill_file, source, service):
+                shutil.copy2(skill_file, source / "SKILL.md")
+                package_id = f"community.{str(skill.get('name') or skill_name).lower()}"
+                package_id = re.sub(r"[^a-z0-9_.-]+", "-", package_id).strip("-._")
+                manifest = {
+                    "id": package_id,
+                    "name": str(skill.get("title") or skill.get("name") or skill_name)[:160],
+                    "skill_name": str(skill.get("name") or skill_name),
+                    "version": "1.0.0",
+                    "author": "VRCForge User",
+                    "description": str(skill.get("description") or "Exported VRCForge skill.")[:4000],
+                    "min_vrcforge_version": DEFAULT_MIN_VRCFORGE_VERSION,
+                    "permissions": ["read_project"],
+                    "entrypoints": {"skill": "SKILL.md"},
+                }
+                (source / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
         if params.get("release"):
             private_key = params.get("privateKeyPem") or params.get("private_key_pem") or params.get("privateKeyPath") or params.get("private_key_path")
             exported = service.export_release(source, output_path, private_key)
@@ -6286,7 +6340,7 @@ def connector_bundle_sync(params: dict[str, Any] | None = None) -> dict[str, Any
         skills_projection_dir=str(
             params.get("skillsProjectionDir")
             or params.get("skills_projection_dir")
-            or AGENT_GATEWAY.user_skills_dir
+            or AGENT_GATEWAY.skills.user_skills_dir
         ),
         stdio_command=stdio_command,
         stdio_script=str(stdio_script),
@@ -6542,7 +6596,8 @@ def app_preflight_skill_package(request: SkillPackagePathRequest) -> dict[str, A
 @app.post("/api/app/skill-packages/import")
 def app_import_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]:
     try:
-        return SKILL_PACKAGE_CONTROLLER.import_package(request.model_dump(by_alias=True))
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SKILL_PACKAGE_CONTROLLER.import_package(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6550,7 +6605,8 @@ def app_import_skill_package(request: SkillPackagePathRequest) -> dict[str, Any]
 @app.post("/api/app/skill-packages/safe-mode")
 def app_set_skill_package_safe_mode(request: SkillPackageSafeModeRequest) -> dict[str, Any]:
     try:
-        return SKILL_PACKAGE_GOVERNANCE.set_safe_mode(request.model_dump(by_alias=True))
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SKILL_PACKAGE_GOVERNANCE.set_safe_mode(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6558,7 +6614,8 @@ def app_set_skill_package_safe_mode(request: SkillPackageSafeModeRequest) -> dic
 @app.post("/api/app/skill-packages/trust-signer")
 def app_trust_skill_package_signer(request: SkillPackageSignerRequest) -> dict[str, Any]:
     try:
-        return SKILL_PACKAGE_GOVERNANCE.trust_signer(request.model_dump(by_alias=True))
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SKILL_PACKAGE_GOVERNANCE.trust_signer(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6566,7 +6623,8 @@ def app_trust_skill_package_signer(request: SkillPackageSignerRequest) -> dict[s
 @app.post("/api/app/skill-packages/revoke-signer")
 def app_revoke_skill_package_signer(request: SkillPackageSignerRequest) -> dict[str, Any]:
     try:
-        return SKILL_PACKAGE_GOVERNANCE.revoke_signer(request.model_dump(by_alias=True))
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SKILL_PACKAGE_GOVERNANCE.revoke_signer(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6574,7 +6632,8 @@ def app_revoke_skill_package_signer(request: SkillPackageSignerRequest) -> dict[
 @app.post("/api/app/skill-packages/block-package")
 def app_block_skill_package(request: SkillPackageBlockRequest) -> dict[str, Any]:
     try:
-        return SKILL_PACKAGE_GOVERNANCE.block_package(request.model_dump(by_alias=True))
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SKILL_PACKAGE_GOVERNANCE.block_package(request.model_dump(by_alias=True))
     except Exception as exc:  # noqa: BLE001
         raise skill_package_error_response(exc) from exc
 
@@ -6620,9 +6679,10 @@ def app_write_path_to_skill(request: PathToSkillCaptureRequest) -> dict[str, Any
 @app.put("/api/app/skill-packages/{skill_package_id}")
 def app_set_skill_package_enabled(skill_package_id: str, request: SkillPackageStateRequest) -> dict[str, Any]:
     try:
-        return SKILL_PACKAGE_CONTROLLER.set_enabled(
-            {"skillPackageId": skill_package_id, **request.model_dump(by_alias=True)}
-        )
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SKILL_PACKAGE_CONTROLLER.set_enabled(
+                {"skillPackageId": skill_package_id, **request.model_dump(by_alias=True)}
+            )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -6633,9 +6693,10 @@ def app_set_skill_package_enabled(skill_package_id: str, request: SkillPackageSt
 def app_uninstall_skill_package(skill_package_id: str, request: SkillPackageUninstallRequest | None = None) -> dict[str, Any]:
     try:
         payload = request.model_dump(by_alias=True) if request is not None else {}
-        return SKILL_PACKAGE_CONTROLLER.uninstall(
-            {"skillPackageId": skill_package_id, **payload}
-        )
+        with AGENT_GATEWAY.local_state_write_guard(), SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.skills.write_lock:
+            return SKILL_PACKAGE_CONTROLLER.uninstall(
+                {"skillPackageId": skill_package_id, **payload}
+            )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -7803,7 +7864,7 @@ def _skill_signature_failed(entry: dict[str, Any]) -> bool:
 
 
 def _skill_doctor_snapshot() -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    registry = AGENT_GATEWAY.build_skill_registry()
+    registry = AGENT_GATEWAY.skills.build_skill_registry()
     skills = registry.get("skills") if isinstance(registry.get("skills"), list) else []
     rows: list[dict[str, Any]] = []
     repair_candidates: list[dict[str, Any]] = []
@@ -7821,10 +7882,11 @@ def _skill_doctor_snapshot() -> tuple[dict[str, Any], list[dict[str, Any]], list
             }
         )
         if state == "broken" and str(skill.get("source") or "") == "user":
-            storage_path = Path(str(skill.get("storagePath") or ""))
             try:
-                manifest_digest = hashlib.sha256(storage_path.read_bytes()).hexdigest()
-            except OSError:
+                manifest_digest = hashlib.sha256(
+                    AGENT_GATEWAY.skills.read_user_skill_manifest_bytes(skill)
+                ).hexdigest()
+            except AgentGatewayError:
                 manifest_digest = ""
             repair_candidates.append(
                 {
@@ -7893,14 +7955,29 @@ def _quarantine_broken_user_skill(candidate: dict[str, Any]) -> bool:
     if not storage_value:
         return False
     source = Path(storage_value)
-    root = AGENT_GATEWAY.user_skills_dir.resolve()
+    safe_root = AGENT_GATEWAY.skills.validated_user_skills_root()
+    if safe_root is None:
+        return False
+    root = safe_root.resolve()
     try:
+        if (
+            not os.path.lexists(source)
+            or _path_is_reparse_or_link(source)
+            or not source.is_file()
+        ):
+            return False
+        skill_dir = source.parent
+        if (
+            skill_dir.parent != safe_root
+            or _path_is_reparse_or_link(skill_dir)
+            or not skill_dir.is_dir()
+        ):
+            return False
         resolved_source = source.resolve(strict=True)
         resolved_source.relative_to(root)
     except (OSError, ValueError):
         return False
-    skill_dir = resolved_source.parent
-    if skill_dir.parent != root or _path_is_reparse_or_link(skill_dir) or _path_is_reparse_or_link(resolved_source):
+    if resolved_source.parent != skill_dir.resolve(strict=True):
         return False
     expected_digest = str(candidate.get("manifestDigest") or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
@@ -7908,11 +7985,28 @@ def _quarantine_broken_user_skill(candidate: dict[str, Any]) -> bool:
     raw = resolved_source.read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected_digest:
         return False
-    quarantine_root = AGENT_GATEWAY.user_constraints_path.parent / "quarantine" / "skills"
-    quarantine_root.mkdir(parents=True, exist_ok=True)
+    app_state_root = AGENT_GATEWAY.user_constraints_path.parent
+    quarantine_root = app_state_root / "quarantine" / "skills"
+    quarantine_chain = (
+        app_state_root,
+        app_state_root / "quarantine",
+        quarantine_root,
+    )
+    try:
+        if any(
+            os.path.lexists(path)
+            and (_path_is_reparse_or_link(path) or not path.is_dir())
+            for path in quarantine_chain
+        ):
+            return False
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        if any(_path_is_reparse_or_link(path) or not path.is_dir() for path in quarantine_chain):
+            return False
+    except OSError:
+        return False
     destination = quarantine_root / f"{skill_dir.name}.{hashlib.sha256(raw).hexdigest()[:16]}.quarantine"
-    if destination.exists():
-        return not skill_dir.exists()
+    if os.path.lexists(destination):
+        return not os.path.lexists(skill_dir)
     os.replace(skill_dir, destination)
     return True
 
@@ -7920,7 +8014,11 @@ def _quarantine_broken_user_skill(candidate: dict[str, Any]) -> bool:
 def _repair_skills_doctor(_context: dict[str, Any], _mode: str, phases: PhaseLog) -> dict[str, Any]:
     changed = False
     failures = 0
-    with SKILL_PACKAGE_WRITE_LOCK, AGENT_GATEWAY.user_skill_lock:
+    with (
+        AGENT_GATEWAY.local_state_write_guard(),
+        SKILL_PACKAGE_WRITE_LOCK,
+        AGENT_GATEWAY.skills.write_lock,
+    ):
         _registry, rows, candidates = _skill_doctor_snapshot()
         candidate_ids = {str(candidate.get("id") or "") for candidate in candidates}
         unresolved_broken = any(
@@ -8748,13 +8846,13 @@ def read_agent_health(request: Request) -> dict[str, Any]:
 @app.get("/api/agent/skills")
 def read_agent_skills(request: Request, exposure_layer: Literal["planning", "execution"] = "planning") -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=True)
-    return AGENT_GATEWAY.build_skill_registry(exposure_layer=exposure_layer)
+    return AGENT_GATEWAY.skills.build_skill_registry(exposure_layer=exposure_layer)
 
 
 @app.get("/api/agent/skills/check")
 def read_agent_skills_check(request: Request) -> dict[str, Any]:
     authenticate_agent_request(request, allow_disabled=True)
-    return AGENT_GATEWAY.check_skill_registry()
+    return AGENT_GATEWAY.skills.check_skill_registry()
 
 
 @app.post("/api/agent/session")
@@ -13339,7 +13437,7 @@ class _RuntimePlannerCatalog:
             _runtime_planner_tool(tool)
             for tool in AGENT_GATEWAY._tools.values()
         )
-        skill_payloads = AGENT_GATEWAY.build_skill_registry(
+        skill_payloads = AGENT_GATEWAY.skills.build_skill_registry(
             gateway_config,
             RUNTIME_PLANNER_EXECUTION_LAYER,
         ).get("skills") or []
@@ -19227,7 +19325,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "Execute low-risk shell commands or request approval for high-risk commands.", "supervised-write", lambda params: AGENT_GATEWAY.shell.execute(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")), write=True)
     AGENT_GATEWAY.register_tool("vrcforge_execute_approved_shell", "Execute a previously approved shell command payload.", "supervised-write", AGENT_GATEWAY.shell.execute_approved, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_skill_manifest", "List VRCForge Agent Gateway skills.", "read/debug", lambda params: AGENT_GATEWAY.build_manifest(normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
-    AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda params: AGENT_GATEWAY.check_skill_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
+    AGENT_GATEWAY.register_tool("vrcforge_skill_check", "Validate VRCForge Agent Gateway skill packages.", "read/debug", lambda params: AGENT_GATEWAY.skills.check_skill_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_tool_registry", "List standardized VRCForge tool metadata for Desktop, MCP, and CLI surfaces.", "read/debug", lambda params: AGENT_GATEWAY.build_tool_registry(exposure_layer=normalize_exposure_layer(ensure_dict(params).get("exposureLayer"))))
     AGENT_GATEWAY.register_tool("vrcforge_external_agent_connectors", "Generate loopback MCP connector templates for external coding agents without exposing plaintext tokens.", "read/debug", connector_bundle_sync)
     AGENT_GATEWAY.register_tool("vrcforge_list_skill_packages", "List installed community .vsk skill packages.", "read/debug", list_skill_packages_sync)

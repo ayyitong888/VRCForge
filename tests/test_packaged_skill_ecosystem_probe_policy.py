@@ -23,7 +23,7 @@ def test_agent_skill_route_remains_default_planning_for_product_callers() -> Non
         'exposure_layer: Literal["planning", "execution"] = "planning"'
         in source
     )
-    assert "AGENT_GATEWAY.build_skill_registry(exposure_layer=exposure_layer)" in source
+    assert "AGENT_GATEWAY.skills.build_skill_registry(exposure_layer=exposure_layer)" in source
 
 
 def test_packaged_skill_probe_keeps_approval_packages_request_only() -> None:

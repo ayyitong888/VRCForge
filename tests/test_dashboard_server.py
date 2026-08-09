@@ -10,7 +10,7 @@ import time
 import unittest
 import zipfile
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -133,7 +133,7 @@ class _TestRuntimePlannerCatalog:
                 enabled=bool(skill.get("enabled", True)),
                 disable_model_invocation=bool(skill.get("disableModelInvocation")),
             )
-            for skill in self._gateway.build_skill_registry(config, EXPOSURE_LAYER_EXECUTION).get("skills") or []
+            for skill in self._gateway.skills.build_skill_registry(config, EXPOSURE_LAYER_EXECUTION).get("skills") or []
             if isinstance(skill, dict) and str(skill.get("name") or "").strip()
         )
         return PlannerCatalogSnapshot(
@@ -4741,7 +4741,7 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             gateway = dashboard_server.AgentGateway(root / "config" / "gateway.json", root / "audit")
-            manifest = gateway.user_skills_dir / "broken-skill" / "SKILL.md"
+            manifest = gateway.skills.user_skills_dir / "broken-skill" / "SKILL.md"
             manifest.parent.mkdir(parents=True)
             original = b"broken-before"
             manifest.write_bytes(original)
@@ -4757,18 +4757,113 @@ class DashboardServerTests(unittest.TestCase):
             self.assertFalse(changed)
             self.assertEqual(manifest.read_bytes(), b"changed-after-scan")
 
+    def test_skill_quarantine_rejects_linked_source_and_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = dashboard_server.AgentGateway(root / "config" / "gateway.json", root / "audit")
+            skills_root = gateway.skills.user_skills_dir
+            victim = skills_root / "victim" / "SKILL.md"
+            victim.parent.mkdir(parents=True)
+            victim_bytes = b"victim manifest bytes"
+            victim.write_bytes(victim_bytes)
+            linked_source = skills_root / "linked" / "SKILL.md"
+            linked_source.parent.mkdir()
+            try:
+                linked_source.symlink_to(victim)
+            except OSError as exc:
+                self.skipTest(f"file symlink creation is unavailable: {exc}")
+            linked_candidate = {
+                "storagePath": str(linked_source),
+                "manifestDigest": hashlib.sha256(victim_bytes).hexdigest(),
+            }
+
+            with patch("dashboard_server.AGENT_GATEWAY", gateway):
+                self.assertFalse(dashboard_server._quarantine_broken_user_skill(linked_candidate))
+
+            self.assertEqual(victim.read_bytes(), victim_bytes)
+            self.assertTrue(linked_source.is_symlink())
+
+            normal = skills_root / "normal" / "SKILL.md"
+            normal.parent.mkdir()
+            normal_bytes = b"normal broken manifest"
+            normal.write_bytes(normal_bytes)
+            quarantine_parent = gateway.user_constraints_path.parent / "quarantine"
+            quarantine_parent.mkdir(parents=True, exist_ok=True)
+            external = root / "external-quarantine"
+            external.mkdir()
+            quarantine_link = quarantine_parent / "skills"
+            try:
+                quarantine_link.symlink_to(external, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest(f"directory symlink creation is unavailable: {exc}")
+            normal_candidate = {
+                "storagePath": str(normal),
+                "manifestDigest": hashlib.sha256(normal_bytes).hexdigest(),
+            }
+
+            with patch("dashboard_server.AGENT_GATEWAY", gateway):
+                self.assertFalse(dashboard_server._quarantine_broken_user_skill(normal_candidate))
+
+            self.assertEqual(normal.read_bytes(), normal_bytes)
+            self.assertEqual(list(external.iterdir()), [])
+
     def test_skill_registry_read_failure_never_reports_doctor_fix_as_healthy(self) -> None:
         package_service = Mock()
         package_service.list_installed.side_effect = OSError("registry unavailable")
-        with (
-            patch.object(dashboard_server.AGENT_GATEWAY, "build_skill_registry", return_value={"skills": []}),
-            patch("dashboard_server.skill_package_service", return_value=package_service),
-        ):
-            result = dashboard_server.app_doctor_service().fix("skills.registry", "safe")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = dashboard_server.AgentGateway(root / "config" / "gateway.json", root / "audit")
+            with (
+                patch("dashboard_server.AGENT_GATEWAY", gateway),
+                patch("dashboard_server.skill_package_service", return_value=package_service),
+            ):
+                result = dashboard_server.app_doctor_service().fix("skills.registry", "safe")
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["status"], "needs_user_action")
         self.assertEqual(result["after"]["status"], "error")
+
+    def test_skill_doctor_repair_is_blocked_by_active_local_state_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = dashboard_server.AgentGateway(
+                root / "config" / "gateway.json",
+                root / "audit",
+            )
+            calls: list[str] = []
+
+            @contextmanager
+            def blocked_guard():
+                calls.append("guard")
+                raise dashboard_server.AgentGatewayError(
+                    "active local-state recovery",
+                    status_code=409,
+                )
+                yield  # pragma: no cover - the active recovery blocks entry.
+
+            with (
+                patch("dashboard_server.AGENT_GATEWAY", gateway),
+                patch.object(
+                    gateway,
+                    "local_state_write_guard",
+                    side_effect=lambda: blocked_guard(),
+                ),
+                patch(
+                    "dashboard_server._skill_doctor_snapshot",
+                    side_effect=AssertionError("snapshot must not run"),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    dashboard_server.AgentGatewayError,
+                    "active local-state recovery",
+                ):
+                    dashboard_server._repair_skills_doctor(
+                        {},
+                        "safe",
+                        dashboard_server.PhaseLog(),
+                    )
+
+            self.assertEqual(calls, ["guard"])
 
     def test_app_doctor_degrades_when_diagnostics_fail(self) -> None:
         with patch(
@@ -6455,7 +6550,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(created.status_code, 200)
             created_payload = created.json()
             self.assertEqual(created_payload["skill"]["name"], "avatar-review")
-            skill_file = dashboard_server.AGENT_GATEWAY.user_skills_dir / "avatar-review" / "SKILL.md"
+            skill_file = dashboard_server.AGENT_GATEWAY.skills.user_skills_dir / "avatar-review" / "SKILL.md"
             self.assertTrue(skill_file.exists())
             skill_text = skill_file.read_text(encoding="utf-8")
             self.assertIn("allowed-tools:", skill_text)
@@ -6486,7 +6581,7 @@ class DashboardServerTests(unittest.TestCase):
             self.assertFalse(skill_file.exists())
 
     def test_skill_markdown_hyphen_frontmatter_and_dependency_check(self) -> None:
-        skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / "hyphen-skill"
+        skill_dir = dashboard_server.AGENT_GATEWAY.skills.user_skills_dir / "hyphen-skill"
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(
             "\n".join(
@@ -7243,10 +7338,10 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(packages_after_uninstall, [])
             self.assertFalse(any(skill["name"] == "avatar-review" for skill in skills_after_uninstall))
 
-    def test_user_path_to_skill_export_preserves_manifest_and_workflow_then_round_trips(self) -> None:
+    def test_user_path_to_skill_export_preserves_manual_source_and_requires_projection_opt_out(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / "roundtrip-profile"
+            skill_dir = dashboard_server.AGENT_GATEWAY.skills.user_skills_dir / "roundtrip-profile"
             captured = build_path_to_skill_source(
                 {"status": "passed", "workflow": "optimizer_conservative_profile", "steps": ["inspect"]},
                 package_id="community.path-to-skill.roundtrip-profile",
@@ -7258,6 +7353,11 @@ class DashboardServerTests(unittest.TestCase):
             captured.write_to(skill_dir)
             workflow_bytes = (skill_dir / "workflows" / "captured-path.json").read_bytes()
             (skill_dir / "private-notes.txt").write_text("must not be exported", encoding="utf-8")
+            source_before = {
+                path.relative_to(skill_dir).as_posix(): path.read_bytes()
+                for path in skill_dir.rglob("*")
+                if path.is_file()
+            }
             package_path = root / "roundtrip-profile.vsk"
 
             with TestClient(dashboard_server.app) as client:
@@ -7269,6 +7369,13 @@ class DashboardServerTests(unittest.TestCase):
                     "/api/app/skill-packages/import",
                     json={"packagePath": str(package_path)},
                 )
+                imported_without_projection = client.post(
+                    "/api/app/skill-packages/import",
+                    json={
+                        "packagePath": str(package_path),
+                        "projectToUserSkills": False,
+                    },
+                )
 
             self.assertEqual(exported.status_code, 200, exported.text)
             with zipfile.ZipFile(package_path, "r") as archive:
@@ -7279,17 +7386,87 @@ class DashboardServerTests(unittest.TestCase):
             for field in ("id", "author", "version", "permissions", "agent"):
                 self.assertEqual(preview.manifest[field], captured.manifest[field])
             self.assertEqual(preview.manifest["entrypoints"], captured.manifest["entrypoints"])
-            self.assertEqual(imported.status_code, 200, imported.text)
-            self.assertEqual(imported.json()["projectedSkill"]["supportFiles"], ["workflows/captured-path.json"])
+            self.assertEqual(imported.status_code, 409, imported.text)
+            self.assertIn("not owned by this package", imported.json()["detail"])
+            self.assertEqual(imported_without_projection.status_code, 200, imported_without_projection.text)
+            self.assertIsNone(imported_without_projection.json()["projectedSkill"])
             self.assertEqual(
-                (dashboard_server.AGENT_GATEWAY.user_skills_dir / "roundtrip-profile" / "workflows" / "captured-path.json").read_bytes(),
-                workflow_bytes,
+                {
+                    path.relative_to(skill_dir).as_posix(): path.read_bytes()
+                    for path in skill_dir.rglob("*")
+                    if path.is_file()
+                },
+                source_before,
             )
+
+    def test_skill_export_captures_one_locked_snapshot_then_releases_before_export(self) -> None:
+        gateway = dashboard_server.AGENT_GATEWAY
+        gateway.skills.create_user_skill(
+            {
+                "name": "locked-export",
+                "title": "Locked Export",
+                "instructions": "Old snapshot instructions.",
+            }
+        )
+        skill_file = gateway.skills.user_skills_dir / "locked-export" / "SKILL.md"
+        writer_started = threading.Event()
+        writer_acquired = threading.Event()
+        writer: threading.Thread | None = None
+
+        def mutate_source_after_capture() -> None:
+            writer_started.set()
+            with gateway.skills.write_lock:
+                writer_acquired.set()
+                skill_file.write_text("new version after capture\n", encoding="utf-8")
+
+        def capture_source(
+            _skill_file: Path,
+            _destination: Path,
+            _service: object,
+        ) -> bool:
+            nonlocal writer
+            writer = threading.Thread(target=mutate_source_after_capture)
+            writer.start()
+            self.assertTrue(writer_started.wait(1))
+            self.assertFalse(writer_acquired.wait(0.05))
+            return False
+
+        class FakePackageService:
+            def export_dev(self, source: Path, _output: Path):
+                self.assert_writer_released()
+                captured = (source / "SKILL.md").read_text(encoding="utf-8")
+                self_test.assertIn("Old snapshot instructions.", captured)
+                self_test.assertNotIn("new version after capture", captured)
+                return SimpleNamespace(as_dict=lambda: {"packagePath": "captured.vsk"})
+
+            @staticmethod
+            def assert_writer_released() -> None:
+                self_test.assertTrue(writer_acquired.wait(1))
+
+        self_test = self
+        with (
+            patch("dashboard_server.skill_package_service", return_value=FakePackageService()),
+            patch(
+                "dashboard_server._copy_manifest_user_skill_export_source",
+                side_effect=capture_source,
+            ),
+        ):
+            result = dashboard_server.export_skill_package_sync(
+                {
+                    "skillName": "locked-export",
+                    "outputPath": str(Path(self.tuning_store_dir.name) / "locked-export.vsk"),
+                }
+            )
+
+        assert writer is not None
+        writer.join(timeout=1)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(result["exported"]["packagePath"], "captured.vsk")
 
     def test_legacy_user_skill_export_still_synthesizes_minimal_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / "legacy-export"
+            skill_dir = dashboard_server.AGENT_GATEWAY.skills.user_skills_dir / "legacy-export"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text(
                 "---\nname: legacy-export\ntitle: Legacy Export\n---\nRead project state.\n",
@@ -7308,6 +7485,42 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(preview.manifest["min_vrcforge_version"], "1.3.0")
             self.assertEqual(preview.manifest["entrypoints"], {"skill": "SKILL.md"})
 
+    def test_manifest_export_rejects_projected_name_mismatch_without_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skill_dir = dashboard_server.AGENT_GATEWAY.skills.user_skills_dir / "actual-export"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: actual-export\ntitle: Actual Export\n---\nRead project state.\n",
+                encoding="utf-8",
+            )
+            (skill_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "id": "community.actual-export",
+                        "name": "Actual Export",
+                        "skill_name": "different-target",
+                        "version": "1.0.0",
+                        "author": "Unit Test",
+                        "description": "Identity mismatch fixture.",
+                        "min_vrcforge_version": "1.3.0",
+                        "permissions": ["read_project"],
+                        "entrypoints": {"skill": "SKILL.md"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = Path(temp_dir) / "mismatch.vsk"
+
+            with self.assertRaisesRegex(
+                SkillPackageError,
+                "projected name does not match",
+            ):
+                dashboard_server.export_skill_package_sync(
+                    {"skillName": "actual-export", "outputPath": str(output)}
+                )
+
+            self.assertFalse(output.exists())
+
     def test_manifest_user_skill_export_rejects_unsafe_support_without_residue(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -7323,7 +7536,7 @@ class DashboardServerTests(unittest.TestCase):
                 files: dict[str, bytes] | None = None,
                 manifest_bytes: bytes | None = None,
             ) -> Path:
-                skill_dir = dashboard_server.AGENT_GATEWAY.user_skills_dir / name
+                skill_dir = dashboard_server.AGENT_GATEWAY.skills.user_skills_dir / name
                 skill_dir.mkdir(parents=True)
                 support_yaml = "".join(f"  - {value}\n" for value in support_files)
                 (skill_dir / "SKILL.md").write_text(
@@ -9237,7 +9450,7 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
-            skill_dir = gateway.user_skills_dir / "avatar-review"
+            skill_dir = gateway.skills.user_skills_dir / "avatar-review"
             skill_dir.mkdir(parents=True)
             (skill_dir / "SKILL.md").write_text("before", encoding="utf-8")
 
@@ -9416,18 +9629,29 @@ class DashboardServerTests(unittest.TestCase):
             )
             SkillPackageService(root / "build-store", vrcforge_version="0.5.1").export_dev(source, package)
 
-            gateway = AgentGateway(root / "app" / "config" / "agent_gateway.json", root / "audit")
+            package_lock = threading.RLock()
+            gateway = AgentGateway(
+                root / "app" / "config" / "agent_gateway.json",
+                root / "audit",
+                skill_package_write_lock=package_lock,
+            )
             service = SkillPackageService(
                 gateway.user_constraints_path.parent / "skill-packages",
                 vrcforge_version=dashboard_server.app.version,
             )
             projection = SkillPackageProjectionService(
                 SkillPackageProjectionPorts(
-                    user_skills_dir=lambda: gateway.user_skills_dir,
-                    user_skill_lock=gateway.user_skill_lock,
-                    find_user_skill=gateway._find_user_skill,  # noqa: SLF001 - isolated checkpoint integration fixture.
+                    user_skills_dir=lambda: gateway.skills.user_skills_dir,
+                    user_skill_lock=gateway.skills.write_lock,
+                    find_user_skill=gateway.skills.find_user_skill,
+                    validate_projection_name=gateway.skills.validate_projection_name,
+                    make_conflict_error=lambda message: AgentGatewayError(
+                        message,
+                        status_code=409,
+                    ),
                     parse_skill=parse_skill_markdown,
                     parse_error_types=(AgentGatewayError,),
+                    installed_package_candidates=service.projection_candidates,
                     state_name=PROJECTED_SKILL_STATE_NAME,
                     state_schema=PROJECTED_SKILL_STATE_SCHEMA,
                     state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
@@ -9437,6 +9661,7 @@ class DashboardServerTests(unittest.TestCase):
                 replace(
                     dashboard_server.SKILL_PACKAGE_CONTROLLER._ports,  # noqa: SLF001 - isolated checkpoint integration fixture.
                     make_service=lambda: service,
+                    write_lock=package_lock,
                     project_installed_skill=lambda installed,
                     manifest,
                     enabled: projection.project_installed(
@@ -9474,17 +9699,23 @@ class DashboardServerTests(unittest.TestCase):
             checkpoint = applied["checkpoint"]
             self.assertEqual(checkpoint["strategy"], "local_state_archive")
             self.assertEqual(checkpoint["pathspecs"], ["skill-packages", "skills"])
-            self.assertTrue((gateway.user_skills_dir / "avatar-review" / "SKILL.md").is_file())
+            self.assertTrue((gateway.skills.user_skills_dir / "avatar-review" / "SKILL.md").is_file())
             self.assertTrue((gateway.user_constraints_path.parent / "skill-packages" / "community.avatar-review").is_dir())
             preview = gateway.preview_restore_checkpoint({"checkpointId": checkpoint["id"]})
             self.assertTrue(preview["ok"])
             self.assertTrue(any("avatar-review" in item for item in preview["workingTreeStatus"] + preview["changedFiles"]))
 
-            restored = gateway.restore_checkpoint({"checkpointId": checkpoint["id"], "confirmRestore": True})
+            restored = gateway.restore_checkpoint(
+                {
+                    "checkpointId": checkpoint["id"],
+                    "confirmRestore": True,
+                    "currentStateDigest": preview["currentStateDigest"],
+                }
+            )
 
             self.assertTrue(restored["ok"])
             self.assertEqual(restored["status"], "restored")
-            self.assertFalse((gateway.user_skills_dir / "avatar-review").exists())
+            self.assertFalse((gateway.skills.user_skills_dir / "avatar-review").exists())
             self.assertFalse((gateway.user_constraints_path.parent / "skill-packages").exists())
             audit = restored["rollbackCoverageAudit"]
             checks = {item["id"]: item for item in audit["checks"]}

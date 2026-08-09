@@ -434,7 +434,18 @@ def test_rollback_verify_blocks_when_ma_vrcf_validation_proof_is_missing(tmp_pat
     assert vrcfury["coverageStatus"] == "blocked"
 
 
-def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:
+def test_mcp_projection_exposes_read_plan_without_direct_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(
+        dashboard_server.AGENT_GATEWAY.ensure_config(),
+        allow_write_requests=True,
+    )
+    monkeypatch.setattr(
+        dashboard_server.AGENT_GATEWAY,
+        "ensure_config",
+        lambda: config,
+    )
     manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
     tool_names = {tool["name"] for tool in manifest["tools"]}
     write_targets = {target["name"] for target in manifest["writeTargets"]}
@@ -476,7 +487,18 @@ def test_mcp_projection_exposes_read_plan_without_direct_apply() -> None:
     assert direct_apply_names == set()
 
 
-def test_optimizer_apply_requests_are_stable_request_tools_without_direct_apply() -> None:
+def test_optimizer_apply_requests_are_stable_request_tools_without_direct_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = replace(
+        dashboard_server.AGENT_GATEWAY.ensure_config(),
+        allow_write_requests=True,
+    )
+    monkeypatch.setattr(
+        dashboard_server.AGENT_GATEWAY,
+        "ensure_config",
+        lambda: config,
+    )
     manifest = dashboard_server.AGENT_GATEWAY.build_manifest()
     tool_names = {tool["name"] for tool in manifest["tools"]}
     unstable = set(OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES) - set(STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES)
@@ -490,7 +512,7 @@ def test_optimizer_apply_requests_are_stable_request_tools_without_direct_apply(
 
 
 def test_avatar_optimization_skill_group_contains_stable_request_tools_only() -> None:
-    skills = dashboard_server.AGENT_GATEWAY.build_skill_registry()["skills"]
+    skills = dashboard_server.AGENT_GATEWAY.skills.build_skill_registry()["skills"]
     group = next(skill for skill in skills if skill["name"] == "avatar-optimization-skills")
     allowed = set(group["allowedTools"])
 

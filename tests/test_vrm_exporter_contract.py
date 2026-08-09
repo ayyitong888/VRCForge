@@ -67,7 +67,10 @@ def test_vrm_export_is_registered_as_a_medium_risk_approved_static_unity_write()
     config = dashboard_server.AGENT_GATEWAY.ensure_config()
     skills = {
         skill["name"]: skill
-        for skill in dashboard_server.AGENT_GATEWAY._builtin_skill_definitions(config)
+        for skill in dashboard_server.AGENT_GATEWAY.skills.build_skill_registry(
+            config
+        )["skills"]
+        if skill.get("source") == "builtin"
     }
     skill = skills["vrcforge_export_vrm"]
     assert skill["title"] == "Unity Avatar to VRM 1.0"

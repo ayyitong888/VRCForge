@@ -859,6 +859,68 @@ class AgentApprovalTransactionService:
                                 handler_arguments_digest,
                                 ensure_dict(approval.get("approvedUnityExecutionPlan")),
                             )
+            elif requires_checkpoint and target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
+                if not self._skill_package_write_lock_bound:
+                    raise AgentGatewayError(
+                        "Local-state approved writes require the shared skill-package lock.",
+                        status_code=503,
+                    )
+                # Keep archive capture and the package/user-skill mutation in
+                # one storage -> package -> user critical section. The
+                # package and user locks are re-entrant because the typed
+                # Controller/Projection owners enforce the same order.
+                with self._checkpoint_storage_lock:
+                    with self._skill_package_write_lock:
+                        with self.skills.write_lock:
+                            checkpoint = self._create_pre_write_checkpoint(
+                                approval,
+                                arguments,
+                            )
+                            if checkpoint:
+                                approval["checkpoint"] = checkpoint
+                                if checkpoint.get("ok") is not True:
+                                    checkpoint["blocking"] = True
+                                    raise AgentGatewayError(
+                                        str(
+                                            checkpoint.get("error")
+                                            or "Pre-write checkpoint failed."
+                                        )
+                                    )
+                                self._observe_apply_lifecycle(
+                                    "checkpoint_created",
+                                    approval,
+                                    checkpoint=checkpoint,
+                                )
+                                self._observe_apply_lifecycle(
+                                    "handler_starting",
+                                    approval,
+                                    checkpoint=checkpoint,
+                                    arguments_digest=handler_arguments_digest,
+                                )
+                                recovery = self._start_apply_recovery(
+                                    approval,
+                                    arguments,
+                                    checkpoint,
+                                )
+                            if not checkpoint:
+                                self._observe_apply_lifecycle(
+                                    "handler_starting",
+                                    approval,
+                                    checkpoint=checkpoint,
+                                    arguments_digest=handler_arguments_digest,
+                                )
+                            with capture_unity_mcp_core_call_audits() as core_call_audits:
+                                result = self._call_write_handler(
+                                    write_handler,
+                                    target_tool,
+                                    approval_id,
+                                    checkpoint,
+                                    arguments,
+                                    handler_arguments_digest,
+                                    ensure_dict(
+                                        approval.get("approvedUnityExecutionPlan")
+                                    ),
+                                )
             else:
                 if requires_checkpoint:
                     with self._checkpoint_storage_lock:

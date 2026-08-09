@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import zipfile
 import zlib
 from datetime import datetime, timezone
@@ -48,6 +49,15 @@ from agent_gateway import (
     redact_sensitive,
     utc_now_iso,
 )
+
+
+class _LocalStateRestoreRecoveryError(RuntimeError):
+    """Report a failed rollback without losing the only recovery copy."""
+
+    def __init__(self, message: str, recovery_paths: list[Path]) -> None:
+        self.recovery_paths = tuple(recovery_paths)
+        rendered = ", ".join(str(path) for path in self.recovery_paths)
+        super().__init__(f"{message}; recovery data remains at: {rendered}")
 
 
 class AgentCheckpointRecoveryService:
@@ -703,7 +713,19 @@ class AgentCheckpointRecoveryService:
             "blockingWrites": self._apply_recovery_blocks_writes(recovery),
             "restoreRequest": {
                 "targetTool": "vrcforge_restore_checkpoint",
-                "arguments": {"checkpointId": checkpoint_id, "confirmRestore": True},
+                "arguments": {
+                    "checkpointId": checkpoint_id,
+                    "confirmRestore": True,
+                    **(
+                        {
+                            "currentStateDigest": str(
+                                checkpoint_preview.get("currentStateDigest") or ""
+                            )
+                        }
+                        if checkpoint_preview.get("currentStateDigest")
+                        else {}
+                    ),
+                },
             },
             "manualResolveRequest": {
                 "targetTool": "vrcforge_resolve_interrupted_apply_recovery",
@@ -1027,7 +1049,14 @@ class AgentCheckpointRecoveryService:
             payload = (
                 self._restore_project_chat_checkpoint(checkpoint)
                 if checkpoint.get("strategy") == "project_chat_archive"
-                else self._restore_local_state_checkpoint(checkpoint)
+                else self._restore_local_state_checkpoint(
+                    checkpoint,
+                    expected_current_state_digest=str(
+                        params.get("current_state_digest")
+                        or params.get("currentStateDigest")
+                        or ""
+                    ),
+                )
             )
         elif checkpoint.get("strategy") == "archive":
             payload = self._restore_archive_checkpoint(checkpoint)
@@ -1251,6 +1280,10 @@ class AgentCheckpointRecoveryService:
         return record
 
     def _impl__create_local_state_checkpoint(self, record: dict[str, Any]) -> dict[str, Any]:
+        with self._skill_package_write_lock, self.skills.write_lock:
+            return self._create_local_state_checkpoint_locked(record)
+
+    def _create_local_state_checkpoint_locked(self, record: dict[str, Any]) -> dict[str, Any]:
         checkpoint_id = str(record["id"])
         archive_dir = self.checkpoint_store_dir / "local-state"
         archive_path = archive_dir / f"{checkpoint_id}.zip"
@@ -1265,17 +1298,24 @@ class AgentCheckpointRecoveryService:
                 temp_path.unlink()
             with zipfile.ZipFile(temp_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
                 for scope, root in roots.items():
+                    if os.path.lexists(root) and (_path_is_link_like(root) or not root.is_dir()):
+                        raise ValueError(f"Local state root is not a regular directory: {root}")
                     resolved = root.resolve()
                     root_file_count = 0
+                    root_directory_count = 0
                     if resolved.exists():
-                        if resolved.is_symlink() or not resolved.is_dir():
-                            raise ValueError(f"Local state root is not a regular directory: {resolved}")
                         for source in sorted(resolved.rglob("*")):
-                            if source.is_symlink():
-                                raise ValueError(f"Refusing to checkpoint symlinked local state path: {source}")
+                            if _path_is_link_like(source):
+                                raise ValueError(f"Refusing to checkpoint linked local state path: {source}")
+                            relative = f"{scope}/{source.relative_to(resolved).as_posix()}"
+                            if source.is_dir():
+                                directory_info = zipfile.ZipInfo(relative.rstrip("/") + "/")
+                                directory_info.external_attr = (stat.S_IFDIR | 0o755) << 16
+                                archive.writestr(directory_info, b"")
+                                root_directory_count += 1
+                                continue
                             if not source.is_file():
                                 continue
-                            relative = f"{scope}/{source.relative_to(resolved).as_posix()}"
                             archive.write(source, relative)
                             size = source.stat().st_size
                             file_count += 1
@@ -1287,6 +1327,7 @@ class AgentCheckpointRecoveryService:
                             "path": str(resolved),
                             "exists": resolved.exists(),
                             "fileCount": root_file_count,
+                            "directoryCount": root_directory_count,
                         }
                     )
             fsync_file_path(temp_path)
@@ -1523,6 +1564,10 @@ class AgentCheckpointRecoveryService:
             return {"ok": False, "checkpoint": checkpoint, "error": str(exc)}
 
     def _impl__preview_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+        with self._skill_package_write_lock, self.skills.write_lock:
+            return self._preview_local_state_checkpoint_locked(checkpoint)
+
+    def _preview_local_state_checkpoint_locked(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
         archive_path = self._resolve_checkpoint_archive_path(checkpoint, "local_state_archive")
         try:
             with zipfile.ZipFile(archive_path, "r") as archive:
@@ -1534,6 +1579,7 @@ class AgentCheckpointRecoveryService:
                 for name in archived:
                     self._validate_local_state_archive_member(name)
             current = self._local_state_archive_contents()
+            current_state_digest = self._local_state_current_digest()
             changed = [f"M\t{name}" for name in sorted(archived.keys() & current.keys()) if archived[name] != current[name]]
             changed.extend(f"D\t{name}" for name in sorted(archived.keys() - current.keys()))
             changed.extend(f"A\t{name}" for name in sorted(current.keys() - archived.keys()))
@@ -1542,6 +1588,7 @@ class AgentCheckpointRecoveryService:
                 "checkpoint": checkpoint,
                 "changedFiles": changed,
                 "workingTreeStatus": changed,
+                "currentStateDigest": current_state_digest,
                 "rollbackCoverageAudit": self._build_checkpoint_rollback_coverage_audit(checkpoint, phase="preview"),
                 "error": "",
             }
@@ -1622,7 +1669,399 @@ class AgentCheckpointRecoveryService:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "checkpoint": checkpoint, "error": f"Archive restore failed: {exc}"}
 
-    def _impl__restore_local_state_checkpoint(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _impl__restore_local_state_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        expected_current_state_digest: str = "",
+    ) -> dict[str, Any]:
+        with self._skill_package_write_lock, self.skills.write_lock:
+            return self._restore_local_state_checkpoint_locked(
+                checkpoint,
+                expected_current_state_digest=expected_current_state_digest,
+            )
+
+    def _validated_local_state_restore_members(
+        self,
+        archive: zipfile.ZipFile,
+        checkpoint: dict[str, Any],
+        roots: dict[str, Path],
+        state_roots: dict[str, dict[str, Any]],
+    ) -> tuple[list[tuple[str, zipfile.ZipInfo]], dict[str, bool]]:
+        members: list[tuple[str, zipfile.ZipInfo]] = []
+        seen: set[str] = set()
+        scope_counts = {scope: 0 for scope in roots}
+        scope_directory_counts = {scope: 0 for scope in roots}
+        total_bytes = 0
+        expected_exists = {
+            scope: state_roots.get(scope, {}).get("exists") is True
+            for scope in roots
+        }
+        for info in archive.infolist():
+            self._validate_local_state_archive_member(info.filename)
+            normalized = PurePosixPath(str(info.filename)).as_posix()
+            collision_key = normalized.casefold()
+            if collision_key in seen:
+                raise ValueError(
+                    f"Duplicate local state archive member: {normalized}"
+                )
+            seen.add(collision_key)
+            mode = (int(info.external_attr) >> 16) & 0xFFFF
+            if mode and stat.S_ISLNK(mode):
+                raise ValueError(
+                    f"Linked local state archive member is not allowed: {normalized}"
+                )
+            scope = PurePosixPath(normalized).parts[0]
+            if info.is_dir():
+                scope_directory_counts[scope] += 1
+                members.append((normalized, info))
+                continue
+            if not expected_exists.get(scope, False):
+                raise ValueError(
+                    f"Local state archive contains files for an absent root: {scope}"
+                )
+            if info.file_size < 0:
+                raise ValueError(
+                    f"Local state archive member has an invalid size: {normalized}"
+                )
+            scope_counts[scope] += 1
+            total_bytes += int(info.file_size)
+            members.append((normalized, info))
+
+        bad_member = archive.testzip()
+        if bad_member is not None:
+            raise ValueError(
+                f"Local state archive CRC validation failed: {bad_member}"
+            )
+
+        for scope, metadata in state_roots.items():
+            if scope not in roots or "fileCount" not in metadata:
+                continue
+            expected_count = metadata.get("fileCount")
+            if (
+                isinstance(expected_count, bool)
+                or not isinstance(expected_count, int)
+                or expected_count < 0
+                or scope_counts[scope] != expected_count
+            ):
+                raise ValueError(
+                    f"Local state archive file count does not match metadata: {scope}"
+                )
+            if "directoryCount" in metadata:
+                expected_directory_count = metadata.get("directoryCount")
+                if (
+                    isinstance(expected_directory_count, bool)
+                    or not isinstance(expected_directory_count, int)
+                    or expected_directory_count < 0
+                    or scope_directory_counts[scope]
+                    != expected_directory_count
+                ):
+                    raise ValueError(
+                        "Local state archive directory count does not match "
+                        f"metadata: {scope}"
+                    )
+        if "fileCount" in checkpoint:
+            expected_count = checkpoint.get("fileCount")
+            if (
+                isinstance(expected_count, bool)
+                or not isinstance(expected_count, int)
+                or expected_count < 0
+                or sum(1 for _name, info in members if not info.is_dir())
+                != expected_count
+            ):
+                raise ValueError(
+                    "Local state archive total file count does not match metadata."
+                )
+        if "uncompressedBytes" in checkpoint:
+            expected_bytes = checkpoint.get("uncompressedBytes")
+            if (
+                isinstance(expected_bytes, bool)
+                or not isinstance(expected_bytes, int)
+                or expected_bytes < 0
+                or total_bytes != expected_bytes
+            ):
+                raise ValueError(
+                    "Local state archive byte size does not match metadata."
+                )
+        return members, expected_exists
+
+    @staticmethod
+    def _remove_local_state_restore_tree(path: Path) -> None:
+        if not os.path.lexists(path):
+            return
+        if _path_is_link_like(path) or not path.is_dir():
+            raise RuntimeError(
+                f"Refusing to remove unsafe local state restore path: {path}"
+            )
+        shutil.rmtree(path)
+
+    def _stage_local_state_restore(
+        self,
+        archive: zipfile.ZipFile,
+        roots: dict[str, Path],
+        members: list[tuple[str, zipfile.ZipInfo]],
+        expected_exists: dict[str, bool],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        token = secrets.token_hex(16)
+        records: list[dict[str, Any]] = []
+        try:
+            for scope, root in roots.items():
+                root.parent.mkdir(parents=True, exist_ok=True)
+                if _path_is_link_like(root.parent) or not root.parent.is_dir():
+                    raise ValueError(
+                        f"Local state restore parent is not a safe directory: {root.parent}"
+                    )
+                stage = root.parent / f".{root.name}.vrcforge-restore-{token}.staged"
+                backup = root.parent / f".{root.name}.vrcforge-restore-{token}.backup"
+                if os.path.lexists(stage) or os.path.lexists(backup):
+                    raise RuntimeError(
+                        f"Local state restore workspace already exists: {root.parent}"
+                    )
+                record = {
+                    "scope": scope,
+                    "root": root,
+                    "stage": stage,
+                    "backup": backup,
+                    "expected": bool(expected_exists.get(scope)),
+                    "backupMoved": False,
+                    "published": False,
+                }
+                records.append(record)
+                if record["expected"]:
+                    stage.mkdir()
+                    fsync_directory_best_effort(stage.parent)
+
+            restored: list[str] = []
+            for normalized, info in members:
+                parts = PurePosixPath(normalized).parts
+                record = next(item for item in records if item["scope"] == parts[0])
+                stage = Path(record["stage"])
+                target = stage.joinpath(*parts[1:])
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    fsync_directory_best_effort(target.parent)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info, "r") as source, target.open("xb") as destination:
+                    shutil.copyfileobj(source, destination, length=1024 * 1024)
+                    flush_and_fsync(destination)
+                metadata = target.stat(follow_symlinks=False)
+                crc = 0
+                size = 0
+                with target.open("rb") as staged_file:
+                    while chunk := staged_file.read(1024 * 1024):
+                        size += len(chunk)
+                        crc = zlib.crc32(chunk, crc)
+                if size != info.file_size or (crc & 0xFFFFFFFF) != info.CRC:
+                    raise ValueError(
+                        f"Staged local state member failed size or CRC validation: {normalized}"
+                    )
+                if metadata.st_size != info.file_size:
+                    raise ValueError(
+                        f"Staged local state member size changed after fsync: {normalized}"
+                    )
+                fsync_directory_best_effort(target.parent)
+                restored.append(normalized)
+
+            for record in records:
+                stage = Path(record["stage"])
+                if not record["expected"]:
+                    continue
+                directories = [stage]
+                directories.extend(
+                    sorted(
+                        (path for path in stage.rglob("*") if path.is_dir()),
+                        key=lambda path: len(path.parts),
+                        reverse=True,
+                    )
+                )
+                for directory in directories:
+                    fsync_directory_best_effort(directory)
+                fsync_directory_best_effort(stage.parent)
+            return records, restored
+        except Exception as exc:
+            cleanup_failures: list[Path] = []
+            for record in records:
+                stage = Path(record["stage"])
+                try:
+                    self._remove_local_state_restore_tree(stage)
+                except Exception:
+                    if os.path.lexists(stage):
+                        cleanup_failures.append(stage)
+            if cleanup_failures:
+                raise _LocalStateRestoreRecoveryError(
+                    "Local state restore staging failed and temporary data could not be cleaned",
+                    list(dict.fromkeys(cleanup_failures)),
+                ) from exc
+            raise
+
+    def _rollback_local_state_restore_publish(
+        self,
+        records: list[dict[str, Any]],
+        publish_error: Exception,
+    ) -> None:
+        rollback_errors: list[str] = []
+        recovery_paths: list[Path] = []
+        for record in reversed(records):
+            root = Path(record["root"])
+            stage = Path(record["stage"])
+            backup = Path(record["backup"])
+            restored = False
+            try:
+                if record["published"] and os.path.lexists(root):
+                    if os.path.lexists(stage):
+                        raise RuntimeError(
+                            f"Local state rollback staging path was recreated: {stage}"
+                        )
+                    os.replace(root, stage)
+                    record["published"] = False
+                if record["backupMoved"]:
+                    if os.path.lexists(root):
+                        raise RuntimeError(
+                            f"Local state rollback target was recreated: {root}"
+                        )
+                    os.replace(backup, root)
+                    record["backupMoved"] = False
+                restored = True
+                fsync_directory_best_effort(root.parent)
+            except Exception as exc:  # noqa: BLE001 - restore every independent root.
+                rollback_errors.append(f"{record['scope']}: {exc}")
+                if os.path.lexists(backup):
+                    recovery_paths.append(backup)
+                elif os.path.lexists(root):
+                    recovery_paths.append(root)
+                elif os.path.lexists(stage):
+                    recovery_paths.append(stage)
+            finally:
+                if restored or os.path.lexists(backup):
+                    try:
+                        self._remove_local_state_restore_tree(stage)
+                    except Exception as exc:  # noqa: BLE001 - live/backup state remains authoritative.
+                        rollback_errors.append(f"{record['scope']} staging cleanup: {exc}")
+                        if os.path.lexists(stage):
+                            recovery_paths.append(stage)
+
+        if rollback_errors:
+            unique_paths = list(dict.fromkeys(recovery_paths))
+            if not unique_paths:
+                unique_paths = [
+                    Path(record["backup"])
+                    for record in records
+                    if os.path.lexists(record["backup"])
+                ]
+            raise _LocalStateRestoreRecoveryError(
+                "Local state restore publish failed and prior state could not be restored"
+                f" ({'; '.join(rollback_errors)})",
+                unique_paths,
+            ) from publish_error
+        raise publish_error
+
+    def _publish_local_state_restore(self, records: list[dict[str, Any]]) -> None:
+        try:
+            for record in records:
+                root = Path(record["root"])
+                stage = Path(record["stage"])
+                backup = Path(record["backup"])
+                if os.path.lexists(root) and (
+                    _path_is_link_like(root) or not root.is_dir()
+                ):
+                    raise ValueError(
+                        f"Local state restore root is not a regular directory: {root}"
+                    )
+                if os.path.lexists(backup):
+                    raise RuntimeError(
+                        f"Local state restore backup already exists: {backup}"
+                    )
+                if record["expected"] and (
+                    not stage.is_dir() or _path_is_link_like(stage)
+                ):
+                    raise RuntimeError(
+                        f"Local state restore staging root is unavailable: {stage}"
+                    )
+                if not record["expected"] and os.path.lexists(stage):
+                    raise RuntimeError(
+                        f"Unexpected local state restore staging root: {stage}"
+                    )
+                if root.parent.stat().st_dev != stage.parent.stat().st_dev:
+                    raise RuntimeError(
+                        f"Local state restore staging is not on the target filesystem: {root}"
+                    )
+        except Exception as exc:
+            cleanup_failures: list[Path] = []
+            for record in records:
+                stage = Path(record["stage"])
+                try:
+                    self._remove_local_state_restore_tree(stage)
+                except Exception:
+                    if os.path.lexists(stage):
+                        cleanup_failures.append(stage)
+            if cleanup_failures:
+                raise _LocalStateRestoreRecoveryError(
+                    "Local state restore preflight failed and staging could not be cleaned",
+                    list(dict.fromkeys(cleanup_failures)),
+                ) from exc
+            raise
+
+        try:
+            for record in records:
+                root = Path(record["root"])
+                stage = Path(record["stage"])
+                backup = Path(record["backup"])
+                if os.path.lexists(root):
+                    os.replace(root, backup)
+                    record["backupMoved"] = True
+                if record["expected"]:
+                    os.replace(stage, root)
+                    record["published"] = True
+                fsync_directory_best_effort(root.parent)
+        except Exception as exc:  # noqa: BLE001 - rollback every root before returning.
+            self._rollback_local_state_restore_publish(records, exc)
+
+        cleanup_failures: list[Path] = []
+        for record in records:
+            for key in ("backup", "stage"):
+                path = Path(record[key])
+                try:
+                    self._remove_local_state_restore_tree(path)
+                except Exception:
+                    if os.path.lexists(path):
+                        cleanup_failures.append(path)
+            fsync_directory_best_effort(Path(record["root"]).parent)
+        if cleanup_failures:
+            raise _LocalStateRestoreRecoveryError(
+                "Local state restore committed but temporary state could not be cleaned",
+                list(dict.fromkeys(cleanup_failures)),
+            )
+
+    def _restore_local_state_checkpoint_locked(
+        self,
+        checkpoint: dict[str, Any],
+        *,
+        expected_current_state_digest: str,
+    ) -> dict[str, Any]:
+        if re.fullmatch(r"[0-9a-f]{64}", expected_current_state_digest) is None:
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "current_state_digest_required",
+                "error": "currentStateDigest from the restore preview is required.",
+            }
+        try:
+            current_state_digest = self._local_state_current_digest()
+        except Exception as exc:  # noqa: BLE001 - validation must fail before staging.
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "current_state_unavailable",
+                "error": f"Local state could not be verified before restore: {exc}",
+            }
+        if current_state_digest != expected_current_state_digest:
+            return {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "status": "current_state_changed",
+                "currentStateDigest": current_state_digest,
+                "error": "currentStateDigest no longer matches local skill state; preview and approve again.",
+            }
         archive_path = self._resolve_checkpoint_archive_path(checkpoint, "local_state_archive")
         roots = self._local_state_checkpoint_roots()
         state_roots = {
@@ -1632,41 +2071,33 @@ class AgentCheckpointRecoveryService:
         }
         try:
             with zipfile.ZipFile(archive_path, "r") as archive:
-                members = [info for info in archive.infolist() if not info.is_dir()]
-                for info in members:
-                    self._validate_local_state_archive_member(info.filename)
-
+                members, expected_exists = self._validated_local_state_restore_members(
+                    archive,
+                    checkpoint,
+                    roots,
+                    state_roots,
+                )
                 current = self._local_state_archive_contents()
-                restored: list[str] = []
-                deleted: list[str] = []
                 app_state_root = self.user_constraints_path.parent.resolve()
-
                 for scope, root in roots.items():
+                    if os.path.lexists(root) and (_path_is_link_like(root) or not root.is_dir()):
+                        raise ValueError(f"Local state restore root is not a regular directory: {root}")
                     target_root = root.resolve()
                     if not is_path_within(target_root, app_state_root):
                         raise ValueError(f"Unsafe local state restore root: {target_root}")
-                    if target_root.exists():
-                        if target_root.is_symlink() or not target_root.is_dir():
-                            raise ValueError(f"Local state restore root is not a regular directory: {target_root}")
-                        shutil.rmtree(target_root)
-                    deleted.extend(name for name in sorted(current) if name == scope or name.startswith(scope + "/"))
-                    if state_roots.get(scope, {}).get("exists"):
-                        target_root.mkdir(parents=True, exist_ok=True)
-
-                for info in members:
-                    parts = PurePosixPath(info.filename).parts
-                    scope = parts[0]
-                    root = roots[scope].resolve()
-                    target = (root / Path(*parts[1:])).resolve()
-                    if not is_path_within(target, root):
-                        raise ValueError(f"Unsafe local state restore target: {target}")
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    temp_target = target.with_name(target.name + ".vrcforge-restore-tmp")
-                    with archive.open(info, "r") as source, temp_target.open("wb") as destination:
-                        shutil.copyfileobj(source, destination, length=1024 * 1024)
-                        flush_and_fsync(destination)
-                    os.replace(temp_target, target)
-                    restored.append(info.filename)
+                records, restored = self._stage_local_state_restore(
+                    archive,
+                    roots,
+                    members,
+                    expected_exists,
+                )
+            deleted = [
+                name
+                for scope in roots
+                for name in sorted(current)
+                if name == scope or name.startswith(scope + "/")
+            ]
+            self._publish_local_state_restore(records)
 
             return {
                 "ok": True,
@@ -1680,7 +2111,15 @@ class AgentCheckpointRecoveryService:
                 "error": "",
             }
         except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "checkpoint": checkpoint, "error": f"Local state restore failed: {exc}"}
+            failure = {
+                "ok": False,
+                "checkpoint": checkpoint,
+                "error": f"Local state restore failed: {exc}",
+            }
+            recovery_paths = getattr(exc, "recovery_paths", ())
+            if recovery_paths:
+                failure["recoveryPaths"] = [str(path) for path in recovery_paths]
+            return failure
 
     def _impl__build_checkpoint_rollback_coverage_audit(
         self,
@@ -2048,16 +2487,20 @@ class AgentCheckpointRecoveryService:
         app_state_root = self.user_constraints_path.parent
         return {
             "skill-packages": app_state_root / "skill-packages",
-            "skills": self.user_skills_dir,
+            "skills": self.skills.user_skills_dir,
         }
 
     def _impl__local_state_archive_contents(self) -> dict[str, tuple[int, int]]:
         result: dict[str, tuple[int, int]] = {}
         for scope, root in self._local_state_checkpoint_roots().items():
+            if os.path.lexists(root) and (_path_is_link_like(root) or not root.is_dir()):
+                raise ValueError(f"Local state root is not a regular directory: {root}")
             if not root.is_dir():
                 continue
             for source in sorted(root.rglob("*")):
-                if source.is_symlink() or not source.is_file():
+                if _path_is_link_like(source):
+                    raise ValueError(f"Local state contains a linked path: {source}")
+                if not source.is_file():
                     continue
                 crc = 0
                 with source.open("rb") as handle:
@@ -2067,11 +2510,113 @@ class AgentCheckpointRecoveryService:
                 result[relative] = (source.stat().st_size, crc & 0xFFFFFFFF)
         return result
 
+    def _local_state_current_digest(self) -> str:
+        """Bind a restore approval to the exact current local-state trees."""
+
+        roots = self._local_state_checkpoint_roots()
+        root_rows: list[list[Any]] = []
+        entry_rows: list[list[Any]] = []
+        for scope, root in sorted(roots.items()):
+            exists = os.path.lexists(root)
+            if exists and (_path_is_link_like(root) or not root.is_dir()):
+                raise ValueError(
+                    f"Local state root is not a regular directory: {root}"
+                )
+            root_rows.append([scope, str(root.absolute()), exists])
+            if not exists:
+                continue
+            pending: list[tuple[Path, PurePosixPath]] = [
+                (root, PurePosixPath("."))
+            ]
+            while pending:
+                directory, relative_directory = pending.pop()
+                children = sorted(
+                    directory.iterdir(),
+                    key=lambda path: (path.name.casefold(), path.name),
+                )
+                for child in children:
+                    if _path_is_link_like(child):
+                        raise ValueError(
+                            f"Local state contains a linked path: {child}"
+                        )
+                    relative = (
+                        PurePosixPath(child.name)
+                        if relative_directory == PurePosixPath(".")
+                        else relative_directory / child.name
+                    )
+                    relative_text = relative.as_posix()
+                    if child.is_dir():
+                        entry_rows.append([scope, "directory", relative_text])
+                        pending.append((child, relative))
+                        continue
+                    if not child.is_file():
+                        raise ValueError(
+                            f"Local state contains a non-regular path: {child}"
+                        )
+                    before = child.stat(follow_symlinks=False)
+                    file_digest = hashlib.sha256()
+                    consumed = 0
+                    with child.open("rb") as stream:
+                        while chunk := stream.read(1024 * 1024):
+                            consumed += len(chunk)
+                            file_digest.update(chunk)
+                    after = child.stat(follow_symlinks=False)
+                    if (
+                        consumed != before.st_size
+                        or after.st_size != before.st_size
+                        or after.st_mtime_ns != before.st_mtime_ns
+                    ):
+                        raise ValueError(
+                            f"Local state changed while being verified: {child}"
+                        )
+                    entry_rows.append(
+                        [
+                            scope,
+                            "file",
+                            relative_text,
+                            consumed,
+                            file_digest.hexdigest(),
+                        ]
+                    )
+        payload = {
+            "roots": root_rows,
+            "entries": sorted(
+                entry_rows,
+                key=lambda row: (
+                    str(row[0]),
+                    str(row[2]).casefold(),
+                    str(row[2]),
+                    str(row[1]),
+                ),
+            ),
+        }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+
     def _impl__validate_local_state_archive_member(self, name: str) -> None:
-        parts = PurePosixPath(str(name)).parts
-        if len(parts) < 2 or parts[0] not in LOCAL_STATE_CHECKPOINT_SCOPE or ".." in parts:
+        text = str(name or "").replace("\\", "/")
+        if text.endswith("/"):
+            text = text[:-1]
+        member = PurePosixPath(text)
+        parts = member.parts
+        raw_parts = text.split("/")
+        if (
+            len(parts) < 2
+            or parts[0] not in LOCAL_STATE_CHECKPOINT_SCOPE
+            or any(part in {"", ".", ".."} for part in raw_parts)
+        ):
             raise ValueError(f"Unsafe local state archive member: {name}")
-        if PurePosixPath(str(name)).is_absolute() or Path(str(name)).is_absolute():
+        if (
+            member.is_absolute()
+            or Path(str(name)).is_absolute()
+            or looks_like_absolute_path(text)
+        ):
             raise ValueError(f"Unsafe local state archive member: {name}")
 
     def _impl__cleanup_checkpoint_restore_unity_caches(self, checkpoint: dict[str, Any]) -> dict[str, Any]:

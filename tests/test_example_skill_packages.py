@@ -73,11 +73,17 @@ EXAMPLES = (
 def _projection(gateway: AgentGateway) -> SkillPackageProjectionService:
     return SkillPackageProjectionService(
         SkillPackageProjectionPorts(
-            user_skills_dir=lambda: gateway.user_skills_dir,
-            user_skill_lock=gateway.user_skill_lock,
-            find_user_skill=gateway._find_user_skill,  # noqa: SLF001 - isolated runtime projection fixture.
+            user_skills_dir=lambda: gateway.skills.user_skills_dir,
+            user_skill_lock=gateway.skills.write_lock,
+            find_user_skill=gateway.skills.find_user_skill,
+            validate_projection_name=gateway.skills.validate_projection_name,
+            make_conflict_error=lambda message: AgentGatewayError(
+                message,
+                status_code=409,
+            ),
             parse_skill=parse_skill_markdown,
             parse_error_types=(AgentGatewayError,),
+            installed_package_candidates=lambda _package_id: (),
             state_name=PROJECTED_SKILL_STATE_NAME,
             state_schema=PROJECTED_SKILL_STATE_SCHEMA,
             state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
@@ -412,7 +418,7 @@ def test_signed_material_package_install_projection_and_runtime_support_are_comp
         "presets/material-presets.json",
     }
     for relative in projection["supportFiles"]:
-        assert (gateway.user_skills_dir / "material-preset-pack" / relative).is_file()
+        assert (gateway.skills.user_skills_dir / "material-preset-pack" / relative).is_file()
 
     loaded = gateway.execute_runtime_skill("material-preset-pack", {}, "projection-integration-test")
 

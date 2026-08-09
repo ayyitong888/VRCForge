@@ -129,7 +129,7 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
     expected_routable = set(gateway._tools)
     expected_skills = {
         str(item.get("name") or "")
-        for item in gateway.build_skill_registry(config, EXPOSURE_LAYER_EXECUTION)["skills"]
+        for item in gateway.skills.build_skill_registry(config, EXPOSURE_LAYER_EXECUTION)["skills"]
         if str(item.get("name") or "")
     }
 

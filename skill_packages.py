@@ -47,6 +47,16 @@ DEFAULT_MAX_TOTAL_SIZE = 64 * 1024 * 1024
 DEFAULT_MAX_COMPRESSION_RATIO = 200.0
 DEFAULT_AUDIT_LIMIT = 200
 
+
+def _projected_skill_name(manifest: Mapping[str, Any]) -> str:
+    raw = str(
+        manifest.get("skill_name")
+        or manifest.get("skillName")
+        or manifest.get("id")
+        or ""
+    ).strip()
+    return re.sub(r"[^a-z0-9_.-]+", "-", raw.lower()).strip("-._")
+
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)"
@@ -1029,6 +1039,97 @@ class SkillPackageService:
             self._decorate_installed_entry(dict(registry["skills"][key]), registry)
             for key in sorted(registry["skills"])
         ]
+
+    def projection_candidates(
+        self,
+        skill_id: str,
+    ) -> tuple[tuple[Path, dict[str, Any]], ...]:
+        """Return validated installed versions usable for a projection migration."""
+
+        normalized = self._normalize_installed_skill_id(skill_id)
+        registry = self.load_registry()
+        entry = self._find_installed_entry(normalized, registry)
+        if entry is None:
+            return ()
+        version = str(entry.get("version") or "")
+        try:
+            root, preview = self._verified_installed_projection_candidate(
+                normalized,
+                version,
+            )
+        except (OSError, SkillPackageError):
+            return ()
+        if (
+            preview.lock_sha256 != str(entry.get("lock_sha256") or "")
+            or preview.signature_status != str(entry.get("signature_status") or "")
+            or preview.signer_fingerprint != entry.get("signer_fingerprint")
+        ):
+            return ()
+        return ((root, preview.manifest),)
+
+    def _verified_installed_projection_candidate(
+        self,
+        skill_id: str,
+        version: str,
+    ) -> tuple[Path, ImportPreview]:
+        root = self.skill_store / skill_id / "versions" / version
+        if _is_symlink_like(root) or not root.is_dir():
+            raise PackageIntegrityError(
+                f"Installed version root is unsafe: {skill_id}/{version}."
+            )
+        pending = [root]
+        file_count = 0
+        entry_count = 0
+        entry_limit = (self.max_file_count * 2) + 16
+        total_size = 0
+        while pending:
+            directory = pending.pop()
+            for path in directory.iterdir():
+                entry_count += 1
+                if entry_count > entry_limit:
+                    raise PackageIntegrityError(
+                        f"Installed version contains too many entries: {skill_id}/{version}."
+                    )
+                if _is_symlink_like(path):
+                    raise PackageIntegrityError(
+                        f"Installed version contains a linked path: {skill_id}/{version}."
+                    )
+                if path.is_dir():
+                    pending.append(path)
+                    continue
+                if not path.is_file():
+                    raise PackageIntegrityError(
+                        f"Installed version contains a non-regular path: {skill_id}/{version}."
+                    )
+                metadata = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > self.max_file_size:
+                    raise PackageIntegrityError(
+                        f"Installed version file exceeds its limit: {skill_id}/{version}."
+                    )
+                file_count += 1
+                total_size += metadata.st_size
+                if file_count > self.max_file_count + len(RESERVED_PACKAGE_FILES):
+                    raise PackageIntegrityError(
+                        f"Installed version contains too many files: {skill_id}/{version}."
+                    )
+                if total_size > self.max_total_size + (3 * self.max_file_size):
+                    raise PackageIntegrityError(
+                        f"Installed version exceeds its total size limit: {skill_id}/{version}."
+                    )
+        preview = self._inspect_extracted(
+            root,
+            root,
+            total_size,
+            package_sha256="",
+        )
+        if (
+            str(preview.manifest.get("id") or "") != skill_id
+            or str(preview.manifest.get("version") or "") != version
+        ):
+            raise PackageIntegrityError(
+                f"Installed manifest identity does not match its version root: {skill_id}/{version}."
+            )
+        return root, preview
 
     def runtime_audit_context(
         self,
@@ -2475,10 +2576,30 @@ class SkillPackageService:
 
         incoming_author = str(incoming.manifest.get("author") or "").strip()
         metadata_author = str(existing.get("author") or "").strip()
-        installed_manifest = self._read_current_manifest(
-            str(incoming.manifest["id"]),
-            str(existing.get("version") or ""),
+        _installed_root, installed_preview = (
+            self._verified_installed_projection_candidate(
+                str(incoming.manifest["id"]),
+                str(existing.get("version") or ""),
+            )
         )
+        installed_manifest = installed_preview.manifest
+        if (
+            installed_preview.lock_sha256
+            != str(existing.get("lock_sha256") or "")
+            or installed_preview.signature_status
+            != str(existing.get("signature_status") or "")
+            or installed_preview.signer_fingerprint
+            != existing.get("signer_fingerprint")
+        ):
+            raise PackageIntegrityError(
+                "Installed package trust metadata does not match its locked tree."
+            )
+        if _projected_skill_name(incoming.manifest) != _projected_skill_name(
+            installed_manifest
+        ):
+            raise PackageUpdateError(
+                "Projected skill name cannot change during a package update."
+            )
         manifest_author = str(installed_manifest.get("author") or "").strip()
         if metadata_author and manifest_author and metadata_author != manifest_author:
             raise PackageIntegrityError("Installed author identity metadata does not match its manifest.")

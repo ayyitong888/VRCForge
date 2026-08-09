@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -64,7 +65,7 @@ def _write_signed_skill_source(root: Path) -> Path:
 
 
 def _project_signed_skill(gateway: AgentGateway, installed_path: Path) -> Path:
-    projected_root = gateway.user_skills_dir / "runtime-audit-fixture"
+    projected_root = gateway.skills.user_skills_dir / "runtime-audit-fixture"
     (projected_root / "workflows").mkdir(parents=True)
     shutil.copy2(installed_path / "SKILL.md", projected_root / "SKILL.md")
     shutil.copy2(
@@ -232,7 +233,7 @@ def test_runtime_support_loader_blocks_traversal_and_sensitive_text(
 ) -> None:
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
     gateway.register_tool("vrcforge_health", "Read runtime health.", "read/debug", lambda _params: {"ok": True})
-    skill_root = gateway.user_skills_dir / "unsafe-support"
+    skill_root = gateway.skills.user_skills_dir / "unsafe-support"
     skill_root.mkdir(parents=True)
     (skill_root / "SKILL.md").write_text(
         "\n".join(
@@ -263,3 +264,78 @@ def test_runtime_support_loader_blocks_traversal_and_sensitive_text(
     assert result["status"] == "blocked"
     assert result["ok"] is False
     assert "support" in result["error"]
+
+
+def test_runtime_skill_capture_is_one_package_then_user_locked_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class PackageLock:
+        active = False
+
+        def __enter__(self) -> object:
+            assert self.active is False
+            self.active = True
+            events.append("package:enter")
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            events.append("package:exit")
+            self.active = False
+
+    package_lock = PackageLock()
+    gateway = AgentGateway(
+        tmp_path / "config" / "agent_gateway.json",
+        tmp_path / "audit",
+        skill_package_write_lock=package_lock,
+    )
+    gateway.skills.create_user_skill(
+        {
+            "name": "snapshot-skill",
+            "instructions": "OLD SNAPSHOT INSTRUCTIONS",
+        }
+    )
+    skill_file = gateway.skills.user_skills_dir / "snapshot-skill" / "SKILL.md"
+    writer_started = threading.Event()
+    writer_acquired = threading.Event()
+    writer: threading.Thread | None = None
+
+    def mutate_after_capture() -> None:
+        writer_started.set()
+        with gateway.skills.write_lock:
+            writer_acquired.set()
+            skill_file.write_text(
+                skill_file.read_text(encoding="utf-8").replace(
+                    "OLD SNAPSHOT INSTRUCTIONS",
+                    "NEW VERSION AFTER CAPTURE",
+                ),
+                encoding="utf-8",
+            )
+
+    def audit_context(_skill: dict[str, object]) -> dict[str, object]:
+        nonlocal writer
+        assert package_lock.active is True
+        writer = threading.Thread(target=mutate_after_capture)
+        writer.start()
+        assert writer_started.wait(1)
+        assert not writer_acquired.wait(0.05)
+        return {"packageId": "captured"}
+
+    monkeypatch.setattr(
+        gateway,
+        "_runtime_skill_package_audit_context_locked",
+        audit_context,
+    )
+
+    result = gateway.execute_runtime_skill("snapshot-skill", {}, "test-agent")
+
+    assert writer is not None
+    writer.join(timeout=1)
+    assert not writer.is_alive()
+    assert writer_acquired.is_set()
+    assert events == ["package:enter", "package:exit"]
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert "OLD SNAPSHOT INSTRUCTIONS" in serialized
+    assert "NEW VERSION AFTER CAPTURE" not in serialized

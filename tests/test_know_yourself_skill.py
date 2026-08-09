@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -802,9 +803,12 @@ def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(
             scoped.setattr(dashboard_server.DASHBOARD_STATE, "unity_editor_path", __file__)
             scoped.setattr(dashboard_server.AGENT_GATEWAY, "build_tool_registry", _tool_registry)
             scoped.setattr(
-                dashboard_server.AGENT_GATEWAY,
-                "build_skill_registry",
-                lambda *_args: _skill_registry(),
+                dashboard_server._KNOW_YOURSELF_READINESS,
+                "_ports",
+                replace(
+                    dashboard_server._KNOW_YOURSELF_READINESS._ports,
+                    build_skill_registry=_skill_registry,
+                ),
             )
             scoped.setattr(dashboard_server.AGENT_GATEWAY, "permission_state", _permission_state)
             return dashboard_server.know_yourself_sync({})
@@ -862,19 +866,26 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
     monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "selected_project_path", r"C:\fixture\UnityProject")
     monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "unity_editor_path", __file__)
     monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "build_tool_registry", _tool_registry)
-    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "build_skill_registry", lambda *_args: _skill_registry())
+    monkeypatch.setattr(
+        dashboard_server._KNOW_YOURSELF_READINESS,
+        "_ports",
+        replace(
+            dashboard_server._KNOW_YOURSELF_READINESS._ports,
+            build_skill_registry=_skill_registry,
+        ),
+    )
     monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "permission_state", _permission_state)
 
     report = dashboard_server.know_yourself_sync({"editorFocusConfirmed": "true"})
-    route = dashboard_server.AGENT_GATEWAY._match_runtime_skill(
+    route = dashboard_server.AGENT_GATEWAY.runtime_planner._match_runtime_skill(
         "API 已经接好了，准备打开 Unity 工程",
         {},
     )
-    direct_work_start_route = dashboard_server.AGENT_GATEWAY._match_runtime_skill(
+    direct_work_start_route = dashboard_server.AGENT_GATEWAY.runtime_planner._match_runtime_skill(
         "打开这个 Unity 工程开始做头像",
         {},
     )
-    short_work_start_route = dashboard_server.AGENT_GATEWAY._match_runtime_skill(
+    short_work_start_route = dashboard_server.AGENT_GATEWAY.runtime_planner._match_runtime_skill(
         "开工程",
         {},
     )
@@ -885,9 +896,8 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
     )
     tool = dashboard_server.AGENT_GATEWAY._tools["vrcforge_know_yourself"]
     group = next(
-        item for item in dashboard_server.AGENT_GATEWAY._builtin_skill_definitions(
-            dashboard_server.AGENT_GATEWAY.ensure_config()
-        )
+        item
+        for item in dashboard_server.AGENT_GATEWAY.skills.build_skill_registry()["skills"]
         if item["name"] == "know-yourself"
     )
 

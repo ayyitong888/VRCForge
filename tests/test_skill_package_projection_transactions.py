@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from contextlib import contextmanager
 from dataclasses import replace
@@ -16,7 +17,14 @@ from agent_gateway import (
     PROJECTED_SKILL_STATE_SCHEMA,
     RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES,
 )
-from skill_packages import SkillPackageError, SkillPackageService
+from skill_packages import (
+    LOCK_NAME,
+    PackageIntegrityError,
+    PackageUpdateError,
+    SkillPackageError,
+    SkillPackageService,
+    canonical_json_bytes,
+)
 from skill_package_governance import (
     SkillPackageGovernancePorts,
     SkillPackageGovernanceService,
@@ -31,11 +39,17 @@ from skill_package_projection import (
 def _projection(gateway: AgentGateway) -> SkillPackageProjectionService:
     return SkillPackageProjectionService(
         SkillPackageProjectionPorts(
-            user_skills_dir=lambda: gateway.user_skills_dir,
-            user_skill_lock=gateway.user_skill_lock,
-            find_user_skill=gateway._find_user_skill,  # noqa: SLF001 - local runtime projection fixture.
+            user_skills_dir=lambda: gateway.skills.user_skills_dir,
+            user_skill_lock=gateway.skills.write_lock,
+            find_user_skill=gateway.skills.find_user_skill,
+            validate_projection_name=gateway.skills.validate_projection_name,
+            make_conflict_error=lambda message: AgentGatewayError(
+                message,
+                status_code=409,
+            ),
             parse_skill=dashboard_server.parse_skill_markdown,
             parse_error_types=(AgentGatewayError,),
+            installed_package_candidates=lambda _package_id: (),
             state_name=PROJECTED_SKILL_STATE_NAME,
             state_schema=PROJECTED_SKILL_STATE_SCHEMA,
             state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
@@ -81,11 +95,23 @@ def _governance(
     )
 
 
+def _runtime_snapshot(gateway: AgentGateway, skill_name: str):
+    with gateway._skill_package_write_lock:  # noqa: SLF001 - mirror the production package -> user lock order.
+        snapshot = gateway.skills.prepare_runtime_skill(
+            skill_name,
+            gateway.ensure_config(),
+            gateway._runtime_skill_package_audit_context_locked,  # noqa: SLF001 - exact production capture callback.
+        )
+    assert snapshot is not None
+    return snapshot
+
+
 def _write_package_source(
     root: Path,
     *,
     package_id: str,
     skill_name: str,
+    version: str = "1.0.0",
     entrypoints: dict[str, str] | None = None,
     support_files: tuple[str, ...] = ("workflows/workflow.json",),
     permissions: tuple[str, ...] = ("read_project",),
@@ -100,7 +126,7 @@ def _write_package_source(
         "id": package_id,
         "name": "Projection Transaction Fixture",
         "skill_name": skill_name,
-        "version": "1.0.0",
+        "version": version,
         "author": "VRCForge Tests",
         "description": "Projection transaction and runtime audit fixture.",
         "min_vrcforge_version": "0.0.0",
@@ -135,6 +161,17 @@ def _write_package_source(
     return source
 
 
+def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes]]:
+    if not root.exists():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): (
+            ("dir", b"") if path.is_dir() else ("file", path.read_bytes())
+        )
+        for path in root.rglob("*")
+    }
+
+
 def test_projection_rejects_support_entrypoint_that_overwrites_skill(tmp_path: Path) -> None:
     installed = tmp_path / "installed"
     (installed / "docs").mkdir(parents=True)
@@ -144,10 +181,22 @@ def test_projection_rejects_support_entrypoint_that_overwrites_skill(tmp_path: P
     )
     (installed / "SKILL.md").write_text("---\nname: overwritten-name\n---\nUnexpected instructions.\n", encoding="utf-8")
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
-    old_projection = gateway.user_skills_dir / "benign-name" / "SKILL.md"
-    old_projection.parent.mkdir(parents=True)
-    old_projection.write_text("old projection remains intact\n", encoding="utf-8")
     projection = _projection(gateway)
+    old_installed = tmp_path / "old-installed"
+    old_installed.mkdir()
+    old_installed.joinpath("SKILL.md").write_text(
+        "---\nname: benign-name\n---\nOld projection remains intact.\n",
+        encoding="utf-8",
+    )
+    owner_manifest = {
+        "id": "community.tests.projection-collision",
+        "skill_name": "benign-name",
+        "entrypoints": {"skill": "SKILL.md"},
+    }
+    projected = projection.project_installed(old_installed, owner_manifest)
+    assert projected is not None
+    old_projection = Path(projected["path"])
+    original_projection = old_projection.read_bytes()
 
     with pytest.raises(SkillPackageError, match="cannot overwrite reserved"):
         projection.project_installed(
@@ -159,7 +208,7 @@ def test_projection_rejects_support_entrypoint_that_overwrites_skill(tmp_path: P
             },
         )
 
-    assert old_projection.read_text(encoding="utf-8") == "old projection remains intact\n"
+    assert old_projection.read_bytes() == original_projection
 
 
 def test_import_projection_failure_restores_registry_version_and_old_projection(
@@ -177,10 +226,25 @@ def test_import_projection_failure_restores_registry_version_and_old_projection(
     package = build_service.export_dev(source, tmp_path / "rollback.vsk").package_path
     service = SkillPackageService(tmp_path / "skill-packages", vrcforge_version="0.0.0")
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
-    old_projection = gateway.user_skills_dir / "projection-rollback" / "SKILL.md"
-    old_projection.parent.mkdir(parents=True)
-    old_projection.write_text("old projection remains intact\n", encoding="utf-8")
-    controller = _controller(service, _projection(gateway))
+    projection = _projection(gateway)
+    old_installed = tmp_path / "old-installed"
+    old_installed.mkdir()
+    old_installed.joinpath("SKILL.md").write_text(
+        "---\nname: projection-rollback\n---\nOld projection remains intact.\n",
+        encoding="utf-8",
+    )
+    projected = projection.project_installed(
+        old_installed,
+        {
+            "id": "community.tests.projection-rollback",
+            "skill_name": "projection-rollback",
+            "entrypoints": {"skill": "SKILL.md"},
+        },
+    )
+    assert projected is not None
+    old_projection = Path(projected["path"])
+    original_projection = old_projection.read_bytes()
+    controller = _controller(service, projection)
 
     with pytest.raises(SkillPackageError, match="must also be declared as manifest entrypoints"):
         controller.import_package(
@@ -189,7 +253,150 @@ def test_import_projection_failure_restores_registry_version_and_old_projection(
 
     assert service.list_installed() == []
     assert not (service.skill_store / "community.tests.projection-rollback").exists()
-    assert old_projection.read_text(encoding="utf-8") == "old projection remains intact\n"
+    assert old_projection.read_bytes() == original_projection
+
+
+def test_package_update_rejects_skill_name_rename_without_tree_changes(
+    tmp_path: Path,
+) -> None:
+    package_id = "community.tests.rename-owner"
+    service = SkillPackageService(
+        tmp_path / "skill-packages",
+        vrcforge_version="0.0.0",
+    )
+    old_source = _write_package_source(
+        tmp_path / "old",
+        package_id=package_id,
+        skill_name="old-skill-name",
+        version="1.0.0",
+    )
+    old_package = service.export_dev(
+        old_source,
+        tmp_path / "old.vsk",
+    ).package_path
+    gateway = AgentGateway(
+        tmp_path / "config" / "agent_gateway.json",
+        tmp_path / "audit",
+    )
+    projection = _projection(gateway)
+    controller = _controller(service, projection)
+    imported = controller.import_package({"packagePath": str(old_package)})
+    old_projection = Path(imported["projectedSkill"]["path"]).parent
+
+    new_source = _write_package_source(
+        tmp_path / "new",
+        package_id=package_id,
+        skill_name="new-skill-name",
+        version="2.0.0",
+    )
+    new_package = service.export_dev(
+        new_source,
+        tmp_path / "new.vsk",
+    ).package_path
+    package_before = _tree_snapshot(service.skill_store)
+    projection_before = _tree_snapshot(gateway.skills.user_skills_dir)
+
+    with pytest.raises(
+        PackageUpdateError,
+        match="Projected skill name cannot change",
+    ):
+        controller.import_package({"packagePath": str(new_package)})
+
+    assert _tree_snapshot(service.skill_store) == package_before
+    assert _tree_snapshot(gateway.skills.user_skills_dir) == projection_before
+    assert old_projection.is_dir()
+    assert not (gateway.skills.user_skills_dir / "new-skill-name").exists()
+
+
+def test_projection_candidates_exclude_tampered_versions_and_update_fails_closed(
+    tmp_path: Path,
+) -> None:
+    package_id = "community.tests.locked-migration"
+    service = SkillPackageService(
+        tmp_path / "skill-packages",
+        vrcforge_version="0.0.0",
+    )
+    for version in ("1.0.0", "2.0.0"):
+        source = _write_package_source(
+            tmp_path / version,
+            package_id=package_id,
+            skill_name="locked-migration",
+            version=version,
+        )
+        package = service.export_dev(
+            source,
+            tmp_path / f"locked-migration-{version}.vsk",
+        ).package_path
+        service.install(package, source="locked-migration-test")
+
+    versions_root = service.skill_store / package_id / "versions"
+    retained_skill = versions_root / "1.0.0" / "SKILL.md"
+    retained_skill.write_text(
+        "---\nname: locked-migration\n---\nTampered retained version.\n",
+        encoding="utf-8",
+    )
+    retained_lock_path = versions_root / "1.0.0" / LOCK_NAME
+    retained_lock = json.loads(retained_lock_path.read_text(encoding="utf-8"))
+    retained_lock["files"]["SKILL.md"] = hashlib.sha256(
+        retained_skill.read_bytes()
+    ).hexdigest()
+    retained_lock_path.write_bytes(canonical_json_bytes(retained_lock))
+    candidates = service.projection_candidates(package_id)
+    assert [manifest["version"] for _root, manifest in candidates] == ["2.0.0"]
+
+    (versions_root / "2.0.0" / "SKILL.md").write_text(
+        "---\nname: locked-migration\n---\nTampered current version.\n",
+        encoding="utf-8",
+    )
+    source = _write_package_source(
+        tmp_path / "3.0.0",
+        package_id=package_id,
+        skill_name="locked-migration",
+        version="3.0.0",
+    )
+    package = service.export_dev(
+        source,
+        tmp_path / "locked-migration-3.0.0.vsk",
+    ).package_path
+    before = _tree_snapshot(service.skill_store)
+
+    with pytest.raises(PackageIntegrityError):
+        service.install(package, source="locked-migration-test")
+
+    assert _tree_snapshot(service.skill_store) == before
+
+
+def test_installed_projection_candidate_entry_cap_fails_before_descent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = SkillPackageService(
+        tmp_path / "skill-packages",
+        vrcforge_version="0.0.0",
+        max_file_count=1,
+    )
+    version_root = (
+        service.skill_store
+        / "community.tests.entry-cap"
+        / "versions"
+        / "1.0.0"
+    )
+    for index in range(19):
+        (version_root / f"directory-{index:02d}").mkdir(parents=True)
+
+    original_iterdir = Path.iterdir
+
+    def guarded_iterdir(path: Path):
+        if path != version_root:
+            raise AssertionError("verifier descended after the entry cap was exceeded")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", guarded_iterdir)
+    with pytest.raises(PackageIntegrityError, match="too many entries"):
+        service._verified_installed_projection_candidate(  # noqa: SLF001 - bounded verifier regression.
+            "community.tests.entry-cap",
+            "1.0.0",
+        )
 
 
 def test_package_enable_toggle_preserves_signed_projection_and_audit_identity(
@@ -213,26 +420,23 @@ def test_package_enable_toggle_preserves_signed_projection_and_audit_identity(
     )
     projected_skill = Path(imported["projectedSkill"]["path"])
     original_bytes = projected_skill.read_bytes()
-    initial_context = gateway._runtime_skill_package_audit_context(  # noqa: SLF001 - regression checks attribution.
-        gateway._find_registry_skill("projection-toggle")  # noqa: SLF001
-    )
+    initial_context = _runtime_snapshot(gateway, "projection-toggle").package_audit_context
 
     controller.set_enabled(
         {"skillPackageId": "community.tests.projection-toggle", "enabled": False}
     )
-    assert gateway._find_registry_skill("projection-toggle")["enabled"] is False  # noqa: SLF001
+    assert _runtime_snapshot(gateway, "projection-toggle").skill["enabled"] is False
     controller.set_enabled(
         {"skillPackageId": "community.tests.projection-toggle", "enabled": True}
     )
-    final_skill = gateway._find_registry_skill("projection-toggle")  # noqa: SLF001
-    final_context = gateway._runtime_skill_package_audit_context(final_skill)  # noqa: SLF001
+    final_context = _runtime_snapshot(gateway, "projection-toggle").package_audit_context
 
     assert projected_skill.read_bytes() == original_bytes
     assert (projected_skill.parent / PROJECTED_SKILL_STATE_NAME).is_file()
     assert initial_context["signerFingerprint"] == key_pair.fingerprint
     assert final_context == initial_context
 
-    gateway.create_user_skill({"name": "unrelated-user-skill", "instructions": "Keep package bytes intact."})
+    gateway.skills.create_user_skill({"name": "unrelated-user-skill", "instructions": "Keep package bytes intact."})
     assert projected_skill.read_bytes() == original_bytes
 
 
@@ -266,6 +470,8 @@ def test_package_enable_projection_failure_restores_registry_and_projection_stat
         _owner: SkillPackageProjectionService,
         _target_dir: Path,
         _enabled: bool,
+        _package_id: str,
+        _projection_digest: str,
     ) -> Path:
         raise OSError("injected projected state failure")
 
@@ -283,7 +489,7 @@ def test_package_enable_projection_failure_restores_registry_and_projection_stat
     assert installed_path.read_bytes() == original_installed
     assert state_path.read_bytes() == original_state
     assert service.list_installed()[0]["enabled"] is True
-    assert gateway._find_registry_skill("projection-toggle-rollback")["enabled"] is True  # noqa: SLF001
+    assert _runtime_snapshot(gateway, "projection-toggle-rollback").skill["enabled"] is True
 
 
 def test_safe_mode_projection_failure_restores_all_registry_and_projection_states(
@@ -330,12 +536,20 @@ def test_safe_mode_projection_failure_restores_all_registry_and_projection_state
         owner: SkillPackageProjectionService,
         target_dir: Path,
         enabled: bool,
+        package_id: str,
+        projection_digest: str,
     ) -> Path:
         nonlocal write_count
         write_count += 1
         if write_count == 2:
             raise OSError("injected safe-mode projection failure")
-        return original_write_state(owner, target_dir, enabled)
+        return original_write_state(
+            owner,
+            target_dir,
+            enabled,
+            package_id,
+            projection_digest,
+        )
 
     monkeypatch.setattr(
         SkillPackageProjectionService,
@@ -384,6 +598,8 @@ def test_governance_projection_failure_restores_registry_and_projection_state(
         _owner: SkillPackageProjectionService,
         _target_dir: Path,
         _enabled: bool,
+        _package_id: str,
+        _projection_digest: str,
     ) -> Path:
         raise OSError(f"injected {operation} projection failure")
 
@@ -406,7 +622,7 @@ def test_governance_projection_failure_restores_registry_and_projection_state(
     assert installed_path.read_bytes() == original_installed
     assert state_path.read_bytes() == original_state
     assert service.list_installed()[0]["enabled"] is True
-    assert gateway._find_registry_skill(skill_name)["enabled"] is True  # noqa: SLF001
+    assert _runtime_snapshot(gateway, skill_name).skill["enabled"] is True
 
 
 def test_uninstall_projection_failure_restores_package_tree_registry_and_projection(
@@ -501,7 +717,7 @@ def test_trust_signer_write_runs_inside_shared_package_lock(monkeypatch: pytest.
 
 def test_runtime_support_limit_is_checked_before_file_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     gateway = AgentGateway(tmp_path / "config" / "agent_gateway.json", tmp_path / "audit")
-    skill_root = gateway.user_skills_dir / "bounded-support"
+    skill_root = gateway.skills.user_skills_dir / "bounded-support"
     skill_root.mkdir(parents=True)
     skill_file = skill_root / "SKILL.md"
     skill_file.write_text("---\nname: bounded-support\n---\nBounded support.\n", encoding="utf-8")
@@ -520,7 +736,7 @@ def test_runtime_support_limit_is_checked_before_file_read(tmp_path: Path, monke
     monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
 
     with pytest.raises(AgentGatewayError, match="exceeds the .*byte limit"):
-        gateway._load_runtime_skill_support_files(  # noqa: SLF001 - focused bounded-read regression.
+        gateway.skills.load_runtime_skill_support_files(
             {"supportFiles": ["oversized.txt"], "storagePath": str(skill_file)}
         )
     assert read_calls == []
@@ -545,7 +761,7 @@ def test_runtime_audit_rejects_oversized_installed_file_before_hash_read(
         installed.installed_path,
         installed.preview.manifest,
     )
-    projected_skill = gateway.user_skills_dir / "audit-size" / "SKILL.md"
+    projected_skill = gateway.skills.user_skills_dir / "audit-size" / "SKILL.md"
     oversized = installed.installed_path / "workflows" / "workflow.json"
     with oversized.open("wb") as stream:
         stream.truncate(service.max_file_size + 1)

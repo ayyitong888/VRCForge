@@ -543,43 +543,6 @@
       "hostProxy": {"source": "agent_checkpoint_recovery.py", "class": "AgentCheckpointRecoveryService"}
     },
     {
-      "id": "gateway.skill-registry-host-proxy",
-      "rootSymbols": [
-        {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_skill_registry"}
-      ],
-      "facades": [
-        {
-          "source": "agent_gateway.py",
-          "scope": "class",
-          "class": "AgentGateway",
-          "methods": [
-            "build_skill_registry",
-            "check_skill_registry",
-            "create_user_skill",
-            "update_user_skill",
-            "delete_user_skill",
-            "_builtin_skill_definitions",
-            "_skill_from_builtin_group",
-            "_skill_from_tool",
-            "_skill_from_write_handler",
-            "_skill_dependency_visible",
-            "user_skills_dir",
-            "_load_user_skills",
-            "_load_projected_skill_state",
-            "_find_user_skill",
-            "_save_user_skills",
-            "_save_user_skill",
-            "_normalize_user_skill",
-            "_ensure_user_skill_can_use_id",
-            "_decorate_skill_validation",
-            "_validate_skill",
-            "_load_runtime_skill_support_files"
-          ]
-        }
-      ],
-      "hostProxy": {"source": "agent_skill_registry.py", "class": "AgentSkillRegistryService"}
-    },
-    {
       "id": "dashboard.runtime-composition-root",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "AGENT_GATEWAY"},

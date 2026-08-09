@@ -953,12 +953,18 @@ def test_skill_init_write_exports_installs_projects_and_loads_as_request_only(
     )
     projection_owner = SkillPackageProjectionService(
         SkillPackageProjectionPorts(
-            user_skills_dir=lambda: gateway.user_skills_dir,
-            user_skill_lock=gateway.user_skill_lock,
-            find_user_skill=gateway._find_user_skill,  # noqa: SLF001 - isolated CLI projection fixture.
-            parse_skill=parse_skill_markdown,
-            parse_error_types=(AgentGatewayError,),
-            state_name=PROJECTED_SKILL_STATE_NAME,
+            user_skills_dir=lambda: gateway.skills.user_skills_dir,
+            user_skill_lock=gateway.skills.write_lock,
+            find_user_skill=gateway.skills.find_user_skill,
+            validate_projection_name=gateway.skills.validate_projection_name,
+            make_conflict_error=lambda message: AgentGatewayError(
+                message,
+                status_code=409,
+            ),
+                parse_skill=parse_skill_markdown,
+                parse_error_types=(AgentGatewayError,),
+                installed_package_candidates=lambda _package_id: (),
+                state_name=PROJECTED_SKILL_STATE_NAME,
             state_schema=PROJECTED_SKILL_STATE_SCHEMA,
             state_max_bytes=PROJECTED_SKILL_STATE_MAX_BYTES,
         )
