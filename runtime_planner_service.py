@@ -1249,6 +1249,9 @@ class RuntimePlannerService:
             skill_params = ensure_dict(payload.get("skill_params") or payload.get("skillParams"))
             shell_command = str(payload.get("shell_command") or payload.get("shellCommand") or "").strip()
             shell_params = ensure_dict(payload.get("shell_params") or payload.get("shellParams"))
+            completion_claim = ensure_dict(
+                payload.get("completion_claim") or payload.get("completionClaim")
+            )
 
             base = {
                 "planner": "llm",
@@ -1269,6 +1272,7 @@ class RuntimePlannerService:
                 # 工具型动作执行后，把结果回灌给 LLM 再决定下一步（真正的多步循环）。
                 "continueLoop": False,
                 "expectedResult": "",
+                "completionClaim": {},
             }
 
             if action == "enter_execution" and exposure_layer == EXPOSURE_LAYER_PLANNING:
@@ -1330,6 +1334,7 @@ class RuntimePlannerService:
                         "summary": reply_text,
                         "reply": reply_text,
                         "expectedResult": "Conversational reply.",
+                        "completionClaim": completion_claim,
                         "nextStep": "done",
                     }
             return self._planner_failure_plan(
@@ -1653,6 +1658,9 @@ class RuntimePlannerService:
     def _llm_loop_step_observation(self, step: dict[str, object]) -> str:
             result = step.get("result")
             fields: list[str] = []
+            action_id = str(step.get("actionId") or "").strip()
+            if action_id:
+                fields.append("actionId=" + sanitize_planner_observation_text(action_id, 80))
             outcome = ensure_dict(step.get("outcome"))
             if outcome:
                 fields.append(
@@ -1757,7 +1765,7 @@ class RuntimePlannerService:
                     line += f" -> {observation_text}"
                 step_lines.append(line)
             steps_block = "\n".join(step_lines) if step_lines else "（本轮尚未执行任何工具）"
-            return (
+            prompt = (
                 "你是 VRCForge 桌面智能体的规划器，负责把用户的请求转换成下一步动作。\n"
                 "这是一个多步循环：你每次只产出一个动作；工具执行后结果会回灌给你，由你决定下一步，"
                 "直到信息足够后再用 reply 收尾。\n"
@@ -1781,6 +1789,15 @@ class RuntimePlannerService:
                 f"最近对话：\n{history_block}\n\n"
                 f"本轮已执行步骤+结果：\n{steps_block}\n\n"
                 f"用户最新消息：{message}"
+            )
+            return prompt + (
+                "\n\nCompletion contract:\n"
+                "- A tool call is not task completion. Read its canonical outcome and verification first.\n"
+                "- Never finish while an action is running, pending approval, failed, or unverified.\n"
+                "- After one or more tool actions, a terminal reply must include "
+                '"completion_claim":{"satisfied":true,"evidence_action_ids":["<exact actionId>"]}.\n'
+                "- Cite every completed action from this turn exactly once. The runtime, not the model, "
+                "makes the final completion decision.\n"
             )
 
 

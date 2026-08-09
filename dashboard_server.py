@@ -4243,17 +4243,51 @@ async def app_agent_approve_and_execute(
         def approve_and_execute() -> dict[str, Any]:
             approved = approve()
             execution = execute_approved(approved)
-            return {
+            result = {
                 "ok": bool(approved.get("ok")),
                 "approval": approved.get("approval"),
                 "execution": execution or None,
             }
+            terminal_approval = ensure_dict(ensure_dict(execution).get("approval"))
+            if not terminal_approval:
+                terminal_approval = ensure_dict(approved.get("approval"))
+            try:
+                continuation = AGENT_GATEWAY.resume_runtime_task_after_approval(
+                    terminal_approval,
+                    ensure_dict(execution),
+                )
+            except Exception as exc:  # noqa: BLE001 - applied writes must remain visible.
+                emit_log(
+                    "error",
+                    "agent",
+                    "Task continuation failed after an approved write.",
+                    {"approvalId": approval_id, "errorType": type(exc).__name__},
+                    essential=True,
+                )
+                result["continuationError"] = (
+                    "The write transaction finished, but the original task could not resume. "
+                    "The write result remains recorded and will not be replayed automatically."
+                )
+            else:
+                if continuation is not None:
+                    result["continuation"] = continuation
+            return result
 
         try:
             payload = await asyncio.to_thread(approve_and_execute)
         except AgentGatewayError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
+    continuation = ensure_dict(payload.get("continuation"))
+    if continuation:
+        await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
+        await EVENT_BUS.broadcast(
+            "agentRuntimeRuns",
+            AGENT_GATEWAY.runtime_runs.list_runs(
+                limit=30,
+                session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
+            ),
+        )
     if linked_delivery_id:
         await broadcast_background_goal_state({})
     return payload
@@ -4264,16 +4298,52 @@ async def app_agent_reject(
     approval_id: str,
     request: AgentApprovalScopeRequest | None = None,
 ) -> dict[str, Any]:
-    try:
-        payload = AGENT_GATEWAY.approval_transactions.reject(
+    def reject_and_resume() -> dict[str, Any]:
+        result = AGENT_GATEWAY.approval_transactions.reject(
             approval_id,
             expected_project_root=((request.expected_project_root if request else "") or ""),
             global_only=bool(request.global_only if request else True),
         )
+        approval = ensure_dict(result.get("approval"))
+        if result.get("ok") and result.get("goalDelivery") is None:
+            try:
+                continuation = AGENT_GATEWAY.resume_runtime_task_after_approval(
+                    approval,
+                    rejected=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - rejection remains terminal.
+                emit_log(
+                    "error",
+                    "agent",
+                    "Task continuation failed after approval rejection.",
+                    {"approvalId": approval_id, "errorType": type(exc).__name__},
+                    essential=True,
+                )
+                result["continuationError"] = (
+                    "The rejection was recorded, but the original task result could not be "
+                    "projected back into the conversation."
+                )
+            else:
+                if continuation is not None:
+                    result["continuation"] = continuation
+        return result
+
+    try:
+        payload = await asyncio.to_thread(reject_and_resume)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     denied_goal = payload.get("goalDelivery")
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
+    continuation = ensure_dict(payload.get("continuation"))
+    if continuation:
+        await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
+        await EVENT_BUS.broadcast(
+            "agentRuntimeRuns",
+            AGENT_GATEWAY.runtime_runs.list_runs(
+                limit=30,
+                session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
+            ),
+        )
     if denied_goal is not None:
         await broadcast_background_goal_state({})
     return payload

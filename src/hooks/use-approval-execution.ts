@@ -24,6 +24,7 @@ type UseApprovalExecutionParams = {
   setRuntimeNotice: (message: string) => void;
   setError: (message: string) => void;
   appendToChat: (chatId: string, item: ConversationItem) => void;
+  chatIdForSessionId: (sessionId: string) => string;
   refresh: (target?: string) => Promise<void>;
   refreshRuntimeRuns: (includeEvents?: boolean, target?: string) => Promise<void>;
   loadCheckpoints: () => Promise<void>;
@@ -42,6 +43,7 @@ export function useApprovalExecution({
   setRuntimeNotice,
   setError,
   appendToChat,
+  chatIdForSessionId,
   refresh,
   refreshRuntimeRuns,
   loadCheckpoints,
@@ -49,6 +51,25 @@ export function useApprovalExecution({
 }: UseApprovalExecutionParams) {
   const { t } = useTranslation();
   const [approvalActions, setApprovalActions] = useState<Record<string, ApprovalActionState>>({});
+
+  function appendContinuation(response: AgentRuntimeResponse | undefined): boolean {
+    if (!response) {
+      return false;
+    }
+    const ownerSessionId = response.sessionId || response.session_id || "";
+    const ownerChatId = chatIdForSessionId(ownerSessionId);
+    if (!ownerChatId) {
+      return false;
+    }
+    appendToChat(ownerChatId, {
+      id: `approval-continuation-${response.turnId || response.turn_id || Date.now()}`,
+      type: "agent",
+      response,
+      elapsedSeconds: 0,
+      createdAt: new Date().toISOString(),
+    });
+    return true;
+  }
 
   function pendingApprovalForResponse(response: AgentRuntimeResponse): AgentApproval | null {
     const approvalId = approvalIdFromResponse(response);
@@ -129,9 +150,17 @@ export function useApprovalExecution({
     setApprovalActions((current) => ({ ...current, [approvalId]: "approve" }));
     setError("");
     const approvalScope = scopeForApproval(approvalId, allowFutureCategory);
-    const pendingTargetTool = pendingApprovalItems.find((approval) => approval.id === approvalId)?.targetTool || "";
+    const pendingApproval = pendingApprovalItems.find((approval) => approval.id === approvalId);
+    const pendingTargetTool = pendingApproval?.targetTool || "";
+    const taskSessionId = pendingApproval?.taskContext?.sessionId || "";
+    const ownerChatId = chatIdForSessionId(taskSessionId);
+    const resultChatId = taskSessionId ? ownerChatId : activeChatId;
     try {
       const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
+      appendContinuation(payload.continuation);
+      if (payload.continuationError) {
+        setRuntimeNotice(payload.continuationError);
+      }
       const executionResult = payload.execution?.result;
       const shellResult = isAgentShellResult(executionResult) ? executionResult : undefined;
       const executionRecord = asRecord(payload.execution);
@@ -140,8 +169,8 @@ export function useApprovalExecution({
         && typeof payload.execution.outcome?.summary === "string"
           ? payload.execution.outcome.summary
           : "";
-      if (activeChatId && (shellResult || payload.execution?.error || completionNotice)) {
-        appendToChat(activeChatId, {
+      if (resultChatId && (shellResult || payload.execution?.error || completionNotice)) {
+        appendToChat(resultChatId, {
           id: `result-${approvalId}-${Date.now()}`,
           type: "result",
           approvalId,
@@ -182,9 +211,20 @@ export function useApprovalExecution({
     setError("");
     const approvalScope = scopeForApproval(approvalId);
     try {
-      await rejectAgentApproval(endpoint, approvalId, approvalScope);
-      if (activeChatId) {
-        appendToChat(activeChatId, {
+      const payload = await rejectAgentApproval(endpoint, approvalId, approvalScope);
+      if (!payload.ok) {
+        throw new Error(payload.message || `Approval ${approvalId} could not be rejected.`);
+      }
+      const continued = appendContinuation(payload.continuation);
+      if (payload.continuationError) {
+        setRuntimeNotice(payload.continuationError);
+      }
+      const approval = pendingApprovalItems.find((item) => item.id === approvalId);
+      const taskSessionId = approval?.taskContext?.sessionId || "";
+      const ownerChatId = chatIdForSessionId(taskSessionId);
+      const resultChatId = taskSessionId ? ownerChatId : activeChatId;
+      if (!continued && resultChatId) {
+        appendToChat(resultChatId, {
           id: `result-${approvalId}-${Date.now()}`,
           type: "result",
           approvalId,

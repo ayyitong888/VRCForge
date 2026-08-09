@@ -80,6 +80,7 @@ class ShellApprovalRequest:
     requires_explicit_approval: bool
     explicit_approval_reason: str
     goal_delivery_id: str
+    task_context: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +315,8 @@ class AgentShellService:
         self,
         params: dict[str, Any],
         agent_name: str = "desktop-agent",
+        *,
+        task_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._execution_admission() as admission_id:
             classification = self.classify(params)
@@ -334,7 +337,12 @@ class AgentShellService:
                     "error": "; ".join(classification["reasons"]),
                 }
             if classification["risk"] == "high":
-                approval = self._create_approval(params, classification, agent_name)
+                approval = self._create_approval(
+                    params,
+                    classification,
+                    agent_name,
+                    task_context=task_context,
+                )
                 if self._ports.approvals.auto_enabled():
                     auto_payload = self._ports.approvals.auto_execute(approval)
                     if auto_payload is not None:
@@ -1096,6 +1104,8 @@ class AgentShellService:
         params: dict[str, Any],
         classification: dict[str, Any],
         agent_name: str,
+        *,
+        task_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
         turn_id = str(params.get("turn_id") or params.get("turnId") or "").strip()
@@ -1152,6 +1162,18 @@ class AgentShellService:
             and existing.get("sessionId") == session_id
             and existing.get("turnId") == turn_id
             and all(existing.get(key) == value for key, value in expected_binding.items())
+            and (
+                (
+                    task_context is None
+                    and not isinstance(existing.get("taskContext"), dict)
+                )
+                or (
+                    isinstance(task_context, dict)
+                    and isinstance(existing.get("taskContext"), dict)
+                    and str(existing["taskContext"].get("taskId") or "")
+                    == str(task_context.get("taskId") or "")
+                )
+            )
         ):
             return self._ports.approvals.redact(dict(existing))
 
@@ -1197,6 +1219,7 @@ class AgentShellService:
                 goal_delivery_id=str(
                     params.get("goalDeliveryId") or params.get("goal_delivery_id") or ""
                 ).strip(),
+                task_context=dict(task_context) if isinstance(task_context, dict) else None,
             )
         )
         self._ports.approvals.update_metadata(

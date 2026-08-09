@@ -65,6 +65,12 @@ from optimization_service import (
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
+from agent_task_loop import (
+    AgentTaskLoop,
+    approval_task_context,
+    canonical_action_id,
+    prepare_approval_task_continuation,
+)
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
 from runtime_planner_service import RuntimePlannerService
 from background_goal_runtime import (
@@ -1960,6 +1966,11 @@ class AgentGateway:
                 requires_explicit_approval=request.requires_explicit_approval,
                 explicit_approval_reason=request.explicit_approval_reason,
                 goal_delivery_id=request.goal_delivery_id,
+                task_context=approval_task_context(
+                    request.task_context,
+                    tool=request.target_tool,
+                    arguments=request.arguments,
+                ),
             )
 
         def update_shell_approval_metadata(approval_id: str, metadata: dict[str, Any]) -> None:
@@ -2797,10 +2808,49 @@ class AgentGateway:
         except DesktopActionBrokerError as exc:
             raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
 
+    def resume_runtime_task_after_approval(
+        self,
+        approval: dict[str, Any] | None,
+        execution: dict[str, Any] | None = None,
+        *,
+        rejected: bool = False,
+    ) -> dict[str, Any] | None:
+        """Resume only a task-linked approval, after its transaction is terminal.
+
+        Approval owns the write transaction.  This method owns the subsequent
+        task decision and never calls the approved handler again.
+        """
+
+        prepared = prepare_approval_task_continuation(
+            approval,
+            execution,
+            rejected=rejected,
+        )
+        if prepared is None:
+            return None
+        params = ensure_dict(prepared.get("params"))
+        continuation = ensure_dict(prepared.get("taskContinuation"))
+        self._signal_background_activity("approval_task_continuation")
+        agent_name = str(prepared.get("agentName") or "desktop-agent")
+        try:
+            with self.runtime_planner.bind_turn(params) as metadata:
+                params["_contextCompactionLimit"] = metadata.verified_context_limit
+                params["_plannerAttemptLabel"] = metadata.planner_label
+                with self._desktop.runtime_turn_context(params):
+                    return self._runtime_message_impl(
+                        params,
+                        agent_name=agent_name,
+                        task_continuation=continuation,
+                    )
+        except DesktopActionBrokerError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+
     def _runtime_message_impl(
         self,
         params: dict[str, Any] | None = None,
         agent_name: str = "desktop-agent",
+        *,
+        task_continuation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         params = params or {}
         message = str(params.get("message") or "").strip()
@@ -2825,6 +2875,30 @@ class AgentGateway:
         if history:
             self._runtime_session_state.restore_session(session_id, history, now)
         project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        continuation_context = ensure_dict(ensure_dict(task_continuation).get("context"))
+        continuation_completion = ensure_dict(ensure_dict(task_continuation).get("completion"))
+        if continuation_context and continuation_completion:
+            task_loop = AgentTaskLoop.from_approval_context(
+                continuation_context,
+                continuation_completion,
+            )
+        else:
+            task_loop = AgentTaskLoop(
+                message,
+                session_id=session_id,
+                turn_id=turn_id,
+                client_turn_id=client_turn_id,
+                project_root=project_root,
+                agent_name=agent_name,
+                provider=str(params.get("provider") or ""),
+                provider_label=str(params.get("providerLabel") or ""),
+                model=str(params.get("model") or ""),
+                context_limit=(
+                    int(params.get("_requestedContextLimit"))
+                    if isinstance(params.get("_requestedContextLimit"), int)
+                    else None
+                ),
+            )
         observe = self.runtime_observe(session_id=session_id, project_root=project_root)
         if attachments:
             observe["turn"] = {"attachments": attachments}
@@ -2874,7 +2948,9 @@ class AgentGateway:
         # 路由到 call_tool，由既有审批/检查点/回滚模型负责安全——循环只负责「提议」，
         # 不绕过审批直接落地（遵守 AGENTS 非协商项）。
         param_command = str(params.get("shell_command") or params.get("shellCommand") or "").strip()
-        loop_state: list[dict[str, Any]] = []
+        loop_state: list[dict[str, Any]] = (
+            task_loop.planner_observations() if continuation_context else []
+        )
         steps: list[dict[str, Any]] = []
         if vision_payload is not None:
             # 带标签的视觉分析 run step：记录真实执行的 provider/model 与该次
@@ -2898,20 +2974,42 @@ class AgentGateway:
         repeated_failure_guard = RepeatedFailureGuard()
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
-        write_payload: dict[str, Any] | None = None
-        approval_id = ""
+        write_payload: dict[str, Any] | None = (
+            ensure_dict(ensure_dict(task_continuation).get("execution")) or None
+        )
+        approval_id = str(ensure_dict(task_continuation).get("approvalId") or "").strip()
         first_plan: dict[str, Any] | None = None
         last_plan: dict[str, Any] = {}
         iterations = 0
         cap_reached = False
         tool_call_cap_reached = False
-        tool_calls_used = 0
-        runtime_exposure_layer = EXPOSURE_LAYER_PLANNING
+        tool_calls_used = task_loop.tool_calls_used if continuation_context else 0
+        runtime_exposure_layer = (
+            task_loop.exposure_layer if continuation_context else EXPOSURE_LAYER_PLANNING
+        )
         remaining_action: dict[str, Any] | None = None
         runtime_compaction: dict[str, Any] | None = None
         runtime_compaction_attempted = False
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
         unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
+        completed_continuation_action_ids: set[str] = set()
+        if continuation_context and str(continuation_completion.get("status") or "").casefold() == "completed":
+            completed_requested_action_id = str(
+                continuation_context.get("requestedActionId") or ""
+            ).strip()
+            if completed_requested_action_id:
+                completed_continuation_action_ids.add(completed_requested_action_id)
+            successful_actions.add(
+                (
+                    "write",
+                    json.dumps(
+                        ensure_dict(ensure_dict(task_continuation).get("arguments")),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
+                )
+            )
 
         def discard_runtime_compaction_for_cancel() -> None:
             nonlocal runtime_compaction
@@ -2975,6 +3073,13 @@ class AgentGateway:
             )
 
         for step_index in range(RUNTIME_AGENT_MAX_STEPS):
+            continuation_terminal_plan = ensure_dict(
+                ensure_dict(task_continuation).get("terminalPlan")
+            )
+            if step_index == 0 and continuation_terminal_plan:
+                last_plan = continuation_terminal_plan
+                iterations += 1
+                break
             if self._runtime_session_state.consume_cancel_request(
                 session_id=session_id,
                 turn_id=turn_id,
@@ -3132,10 +3237,25 @@ class AgentGateway:
             # failed action may be retried, but only until the bounded failure
             # guard observes the same tool, arguments, and failure class three
             # times in succession.
-            if action_key in successful_actions:
+            planned_action_id = canonical_action_id(
+                action_kind,
+                str(plan.get("writeTool") or plan.get("skillTool") or ("shell" if action_kind == "shell" else "")),
+                (
+                    ensure_dict(plan.get("writeParams"))
+                    if action_kind == "write"
+                    else ensure_dict(plan.get("skillParams"))
+                    if action_kind == "skill"
+                    else {"command": command, **shell_step_params}
+                ),
+            )
+            if (
+                action_key in successful_actions
+                or planned_action_id in completed_continuation_action_ids
+            ):
                 break
 
             step_tool = ""
+            action_arguments: Any = {}
             tool_calls_used += 1
             if action_kind == "shell":
                 step_tool = "shell"
@@ -3157,6 +3277,12 @@ class AgentGateway:
                     # conversation for the entire command lifetime.
                     shell_step_params.setdefault("yieldMs", 10_000)
                     shell_step_params.setdefault("timeout", 30 * 60)
+                action_arguments = {
+                    "command": command,
+                    "cwd": shell_step_params.get("cwd") or params.get("cwd") or project_root,
+                    "workspaceRoot": shell_workspace_root,
+                    "options": shell_step_params,
+                }
                 step_payload = self.shell.execute(
                     {
                         **shell_step_params,
@@ -3176,6 +3302,14 @@ class AgentGateway:
                         "reason": plan.get("summary") or "Agent shell step",
                     },
                     agent_name=agent_name,
+                    task_context=task_loop.approval_seed(
+                        tool_calls_used=tool_calls_used,
+                        exposure_layer=runtime_exposure_layer,
+                        requested_kind="shell",
+                        requested_tool="shell",
+                        requested_arguments={"command": command, **shell_step_params},
+                        continue_after_approval=bool(plan.get("continueLoop")),
+                    ),
                 )
                 # Runtime turns already have a trusted per-turn owner. The
                 # external control capability is unnecessary here and must
@@ -3208,11 +3342,19 @@ class AgentGateway:
                 )
             elif action_kind == "write":
                 step_tool = str(plan.get("writeTool") or "")
+                action_arguments = ensure_dict(plan.get("writeParams"))
                 step_payload = self.approval_transactions._execute_write_request(
                     step_tool,
-                    ensure_dict(plan.get("writeParams")),
+                    action_arguments,
                     agent_name,
                     goal_delivery_id=goal_delivery_id,
+                    task_context=task_loop.approval_seed(
+                        tool_calls_used=tool_calls_used,
+                        exposure_layer=runtime_exposure_layer,
+                        requested_tool=step_tool,
+                        requested_arguments=action_arguments,
+                        continue_after_approval=bool(plan.get("continueLoop")),
+                    ),
                 )
                 write_payload = step_payload
                 loop_state.append(
@@ -3227,6 +3369,7 @@ class AgentGateway:
             else:  # skill
                 step_tool = str(plan.get("skillTool") or "")
                 step_params = ensure_dict(plan.get("skillParams"))
+                action_arguments = step_params
                 if step_tool == "vrcforge_agent_desktop_action" or step_tool.startswith("vrcforge_progress_") or step_tool == "vrcforge_ask_user":
                     step_params.setdefault("sessionId", session_id)
                     if goal_delivery_id:
@@ -3282,6 +3425,19 @@ class AgentGateway:
                         )
                 loop_state.append(loop_step)
 
+            task_action = task_loop.record_action(
+                kind=action_kind,
+                tool=step_tool,
+                arguments=action_arguments,
+                raw_result=step_payload,
+                outcome=ensure_dict(step_payload.get("outcome")),
+                action_id=str(step_payload.get("taskActionId") or planned_action_id),
+            )
+            step_payload["outcome"] = task_action["outcome"]
+            if loop_state:
+                loop_state[-1]["actionId"] = task_action["actionId"]
+                loop_state[-1]["outcome"] = task_action["outcome"]
+
             steps.append(
                 {
                     # len(steps)：有视觉前置步时循环步顺延，无视觉步时与 step_index 一致。
@@ -3290,12 +3446,18 @@ class AgentGateway:
                     "tool": step_tool,
                     "summary": plan.get("summary") or "",
                     "status": step_payload.get("status") or "",
+                    "actionId": task_action["actionId"],
                 }
             )
 
             step_approval = str(
                 step_payload.get("approval_id") or step_payload.get("approvalId") or ""
             ).strip()
+            step_waits_for_approval = bool(
+                step_approval
+                and str(step_payload.get("status") or "").strip().casefold()
+                in {"approval_pending", "pending", "pending_approval"}
+            )
             if step_approval:
                 approval_id = approval_id or step_approval
             step_failure_class = runtime_step_failure_class(step_payload)
@@ -3346,10 +3508,10 @@ class AgentGateway:
                 repeated_failure_guard.record_success()
                 successful_actions.add(action_key)
 
-            if step_approval:
+            if step_waits_for_approval:
                 break  # 进入审批等待 → 本轮收尾。
-            if action_kind == "write":
-                break  # 写入提议是本轮的终点（等审批/检查点/回滚）。
+            if action_kind == "write" and not plan.get("continueLoop"):
+                break
             if not plan.get("continueLoop"):
                 break
             if str(plan.get("nextStep") or "") == "done":
@@ -3406,6 +3568,8 @@ class AgentGateway:
             )
             if gated_plan is not None:
                 top_plan = gated_plan
+        if isinstance(top_plan, dict):
+            top_plan = task_loop.gate_terminal(top_plan)
 
         # Non-analyzed image state is rendered by the structured vision step.
         if (
@@ -3510,7 +3674,10 @@ class AgentGateway:
             "turnId": turn_id,
             "observe": observe,
             "plan": top_plan,
+            "task": ensure_dict(top_plan.get("task")) or task_loop.snapshot(),
         }
+        if approval_id and continuation_context:
+            payload["resumedApprovalId"] = approval_id
         if client_turn_id:
             payload["clientTurnId"] = client_turn_id
         if goal_delivery_id:

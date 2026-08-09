@@ -75,6 +75,8 @@ class FakeApprovals:
             "targetTool": request.target_tool,
             "arguments": request.arguments,
         }
+        if request.task_context is not None:
+            approval["taskContext"] = dict(request.task_context)
         self.approvals[approval_id] = approval
         return approval
 
@@ -454,6 +456,38 @@ def test_high_risk_approval_binds_command_cwd_workspace_timeout_and_hashes(tmp_p
     )
     assert changed["approval_id"] != result["approval_id"]
     assert len(approvals.requests) == 2
+
+
+def test_unity_shell_approval_binds_the_trusted_task_without_accepting_param_forgery(
+    tmp_path: Path,
+) -> None:
+    shell, approvals, processes, _audits = service(tmp_path)
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
+    trusted_task = {
+        "schema": "vrcforge.agent_task_loop.v1",
+        "taskId": "task-shell-loop",
+        "objective": "write the probe and verify the task",
+    }
+
+    pending = shell.execute(
+        {
+            "command": "Set-Content Assets/task-loop.txt ok",
+            "cwd": str(project),
+            "workspace_root": str(project),
+            "projectRoot": str(project),
+            "session_id": "shell-loop-session",
+            "turn_id": "shell-loop-turn",
+            "taskContext": {"taskId": "forged"},
+        },
+        task_context=trusted_task,
+    )
+
+    assert pending["status"] == "pending_approval"
+    assert processes.processes == []
+    assert approvals.requests[0].task_context == trusted_task
+    assert approvals.approvals[pending["approval_id"]]["taskContext"]["taskId"] == "task-shell-loop"
 
 
 def test_full_permission_keeps_checkpoint_transaction_but_skips_manual_confirmation(tmp_path: Path) -> None:

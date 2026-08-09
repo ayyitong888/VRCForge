@@ -11,6 +11,7 @@ from contextlib import AbstractContextManager
 from typing import Any, Callable, Mapping
 
 from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
+from agent_task_loop import approval_completion, approval_task_context
 from agent_tool_result_contract import normalize_agent_tool_result
 from agent_gateway import (
     APPLY_RECOVERY_ACTIVE_STATUSES,
@@ -355,6 +356,7 @@ class AgentApprovalTransactionService:
         agent_name: str,
         *,
         goal_delivery_id: str = "",
+        task_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Route an avatar/Unity write through the supervised tool path.
 
@@ -386,7 +388,8 @@ class AgentApprovalTransactionService:
                             "summary": f"Agent proposed {tool_name}.",
                             "paramsSummary": params_summary,
                         },
-                    }
+                    },
+                    task_context=task_context,
                 )
             else:
                 outcome = self._ports.call_tool(tool_name, params, agent_name=agent_name)
@@ -405,7 +408,11 @@ class AgentApprovalTransactionService:
             if not approval_record:
                 approval_record = ensure_dict(ensure_dict(outcome.get("result")).get("approval"))
             approval = str(approval_record.get("id") or "").strip()
-        if approval:
+        approval_record = ensure_dict(outcome.get("approval"))
+        if not approval_record:
+            approval_record = ensure_dict(ensure_dict(outcome.get("result")).get("approval"))
+        approval_status = str(approval_record.get("status") or "").strip().casefold()
+        if approval and approval_status in {"pending", "approved", "applying"}:
             status = "approval_pending"
         elif outcome.get("ok"):
             status = "executed"
@@ -428,9 +435,17 @@ class AgentApprovalTransactionService:
                 write=True,
             )
         )
+        linked_task = ensure_dict(approval_record.get("taskContext"))
+        task_completion = ensure_dict(outcome.get("taskCompletion"))
+        if not task_completion:
+            task_completion = ensure_dict(approval_record.get("taskCompletion"))
         if approval:
             payload["approval_id"] = approval
             payload["approvalId"] = approval
+        if linked_task.get("actionId"):
+            payload["taskActionId"] = str(linked_task.get("actionId"))
+        if task_completion:
+            payload["taskCompletion"] = task_completion
         if outcome.get("error"):
             payload["error"] = outcome["error"]
         return payload
@@ -441,6 +456,7 @@ class AgentApprovalTransactionService:
         *,
         internal_wrapper: bool = False,
         include_arguments_digest: bool = False,
+        task_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         config = self._ports.ensure_config()
         if not config.allow_write_requests:
@@ -589,6 +605,11 @@ class AgentApprovalTransactionService:
                     "riskLevel": effective_risk_level,
                     "requiresExplicitApproval": requires_explicit_for_mode,
                 },
+            ),
+            task_context=approval_task_context(
+                task_context,
+                tool=target_tool,
+                arguments=arguments,
             ),
         )
         if include_arguments_digest:
@@ -937,6 +958,9 @@ class AgentApprovalTransactionService:
         core_call_audits: list[dict[str, Any]] = []
         execution_id = f"exec_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}"
         request_trace: dict[str, Any] | None = None
+        result: Any = None
+        completion_outcome: dict[str, Any] = {}
+        task_completion: dict[str, Any] | None = None
         try:
             user_constraints = self._ports.read_user_constraints()
             arguments = self._inject_user_constraints_for_apply(
@@ -1122,6 +1146,13 @@ class AgentApprovalTransactionService:
                     )
                 )
             )
+            task_completion = approval_completion(
+                ensure_dict(approval.get("taskContext")),
+                raw_result=result,
+                outcome=completion_outcome,
+            )
+            if task_completion is not None:
+                completion_outcome = ensure_dict(task_completion.get("outcome"))
             completion_status = str(completion_outcome["status"])
             if completion_status == "failed":
                 raise AgentGatewayError(str(completion_outcome["summary"]))
@@ -1132,6 +1163,8 @@ class AgentApprovalTransactionService:
                 approval["status"] = "applied"
                 approval["appliedAt"] = utc_now_iso()
                 approval["completionOutcome"] = completion_outcome
+                if task_completion is not None:
+                    approval["taskCompletion"] = task_completion
                 approval["resultSummary"] = summarize_params(result if isinstance(result, dict) else {"result": result})
                 self._ports.state.approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
@@ -1186,6 +1219,8 @@ class AgentApprovalTransactionService:
                 "result": result,
                 "outcome": completion_outcome,
             }
+            if task_completion is not None:
+                payload["taskCompletion"] = task_completion
             if request_trace is not None:
                 payload["requestTrace"] = request_trace
             if checkpoint:
@@ -1199,10 +1234,41 @@ class AgentApprovalTransactionService:
                     "executionId": execution_id,
                     "unityCoreCallAudits": [dict(audit) for audit in core_call_audits],
                 }
+            if str(completion_outcome.get("status") or "").casefold() != "failed":
+                completion_outcome = ensure_dict(
+                    redact_sensitive(
+                        normalize_agent_tool_result(
+                            result
+                            if result is not None
+                            else {"ok": False, "status": "failed", "error": str(exc)},
+                            fallback_summary=f"{write_handler.description} failed.",
+                            write=True,
+                        )
+                    )
+                )
+            if str(completion_outcome.get("status") or "").casefold() != "failed":
+                completion_outcome = {
+                    "status": "failed",
+                    "summary": f"{write_handler.description} failed.",
+                    "verification": {"state": "failed", "checks": []},
+                }
+            if task_completion is None:
+                task_completion = approval_completion(
+                    ensure_dict(approval.get("taskContext")),
+                    raw_result=(
+                        result
+                        if result is not None
+                        else {"ok": False, "status": "failed", "error": str(exc)}
+                    ),
+                    outcome=completion_outcome,
+                )
             with self._ports.state.shared_state_lock:
                 approval["status"] = "failed"
                 approval["failedAt"] = utc_now_iso()
                 approval["error"] = str(exc)
+                approval["completionOutcome"] = completion_outcome
+                if task_completion is not None:
+                    approval["taskCompletion"] = task_completion
                 self._ports.state.approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
                 failed_audit = {"event": "approval_failed", "approval": approval, **permission_context}
@@ -1231,7 +1297,15 @@ class AgentApprovalTransactionService:
                     resolution="no_write_snapshot_conflict" if no_write_conflict else "write_failed_after_checkpoint",
                     error=str(exc),
                 )
-            payload = {"ok": False, "status": "failed", "approval": approval, "error": str(exc)}
+            payload = {
+                "ok": False,
+                "status": "failed",
+                "approval": approval,
+                "error": str(exc),
+                "outcome": completion_outcome,
+            }
+            if task_completion is not None:
+                payload["taskCompletion"] = task_completion
             if request_trace is not None:
                 payload["requestTrace"] = request_trace
             if checkpoint:
@@ -1945,6 +2019,7 @@ class AgentApprovalTransactionService:
         goal_delivery_id: str = "",
         approved_execution_plan: dict[str, Any] | None = None,
         allow_future_eligible: bool = False,
+        task_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._ports.signal_background_activity("pending_approval")
         now = datetime.now(timezone.utc)
@@ -1974,6 +2049,8 @@ class AgentApprovalTransactionService:
             approval["goalDeliveryId"] = goal_delivery_id
         if approved_execution_plan is not None:
             approval["approvedUnityExecutionPlan"] = approved_execution_plan
+        if isinstance(task_context, Mapping) and task_context:
+            approval["taskContext"] = dict(task_context)
         project_root = self._approval_project_root(approval)
         if project_root:
             approval["projectRoot"] = project_root
@@ -2037,7 +2114,7 @@ class AgentApprovalTransactionService:
             approval = self._refresh_approval_expiry(approval)
             if approval.get("status") not in {"pending", "approved"} and status == "approved":
                 return {"ok": False, "approval": approval, "message": f"Approval is {approval.get('status')}."}
-            if approval.get("status") != "pending" and status == "rejected":
+            if approval.get("status") not in {"pending", "approved"} and status == "rejected":
                 return {"ok": False, "approval": approval, "message": f"Approval is {approval.get('status')}."}
             if approval.get("status") == "expired":
                 return {"ok": False, "approval": approval, "message": "Approval has expired."}

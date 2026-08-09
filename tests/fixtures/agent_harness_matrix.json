@@ -1,5 +1,5 @@
 {
-  "schema": "vrcforge.agent_harness_matrix.v1",
+  "schema": "vrcforge.agent_harness_matrix.v2",
   "selectionCases": [
     {"id":"selection-compile-errors","prompt":"检查 Unity 当前的 C# 编译错误。","expectedTool":"vrcforge_get_compile_errors","forbiddenTools":["vrcforge_unity_status"]},
     {"id":"selection-materials","prompt":"扫描这个 avatar 的材质，并列出 shader。","expectedTool":"vrcforge_scan_materials","forbiddenTools":["vrcforge_list_avatars"]},
@@ -23,5 +23,16 @@
     {"id":"completion-readback-passed-visual-deferred","write":true,"result":{"ok":true,"status":"applied","readbackVerified":true,"visualProof":{"status":"unavailable"}},"expectedStatus":"ok","expectedNextStep":"done"},
     {"id":"completion-required-visual-missing","write":true,"result":{"ok":true,"status":"applied","readbackVerified":true,"visualProof":{"status":"unavailable"},"verification":{"required":["visual"]}},"expectedStatus":"needs_user_action","expectedNextStep":"needs_user_action"},
     {"id":"completion-shell-failed","write":true,"result":{"ok":false,"status":"failed","error":"Shell command failed."},"expectedStatus":"failed","expectedNextStep":"tool_failed"}
+  ],
+  "loopCases": [
+    {"id":"loop-llm-exact-claim","objective":"Inspect materials","claim":"exact","actions":[{"kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed","summary":"Materials scanned."}}],"expectedNextStep":"done","expectedTaskStatus":"completed"},
+    {"id":"loop-llm-missing-claim","objective":"Inspect materials","claim":"missing","actions":[{"kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed","summary":"Materials scanned."}}],"expectedNextStep":"completion_unverified","expectedTaskStatus":"completion_unverified"},
+    {"id":"loop-llm-unknown-claim","objective":"Inspect materials","claim":"unknown","actions":[{"kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed","summary":"Materials scanned."}}],"expectedNextStep":"completion_unverified","expectedTaskStatus":"completion_unverified"},
+    {"id":"loop-shell-running","objective":"Run the worker","claim":"exact","actions":[{"kind":"shell","tool":"shell","arguments":{"command":"python worker.py"},"result":{"ok":true,"status":"running","session":{"sessionId":"shell-1","status":"running"}}}],"expectedNextStep":"waiting_for_tool","expectedTaskStatus":"running"},
+    {"id":"loop-shell-running-then-terminal","objective":"Run the worker","claim":"exact","actions":[{"kind":"shell","tool":"shell","arguments":{"command":"python worker.py"},"result":{"ok":true,"status":"running","session":{"sessionId":"shell-1","status":"running"}}},{"kind":"shell","tool":"shell","arguments":{"command":"python worker.py"},"result":{"ok":true,"status":"finished","result":{"exitCode":0,"stdout":"done","stderr":""}}}],"expectedNextStep":"done","expectedTaskStatus":"completed"},
+    {"id":"loop-unity-readback-missing","objective":"Create an object","claim":"exact","actions":[{"kind":"write","tool":"vrcforge_create_gameobject","write":true,"arguments":{"name":"Probe"},"result":{"ok":true,"status":"applied","persistedReadback":false,"sceneSaved":true}}],"expectedNextStep":"needs_user_action","expectedTaskStatus":"needs_user_action"},
+    {"id":"loop-unity-readback-passed","objective":"Create an object","claim":"exact","actions":[{"kind":"write","tool":"vrcforge_create_gameobject","write":true,"arguments":{"name":"Probe"},"result":{"ok":true,"status":"applied","persistedReadback":true,"sceneSaved":true}}],"expectedNextStep":"done","expectedTaskStatus":"completed"},
+    {"id":"loop-multiple-actions-exact","objective":"Inspect materials and parameters","claim":"exact","actions":[{"kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}},{"kind":"skill","tool":"vrcforge_scan_parameters","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}}],"expectedNextStep":"done","expectedTaskStatus":"completed"},
+    {"id":"loop-multiple-actions-partial","objective":"Inspect materials and parameters","claim":"first_only","actions":[{"kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}},{"kind":"skill","tool":"vrcforge_scan_parameters","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}}],"expectedNextStep":"completion_unverified","expectedTaskStatus":"completion_unverified"}
   ]
 }

@@ -257,6 +257,14 @@ export type AgentApproval = {
   revisionNote?: string;
   arguments?: Record<string, unknown>;
   paramsSummary?: Record<string, unknown>;
+  taskContext?: {
+    taskId?: string;
+    sessionId?: string;
+    turnId?: string;
+    clientTurnId?: string;
+    actionId?: string;
+  } & Record<string, unknown>;
+  taskCompletion?: Record<string, unknown>;
   preview?: {
     command?: string;
     cwd?: string;
@@ -391,6 +399,7 @@ export type AgentApprovalExecution = {
   } & Record<string, unknown>;
   error?: string;
   checkpoint?: AgentCheckpoint;
+  taskCompletion?: Record<string, unknown>;
 };
 
 export type AgentShellResult = {

@@ -777,7 +777,9 @@ export default function App() {
   const hasAgentRuntimeScope = Boolean(sessionId || activeRuntimeProjectPath);
   const latestEditableUserItemId = latestConversationItemId(conversation, (item) => item.type === "user");
   const latestRetryableItemId = latestConversationItemId(conversation, isRetryableConversationItem);
-  const pendingApprovalItems = (agentApprovals ?? []).filter((item) => item.status === "pending");
+  const pendingApprovalItems = (agentApprovals ?? []).filter(
+    (item) => item.status === "pending" || item.status === "approved",
+  );
   const pendingApprovals = pendingApprovalItems.length;
   const {
     compacting,
@@ -1025,6 +1027,8 @@ export default function App() {
     setRuntimeNotice,
     setError,
     appendToChat,
+    chatIdForSessionId: (ownerSessionId) =>
+      chats.find((chat) => chat.sessionId === ownerSessionId)?.id || "",
     refresh,
     refreshRuntimeRuns,
     loadCheckpoints,

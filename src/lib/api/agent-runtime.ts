@@ -763,7 +763,13 @@ export async function approveAgentApproval(
   endpoint: string,
   approvalId: string,
   scope: { expectedProjectRoot?: string; globalOnly?: boolean; allowFutureCategory?: boolean } = {},
-): Promise<{ ok: boolean; approval?: AgentApproval; execution?: AgentApprovalExecution }> {
+): Promise<{
+  ok: boolean;
+  approval?: AgentApproval;
+  execution?: AgentApprovalExecution;
+  continuation?: AgentRuntimeResponse;
+  continuationError?: string;
+}> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("approve_agent_approval", {
       request: { approvalId, ...scope, timeoutMs: 180000 },
@@ -833,7 +839,13 @@ export async function rejectAgentApproval(
   endpoint: string,
   approvalId: string,
   scope: { expectedProjectRoot?: string; globalOnly?: boolean } = {},
-): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
+): Promise<{
+  ok: boolean;
+  approval?: AgentApproval;
+  message?: string;
+  continuation?: AgentRuntimeResponse;
+  continuationError?: string;
+}> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("reject_agent_approval", {
       request: { approvalId, ...scope, timeoutMs: 60000 },

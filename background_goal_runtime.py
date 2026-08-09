@@ -153,6 +153,10 @@ def classify_runtime_plan_outcome(plan: Any) -> tuple[str, str]:
         return "failed", "tool_failed"
     if next_step == "needs_user_action":
         return "parked", "needs_user_action"
+    if next_step == "waiting_for_tool":
+        return "parked", "waiting_for_tool"
+    if next_step == "completion_unverified":
+        return "parked", "completion_unverified"
     if next_step == "context_compaction_required":
         return "parked", "context_compaction_required"
     if next_step == "await_user_instruction":
