@@ -20,7 +20,7 @@ from approved_unity_execution import (
     ApprovedUnityExecutionPlan,
     current_approved_unity_execution,
 )
-from unity_mcp_core_client import UnityMcpCoreClient
+from unity_mcp_core_client import UnityMcpCoreClient, UnityMcpCoreError
 from unity_mcp_tool_contract import READ_ONLY_TOOL_NAMES
 
 
@@ -141,7 +141,20 @@ class LlmPlanResponse:
 
 
 class UnityMcpError(RuntimeError):
-    pass
+    """A bounded, user-facing Unity Core failure with stable retry semantics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause_code: str = "unity_request_invalid",
+        retryable: bool = False,
+        core_tool: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.cause_code = cause_code
+        self.retryable = retryable
+        self.core_tool = core_tool
 
 
 class _UnityMcpToolRejectedError(UnityMcpError):
@@ -2933,14 +2946,18 @@ def invoke_unity_mcp(
     if not core_project:
         raise UnityMcpError(
             "No Unity project is selected for VRCForge MCP Core. "
-            "Select the project that is currently open in Unity and retry."
+            "Select the project that is currently open in Unity and retry.",
+            cause_code="unity_project_not_selected",
+            core_tool=tool_name,
         )
     if core_descriptor is not None and not core_descriptor.is_file() and not core_installed:
         missing_names = ", ".join(Path(path).name for path in missing_core_markers)
         raise UnityMcpError(
             f"The selected Unity project '{core_project}' does not contain a complete "
             f"VRCForge MCP2 package. Missing required files: {missing_names}. "
-            "Select the project that is currently open in Unity or reimport VRCForge.unitypackage."
+            "Select the project that is currently open in Unity or reimport VRCForge.unitypackage.",
+            cause_code="unity_core_package_incomplete",
+            core_tool=tool_name,
         )
 
     if (
@@ -2953,7 +2970,10 @@ def invoke_unity_mcp(
                 if core_installed:
                     raise UnityMcpError(
                         f"VRCForge MCP Core is installed but not ready in the selected "
-                        f"Unity project '{core_project}'; its runtime descriptor is missing."
+                        f"Unity project '{core_project}'; its runtime descriptor is missing.",
+                        cause_code="unity_core_starting",
+                        retryable=True,
+                        core_tool=tool_name,
                     )
                 raise UnityMcpError(
                     f"The selected Unity project '{core_project}' does not contain a complete "
@@ -2977,16 +2997,30 @@ def invoke_unity_mcp(
             # identifier terminal.  Only an exception leaves transport outcome
             # uncertain and closes the remaining plan.
             claim.complete()
+        except UnityMcpCoreError as exc:
+            claim.uncertain()
+            raise UnityMcpError(
+                "The approved Unity write could not complete its single transport attempt.",
+                cause_code=exc.cause_code,
+                retryable=exc.retryable,
+                core_tool=tool_name,
+            ) from exc
         except Exception as exc:  # noqa: BLE001 - unknown transport outcome fails closed.
             claim.uncertain()
             raise UnityMcpError(
-                f"Approved Unity write '{tool_name}' failed after its single transport attempt."
+                "The approved Unity write could not complete its single transport attempt.",
+                cause_code="unity_request_failed",
+                core_tool=tool_name,
             ) from exc
         serialized = json.dumps(core_result, ensure_ascii=False, separators=(",", ":"))
         if core_result.get("isError") is True:
             detail = summarize_unity_mcp_core_rejection(core_result)
             suffix = f" Reason code: {detail}." if detail else ""
-            raise UnityMcpError(f"Unity MCP Core rejected the approved tool execution.{suffix}")
+            raise UnityMcpError(
+                f"Unity MCP Core rejected the approved tool execution.{suffix}",
+                cause_code="unity_core_tool_rejected",
+                core_tool=tool_name,
+            )
         return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
 
     last_error: Exception | None = None
@@ -3019,13 +3053,18 @@ def invoke_unity_mcp(
                     detail = summarize_unity_mcp_core_rejection(core_result)
                     suffix = f" Reason code: {detail}." if detail else ""
                     raise _UnityMcpToolRejectedError(
-                        f"Unity MCP Core rejected the tool execution.{suffix}"
+                        f"Unity MCP Core rejected the tool execution.{suffix}",
+                        cause_code="unity_core_tool_rejected",
+                        core_tool=tool_name,
                     )
                 return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
             if core_installed:
                 raise UnityMcpError(
                     f"VRCForge MCP Core is installed but not ready in the selected "
-                    f"Unity project '{core_project}'; its runtime descriptor is missing."
+                    f"Unity project '{core_project}'; its runtime descriptor is missing.",
+                    cause_code="unity_core_starting",
+                    retryable=True,
+                    core_tool=tool_name,
                 )
             raise UnityMcpError(
                 f"The selected Unity project '{core_project}' does not contain a complete "
@@ -3033,14 +3072,38 @@ def invoke_unity_mcp(
             )
         except _UnityMcpToolRejectedError:
             raise
-        except Exception as exc:  # noqa: BLE001 - We want to retry any transport/runtime failure here.
+        except UnityMcpError as exc:
+            if not exc.retryable:
+                raise
             last_error = exc
             if attempt >= settings.unity_mcp_retries:
                 break
             time.sleep(settings.unity_mcp_retry_backoff_seconds * attempt)
+        except UnityMcpCoreError as exc:
+            if not exc.retryable:
+                raise UnityMcpError(
+                    str(exc),
+                    cause_code=exc.cause_code,
+                    core_tool=tool_name,
+                ) from exc
+            last_error = exc
+            if attempt >= settings.unity_mcp_retries:
+                break
+            time.sleep(settings.unity_mcp_retry_backoff_seconds * attempt)
+        except Exception as exc:  # noqa: BLE001 - Unclassified failures are terminal, never transient.
+            raise UnityMcpError(
+                "VRCForge could not prepare the Unity request.",
+                cause_code="unity_request_failed",
+                core_tool=tool_name,
+            ) from exc
 
     detail = f": {last_error}" if last_error else "."
-    raise UnityMcpError(f"Failed to call unity-mcp tool '{tool_name}' after retries{detail}") from last_error
+    raise UnityMcpError(
+        f"VRCForge could not reach the selected Unity project's MCP Core after retries{detail}",
+        cause_code=str(getattr(last_error, "cause_code", "unity_core_unavailable")),
+        retryable=bool(getattr(last_error, "retryable", True)),
+        core_tool=tool_name,
+    ) from last_error
 
 
 def read_unity_mcp_core_status(settings: Settings) -> dict[str, Any]:

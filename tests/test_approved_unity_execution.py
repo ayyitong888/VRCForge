@@ -13,6 +13,7 @@ from approved_unity_execution import (
     freeze_approved_unity_execution_plan,
     validate_frozen_approved_unity_execution_plan,
 )
+from unity_mcp_core_client import UnityMcpCoreConnectionError, UnityMcpCoreError
 
 
 def _context(project: Path, *, issued: int = 1_000, expires: int = 2_000) -> dict[str, object]:
@@ -171,17 +172,53 @@ def test_approved_write_transport_failure_is_uncertain_and_never_retries(
         def call_tool(self, _name: str, _arguments: dict, *, execution_context=None) -> dict:
             nonlocal attempts
             attempts += 1
-            raise OSError("connection dropped")
+            raise UnityMcpCoreConnectionError("Unity MCP Core connection failed.")
 
     monkeypatch.setattr(agent, "UnityMcpCoreClient", FailingCoreClient)
     plan = create_approved_unity_execution_plan(_context(tmp_path, issued=0, expires=9_999_999_999_999), [("vrc_write", {"value": 1})])
     with bind_approved_unity_execution(plan):
-        with pytest.raises(agent.UnityMcpError, match="single transport attempt"):
+        with pytest.raises(agent.UnityMcpError, match="single transport attempt") as raised:
             agent.invoke_unity_mcp(_settings(tmp_path), "vrc_write", {"value": 1})
         with pytest.raises(agent.UnityMcpError, match="uncertain"):
             agent.invoke_unity_mcp(_settings(tmp_path), "vrc_write", {"value": 1})
     assert attempts == 1
     assert plan.uncertain_state is True
+    assert raised.value.cause_code == "unity_core_unavailable"
+    assert raised.value.retryable is True
+    assert raised.value.core_tool == "vrc_write"
+    assert "vrc_write" not in str(raised.value)
+
+
+def test_approved_write_contract_failure_is_terminal_but_still_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _descriptor(tmp_path)
+    attempts = 0
+
+    class InvalidCoreClient:
+        def __init__(self, _project: str, *, timeout_seconds: int) -> None:
+            pass
+
+        def call_tool(self, _name: str, _arguments: dict, *, execution_context=None) -> dict:
+            nonlocal attempts
+            attempts += 1
+            raise UnityMcpCoreError("Unity MCP Core tool contract is invalid.")
+
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", InvalidCoreClient)
+    plan = create_approved_unity_execution_plan(
+        _context(tmp_path, issued=0, expires=9_999_999_999_999),
+        [("vrc_write", {"value": 1})],
+    )
+
+    with bind_approved_unity_execution(plan):
+        with pytest.raises(agent.UnityMcpError, match="single transport attempt") as raised:
+            agent.invoke_unity_mcp(_settings(tmp_path), "vrc_write", {"value": 1})
+
+    assert attempts == 1
+    assert plan.uncertain_state is True
+    assert raised.value.cause_code == "unity_core_contract_invalid"
+    assert raised.value.retryable is False
 
 
 def test_approved_write_preserves_a_bounded_safe_core_rejection_reason(
@@ -245,13 +282,42 @@ def test_read_calls_keep_retry_behavior(tmp_path: Path, monkeypatch: pytest.Monk
             nonlocal attempts
             attempts += 1
             if attempts == 1:
-                raise OSError("temporary")
+                raise UnityMcpCoreConnectionError("Unity MCP Core connection failed.")
             return {"isError": False, "content": []}
 
     monkeypatch.setattr(agent, "UnityMcpCoreClient", FlakyCoreClient)
     result = agent.invoke_unity_mcp(_settings(tmp_path, retries=2), "vrc_read", {})
     assert result.exit_code == 0
     assert attempts == 2
+
+
+def test_unclassified_read_failure_is_terminal_and_never_retries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _descriptor(tmp_path)
+    attempts = 0
+    sleep_calls: list[float] = []
+
+    class BrokenCoreClient:
+        def __init__(self, _project: str, *, timeout_seconds: int) -> None:
+            pass
+
+        def call_tool(self, _name: str, _arguments: dict, *, execution_context=None) -> dict:
+            nonlocal attempts
+            attempts += 1
+            raise ValueError("implementation bug")
+
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", BrokenCoreClient)
+    monkeypatch.setattr(agent.time, "sleep", sleep_calls.append)
+
+    with pytest.raises(agent.UnityMcpError, match="could not prepare") as raised:
+        agent.invoke_unity_mcp(_settings(tmp_path), "vrc_read", {})
+
+    assert attempts == 1
+    assert sleep_calls == []
+    assert raised.value.cause_code == "unity_request_failed"
+    assert raised.value.retryable is False
 
 
 def test_bound_plan_does_not_consume_the_direct_read_lane(

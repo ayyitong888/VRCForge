@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import vrchat_blendshape_agent as agent
+from unity_mcp_core_client import UnityMcpCoreConnectionError, UnityMcpCoreError
 
 
 def _settings(project: Path) -> agent.Settings:
@@ -103,12 +104,22 @@ def test_core_installed_without_descriptor_never_falls_back_to_legacy_write(
         (core_root / name).write_text("// marker", encoding="utf-8")
     server_marker.write_text("// marker", encoding="utf-8")
 
-    with pytest.raises(agent.UnityMcpError, match="installed but not ready"):
+    settings = _settings(tmp_path)
+    settings.unity_mcp_retries = 3
+    settings.unity_mcp_retry_backoff_seconds = 2
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(agent.time, "sleep", sleep_calls.append)
+
+    with pytest.raises(agent.UnityMcpError, match="installed but not ready") as raised:
         agent.invoke_unity_mcp(
-            _settings(tmp_path),
+            settings,
             "vrc_write",
             {"projectPath": str(tmp_path)},
         )
+
+    assert raised.value.cause_code == "unity_core_starting"
+    assert raised.value.retryable is True
+    assert sleep_calls == [2, 4]
 
 
 def test_incomplete_core_fails_without_retry_and_names_the_selected_project(
@@ -146,6 +157,94 @@ def test_invoke_without_selected_project_fails_before_retry(
         agent.invoke_unity_mcp(settings, "vrc_export_blendshapes", {})
 
     assert sleep_calls == []
+
+
+def test_invalid_core_descriptor_is_terminal_and_does_not_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = tmp_path / "Library" / "VRCForge" / "mcp-core.json"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text("{}", encoding="utf-8")
+    settings = _settings(tmp_path)
+    settings.unity_mcp_retries = 3
+    settings.unity_mcp_retry_backoff_seconds = 2
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(agent.time, "sleep", sleep_calls.append)
+
+    class InvalidDescriptorClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise UnityMcpCoreError("Unity MCP Core descriptor is not recognized.")
+
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", InvalidDescriptorClient)
+
+    with pytest.raises(agent.UnityMcpError, match="descriptor is not recognized") as raised:
+        agent.invoke_unity_mcp(settings, "vrc_read", {"projectPath": str(tmp_path)})
+
+    assert raised.value.cause_code == "unity_core_contract_invalid"
+    assert raised.value.retryable is False
+    assert sleep_calls == []
+
+
+def test_transient_core_connection_retries_and_preserves_gateway_facing_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = tmp_path / "Library" / "VRCForge" / "mcp-core.json"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text("{}", encoding="utf-8")
+    settings = _settings(tmp_path)
+    settings.unity_mcp_retries = 3
+    settings.unity_mcp_retry_backoff_seconds = 2
+    sleep_calls: list[float] = []
+    attempts: list[int] = []
+    monkeypatch.setattr(agent.time, "sleep", sleep_calls.append)
+
+    class TransientClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def call_tool(self, _name: str, _arguments: dict) -> dict:
+            attempts.append(len(attempts) + 1)
+            if len(attempts) < 3:
+                raise UnityMcpCoreConnectionError("Unity MCP Core connection failed.")
+            return {"content": [{"type": "text", "text": "ok"}], "isError": False}
+
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", TransientClient)
+
+    result = agent.invoke_unity_mcp(settings, "vrc_read", {"projectPath": str(tmp_path)})
+
+    assert result.exit_code == 0
+    assert attempts == [1, 2, 3]
+    assert sleep_calls == [2, 4]
+
+
+def test_exhausted_connection_error_hides_the_internal_core_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = tmp_path / "Library" / "VRCForge" / "mcp-core.json"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text("{}", encoding="utf-8")
+    settings = _settings(tmp_path)
+    settings.unity_mcp_retries = 2
+
+    class OfflineClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def call_tool(self, _name: str, _arguments: dict) -> dict:
+            raise UnityMcpCoreConnectionError("Unity MCP Core connection failed.")
+
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", OfflineClient)
+
+    with pytest.raises(agent.UnityMcpError) as raised:
+        agent.invoke_unity_mcp(settings, "vrc_export_blendshapes", {"projectPath": str(tmp_path)})
+
+    assert "vrc_export_blendshapes" not in str(raised.value)
+    assert raised.value.core_tool == "vrc_export_blendshapes"
+    assert raised.value.cause_code == "unity_core_unavailable"
+    assert raised.value.retryable is True
 
 
 def test_cli_status_reads_only_the_project_scoped_core_descriptor(

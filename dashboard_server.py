@@ -15590,8 +15590,14 @@ def load_manifest_payload(manifest_path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
-    selected_project = Path(DASHBOARD_STATE.selected_project_path) if DASHBOARD_STATE.selected_project_path else None
+def build_health_components(
+    settings: Settings,
+    *,
+    selected_project_path: str | None = None,
+    unity_status_override: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    selected_value = DASHBOARD_STATE.selected_project_path if selected_project_path is None else selected_project_path
+    selected_project = Path(selected_value) if selected_value else None
     manifest_path = selected_project / "Packages" / "manifest.json" if selected_project else None
     manifest_payload = load_manifest_payload(manifest_path) if manifest_path else None
     dependencies = manifest_payload.get("dependencies") if isinstance(manifest_payload, dict) else {}
@@ -15664,7 +15670,11 @@ def build_health_components(settings: Settings) -> dict[str, dict[str, Any]]:
             {"corePath": str(selected_project / "Assets" / "VRCForge" / "Core" / "MCP")},
         )
 
-    unity_status = CURRENT_UNITY_STATUS or UNITY_STATUS.build_unity_status_snapshot(settings)
+    unity_status = (
+        unity_status_override
+        if unity_status_override is not None
+        else CURRENT_UNITY_STATUS or UNITY_STATUS.build_unity_status_snapshot(settings)
+    )
     if unity_status.get("connected"):
         components["unityMcpBridgeReachable"] = health_component("ok", "Unity MCP bridge is reachable.", unity_status)
     else:
@@ -17862,9 +17872,22 @@ def validation_dependency_status_sync(params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def validation_environment_status_sync(_params: dict[str, Any]) -> dict[str, Any]:
-    health = build_agentic_app_health()
-    components = health.get("components") if isinstance(health.get("components"), dict) else {}
+def validation_environment_status_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    project_value = str(
+        params.get("projectPath")
+        or params.get("project_path")
+        or DASHBOARD_STATE.selected_project_path
+        or ""
+    ).strip()
+    settings = load_dashboard_settings(build_agent_connection_request({**params, "projectPath": project_value}))
+    project_root = Path(project_value) if project_value else None
+    unity_status = UNITY_STATUS.build_unity_status_snapshot(settings, project_root)
+    components = build_health_components(
+        settings,
+        selected_project_path=project_value,
+        unity_status_override=unity_status,
+    )
     selected = {
         key: components.get(key)
         for key in (
@@ -17876,10 +17899,13 @@ def validation_environment_status_sync(_params: dict[str, Any]) -> dict[str, Any
         )
     }
     return {
-        "ok": bool(health.get("ok", True)),
-        "version": health.get("version") or app.version,
+        "ok": not any(
+            isinstance(component, dict) and component.get("status") == "error"
+            for component in selected.values()
+        ),
+        "version": app.version,
         "components": selected,
-        "unityStatus": health.get("unityStatus"),
+        "unityStatus": unity_status,
     }
 
 
@@ -21042,7 +21068,8 @@ app.mount("/", AGENT_MCP_MOUNT, name="agent_mcp")
 def to_http_exception(exc: Exception) -> HTTPException:
     detail = str(exc)
     lowered = detail.lower()
-    status_code = 503 if "unity mcp server is not ready yet" in lowered or "cannot connect to unity mcp server" in lowered else 400
+    retryable = bool(getattr(exc, "retryable", False))
+    status_code = 503 if retryable or "unity mcp server is not ready yet" in lowered or "cannot connect to unity mcp server" in lowered else 400
     return HTTPException(status_code=status_code, detail=detail)
 
 

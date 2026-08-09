@@ -38,6 +38,16 @@ _ACTIVE_CALL_AUDIT_CAPTURE: ContextVar[list[dict[str, Any]] | None] = ContextVar
 class UnityMcpCoreError(RuntimeError):
     """A deliberately non-sensitive Core discovery or transport failure."""
 
+    cause_code = "unity_core_contract_invalid"
+    retryable = False
+
+
+class UnityMcpCoreConnectionError(UnityMcpCoreError):
+    """A transient project-scoped Core connection failure."""
+
+    cause_code = "unity_core_unavailable"
+    retryable = True
+
 
 @contextmanager
 def capture_unity_mcp_core_call_audits() -> Iterator[list[dict[str, Any]]]:
@@ -256,7 +266,7 @@ class UnityMcpCoreClient:
         except UnityMcpCoreError:
             raise
         except (OSError, UnicodeError, json.JSONDecodeError):
-            raise UnityMcpCoreError("Unity MCP Core connection failed.") from None
+            raise UnityMcpCoreConnectionError("Unity MCP Core connection failed.") from None
 
     def _open_connection(self) -> socket.socket:
         connection = socket.create_connection((self._connection.host, self._connection.port), self._timeout_seconds)
@@ -316,7 +326,7 @@ class UnityMcpCoreClient:
         while len(data) <= MAX_FRAME_BYTES:
             byte = connection.recv(1)
             if not byte:
-                raise UnityMcpCoreError("Unity MCP Core connection closed unexpectedly.")
+                raise UnityMcpCoreConnectionError("Unity MCP Core connection closed unexpectedly.")
             if byte == b"\n":
                 if not data:
                     raise UnityMcpCoreError("Unity MCP Core response is invalid.")

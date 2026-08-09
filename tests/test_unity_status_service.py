@@ -152,6 +152,7 @@ def test_unity_status_service_preserves_core_error_and_missing_project_contract(
     missing = make_service(selected_project="", core_installed=lambda _project: False).build_unity_status_snapshot()
 
     assert offline["error"] == "offline"
+    assert offline["causeCode"] == "unity_core_contract_invalid"
     assert offline["tools"] == {
         "ok": False,
         "reachable": False,
@@ -161,8 +162,135 @@ def test_unity_status_service_preserves_core_error_and_missing_project_contract(
         "error": "offline",
     }
     assert missing["error"] == "No Unity project is selected."
+    assert missing["causeCode"] == "unity_project_not_selected"
     assert missing["projectPath"] == ""
     assert missing["tools"]["missingRequiredVrcForgeTools"] == ["vrc_alpha", "vrc_beta"]
+
+
+def test_settings_project_path_overrides_the_persisted_selected_project(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / "SelectedA"
+    requested = tmp_path / "RequestedB"
+    observed: list[Path] = []
+
+    class FakeCoreClient:
+        def __init__(self, project_root: Path, *, timeout_seconds: int) -> None:
+            assert timeout_seconds == 7
+            observed.append(project_root)
+
+        def list_tools(self, *, exposure_layer: str) -> list[dict[str, str]]:
+            assert exposure_layer == "execution"
+            return [{"name": "vrc_alpha"}, {"name": "vrc_beta"}]
+
+    monkeypatch.setattr(unity_status_service, "UnityMcpCoreClient", FakeCoreClient)
+    status = make_service(selected_project=str(selected)).build_unity_status_snapshot(
+        SimpleNamespace(unity_mcp_timeout_seconds=7, unity_project_path=str(requested))
+    )
+
+    assert observed == [requested]
+    assert status["projectPath"] == str(requested).replace("\\", "/")
+
+
+def test_gateway_status_and_tools_handlers_forward_the_requested_project(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    requested = tmp_path / "RequestedB"
+    observed: list[str] = []
+
+    def fake_snapshot(_self, settings=None, project_root=None):
+        assert project_root is None
+        observed.append(str(settings.unity_project_path))
+        return {"projectPath": str(settings.unity_project_path), "tools": {"ok": True}}
+
+    monkeypatch.setattr(UnityStatusService, "build_unity_status_snapshot", fake_snapshot)
+    status = dashboard_server.AGENT_GATEWAY._tools["vrcforge_unity_status"].handler(  # noqa: SLF001
+        {"projectPath": str(requested)}
+    )
+    tools = dashboard_server.AGENT_GATEWAY._tools["vrcforge_unity_tools"].handler(  # noqa: SLF001
+        {"projectPath": str(requested)}
+    )
+
+    assert observed == [str(requested), str(requested)]
+    assert status["projectPath"] == str(requested)
+    assert tools == {"ok": True}
+
+
+def test_validation_environment_uses_the_requested_project_for_every_component(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    selected = tmp_path / "SelectedA"
+    requested = tmp_path / "RequestedB"
+    settings = SimpleNamespace(unity_project_path=str(requested), unity_mcp_timeout_seconds=5)
+    status = {"projectPath": str(requested), "connected": True}
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "selected_project_path", str(selected))
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: settings)
+
+    def fake_snapshot(_self, observed_settings=None, project_root=None):
+        observed["statusSettings"] = observed_settings
+        observed["statusProject"] = project_root
+        return status
+
+    def fake_components(
+        observed_settings,
+        *,
+        selected_project_path=None,
+        unity_status_override=None,
+    ):
+        observed["healthSettings"] = observed_settings
+        observed["healthProject"] = selected_project_path
+        observed["healthStatus"] = unity_status_override
+        return {
+            name: {"status": "ok", "detail": str(requested)}
+            for name in (
+                "unityPluginInstalled",
+                "mcpPackageConfigured",
+                "unityMcpBridgeReachable",
+                "unityMcpInstance",
+                "vrcForgeUnityTools",
+            )
+        }
+
+    monkeypatch.setattr(UnityStatusService, "build_unity_status_snapshot", fake_snapshot)
+    monkeypatch.setattr(dashboard_server, "build_health_components", fake_components)
+
+    result = dashboard_server.validation_environment_status_sync({"projectPath": str(requested)})
+
+    assert observed == {
+        "statusSettings": settings,
+        "statusProject": requested,
+        "healthSettings": settings,
+        "healthProject": str(requested),
+        "healthStatus": status,
+    }
+    assert result["unityStatus"] is status
+    assert set(result["components"]) == {
+        "unityPluginInstalled",
+        "mcpPackageConfigured",
+        "unityMcpBridgeReachable",
+        "unityMcpInstance",
+        "vrcForgeUnityTools",
+    }
+
+
+def test_http_error_mapping_uses_stable_retryability_instead_of_core_error_text() -> None:
+    temporary = dashboard_server.UnityMcpError(
+        "Core is starting.",
+        cause_code="unity_core_starting",
+        retryable=True,
+    )
+    terminal = dashboard_server.UnityMcpError(
+        "Core package is incomplete.",
+        cause_code="unity_core_package_incomplete",
+    )
+
+    assert dashboard_server.to_http_exception(temporary).status_code == 503
+    assert dashboard_server.to_http_exception(terminal).status_code == 400
 
 
 def test_dashboard_unity_status_service_is_constructed_with_frozen_ports() -> None:

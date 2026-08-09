@@ -38,19 +38,24 @@ class UnityStatusService:
     ) -> dict[str, Any]:
         settings = settings or self._ports.load_settings()
         settings.unity_mcp_timeout_seconds = min(settings.unity_mcp_timeout_seconds, 10)
-        selected_project = self._ports.normalize_path(
-            str(project_root) if project_root is not None else self._ports.selected_project_path()
+        requested_project = (
+            str(project_root)
+            if project_root is not None
+            else str(getattr(settings, "unity_project_path", "") or self._ports.selected_project_path())
         )
+        selected_project = self._ports.normalize_path(requested_project)
         selected_project_path = Path(selected_project) if selected_project else None
         if selected_project_path is None:
             return self.build_vrcforge_mcp_core_unavailable_status(
                 None,
                 "No Unity project is selected.",
+                cause_code="unity_project_not_selected",
             )
         if not self._ports.core_installed(selected_project_path):
             return self.build_vrcforge_mcp_core_unavailable_status(
                 selected_project_path,
                 "The selected project does not contain the VRCForge MCP2 unitypackage.",
+                cause_code="unity_core_package_incomplete",
             )
         return self.build_vrcforge_mcp_core_status(selected_project_path, settings)
 
@@ -58,6 +63,8 @@ class UnityStatusService:
         self,
         project_root: Path | None,
         error: str,
+        *,
+        cause_code: str = "unity_core_unavailable",
     ) -> dict[str, Any]:
         project_path = self._ports.normalize_path(str(project_root)) if project_root is not None else ""
         missing = list(self._ports.required_tools)
@@ -91,6 +98,7 @@ class UnityStatusService:
             "output": "",
             "parsed": None,
             "error": error,
+            "causeCode": cause_code,
         }
 
     def build_vrcforge_mcp_core_status(self, project_root: Path, settings: Any) -> dict[str, Any]:
@@ -178,4 +186,5 @@ class UnityStatusService:
                 "output": "",
                 "parsed": None,
                 "error": str(exc),
+                "causeCode": getattr(exc, "cause_code", "unity_core_contract_invalid"),
             }
