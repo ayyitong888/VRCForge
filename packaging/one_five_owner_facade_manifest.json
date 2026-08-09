@@ -143,29 +143,6 @@
       "facades": []
     },
     {
-      "id": "dashboard.package-install-root-owners",
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "detect_addon_package",
-            "locate_vpm_package_managers",
-            "prepare_vpm_package_install_request",
-            "install_vpm_package_sync",
-            "_optimizer_package_catalog",
-            "package_manager_status_sync",
-            "_select_package_install_strategy",
-            "package_install_plan_sync",
-            "request_package_install_sync",
-            "diagnose_package_install_errors_sync",
-            "_classify_package_install_symptoms",
-            "_build_package_install_fix_suggestions"
-          ]
-        }
-      ]
-    },
-    {
       "id": "dashboard.package-install-typed-root-owners",
       "rootSymbols": [
         {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_MANAGER_DISCOVERY"},
@@ -455,54 +432,6 @@
         {"source": "dashboard_server.py", "scope": "module", "name": "RUNTIME_PLANNER"}
       ],
       "facades": []
-    },
-    {
-      "id": "gateway.shell-policy-execution-owner",
-      "rootSymbols": [
-        {"source": "agent_gateway.py", "scope": "module", "name": "SHELL_RUNNER_NATIVE"},
-        {"source": "agent_gateway.py", "scope": "module", "name": "SHELL_RUNNER_POWERSHELL"},
-        {"source": "agent_gateway.py", "scope": "module", "name": "SHELL_NATIVE_BLOCK_PATTERN"},
-        {"source": "agent_gateway.py", "scope": "module", "name": "_POWERSHELL_EXECUTABLE_CACHE"}
-      ],
-      "facades": [
-        {
-          "source": "agent_gateway.py",
-          "scope": "class",
-          "class": "AgentGateway",
-          "methods": [
-            "classify_shell",
-            "execute_shell",
-            "execute_approved_shell",
-            "execute_shell_payload",
-            "default_workspace_root",
-            "_resolve_workspace_root",
-            "_resolve_cwd",
-            "_shell_classification",
-            "_shell_command_is_read_only",
-            "_shell_auto_manual_approval_reason",
-            "_low_risk_reasons",
-            "_read_command_args_are_low_risk",
-            "_args_stay_in_workspace",
-            "_git_low_risk_reasons",
-            "_git_log_args_are_low_risk",
-            "_git_diff_args_are_low_risk",
-            "_git_show_args_are_low_risk",
-            "_create_shell_approval",
-            "_run_shell_command"
-          ]
-        },
-        {
-          "source": "agent_gateway.py",
-          "scope": "module",
-          "methods": [
-            "resolve_powershell_executable",
-            "native_shell_argv",
-            "command_hash",
-            "summarize_shell_result",
-            "kill_process_tree"
-          ]
-        }
-      ]
     },
     {
       "id": "gateway.desktop-computer-use-stopgap-facade",
