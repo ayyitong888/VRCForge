@@ -34,6 +34,7 @@ def make_args(tmp_path: Path, **overrides: object) -> Namespace:
         "optimizer_request_guard_smoke": "",
         "external_agent_smoke": "",
         "installer_smoke": "",
+        "upgrade_from_installer_sha256": "",
         "release_evidence": str(tmp_path / "docs" / "RELEASE_EVIDENCE.md"),
         "proof_matrix": str(tmp_path / "docs" / "PROOF_MATRIX.md"),
         "artifacts_dir": str(tmp_path / "reports"),
@@ -199,15 +200,22 @@ def write_evidence_tree(tmp_path: Path) -> None:
     write_json(
         tmp_path / "artifacts" / "installer-smoke" / "installer-install-uninstall-test.json",
         {
-            "schema": "vrcforge.installer_install_uninstall_smoke.v1",
+            "schema": "vrcforge.installer_install_uninstall_smoke.v2",
             "ok": True,
             "installerSha256": artifact_hashes["VRCForge_Offline_Installer_x64.exe"],
+            "upgradeInstallerSha256": "",
+            "scope": {
+                "mode": "production-clean",
+                "productionIdentity": True,
+                "cleanEnvironmentConfirmed": True,
+            },
             "summary": {
                 "status": "passed",
                 "failedSteps": [],
                 "phases": {"install": "passed", "uninstall": "passed", "preservation": "passed", "upgrade": "skipped"},
             },
             "steps": [
+                {"name": "production_scope.clean_identity", "ok": True},
                 {"name": "admin.check", "ok": True},
                 {"name": "install.payload_verify", "ok": True},
                 {"name": "installed_backend.health", "ok": True, "version": "1.0.1", "portableMode": True},
@@ -1175,3 +1183,49 @@ def test_installer_smoke_requires_full_phase_and_cleanup_evidence(tmp_path, monk
     step = _step(report, "installer.install_uninstall")
     assert step["ok"] is False
     assert step["details"]["requiredStepsOk"] is False
+
+
+def test_stable_installer_gate_rejects_isolated_smoke_flavor_even_when_payload_passes(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    installer_path = tmp_path / "artifacts" / "installer-smoke" / "installer-install-uninstall-test.json"
+    installer = json.loads(installer_path.read_text(encoding="utf-8"))
+    installer["scope"] = {
+        "mode": "isolated-smoke",
+        "productionIdentity": False,
+        "cleanEnvironmentConfirmed": False,
+    }
+    write_json(installer_path, installer)
+
+    step = gate.check_installer_smoke(installer_path, "1.0.1", installer["installerSha256"])
+
+    assert step["ok"] is False
+    assert step["details"]["scope"]["mode"] == "isolated-smoke"
+
+
+def test_1_5_stable_installer_gate_requires_exact_previous_installer_upgrade(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    installer_path = tmp_path / "artifacts" / "installer-smoke" / "installer-install-uninstall-test.json"
+    installer = json.loads(installer_path.read_text(encoding="utf-8"))
+    current_hash = installer["installerSha256"]
+    previous_hash = "a" * 64
+    installer["upgradeInstallerSha256"] = previous_hash
+    installer["summary"]["phases"]["upgrade"] = "passed"
+    installer["steps"].append({"name": "preservation.after_upgrade", "ok": True})
+    for step in installer["steps"]:
+        if step["name"] == "installed_backend.health":
+            step["version"] = "1.5.0"
+    write_json(installer_path, installer)
+
+    exact = gate.check_installer_smoke(installer_path, "1.5.0", current_hash, previous_hash)
+    wrong_previous = gate.check_installer_smoke(installer_path, "1.5.0", current_hash, "b" * 64)
+    missing_previous = gate.check_installer_smoke(installer_path, "1.5.0", current_hash, "")
+
+    assert exact["ok"] is True
+    assert exact["details"]["upgradeRequired"] is True
+    assert exact["details"]["upgradeOk"] is True
+    assert wrong_previous["ok"] is False
+    assert missing_previous["ok"] is False

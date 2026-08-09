@@ -126,6 +126,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--optimizer-request-guard-smoke", default="")
     parser.add_argument("--external-agent-smoke", default="")
     parser.add_argument("--installer-smoke", default="")
+    parser.add_argument(
+        "--upgrade-from-installer-sha256",
+        default="",
+        help="Expected SHA-256 of the previous production offline installer. Required for 1.5+ stable evidence.",
+    )
     parser.add_argument("--release-evidence", default="docs/RELEASE_EVIDENCE.md")
     parser.add_argument("--proof-matrix", default="docs/PROOF_MATRIX.md")
     parser.add_argument("--artifacts-dir", default="artifacts/stable-readiness-gate")
@@ -231,6 +236,7 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
             installer_path,
             version,
             manifest_hashes.get("VRCForge_Offline_Installer_x64.exe", ""),
+            str(getattr(args, "upgrade_from_installer_sha256", "") or "").strip().lower(),
         )
     )
 
@@ -1252,7 +1258,12 @@ def check_external_agent_smoke(path: Path) -> dict[str, Any]:
     )
 
 
-def check_installer_smoke(path: Path, version: str, expected_installer_sha256: str) -> dict[str, Any]:
+def check_installer_smoke(
+    path: Path,
+    version: str,
+    expected_installer_sha256: str,
+    expected_upgrade_installer_sha256: str = "",
+) -> dict[str, Any]:
     payload, parse_error = read_json_document(path)
     if parse_error:
         return evidence_step("installer.install_uninstall", False, True, path, reason=parse_error, category="installer")
@@ -1261,8 +1272,10 @@ def check_installer_smoke(path: Path, version: str, expected_installer_sha256: s
     failed_steps = summary.get("failedSteps") if isinstance(summary.get("failedSteps"), list) else []
     steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
     by_name = {str(step.get("name") or ""): step for step in steps if isinstance(step, dict)}
+    scope = payload.get("scope") if isinstance(payload.get("scope"), dict) else {}
+    require_upgrade = version_at_least(version, "1.5.0")
     admin_blocked = bool(
-        payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v1"
+        payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v2"
         and summary.get("status") == "blocked"
         and failed_steps == ["admin.check"]
         and phases.get("install") == "blocked"
@@ -1272,6 +1285,7 @@ def check_installer_smoke(path: Path, version: str, expected_installer_sha256: s
     required_steps_ok = all(
         by_name.get(name, {}).get("ok") is True
         for name in (
+            "production_scope.clean_identity",
             "admin.check",
             "install.payload_verify",
             "installed_backend.health",
@@ -1281,15 +1295,28 @@ def check_installer_smoke(path: Path, version: str, expected_installer_sha256: s
             "preservation.after_uninstall",
         )
     )
+    upgrade_ok = bool(
+        not require_upgrade
+        or (
+            phases.get("upgrade") == "passed"
+            and by_name.get("preservation.after_upgrade", {}).get("ok") is True
+            and re.fullmatch(r"[0-9a-f]{64}", expected_upgrade_installer_sha256) is not None
+            and payload.get("upgradeInstallerSha256") == expected_upgrade_installer_sha256
+        )
+    )
     ok = bool(
-        payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v1"
+        payload.get("schema") == "vrcforge.installer_install_uninstall_smoke.v2"
         and payload.get("ok") is True
+        and scope.get("mode") == "production-clean"
+        and scope.get("productionIdentity") is True
+        and scope.get("cleanEnvironmentConfirmed") is True
         and summary.get("status") == "passed"
         and failed_steps == []
         and phases.get("install") == "passed"
         and phases.get("uninstall") == "passed"
         and phases.get("preservation") == "passed"
         and required_steps_ok
+        and upgrade_ok
         and by_name.get("installed_backend.health", {}).get("version") == version
         and by_name.get("installed_backend.health", {}).get("portableMode") is True
         and bool(expected_installer_sha256)
@@ -1303,14 +1330,19 @@ def check_installer_smoke(path: Path, version: str, expected_installer_sha256: s
         category="installer",
         schema=str(payload.get("schema") or ""),
         status="passed" if ok else ("blocked" if admin_blocked else "failed"),
-        fields_checked=["ok", "summary.status", "failedSteps", "phases.install", "phases.uninstall", "phases.preservation", "installed_backend.health", "installed_backend.cleanup", "preservation.after_uninstall", "installerSha256", "blockedReason"],
+        fields_checked=["ok", "scope.mode", "scope.productionIdentity", "scope.cleanEnvironmentConfirmed", "production_scope.clean_identity", "summary.status", "failedSteps", "phases.install", "phases.upgrade", "phases.uninstall", "phases.preservation", "installed_backend.health", "installed_backend.cleanup", "preservation.after_upgrade", "preservation.after_uninstall", "installerSha256", "upgradeInstallerSha256", "blockedReason"],
         reason="" if ok else ("installer requires Administrator elevation" if admin_blocked else "installer install/uninstall smoke did not pass"),
         details={
             "adminBlocked": admin_blocked,
             "summary": summary,
             "requiredStepsOk": required_steps_ok,
+            "upgradeRequired": require_upgrade,
+            "upgradeOk": upgrade_ok,
+            "scope": scope,
             "installerSha256": payload.get("installerSha256"),
             "expectedInstallerSha256": expected_installer_sha256,
+            "upgradeInstallerSha256": payload.get("upgradeInstallerSha256"),
+            "expectedUpgradeInstallerSha256": expected_upgrade_installer_sha256,
         },
     )
 

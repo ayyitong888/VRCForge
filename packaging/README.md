@@ -144,6 +144,30 @@ Program Files leaf and the isolated user-data root. This prevents the test from
 overwriting or uninstalling a real VRCForge installation. Reports default to
 `artifacts\installer-smoke`; use `--artifacts-dir` only to relocate evidence.
 
+The isolated smoke proves installer behavior but cannot satisfy the stable
+artifact hash gate because its compiler-scoped registry, shortcut, uninstall,
+and user-data identity intentionally changes the executable bytes. Final stable
+evidence must run the exact strict offline installer in a disposable clean
+Windows VM (or an equivalent throwaway machine) with no existing VRCForge
+install, user data, shortcuts, or registry identity. The runner checks those
+conditions before mutation and refuses to run without the exact confirmation:
+
+```powershell
+python scripts\smoke_installer_install_uninstall.py `
+  --scope production-clean `
+  --production-clean-confirmation I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT `
+  --upgrade-installer "<downloaded official v1.4.0 offline installer>" `
+  --installer "dist\release\VRCForge_Offline_Installer_x64.exe" `
+  --backend-port 8791
+```
+
+Do not run `production-clean` on a normal workstation or an environment that
+contains user data. Do not pass `--smoke-id`, `--install-dir`, or
+`--user-data-root` in this mode. For 1.5 stable evidence the report must show a
+successful production-identity 1.4-to-1.5 upgrade, health check, uninstall, and
+user-data preservation, and its current-installer SHA-256 must exactly match the
+strict release manifest.
+
 Manual Unity package fallback smoke should import `VRCForge.unitypackage` into a
 fresh supported VCC VRChat Avatar project on Unity 2022.3 and verify zero compiler errors, protocol
 `2026-07-28`, all 64 VRCForge tools, automatic App connection to that exact
@@ -186,7 +210,13 @@ paste that artifact manually. The bundle must not be auto-attached to issues.
 Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
-python scripts\smoke_stable_readiness_gate.py --version 1.5.0 --latest-stable 1.4.0
+python scripts\smoke_stable_readiness_gate.py `
+  --version 1.5.0 `
+  --latest-stable 1.4.0 `
+  --installer-smoke "<production-clean installer report>" `
+  --upgrade-from-installer-sha256 58bf32ec8cb4f71dd6272db427dd0218e7161c5730314e9ae4f9516a50c02901 `
+  --max-artifact-age-hours 24 `
+  --require-live-writes
 ```
 
 This gate checks current target-version public docs, the public golden-path wording,

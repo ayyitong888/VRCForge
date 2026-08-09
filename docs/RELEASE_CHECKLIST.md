@@ -10,7 +10,7 @@ Before publishing a release package:
 * [ ] Mark whether this is an official release or a modified build.
 * [ ] Ensure third-party dependencies and their licenses are documented.
 * [ ] Run
-      `python scripts\smoke_stable_readiness_gate.py --version <VERSION> --latest-stable <PUBLISHED_VERSION>`
+      `python scripts\smoke_stable_readiness_gate.py --version <VERSION> --latest-stable <PUBLISHED_VERSION> --installer-smoke <production-clean-report> --upgrade-from-installer-sha256 <published-previous-offline-installer-sha256>`
       and resolve any public-doc or COMPATIBILITY_MATRIX blocker before
       publishing a stable release or stable refresh. This includes the Doctor
       support bundle flow and prevents target-version docs from mislabeling an
@@ -18,6 +18,10 @@ Before publishing a release package:
       For an already-published stable refresh, pass `--stable-refresh` and set
       `--latest-stable` equal to `<VERSION>`; a new release must name a lower
       explicitly published stable version.
+    - Stable installer evidence must use the exact strict production installer
+      in the runner's `production-clean` mode on a disposable clean Windows
+      environment. A compiler-scoped isolated smoke flavor is useful behavior
+      evidence but can never satisfy the production installer hash gate.
 * [ ] For `1.3.0` and newer, provide a fresh
       `--skill-ecosystem-smoke <report.json>` artifact from
       `scripts\diagnose_packaged_skill_ecosystem.mjs`. The strict gate must

@@ -24,6 +24,8 @@ def make_args(tmp_path: Path, installer: Path, **overrides: object) -> Namespace
     values = {
         "installer": str(installer),
         "upgrade_installer": "",
+        "scope": "isolated-smoke",
+        "production_clean_confirmation": "",
         "smoke_id": SMOKE_ID,
         "install_dir": str(tmp_path / "Program Files" / f"VRCForge-Smoke-{SMOKE_ID}"),
         "user_data_root": str(tmp_path / "LocalAppData" / "VRCForge" / "installer-smoke" / SMOKE_ID),
@@ -371,6 +373,64 @@ def test_smoke_scope_rejects_missing_or_mismatched_identity(tmp_path, monkeypatc
     assert smoke.smoke_scope_step("A" * 32, expected_install.resolve(), expected_user_data.resolve())["ok"] is False
     assert smoke.smoke_scope_step(SMOKE_ID, (program_files / "VRCForge").resolve(), expected_user_data.resolve())["ok"] is False
     assert smoke.smoke_scope_step(SMOKE_ID, expected_install.resolve(), (local_app_data / "VRCForge" / "agentic-app").resolve())["ok"] is False
+
+
+def test_production_clean_scope_requires_exact_confirmation_paths_and_zero_existing_identity(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    program_files = tmp_path / "Program Files"
+    local_app_data = tmp_path / "LocalAppData"
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.setattr(smoke, "production_identity_presence", lambda install_dir, user_data_root: [])
+    install_dir = (program_files / "VRCForge").resolve()
+    user_data_root = (local_app_data / "VRCForge" / "agentic-app").resolve()
+    args = Namespace(production_clean_confirmation=smoke.PRODUCTION_CLEAN_CONFIRMATION)
+
+    step = smoke.production_clean_scope_step(args, "", install_dir, user_data_root)
+
+    assert step["ok"] is True
+    assert step["productionIdentity"] is True
+    assert step["existingIdentities"] == []
+    assert smoke.production_clean_scope_step(Namespace(production_clean_confirmation=""), "", install_dir, user_data_root)["ok"] is False
+    assert smoke.production_clean_scope_step(args, SMOKE_ID, install_dir, user_data_root)["ok"] is False
+    monkeypatch.setattr(smoke, "production_identity_presence", lambda install_dir, user_data_root: ["install-dir:occupied"])
+    assert smoke.production_clean_scope_step(args, "", install_dir, user_data_root)["ok"] is False
+
+
+def test_production_clean_dry_run_records_exact_release_identity_without_mutation(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    program_files = tmp_path / "Program Files"
+    local_app_data = tmp_path / "LocalAppData"
+    monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.setattr(smoke, "production_identity_presence", lambda install_dir, user_data_root: [])
+    installer = tmp_path / "VRCForge_Offline_Installer_x64.exe"
+    installer.write_bytes(b"strict-installer")
+
+    report = smoke.run_smoke(
+        make_args(
+            tmp_path,
+            installer,
+            scope="production-clean",
+            production_clean_confirmation=smoke.PRODUCTION_CLEAN_CONFIRMATION,
+            smoke_id="",
+            install_dir=str(program_files / "VRCForge"),
+            user_data_root=str(local_app_data / "VRCForge" / "agentic-app"),
+            dry_run=True,
+        )
+    )
+
+    assert report["ok"] is True
+    assert report["schema"] == "vrcforge.installer_install_uninstall_smoke.v2"
+    assert report["scope"] == {
+        "mode": "production-clean",
+        "productionIdentity": True,
+        "cleanEnvironmentConfirmed": True,
+    }
+    assert report["smoke"]["id"] == ""
+    assert not (local_app_data / "VRCForge" / "agentic-app").exists()
 
 
 def test_dry_run_rejects_an_unscoped_or_mismatched_smoke_target(tmp_path, monkeypatch):

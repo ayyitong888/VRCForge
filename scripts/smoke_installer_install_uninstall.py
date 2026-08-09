@@ -11,15 +11,21 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+try:
+    import winreg
+except ImportError:  # pragma: no cover - the installer gate only runs on Windows.
+    winreg = None  # type: ignore[assignment]
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 
-SCHEMA = "vrcforge.installer_install_uninstall_smoke.v1"
+SCHEMA = "vrcforge.installer_install_uninstall_smoke.v2"
 SENTINEL_NAME = "installer-smoke-preservation.json"
 SMOKE_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
+PRODUCTION_CLEAN_CONFIRMATION = "I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT"
 
 
 def main() -> int:
@@ -36,6 +42,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Smoke-test VRCForge NSIS installer install/uninstall.")
     parser.add_argument("--installer", default="dist/release/VRCForge_Offline_Installer_x64.exe")
     parser.add_argument("--upgrade-installer", default="", help="Optional older installer to install before upgrading with --installer.")
+    parser.add_argument(
+        "--scope",
+        choices=("isolated-smoke", "production-clean"),
+        default="isolated-smoke",
+        help="Use isolated-smoke for compiler-scoped smoke builds; production-clean is reserved for exact release installers in a disposable clean Windows environment.",
+    )
+    parser.add_argument(
+        "--production-clean-confirmation",
+        default="",
+        help=f"Required exact value for production-clean: {PRODUCTION_CLEAN_CONFIRMATION}",
+    )
     parser.add_argument("--smoke-id", default="", help="Required 32-lowercase-hex identity for an isolated smoke-flavor installer.")
     parser.add_argument("--install-dir", default="", help="Must be %%ProgramFiles%%\\VRCForge-Smoke-<smoke-id>.")
     parser.add_argument("--user-data-root", default="", help="Must be %%LOCALAPPDATA%%\\VRCForge\\installer-smoke\\<smoke-id>.")
@@ -52,6 +69,7 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
     installer = Path(args.installer).expanduser().resolve()
     upgrade_installer = Path(args.upgrade_installer).expanduser().resolve() if args.upgrade_installer else None
     smoke_id = str(getattr(args, "smoke_id", "")).strip()
+    scope_mode = str(getattr(args, "scope", "isolated-smoke") or "isolated-smoke").strip()
     install_dir = resolve_install_dir(args.install_dir, smoke_id)
     user_data_root = resolve_user_data_root(args.user_data_root, smoke_id)
     steps: list[dict[str, Any]] = []
@@ -91,9 +109,17 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
             )
             if not upgrade_installer.is_file() and not args.dry_run:
                 raise RuntimeError("Upgrade installer does not exist.")
-        scope = smoke_scope_step(smoke_id, install_dir, user_data_root)
+        scope = (
+            production_clean_scope_step(args, smoke_id, install_dir, user_data_root)
+            if scope_mode == "production-clean"
+            else smoke_scope_step(smoke_id, install_dir, user_data_root)
+        )
         steps.append(scope)
         if not scope["ok"]:
+            if scope_mode == "production-clean":
+                raise RuntimeError(
+                    "Production installer evidence requires an explicitly confirmed disposable clean Windows environment with no existing VRCForge identity or user data."
+                )
             raise RuntimeError("Installer smoke requires an exact isolated smoke identity, install leaf, and user-data root.")
         if args.dry_run:
             return build_report(
@@ -527,6 +553,99 @@ def smoke_scope_step(smoke_id: str, install_dir: Path, user_data_root: Path) -> 
     }
 
 
+def production_clean_scope_step(
+    args: argparse.Namespace,
+    smoke_id: str,
+    install_dir: Path,
+    user_data_root: Path,
+) -> dict[str, Any]:
+    expected_install = default_install_dir().resolve()
+    expected_user_data = default_user_data_root().resolve()
+    confirmation = str(getattr(args, "production_clean_confirmation", "") or "")
+    existing_identities = production_identity_presence(expected_install, expected_user_data)
+    exact_paths = install_dir == expected_install and user_data_root == expected_user_data
+    return {
+        "name": "production_scope.clean_identity",
+        "ok": bool(
+            not smoke_id
+            and confirmation == PRODUCTION_CLEAN_CONFIRMATION
+            and exact_paths
+            and not existing_identities
+        ),
+        "mode": "production-clean",
+        "productionIdentity": True,
+        "confirmationAccepted": confirmation == PRODUCTION_CLEAN_CONFIRMATION,
+        "smokeIdEmpty": not smoke_id,
+        "exactPaths": exact_paths,
+        "expectedInstallDir": str(expected_install),
+        "installDir": str(install_dir),
+        "expectedUserDataRoot": str(expected_user_data),
+        "userDataRoot": str(user_data_root),
+        "existingIdentities": existing_identities,
+        "requiresDisposableEnvironment": True,
+    }
+
+
+def production_identity_presence(install_dir: Path, user_data_root: Path) -> list[str]:
+    existing: list[str] = []
+    for label, path in (
+        ("install-dir", install_dir),
+        ("user-data-root", user_data_root),
+        ("start-menu", production_start_menu_dir()),
+        ("public-desktop-shortcut", production_public_desktop_shortcut()),
+        ("user-desktop-shortcut", production_user_desktop_shortcut()),
+    ):
+        if os.path.lexists(path):
+            existing.append(f"{label}:{path}")
+    existing.extend(production_registry_identities())
+    return existing
+
+
+def production_start_menu_dir() -> Path:
+    program_data = os.environ.get("ProgramData", "").strip()
+    base = Path(program_data).expanduser() if program_data else default_install_dir().anchor + "ProgramData"
+    return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "VRCForge"
+
+
+def production_public_desktop_shortcut() -> Path:
+    public = os.environ.get("PUBLIC", "").strip()
+    base = Path(public).expanduser() if public else Path(default_install_dir().anchor) / "Users" / "Public"
+    return base / "Desktop" / "VRCForge.lnk"
+
+
+def production_user_desktop_shortcut() -> Path:
+    profile = os.environ.get("USERPROFILE", "").strip()
+    base = Path(profile).expanduser() if profile else Path.home()
+    return base / "Desktop" / "VRCForge.lnk"
+
+
+def production_registry_identities() -> list[str]:
+    if winreg is None:
+        return ["registry:windows-registry-unavailable"]
+    identities: list[str] = []
+    keys = (
+        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\VRCForge",
+        r"Software\VRCForge",
+    )
+    views = (
+        ("64", getattr(winreg, "KEY_WOW64_64KEY", 0)),
+        ("32", getattr(winreg, "KEY_WOW64_32KEY", 0)),
+    )
+    for key_path in keys:
+        for view_name, view_flag in views:
+            try:
+                handle = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0, winreg.KEY_READ | view_flag)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                identities.append(f"registry-check-error-{view_name}:{key_path}:{exc}")
+                continue
+            else:
+                winreg.CloseKey(handle)
+                identities.append(f"registry-{view_name}:{key_path}")
+    return identities
+
+
 def create_preservation_sentinel(user_data_root: Path, installer: Path, upgrade_installer: Path | None) -> dict[str, Any]:
     user_data_root.mkdir(parents=True, exist_ok=True)
     sentinel = {
@@ -580,7 +699,15 @@ def build_report(
         "installer": str(installer),
         "installerSha256": sha256_file(installer),
         "upgradeInstaller": str(upgrade_installer) if upgrade_installer else "",
+        "upgradeInstallerSha256": sha256_file(upgrade_installer) if upgrade_installer else "",
         "installDir": str(install_dir),
+        "scope": {
+            "mode": str(getattr(args, "scope", "isolated-smoke") or "isolated-smoke"),
+            "productionIdentity": str(getattr(args, "scope", "isolated-smoke") or "isolated-smoke")
+            == "production-clean",
+            "cleanEnvironmentConfirmed": str(getattr(args, "production_clean_confirmation", "") or "")
+            == PRODUCTION_CLEAN_CONFIRMATION,
+        },
         "smoke": {
             "id": str(getattr(args, "smoke_id", "")).strip(),
             "requiredPattern": SMOKE_ID_PATTERN.pattern,

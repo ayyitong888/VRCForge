@@ -210,6 +210,11 @@ def test_installer_smoke_documentation_uses_the_exact_isolated_identity() -> Non
     assert "--smoke-id $smokeId" in source
     assert '--install-dir "$env:ProgramFiles\\VRCForge-Smoke-$smokeId"' in source
     assert '--user-data-root "$env:LOCALAPPDATA\\VRCForge\\installer-smoke\\$smokeId"' in source
+    assert "--scope production-clean" in source
+    assert "--production-clean-confirmation I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT" in source
+    assert '--upgrade-installer "<downloaded official v1.4.0 offline installer>"' in source
+    assert "Do not run `production-clean` on a normal workstation" in source
+    assert "--upgrade-from-installer-sha256 58bf32ec8cb4f71dd6272db427dd0218e7161c5730314e9ae4f9516a50c02901" in source
 
 
 def test_payload_helper_accepts_only_the_exact_compiled_scope_identity() -> None:
