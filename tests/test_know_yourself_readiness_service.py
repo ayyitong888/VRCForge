@@ -92,7 +92,7 @@ def _service(*, unity: dict[str, Any] | None = None, process_error: bool = False
     ))
 
 
-def test_know_yourself_service_has_explicit_read_only_ports_and_single_root_facade() -> None:
+def test_know_yourself_service_has_explicit_read_only_ports_and_no_root_facade() -> None:
     source = (ROOT / "know_yourself_readiness_service.py").read_text(encoding="utf-8")
     dashboard_source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
     service = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name == "KnowYourselfReadinessService")
@@ -106,13 +106,13 @@ def test_know_yourself_service_has_explicit_read_only_ports_and_single_root_faca
     assert "Thread(" not in source
     assert KnowYourselfReadinessService.__slots__ == ("_ports",)
 
-    facade = next(node for node in ast.parse(dashboard_source).body if isinstance(node, ast.FunctionDef) and node.name == "know_yourself_sync")
-    assert len(facade.body) == 1
-    assert isinstance(facade.body[0], ast.Return)
-    assert isinstance(facade.body[0].value, ast.Call)
-    assert isinstance(facade.body[0].value.func, ast.Attribute)
-    assert facade.body[0].value.func.attr == "know_yourself_sync"
-    assert "STOPGAP: Migration-only owner for the root Know Yourself compatibility facade below." in dashboard_source
+    dashboard_tree = ast.parse(dashboard_source)
+    assert not any(
+        isinstance(node, ast.FunctionDef) and node.name == "know_yourself_sync"
+        for node in dashboard_tree.body
+    )
+    assert "_KNOW_YOURSELF_READINESS" not in dashboard_source
+    assert "STOPGAP: Migration-only owner for the root Know Yourself compatibility facade below." not in dashboard_source
 
 
 def test_know_yourself_service_preserves_compile_gate_focus_scope_and_privacy() -> None:
@@ -140,7 +140,7 @@ def test_know_yourself_service_skips_compile_without_live_core_and_preserves_str
 
 
 def test_dashboard_constructs_know_yourself_service_with_strict_process_port() -> None:
-    assert isinstance(dashboard_server._KNOW_YOURSELF_READINESS, KnowYourselfReadinessService)
-    assert dashboard_server._KNOW_YOURSELF_READINESS._ports.list_running_unity_processes_strict
+    assert isinstance(dashboard_server.KNOW_YOURSELF_READINESS, KnowYourselfReadinessService)
+    assert dashboard_server.KNOW_YOURSELF_READINESS._ports.list_running_unity_processes_strict
     source = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
     assert "list_running_unity_processes(require_discovery_evidence=True)" in source

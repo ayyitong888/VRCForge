@@ -803,15 +803,15 @@ def test_dashboard_process_discovery_unavailable_or_failed_stays_blocked(
             scoped.setattr(dashboard_server.DASHBOARD_STATE, "unity_editor_path", __file__)
             scoped.setattr(dashboard_server.AGENT_GATEWAY, "build_tool_registry", _tool_registry)
             scoped.setattr(
-                dashboard_server._KNOW_YOURSELF_READINESS,
+                dashboard_server.KNOW_YOURSELF_READINESS,
                 "_ports",
                 replace(
-                    dashboard_server._KNOW_YOURSELF_READINESS._ports,
+                    dashboard_server.KNOW_YOURSELF_READINESS._ports,
                     build_skill_registry=_skill_registry,
                 ),
             )
             scoped.setattr(dashboard_server.AGENT_GATEWAY, "permission_state", _permission_state)
-            return dashboard_server.know_yourself_sync({})
+            return dashboard_server.KNOW_YOURSELF_READINESS.know_yourself_sync({})
 
     missing = run_case(None)
 
@@ -867,16 +867,16 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
     monkeypatch.setattr(dashboard_server.DASHBOARD_STATE, "unity_editor_path", __file__)
     monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "build_tool_registry", _tool_registry)
     monkeypatch.setattr(
-        dashboard_server._KNOW_YOURSELF_READINESS,
+        dashboard_server.KNOW_YOURSELF_READINESS,
         "_ports",
         replace(
-            dashboard_server._KNOW_YOURSELF_READINESS._ports,
+            dashboard_server.KNOW_YOURSELF_READINESS._ports,
             build_skill_registry=_skill_registry,
         ),
     )
     monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "permission_state", _permission_state)
 
-    report = dashboard_server.know_yourself_sync({"editorFocusConfirmed": "true"})
+    report = dashboard_server.KNOW_YOURSELF_READINESS.know_yourself_sync({"editorFocusConfirmed": "true"})
     route = dashboard_server.AGENT_GATEWAY.runtime_planner._match_runtime_skill(
         "API 已经接好了，准备打开 Unity 工程",
         {},
@@ -914,6 +914,8 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
     assert executed["entrypoint"]["result"]["readyForUnityWork"] is True
     assert tool.write is False
     assert tool.category == "read/debug"
+    assert tool.handler.__self__ is dashboard_server.KNOW_YOURSELF_READINESS
+    assert tool.handler.__func__ is dashboard_server.KNOW_YOURSELF_READINESS.know_yourself_sync.__func__
     assert group["entrypointTool"] == "vrcforge_know_yourself"
     assert group["available"] is True
     assert group["permissionMode"] == "read_only"

@@ -2183,9 +2183,7 @@ _DOCTOR_READINESS_REPORT = DoctorReadinessReportService(
         version=lambda: app.version,
     )
 )
-# STOPGAP: Migration-only owner for the root Know Yourself compatibility facade below.
-# Remove it in the final 1.5 typed-composition seam-retirement gate.
-_KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
+KNOW_YOURSELF_READINESS = KnowYourselfReadinessService(
     KnowYourselfReadinessPorts(
         load_settings_for_params=lambda params: load_dashboard_settings(build_agent_connection_request(params)),
         build_unity_status=lambda settings: build_unity_status_snapshot(settings),
@@ -8656,10 +8654,6 @@ def _merge_registered_doctor_checks(checks: list[dict[str, Any]]) -> list[dict[s
 
 def build_app_doctor_report() -> dict[str, Any]:
     return _DOCTOR_READINESS_REPORT.build_app_doctor_report()
-
-
-def know_yourself_sync(params: dict[str, Any] | None = None) -> dict[str, Any]:
-    return _KNOW_YOURSELF_READINESS.know_yourself_sync(params)
 
 
 @app.get("/api/app/doctor")
@@ -19344,7 +19338,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_know_yourself",
         "Read the current work-start preparation, Unity/MCP readiness, capability map, gaps, and safe operating boundaries without changing the Unity project.",
         "read/debug",
-        know_yourself_sync,
+        KNOW_YOURSELF_READINESS.know_yourself_sync,
     )
     AGENT_GATEWAY.register_tool(
         "vrcforge_unity_status",

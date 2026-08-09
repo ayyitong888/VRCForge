@@ -262,6 +262,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert len(groups["gateway.approval-transaction-host-proxy"]["facades"][0]["methods"]) == 41
     assert len(groups["gateway.checkpoint-recovery-host-proxy"]["facades"][0]["methods"]) == 87
     assert "gateway.skill-registry-host-proxy" not in groups
+    assert "dashboard.know-yourself-root-facade" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
     assert {item["id"] for item in manifest["publicApiAllowlist"]["contracts"]} == {
         "fastapi-route-request-response-openapi",
