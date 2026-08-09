@@ -268,6 +268,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     assert "dashboard.optimization-root-owners" not in groups
     assert "dashboard.goal-root-owner" not in groups
     assert "dashboard.memory-review-root-graph" not in groups
+    assert "dashboard.sub-agent-collaboration-root-owner" not in groups
     assert len(groups["gateway.desktop-computer-use-stopgap-facade"]["facades"][0]["methods"]) == 20
     assert {item["id"] for item in manifest["publicApiAllowlist"]["contracts"]} == {
         "fastapi-route-request-response-openapi",
@@ -332,6 +333,33 @@ def test_dashboard_provider_typed_roots_do_not_reexport_removed_host_seams() -> 
         "_provider_probe_settings",
     }
     assert bindings.isdisjoint(removed)
+
+
+def test_sub_agent_collaboration_has_one_stable_typed_owner_construction() -> None:
+    tree = ast.parse((REPO_ROOT / "dashboard_server.py").read_text(encoding="utf-8"))
+    owner_assignments = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "SUB_AGENT_COLLABORATION"
+            for target in node.targets
+        )
+    ]
+    constructions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "SubAgentCollaborationService"
+    ]
+
+    assert len(owner_assignments) == 1
+    assert len(constructions) == 1
+    assert owner_assignments[0].value is constructions[0]
+    assert "_SUB_AGENT_COLLABORATION" not in {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
 
 
 def test_build_and_publish_invoke_gate_before_build_or_remote_mutation() -> None:

@@ -1265,7 +1265,7 @@ def test_support_bundle_forces_redaction_and_excludes_identity_mapping() -> None
             patch.object(dashboard_server.AGENT_GATEWAY, "recent_audit_logs", return_value=[]),
             patch.object(
                 dashboard_server,
-                "_SUB_AGENT_COLLABORATION",
+                "SUB_AGENT_COLLABORATION",
                 SimpleNamespace(recent_events=lambda **_kwargs: [], list_tasks=lambda **_kwargs: {"tasks": []}),
             ),
         ):

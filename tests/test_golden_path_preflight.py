@@ -210,7 +210,7 @@ def test_sub_agent_endpoint_runs_project_index_worker(tmp_path: Path, monkeypatc
     )
     monkeypatch.setattr(
         dashboard_server,
-        "_SUB_AGENT_COLLABORATION",
+        "SUB_AGENT_COLLABORATION",
         SubAgentCollaborationService.from_registry_for_testing(registry),
     )
 
@@ -254,7 +254,7 @@ def test_sub_agent_endpoint_runs_selected_context_worker(tmp_path: Path, monkeyp
     )
     monkeypatch.setattr(
         dashboard_server,
-        "_SUB_AGENT_COLLABORATION",
+        "SUB_AGENT_COLLABORATION",
         SubAgentCollaborationService.from_registry_for_testing(registry),
     )
 

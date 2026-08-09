@@ -1232,7 +1232,7 @@ class DashboardServerTests(unittest.TestCase):
                     patch("dashboard_server.BACKEND_OWNER_LEASE", SimpleNamespace(owned=True)),
                     patch.object(
                         dashboard_server,
-                        "_SUB_AGENT_COLLABORATION",
+                        "SUB_AGENT_COLLABORATION",
                         SimpleNamespace(reconcile_startup=reconcile_sub_agents),
                     ),
                     patch.object(
@@ -1285,7 +1285,7 @@ class DashboardServerTests(unittest.TestCase):
                     patch("project_snapshot_selection_service.ProjectSnapshotSelectionService.load_project_snapshot_cache"),
                     patch.object(
                         dashboard_server,
-                        "_SUB_AGENT_COLLABORATION",
+                        "SUB_AGENT_COLLABORATION",
                         SimpleNamespace(reconcile_startup=reconcile_sub_agents),
                     ),
                     patch.object(
@@ -1338,7 +1338,7 @@ class DashboardServerTests(unittest.TestCase):
                     patch("project_snapshot_selection_service.ProjectSnapshotSelectionService.load_project_snapshot_cache"),
                     patch.object(
                         dashboard_server,
-                        "_SUB_AGENT_COLLABORATION",
+                        "SUB_AGENT_COLLABORATION",
                         SimpleNamespace(reconcile_startup=reconcile_sub_agents),
                     ),
                     patch.object(
@@ -3097,15 +3097,32 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(goal["wakeCount"], 1)
         self.assertFalse(target.exists())
 
+    def test_sub_agent_composition_keeps_one_registry_and_memory_commit_lock(self) -> None:
+        owner = dashboard_server.SUB_AGENT_COLLABORATION
+
+        self.assertFalse(hasattr(dashboard_server, "_SUB_AGENT_COLLABORATION"))
+        self.assertIs(
+            dashboard_server.MEMORY_REVIEW.source_commit_lock._locks[3],
+            owner.source_commit_lock(),
+        )
+        self.assertIn(
+            "SUB_AGENT_COLLABORATION",
+            dashboard_server.MEMORY_REVIEW.adapter.list_tasks.__code__.co_names,
+        )
+        self.assertNotIn(
+            "_SUB_AGENT_COLLABORATION",
+            dashboard_server.MEMORY_REVIEW.adapter.list_tasks.__code__.co_names,
+        )
+
     def test_sub_agent_routes_persist_parent_handoff_and_merge_revision(self) -> None:
-        original_service = dashboard_server._SUB_AGENT_COLLABORATION
+        original_service = dashboard_server.SUB_AGENT_COLLABORATION
         with tempfile.TemporaryDirectory() as tmp:
             registry = SubAgentTaskRegistry(
                 Path(tmp),
                 roles=[SubAgentRole("test_role", "Test", "Test role")],
                 handlers={"test_role": lambda _payload, _cancel: {"ok": True, "summaryText": "ready"}},
             )
-            dashboard_server._SUB_AGENT_COLLABORATION = SubAgentCollaborationService.from_registry_for_testing(registry)
+            dashboard_server.SUB_AGENT_COLLABORATION = SubAgentCollaborationService.from_registry_for_testing(registry)
             try:
                 with TestClient(dashboard_server.app) as client:
                     ownerless = client.post(
@@ -3144,7 +3161,7 @@ class DashboardServerTests(unittest.TestCase):
                         },
                     )
             finally:
-                dashboard_server._SUB_AGENT_COLLABORATION = original_service
+                dashboard_server.SUB_AGENT_COLLABORATION = original_service
 
         self.assertEqual(ownerless.status_code, 400)
         self.assertEqual(task["parentChatId"], "chat-a")
@@ -13738,7 +13755,7 @@ namespace VRCForge.Editor
             patch("dashboard_server.parse_args", return_value=args),
             patch.object(
                 dashboard_server,
-                "_SUB_AGENT_COLLABORATION",
+                "SUB_AGENT_COLLABORATION",
                 SimpleNamespace(reconcile_startup=reconcile_sub_agents),
             ),
             patch("tools.vrcforge_agent_mcp_stdio.VRCForgeBridge") as bridge_class,
@@ -13763,7 +13780,7 @@ namespace VRCForge.Editor
             patch("dashboard_server.parse_args", return_value=args),
             patch.object(
                 dashboard_server,
-                "_SUB_AGENT_COLLABORATION",
+                "SUB_AGENT_COLLABORATION",
                 SimpleNamespace(reconcile_startup=reconcile_sub_agents),
             ),
             patch("tools.vrcforge_cli.main", return_value=0) as cli_main,

@@ -406,7 +406,7 @@ def memory_review_dashboard(tmp_path: Path):
             adapter=TestAdapter(), broadcast=capture_event, emit_warning=lambda _failure: None,
             provider_call=call_provider,
             chat_lock=dashboard_server.CHAT_TRANSCRIPTS_LOCK,
-            sub_agent_source_commit_lock=dashboard_server._SUB_AGENT_COLLABORATION.source_commit_lock,
+            sub_agent_source_commit_lock=dashboard_server.SUB_AGENT_COLLABORATION.source_commit_lock,
     )
     composition = build_memory_review_composition(ports)
     test_app = FastAPI()
@@ -1309,7 +1309,7 @@ def test_source_commit_critical_section_blocks_every_source_writer_until_commit(
         for name, lock in (
             ("gateway", dashboard_server.AGENT_GATEWAY._lock),
             ("chat", dashboard_server.CHAT_TRANSCRIPTS_LOCK),
-            ("task", dashboard_server._SUB_AGENT_COLLABORATION.source_commit_lock()),
+            ("task", dashboard_server.SUB_AGENT_COLLABORATION.source_commit_lock()),
             ("audit", dashboard_server.AGENT_GATEWAY._audit_append_lock),
         ):
             writer = threading.Thread(target=source_writer, args=(name, lock), daemon=True)
