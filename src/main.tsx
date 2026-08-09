@@ -1,25 +1,11 @@
 import React from "react";
-import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { initializeI18n } from "./i18n";
 import "./styles.css";
 
-function StartupShell() {
-  return (
-    <main className="flex h-screen items-center justify-center bg-workspace text-foreground" data-vrcforge-startup-shell>
-      <div className="rounded-2xl border border-border/70 bg-background/80 px-8 py-6 text-center shadow-panel">
-        <div className="text-lg font-semibold">VRCForge</div>
-        <div className="mt-2 text-sm text-muted-foreground">Local AI Workbench for VRChat Avatar Editing</div>
-      </div>
-    </main>
-  );
-}
-
 async function main() {
   const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
   metrics.mainModuleStartedMs ??= Math.round(performance.now());
-  const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
-  flushSync(() => root.render(<StartupShell />));
   metrics.startupShellRequestedMs ??= Math.round(performance.now());
   const startupShellPainted = new Promise<void>((resolve) => {
     window.requestAnimationFrame(() => {
@@ -35,6 +21,7 @@ async function main() {
   const [, { default: App }] = await Promise.all([initializeI18n(), appModule, startupShellPainted]);
   metrics.appDependenciesReadyMs ??= Math.round(performance.now());
 
+  const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
   root.render(
     <React.StrictMode>
       <App />
