@@ -74,8 +74,16 @@ def test_core_tool_error_never_falls_back_to_legacy_transport(tmp_path: Path, mo
 
     monkeypatch.setattr(agent, "UnityMcpCoreClient", FakeCoreClient)
 
-    with pytest.raises(agent.UnityMcpError, match="Failed to call unity-mcp"):
-        agent.invoke_unity_mcp(_settings(tmp_path), "vrc_write", {"projectPath": str(tmp_path)})
+    settings = _settings(tmp_path)
+    settings.unity_mcp_retries = 3
+    settings.unity_mcp_retry_backoff_seconds = 2
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(agent.time, "sleep", sleep_calls.append)
+
+    with pytest.raises(agent.UnityMcpError, match="rejected the tool execution"):
+        agent.invoke_unity_mcp(settings, "vrc_write", {"projectPath": str(tmp_path)})
+
+    assert sleep_calls == []
 
 
 def test_core_installed_without_descriptor_never_falls_back_to_legacy_write(
@@ -101,6 +109,43 @@ def test_core_installed_without_descriptor_never_falls_back_to_legacy_write(
             "vrc_write",
             {"projectPath": str(tmp_path)},
         )
+
+
+def test_incomplete_core_fails_without_retry_and_names_the_selected_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.unity_mcp_retries = 3
+    settings.unity_mcp_retry_backoff_seconds = 2
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(agent.time, "sleep", sleep_calls.append)
+
+    with pytest.raises(agent.UnityMcpError) as raised:
+        agent.invoke_unity_mcp(settings, "vrc_export_blendshapes", {})
+
+    message = str(raised.value)
+    assert str(tmp_path) in message
+    assert "does not contain a complete VRCForge MCP2 package" in message
+    assert "VRCForgeCommandAttribute.cs" in message
+    assert "Select the project that is currently open in Unity" in message
+    assert sleep_calls == []
+
+
+def test_invoke_without_selected_project_fails_before_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _settings(tmp_path)
+    settings.unity_project_path = ""
+    settings.unity_mcp_retries = 3
+    sleep_calls: list[float] = []
+    monkeypatch.setattr(agent.time, "sleep", sleep_calls.append)
+
+    with pytest.raises(agent.UnityMcpError, match="No Unity project is selected"):
+        agent.invoke_unity_mcp(settings, "vrc_export_blendshapes", {})
+
+    assert sleep_calls == []
 
 
 def test_cli_status_reads_only_the_project_scoped_core_descriptor(

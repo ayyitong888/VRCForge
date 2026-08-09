@@ -144,6 +144,10 @@ class UnityMcpError(RuntimeError):
     pass
 
 
+class _UnityMcpToolRejectedError(UnityMcpError):
+    """A terminal Core response that must not enter the transport retry loop."""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Use an LLM provider and Unity MCP to tune VRChat avatar blendshapes from natural language."
@@ -2912,14 +2916,32 @@ def invoke_unity_mcp(
         or ""
     ).strip()
     core_descriptor = Path(core_project) / "Library" / "VRCForge" / "mcp-core.json" if core_project else None
-    core_installed = bool(
-        core_project
-        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeCommandAttribute.cs").is_file()
-        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeInputAttribute.cs").is_file()
-        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolRegistry.cs").is_file()
-        and (Path(core_project) / "Assets" / "VRCForge" / "Core" / "MCP" / "VRCForgeToolResult.cs").is_file()
-        and (Path(core_project) / "Assets" / "VRCForge" / "Editor" / "MCP" / "VRCForgeMcpCoreServer.cs").is_file()
+    core_marker_paths = (
+        "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+        "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
+        "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
+        "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
+        "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
     )
+    missing_core_markers = [
+        relative_path
+        for relative_path in core_marker_paths
+        if not core_project or not (Path(core_project) / relative_path).is_file()
+    ]
+    core_installed = bool(core_project and not missing_core_markers)
+
+    if not core_project:
+        raise UnityMcpError(
+            "No Unity project is selected for VRCForge MCP Core. "
+            "Select the project that is currently open in Unity and retry."
+        )
+    if core_descriptor is not None and not core_descriptor.is_file() and not core_installed:
+        missing_names = ", ".join(Path(path).name for path in missing_core_markers)
+        raise UnityMcpError(
+            f"The selected Unity project '{core_project}' does not contain a complete "
+            f"VRCForge MCP2 package. Missing required files: {missing_names}. "
+            "Select the project that is currently open in Unity or reimport VRCForge.unitypackage."
+        )
 
     if (
         isinstance(active_plan, ApprovedUnityExecutionPlan)
@@ -2929,9 +2951,13 @@ def invoke_unity_mcp(
         try:
             if core_descriptor is None or not core_descriptor.is_file():
                 if core_installed:
-                    raise UnityMcpError("VRCForge MCP Core is installed but not ready for this project.")
+                    raise UnityMcpError(
+                        f"VRCForge MCP Core is installed but not ready in the selected "
+                        f"Unity project '{core_project}'; its runtime descriptor is missing."
+                    )
                 raise UnityMcpError(
-                    "This Unity project does not have the VRCForge MCP2 unitypackage installed and ready."
+                    f"The selected Unity project '{core_project}' does not contain a complete "
+                    "VRCForge MCP2 package."
                 )
             claim = active_plan.claim(tool_name, params, core_project)
         except ApprovedUnityExecutionError as exc:
@@ -2990,15 +3016,23 @@ def invoke_unity_mcp(
                             stderr="",
                             payload=core_result,
                         )
-                    raise UnityMcpError("Unity MCP Core rejected the tool execution.")
+                    detail = summarize_unity_mcp_core_rejection(core_result)
+                    suffix = f" Reason code: {detail}." if detail else ""
+                    raise _UnityMcpToolRejectedError(
+                        f"Unity MCP Core rejected the tool execution.{suffix}"
+                    )
                 return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
             if core_installed:
                 raise UnityMcpError(
-                    "VRCForge MCP Core is installed but not ready for this project."
+                    f"VRCForge MCP Core is installed but not ready in the selected "
+                    f"Unity project '{core_project}'; its runtime descriptor is missing."
                 )
             raise UnityMcpError(
-                "This Unity project does not have the VRCForge MCP2 unitypackage installed and ready."
+                f"The selected Unity project '{core_project}' does not contain a complete "
+                "VRCForge MCP2 package."
             )
+        except _UnityMcpToolRejectedError:
+            raise
         except Exception as exc:  # noqa: BLE001 - We want to retry any transport/runtime failure here.
             last_error = exc
             if attempt >= settings.unity_mcp_retries:
