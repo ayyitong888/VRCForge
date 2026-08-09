@@ -61,67 +61,6 @@
   },
   "seamGroups": [
     {
-      "id": "dashboard.package-install-typed-root-owners",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_MANAGER_DISCOVERY"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_DETECTION"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_INSTALL_WORKFLOWS"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "VPM_PACKAGE_INSTALL_PREPARER"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "VPM_PACKAGE_INSTALL_EXECUTOR"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "PACKAGE_INSTALL_APPROVED_WRITE"}
-      ]
-    },
-    {
-      "id": "dashboard.avatar-tuning-root-owners",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_WORKFLOWS"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_APPROVED_WRITES"}
-      ],
-      "facades": [
-        {
-          "source": "dashboard_server.py",
-          "scope": "module",
-          "methods": [
-            "scan_scene_avatars_sync",
-            "read_avatars_sync",
-            "read_avatar_blendshapes_sync",
-            "run_dashboard_pipeline_sync",
-            "apply_manual_blendshapes_sync",
-            "preview_agent_blendshape_apply",
-            "load_tuning_history_store",
-            "load_tuning_preset_store",
-            "load_locked_blendshapes",
-            "create_tuning_preset_sync",
-            "rename_tuning_preset_sync",
-            "duplicate_tuning_preset_sync",
-            "delete_tuning_preset_sync",
-            "update_tuning_locks_sync",
-            "ai_select_tuning_locks_sync",
-            "apply_saved_tuning_history_sync",
-            "apply_saved_tuning_preset_sync",
-            "prepare_manual_blendshape_apply_request",
-            "apply_manual_blendshapes_approved_sync",
-            "prepare_manual_blendshape_undo_request",
-            "undo_manual_blendshapes_approved_sync",
-            "prepare_face_tuning_execution_request",
-            "run_face_tuning_approved_sync",
-            "prepare_reapply_tuning_history_request",
-            "reapply_tuning_history_approved_sync",
-            "prepare_apply_tuning_preset_request",
-            "apply_tuning_preset_approved_sync"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "dashboard.avatar-tuning-typed-root-owner",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_STORES"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_UNDO"},
-        {"source": "dashboard_server.py", "scope": "module", "name": "AVATAR_TUNING_PREPARED"}
-      ]
-    },
-    {
       "id": "gateway.approval-transaction-host-proxy",
       "rootSymbols": [
         {"source": "agent_gateway.py", "scope": "class", "class": "AgentGateway", "name": "_approval_transactions"}
@@ -343,13 +282,6 @@
           ]
         }
       ]
-    },
-    {
-      "id": "dashboard.runtime-planner-typed-root-owner",
-      "rootSymbols": [
-        {"source": "dashboard_server.py", "scope": "module", "name": "RUNTIME_PLANNER"}
-      ],
-      "facades": []
     },
     {
       "id": "gateway.desktop-computer-use-stopgap-facade",
