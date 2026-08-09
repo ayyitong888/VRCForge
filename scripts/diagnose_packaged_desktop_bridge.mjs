@@ -770,20 +770,26 @@ async function prepareComposerAfterFirstRun(cdp, timeoutMs = 30000) {
   while (Date.now() < deadline) {
     lastState = await evalValue(
       cdp,
-      `(() => ({
-        composerReady: Boolean(
-          document.querySelector("textarea") &&
-          document.querySelector("button[type='submit']") &&
-          !document.querySelector("textarea").disabled
-        ),
-        languageGate: Boolean(document.querySelector("[data-vrcforge-onboarding-language-gate='true']")),
-        onboarding: Boolean(document.querySelector("[data-vrcforge-onboarding='true']")),
-        bodyLength: document.body.innerText.length,
-      }))()`,
+      `(() => {
+        const textarea = document.querySelector("textarea");
+        const submit = document.querySelector("button[type='submit']");
+        return {
+          composerReady: Boolean(textarea && submit),
+          composerDisabled: Boolean(textarea?.disabled),
+          languageGate: Boolean(document.querySelector("[data-vrcforge-onboarding-language-gate='true']")),
+          onboarding: Boolean(document.querySelector("[data-vrcforge-onboarding='true']")),
+          bodyLength: document.body.innerText.length,
+        };
+      })()`,
       5000,
     ).catch((error) => ({ error: String(error) }));
     if (composerIsReadyAfterOnboarding(lastState)) {
-      return { ok: true, actions, bodyLength: lastState.bodyLength };
+      return {
+        ok: true,
+        actions,
+        bodyLength: lastState.bodyLength,
+        composerDisabled: lastState.composerDisabled,
+      };
     }
     if (lastState?.languageGate && !actions.includes("language-continue")) {
       const clicked = await evalValue(

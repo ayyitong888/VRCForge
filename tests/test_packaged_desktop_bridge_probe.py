@@ -130,6 +130,9 @@ def test_desktop_probe_completes_isolated_first_run_before_waiting_for_the_compo
     assert "state?.composerReady && !state.languageGate && !state.onboarding" in source
     assert "if (composerIsReadyAfterOnboarding(lastState))" in source
     assert "composer readiness bypassed an active first-run overlay" in source
+    assert "composerReady: Boolean(textarea && submit)" in source
+    assert "composerDisabled: Boolean(textarea?.disabled)" in source
+    assert "composerDisabled: lastState.composerDisabled" in source
     assert "output.ready = await prepareComposerAfterFirstRun(cdp);" in source
     assert source.index("output.ready = await prepareComposerAfterFirstRun(cdp);") < source.index(
         'output.bootstrap = await appApi("/api/app/bootstrap")'
