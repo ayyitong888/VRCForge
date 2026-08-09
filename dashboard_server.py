@@ -2888,7 +2888,7 @@ def read_app_runtime_snapshot(
     workspace_diff = build_workspace_diff_summary(projectRoot, include_patch=includePatch)
     if scoped_ledgers:
         runs = AGENT_GATEWAY.list_runtime_runs(limit=40, session_id=sessionId, project_root=projectRoot)
-        desktop_actions = AGENT_GATEWAY.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)
+        desktop_actions = AGENT_GATEWAY.desktop.list_desktop_actions(limit=8, session_id=sessionId, project_root=projectRoot)
         goals = AGENT_GATEWAY.goal.list_agent_goals(limit=8, session_id=sessionId, project_root=projectRoot)
         progress = AGENT_GATEWAY.list_agent_progress(limit=12, session_id=sessionId, project_root=projectRoot)
         questions = AGENT_GATEWAY.questions.list(limit=6, session_id=sessionId, project_root=projectRoot)
@@ -2912,8 +2912,8 @@ def read_app_runtime_snapshot(
         "approvals": {"approvals": approval_items, "count": len(approval_items)},
         "runs": runs,
         "desktopActions": desktop_actions,
-        "activeDesktopActions": AGENT_GATEWAY.list_active_desktop_actions(limit=8),
-        "desktopBridge": AGENT_GATEWAY.desktop_bridge_status(),
+        "activeDesktopActions": AGENT_GATEWAY.desktop.list_active_desktop_actions(limit=8),
+        "desktopBridge": AGENT_GATEWAY.desktop.desktop_bridge_status(),
         "goals": goals,
         "progress": progress,
         "questions": questions,
@@ -3072,7 +3072,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
     runtime_params = agent_runtime_request_payload(runtime_request)
     try:
         if runtime_request.computer_use_requested:
-            AGENT_GATEWAY.require_computer_use_enabled()
+            AGENT_GATEWAY.desktop.require_computer_use_enabled()
         if runtime_request.goal_delivery_id:
             provider, base_url = background_goal_provider_endpoint(runtime_request)
             payload = await BACKGROUND_GOAL_COORDINATOR.execute(
@@ -3160,7 +3160,7 @@ def background_goal_provider_endpoint(runtime_request: AgentRuntimeMessageReques
 @app.post("/api/app/agent/computer-use/grants")
 def app_issue_computer_use_turn_grant(request: ComputerUseTurnGrantRequest) -> dict[str, Any]:
     try:
-        return AGENT_GATEWAY.issue_computer_use_turn_grant(
+        return AGENT_GATEWAY.desktop.issue_computer_use_turn_grant(
             {
                 "sessionId": request.session_id,
                 "clientTurnId": request.client_turn_id,
@@ -3260,13 +3260,13 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
 
 @app.get("/api/app/agent/desktop-actions")
 def app_agent_desktop_actions(limit: int = 50, sessionId: str = "", projectRoot: str = "") -> dict[str, Any]:
-    return AGENT_GATEWAY.list_desktop_actions(limit=limit, session_id=sessionId, project_root=projectRoot)
+    return AGENT_GATEWAY.desktop.list_desktop_actions(limit=limit, session_id=sessionId, project_root=projectRoot)
 
 
 @app.get("/api/app/agent/desktop-actions/{action_id}/result")
 def app_agent_desktop_action_result(action_id: str) -> dict[str, Any]:
     try:
-        return AGENT_GATEWAY.get_desktop_action_result(action_id)
+        return AGENT_GATEWAY.desktop.get_desktop_action_result(action_id)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
@@ -3275,9 +3275,9 @@ def app_agent_desktop_action_result(action_id: str) -> dict[str, Any]:
 async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[str, Any]:
     try:
         if request.action in DESKTOP_BRIDGE_ACTION_TYPES:
-            AGENT_GATEWAY.require_computer_use_enabled()
+            AGENT_GATEWAY.desktop.require_computer_use_enabled()
         payload = await asyncio.to_thread(
-            AGENT_GATEWAY.request_desktop_action,
+            AGENT_GATEWAY.desktop.request_desktop_action,
             {
                 "action": request.action,
                 "prompt": request.prompt,
@@ -3290,14 +3290,14 @@ async def app_agent_desktop_action(request: AgentDesktopActionRequest) -> dict[s
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30, session_id=request.session_id or ""))
+    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30, session_id=request.session_id or ""))
     return payload
 
 
 @app.get("/api/app/agent/desktop-bridge")
 def app_agent_desktop_bridge_status() -> dict[str, Any]:
     return {
-        **AGENT_GATEWAY.desktop_bridge_status(),
+        **AGENT_GATEWAY.desktop.desktop_bridge_status(),
         "embeddedExecutor": AGENT_GATEWAY.desktop.embedded_worker_status(),
     }
 
@@ -3306,7 +3306,7 @@ def app_agent_desktop_bridge_status() -> dict[str, Any]:
 async def app_agent_desktop_bridge_register(request: DesktopBridgeRegisterRequest) -> dict[str, Any]:
     try:
         payload = await asyncio.to_thread(
-            AGENT_GATEWAY.register_desktop_bridge,
+            AGENT_GATEWAY.desktop.register_desktop_bridge,
             {
                 "name": request.name,
                 "provider": request.provider,
@@ -3323,7 +3323,7 @@ async def app_agent_desktop_bridge_register(request: DesktopBridgeRegisterReques
 async def app_agent_desktop_bridge_heartbeat(request: DesktopBridgeHeartbeatRequest) -> dict[str, Any]:
     try:
         payload = await asyncio.to_thread(
-            AGENT_GATEWAY.heartbeat_desktop_bridge,
+            AGENT_GATEWAY.desktop.heartbeat_desktop_bridge,
             {"bridgeId": request.bridge_id, "bridgeCredential": request.bridge_credential},
         )
     except AgentGatewayError as exc:
@@ -3335,7 +3335,7 @@ async def app_agent_desktop_bridge_heartbeat(request: DesktopBridgeHeartbeatRequ
 async def app_agent_desktop_action_claim(request: DesktopActionClaimRequest) -> dict[str, Any]:
     try:
         payload = await asyncio.to_thread(
-            AGENT_GATEWAY.claim_desktop_action,
+            AGENT_GATEWAY.desktop.claim_desktop_action,
             {
                 "bridgeId": request.bridge_id,
                 "bridgeCredential": request.bridge_credential,
@@ -3346,7 +3346,7 @@ async def app_agent_desktop_action_claim(request: DesktopActionClaimRequest) -> 
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if payload.get("action"):
-        await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30))
+        await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30))
     return payload
 
 
@@ -3354,7 +3354,7 @@ async def app_agent_desktop_action_claim(request: DesktopActionClaimRequest) -> 
 async def app_agent_desktop_action_complete(request: DesktopActionCompleteRequest) -> dict[str, Any]:
     try:
         payload = await asyncio.to_thread(
-            AGENT_GATEWAY.complete_desktop_action,
+            AGENT_GATEWAY.desktop.complete_desktop_action,
             {
                 "bridgeId": request.bridge_id,
                 "bridgeCredential": request.bridge_credential,
@@ -3366,7 +3366,7 @@ async def app_agent_desktop_action_complete(request: DesktopActionCompleteReques
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30))
+    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30))
     return payload
 
 
@@ -3374,13 +3374,13 @@ async def app_agent_desktop_action_complete(request: DesktopActionCompleteReques
 async def app_agent_desktop_action_cancel(action_id: str, request: DesktopActionCancelRequest) -> dict[str, Any]:
     try:
         payload = await asyncio.to_thread(
-            AGENT_GATEWAY.request_desktop_action_cancel,
+            AGENT_GATEWAY.desktop.request_desktop_action_cancel,
             action_id,
             {"reason": request.reason},
         )
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30))
+    await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30))
     return payload
 
 
@@ -8863,7 +8863,7 @@ async def call_agent_tool(tool_name: str, request: Request, tool_request: AgentT
     elif tool_name == "vrcforge_ask_user":
         await EVENT_BUS.broadcast("agentQuestions", AGENT_GATEWAY.questions.list(limit=30, session_id=session_id, project_root=project_root))
     elif tool_name == "vrcforge_agent_desktop_action":
-        await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.list_desktop_actions(limit=30, session_id=session_id, project_root=project_root))
+        await EVENT_BUS.broadcast("agentDesktopActions", AGENT_GATEWAY.desktop.list_desktop_actions(limit=30, session_id=session_id, project_root=project_root))
     elif tool_name == "vrcforge_apply_approved":
         await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.list_approvals()})
         if isinstance(payload, dict) and payload.get("goalDelivery") is not None:
@@ -14699,7 +14699,7 @@ def memory_review_background_blocker() -> str:
         return "active_project_write"
     if AGENT_GATEWAY._active_apply_recoveries():
         return "active_project_recovery"
-    active_desktop = AGENT_GATEWAY.list_active_desktop_actions(limit=1)
+    active_desktop = AGENT_GATEWAY.desktop.list_active_desktop_actions(limit=1)
     if int(active_desktop.get("count") or len(active_desktop.get("actions") or [])) > 0:
         return "active_desktop_action"
     if int(RUNTIME_LANE_BUDGET.snapshot().get("interactive") or 0) > 0:
@@ -19166,7 +19166,7 @@ def register_agent_gateway_tools() -> None:
         "vrcforge_agent_desktop_action",
         "Run an action only inside a user-started Computer Use turn. Supported params.operation values are list_apps, launch_app, list_windows, get_window, window_state/get_window_state, inspect_window, screenshot, focus_window/activate_window, move_pointer, click, drag, scroll, type_text, key_press/press_key, focus_element, invoke_element, set_value, secondary_action/perform_secondary_action, wait, and sequence. Start with list_apps, carry the returned window handle plus app/process identity, then use window_state for a bounded screenshot and/or UI Automation text. Input actions require and automatically activate a target window; click and value/secondary actions can use a fresh elementIndex. Never target terminals, authentication/security UI, password managers, ChatGPT/Codex, or Windows-key shortcuts. Before deleting, sending/submitting, uploading, installing, changing permissions/settings, or making financial/medical actions, call vrcforge_ask_user at action time unless the exact action was explicitly pre-approved and policy permits that. Execution stays visible, cancellable, and scoped to the explicit turn.",
         "supervised-write",
-        AGENT_GATEWAY.request_turn_authorized_desktop_action_and_wait,
+        AGENT_GATEWAY.desktop.request_turn_authorized_desktop_action_and_wait,
         write=True,
         requires_user_activation=True,
     )

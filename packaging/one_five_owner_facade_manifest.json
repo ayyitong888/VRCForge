@@ -263,41 +263,6 @@
           ]
         }
       ]
-    },
-    {
-      "id": "gateway.desktop-computer-use-stopgap-facade",
-      "facades": [
-        {
-          "source": "agent_gateway.py",
-          "scope": "class",
-          "class": "AgentGateway",
-          "methods": [
-            "_desktop_gateway_call",
-            "computer_use_turn_active",
-            "computer_use_model_invocable",
-            "require_computer_use_enabled",
-            "issue_computer_use_turn_grant",
-            "consume_computer_use_turn_grant",
-            "request_turn_authorized_desktop_action_and_wait",
-            "request_desktop_action",
-            "request_desktop_action_and_wait",
-            "list_desktop_actions",
-            "list_active_desktop_actions",
-            "get_desktop_action_result",
-            "register_desktop_bridge",
-            "heartbeat_desktop_bridge",
-            "unregister_desktop_bridge",
-            "desktop_bridge_status",
-            "claim_desktop_action",
-            "request_desktop_action_cancel",
-            "desktop_action_cancel_requested",
-            "complete_desktop_action"
-          ]
-        }
-      ],
-      "markers": [
-        {"source": "agent_gateway.py", "text": "# STOPGAP(1.5): preserve the accepted Gateway call surface while the"}
-      ]
     }
   ]
 }

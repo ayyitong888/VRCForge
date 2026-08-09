@@ -7,6 +7,7 @@ import sys
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from desktop_apps import WindowsAppCatalog
 from desktop_executor import DesktopActionCancelled, DesktopExecutorError, WindowsDesktopController
 from desktop_operations import canonical_desktop_params
 from desktop_worker import EmbeddedDesktopWorker
+from runtime_planner_service import RuntimePlannerService
 
 
 class FakeDesktopController:
@@ -268,7 +270,11 @@ class DesktopExecutorTests(unittest.TestCase):
             gateway.vision_analyze_fn = analyze
             result = {"status": "completed", "result": {"operation": "screenshot", "artifactPath": str(path), "width": 2, "height": 2}}
             vision = gateway._desktop_action_vision_analysis("inspect settings", result)  # noqa: SLF001
-            observation = gateway._llm_loop_step_observation(  # noqa: SLF001
+            planner = object.__new__(RuntimePlannerService)
+            planner._desktop = SimpleNamespace(  # type: ignore[attr-defined]  # noqa: SLF001
+                summarize_action_result=gateway.desktop.desktop_action_observation
+            )
+            observation = planner._llm_loop_step_observation(  # noqa: SLF001
                 {"tool": "vrcforge_agent_desktop_action", "result": result, "desktopVision": vision}
             )
 
@@ -290,7 +296,7 @@ class DesktopExecutorTests(unittest.TestCase):
             )
             worker.start()
             try:
-                result = gateway.request_desktop_action_and_wait(
+                result = gateway.desktop.request_desktop_action_and_wait(
                     {
                         "action": "computer_use",
                         "prompt": "execute fake operation",
@@ -319,7 +325,7 @@ class DesktopExecutorTests(unittest.TestCase):
             )
             worker.start()
             try:
-                requested = gateway.request_desktop_action(
+                requested = gateway.desktop.request_desktop_action(
                     {
                         "action": "computer_use",
                         "prompt": "wait until cancelled",
@@ -333,7 +339,7 @@ class DesktopExecutorTests(unittest.TestCase):
                     if row and row.get("status") == "claimed":
                         break
                     time.sleep(0.01)
-                gateway.request_desktop_action_cancel(action_id, {"reason": "test cancellation"})
+                gateway.desktop.request_desktop_action_cancel(action_id, {"reason": "test cancellation"})
                 deadline = time.monotonic() + 2
                 while time.monotonic() < deadline:
                     row = gateway.desktop._desktop_action_rows_by_id().get(action_id)  # noqa: SLF001
@@ -359,9 +365,9 @@ class DesktopExecutorTests(unittest.TestCase):
                 heartbeat_interval_seconds=0.05,
             )
             worker.start()
-            self.assertTrue(gateway.desktop_bridge_status()["connected"])
+            self.assertTrue(gateway.desktop.desktop_bridge_status()["connected"])
             worker.stop()
-            self.assertFalse(gateway.desktop_bridge_status()["connected"])
+            self.assertFalse(gateway.desktop.desktop_bridge_status()["connected"])
 
     def test_interactive_text_and_bridge_credential_are_not_persisted(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -375,7 +381,7 @@ class DesktopExecutorTests(unittest.TestCase):
                 "vrcforge_agent_desktop_action",
                 "test desktop action",
                 "supervised-write",
-                gateway.request_desktop_action_and_wait,
+                gateway.desktop.request_desktop_action_and_wait,
                 write=True,
             )
             worker = EmbeddedDesktopWorker(

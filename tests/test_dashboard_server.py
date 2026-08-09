@@ -1622,7 +1622,7 @@ class DashboardServerTests(unittest.TestCase):
             root = Path(tmp)
             gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
             gateway.record_runtime_queue_event({"clientTurnId": "turn-a", "sessionId": "session-a", "message": "queued"})
-            gateway.request_desktop_action({"action": "browser", "sessionId": "session-a", "message": "open"})
+            gateway.desktop.request_desktop_action({"action": "browser", "sessionId": "session-a", "message": "open"})
             gateway.goal.create_agent_goal({"title": "Scoped goal", "sessionId": "session-a"})
             gateway.create_agent_memory({"scope": "user", "text": "user memory", "kind": "preference"})
             original_gateway = dashboard_server.AGENT_GATEWAY
@@ -1802,7 +1802,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(len(captured), 2)
         self.assertNotIn("vrcforge_agent_desktop_action", captured[0])
         self.assertIn("vrcforge_agent_desktop_action", captured[1])
-        self.assertFalse(dashboard_server.AGENT_GATEWAY.computer_use_turn_active())
+        self.assertFalse(dashboard_server.AGENT_GATEWAY.desktop.computer_use_turn_active())
 
     def test_computer_use_turn_grant_is_required_bound_and_single_use(self) -> None:
         response = LlmPlanResponse(
@@ -1905,7 +1905,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(actions[0]["action"], "computer_use")
         self.assertEqual(actions[0]["clientTurnId"], "turn-test")
         self.assertTrue(
-            any(call.args and call.args[0] == dashboard_server.AGENT_GATEWAY.request_desktop_action for call in to_thread.call_args_list)
+                any(call.args and call.args[0] == dashboard_server.AGENT_GATEWAY.desktop.request_desktop_action for call in to_thread.call_args_list)
         )
 
     def test_desktop_bridge_lifecycle_claim_and_complete(self) -> None:
@@ -2423,16 +2423,16 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             gateway = AgentGateway(root / "config.json", root / "audit")
-            registration = gateway.register_desktop_bridge(
+            registration = gateway.desktop.register_desktop_bridge(
                 {"name": "projection-bridge", "provider": "mock-provider", "capabilities": ["computer_use"]}
             )
             bridge_id = registration["bridge"]["bridgeId"]
             bridge_credential = registration["bridgeCredential"]
-            action_id = gateway.request_desktop_action({"action": "computer_use", "prompt": "old request"})["actionId"]
-            gateway.claim_desktop_action({"bridgeId": bridge_id, "bridgeCredential": bridge_credential})
+            action_id = gateway.desktop.request_desktop_action({"action": "computer_use", "prompt": "old request"})["actionId"]
+            gateway.desktop.claim_desktop_action({"bridgeId": bridge_id, "bridgeCredential": bridge_credential})
             for index in range(230):
-                gateway.request_desktop_action({"action": "annotation", "prompt": f"newer legacy row {index}"})
-            gateway.complete_desktop_action(
+                gateway.desktop.request_desktop_action({"action": "annotation", "prompt": f"newer legacy row {index}"})
+            gateway.desktop.complete_desktop_action(
                 {
                     "bridgeId": bridge_id,
                     "bridgeCredential": bridge_credential,
@@ -2440,7 +2440,7 @@ class DashboardServerTests(unittest.TestCase):
                     "status": "completed",
                 }
             )
-            listing = gateway.list_desktop_actions(limit=5)
+            listing = gateway.desktop.list_desktop_actions(limit=5)
 
         self.assertEqual(listing["actions"][0]["actionId"], action_id)
         self.assertEqual(listing["actions"][0]["status"], "completed")
@@ -3508,12 +3508,12 @@ class DashboardServerTests(unittest.TestCase):
             stored_project = str(project).replace("/", "\\")
             query_project = str(project).replace("\\", "/")
             gateway.record_runtime_queue_event({"clientTurnId": "turn-path", "message": "queued", "projectRoot": stored_project})
-            gateway.request_desktop_action({"action": "computer_use", "prompt": "inspect", "projectRoot": stored_project})
+            gateway.desktop.request_desktop_action({"action": "computer_use", "prompt": "inspect", "projectRoot": stored_project})
             gateway.goal.create_agent_goal({"title": "Path scoped goal", "projectRoot": stored_project})
             gateway.create_agent_memory({"scope": "project", "text": "Path scoped memory", "projectRoot": stored_project})
 
             runs = gateway.list_runtime_runs(project_root=query_project, limit=10)
-            actions = gateway.list_desktop_actions(project_root=query_project, limit=10)
+            actions = gateway.desktop.list_desktop_actions(project_root=query_project, limit=10)
             goals = gateway.goal.list_agent_goals(project_root=query_project, limit=10)
             memories = gateway.list_agent_memory(project_root=query_project, limit=10)
 

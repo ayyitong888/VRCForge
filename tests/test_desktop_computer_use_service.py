@@ -38,14 +38,14 @@ def test_desktop_owner_holds_all_state_and_embedded_worker(tmp_path: Path) -> No
 def test_configure_paths_rebinds_owner_and_clears_transient_authority(tmp_path: Path) -> None:
     gateway = _enabled_gateway(tmp_path)
     owner = gateway.desktop
-    registration = gateway.register_desktop_bridge(
+    registration = gateway.desktop.register_desktop_bridge(
         {
             "name": "fixture",
             "provider": "test",
             "capabilities": ["computer_use"],
         }
     )
-    grant = gateway.issue_computer_use_turn_grant({"clientTurnId": "turn-before-rebind"})
+    grant = gateway.desktop.issue_computer_use_turn_grant({"clientTurnId": "turn-before-rebind"})
     assert registration["bridgeCredential"]
     assert grant["grantId"]
     assert owner._desktop_bridges  # noqa: SLF001
@@ -63,17 +63,13 @@ def test_configure_paths_rebinds_owner_and_clears_transient_authority(tmp_path: 
     assert owner._computer_use_turn_grants == {}  # noqa: SLF001
 
 
-def test_domain_error_stays_narrow_and_gateway_facade_preserves_http_status(tmp_path: Path) -> None:
+def test_composed_owner_error_preserves_gateway_and_worker_status_contract(tmp_path: Path) -> None:
     gateway = _enabled_gateway(tmp_path)
 
-    with pytest.raises(DesktopActionBrokerError) as domain_error:
+    with pytest.raises(AgentGatewayError) as domain_error:
         gateway.desktop.register_desktop_bridge({"capabilities": []})
     assert domain_error.value.status_code == 400
-
-    with pytest.raises(AgentGatewayError) as gateway_error:
-        gateway.register_desktop_bridge({"capabilities": []})
-    assert gateway_error.value.status_code == 400
-    assert not isinstance(gateway_error.value, DesktopActionBrokerError)
+    assert isinstance(domain_error.value, DesktopActionBrokerError)
 
 
 def test_stop_blocked_keeps_bridge_authority_until_threads_are_owned_down(
@@ -114,5 +110,15 @@ def test_root_modules_expose_no_second_desktop_owner() -> None:
     assert "DESKTOP_EXECUTOR" not in dashboard_source
     assert "DESKTOP_CAPTURE_DIR" not in dashboard_source
     assert "from agent_gateway import" not in worker_source
-    assert "STOPGAP(1.5)" in gateway_source
+    assert "STOPGAP(1.5)" not in gateway_source
+    for facade in (
+        "_desktop_gateway_call",
+        "computer_use_turn_active",
+        "require_computer_use_enabled",
+        "request_desktop_action",
+        "list_desktop_actions",
+        "register_desktop_bridge",
+        "complete_desktop_action",
+    ):
+        assert f"def {facade}(" not in gateway_source
     assert "_impl" not in (root / "desktop_computer_use_service.py").read_text(encoding="utf-8")

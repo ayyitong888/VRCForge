@@ -84,6 +84,9 @@ class DesktopComputerUsePorts:
     redact_sensitive: Callable[[Any], Any]
     normalize_filesystem_path: Callable[[str], str]
     normalize_execution_mode: Callable[[Any], str]
+    error_factory: Callable[[str, int], Exception] = (
+        lambda detail, status: DesktopActionBrokerError(detail, status)
+    )
     on_actions_changed: Callable[[], None] | None = None
     controller_factory: Callable[[Path], DesktopController] | None = None
 
@@ -145,9 +148,8 @@ class DesktopComputerUseService:
     def embedded_worker_status(self) -> dict[str, Any]:
         return self._worker.status()
 
-    @staticmethod
-    def _error(message: str, status_code: int = 400) -> DesktopActionBrokerError:
-        return DesktopActionBrokerError(message, status_code)
+    def _error(self, message: str, status_code: int = 400) -> Exception:
+        return self._ports.error_factory(message, status_code)
 
     def _text(self, value: Any, limit: int = 240) -> str:
         return self._ports.summarize_text(str(value if value is not None else ""), limit)

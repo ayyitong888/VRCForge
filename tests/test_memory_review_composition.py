@@ -57,7 +57,7 @@ def test_gateway_runtime_and_desktop_activity_use_constructor_bound_signal(tmp_p
         gateway.runtime_message({"message": "Trigger the interactive lane."})
     assert reasons == ["runtime_message"]
 
-    gateway.request_desktop_action(
+    gateway.desktop.request_desktop_action(
         {
             "action": "annotation",
             "prompt": "Record a local annotation.",

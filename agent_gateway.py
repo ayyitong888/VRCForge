@@ -158,6 +158,13 @@ class AgentGatewayError(RuntimeError):
         self.status_code = status_code
 
 
+class AgentDesktopGatewayError(AgentGatewayError, DesktopActionBrokerError):
+    """Desktop boundary error understood by both Gateway and worker callers."""
+
+    def __init__(self, message: str, status_code: int = 400) -> None:
+        AgentGatewayError.__init__(self, message, status_code)
+
+
 def _split_lf_jsonl_lines(data: bytes, *, keepends: bool = False) -> list[bytes]:
     """Split JSONL only on its LF record delimiter, never on VT/FF."""
 
@@ -1960,6 +1967,10 @@ class AgentGateway:
                 redact_sensitive=redact_sensitive,
                 normalize_filesystem_path=command_safety.normalize_filesystem_path,
                 normalize_execution_mode=normalize_execution_mode,
+                error_factory=lambda detail, status: AgentDesktopGatewayError(
+                    detail,
+                    status,
+                ),
                 on_actions_changed=desktop_actions_changed,
                 controller_factory=desktop_controller_factory,
             ),
@@ -2303,7 +2314,7 @@ class AgentGateway:
             self._serialize_tool(tool, config)
             for tool in self._tools.values()
             if self._tool_visible(tool, config, exposure_layer)
-            and (not tool.requires_user_activation or self.computer_use_model_invocable(config))
+            and (not tool.requires_user_activation or self._desktop.computer_use_model_invocable(config))
         ]
         return {
             "ok": True,
@@ -3626,7 +3637,7 @@ class AgentGateway:
                 None,
             )
             resolved_client_turn_id = str((matching_run or {}).get("clientTurnId") or "")
-        for action in self.list_active_desktop_actions(limit=32).get("actions", []):
+        for action in self._desktop.list_active_desktop_actions(limit=32).get("actions", []):
             action_id = str(action.get("actionId") or "")
             same_turn = bool(
                 resolved_client_turn_id
@@ -3640,7 +3651,7 @@ class AgentGateway:
             if not action_id or not (same_turn or same_session):
                 continue
             try:
-                self.request_desktop_action_cancel(action_id, {"reason": reason})
+                self._desktop.request_desktop_action_cancel(action_id, {"reason": reason})
                 cancelled_desktop_action_ids.append(action_id)
             except AgentGatewayError:
                 continue
@@ -3856,116 +3867,6 @@ class AgentGateway:
             }
         )
         return {"ok": True, "schema": "vrcforge.advanced_settings.v1", "settings": updated}
-
-    # STOPGAP(1.5): preserve the accepted Gateway call surface while the
-    # Dashboard consumers move to typed app composition. Delete this facade,
-    # including every delegate below, at the final seam-retirement gate.
-    def _desktop_gateway_call(self, callback: Callable[[], Any]) -> Any:
-        try:
-            return callback()
-        except DesktopActionBrokerError as exc:
-            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
-
-    def computer_use_turn_active(self) -> bool:
-        return self._desktop.computer_use_turn_active()
-
-    def computer_use_model_invocable(self, config: AgentGatewayConfig | None = None) -> bool:
-        return self._desktop.computer_use_model_invocable(config)
-
-    def require_computer_use_enabled(self) -> AgentGatewayConfig:
-        return self._desktop_gateway_call(self._desktop.require_computer_use_enabled)
-
-    def issue_computer_use_turn_grant(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.issue_computer_use_turn_grant(params))
-
-    def consume_computer_use_turn_grant(
-        self,
-        grant_id: str,
-        *,
-        session_id: str = "",
-        client_turn_id: str = "",
-        project_root: str = "",
-    ) -> None:
-        return self._desktop_gateway_call(
-            lambda: self._desktop.consume_computer_use_turn_grant(
-                grant_id,
-                session_id=session_id,
-                client_turn_id=client_turn_id,
-                project_root=project_root,
-            )
-        )
-
-    def request_turn_authorized_desktop_action_and_wait(
-        self,
-        params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return self._desktop_gateway_call(
-            lambda: self._desktop.request_turn_authorized_desktop_action_and_wait(params)
-        )
-
-    def request_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.request_desktop_action(params))
-
-    def request_desktop_action_and_wait(
-        self,
-        params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.request_desktop_action_and_wait(params))
-
-    def list_desktop_actions(
-        self,
-        *,
-        limit: int = 50,
-        session_id: str = "",
-        project_root: str = "",
-    ) -> dict[str, Any]:
-        return self._desktop_gateway_call(
-            lambda: self._desktop.list_desktop_actions(
-                limit=limit,
-                session_id=session_id,
-                project_root=project_root,
-            )
-        )
-
-    def list_active_desktop_actions(self, *, limit: int = 8) -> dict[str, Any]:
-        return self._desktop_gateway_call(
-            lambda: self._desktop.list_active_desktop_actions(limit=limit)
-        )
-
-    def get_desktop_action_result(self, action_id: str) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.get_desktop_action_result(action_id))
-
-    def register_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.register_desktop_bridge(params))
-
-    def heartbeat_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.heartbeat_desktop_bridge(params))
-
-    def unregister_desktop_bridge(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.unregister_desktop_bridge(params))
-
-    def desktop_bridge_status(self) -> dict[str, Any]:
-        return self._desktop_gateway_call(self._desktop.desktop_bridge_status)
-
-    def claim_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.claim_desktop_action(params))
-
-    def request_desktop_action_cancel(
-        self,
-        action_id: str,
-        params: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        return self._desktop_gateway_call(
-            lambda: self._desktop.request_desktop_action_cancel(action_id, params)
-        )
-
-    def desktop_action_cancel_requested(self, action_id: str) -> bool:
-        return self._desktop_gateway_call(
-            lambda: self._desktop.desktop_action_cancel_requested(action_id)
-        )
-
-    def complete_desktop_action(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self._desktop_gateway_call(lambda: self._desktop.complete_desktop_action(params))
 
     def replace_agent_progress(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = params or {}
@@ -5398,7 +5299,7 @@ class AgentGateway:
                 "tool": tool_name,
                 "error": f"Unknown skill: {tool_name}",
             }
-        user_activated_tool = bool(tool.requires_user_activation and self.computer_use_model_invocable(config))
+        user_activated_tool = bool(tool.requires_user_activation and self._desktop.computer_use_model_invocable(config))
         if (
             tool.name in RUNTIME_BLOCKED_SKILLS
             or (tool.write and not user_activated_tool)
@@ -5643,7 +5544,7 @@ class AgentGateway:
         return str(query_params.get("token") or "")
 
     def _serialize_tool(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
-        model_invocable = not tool.requires_user_activation or self.computer_use_model_invocable(config)
+        model_invocable = not tool.requires_user_activation or self._desktop.computer_use_model_invocable(config)
         return {
             "name": tool.name,
             "description": tool_usage_description(tool.name, tool.description, write=tool.write),
@@ -5657,7 +5558,7 @@ class AgentGateway:
 
     def _serialize_tool_registry_entry(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
         available = self._tool_visible(tool, config)
-        model_invocable = not tool.requires_user_activation or self.computer_use_model_invocable(config)
+        model_invocable = not tool.requires_user_activation or self._desktop.computer_use_model_invocable(config)
         risk = self._registry_risk_for_tool(tool)
         requires_approval = tool.write or risk in {"write_request", "advanced_write"}
         return {
