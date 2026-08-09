@@ -346,6 +346,71 @@ def test_publish_path_stops_after_verified_draft_and_never_publishes_it() -> Non
     assert 'Write-Host "Created, uploaded, and verified Draft GitHub Release $tag. It remains unpublished."' in final_tail
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="the regression is specific to Windows PowerShell native stderr",
+)
+@pytest.mark.parametrize(
+    ("stderr_text", "allow_missing", "expected_returncode"),
+    (
+        ("gh: Not Found (HTTP 404)", True, 0),
+        ("gh: authentication failed (HTTP 401)", True, 1),
+    ),
+)
+def test_publish_release_readback_only_tolerates_an_expected_missing_release(
+    tmp_path: Path,
+    stderr_text: str,
+    allow_missing: bool,
+    expected_returncode: int,
+) -> None:
+    source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("function Get-GitHubReleaseSnapshot {")
+    end = source.index("function Assert-RemoteTagTarget {", start)
+    function_source = source[start:end]
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    escaped_stderr = stderr_text.replace("(", "^(").replace(")", "^)")
+    (fake_bin / "gh.cmd").write_text(
+        f"@echo {escaped_stderr} 1>&2\r\n@exit /b 1\r\n",
+        encoding="utf-8",
+    )
+    allow_missing_switch = "-AllowMissing" if allow_missing else ""
+    probe = tmp_path / "probe.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Get-RequiredProperty { throw 'not reached' }\n"
+        f"{function_source}\n"
+        f"$result = Get-GitHubReleaseSnapshot -Tag 'v1.5.0' {allow_missing_switch}\n"
+        "if ($null -ne $result) { throw 'expected a null missing-release result' }\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["PATH"] = str(fake_bin) + os.pathsep + environment.get("PATH", "")
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(probe),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == expected_returncode, completed.stdout + completed.stderr
+    if expected_returncode:
+        assert "Unable to read back GitHub Release tag v1.5.0" in completed.stderr
+
+
 def test_publish_path_requires_version_bound_release_notes_and_reads_them_back() -> None:
     source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
     version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()

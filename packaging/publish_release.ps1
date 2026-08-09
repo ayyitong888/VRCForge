@@ -119,13 +119,26 @@ function Get-GitHubReleaseSnapshot {
     } else {
         "repos/{owner}/{repo}/releases/tags/$Tag"
     }
-    $apiOutput = @(& gh api $endpoint 2>$null)
-    $apiExitCode = $LASTEXITCODE
-    $apiJson = $apiOutput -join [System.Environment]::NewLine
-    if ($apiExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($apiJson)) {
-        if ($AllowMissing) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell can promote native stderr to a terminating
+        # NativeCommandError while the script-wide preference is Stop. Capture
+        # it with Continue so an expected REST 404 can be classified below.
+        $ErrorActionPreference = "Continue"
+        $apiOutput = @(& gh api $endpoint 2>&1)
+        $apiExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    $apiText = (@($apiOutput | ForEach-Object { [string]$_ }) -join [System.Environment]::NewLine).Trim()
+    if ($apiExitCode -ne 0) {
+        if ($AllowMissing -and $apiText -match "(?i)\bHTTP\s+404\b") {
             return $null
         }
+        throw "Unable to read back GitHub Release $releaseLocator through the GitHub REST API."
+    }
+    $apiJson = $apiText
+    if ([string]::IsNullOrWhiteSpace($apiJson)) {
         throw "Unable to read back GitHub Release $releaseLocator through the GitHub REST API."
     }
     $apiRelease = $apiJson | ConvertFrom-Json
