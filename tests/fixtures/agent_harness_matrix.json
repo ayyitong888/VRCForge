@@ -1,0 +1,27 @@
+{
+  "schema": "vrcforge.agent_harness_matrix.v1",
+  "selectionCases": [
+    {"id":"selection-compile-errors","prompt":"检查 Unity 当前的 C# 编译错误。","expectedTool":"vrcforge_get_compile_errors","forbiddenTools":["vrcforge_unity_status"]},
+    {"id":"selection-materials","prompt":"扫描这个 avatar 的材质，并列出 shader。","expectedTool":"vrcforge_scan_materials","forbiddenTools":["vrcforge_list_avatars"]},
+    {"id":"selection-blendshapes","prompt":"扫描 avatar 的 blendshape 名称。","expectedTool":"vrcforge_scan_blendshapes","forbiddenTools":["vrcforge_list_avatars"]},
+    {"id":"selection-parameters","prompt":"检查这个 avatar 的 Expression Parameters 使用情况。","expectedTool":"vrcforge_scan_parameters","forbiddenTools":["vrcforge_list_avatars"]},
+    {"id":"selection-fx","prompt":"读取 FX Animator 的层、状态和参数。","expectedTool":"vrcforge_scan_fx_animator","forbiddenTools":["vrcforge_health"]},
+    {"id":"selection-controls","prompt":"扫描这个 avatar 的 expression menu controls 及关联参数。","expectedTool":"vrcforge_scan_avatar_controls","forbiddenTools":["vrcforge_list_avatars"]},
+    {"id":"selection-sdk-performance","prompt":"计算这个 VRChat avatar 的 SDK performance rating。","expectedTool":"vrcforge_scan_avatar_performance","forbiddenTools":["vrcforge_list_avatars","vrcforge_scan_thry_avatar_performance"]},
+    {"id":"selection-memory-performance","prompt":"计算这个 avatar 的 Thry VRAM 和 mesh memory。","expectedTool":"vrcforge_scan_thry_avatar_performance","forbiddenTools":["vrcforge_list_avatars","vrcforge_scan_avatar_performance"]},
+    {"id":"selection-descriptor","prompt":"读取这个 avatar 的 VRCAvatarDescriptor 视点和 playable layers。","expectedTool":"vrcforge_read_avatar_descriptor","forbiddenTools":["vrcforge_list_avatars"]},
+    {"id":"selection-items","prompt":"列出 avatar hierarchy 里的对象和组件类型。","expectedTool":"vrcforge_scan_avatar_items","forbiddenTools":["vrcforge_list_avatars","vrcforge_get_gameobject"]},
+    {"id":"selection-unity-status","prompt":"检查 Unity MCP 是否已连接。","expectedTool":"vrcforge_unity_status","forbiddenTools":[]},
+    {"id":"selection-avatar-list","prompt":"列出当前 Unity 项目里的所有 avatar。","expectedTool":"vrcforge_list_avatars","forbiddenTools":[]},
+    {"id":"selection-runtime-health","prompt":"检查 VRCForge 后端健康状态。","expectedTool":"vrcforge_health","forbiddenTools":[]}
+  ],
+  "completionCases": [
+    {"id":"completion-read-ok","write":false,"result":{"ok":true,"summary":"Read completed."},"expectedStatus":"ok","expectedNextStep":"done"},
+    {"id":"completion-nested-failure","write":false,"result":{"ok":true,"status":"executed","result":{"ok":false,"status":"failed","error":"Read failed."}},"expectedStatus":"failed","expectedNextStep":"tool_failed"},
+    {"id":"completion-approval-pending","write":true,"result":{"ok":true,"status":"pending_approval","approval":{"id":"approval-1"}},"expectedStatus":"needs_user_action","expectedNextStep":"needs_user_action"},
+    {"id":"completion-readback-failed","write":true,"result":{"ok":true,"status":"applied","readbackVerified":false},"expectedStatus":"needs_user_action","expectedNextStep":"needs_user_action"},
+    {"id":"completion-readback-passed-visual-deferred","write":true,"result":{"ok":true,"status":"applied","readbackVerified":true,"visualProof":{"status":"unavailable"}},"expectedStatus":"ok","expectedNextStep":"done"},
+    {"id":"completion-required-visual-missing","write":true,"result":{"ok":true,"status":"applied","readbackVerified":true,"visualProof":{"status":"unavailable"},"verification":{"required":["visual"]}},"expectedStatus":"needs_user_action","expectedNextStep":"needs_user_action"},
+    {"id":"completion-shell-failed","write":true,"result":{"ok":false,"status":"failed","error":"Shell command failed."},"expectedStatus":"failed","expectedNextStep":"tool_failed"}
+  ]
+}
