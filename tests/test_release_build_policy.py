@@ -15,6 +15,27 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_runtime_and_localized_about_versions_follow_release_version() -> None:
+    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+
+    runtime_sources = (
+        REPO_ROOT / "agent_mcp_2026.py",
+        REPO_ROOT / "agent_gateway.py",
+        REPO_ROOT / "tools" / "vrcforge_agent_mcp_stdio.py",
+    )
+    for path in runtime_sources:
+        source = path.read_text(encoding="utf-8")
+        assert f'server_version="{version}"' in source or f'server_version: str = "{version}"' in source
+
+    for locale_name in ("en-US", "ja-JP", "zh-CN", "zh-TW"):
+        locale = json.loads(
+            (REPO_ROOT / "src" / "locales" / f"{locale_name}.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert locale["settings"]["aboutProduct"] == f"VRCForge {version}"
+
+
 def test_tauri_manifest_selects_the_desktop_app_as_default_binary() -> None:
     manifest = tomllib.loads(
         (REPO_ROOT / "src-tauri" / "Cargo.toml").read_text(encoding="utf-8")
@@ -299,7 +320,8 @@ def test_publish_path_stops_after_verified_draft_and_never_publishes_it() -> Non
 
 def test_publish_path_requires_version_bound_release_notes_and_reads_them_back() -> None:
     source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
-    notes = (REPO_ROOT / "docs" / "RELEASE_NOTES_1.4.0.md").read_text(encoding="utf-8")
+    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    notes = (REPO_ROOT / "docs" / f"RELEASE_NOTES_{version}.md").read_text(encoding="utf-8")
 
     assert "function Get-VersionBoundReleaseNotes" in source
     assert '"${Target}:docs/RELEASE_NOTES_$Version.md"' in source

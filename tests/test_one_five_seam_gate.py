@@ -160,7 +160,7 @@ def test_checked_in_manifest_is_exhaustive_and_keeps_exact_history() -> None:
     gate = load_gate()
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
-    report = gate.inspect_tree(REPO_ROOT, manifest, "1.4.0")
+    report = gate.inspect_tree(REPO_ROOT, manifest, "1.5.0")
 
     assert report["ok"] is True
     assert report["manifestErrors"] == []

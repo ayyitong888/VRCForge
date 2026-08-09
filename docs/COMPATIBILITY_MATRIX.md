@@ -1,6 +1,6 @@
 # VRCForge Compatibility Matrix
 
-This matrix is the public compatibility checklist for the 1.4.0 release line
+This matrix is the public compatibility checklist for the 1.5.0 release line
 and future stable refreshes. It
 does not claim that every avatar, outfit, or shader stack is supported. It
 records the components VRCForge must detect, report, and gate before stable
@@ -8,7 +8,7 @@ release work can be accepted or refreshed.
 
 ## Stable Compatibility Targets
 
-| Area | Current target | Release evidence | 1.4 stable expectation |
+| Area | Current target | Release evidence | 1.5 stable expectation |
 | --- | --- | --- | --- |
 | Windows | Windows x64 installer and portable payload | Strict x64 release build and packaged smokes passed | Use the release notes for the tested installation, migration, uninstall, and portable-launch boundaries |
 | Unity | Unity 2022.3 LTS VRChat avatar projects | Golden Path Matrix and Unity-package import smokes use Unity project roots | Doctor reports Unity version and project validity clearly |
@@ -84,7 +84,7 @@ operating-system compromise.
 | Booth package contents | Local only | No paid asset payloads | No | No | No |
 | Validation metadata | Yes | Yes, redacted | Redacted summary | Redacted summary | Schema and variables only |
 
-## 1.4 Evidence Rule
+## 1.5 Evidence Rule
 
 Before a future stable release or stable refresh is published, every stable row
 above needs either fresh evidence in the Golden Path Matrix / proof matrix or

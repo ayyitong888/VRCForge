@@ -5,7 +5,7 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.4.0`. Latest published stable release:
+Current source / target release: `1.5.0`. Latest published stable release:
 `1.4.0` (`v1.4.0`).
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview

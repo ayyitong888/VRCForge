@@ -276,7 +276,7 @@ def run_stdio_server(bridge: VRCForgeBridge) -> None:
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.4.0",
+        server_version="1.5.0",
     )
     run_stdio_loop(router)
 

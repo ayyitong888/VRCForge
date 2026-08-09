@@ -4458,7 +4458,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.4.0",
+        server_version="1.5.0",
     )
     return create_agent_mcp_2026_asgi_app(
         router,
