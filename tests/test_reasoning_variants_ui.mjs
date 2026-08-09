@@ -12,7 +12,8 @@ const api = read("src/lib/api/app.ts");
 const rustCommands = read("src-tauri/src/commands.rs");
 const rustMain = read("src-tauri/src/main.rs");
 
-assert.match(hook, /fetchReasoningVariants\(endpoint, \{ provider: apiProvider, model: apiModel\.trim\(\) \}\)/);
+assert.match(hook, /fetchReasoningVariants\(endpoint, \{ provider: apiProvider, model: apiModel\.trim\(\), api_type: apiType \}\)/);
+assert.match(hook, /\[endpoint, runtimeConnected, apiProvider, apiModel, apiType\]/);
 assert.doesNotMatch(hook, /setApiThinkingLevel\(\(current\)/);
 assert.match(hook, /thinking_level: apiThinkingLevel === "default" \? "" : apiThinkingLevel/g);
 
@@ -26,6 +27,7 @@ assert.doesNotMatch(settings, /const REASONING_LEVELS/);
 assert.match(api, /"fetch_reasoning_variants"/);
 assert.match(api, /\/api\/app\/provider\/reasoning-variants/);
 assert.match(rustCommands, /pub async fn fetch_reasoning_variants/);
+assert.match(rustCommands, /"api_type": request\.api_type/);
 assert.match(rustCommands, /"thinking_level"\.to_string\(\)[\s\S]*request\.thinking_level\.unwrap_or_default\(\)/);
 assert.match(rustMain, /fetch_reasoning_variants/);
 

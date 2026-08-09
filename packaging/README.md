@@ -123,13 +123,16 @@ agent chat from opening.
 
 The installer install/uninstall smoke is reusable on any Windows x64 machine.
 Run it from an elevated shell, or start it with UAC from a non-elevated shell.
-Use a disposable install directory for smoke so an existing user install is not
-overwritten:
+Use only a compiler-scoped smoke flavor with a disposable install directory so
+an existing user install is not overwritten. The smoke installer must be built
+with `VRCFORGE_SMOKE_BUILD` and the same validated `VRCFORGE_NSIS_SMOKE_ID`
+shown below. Never point this command at `dist\release`: changing `/D` does not
+change a production installer's registry, shortcut, or uninstall identity.
 
 ```powershell
 $smokeId = [guid]::NewGuid().ToString("N")
 python scripts\smoke_installer_install_uninstall.py `
-  --installer dist\release\VRCForge_Offline_Installer_x64.exe `
+  --installer "artifacts\installer-smoke-build\$smokeId\VRCForge_Offline_Installer_x64.exe" `
   --smoke-id $smokeId `
   --install-dir "$env:ProgramFiles\VRCForge-Smoke-$smokeId" `
   --user-data-root "$env:LOCALAPPDATA\VRCForge\installer-smoke\$smokeId" `
@@ -142,7 +145,7 @@ overwriting or uninstalling a real VRCForge installation. Reports default to
 `artifacts\installer-smoke`; use `--artifacts-dir` only to relocate evidence.
 
 Manual Unity package fallback smoke should import `VRCForge.unitypackage` into a
-fresh Unity 2022.3 project and verify zero compiler errors, protocol
+fresh supported VCC VRChat Avatar project on Unity 2022.3 and verify zero compiler errors, protocol
 `2026-07-28`, all 64 VRCForge tools, automatic App connection to that exact
 project, a UTF-8 read, an approved checkpointed write/readback/restore, and
 automatic reconnect after Unity domain reload and App restart. Folder entries

@@ -203,6 +203,10 @@ def test_installer_smoke_documentation_uses_the_exact_isolated_identity() -> Non
     source = (REPO_ROOT / "packaging" / "README.md").read_text(encoding="utf-8")
 
     assert '$smokeId = [guid]::NewGuid().ToString("N")' in source
+    assert "compiler-scoped smoke flavor" in source
+    assert "Never point this command at `dist\\release`" in source
+    assert "artifacts\\installer-smoke-build\\$smokeId\\VRCForge_Offline_Installer_x64.exe" in source
+    assert "--installer dist\\release\\VRCForge_Offline_Installer_x64.exe" not in source
     assert "--smoke-id $smokeId" in source
     assert '--install-dir "$env:ProgramFiles\\VRCForge-Smoke-$smokeId"' in source
     assert '--user-data-root "$env:LOCALAPPDATA\\VRCForge\\installer-smoke\\$smokeId"' in source

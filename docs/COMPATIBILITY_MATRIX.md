@@ -10,7 +10,7 @@ release work can be accepted or refreshed.
 
 | Area | Current target | Release evidence | 1.5 stable expectation |
 | --- | --- | --- | --- |
-| Windows | Windows x64 installer and portable payload | Strict x64 release build and packaged smokes passed | Use the release notes for the tested installation, migration, uninstall, and portable-launch boundaries |
+| Windows | Windows x64 installer and portable payload | Local candidate build, packaged smokes, and isolated elevated install/uninstall pass; strict final-hash rebuild and clean-environment installer rerun remain release gates | Use the release notes for the tested installation, migration, uninstall, and portable-launch boundaries |
 | Unity | Unity 2022.3 LTS VRChat avatar projects | Golden Path Matrix and Unity-package import smokes use Unity project roots | Doctor reports Unity version and project validity clearly |
 | VRCForge MCP 2.0 Core | Self-contained Unity package, MCP 2.0 (`2026-07-28`), fixed 64-tool contract | Clean import, direct App connection, `tools/list`, approval/checkpoint/write/readback/restore/reconnect evidence | No external MCP runtime is required; older clients fail with an update instruction |
 | VRChat SDK | VRChat SDK3 Avatar package | Validation report and Build/Test readiness detect SDK state | Missing SDK is a clear blocker, not a generic scan failure |
