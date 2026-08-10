@@ -25,6 +25,7 @@ docs/*
 !docs/COMPATIBILITY_MATRIX.md
 !docs/RELEASE_NOTES_1.4.0.md
 !docs/RELEASE_NOTES_1.5.0.md
+!docs/RELEASE_NOTES_1.5.1.md
 
 AGENTS.md
 CLAUDE.md

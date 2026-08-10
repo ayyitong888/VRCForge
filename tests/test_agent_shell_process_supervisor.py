@@ -335,23 +335,22 @@ def test_background_completion_emits_one_bounded_runtime_event(tmp_path: Path) -
         on_finished=events.append,
     )
 
+    process.feed("terminal-marker\n")
     process.finish(0)
     wait_until(lambda: len(events) == 1)
 
-    assert events == [
-        {
-            "runtimeSessionId": "chat-a",
-            "turnId": "turn-a",
-            "clientTurnId": "client-a",
-            "shellSessionId": started["sessionId"],
-            "status": "finished",
-            "exitCode": 0,
-            "timedOut": False,
-            "cancelled": False,
-            "terminationFailed": False,
-            "finishedAt": events[0]["finishedAt"],
-        }
-    ]
+    event = events[0]
+    assert event["runtimeSessionId"] == "chat-a"
+    assert event["turnId"] == "turn-a"
+    assert event["clientTurnId"] == "client-a"
+    assert event["shellSessionId"] == started["sessionId"]
+    assert event["status"] == "finished"
+    assert event["exitCode"] == 0
+    assert event["timedOut"] is False
+    assert event["cancelled"] is False
+    assert event["terminationFailed"] is False
+    assert event["result"]["stdout"] == "terminal-marker\n"
+    assert event["result"]["stdoutTruncated"] is False
     assert "secret command" not in str(events)
     supervisor.shutdown(grace_seconds=0.1)
 

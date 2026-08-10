@@ -28,13 +28,15 @@ def test_offline_agent_harness_runs_the_real_runtime_selection_and_completion_ga
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads(completed.stdout)
-    assert report["schema"] == "vrcforge.agent_harness_report.v3"
+    assert report["schema"] == "vrcforge.agent_harness_report.v4"
     assert report["accepted"] is True
     assert report["releaseAccepted"] is False
     assert report["toolsExecuted"] is False
     assert report["selection"]["passed"] == report["selection"]["total"] == 13
     assert report["completion"]["passed"] == report["completion"]["total"] == 7
     assert report["loop"]["passed"] == report["loop"]["total"] == 9
+    assert report["chain"]["passed"] == report["chain"]["total"] == 5
+    assert report["selectionOnly"] is False
 
 
 def test_agent_harness_rejects_duplicate_case_ids(tmp_path: Path) -> None:

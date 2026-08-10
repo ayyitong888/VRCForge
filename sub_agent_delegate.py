@@ -76,6 +76,14 @@ def run_project_index_review(
         "role": "project_index_review",
         "readOnly": True,
         "summaryText": summary_text,
+        "plannerEvidence": {
+            "role": "project_index_review",
+            "changed": changed,
+            "addedFiles": int(summary.get("addedFiles") or 0),
+            "modifiedFiles": int(summary.get("modifiedFiles") or 0),
+            "deletedFiles": int(summary.get("deletedFiles") or 0),
+            "scannerFamilies": [str(item)[:120] for item in (scanner_families or [])[:12]],
+        },
         "projectIndex": result,
         "proposedNextAction": "Run targeted scanners for the affected families before planning writes." if changed else "No project-index-triggered scanner rerun is needed.",
     }
@@ -107,6 +115,12 @@ def run_outfit_package_inspection(
         "role": "outfit_package_inspection",
         "readOnly": True,
         "summaryText": summary_text,
+        "plannerEvidence": {
+            "role": "outfit_package_inspection",
+            "unityPackageCount": int(summary.get("unityPackageCount") or 0),
+            "prefabCandidateCount": int(summary.get("prefabCandidateCount") or 0),
+            "textureCount": int(summary.get("textureCount") or 0),
+        },
         "inspection": result,
         "proposedNextAction": "Create a supervised import plan if the package has a UnityPackage or prefab candidate.",
     }
@@ -143,6 +157,14 @@ def run_validation_triage(
         "role": "validation_triage",
         "readOnly": True,
         "summaryText": summary_text,
+        "plannerEvidence": {
+            "role": "validation_triage",
+            "severityCounts": {
+                "Error": int(severity_counts.get("Error") or 0),
+                "Warning": int(severity_counts.get("Warning") or 0),
+                "Suggestion": int(severity_counts.get("Suggestion") or 0),
+            },
+        },
         "validation": result,
         "proposedNextAction": "Convert selected validation findings into separate supervised fix plans.",
     }
@@ -167,6 +189,11 @@ def run_selected_context_review(payload: dict[str, Any], cancel_event: Any) -> d
         "role": "selected_context_review",
         "readOnly": True,
         "summaryText": summary_text,
+        "plannerEvidence": {
+            "role": "selected_context_review",
+            "selectedTextPreview": preview,
+            "selectedTextCharacters": len(selected_text),
+        },
         "selectedTextPreview": preview,
         "selectedTextCharacters": len(selected_text),
         "proposedNextAction": "Use this scoped sub-agent thread for follow-up review without branching the main chat history.",
@@ -187,6 +214,7 @@ def run_package_install_diagnosis(
     )
     symptoms = result.get("symptoms") if isinstance(result.get("symptoms"), list) else []
     titles = [str(item.get("title") or item.get("code") or "") for item in symptoms if isinstance(item, dict)]
+    symptom_codes = [str(item.get("code") or "") for item in symptoms if isinstance(item, dict)]
     summary_text = f"Package install diagnosis found {len(symptoms)} symptom(s): {', '.join(titles[:4]) or 'none'}."
     return {
         "ok": bool(result.get("ok")),
@@ -194,6 +222,12 @@ def run_package_install_diagnosis(
         "role": "package_install_diagnosis",
         "readOnly": True,
         "summaryText": summary_text,
+        "plannerEvidence": {
+            "role": "package_install_diagnosis",
+            "symptomCount": len(symptoms),
+            "symptomCodes": [item[:120] for item in symptom_codes[:8] if item],
+            "symptomTitles": [item[:240] for item in titles[:8] if item],
+        },
         "diagnostics": result,
         "proposedNextAction": "Create a separate supervised repair plan for any selected symptom.",
     }
@@ -224,6 +258,16 @@ def run_outfit_import_plan_review(
         "readOnly": True,
         "planOnly": True,
         "summaryText": summary_text,
+        "plannerEvidence": {
+            "role": "outfit_import_plan_review",
+            "readyToApply": ready,
+            "kind": str(plan.get("kind") or "")[:120],
+            "writeTarget": str(plan.get("writeTarget") or "")[:240],
+            "blockers": [
+                str(item)[:240]
+                for item in (plan.get("blockers") if isinstance(plan.get("blockers"), list) else [])[:8]
+            ],
+        },
         "importPlan": result,
         "proposedNextAction": "Queue the normal VRCForge approval from the parent thread if the user accepts this plan." if ready else "Resolve package ambiguity before requesting a write.",
     }
@@ -278,6 +322,11 @@ def run_skill_delegate(
         "readOnly": True,
         "toolName": tool_name,
         "summaryText": summary_text,
+        "plannerEvidence": {
+            "role": "skill_delegate",
+            "toolName": tool_name[:160],
+            "summary": summary_text[:600],
+        },
         "result": result,
         "proposedNextAction": "Review the delegated skill output in the parent thread before planning any write.",
     }

@@ -51,6 +51,215 @@ def test_sub_agent_registry_runs_records_and_retries(tmp_path):
     assert retried["task"]["displayName"] == "Kikyo"
 
 
+def test_task_linked_sub_agent_notifies_once_after_terminal_state_is_durable(tmp_path):
+    terminal_events: list[dict[str, object]] = []
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={
+            "project_index_review": lambda _payload, _cancel: {
+                "ok": True,
+                "summaryText": "found three relevant files",
+            }
+        },
+        task_finished=terminal_events.append,
+    )
+    created = registry.create_task(
+        role="project_index_review",
+        task="scan",
+        display_name="Manuka",
+        parent_session_id="owner-session",
+        params={"_taskSeed": {"schema": "vrcforge.agent_task_loop.v2", "taskId": "owner-task"}},
+    )
+    task_id = created["task"]["id"]
+
+    deadline = time.time() + 3
+    while not terminal_events and time.time() < deadline:
+        time.sleep(0.02)
+
+    assert len(terminal_events) == 1
+    event = terminal_events[0]
+    assert event["subAgentTaskId"] == task_id
+    assert event["status"] == "completed"
+    assert event["taskSeed"]["taskId"] == "owner-task"
+    delivered = _wait_for_parent_continuation(registry, task_id, "delivered")["task"]
+    assert delivered["status"] == "completed"
+
+
+def test_parent_continuation_callback_failure_is_not_replayed_after_restart(tmp_path):
+    callback_attempts: list[dict[str, object]] = []
+
+    def fail_callback(event: dict[str, object]) -> None:
+        callback_attempts.append(event)
+        raise RuntimeError("temporary callback fault")
+
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    handlers = {
+        "project_index_review": lambda _payload, _cancel: {
+            "ok": True,
+            "summaryText": "durable result",
+        }
+    }
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers=handlers,
+        task_finished=fail_callback,
+    )
+    task_id = registry.create_task(
+        role="project_index_review",
+        task="scan",
+        display_name="Manuka",
+        parent_session_id="owner-session",
+        params={"_taskSeed": {"schema": "vrcforge.agent_task_loop.v2", "taskId": "owner-task"}},
+    )["task"]["id"]
+
+    interrupted = _wait_for_parent_continuation(registry, task_id, "interrupted")["task"]
+    registry._threads[task_id].join(3)
+    assert interrupted["status"] == "completed"
+    assert len(callback_attempts) == 1
+    interrupted_events = registry.interrupted_parent_continuations()
+    assert [event["subAgentTaskId"] for event in interrupted_events] == [task_id]
+    assert interrupted_events[0]["taskSeed"]["taskId"] == "owner-task"
+
+    replayed_events: list[dict[str, object]] = []
+    restarted = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers=handlers,
+        task_finished=replayed_events.append,
+    )
+    recovered = restarted.get_task(task_id)["task"]
+    assert recovered["parentContinuationStatus"] == "interrupted"
+    assert replayed_events == []
+
+    duplicate_events: list[dict[str, object]] = []
+    reopened = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers=handlers,
+        task_finished=duplicate_events.append,
+    )
+    assert reopened.get_task(task_id)["task"]["parentContinuationStatus"] == "interrupted"
+    assert duplicate_events == []
+
+
+def test_startup_can_stage_parent_replay_without_blocking_on_the_callback(tmp_path):
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    handlers = {
+        "project_index_review": lambda _payload, _cancel: {
+            "ok": True,
+            "summaryText": "durable result",
+        }
+    }
+
+    task_id = "sub_pending_parent_replay"
+    _write_task_projection(
+        tmp_path,
+        task_id,
+        "completed",
+        task_seed={"schema": "vrcforge.agent_task_loop.v2", "taskId": "owner-task"},
+        parent_continuation_status="pending",
+    )
+
+    replayed: list[dict[str, object]] = []
+    restarted = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers=handlers,
+        task_finished=replayed.append,
+        reconcile_on_init=False,
+    )
+    assert restarted.reconcile_startup(replay_parent_continuations=False) is True
+    assert replayed == []
+    assert restarted.get_task(task_id)["task"]["parentContinuationStatus"] == "pending"
+
+    assert restarted.replay_parent_continuations() == 1
+    assert len(replayed) == 1
+    assert restarted.get_task(task_id)["task"]["parentContinuationStatus"] == "delivered"
+
+
+def test_delivered_marker_failure_never_replays_a_dispatched_side_effect(tmp_path):
+    task_id = "sub_dispatched_once"
+    _write_task_projection(
+        tmp_path,
+        task_id,
+        "completed",
+        task_seed={"schema": "vrcforge.agent_task_loop.v2", "taskId": "owner-task"},
+        parent_continuation_status="pending",
+    )
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    handlers = {"project_index_review": lambda _payload, _cancel: {"ok": True}}
+    effects: list[str] = []
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers=handlers,
+        task_finished=lambda _event: effects.append("executed"),
+        reconcile_on_init=False,
+    )
+    original_commit = registry._commit_task_event_locked
+
+    def fail_delivered_commit(current, next_task, event, data, **kwargs):
+        if event == "parent_continuation_delivered":
+            raise OSError("durable marker unavailable")
+        return original_commit(current, next_task, event, data, **kwargs)
+
+    registry._commit_task_event_locked = fail_delivered_commit
+    assert registry.replay_parent_continuations() == 1
+    assert effects == ["executed"]
+    assert registry.get_task(task_id)["task"]["parentContinuationStatus"] == "dispatching"
+
+    replayed: list[dict[str, object]] = []
+    restarted = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers=handlers,
+        task_finished=replayed.append,
+    )
+    assert restarted.get_task(task_id)["task"]["parentContinuationStatus"] == "interrupted"
+    assert effects == ["executed"]
+    assert replayed == []
+
+
+def test_handler_ok_false_is_a_durable_failed_task(tmp_path):
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={
+            "project_index_review": lambda _payload, _cancel: {
+                "ok": False,
+                "summaryText": "project review could not finish",
+                "error": "project index unavailable",
+            }
+        },
+    )
+    task_id = registry.create_task(
+        role="project_index_review",
+        task="scan",
+        display_name="Manuka",
+    )["task"]["id"]
+
+    failed = _wait_for_status(registry, task_id, {"failed"})["task"]
+    assert failed["status"] == "failed"
+    assert failed["summary"] == "project review could not finish"
+    assert failed["error"] == "project index unavailable"
+    assert failed["result"]["ok"] is False
+    assert failed["resultAvailable"] is True
+    assert [
+        event["event"]
+        for event in registry.recent_events()
+        if event.get("taskId") == task_id and event.get("event") in {"completed", "failed"}
+    ] == ["failed"]
+
+    reopened = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel: {"ok": True}},
+    )
+    assert reopened.get_task(task_id)["task"]["status"] == "failed"
+
+
 def test_interactive_lane_signal_never_inverts_registry_and_idle_commit_locks(
     tmp_path: Path,
 ) -> None:
@@ -146,6 +355,243 @@ def test_sub_agent_registry_cancel_sets_event(tmp_path):
     assert payload["task"]["status"] == "cancelled"
 
 
+def test_registry_shutdown_rejects_admission_cancels_worker_and_defers_continuation(tmp_path):
+    entered = threading.Event()
+    continuations: list[dict[str, object]] = []
+
+    def handler(_payload: dict[str, object], cancel_event: threading.Event) -> dict[str, object]:
+        entered.set()
+        assert cancel_event.wait(2)
+        return {"ok": True, "summaryText": "cancelled during shutdown"}
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("validation_triage", "Validation", "Read-only validation.")],
+        handlers={"validation_triage": handler},
+        task_finished=continuations.append,
+    )
+    task_id = registry.create_task(
+        role="validation_triage",
+        task="validate",
+        display_name="Rindo",
+        parent_session_id="owner-session",
+        params={"_taskSeed": {"schema": "vrcforge.agent_task_loop.v2", "taskId": "owner-task"}},
+    )["task"]["id"]
+    assert entered.wait(1)
+
+    result = registry.shutdown(timeout_seconds=1)
+
+    assert result == {
+        "ok": True,
+        "shutdown": True,
+        "cancelRequestedTaskIds": [task_id],
+        "joinedTaskIds": [task_id],
+        "timedOutTaskIds": [],
+        "timedOutContinuationTaskIds": [],
+        "cancellationErrors": [],
+    }
+    task = registry.get_task(task_id)["task"]
+    assert task["status"] == "cancelled"
+    assert task["parentContinuationStatus"] == "pending"
+    assert continuations == []
+    assert registry.replay_parent_continuations() == 0
+    with pytest.raises(RuntimeError, match="registry is shut down"):
+        registry.create_task(
+            role="validation_triage",
+            task="new work",
+            display_name="Rindo",
+        )
+    with pytest.raises(RuntimeError, match="registry is shut down"):
+        registry.retry_task(task_id)
+
+    registry.start()
+    registry.reconcile_startup(refresh_from_disk=True)
+    restarted_task_id = registry.create_task(
+        role="validation_triage",
+        task="validate after restart",
+        display_name="Rindo",
+    )["task"]["id"]
+    restarted_shutdown = registry.shutdown(timeout_seconds=1)
+    assert restarted_shutdown["cancelRequestedTaskIds"] == [restarted_task_id]
+    assert restarted_shutdown["timedOutTaskIds"] == []
+
+
+def test_registry_shutdown_join_is_bounded_for_uncooperative_worker(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def handler(_payload: dict[str, object], _cancel_event: threading.Event) -> dict[str, object]:
+        entered.set()
+        release.wait(3)
+        return {"ok": True, "summaryText": "released"}
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("validation_triage", "Validation", "Read-only validation.")],
+        handlers={"validation_triage": handler},
+    )
+    task_id = registry.create_task(
+        role="validation_triage",
+        task="validate",
+        display_name="Rindo",
+    )["task"]["id"]
+    assert entered.wait(1)
+
+    try:
+        result = registry.shutdown(timeout_seconds=0.01)
+        assert result["ok"] is False
+        assert result["joinedTaskIds"] == []
+        assert result["timedOutTaskIds"] == [task_id]
+        assert registry._threads[task_id].is_alive()  # noqa: SLF001 - bounded join ownership proof.
+    finally:
+        release.set()
+        registry._threads[task_id].join(2)  # noqa: SLF001 - test-owned uncooperative worker cleanup.
+    assert registry.get_task(task_id)["task"]["status"] == "cancelled"
+
+
+def test_shutdown_wins_lane_admission_race_without_leaking_capacity(tmp_path):
+    callback_entered = threading.Event()
+    release_callback = threading.Event()
+    create_finished = threading.Event()
+    errors: list[Exception] = []
+    budget = RuntimeLaneBudget()
+
+    def block_after_lane_acquire(_token: str) -> None:
+        callback_entered.set()
+        assert release_callback.wait(2)
+
+    budget.set_interactive_acquire_callback(block_after_lane_acquire)
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("validation_triage", "Validation", "Read-only validation.")],
+        handlers={"validation_triage": lambda _payload, _cancel: {"ok": True}},
+        lane_budget=budget,
+    )
+
+    def create() -> None:
+        try:
+            registry.create_task(
+                role="validation_triage",
+                task="validate",
+                display_name="Rindo",
+            )
+        except Exception as exc:  # noqa: BLE001 - exact rejected admission is asserted below.
+            errors.append(exc)
+        finally:
+            create_finished.set()
+
+    creator = threading.Thread(target=create)
+    creator.start()
+    assert callback_entered.wait(1)
+    assert registry.shutdown(timeout_seconds=0)["ok"] is True
+    release_callback.set()
+    creator.join(2)
+
+    assert create_finished.is_set()
+    assert len(errors) == 1
+    assert "registry is shut down" in str(errors[0])
+    assert registry.list_tasks()["count"] == 0
+    assert budget.snapshot()["total"] == 0
+
+
+def test_shutdown_stops_startup_parent_replay_before_dispatch(tmp_path):
+    task_id = "sub_pending_shutdown_replay"
+    _write_task_projection(
+        tmp_path,
+        task_id,
+        "completed",
+        task_seed={"schema": "vrcforge.agent_task_loop.v2", "taskId": "owner-task"},
+        parent_continuation_status="pending",
+    )
+    replayed: list[dict[str, object]] = []
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel: {"ok": True}},
+        task_finished=replayed.append,
+        reconcile_on_init=False,
+    )
+
+    assert registry.shutdown(timeout_seconds=0)["ok"] is True
+    assert registry.reconcile_startup() is False
+    assert registry.replay_parent_continuations() == 0
+    assert replayed == []
+    assert registry.get_task(task_id)["task"]["parentContinuationStatus"] == "pending"
+
+
+def test_shutdown_boundedly_reports_an_inflight_parent_continuation(tmp_path):
+    task_id = "sub_inflight_shutdown"
+    _write_task_projection(
+        tmp_path,
+        task_id,
+        "completed",
+        task_seed={"schema": "vrcforge.agent_task_loop.v2", "taskId": "owner-task"},
+        parent_continuation_status="pending",
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def block_continuation(_event: dict[str, object]) -> None:
+        entered.set()
+        assert release.wait(2)
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel: {"ok": True}},
+        task_finished=block_continuation,
+        reconcile_on_init=False,
+    )
+    replay = threading.Thread(target=registry.replay_parent_continuations)
+    replay.start()
+    assert entered.wait(1)
+
+    result = registry.shutdown(timeout_seconds=0.01)
+    assert result["ok"] is False
+    assert result["timedOutContinuationTaskIds"] == [task_id]
+    assert result["timedOutTaskIds"] == []
+
+    release.set()
+    replay.join(2)
+    assert registry.get_task(task_id)["task"]["parentContinuationStatus"] == "delivered"
+
+
+def test_shutdown_during_parent_replay_does_not_dispatch_the_next_pending_task(tmp_path):
+    task_ids = ["sub_pending_replay_first", "sub_pending_replay_second"]
+    event_log = tmp_path / "sub-agent-events.jsonl"
+    projections: list[str] = []
+    for task_id in task_ids:
+        _write_task_projection(
+            tmp_path,
+            task_id,
+            "completed",
+            task_seed={"schema": "vrcforge.agent_task_loop.v2", "taskId": task_id},
+            parent_continuation_status="pending",
+        )
+        projections.append(event_log.read_text(encoding="utf-8"))
+    event_log.write_text("".join(projections), encoding="utf-8")
+
+    replayed: list[str] = []
+    registry: SubAgentTaskRegistry
+
+    def stop_after_first(event: dict[str, object]) -> None:
+        replayed.append(str(event.get("subAgentTaskId") or ""))
+        registry.shutdown(timeout_seconds=0)
+
+    registry = SubAgentTaskRegistry(
+        tmp_path,
+        roles=[SubAgentRole("project_index_review", "Project", "Read local project index.")],
+        handlers={"project_index_review": lambda _payload, _cancel: {"ok": True}},
+        task_finished=stop_after_first,
+        reconcile_on_init=False,
+    )
+
+    assert registry.replay_parent_continuations(task_ids) == 1
+    assert replayed == [task_ids[0]]
+    assert registry.get_task(task_ids[0])["task"]["parentContinuationStatus"] == "delivered"
+    assert registry.get_task(task_ids[1])["task"]["parentContinuationStatus"] == "pending"
+
+
 def _wait_for_status(registry: SubAgentTaskRegistry, task_id: str, statuses: set[str], timeout: float = 3.0) -> dict:
     deadline = time.time() + timeout
     payload = registry.get_task(task_id)
@@ -155,7 +601,28 @@ def _wait_for_status(registry: SubAgentTaskRegistry, task_id: str, statuses: set
     return payload
 
 
-def _write_task_projection(tmp_path, task_id: str, status: str) -> None:
+def _wait_for_parent_continuation(
+    registry: SubAgentTaskRegistry,
+    task_id: str,
+    status: str,
+    timeout: float = 3.0,
+) -> dict:
+    deadline = time.time() + timeout
+    payload = registry.get_task(task_id)
+    while payload["task"].get("parentContinuationStatus") != status and time.time() < deadline:
+        time.sleep(0.02)
+        payload = registry.get_task(task_id)
+    return payload
+
+
+def _write_task_projection(
+    tmp_path,
+    task_id: str,
+    status: str,
+    *,
+    task_seed: dict[str, object] | None = None,
+    parent_continuation_status: str = "",
+) -> None:
     timestamp = "2026-01-01T00:00:00+00:00"
     snapshot = {
         "id": task_id,
@@ -182,9 +649,10 @@ def _write_task_projection(tmp_path, task_id: str, status: str) -> None:
         "mergedAt": "",
         "mergedChatId": "",
         "mergeDecision": "",
+        "parentContinuationStatus": parent_continuation_status,
         "resultAvailable": False,
         "resultUnavailable": False,
-        "params": {},
+        "params": {"_taskSeed": task_seed} if task_seed is not None else {},
     }
     event = {
         "schema": SUB_AGENT_LOG_SCHEMA,
@@ -535,6 +1003,50 @@ def test_startup_reconcile_can_be_deferred_and_runs_only_once(tmp_path):
     ) == 1
 
 
+@pytest.mark.parametrize(
+    ("active_status", "terminal_status"),
+    [("running", "interrupted"), ("cancelling", "cancelled")],
+)
+def test_startup_replays_seeded_interrupted_and_cancelled_tasks_once(
+    tmp_path,
+    active_status,
+    terminal_status,
+):
+    task_id = f"sub_seeded_{active_status}"
+    _write_task_projection(
+        tmp_path,
+        task_id,
+        active_status,
+        task_seed={"schema": "vrcforge.agent_task_loop.v2", "taskId": "owner-task"},
+    )
+    roles = [SubAgentRole("project_index_review", "Project", "Read local project index.")]
+    handlers = {"project_index_review": lambda _payload, _cancel_event: {"ok": True}}
+    terminal_events: list[dict[str, object]] = []
+
+    restarted = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers=handlers,
+        task_finished=terminal_events.append,
+    )
+    terminal = restarted.get_task(task_id)["task"]
+    assert terminal["status"] == terminal_status
+    assert terminal["parentContinuationStatus"] == "delivered"
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["status"] == terminal_status
+    assert terminal_events[0]["taskSeed"]["taskId"] == "owner-task"
+
+    duplicate_events: list[dict[str, object]] = []
+    reopened = SubAgentTaskRegistry(
+        tmp_path,
+        roles=roles,
+        handlers=handlers,
+        task_finished=duplicate_events.append,
+    )
+    assert reopened.get_task(task_id)["task"]["parentContinuationStatus"] == "delivered"
+    assert duplicate_events == []
+
+
 def test_refresh_from_disk_observes_failed_event_written_after_registry_import(tmp_path):
     entered = threading.Event()
     release = threading.Event()
@@ -614,6 +1126,7 @@ def test_refresh_from_disk_is_transactional_on_projection_read_error(tmp_path, m
         reconcile_on_init=False,
     )
     original_task = registry.get_task(task_id, include_events=False)["task"]
+    registry.start()
     event_log = registry._event_log_path()
     original_read_text = Path.read_text
 
@@ -628,6 +1141,13 @@ def test_refresh_from_disk_is_transactional_on_projection_read_error(tmp_path, m
 
     assert registry.get_task(task_id, include_events=False)["task"] == original_task
     assert registry._startup_reconciled is False
+    assert registry.replay_parent_continuations() == 0
+    with pytest.raises(RuntimeError, match="has not completed startup recovery"):
+        registry.create_task(
+            role="project_index_review",
+            task="must remain blocked after a failed recovery",
+            display_name="Manuka",
+        )
 
 
 def test_refresh_from_disk_rejects_live_local_workers(tmp_path):

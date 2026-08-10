@@ -26,6 +26,27 @@ RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH = 2
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS = 12
 RUNTIME_VISION_ANALYSIS_MAX_CHARS = 4_000
 
+_HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
+    "vrcforge_get_compile_errors": ("projectPath?:string", "maxErrors?:integer"),
+    "vrcforge_list_avatars": ("projectPath?:string",),
+    "vrcforge_scan_materials": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_scan_blendshapes": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_scan_parameters": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_scan_fx_animator": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_scan_avatar_controls": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_scan_avatar_performance": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_scan_thry_avatar_performance": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_read_avatar_descriptor": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_scan_avatar_items": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_create_gameobject": (
+        "projectPath?:string",
+        "name:string",
+        "parentPath?:string",
+        "targetAvatar?:string",
+        "preview?:boolean",
+    ),
+}
+
 
 class RuntimePlannerError(ValueError):
     def __init__(self, message: str, status_code: int = 400) -> None:
@@ -45,6 +66,11 @@ class PlannerTool:
     write: bool = False
     advanced: bool = False
     requires_user_activation: bool = False
+    input_contract: tuple[str, ...] = ()
+
+
+def planner_tool_input_contract(name: str) -> tuple[str, ...]:
+    return _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS.get(str(name or "").strip(), ())
 
 
 @dataclass(frozen=True, slots=True)
@@ -470,6 +496,46 @@ def has_any(lowered_text: str, original_text: str, needles: list[str]) -> bool:
 def ensure_dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
+def model_object_field(
+    payload: Mapping[str, object],
+    *names: str,
+) -> tuple[dict[str, object], bool]:
+    """Read an optional JSON object field without coercing invalid model output."""
+
+    selected: dict[str, object] | None = None
+    for name in names:
+        if name not in payload:
+            continue
+        value = payload[name]
+        if not isinstance(value, dict):
+            return {}, False
+        if selected is None:
+            selected = dict(value)
+    return selected or {}, True
+
+def latest_loop_step_needs_model_correction(
+    loop_state: list[dict[str, object]],
+) -> bool:
+    """Return whether any observed failure still lacks a matching correction."""
+
+    resolved_action_ids: set[str] = set()
+    for step in reversed(loop_state):
+        if not isinstance(step, dict) or not str(step.get("tool") or "").strip():
+            continue
+        outcome = ensure_dict(step.get("outcome"))
+        status = str(outcome.get("status") or step.get("status") or "").strip().lower()
+        action_id = str(step.get("actionId") or "").strip()
+        if status in {"failed", "needs_user_action"}:
+            if not action_id or action_id not in resolved_action_ids:
+                return True
+            continue
+        if status in {"ok", "completed", "executed", "applied"} and action_id:
+            resolved_action_ids.add(action_id)
+            corrected_action_id = str(step.get("correctionForActionId") or "").strip()
+            if corrected_action_id:
+                resolved_action_ids.add(corrected_action_id)
+    return False
+
 def ensure_list(value: object) -> list[object]:
     if isinstance(value, list):
         return value
@@ -743,8 +809,11 @@ class RuntimePlannerService:
         ) -> dict[str, object]:
             loop_state = loop_state or []
             local_plan = self._local_plan_agent_turn(message, params, observe, loop_state)
+            correction_needed = latest_loop_step_needs_model_correction(loop_state)
             # 关键词命中（明确的技能/命令/写入意图）直接走确定性路径：快、稳定、可测试。
-            if (
+            # A failed/needs-user-action tool observation must be shown to the
+            # model before deterministic routing can replay the same action.
+            if not correction_needed and (
                 local_plan.get("shellNeeded")
                 or local_plan.get("skillNeeded")
                 or local_plan.get("writeNeeded")
@@ -752,7 +821,7 @@ class RuntimePlannerService:
                 return local_plan
             # 确定性兜底已经给出明确的终止答复（例如「多个模型让用户选」「没找到模型」），
             # 这是确定结论，不交给 LLM 再编一遍。
-            if local_plan.get("deterministicTerminal"):
+            if not correction_needed and local_plan.get("deterministicTerminal"):
                 return local_plan
             # 本地规划没认出意图时，尝试 LLM 规划。
             llm_plan = self._llm_plan_agent_turn(
@@ -791,6 +860,15 @@ class RuntimePlannerService:
                     "plannerLabel": "",
                     "deterministicTerminal": True,
                     "providerConnected": False,
+                    "shellNeeded": False,
+                    "shellCommand": "",
+                    "shellParams": {},
+                    "skillNeeded": False,
+                    "skillTool": "",
+                    "skillParams": {},
+                    "writeNeeded": False,
+                    "writeTool": "",
+                    "writeParams": {},
                     "continueLoop": False,
                     "nextStep": "done",
                 }
@@ -1058,6 +1136,12 @@ class RuntimePlannerService:
                 plan.update(overrides)
                 return plan
 
+            write_requirement = {
+                "kind": "write",
+                "tool": "vrcforge_create_gameobject",
+                "verificationProfile": "persisted_scene_write",
+            }
+
             # 1) 用户已显式给出目标模型/对象路径 → 直接发起写入审批。
             explicit_target = str(
                 params.get("avatar_path")
@@ -1072,7 +1156,8 @@ class RuntimePlannerService:
                     summary="Conflicting Unity write targets were rejected.",
                     reply="请求同时指定了活动场景根节点和模型路径，无法安全判断写入位置。请只保留一个目标。",
                     deterministicTerminal=True,
-                    nextStep="done",
+                    completionRequirement=write_requirement,
+                    nextStep="needs_user_action",
                 )
 
             # 2) 否则从 loop_state 里找已扫描到的模型列表。
@@ -1092,6 +1177,7 @@ class RuntimePlannerService:
                     skillCategory=route.get("category") or "",
                     skillParams=route.get("params") or {},
                     skillReason="avatar write intent: scan first",
+                    completionRequirement=write_requirement,
                     continueLoop=True,
                     expectedResult="Avatar list will be returned and re-planned against.",
                     nextStep="call_skill",
@@ -1105,7 +1191,8 @@ class RuntimePlannerService:
                         summary="No avatar was found in the open project.",
                         reply="扫了一圈，当前工程里没有可写入的模型。请先在 Unity 里打开带模型的场景，或告诉我模型路径。",
                         deterministicTerminal=True,
-                        nextStep="done",
+                        completionRequirement=write_requirement,
+                        nextStep="needs_user_action",
                     )
                 if len(avatars) > 1:
                     listed = "\n".join(f"- {path}" for path in avatars[:12])
@@ -1113,7 +1200,8 @@ class RuntimePlannerService:
                         summary="Multiple avatars found; need the user to choose one.",
                         reply=f"工程里有多个模型，告诉我加到哪个上面：\n{listed}",
                         deterministicTerminal=True,
-                        nextStep="done",
+                        completionRequirement=write_requirement,
+                        nextStep="needs_user_action",
                     )
                 # 恰好一个模型 → 自动选中，不反问。
                 target = avatars[0]
@@ -1135,6 +1223,7 @@ class RuntimePlannerService:
                 writeNeeded=True,
                 writeTool="vrcforge_create_gameobject",
                 writeParams=write_params,
+                completionRequirement=write_requirement,
                 resolvedAvatar=target if not scene_root_target else "",
                 resolvedTarget="scene_root" if scene_root_target else target,
                 continueLoop=False,
@@ -1246,9 +1335,34 @@ class RuntimePlannerService:
             summary = str(payload.get("summary") or "").strip()
             reply = str(payload.get("reply") or "").strip()
             skill_tool = str(payload.get("skill_tool") or payload.get("skillTool") or "").strip()
-            skill_params = ensure_dict(payload.get("skill_params") or payload.get("skillParams"))
+            skill_params, valid_skill_params = model_object_field(
+                payload,
+                "skill_params",
+                "skillParams",
+            )
+            write_tool = str(payload.get("write_tool") or payload.get("writeTool") or "").strip()
+            write_params, valid_write_params = model_object_field(
+                payload,
+                "write_params",
+                "writeParams",
+            )
             shell_command = str(payload.get("shell_command") or payload.get("shellCommand") or "").strip()
-            shell_params = ensure_dict(payload.get("shell_params") or payload.get("shellParams"))
+            shell_params, valid_shell_params = model_object_field(
+                payload,
+                "shell_params",
+                "shellParams",
+            )
+            if not all((valid_skill_params, valid_write_params, valid_shell_params)):
+                return self._planner_failure_plan(
+                    cause_code="planner_invalid_response",
+                    phase=phase,
+                    planner_label=planner_label,
+                )
+            correction_for_action_id = str(
+                payload.get("correction_for_action_id")
+                or payload.get("correctionForActionId")
+                or ""
+            ).strip()
             completion_claim = ensure_dict(
                 payload.get("completion_claim") or payload.get("completionClaim")
             )
@@ -1269,6 +1383,7 @@ class RuntimePlannerService:
                 "writeNeeded": False,
                 "writeTool": "",
                 "writeParams": {},
+                "correctionForActionId": correction_for_action_id,
                 # 工具型动作执行后，把结果回灌给 LLM 再决定下一步（真正的多步循环）。
                 "continueLoop": False,
                 "expectedResult": "",
@@ -1286,16 +1401,19 @@ class RuntimePlannerService:
                 }
             if action == "skill":
                 catalog = self._catalog.read(exposure_layer)
-                known_tool = bool(skill_tool) and (
-                    any(tool.name == skill_tool for tool in catalog.visible_tools)
-                    or (
+                visible_tool = next(
+                    (tool for tool in catalog.visible_tools if tool.name == skill_tool),
+                    None,
+                )
+                known_tool = bool(skill_tool) and visible_tool is not None and not visible_tool.write
+                if visible_tool is None:
+                    known_tool = bool(skill_tool) and (
                         exposure_layer == EXPOSURE_LAYER_EXECUTION
                         and any(
                             normalize_skill_id(skill.name) == normalize_skill_id(skill_tool)
                             for skill in catalog.skills
                         )
                     )
-                )
                 if known_tool:
                     route = self._runtime_skill_route(
                         skill_tool,
@@ -1314,6 +1432,27 @@ class RuntimePlannerService:
                         "continueLoop": True,
                         "expectedResult": "Skill output will be returned inline.",
                         "nextStep": "call_skill",
+                    }
+            elif action == "write" and exposure_layer == EXPOSURE_LAYER_EXECUTION:
+                catalog = self._catalog.read(exposure_layer)
+                known_write_tool = next(
+                    (
+                        tool
+                        for tool in catalog.visible_tools
+                        if tool.name == write_tool and tool.write
+                    ),
+                    None,
+                )
+                if known_write_tool is not None:
+                    return {
+                        **base,
+                        "summary": summary or f"Prepared supervised execution for {write_tool}.",
+                        "writeNeeded": True,
+                        "writeTool": write_tool,
+                        "writeParams": write_params,
+                        "continueLoop": True,
+                        "expectedResult": "The supervised write result will be returned inline.",
+                        "nextStep": "request_write",
                     }
             elif action == "shell" and shell_command:
                 return {
@@ -1678,6 +1817,60 @@ class RuntimePlannerService:
                         "verificationState="
                         + sanitize_planner_observation_text(verification.get("state"), 80)
                     )
+                error = ensure_dict(outcome.get("error"))
+                if error:
+                    for key, label in (
+                        ("type", "errorType"),
+                        ("code", "errorCode"),
+                        ("retryable", "retryable"),
+                    ):
+                        if error.get(key) not in (None, ""):
+                            fields.append(
+                                f"{label}="
+                                + sanitize_planner_observation_text(error.get(key), 120)
+                            )
+                    for key, label in (
+                        ("likelyCauses", "likelyCauses"),
+                        ("nextActions", "nextActions"),
+                    ):
+                        values = error.get(key)
+                        if isinstance(values, list) and values:
+                            fields.append(
+                                f"{label}="
+                                + sanitize_planner_observation_text(" | ".join(map(str, values[:6])), 480)
+                            )
+            skill_context = ensure_dict(step.get("skillContext"))
+            if skill_context:
+                fields.append(
+                    "skillContextName="
+                    + sanitize_planner_observation_text(skill_context.get("name"), 160)
+                )
+                allowed_tools = skill_context.get("allowedTools")
+                if isinstance(allowed_tools, list) and allowed_tools:
+                    fields.append(
+                        "skillAllowedTools="
+                        + sanitize_planner_observation_text(
+                            " | ".join(map(str, allowed_tools[:32])),
+                            1000,
+                        )
+                    )
+                disallowed_tools = skill_context.get("disallowedTools")
+                if isinstance(disallowed_tools, list) and disallowed_tools:
+                    fields.append(
+                        "skillDisallowedTools="
+                        + sanitize_planner_observation_text(
+                            " | ".join(map(str, disallowed_tools[:32])),
+                            1000,
+                        )
+                    )
+                if skill_context.get("instructions"):
+                    fields.append(
+                        "skillInstructions="
+                        + sanitize_planner_observation_text(
+                            skill_context.get("instructions"),
+                            6000,
+                        )
+                    )
             if str(step.get("tool") or "") == "vrcforge_agent_desktop_action":
                 desktop_observation = self._desktop_action_observation(result)
                 if desktop_observation:
@@ -1694,6 +1887,21 @@ class RuntimePlannerService:
                             + summarize_text(str(vision.get("reason") or vision.get("error") or "pixels were not analyzed"), 300)
                         )
             if isinstance(result, dict):
+                planner_evidence = result.get("plannerEvidence")
+                if isinstance(planner_evidence, dict):
+                    fields.append(
+                        "plannerEvidence="
+                        + sanitize_planner_observation_text(
+                            json.dumps(
+                                redact_sensitive(planner_evidence),
+                                ensure_ascii=False,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                default=str,
+                            ),
+                            1600,
+                        )
+                    )
                 for key in (
                     "ok",
                     "status",
@@ -1741,8 +1949,14 @@ class RuntimePlannerService:
                 if tool.advanced:
                     flags.append("advanced")
                 suffix = f"（{','.join(flags)}）" if flags else ""
+                input_contract = (
+                    " inputs={" + ", ".join(tool.input_contract) + "}"
+                    if tool.input_contract
+                    else ""
+                )
                 tool_lines.append(
-                    f"- {tool.name}{suffix}: {planner_tool_usage_description(tool.name, tool.description, write=tool.write)}"
+                    f"- {tool.name}{suffix}{input_contract}: "
+                    f"{planner_tool_usage_description(tool.name, tool.description, write=tool.write)}"
                 )
             history_lines: list[str] = []
             for entry in history:
@@ -1791,6 +2005,12 @@ class RuntimePlannerService:
                 f"用户最新消息：{message}"
             )
             return prompt + (
+                "\n\nExecution action contract:\n"
+                "- In the execution exposure layer, request a supervised write with "
+                "{\"action\":\"write\",\"write_tool\":\"<exact visible write tool>\","
+                "\"write_params\":{...}}. Never disguise a write as a read skill.\n"
+                "- When retrying a failed action with corrected arguments, include "
+                "correction_for_action_id with the exact failed actionId. Omit it for unrelated work.\n"
                 "\n\nCompletion contract:\n"
                 "- A tool call is not task completion. Read its canonical outcome and verification first.\n"
                 "- Never finish while an action is running, pending approval, failed, or unverified.\n"

@@ -24,6 +24,7 @@ class SubAgentCollaborationPorts:
     lane_budget: RuntimeLaneBudget
     build_roles: Callable[[], list[SubAgentRole]]
     build_handlers: Callable[[Any], dict[str, SubAgentHandler]]
+    task_finished: Callable[[dict[str, Any]], None] = lambda _event: None
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class SubAgentCollaborationService:
             max_concurrent=5,
             reconcile_on_init=False,
             lane_budget=ports.lane_budget,
+            task_finished=ports.task_finished,
         )
 
     @classmethod
@@ -66,8 +68,28 @@ class SubAgentCollaborationService:
         service._registry = registry
         return service
 
-    def reconcile_startup(self, *, refresh_from_disk: bool = False) -> bool:
-        return self._registry.reconcile_startup(refresh_from_disk=refresh_from_disk)
+    def reconcile_startup(
+        self,
+        *,
+        refresh_from_disk: bool = False,
+        replay_parent_continuations: bool = True,
+    ) -> bool:
+        return self._registry.reconcile_startup(
+            refresh_from_disk=refresh_from_disk,
+            replay_parent_continuations=replay_parent_continuations,
+        )
+
+    def replay_parent_continuations(self) -> int:
+        return self._registry.replay_parent_continuations()
+
+    def interrupted_parent_continuations(self) -> list[dict[str, Any]]:
+        return self._registry.interrupted_parent_continuations()
+
+    def start(self) -> None:
+        self._registry.start()
+
+    def shutdown(self, timeout_seconds: float = 5.0) -> dict[str, Any]:
+        return self._registry.shutdown(timeout_seconds)
 
     def list_tasks(self, *, include_events: bool = False, limit: int = 50) -> dict[str, Any]:
         return self._registry.list_tasks(include_events=include_events, limit=limit)

@@ -495,6 +495,7 @@ export type AgentRuntimeResponse = {
   turn_id: string;
   turnId: string;
   clientTurnId?: string;
+  continuationSource?: string;
   goalDeliveryId?: string;
   backgroundGoalSkipped?: boolean;
   backgroundGoalDeferred?: boolean;
@@ -517,6 +518,7 @@ export type AgentRuntimeResponse = {
     skillReason?: string;
     expectedResult?: string;
     nextStep?: string;
+    taskCompletion?: Record<string, unknown>;
     choices?: Array<{
       id?: string;
       label: string;
@@ -1075,6 +1077,7 @@ export type AppBootstrap = {
     ok: boolean;
     error?: string;
   };
+  runtimeContinuations?: Array<Record<string, unknown>>;
 };
 
 export type AppHealth = AppBootstrap["health"];

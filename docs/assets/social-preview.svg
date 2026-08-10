@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
   <title id="title">VRCForge</title>
-  <desc id="desc">VRCForge — Local AI Workbench for VRChat Avatar Editing, target version 1.5.0.</desc>
+  <desc id="desc">VRCForge — Local AI Workbench for VRChat Avatar Editing, target version 1.5.1.</desc>
   <defs>
     <linearGradient id="background" x1="80" y1="0" x2="1200" y2="640" gradientUnits="userSpaceOnUse">
       <stop stop-color="#0B1020"/>
@@ -50,7 +50,7 @@
     <g transform="translate(515 382)">
       <rect width="138" height="46" rx="23" fill="#312E81" stroke="#818CF8"/>
       <circle cx="25" cy="23" r="7" fill="#67E8F9"/>
-      <text x="45" y="31" fill="#E0E7FF" font-size="22" font-weight="650">v1.5.0</text>
+      <text x="45" y="31" fill="#E0E7FF" font-size="22" font-weight="650">v1.5.1</text>
     </g>
     <text x="515" y="474" fill="#94A3B8" font-size="23">Local-first · Supervised writes · Checkpoint &amp; restore</text>
   </g>

@@ -34,6 +34,37 @@ def test_nested_tool_failure_cannot_be_wrapped_as_success() -> None:
     assert outcome["verification"] == {"state": "not_required", "checks": []}
 
 
+def test_structured_tool_error_preserves_only_bounded_correction_fields() -> None:
+    outcome = normalize_agent_tool_result(
+        {
+            "ok": False,
+            "status": "failed",
+            "error": {
+                "type": "unity_core",
+                "code": "unity_core_not_ready",
+                "message": "The selected Unity project has not started its Core bridge.",
+                "likelyCauses": ["Unity is compiling", "The wrong project is selected"],
+                "nextActions": ["Wait for compilation", "Select the open Unity project"],
+                "retryable": True,
+                "rawDump": "must-not-be-projected",
+            },
+        },
+        fallback_summary="Read Unity state.",
+        write=False,
+    )
+
+    assert outcome["status"] == "failed"
+    assert outcome["summary"] == "The selected Unity project has not started its Core bridge."
+    assert outcome["error"] == {
+        "type": "unity_core",
+        "code": "unity_core_not_ready",
+        "likelyCauses": ["Unity is compiling", "The wrong project is selected"],
+        "nextActions": ["Wait for compilation", "Select the open Unity project"],
+        "retryable": True,
+    }
+    assert "rawDump" not in str(outcome)
+
+
 def test_unverified_write_requires_user_action_and_blocks_completion_claim() -> None:
     outcome = normalize_agent_tool_result(
         {

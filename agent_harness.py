@@ -9,8 +9,8 @@ from agent_tool_result_contract import completion_gate_plan, normalize_agent_too
 from agent_task_loop import AgentTaskLoop
 
 
-AGENT_HARNESS_MATRIX_SCHEMA = "vrcforge.agent_harness_matrix.v3"
-AGENT_HARNESS_REPORT_SCHEMA = "vrcforge.agent_harness_report.v3"
+AGENT_HARNESS_MATRIX_SCHEMA = "vrcforge.agent_harness_matrix.v4"
+AGENT_HARNESS_REPORT_SCHEMA = "vrcforge.agent_harness_report.v4"
 _COMPLETION_STATUSES = frozenset({"ok", "failed", "needs_user_action"})
 
 
@@ -26,12 +26,15 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
     selection_cases = value.get("selectionCases")
     completion_cases = value.get("completionCases")
     loop_cases = value.get("loopCases")
+    chain_cases = value.get("chainCases")
     if not isinstance(selection_cases, list) or not selection_cases:
         raise AgentHarnessError("selectionCases must be a non-empty list")
     if not isinstance(completion_cases, list) or not completion_cases:
         raise AgentHarnessError("completionCases must be a non-empty list")
     if not isinstance(loop_cases, list) or not loop_cases:
         raise AgentHarnessError("loopCases must be a non-empty list")
+    if not isinstance(chain_cases, list) or not chain_cases:
+        raise AgentHarnessError("chainCases must be a non-empty list")
 
     seen_ids: set[str] = set()
     for case in selection_cases:
@@ -92,6 +95,50 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
             "completion_unverified",
         }:
             raise AgentHarnessError(f"loop case {case_id} has invalid expectedTaskStatus")
+    for case in chain_cases:
+        case_id = _case_id(case, seen_ids)
+        if not isinstance(case.get("objective"), str) or not case["objective"].strip():
+            raise AgentHarnessError(f"chain case {case_id} requires an objective")
+        requirements = case.get("requirements", [])
+        if not isinstance(requirements, list) or len(requirements) > 3:
+            raise AgentHarnessError(f"chain case {case_id} has invalid requirements")
+        for requirement in requirements:
+            if not isinstance(requirement, Mapping):
+                raise AgentHarnessError(f"chain case {case_id} requirements must be objects")
+            if not str(requirement.get("kind") or "").strip() or not str(requirement.get("tool") or "").strip():
+                raise AgentHarnessError(f"chain case {case_id} requirements need kind and tool")
+            if not isinstance(requirement.get("arguments"), Mapping):
+                raise AgentHarnessError(f"chain case {case_id} requirements need arguments")
+        actions = case.get("actions")
+        if not isinstance(actions, list) or not actions or len(actions) > 3:
+            raise AgentHarnessError(f"chain case {case_id} requires 1-3 actions")
+        action_keys: set[str] = set()
+        for action in actions:
+            if not isinstance(action, Mapping):
+                raise AgentHarnessError(f"chain case {case_id} actions must be objects")
+            action_key = str(action.get("key") or "").strip()
+            if not action_key or action_key in action_keys:
+                raise AgentHarnessError(f"chain case {case_id} actions require unique keys")
+            action_keys.add(action_key)
+            if not str(action.get("kind") or "").strip() or not str(action.get("tool") or "").strip():
+                raise AgentHarnessError(f"chain case {case_id} actions require kind and tool")
+            if not isinstance(action.get("arguments"), Mapping) or not isinstance(action.get("result"), Mapping):
+                raise AgentHarnessError(f"chain case {case_id} actions require arguments and result")
+            correction_for = str(action.get("correctionFor") or "").strip()
+            if correction_for and correction_for not in action_keys:
+                raise AgentHarnessError(f"chain case {case_id} correctionFor must reference an earlier action")
+        if case.get("claim") not in {"exact", "missing"}:
+            raise AgentHarnessError(f"chain case {case_id} has an invalid claim")
+        if not str(case.get("expectedNextStep") or "").strip():
+            raise AgentHarnessError(f"chain case {case_id} requires expectedNextStep")
+        if str(case.get("expectedTaskStatus") or "") not in {
+            "completed",
+            "failed",
+            "needs_user_action",
+            "running",
+            "completion_unverified",
+        }:
+            raise AgentHarnessError(f"chain case {case_id} has invalid expectedTaskStatus")
     return value
 
 
@@ -223,13 +270,93 @@ def evaluate_agent_harness(
             }
         )
 
+    chain_results: list[dict[str, Any]] = []
+    for case in matrix["chainCases"]:
+        loop = AgentTaskLoop(str(case["objective"]))
+        for requirement in case.get("requirements", []):
+            loop.require_action(
+                kind=str(requirement["kind"]),
+                tool=str(requirement["tool"]),
+                arguments=requirement["arguments"],
+                verification_profile=str(requirement.get("verificationProfile") or ""),
+            )
+        action_ids: dict[str, str] = {}
+        action_statuses: dict[str, str] = {}
+        action_error_codes: dict[str, str] = {}
+        for action in case["actions"]:
+            outcome = normalize_agent_tool_result(
+                action["result"],
+                fallback_summary="Harness chain action result.",
+                write=bool(action.get("write")),
+            )
+            correction_for = str(action.get("correctionFor") or "")
+            record = loop.record_action(
+                kind=str(action["kind"]),
+                tool=str(action["tool"]),
+                arguments=action["arguments"],
+                raw_result=action["result"],
+                outcome=outcome,
+                correction_for_action_id=action_ids.get(correction_for, ""),
+            )
+            action_key = str(action["key"])
+            action_ids[action_key] = record["actionId"]
+            action_statuses[action_key] = record["status"]
+            error = record.get("outcome", {}).get("error")
+            if isinstance(error, Mapping):
+                action_error_codes[action_key] = str(error.get("code") or "")
+            if correction_for:
+                corrected = loop.planner_projection()["actions"]
+                previous = next(
+                    (item for item in corrected if item.get("actionId") == action_ids[correction_for]),
+                    None,
+                )
+                if isinstance(previous, Mapping):
+                    action_statuses[correction_for] = str(previous.get("status") or "")
+        plan: dict[str, Any] = {"planner": "llm", "nextStep": "done", "reply": "Done."}
+        if case["claim"] == "exact":
+            plan["completionClaim"] = {
+                "satisfied": True,
+                "evidenceActionIds": loop.completed_action_ids(),
+            }
+        gated = loop.gate_terminal(plan)
+        task = gated.get("task")
+        task = task if isinstance(task, Mapping) else loop.snapshot()
+        expected_statuses = {
+            str(key): str(value)
+            for key, value in dict(case.get("expectedActionStatuses") or {}).items()
+        }
+        expected_error_codes = {
+            str(key): str(value)
+            for key, value in dict(case.get("expectedErrorCodes") or {}).items()
+        }
+        passed = (
+            str(gated.get("nextStep") or "") == case["expectedNextStep"]
+            and str(task.get("status") or "") == case["expectedTaskStatus"]
+            and all(action_statuses.get(key) == value for key, value in expected_statuses.items())
+            and all(action_error_codes.get(key) == value for key, value in expected_error_codes.items())
+        )
+        chain_results.append(
+            {
+                "id": case["id"],
+                "passed": passed,
+                "nextStep": str(gated.get("nextStep") or ""),
+                "expectedNextStep": case["expectedNextStep"],
+                "taskStatus": str(task.get("status") or ""),
+                "expectedTaskStatus": case["expectedTaskStatus"],
+                "actionStatuses": action_statuses,
+                "actionErrorCodes": action_error_codes,
+            }
+        )
+
     selection_passed = sum(1 for item in selection_results if item["passed"])
     completion_passed = sum(1 for item in completion_results if item["passed"])
     loop_passed = sum(1 for item in loop_results if item["passed"])
+    chain_passed = sum(1 for item in chain_results if item["passed"])
     accepted = (
         selection_passed == len(selection_results)
         and completion_passed == len(completion_results)
         and loop_passed == len(loop_results)
+        and chain_passed == len(chain_results)
     )
     provider_evidence_valid = bool(selection_results) and all(
         item["providerEvidenceValid"] for item in selection_results
@@ -241,7 +368,7 @@ def evaluate_agent_harness(
         "schema": AGENT_HARNESS_REPORT_SCHEMA,
         "accepted": accepted,
         "releaseAccepted": release_accepted,
-        "selectionOnly": True,
+        "selectionOnly": False,
         "toolsExecuted": False,
         "selectionSource": str(selection_source or "offline-runtime")[:200],
         "trustedSelectionReceipts": bool(trusted_selection_receipts),
@@ -260,6 +387,11 @@ def evaluate_agent_harness(
             "passed": loop_passed,
             "total": len(loop_results),
             "cases": loop_results,
+        },
+        "chain": {
+            "passed": chain_passed,
+            "total": len(chain_results),
+            "cases": chain_results,
         },
     }
 

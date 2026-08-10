@@ -73,6 +73,55 @@ def _first_text(views: list[Mapping[str, Any]], keys: tuple[str, ...]) -> str:
     return ""
 
 
+def _bounded_text_list(value: Any, *, limit: int = 6) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    result: list[str] = []
+    for item in value[:limit]:
+        text = str(item or "").strip()
+        if text and text[:240] not in result:
+            result.append(text[:240])
+    return result
+
+
+def _structured_error(views: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Project only the bounded error fields that tools deliberately expose."""
+
+    source: Mapping[str, Any] | None = None
+    for view in views:
+        candidate = view.get("error")
+        if isinstance(candidate, Mapping):
+            source = candidate
+            break
+    source = source or {}
+    error_type = str(source.get("type") or "").strip()[:80]
+    code = str(
+        source.get("code")
+        or source.get("causeCode")
+        or source.get("errorCode")
+        or _first_text(views, ("causeCode", "code", "errorCode"))
+        or ""
+    ).strip()[:120]
+    retryable_value = source.get("retryable")
+    if not isinstance(retryable_value, bool):
+        retryable_value = next(
+            (
+                view.get("retryable")
+                for view in views
+                if isinstance(view.get("retryable"), bool)
+            ),
+            None,
+        )
+    return {
+        "type": error_type,
+        "code": code,
+        "likelyCauses": _bounded_text_list(source.get("likelyCauses")),
+        "nextActions": _bounded_text_list(source.get("nextActions")),
+        "retryable": retryable_value,
+        "summary": str(source.get("summary") or source.get("message") or "").strip()[:600],
+    }
+
+
 def _verification(
     views: list[Mapping[str, Any]],
     *,
@@ -208,33 +257,56 @@ def normalize_agent_tool_result(
 
     if failed_view is not None:
         status = "failed"
+        projected_error = _structured_error([failed_view, *views])
         summary = _first_text([failed_view, *views], ("error", "reason", "message", "summary"))
+        summary = summary or projected_error["summary"]
         summary = summary or str(fallback_summary or "Tool execution failed.").strip()
-        code = _first_text([failed_view, *views], ("code", "errorCode", "reason"))
+        code = projected_error["code"] or _first_text(
+            [failed_view, *views], ("code", "errorCode", "reason")
+        )
         error: dict[str, Any] | None = {
-            "type": "tool",
+            "type": projected_error["type"] or "tool",
             "code": code or "tool_failed",
-            "likelyCauses": [],
-            "nextActions": [],
-            "retryable": False,
+            "likelyCauses": projected_error["likelyCauses"],
+            "nextActions": projected_error["nextActions"],
+            "retryable": (
+                projected_error["retryable"]
+                if isinstance(projected_error["retryable"], bool)
+                else False
+            ),
         }
     elif needs_action:
         status = "needs_user_action"
+        projected_error = _structured_error(views)
         if verification_needs_action:
             summary = (
                 "The tool action was not accepted as complete because required verification "
                 "did not pass; inspect the result and choose the next action."
             )
         else:
-            summary = _first_text(views, ("error", "reason", "message", "summary")) or (
+            summary = (
+                _first_text(views, ("error", "reason", "message", "summary"))
+                or projected_error["summary"]
+                or (
                 "The tool action needs user input before it can continue."
+                )
             )
         error = {
-            "type": "validation" if verification_needs_action else "user_action",
-            "code": "verification_required" if verification_needs_action else "user_action_required",
-            "likelyCauses": [],
-            "nextActions": ["Inspect the tool result and complete the required verification."],
-            "retryable": False,
+            "type": projected_error["type"] or (
+                "validation" if verification_needs_action else "user_action"
+            ),
+            "code": projected_error["code"] or (
+                "verification_required" if verification_needs_action else "user_action_required"
+            ),
+            "likelyCauses": projected_error["likelyCauses"],
+            "nextActions": projected_error["nextActions"] or [
+                "Inspect the tool result and complete the required verification."
+            ],
+            "retryable": (
+                projected_error["retryable"]
+                if isinstance(projected_error["retryable"], bool)
+                else False
+            ),
         }
     else:
         status = "ok"

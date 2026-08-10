@@ -1060,6 +1060,19 @@ class ShellProcessSupervisor:
                     "cancelled": session.killed,
                     "terminationFailed": session.termination_failed,
                     "finishedAt": session.finished_at,
+                    "result": {
+                        "ok": session.status == "finished" and session.exit_code == 0,
+                        "runner": "windows-pty" if session.pty else "supervised-process",
+                        "exitCode": session.exit_code if session.exit_code is not None else -1,
+                        "timedOut": session.timed_out,
+                        "cancelled": session.killed,
+                        "terminationFailed": session.termination_failed,
+                        "stdout": session.output,
+                        "stderr": "",
+                        "stdoutTruncated": session.output_truncated,
+                        "stderrTruncated": False,
+                        "sessionId": session.session_id,
+                    },
                 }
             else:
                 completion_event = None

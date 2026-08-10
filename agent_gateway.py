@@ -64,12 +64,15 @@ from optimization_service import (
 )
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
+from agent_runtime_event_projection import project_runtime_turn_event
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
 from agent_task_loop import (
     AgentTaskLoop,
     approval_task_context,
     canonical_action_id,
     prepare_approval_task_continuation,
+    prepare_shell_task_continuation,
+    prepare_sub_agent_task_continuation,
 )
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
 from runtime_planner_service import RuntimePlannerService
@@ -103,6 +106,7 @@ ApprovedUnityExecutionPlanBuilder = Callable[
 RUNTIME_SKILL_SUPPORT_MAX_FILES = 16
 RUNTIME_SKILL_SUPPORT_MAX_FILE_BYTES = 64 * 1024
 RUNTIME_SKILL_SUPPORT_MAX_TOTAL_BYTES = 256 * 1024
+_RUNTIME_TASK_LINK_AUTHORITY = object()
 PROJECTED_SKILL_STATE_NAME = ".vrcforge-package-state.json"
 PROJECTED_SKILL_STATE_MAX_BYTES = 4 * 1024
 LEGACY_PROJECTED_SKILL_STATE_SCHEMA = "vrcforge.projected-skill-state.v1"
@@ -1709,6 +1713,7 @@ class AgentGateway:
         shell_session_ports: ShellSessionPorts | None = None,
         skill_package_write_lock: AbstractContextManager[object] | None = None,
         background_activity_started: Callable[[str], Any] | None = None,
+        runtime_turn_completed: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.config_path = config_path
         self.audit_dir = audit_dir
@@ -1719,6 +1724,11 @@ class AgentGateway:
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self._lock = threading.RLock()
+        self._runtime_shell_completion_ids: set[str] = set()
+        self._runtime_shell_completion_order: list[str] = []
+        self._runtime_continuation_accepting = True
+        self._runtime_continuations_inflight: set[str] = set()
+        self._runtime_continuation_condition = threading.Condition(self._lock)
         self._tool_agent_context: contextvars.ContextVar[str] = contextvars.ContextVar(
             "vrcforge_tool_agent",
             default="",
@@ -1799,6 +1809,11 @@ class AgentGateway:
         if background_activity_started is not None and not callable(background_activity_started):
             raise TypeError("background_activity_started must be callable")
         self._background_activity_started = background_activity_started
+        if runtime_turn_completed is not None and not callable(runtime_turn_completed):
+            raise TypeError("runtime_turn_completed must be callable")
+        # App-lifetime, in-process notification only. It carries the already
+        # redacted runtime turn projection and grants no execution authority.
+        self._runtime_turn_completed = runtime_turn_completed or (lambda _payload: None)
         self._runtime_planner: RuntimePlannerService | None = None
         # Optional vision-analysis hook injected by the host server. Receives
         # (message, image_attachments) and returns a dict:
@@ -2021,6 +2036,34 @@ class AgentGateway:
                     "clientTurnId": client_turn_id,
                 }
             )
+            if isinstance(event.get("taskSeed"), dict):
+                try:
+                    durable_terminal_event = {
+                        **safe_event,
+                        "runtimeSessionId": runtime_session_id,
+                        "turnId": turn_id,
+                        "clientTurnId": client_turn_id,
+                        "result": (
+                            summarize_owned_shell_result(ensure_dict(event.get("result")))
+                            if isinstance(event.get("result"), dict)
+                            else {}
+                        ),
+                    }
+                    staged = self._runtime_run_ledger.stage_shell_continuation(
+                        shell_session_id=safe_event["shellSessionId"],
+                        task_seed=dict(event["taskSeed"]),
+                        terminal_event=durable_terminal_event,
+                    )
+                    if staged:
+                        self._dispatch_runtime_shell_continuation(safe_event["shellSessionId"])
+                except Exception:  # noqa: BLE001 - process completion is already terminal.
+                    self.append_audit(
+                        {
+                            "event": "runtime_shell_task_continuation_failed",
+                            "shellSessionId": safe_event["shellSessionId"],
+                            "status": "failed",
+                        }
+                    )
 
         # The service owns every child process for the gateway lifetime. Its
         # authority is limited to the caller-supplied cwd, approval identity is
@@ -2148,6 +2191,9 @@ class AgentGateway:
             tool_agent_name: str,
             tool_owner_id: str,
         ) -> Any:
+            if tool.name == "vrcforge_delegate_subagent":
+                tool_params = dict(tool_params)
+                tool_params["_runtimeTaskLinkAuthority"] = _RUNTIME_TASK_LINK_AUTHORITY
             agent_token = self._tool_agent_context.set(tool_agent_name)
             owner_token = self._tool_owner_context.set(tool_owner_id)
             try:
@@ -2179,6 +2225,20 @@ class AgentGateway:
                 direct_write_tools=frozenset({"vrcforge_shell_process"}),
             )
         )
+
+    @staticmethod
+    def consume_runtime_task_link(
+        params: dict[str, Any],
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Consume a task link injected only by the in-process runtime loop."""
+
+        trusted = params.pop("_runtimeTaskLinkAuthority", None) is _RUNTIME_TASK_LINK_AUTHORITY
+        task_seed = params.pop("_taskSeed", None)
+        runtime_session_id = str(params.pop("_runtimeSessionId", "") or "").strip()
+        params.pop("_runtimeClientTurnId", None)
+        if not trusted:
+            return None, ""
+        return (dict(task_seed) if isinstance(task_seed, dict) and task_seed else None), runtime_session_id
 
     @property
     def desktop(self) -> DesktopComputerUseService:
@@ -2273,6 +2333,105 @@ class AgentGateway:
         if self._runtime_planner is not None:
             raise RuntimeError("runtime planner is already bound")
         self._runtime_planner = planner
+
+    def reconcile_runtime_shell_continuations(self) -> dict[str, Any]:
+        """Recover only never-dispatched Shell continuations after startup.
+
+        A durable ``dispatching`` owner may already have produced external side
+        effects before its process stopped, so restart always closes that state
+        as ``interrupted`` instead of replaying it.
+        """
+
+        with self._lock:
+            accepting = self._runtime_continuation_accepting
+        if not accepting:
+            return {
+                "ok": False,
+                "schema": "vrcforge.runtime_shell_continuation_reconcile.v1",
+                "pendingDispatched": 0,
+                "delivered": 0,
+                "interrupted": 0,
+            }
+        states = self._runtime_run_ledger.shell_continuation_states(limit=0)
+        interrupted = 0
+        dispatched = 0
+        delivered = 0
+        for state in states:
+            if str(state.get("shellContinuationState") or "") != "dispatching":
+                continue
+            shell_session_id = str(state.get("shellSessionId") or "").strip()
+            if self._runtime_run_ledger.interrupt_shell_continuation(
+                shell_session_id,
+                reason="process_restart_after_dispatch_claim",
+            ):
+                interrupted += 1
+                self.record_interrupted_runtime_task(
+                    task_seed=ensure_dict(state.get("continuationTaskSeed")),
+                    continuation_source="shell_process_finished",
+                    owned_id=shell_session_id,
+                    summary=(
+                        "VRCForge restarted after this background Shell continuation was claimed. "
+                        "Its result is ambiguous; inspect the current state before retrying."
+                    ),
+                )
+        for state in states:
+            if str(state.get("shellContinuationState") or "") != "pending":
+                continue
+            shell_session_id = str(state.get("shellSessionId") or "").strip()
+            dispatched += 1
+            if self._dispatch_runtime_shell_continuation(shell_session_id):
+                delivered += 1
+            else:
+                interrupted += 1
+        return {
+            "ok": True,
+            "schema": "vrcforge.runtime_shell_continuation_reconcile.v1",
+            "pendingDispatched": dispatched,
+            "delivered": delivered,
+            "interrupted": interrupted,
+        }
+
+    def start_runtime_continuations(self) -> None:
+        """Open continuation admission for one app-owned backend lifecycle."""
+
+        with self._lock:
+            if self._runtime_continuations_inflight:
+                raise RuntimeError("Cannot restart runtime continuations while work is active.")
+            self._runtime_continuation_accepting = True
+
+    def shutdown_runtime_continuations(self, timeout_seconds: float = 5.0) -> dict[str, Any]:
+        """Stop new continuation dispatch and boundedly drain real callback owners."""
+
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("continuation shutdown timeout must be non-negative") from exc
+        if timeout != timeout or timeout < 0:
+            raise ValueError("continuation shutdown timeout must be non-negative")
+        deadline = time.monotonic() + min(timeout, 30.0)
+        with self._lock:
+            self._runtime_continuation_accepting = False
+            while self._runtime_continuations_inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._runtime_continuation_condition.wait(remaining)
+            timed_out = sorted(self._runtime_continuations_inflight)
+        return {
+            "ok": not timed_out,
+            "shutdown": True,
+            "timedOutShellSessionIds": timed_out,
+        }
+
+    def _ensure_runtime_continuation_accepting(self) -> None:
+        """Fail closed before a resumed background task can start another action."""
+
+        with self._lock:
+            if not self._runtime_continuation_accepting:
+                raise AgentGatewayError(
+                    "The task continuation was interrupted because app shutdown started.",
+                    status_code=409,
+                )
 
     def configure_paths(self, config_path: Path, audit_dir: Path) -> None:
         with self._lock:
@@ -2845,14 +3004,282 @@ class AgentGateway:
         except DesktopActionBrokerError as exc:
             raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
 
+    def resume_runtime_task_after_shell(
+        self,
+        event: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Resume a task once from a terminal background Shell event."""
+
+        event = event if isinstance(event, dict) else {}
+        shell_session_id = str(event.get("shellSessionId") or "").strip()
+        if not shell_session_id:
+            return None
+        prepared = prepare_shell_task_continuation(
+            event.get("taskSeed") if isinstance(event.get("taskSeed"), dict) else None,
+            event,
+        )
+        if prepared is None:
+            return None
+        with self._lock:
+            if shell_session_id in self._runtime_shell_completion_ids:
+                return None
+            self._runtime_shell_completion_ids.add(shell_session_id)
+            self._runtime_shell_completion_order.append(shell_session_id)
+            while len(self._runtime_shell_completion_order) > 512:
+                expired = self._runtime_shell_completion_order.pop(0)
+                self._runtime_shell_completion_ids.discard(expired)
+        params = ensure_dict(prepared.get("params"))
+        continuation = ensure_dict(prepared.get("taskContinuation"))
+        terminal_result = ensure_dict(event.get("result"))
+        if terminal_result:
+            terminal_result_summary = (
+                dict(terminal_result)
+                if "stdoutSummary" in terminal_result or "stderrSummary" in terminal_result
+                else summarize_owned_shell_result(terminal_result)
+            )
+            continuation["plannerObservation"] = {
+                "tool": "shell",
+                "kind": "shell",
+                "status": str(event.get("status") or ""),
+                "result": terminal_result_summary,
+                "outcome": ensure_dict(ensure_dict(continuation.get("completion")).get("outcome")),
+            }
+        self._signal_background_activity("shell_task_continuation")
+        agent_name = str(prepared.get("agentName") or "desktop-agent")
+        try:
+            with self.runtime_planner.bind_turn(params) as metadata:
+                params["_contextCompactionLimit"] = metadata.verified_context_limit
+                params["_plannerAttemptLabel"] = metadata.planner_label
+                with self._desktop.runtime_turn_context(params):
+                    return self._runtime_message_impl(
+                        params,
+                        agent_name=agent_name,
+                        task_continuation=continuation,
+                        continuation_shutdown_guard=True,
+                    )
+        except DesktopActionBrokerError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+
+    def record_interrupted_runtime_task(
+        self,
+        *,
+        task_seed: dict[str, Any] | None,
+        continuation_source: str,
+        owned_id: str,
+        summary: str,
+    ) -> dict[str, Any] | None:
+        """Persist a UI-only ambiguous terminal without resampling or executing tools."""
+
+        seed = task_seed if isinstance(task_seed, dict) else {}
+        source = str(continuation_source or "").strip()
+        if source not in {"shell_process_finished", "sub_agent_finished"}:
+            return None
+        session_id = str(seed.get("sessionId") or "").strip()[:180]
+        stable_id = str(owned_id or "").strip()[:100]
+        if not session_id or not stable_id:
+            return None
+        original_client_turn_id = str(seed.get("clientTurnId") or "").strip()
+        suffix = "shell" if source == "shell_process_finished" else "subagent"
+        client_turn_id = (
+            f"{original_client_turn_id}:{suffix}:{stable_id}"
+            if original_client_turn_id
+            else f"{suffix}:{stable_id}"
+        )[:240]
+        notice = summarize_text(
+            summary
+            or (
+                "The task continuation was interrupted after dispatch began. Its external result "
+                "may already exist, so inspect the current state before retrying."
+            ),
+            1200,
+        )
+        projected = project_runtime_turn_event(
+            {
+                "continuationSource": source,
+                "sessionId": session_id,
+                "turnId": f"interrupted:{suffix}:{stable_id}"[:180],
+                "clientTurnId": client_turn_id,
+                "plan": {
+                    "summary": notice,
+                    "reply": notice,
+                    "planner": "runtime",
+                    "nextStep": "needs_user_action",
+                    "taskCompletion": {
+                        "status": "needs_user_action",
+                        "taskId": str(seed.get("taskId") or "")[:80],
+                        "evidenceActionIds": [],
+                    },
+                },
+            }
+        )
+        if projected is None:
+            return None
+        self._runtime_run_ledger.append(
+            {
+                "event": "runtime_turn_completed",
+                "status": "needs_user_action",
+                "sessionId": session_id,
+                "turnId": projected["turnId"],
+                "clientTurnId": client_turn_id,
+                "continuationEvent": projected,
+            }
+        )
+        try:
+            self._runtime_turn_completed(projected)
+        except Exception:  # noqa: BLE001 - reconnect reads the durable UI-only projection.
+            pass
+        return projected
+
+    def _dispatch_runtime_shell_continuation(self, shell_session_id: str) -> bool:
+        """Claim, dispatch and terminally record one durable Shell continuation."""
+
+        stable_id = str(shell_session_id or "").strip()[:100]
+        if not stable_id:
+            return False
+        with self._lock:
+            if (
+                not self._runtime_continuation_accepting
+                or stable_id in self._runtime_continuations_inflight
+            ):
+                return False
+            self._runtime_continuations_inflight.add(stable_id)
+        try:
+            return self._dispatch_runtime_shell_continuation_owned(stable_id)
+        finally:
+            with self._lock:
+                self._runtime_continuations_inflight.discard(stable_id)
+                self._runtime_continuation_condition.notify_all()
+
+    def _dispatch_runtime_shell_continuation_owned(self, shell_session_id: str) -> bool:
+        """Dispatch one continuation after its app-lifecycle ownership is reserved."""
+
+        claimed = self._runtime_run_ledger.claim_shell_continuation(shell_session_id)
+        if claimed is None:
+            return False
+        event = {
+            **ensure_dict(claimed.get("terminalEvent")),
+            "taskSeed": ensure_dict(claimed.get("taskSeed")),
+        }
+        try:
+            continuation = self.resume_runtime_task_after_shell(event)
+            if continuation is None:
+                raise AgentGatewayError(
+                    "The durable Shell continuation could not be reconstructed.",
+                    status_code=409,
+                )
+            self._runtime_turn_completed(continuation)
+        except Exception as exc:  # noqa: BLE001 - never replay a claimed external action.
+            try:
+                interrupted = self._runtime_run_ledger.interrupt_shell_continuation(
+                    shell_session_id,
+                    reason=f"dispatch_failed:{type(exc).__name__}",
+                )
+                if interrupted:
+                    self.record_interrupted_runtime_task(
+                        task_seed=ensure_dict(claimed.get("taskSeed")),
+                        continuation_source="shell_process_finished",
+                        owned_id=shell_session_id,
+                        summary=(
+                            "The background Shell continuation was interrupted after dispatch began. "
+                            "The command result may already exist; inspect it before retrying."
+                        ),
+                    )
+            finally:
+                self.append_audit(
+                    {
+                        "event": "runtime_shell_task_continuation_failed",
+                        "shellSessionId": str(shell_session_id or "")[:100],
+                        "status": "interrupted",
+                        "failureClass": type(exc).__name__,
+                    }
+                )
+            return False
+        try:
+            return self._runtime_run_ledger.deliver_shell_continuation(shell_session_id)
+        except Exception as exc:  # noqa: BLE001 - dispatch already ran; restart must not replay it.
+            self.append_audit(
+                {
+                    "event": "runtime_shell_task_continuation_delivery_record_failed",
+                    "shellSessionId": str(shell_session_id or "")[:100],
+                    "status": "dispatching",
+                    "failureClass": type(exc).__name__,
+                }
+            )
+            return False
+
+    def resume_runtime_task_after_sub_agent(
+        self,
+        event: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """Resume one original task from a durable sub-agent terminal event."""
+
+        event = event if isinstance(event, dict) else {}
+        task_id = str(event.get("subAgentTaskId") or "").strip()
+        if not task_id:
+            return None
+        prepared = prepare_sub_agent_task_continuation(
+            event.get("taskSeed") if isinstance(event.get("taskSeed"), dict) else None,
+            event,
+        )
+        if prepared is None:
+            return None
+        completion_key = f"subagent:{task_id}"
+        with self._lock:
+            if completion_key in self._runtime_shell_completion_ids:
+                return None
+            self._runtime_shell_completion_ids.add(completion_key)
+            self._runtime_shell_completion_order.append(completion_key)
+            while len(self._runtime_shell_completion_order) > 512:
+                expired = self._runtime_shell_completion_order.pop(0)
+                self._runtime_shell_completion_ids.discard(expired)
+        params = ensure_dict(prepared.get("params"))
+        continuation = ensure_dict(prepared.get("taskContinuation"))
+        result = ensure_dict(event.get("result"))
+        result_summary = result.get("summaryText") or result.get("summary") or event.get("summary")
+        if isinstance(result_summary, dict):
+            result_summary = json.dumps(result_summary, ensure_ascii=False, sort_keys=True, default=str)
+        continuation["plannerObservation"] = {
+            "tool": "vrcforge_delegate_subagent",
+            "kind": "skill",
+            "status": str(event.get("status") or ""),
+            "result": {
+                "taskId": task_id,
+                "status": str(event.get("status") or ""),
+                "summary": summarize_text(str(event.get("summary") or ""), 1000),
+                "resultSummary": summarize_text(str(result_summary or ""), 1600),
+            },
+            "outcome": ensure_dict(ensure_dict(continuation.get("completion")).get("outcome")),
+        }
+        planner_evidence = result.get("plannerEvidence")
+        if isinstance(planner_evidence, dict):
+            continuation["plannerObservation"]["result"]["plannerEvidence"] = planner_evidence
+        self._signal_background_activity("sub_agent_task_continuation")
+        agent_name = str(prepared.get("agentName") or "desktop-agent")
+        try:
+            with self.runtime_planner.bind_turn(params) as metadata:
+                params["_contextCompactionLimit"] = metadata.verified_context_limit
+                params["_plannerAttemptLabel"] = metadata.planner_label
+                with self._desktop.runtime_turn_context(params):
+                    return self._runtime_message_impl(
+                        params,
+                        agent_name=agent_name,
+                        task_continuation=continuation,
+                        continuation_shutdown_guard=True,
+                    )
+        except DesktopActionBrokerError as exc:
+            raise AgentGatewayError(str(exc), status_code=exc.status_code) from exc
+
     def _runtime_message_impl(
         self,
         params: dict[str, Any] | None = None,
         agent_name: str = "desktop-agent",
         *,
         task_continuation: dict[str, Any] | None = None,
+        continuation_shutdown_guard: bool = False,
     ) -> dict[str, Any]:
         params = params or {}
+        if continuation_shutdown_guard:
+            self._ensure_runtime_continuation_accepting()
         message = str(params.get("message") or "").strip()
         if not message:
             raise AgentGatewayError("message is required.")
@@ -2898,6 +3325,7 @@ class AgentGateway:
                     if isinstance(params.get("_requestedContextLimit"), int)
                     else None
                 ),
+                history=history,
             )
         observe = self.runtime_observe(session_id=session_id, project_root=project_root)
         if attachments:
@@ -2951,6 +3379,11 @@ class AgentGateway:
         loop_state: list[dict[str, Any]] = (
             task_loop.planner_observations() if continuation_context else []
         )
+        continuation_observation = ensure_dict(
+            ensure_dict(task_continuation).get("plannerObservation")
+        )
+        if continuation_observation:
+            loop_state.append(continuation_observation)
         steps: list[dict[str, Any]] = []
         if vision_payload is not None:
             # 带标签的视觉分析 run step：记录真实执行的 provider/model 与该次
@@ -2992,6 +3425,7 @@ class AgentGateway:
         runtime_compaction_attempted = False
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
         unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
+        unresolved_completion_action_keys: dict[str, tuple[str, str]] = {}
         completed_continuation_action_ids: set[str] = set()
         if continuation_context and str(continuation_completion.get("status") or "").casefold() == "completed":
             completed_requested_action_id = str(
@@ -3073,11 +3507,16 @@ class AgentGateway:
             )
 
         for step_index in range(RUNTIME_AGENT_MAX_STEPS):
+            if continuation_shutdown_guard:
+                self._ensure_runtime_continuation_accepting()
             continuation_terminal_plan = ensure_dict(
                 ensure_dict(task_continuation).get("terminalPlan")
             )
             if step_index == 0 and continuation_terminal_plan:
                 last_plan = continuation_terminal_plan
+                if str(continuation_completion.get("status") or "").casefold() == "completed":
+                    last_plan["completionSatisfied"] = True
+                    last_plan["completionActionIds"] = task_loop.completed_action_ids()
                 iterations += 1
                 break
             if self._runtime_session_state.consume_cancel_request(
@@ -3147,6 +3586,8 @@ class AgentGateway:
                 reasoning_trace=reasoning_trace,
                 exposure_layer=runtime_exposure_layer,
             )
+            if continuation_shutdown_guard:
+                self._ensure_runtime_continuation_accepting()
             iterations += 1
             if self._runtime_session_state.consume_cancel_request(
                 session_id=session_id,
@@ -3198,6 +3639,12 @@ class AgentGateway:
             if not command:
                 command = str(plan.get("shellCommand") or "").strip()
             shell_step_params = ensure_dict(plan.get("shellParams"))
+            if command and not project_root:
+                # Projectless chat uses the complete host Shell lane.  Freeze
+                # the effective defaults before deriving action identity,
+                # completion requirements, execution, and the async task seed.
+                shell_step_params.setdefault("yieldMs", 10_000)
+                shell_step_params.setdefault("timeout", 30 * 60)
 
             if command:
                 action_kind = "shell"
@@ -3222,6 +3669,51 @@ class AgentGateway:
                 # 没有工具动作（终止答复 / 未连接 / 让用户选模型）→ 结束本轮。
                 break
 
+            policy_tool = (
+                "vrcforge_shell_execute"
+                if action_kind == "shell"
+                else str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
+            )
+            skill_policy_reason = task_loop.skill_policy_block_reason(policy_tool)
+            if skill_policy_reason:
+                blocked_outcome = normalize_agent_tool_result(
+                    {
+                        "ok": False,
+                        "status": "blocked",
+                        "error": {
+                            "type": "skill_policy",
+                            "code": skill_policy_reason,
+                            "likelyCauses": [
+                                "The loaded Skill does not grant this tool to its instruction path."
+                            ],
+                            "nextActions": [
+                                "Choose one of the Skill's allowed tools or stop and explain the mismatch."
+                            ],
+                            "retryable": True,
+                        },
+                    },
+                    fallback_summary="The loaded Skill does not allow that tool.",
+                    write=action_kind in {"write", "shell"},
+                )
+                loop_state.append(
+                    {
+                        "tool": policy_tool,
+                        "kind": action_kind,
+                        "status": "blocked",
+                        "outcome": blocked_outcome,
+                    }
+                )
+                steps.append(
+                    {
+                        "index": len(steps),
+                        "kind": "policy",
+                        "tool": policy_tool,
+                        "summary": blocked_outcome.get("summary") or "",
+                        "status": "blocked",
+                    }
+                )
+                continue
+
             # A turn may still ask the planner for a terminal reply after the
             # third tool result, but a fourth tool call is never executed.
             if tool_calls_used >= RUNTIME_AGENT_MAX_TOOL_CALLS:
@@ -3237,16 +3729,22 @@ class AgentGateway:
             # failed action may be retried, but only until the bounded failure
             # guard observes the same tool, arguments, and failure class three
             # times in succession.
+            planned_tool = str(
+                plan.get("writeTool")
+                or plan.get("skillTool")
+                or ("shell" if action_kind == "shell" else "")
+            )
+            planned_arguments: dict[str, Any] = (
+                dict(ensure_dict(plan.get("writeParams")))
+                if action_kind == "write"
+                else dict(ensure_dict(plan.get("skillParams")))
+                if action_kind == "skill"
+                else {"command": command, **shell_step_params}
+            )
             planned_action_id = canonical_action_id(
                 action_kind,
-                str(plan.get("writeTool") or plan.get("skillTool") or ("shell" if action_kind == "shell" else "")),
-                (
-                    ensure_dict(plan.get("writeParams"))
-                    if action_kind == "write"
-                    else ensure_dict(plan.get("skillParams"))
-                    if action_kind == "skill"
-                    else {"command": command, **shell_step_params}
-                ),
+                planned_tool,
+                planned_arguments,
             )
             if (
                 action_key in successful_actions
@@ -3254,8 +3752,36 @@ class AgentGateway:
             ):
                 break
 
+            completion_requirement = ensure_dict(plan.get("completionRequirement"))
+            if completion_requirement:
+                task_loop.require_action(
+                    kind=str(completion_requirement.get("kind") or action_kind),
+                    tool=str(
+                        completion_requirement.get("tool")
+                        or plan.get("writeTool")
+                        or plan.get("skillTool")
+                        or ("shell" if action_kind == "shell" else "")
+                    ),
+                    arguments=(
+                        completion_requirement.get("arguments")
+                        if isinstance(completion_requirement.get("arguments"), dict)
+                        else None
+                    ),
+                    verification_profile=str(
+                        completion_requirement.get("verificationProfile") or ""
+                    ),
+                )
+            elif action_kind != "skill":
+                task_loop.require_action(
+                    kind=action_kind,
+                    tool=planned_tool,
+                    arguments=planned_arguments,
+                )
+
             step_tool = ""
             action_arguments: Any = {}
+            if continuation_shutdown_guard:
+                self._ensure_runtime_continuation_accepting()
             tool_calls_used += 1
             if action_kind == "shell":
                 step_tool = "shell"
@@ -3270,13 +3796,6 @@ class AgentGateway:
                     or params.get("workspace_root")
                     or params.get("workspaceRoot")
                 )
-                if not project_root:
-                    # Projectless chat uses the full host Shell lane. Give
-                    # ordinary commands a bounded foreground window, then
-                    # return a controllable session instead of blocking the
-                    # conversation for the entire command lifetime.
-                    shell_step_params.setdefault("yieldMs", 10_000)
-                    shell_step_params.setdefault("timeout", 30 * 60)
                 action_arguments = {
                     "command": command,
                     "cwd": shell_step_params.get("cwd") or params.get("cwd") or project_root,
@@ -3342,7 +3861,7 @@ class AgentGateway:
                 )
             elif action_kind == "write":
                 step_tool = str(plan.get("writeTool") or "")
-                action_arguments = ensure_dict(plan.get("writeParams"))
+                action_arguments = dict(planned_arguments)
                 step_payload = self.approval_transactions._execute_write_request(
                     step_tool,
                     action_arguments,
@@ -3368,8 +3887,25 @@ class AgentGateway:
                 )
             else:  # skill
                 step_tool = str(plan.get("skillTool") or "")
-                step_params = ensure_dict(plan.get("skillParams"))
-                action_arguments = step_params
+                step_params = dict(planned_arguments)
+                action_arguments = dict(planned_arguments)
+                if step_tool == "vrcforge_delegate_subagent":
+                    action_arguments = dict(step_params)
+                    task_loop.require_action(
+                        kind="skill",
+                        tool=step_tool,
+                        arguments=action_arguments,
+                    )
+                    step_params["_runtimeSessionId"] = session_id
+                    step_params["_runtimeClientTurnId"] = client_turn_id
+                    step_params["_taskSeed"] = task_loop.approval_seed(
+                        tool_calls_used=tool_calls_used,
+                        exposure_layer=runtime_exposure_layer,
+                        requested_kind="skill",
+                        requested_tool=step_tool,
+                        requested_arguments=action_arguments,
+                        continue_after_approval=bool(plan.get("continueLoop")),
+                    )
                 if step_tool == "vrcforge_agent_desktop_action" or step_tool.startswith("vrcforge_progress_") or step_tool == "vrcforge_ask_user":
                     step_params.setdefault("sessionId", session_id)
                     if goal_delivery_id:
@@ -3404,6 +3940,24 @@ class AgentGateway:
                     "result": step_payload.get("result"),
                     "outcome": step_payload.get("outcome"),
                 }
+                if (
+                    str(step_payload.get("status") or "").strip().casefold() == "loaded"
+                    and not str(step_payload.get("entrypointTool") or "").strip()
+                ):
+                    loaded_skill = ensure_dict(step_payload.get("result"))
+                    active_skill_policy = task_loop.activate_skill_policy(
+                        name=str(loaded_skill.get("name") or step_tool),
+                        instructions=str(loaded_skill.get("instructions") or ""),
+                        allowed_tools=loaded_skill.get("allowedTools"),
+                        disallowed_tools=loaded_skill.get("disallowedTools"),
+                    )
+                    loop_step["skillContext"] = {
+                        "name": str(loaded_skill.get("name") or step_tool)[:160],
+                        "instructions": str(loaded_skill.get("instructions") or "")[:6000],
+                        "allowedTools": active_skill_policy.get("allowedTools") or [],
+                        "disallowedTools": active_skill_policy.get("disallowedTools") or [],
+                    }
+                    plan["continueLoop"] = True
                 if step_tool == "vrcforge_agent_desktop_action":
                     desktop_vision = self._desktop_action_vision_analysis(message, step_payload.get("result"))
                     if desktop_vision is not None:
@@ -3425,18 +3979,51 @@ class AgentGateway:
                         )
                 loop_state.append(loop_step)
 
-            task_action = task_loop.record_action(
-                kind=action_kind,
-                tool=step_tool,
-                arguments=action_arguments,
-                raw_result=step_payload,
-                outcome=ensure_dict(step_payload.get("outcome")),
-                action_id=str(step_payload.get("taskActionId") or planned_action_id),
+            loaded_skill_context_only = bool(
+                action_kind == "skill"
+                and str(step_payload.get("status") or "").strip().casefold() == "loaded"
+                and not str(step_payload.get("entrypointTool") or "").strip()
             )
-            step_payload["outcome"] = task_action["outcome"]
-            if loop_state:
-                loop_state[-1]["actionId"] = task_action["actionId"]
-                loop_state[-1]["outcome"] = task_action["outcome"]
+            if loaded_skill_context_only:
+                task_loop.require_action(kind="action", tool="*")
+                task_action = {
+                    "actionId": "",
+                    "status": "prepared",
+                    "outcome": ensure_dict(step_payload.get("outcome")),
+                }
+            else:
+                task_record_tool = (
+                    str(step_payload.get("entrypointTool") or "").strip()
+                    if action_kind == "skill"
+                    else ""
+                ) or step_tool
+                if action_kind == "skill" and not completion_requirement:
+                    task_loop.require_action(
+                        kind=action_kind,
+                        tool=task_record_tool,
+                        arguments=action_arguments,
+                    )
+                task_action = task_loop.record_action(
+                    kind=action_kind,
+                    tool=task_record_tool,
+                    arguments=action_arguments,
+                    raw_result=step_payload,
+                    outcome=ensure_dict(step_payload.get("outcome")),
+                    action_id=(
+                        ""
+                        if task_record_tool != step_tool
+                        else str(step_payload.get("taskActionId") or planned_action_id)
+                    ),
+                    correction_for_action_id=str(plan.get("correctionForActionId") or ""),
+                )
+                step_payload["outcome"] = task_action["outcome"]
+                if loop_state:
+                    loop_state[-1]["actionId"] = task_action["actionId"]
+                    loop_state[-1]["outcome"] = task_action["outcome"]
+                    if task_action.get("correctedActionId"):
+                        loop_state[-1]["correctionForActionId"] = task_action[
+                            "correctedActionId"
+                        ]
 
             steps.append(
                 {
@@ -3449,6 +4036,14 @@ class AgentGateway:
                     "actionId": task_action["actionId"],
                 }
             )
+
+            if (
+                str(plan.get("planner") or "").strip().casefold() != "llm"
+                and plan.get("continueLoop") is not True
+                and task_action.get("status") == "completed"
+            ):
+                plan["completionSatisfied"] = True
+                plan["completionActionIds"] = task_loop.completed_action_ids()
 
             step_approval = str(
                 step_payload.get("approval_id") or step_payload.get("approvalId") or ""
@@ -3463,16 +4058,53 @@ class AgentGateway:
             step_failure_class = runtime_step_failure_class(step_payload)
             step_outcome = ensure_dict(step_payload.get("outcome"))
             step_outcome_status = str(step_outcome.get("status") or "").strip()
+            task_action_id = str(task_action.get("actionId") or "").strip()
+            correction_action_id = str(
+                task_action.get("correctedActionId") or ""
+            ).strip()
             if step_outcome_status == "needs_user_action":
                 unresolved_completion_outcomes[action_key] = step_outcome
-                gated_plan = completion_gate_plan(plan, step_outcome)
-                if gated_plan is not None:
-                    last_plan = gated_plan
-                    break
+                if task_action_id:
+                    unresolved_completion_action_keys[task_action_id] = action_key
+                requires_direct_user_input = bool(
+                    step_waits_for_approval
+                    or step_tool == "vrcforge_ask_user"
+                )
+                if (
+                    not requires_direct_user_input
+                    and str(plan.get("planner") or "").strip().casefold() != "llm"
+                ):
+                    # A deterministic first call may discover a structured
+                    # condition that the model can resolve with a different
+                    # read/diagnostic action. Re-feed it once; an LLM-selected
+                    # needs-user-action result remains terminal for this turn.
+                    plan["continueLoop"] = True
+                else:
+                    gated_plan = completion_gate_plan(plan, step_outcome)
+                    if gated_plan is not None:
+                        last_plan = gated_plan
+                        break
             elif step_outcome_status == "failed":
                 unresolved_completion_outcomes[action_key] = step_outcome
+                if task_action_id:
+                    unresolved_completion_action_keys[task_action_id] = action_key
+                if str(plan.get("planner") or "").strip().casefold() != "llm":
+                    # Deterministic routing owns fast first selection, not the
+                    # failure verdict. Re-feed the structured result to the
+                    # model so it can correct arguments or choose a diagnostic
+                    # action instead of terminating at the first tool error.
+                    plan["continueLoop"] = True
             elif not step_failure_class:
                 unresolved_completion_outcomes.pop(action_key, None)
+                if task_action_id:
+                    unresolved_completion_action_keys.pop(task_action_id, None)
+                if correction_action_id:
+                    superseded_key = unresolved_completion_action_keys.pop(
+                        correction_action_id,
+                        None,
+                    )
+                    if superseded_key is not None:
+                        unresolved_completion_outcomes.pop(superseded_key, None)
             if step_failure_class:
                 if action_kind == "shell":
                     failure_arguments: Any = {
@@ -3482,9 +4114,12 @@ class AgentGateway:
                         "shellParams": shell_step_params,
                     }
                 elif action_kind == "write":
-                    failure_arguments = ensure_dict(plan.get("writeParams"))
+                    failure_arguments = action_arguments
                 else:
-                    failure_arguments = step_params
+                    # Runtime-only session/task ownership fields are injected
+                    # into step_params after canonical planning. They must not
+                    # change the identity of an otherwise identical failure.
+                    failure_arguments = action_arguments
                 if repeated_failure_guard.record_failure(
                     step_tool,
                     failure_arguments,
@@ -3510,6 +4145,17 @@ class AgentGateway:
 
             if step_waits_for_approval:
                 break  # 进入审批等待 → 本轮收尾。
+            if task_action.get("status") == "running":
+                # Background Shell and sub-agent tasks own the next decision
+                # after their durable terminal event.  Never continue against
+                # a seed that predates later tool calls.
+                break
+            if action_kind == "shell" and str(step_payload.get("status") or "") == "running":
+                # A task-linked background process owns every subsequent
+                # decision.  Continuing here would execute tools after the
+                # frozen task seed and could replay them when the process
+                # later resumes the task.
+                break
             if action_kind == "write" and not plan.get("continueLoop"):
                 break
             if not plan.get("continueLoop"):
@@ -3528,6 +4174,7 @@ class AgentGateway:
         terminal_override = str(last_plan.get("nextStep") or "") in {
             "cancelled",
             "context_compaction_required",
+            "loop_suppressed",
         }
         top_plan = last_plan if terminal_override else (
             first_plan if iterations <= 1 else self._summarize_loop_plan(
@@ -3561,6 +4208,7 @@ class AgentGateway:
         if unresolved_completion_outcomes and terminal_status not in {
             "cancelled",
             "context_compaction_required",
+            "loop_suppressed",
         }:
             gated_plan = completion_gate_plan(
                 top_plan,
@@ -3638,6 +4286,18 @@ class AgentGateway:
                 "goalDeliveryId": goal_delivery_id,
             }
         )
+        continuation_source = str(
+            ensure_dict(task_continuation).get("source") or ""
+        ).strip()
+        continuation_event = project_runtime_turn_event(
+            {
+                "continuationSource": continuation_source,
+                "sessionId": session_id,
+                "turnId": turn_id,
+                "clientTurnId": client_turn_id,
+                "plan": top_plan,
+            }
+        )
         self._runtime_run_ledger.append(
             self._runtime_run_ledger.build_run_from_turn(
                 event="runtime_turn_completed",
@@ -3661,6 +4321,7 @@ class AgentGateway:
                 skill_payload=skill_payload,
                 write_payload=write_payload,
                 approval_id=approval_id,
+                continuation_event=continuation_event,
                 context_usage=context_usage,
                 context_compaction=planner_policy.runtime_compaction_audit_view(runtime_compaction),
             )
@@ -3676,6 +4337,8 @@ class AgentGateway:
             "plan": top_plan,
             "task": ensure_dict(top_plan.get("task")) or task_loop.snapshot(),
         }
+        if continuation_source:
+            payload["continuationSource"] = continuation_source
         if approval_id and continuation_context:
             payload["resumedApprovalId"] = approval_id
         if client_turn_id:
@@ -4872,7 +5535,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.5.0",
+        server_version="1.5.1",
     )
     return create_agent_mcp_2026_asgi_app(
         router,

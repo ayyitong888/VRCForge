@@ -362,6 +362,7 @@ class AgentShellService:
                 classification,
                 admission_id=admission_id,
                 owner_id=self._session_owner(params, agent_name),
+                task_context=task_context,
             )
             result = execution.get("result")
             self._ports.append_audit(
@@ -539,6 +540,7 @@ class AgentShellService:
             classification,
             admission_id=admission_id,
             owner_id=self._session_owner(params, "approved-shell"),
+            task_context=None,
         )
         result = execution.get("result")
         self._ports.append_audit(
@@ -571,6 +573,7 @@ class AgentShellService:
         *,
         admission_id: int,
         owner_id: str,
+        task_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         command = str(classification["command"])
         cwd = Path(classification["cwd"])
@@ -587,6 +590,19 @@ class AgentShellService:
         if use_sessions:
             environment = build_shell_environment(self._process.environment(), env_overrides)
             cancel_ids = _cancel_ids(params)
+            completion_lock = threading.Lock()
+            pending_completion: dict[str, Any] | None = None
+            completion_owner = "undecided"
+
+            def session_finished(event: dict[str, Any]) -> None:
+                nonlocal pending_completion
+                with completion_lock:
+                    if completion_owner == "undecided":
+                        pending_completion = dict(event)
+                        return
+                    deliver = completion_owner == "async"
+                if deliver:
+                    self._ports.session_finished(event)
 
             def cancel_requested() -> bool:
                 return bool(
@@ -599,7 +615,7 @@ class AgentShellService:
                 )
 
             try:
-                return self._sessions.execute(
+                execution = self._sessions.execute(
                     command=command,
                     argv=self._command_argv(command, interactive=bool(params.get("pty"))),
                     cwd=cwd,
@@ -618,9 +634,50 @@ class AgentShellService:
                         "clientTurnId": str(
                             params.get("client_turn_id") or params.get("clientTurnId") or ""
                         ),
+                        "taskSeed": dict(task_context or {}),
                     },
-                    on_finished=self._ports.session_finished,
+                    on_finished=session_finished,
                 )
+                with completion_lock:
+                    completion_owner = (
+                        "async" if str(execution.get("status") or "") == "running" else "inline"
+                    )
+                    buffered = pending_completion
+                    pending_completion = None
+                if completion_owner == "async" and buffered is not None:
+                    # The process finished before the caller received the
+                    # supervisor's provisional ``running`` payload.  Treat it
+                    # as an inline terminal result: this keeps one owner, one
+                    # provider loop, and prevents a terminal callback from
+                    # racing ahead of the original HTTP response.
+                    terminal_result = (
+                        dict(buffered.get("result"))
+                        if isinstance(buffered.get("result"), dict)
+                        else {}
+                    )
+                    terminal_session = (
+                        dict(execution.get("session"))
+                        if isinstance(execution.get("session"), dict)
+                        else {}
+                    )
+                    terminal_session.update(
+                        {
+                            "status": str(buffered.get("status") or "finished"),
+                            "exitCode": buffered.get("exitCode"),
+                            "timedOut": bool(buffered.get("timedOut")),
+                            "cancelled": bool(buffered.get("cancelled")),
+                            "terminationFailed": bool(buffered.get("terminationFailed")),
+                            "finishedAt": buffered.get("finishedAt"),
+                        }
+                    )
+                    execution = {
+                        **execution,
+                        "ok": bool(terminal_result.get("ok")),
+                        "status": "executed",
+                        "session": terminal_session,
+                        "result": terminal_result,
+                    }
+                return execution
             except ShellSessionError as exc:
                 self._raise(exc.detail, exc.status_code)
         result = self._run_command(

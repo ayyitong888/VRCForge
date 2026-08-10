@@ -6,6 +6,7 @@ from agent_task_loop import (
     approval_completion,
     approval_task_context,
     canonical_action_id,
+    prepare_sub_agent_task_continuation,
     rejected_approval_completion,
 )
 
@@ -16,6 +17,204 @@ def ok_outcome(summary: str = "done") -> dict:
         "summary": summary,
         "verification": {"state": "not_required", "checks": []},
     }
+
+
+def test_failed_sub_agent_terminal_result_returns_to_exact_required_action() -> None:
+    arguments = {
+        "role": "project_index_review",
+        "task": "find relevant prefabs",
+        "displayName": "Manuka",
+    }
+    loop = AgentTaskLoop(
+        "delegate the project review",
+        session_id="owner-session",
+        client_turn_id="owner-turn",
+    )
+    requirement = loop.require_action(
+        kind="skill",
+        tool="vrcforge_delegate_subagent",
+        arguments=arguments,
+    )
+    seed = loop.approval_seed(
+        tool_calls_used=1,
+        requested_kind="skill",
+        requested_tool="vrcforge_delegate_subagent",
+        requested_arguments=arguments,
+        continue_after_approval=True,
+    )
+
+    prepared = prepare_sub_agent_task_continuation(
+        seed,
+        {
+            "subAgentTaskId": "sub-task-failed",
+            "status": "failed",
+            "error": "specialist failed",
+        },
+    )
+
+    assert prepared is not None
+    continuation = prepared["taskContinuation"]
+    completion = continuation["completion"]
+    assert completion["status"] == "failed"
+    assert completion["actionId"] == requirement["actionId"]
+    assert continuation["terminalPlan"] is None
+    resumed = AgentTaskLoop.from_approval_context(continuation["context"], completion)
+    gated = resumed.gate_terminal(
+        {"planner": "llm", "nextStep": "done", "reply": "finished"}
+    )
+    assert gated["nextStep"] == "tool_failed"
+    assert gated["task"]["actions"][0]["actionId"] == requirement["actionId"]
+
+
+def test_cancelled_sub_agent_is_an_honest_terminal_not_a_tool_failure() -> None:
+    arguments = {"role": "validation_triage", "task": "inspect the avatar"}
+    loop = AgentTaskLoop("delegate validation", session_id="session", client_turn_id="turn")
+    seed = loop.approval_seed(
+        tool_calls_used=1,
+        requested_kind="skill",
+        requested_tool="vrcforge_delegate_subagent",
+        requested_arguments=arguments,
+        continue_after_approval=True,
+    )
+
+    prepared = prepare_sub_agent_task_continuation(
+        seed,
+        {
+            "subAgentTaskId": "sub-task-cancelled",
+            "status": "cancelled",
+            "error": "Cancelled by the user.",
+        },
+    )
+
+    assert prepared is not None
+    continuation = prepared["taskContinuation"]
+    assert continuation["completion"]["status"] == "cancelled"
+    assert continuation["terminalPlan"]["nextStep"] == "cancelled"
+    resumed = AgentTaskLoop.from_approval_context(
+        continuation["context"],
+        continuation["completion"],
+    )
+    gated = resumed.gate_terminal(continuation["terminalPlan"])
+    assert gated["nextStep"] == "cancelled"
+    assert gated["task"]["status"] == "cancelled"
+
+
+def test_completed_sub_agent_with_failed_result_is_not_completion_evidence() -> None:
+    arguments = {"role": "project_index_review", "task": "inspect the project"}
+    loop = AgentTaskLoop("delegate review", session_id="session", client_turn_id="turn")
+    seed = loop.approval_seed(
+        tool_calls_used=1,
+        requested_kind="skill",
+        requested_tool="vrcforge_delegate_subagent",
+        requested_arguments=arguments,
+        continue_after_approval=True,
+    )
+
+    prepared = prepare_sub_agent_task_continuation(
+        seed,
+        {
+            "subAgentTaskId": "sub-task-false-success",
+            "status": "completed",
+            "summary": "worker returned an error envelope",
+            "result": {"ok": False, "error": "index failed"},
+        },
+    )
+
+    assert prepared is not None
+    continuation = prepared["taskContinuation"]
+    assert continuation["completion"]["status"] == "failed"
+    assert continuation["terminalPlan"] is None
+
+
+def test_async_task_seed_preserves_bounded_parent_history_for_resampling() -> None:
+    loop = AgentTaskLoop(
+        "continue the referenced task",
+        session_id="session",
+        client_turn_id="turn",
+        history=[
+            {"role": "user", "text": "Use the avatar discussed above."},
+            {"role": "agent", "text": "I will inspect the selected avatar."},
+        ],
+    )
+    seed = loop.approval_seed(
+        requested_kind="skill",
+        requested_tool="vrcforge_delegate_subagent",
+        requested_arguments={"role": "validation_triage", "task": "inspect it"},
+    )
+
+    prepared = prepare_sub_agent_task_continuation(
+        seed,
+        {
+            "subAgentTaskId": "history-task",
+            "status": "completed",
+            "result": {"ok": True},
+            "summary": "inspection completed",
+        },
+    )
+
+    assert prepared is not None
+    assert prepared["params"]["history"] == [
+        {"role": "user", "text": "Use the avatar discussed above."},
+        {"role": "agent", "text": "I will inspect the selected avatar."},
+    ]
+
+
+def test_redacted_durable_shell_seed_preserves_the_pre_execution_action_identity() -> None:
+    arguments = {
+        "command": "Write-Output ok",
+        "env": {"API_KEY": "secret-value"},
+        "background": True,
+    }
+    loop = AgentTaskLoop("run the host check", session_id="session", client_turn_id="turn")
+    requirement = loop.require_action(kind="shell", tool="shell", arguments=arguments)
+    seed = loop.approval_seed(
+        requested_kind="shell",
+        requested_tool="shell",
+        requested_arguments=arguments,
+    )
+    assert seed["requestedActionId"] == requirement["actionId"]
+
+    redacted_seed = {
+        **seed,
+        "requestedArguments": {
+            **arguments,
+            "env": {"API_KEY": "<redacted>"},
+        },
+    }
+    context = approval_task_context(
+        redacted_seed,
+        tool="shell",
+        arguments=redacted_seed["requestedArguments"],
+    )
+
+    assert context is not None
+    assert context["requestedActionId"] == requirement["actionId"]
+    assert context["priorRequirements"][0]["actionId"] == requirement["actionId"]
+
+
+def test_sub_agent_continuation_rejects_a_seed_for_a_different_parent_session() -> None:
+    loop = AgentTaskLoop(
+        "delegate review",
+        session_id="victim-session",
+        client_turn_id="victim-turn",
+    )
+    seed = loop.approval_seed(
+        requested_kind="skill",
+        requested_tool="vrcforge_delegate_subagent",
+        requested_arguments={"role": "project_index_review", "task": "inspect"},
+    )
+
+    prepared = prepare_sub_agent_task_continuation(
+        seed,
+        {
+            "subAgentTaskId": "foreign-task",
+            "parentSessionId": "attacker-session",
+            "status": "completed",
+            "result": {"ok": True},
+        },
+    )
+
+    assert prepared is None
 
 
 def test_llm_completion_requires_exact_completed_action_evidence() -> None:
@@ -138,7 +337,33 @@ def test_same_background_action_can_finish_before_the_completion_claim() -> None
 
 def test_deterministic_single_read_completes_from_its_exact_result() -> None:
     loop = AgentTaskLoop("list avatars")
+    loop.require_action(kind="skill", tool="vrcforge_list_avatars", arguments={})
     action = loop.record_action(
+        kind="skill",
+        tool="vrcforge_list_avatars",
+        arguments={},
+        raw_result={"ok": True, "status": "executed", "result": {"avatars": []}},
+        outcome=ok_outcome("avatar list read"),
+    )
+
+    gated = loop.gate_terminal(
+        {
+            "planner": "deterministic-local",
+            "nextStep": "call_skill",
+            "reply": "listed",
+            "completionSatisfied": True,
+            "completionActionIds": [action["actionId"]],
+        }
+    )
+
+    assert gated["nextStep"] == "done"
+    assert gated["taskCompletion"]["evidenceActionIds"] == [action["actionId"]]
+
+
+def test_deterministic_action_without_runtime_completion_receipt_is_not_done() -> None:
+    loop = AgentTaskLoop("list avatars")
+    loop.require_action(kind="skill", tool="vrcforge_list_avatars", arguments={})
+    loop.record_action(
         kind="skill",
         tool="vrcforge_list_avatars",
         arguments={},
@@ -150,8 +375,115 @@ def test_deterministic_single_read_completes_from_its_exact_result() -> None:
         {"planner": "deterministic-local", "nextStep": "call_skill", "reply": "listed"}
     )
 
+    assert gated["nextStep"] == "completion_unverified"
+    assert gated["completionGate"]["reason"] == "runtime_completion_unbound"
+
+
+def test_corrected_action_supersedes_the_failed_branch_and_keeps_the_requirement() -> None:
+    loop = AgentTaskLoop("inspect the selected avatar")
+    bad_args = {"avatarPath": "Missing"}
+    good_args = {"avatarPath": "AvatarRoot"}
+    loop.require_action(kind="skill", tool="vrcforge_scan_materials", arguments=bad_args)
+    failed = loop.record_action(
+        kind="skill",
+        tool="vrcforge_scan_materials",
+        arguments=bad_args,
+        raw_result={"ok": False, "status": "failed", "error": "missing avatar"},
+        outcome={"status": "failed", "summary": "missing avatar"},
+    )
+    corrected = loop.record_action(
+        kind="skill",
+        tool="vrcforge_scan_materials",
+        arguments=good_args,
+        raw_result={"ok": True, "status": "executed", "result": {"materials": []}},
+        outcome=ok_outcome("materials scanned"),
+        correction_for_action_id=failed["actionId"],
+    )
+
+    gated = loop.gate_terminal(
+        {
+            "planner": "llm",
+            "nextStep": "done",
+            "completionClaim": {
+                "satisfied": True,
+                "evidenceActionIds": [corrected["actionId"]],
+            },
+        }
+    )
+
     assert gated["nextStep"] == "done"
-    assert gated["taskCompletion"]["evidenceActionIds"] == [action["actionId"]]
+    actions = gated["task"]["actions"]
+    assert actions[0]["status"] == "superseded"
+    assert actions[0]["supersededBy"] == corrected["actionId"]
+    assert gated["task"]["requirements"][0]["actionId"] == corrected["actionId"]
+
+
+def test_unrelated_diagnostic_action_cannot_supersede_a_failed_requirement() -> None:
+    loop = AgentTaskLoop("inspect the selected avatar")
+    bad_args = {"avatarPath": "Missing"}
+    loop.require_action(kind="skill", tool="vrcforge_scan_materials", arguments=bad_args)
+    failed = loop.record_action(
+        kind="skill",
+        tool="vrcforge_scan_materials",
+        arguments=bad_args,
+        raw_result={"ok": False, "status": "failed", "error": "missing avatar"},
+        outcome={"status": "failed", "summary": "missing avatar"},
+    )
+    diagnostic = loop.record_action(
+        kind="skill",
+        tool="vrcforge_health",
+        arguments={},
+        raw_result={"ok": True, "status": "executed"},
+        outcome=ok_outcome("runtime healthy"),
+        correction_for_action_id=failed["actionId"],
+    )
+
+    snapshot = loop.snapshot()
+    assert snapshot["actions"][0]["status"] == "failed"
+    assert "correctedActionId" not in diagnostic
+    assert snapshot["requirements"][0]["actionId"] == failed["actionId"]
+    gated = loop.gate_terminal(
+        {
+            "planner": "llm",
+            "nextStep": "done",
+            "completionClaim": {
+                "satisfied": True,
+                "evidenceActionIds": [diagnostic["actionId"]],
+            },
+        }
+    )
+    assert gated["nextStep"] == "tool_failed"
+
+
+def test_structured_failure_survives_the_task_projection_for_the_next_plan() -> None:
+    loop = AgentTaskLoop("inspect materials")
+    loop.record_action(
+        kind="skill",
+        tool="vrcforge_scan_materials",
+        arguments={},
+        raw_result={"ok": False, "status": "failed"},
+        outcome={
+            "status": "failed",
+            "summary": "Unity Core is still starting.",
+            "error": {
+                "type": "unity_core",
+                "code": "unity_core_not_ready",
+                "likelyCauses": ["Unity is compiling"],
+                "nextActions": ["Wait for compilation"],
+                "retryable": True,
+            },
+        },
+    )
+
+    observation = loop.planner_observations()[0]
+
+    assert observation["outcome"]["error"] == {
+        "type": "unity_core",
+        "code": "unity_core_not_ready",
+        "likelyCauses": ["Unity is compiling"],
+        "nextActions": ["Wait for compilation"],
+        "retryable": True,
+    }
 
 
 def test_create_gameobject_requires_persisted_scene_readback() -> None:
@@ -185,6 +517,53 @@ def test_create_gameobject_requires_persisted_scene_readback() -> None:
 
     assert verified["status"] == "completed"
     assert verified["outcome"]["verification"]["state"] == "passed"
+
+
+def test_declared_verification_profile_is_executed_for_the_required_action() -> None:
+    loop = AgentTaskLoop("apply a persisted Unity change")
+    arguments = {"target": "Avatar"}
+    loop.require_action(
+        kind="write",
+        tool="fixture_unity_write",
+        arguments=arguments,
+        verification_profile="persisted_scene_write",
+    )
+
+    failed = loop.record_action(
+        kind="write",
+        tool="fixture_unity_write",
+        arguments=arguments,
+        raw_result={"ok": True, "persistedReadback": True, "sceneSaved": False},
+        outcome=ok_outcome("applied"),
+    )
+
+    assert failed["status"] == "needs_user_action"
+    assert failed["outcome"]["verification"]["checks"] == [
+        {"kind": "persistedReadback", "state": "passed"},
+        {"kind": "sceneSaved", "state": "failed"},
+    ]
+
+
+def test_unknown_declared_verification_profile_fails_closed() -> None:
+    loop = AgentTaskLoop("verify the requested action")
+    loop.require_action(
+        kind="skill",
+        tool="vrcforge_health",
+        arguments={},
+        verification_profile="typo_profile",
+    )
+    action = loop.record_action(
+        kind="skill",
+        tool="vrcforge_health",
+        arguments={},
+        raw_result={"ok": True, "status": "executed"},
+        outcome=ok_outcome("health checked"),
+    )
+
+    assert action["status"] == "needs_user_action"
+    assert action["outcome"]["error"]["code"] == "verification_profile_unknown"
+    gated = loop.gate_terminal({"planner": "llm", "nextStep": "done", "reply": "done"})
+    assert gated["nextStep"] == "needs_user_action"
 
 
 def test_approval_context_binds_identity_and_verifies_terminal_result() -> None:
@@ -247,6 +626,12 @@ def test_approval_continuation_restores_prior_actions_budget_and_identity() -> N
         raw_result={"ok": True, "status": "executed"},
         outcome=ok_outcome("materials scanned"),
     )
+    loop.activate_skill_policy(
+        name="fixture-skill",
+        instructions="Inspect first, then create the requested object.",
+        allowed_tools=["vrcforge_create_gameobject"],
+        disallowed_tools=["vrcforge_shell_execute"],
+    )
     requested = {"name": "Probe", "projectRoot": "D:/Unity/Project"}
     context = approval_task_context(
         loop.approval_seed(
@@ -272,11 +657,69 @@ def test_approval_continuation_restores_prior_actions_budget_and_identity() -> N
     assert resumed.task_id == loop.task_id
     assert resumed.tool_calls_used == 2
     assert resumed.exposure_layer == "execution"
-    assert [item["actionId"] for item in observations] == [
+    assert [item["actionId"] for item in observations if item.get("actionId")] == [
         prior["actionId"],
         completion["actionId"],
     ]
+    assert observations[0] == {
+        "kind": "skill_context",
+        "status": "loaded",
+        "synthetic": True,
+        "skillContext": {
+            "name": "fixture-skill",
+            "instructions": "Inspect first, then create the requested object.",
+            "allowedTools": ["vrcforge_create_gameobject"],
+            "disallowedTools": ["vrcforge_shell_execute"],
+        },
+    }
     assert context["requestedArguments"] == requested
+    assert resumed.skill_policy_block_reason("vrcforge_create_gameobject") == ""
+    assert resumed.skill_policy_block_reason("vrcforge_shell_execute") == "skill_tool_disallowed"
+
+
+def test_skill_context_is_bounded_in_task_and_approval_continuations() -> None:
+    loop = AgentTaskLoop("follow the loaded skill", session_id="session-1")
+    loop.activate_skill_policy(
+        name="n" * 200,
+        instructions="i" * 7_000,
+        allowed_tools=["allowed", "allowed", *(f"allow-{index}" for index in range(40))],
+        disallowed_tools=["denied", "denied", *(f"deny-{index}" for index in range(40))],
+    )
+
+    seed = loop.approval_seed(
+        requested_tool="vrcforge_create_gameobject",
+        requested_arguments={"name": "Probe"},
+    )
+    context = approval_task_context(
+        seed,
+        tool="vrcforge_create_gameobject",
+        arguments={"name": "Probe"},
+    )
+
+    assert context is not None
+    assert seed["skillContext"] == context["skillContext"]
+    skill_context = context["skillContext"]
+    assert len(skill_context["name"]) == 160
+    assert len(skill_context["instructions"]) == 6_000
+    assert 1 <= len(skill_context["allowedTools"]) <= 32
+    assert 1 <= len(skill_context["disallowedTools"]) <= 32
+    assert len(skill_context["allowedTools"]) == len(set(skill_context["allowedTools"]))
+    assert len(skill_context["disallowedTools"]) == len(set(skill_context["disallowedTools"]))
+
+    completion = approval_completion(
+        context,
+        raw_result={"ok": True, "persistedReadback": True, "sceneSaved": True},
+        outcome=ok_outcome("created"),
+    )
+    assert completion is not None
+    resumed = AgentTaskLoop.from_approval_context(context, completion)
+    synthetic = resumed.planner_observations()[0]
+
+    assert synthetic["synthetic"] is True
+    assert synthetic["skillContext"] == skill_context
+    assert "result" not in synthetic
+    assert resumed.skill_policy_block_reason("allowed") == ""
+    assert resumed.skill_policy_block_reason("denied") == "skill_tool_disallowed"
 
 
 def test_rejected_approval_is_a_terminal_needs_user_action_outcome() -> None:

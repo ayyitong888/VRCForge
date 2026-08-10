@@ -19,11 +19,34 @@ from runtime_planner_service import (
     PlannerTool,
     PlannerTurnMetadata,
     RuntimePlannerService,
+    latest_loop_step_needs_model_correction,
     planner_safe_tool_result_fields,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_unrelated_success_does_not_hide_an_unresolved_tool_failure() -> None:
+    failed = {
+        "tool": "vrcforge_scan_materials",
+        "actionId": "action-materials",
+        "outcome": {"status": "failed"},
+    }
+    healthy = {
+        "tool": "vrcforge_health",
+        "actionId": "action-health",
+        "outcome": {"status": "ok"},
+    }
+    corrected = {
+        "tool": "vrcforge_scan_materials",
+        "actionId": "action-materials-fixed",
+        "correctionForActionId": "action-materials",
+        "outcome": {"status": "ok"},
+    }
+
+    assert latest_loop_step_needs_model_correction([failed, healthy]) is True
+    assert latest_loop_step_needs_model_correction([failed, corrected]) is False
 
 
 @dataclass
@@ -227,6 +250,13 @@ def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
                 "status": "failed",
                 "summary": "Material inventory could not be read.",
                 "verification": {"state": "not_required"},
+                "error": {
+                    "type": "unity_core",
+                    "code": "unity_core_not_ready",
+                    "likelyCauses": ["Unity is compiling"],
+                    "nextActions": ["Wait for compilation"],
+                    "retryable": True,
+                },
             },
         }
     )
@@ -234,7 +264,102 @@ def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
     assert "outcomeStatus=failed" in observation
     assert "outcomeSummary=Material inventory could not be read." in observation
     assert "verificationState=not_required" in observation
+    assert "errorType=unity_core" in observation
+    assert "errorCode=unity_core_not_ready" in observation
+    assert "likelyCauses=Unity is compiling" in observation
+    assert "nextActions=Wait for compilation" in observation
+    assert "retryable=True" in observation
     assert "privateDump" not in observation
+
+
+def test_failed_deterministic_tool_feedback_invokes_model_correction_once() -> None:
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(
+                tool("vrcforge_scan_materials"),
+                tool("vrcforge_health"),
+            ),
+            routable_tools=(
+                tool("vrcforge_scan_materials"),
+                tool("vrcforge_health"),
+            ),
+        )
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "skill",
+                    "skill_tool": "vrcforge_health",
+                    "skill_params": {},
+                    "correction_for_action_id": "scan-materials-failed",
+                }
+            )
+        )
+    )
+
+    plan = service(catalog=catalog, model=model).plan_agent_turn(
+        "扫描这个 avatar 的材质，并列出 shader。",
+        {},
+        {},
+        loop_state=[
+            {
+                "tool": "vrcforge_scan_materials",
+                "status": "failed",
+                "outcome": {
+                    "status": "failed",
+                    "summary": "Avatar path is missing.",
+                    "error": {"code": "missing_avatar_path"},
+                },
+            }
+        ],
+    )
+
+    assert len(model.prompts) == 1
+    assert "outcomeStatus=failed" in model.prompts[0]
+    assert plan["skillTool"] == "vrcforge_health"
+    assert plan["correctionForActionId"] == "scan-materials-failed"
+
+
+def test_failed_deterministic_tool_feedback_without_model_does_not_replay() -> None:
+    plan = service().plan_agent_turn(
+        "扫描这个 avatar 的材质，并列出 shader。",
+        {},
+        {},
+        loop_state=[
+            {
+                "tool": "vrcforge_scan_materials",
+                "status": "failed",
+                "outcome": {"status": "failed", "summary": "Unity is unavailable."},
+            }
+        ],
+    )
+
+    assert plan["deterministicTerminal"] is True
+    assert plan["skillNeeded"] is False
+    assert plan["writeNeeded"] is False
+    assert plan["shellNeeded"] is False
+    assert plan["nextStep"] == "done"
+
+
+def test_verified_loaded_skill_context_is_explicit_and_bounded_for_the_next_plan() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "fixture-guidance",
+            "status": "loaded",
+            "skillContext": {
+                "name": "fixture-guidance",
+                "instructions": "Call vrcforge_health and inspect the canonical outcome.",
+                "allowedTools": ["vrcforge_health"],
+                "disallowedTools": ["vrcforge_shell_execute"],
+            },
+        }
+    )
+
+    assert "skillContextName=fixture-guidance" in observation
+    assert "skillInstructions=Call vrcforge_health" in observation
+    assert "skillAllowedTools=vrcforge_health" in observation
+    assert "skillDisallowedTools=vrcforge_shell_execute" in observation
 
 
 def test_model_prompt_keeps_all_trigger_sections_for_long_tool_descriptions() -> None:
@@ -264,6 +389,26 @@ def test_model_prompt_keeps_all_trigger_sections_for_long_tool_descriptions() ->
     assert len(tool_line) < 500
 
 
+def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() -> None:
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(
+                PlannerTool(
+                    name="vrcforge_scan_materials",
+                    description="Inspect avatar materials.",
+                    category="read/debug",
+                    input_contract=("projectPath?:string", "avatarPath?:string"),
+                ),
+            ),
+        )
+    )
+
+    prompt = service(catalog=catalog)._build_llm_plan_prompt("inspect materials", [])
+
+    tool_line = next(line for line in prompt.splitlines() if "vrcforge_scan_materials" in line)
+    assert "inputs={projectPath?:string, avatarPath?:string}" in tool_line
+
+
 def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() -> None:
     catalog = FakeCatalog(
         planning=PlannerCatalogSnapshot(
@@ -283,6 +428,11 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
     assert scan["skillTool"] == "vrcforge_list_avatars"
     assert scan["continueLoop"] is True
     assert scan["writeNeeded"] is False
+    assert scan["completionRequirement"] == {
+        "kind": "write",
+        "tool": "vrcforge_create_gameobject",
+        "verificationProfile": "persisted_scene_write",
+    }
 
     resolved = planner.plan_agent_turn(
         "create an object named Probe",
@@ -306,6 +456,7 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
         "projectPath": "fixture-project",
     }
     assert resolved["nextStep"] == "request_write"
+    assert resolved["completionRequirement"]["tool"] == "vrcforge_create_gameobject"
 
     ambiguous = planner.plan_agent_turn(
         "create an object",
@@ -320,6 +471,7 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
     )
     assert ambiguous["deterministicTerminal"] is True
     assert ambiguous["writeNeeded"] is False
+    assert ambiguous["nextStep"] == "needs_user_action"
 
     conflicting = planner.plan_agent_turn(
         "create an object at the active scene root",
@@ -328,6 +480,118 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
     )
     assert conflicting["deterministicTerminal"] is True
     assert conflicting["writeNeeded"] is False
+    assert conflicting["nextStep"] == "needs_user_action"
+
+
+def test_llm_execution_layer_has_a_first_class_supervised_write_action() -> None:
+    write_tool = tool("vrcforge_create_gameobject", category="supervised-write", write=True)
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(),
+        execution=PlannerCatalogSnapshot(
+            visible_tools=(write_tool,),
+            routable_tools=(write_tool,),
+        ),
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "write",
+                    "write_tool": "vrcforge_create_gameobject",
+                    "write_params": {"name": "Probe"},
+                    "correction_for_action_id": "action_failed",
+                }
+            )
+        )
+    )
+
+    plan = service(catalog=catalog, model=model)._llm_plan_agent_turn(
+        "create Probe",
+        {},
+        [],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert plan is not None
+    assert plan["writeNeeded"] is True
+    assert plan["writeTool"] == "vrcforge_create_gameobject"
+    assert plan["writeParams"] == {"name": "Probe"}
+    assert plan["correctionForActionId"] == "action_failed"
+    assert plan["nextStep"] == "request_write"
+
+
+def test_llm_skill_action_rejects_visible_supervised_write_tool() -> None:
+    write_tool = tool("vrcforge_create_gameobject", category="supervised-write", write=True)
+    catalog = FakeCatalog(
+        execution=PlannerCatalogSnapshot(
+            visible_tools=(write_tool,),
+            routable_tools=(write_tool,),
+        )
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "skill",
+                    "skill_tool": "vrcforge_create_gameobject",
+                    "skill_params": {"name": "Probe"},
+                }
+            )
+        )
+    )
+
+    plan = service(catalog=catalog, model=model)._llm_plan_agent_turn(
+        "create Probe",
+        {},
+        [],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert plan is not None
+    assert plan["plannerFailed"] is True
+    assert plan["plannerFailure"]["code"] == "planner_invalid_response"
+    assert plan["skillNeeded"] is False
+    assert plan["writeNeeded"] is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "action": "skill",
+            "skill_tool": "vrcforge_health",
+            "skill_params": [],
+        },
+        {
+            "action": "write",
+            "write_tool": "vrcforge_create_gameobject",
+            "write_params": "name=Probe",
+        },
+        {
+            "action": "shell",
+            "shell_command": "git status",
+            "shell_params": False,
+        },
+    ],
+)
+def test_llm_non_object_action_params_fail_closed(payload: dict[str, object]) -> None:
+    model = FakeModel(PlannerModelResult(json.dumps(payload)))
+
+    plan = service(model=model)._llm_plan_agent_turn(
+        "continue",
+        {},
+        [],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert len(model.prompts) == 1
+    assert plan is not None
+    assert plan["plannerFailed"] is True
+    assert plan["plannerFailure"]["code"] == "planner_invalid_response"
+    assert plan["skillNeeded"] is False
+    assert plan["writeNeeded"] is False
+    assert plan["shellNeeded"] is False
+    assert plan["nextStep"] == "planner_failed"
 
 
 def test_typed_model_port_owns_reasoning_usage_label_and_exposure() -> None:

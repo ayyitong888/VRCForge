@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +22,7 @@ SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT = 5
 
 _RUNNING_STATUSES = {"queued", "running", "cancelling"}
 _RETRYABLE_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+_PARENT_CONTINUATION_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 _MERGE_DECISIONS = {"adopted", "dismissed"}
 
 SubAgentHandler = Callable[[dict[str, Any], threading.Event], dict[str, Any]]
@@ -65,6 +67,7 @@ class SubAgentTask:
     merged_at: str = ""
     merged_chat_id: str = ""
     merge_decision: str = ""
+    parent_continuation_status: str = ""
 
 
 class SubAgentTaskRegistry:
@@ -83,26 +86,39 @@ class SubAgentTaskRegistry:
         max_concurrent: int = 3,
         reconcile_on_init: bool = True,
         lane_budget: RuntimeLaneBudget | None = None,
+        task_finished: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.artifact_dir = Path(artifact_dir)
         self.roles = {role.id: role for role in roles}
         self.handlers = dict(handlers)
         self.max_concurrent = max(1, min(int(max_concurrent), SUB_AGENT_MAX_CONCURRENT_HARD_LIMIT))
         self._lane_budget = lane_budget
+        self._task_finished = task_finished or (lambda _event: None)
         self._tasks: dict[str, SubAgentTask] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._threads: dict[str, threading.Thread] = {}
+        self._parent_continuations_inflight: set[str] = set()
         self._lock = threading.RLock()
+        self._parent_continuation_condition = threading.Condition(self._lock)
         self._startup_reconciled = False
+        self._shutdown = False
+        self._accepting = True
         with self._lock:
             self._load_projection_locked()
         if reconcile_on_init:
             self.reconcile_startup()
 
-    def reconcile_startup(self, *, refresh_from_disk: bool = False) -> bool:
+    def reconcile_startup(
+        self,
+        *,
+        refresh_from_disk: bool = False,
+        replay_parent_continuations: bool = True,
+    ) -> bool:
         """Reconcile work owned by a prior process, at most once per instance."""
 
         with self._lock:
+            if self._shutdown:
+                return False
             if self._startup_reconciled:
                 return False
             if refresh_from_disk:
@@ -115,10 +131,154 @@ class SubAgentTaskRegistry:
                 self._tasks = refreshed_tasks
                 self._cancel_events = refreshed_cancel_events
                 self._threads.clear()
+                self._parent_continuations_inflight.clear()
             self._recover_orphaned_result_sidecars_locked()
             self._reconcile_interrupted_tasks_locked()
+            self._interrupt_dispatched_parent_continuations_locked()
+            self._stage_existing_parent_continuations_locked()
+            pending_continuations = [
+                task.id
+                for task in self._tasks.values()
+                if task.parent_continuation_status == "pending"
+            ]
             self._startup_reconciled = True
-            return True
+            self._accepting = True
+        if replay_parent_continuations:
+            self.replay_parent_continuations(pending_continuations)
+        return True
+
+    def replay_parent_continuations(self, task_ids: list[str] | None = None) -> int:
+        """Replay staged parent continuations outside startup's critical path."""
+
+        with self._lock:
+            if self._shutdown or not self._accepting:
+                return 0
+            if task_ids is None:
+                task_ids = [
+                    task.id
+                    for task in self._tasks.values()
+                    if task.parent_continuation_status == "pending"
+                ]
+        attempted = 0
+        for task_id in task_ids:
+            with self._lock:
+                if self._shutdown or not self._accepting:
+                    break
+            attempted += 1
+            self._notify_task_finished(task_id)
+        return attempted
+
+    def interrupted_parent_continuations(self) -> list[dict[str, Any]]:
+        """Return bounded private identities for UI-only ambiguous terminal notices."""
+
+        with self._lock:
+            if self._shutdown or not self._accepting:
+                return []
+            events: list[dict[str, Any]] = []
+            for task in self._tasks.values():
+                seed = task.params.get("_taskSeed")
+                if (
+                    task.parent_continuation_status != "interrupted"
+                    or not isinstance(seed, dict)
+                ):
+                    continue
+                events.append(
+                    {
+                        "subAgentTaskId": task.id,
+                        "parentSessionId": task.parent_session_id,
+                        "taskSeed": copy.deepcopy(seed),
+                        "summary": task.summary,
+                        "error": task.error,
+                    }
+                )
+            return events[-200:]
+
+    def start(self) -> None:
+        """Open admission for one app lifecycle after the prior owner stopped."""
+
+        with self._lock:
+            if any(worker.is_alive() for worker in self._threads.values()):
+                raise RuntimeError("Cannot restart sub-agent admission while workers are active.")
+            if self._parent_continuations_inflight:
+                raise RuntimeError("Cannot restart sub-agent admission while continuations are active.")
+            self._shutdown = False
+            self._accepting = False
+            self._startup_reconciled = False
+
+    def shutdown(self, timeout_seconds: float = 5.0) -> dict[str, Any]:
+        """Stop admission, request cancellation, and boundedly collect local workers."""
+
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("shutdown timeout must be a non-negative number") from exc
+        if timeout != timeout or timeout < 0:
+            raise ValueError("shutdown timeout must be a non-negative number")
+        timeout = min(timeout, 30.0)
+        cancellation_errors: list[dict[str, str]] = []
+        cancel_requested: list[str] = []
+        with self._lock:
+            self._shutdown = True
+            self._accepting = False
+            workers = {
+                task_id: worker
+                for task_id, worker in self._threads.items()
+                if worker.is_alive()
+            }
+            for task_id in workers:
+                task = self._tasks.get(task_id)
+                cancel_event = self._cancel_events.get(task_id)
+                if task is not None and task.status in _RUNNING_STATUSES:
+                    cancel_requested.append(task_id)
+                    if not task.cancel_requested or task.status != "cancelling":
+                        next_task = copy.deepcopy(task)
+                        next_task.cancel_requested = True
+                        next_task.status = "cancelling"
+                        try:
+                            self._commit_task_event_locked(
+                                task,
+                                next_task,
+                                "cancel_requested",
+                                {"reason": "registry_shutdown"},
+                            )
+                        except Exception as exc:  # noqa: BLE001 - cancellation signal still owns process shutdown.
+                            cancellation_errors.append(
+                                {"taskId": task_id, "error": str(exc)[:500]}
+                            )
+                if cancel_event is not None:
+                    cancel_event.set()
+
+        deadline = time.monotonic() + timeout
+        current_thread = threading.current_thread()
+        for worker in workers.values():
+            if worker is current_thread:
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            worker.join(remaining)
+
+        with self._lock:
+            while self._parent_continuations_inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._parent_continuation_condition.wait(remaining)
+            timed_out = sorted(
+                task_id for task_id, worker in workers.items() if worker.is_alive()
+            )
+            continuation_timeouts = sorted(self._parent_continuations_inflight)
+            joined = sorted(task_id for task_id in workers if task_id not in timed_out)
+            for task_id in joined:
+                if self._threads.get(task_id) is workers[task_id]:
+                    self._threads.pop(task_id, None)
+            return {
+                "ok": not timed_out and not continuation_timeouts and not cancellation_errors,
+                "shutdown": True,
+                "cancelRequestedTaskIds": sorted(cancel_requested),
+                "joinedTaskIds": joined,
+                "timedOutTaskIds": timed_out,
+                "timedOutContinuationTaskIds": continuation_timeouts,
+                "cancellationErrors": cancellation_errors,
+            }
 
     def list_roles(self) -> list[dict[str, Any]]:
         return [self._serialize_role(role) for role in self.roles.values()]
@@ -164,6 +324,7 @@ class SubAgentTaskRegistry:
         task_text = str(task or "").strip() or self.roles[role_id].title
         role_spec = self.roles[role_id]
         with self._lock:
+            self._ensure_accepting_locked()
             if self._running_count_locked() >= self.max_concurrent:
                 raise RuntimeError(f"Sub-agent concurrency limit reached ({self.max_concurrent}).")
         task_id = f"sub_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
@@ -173,6 +334,10 @@ class SubAgentTaskRegistry:
             if not lane_acquired:
                 raise RuntimeError("Shared runtime concurrency limit reached.")
         with self._lock:
+            if self._shutdown:
+                if lane_acquired and self._lane_budget is not None:
+                    self._lane_budget.release(task_id)
+                self._ensure_accepting_locked()
             if self._running_count_locked() >= self.max_concurrent:
                 if lane_acquired and self._lane_budget is not None:
                     self._lane_budget.release(task_id)
@@ -340,6 +505,91 @@ class SubAgentTaskRegistry:
         finally:
             if self._lane_budget is not None:
                 self._lane_budget.release(task_id)
+        self._notify_task_finished(task_id)
+
+    def _notify_task_finished(self, task_id: str) -> None:
+        """Notify the app after terminal state is durable and its lane is free."""
+
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if (
+                self._shutdown
+                or not self._accepting
+                or task is None
+                or task.status not in _PARENT_CONTINUATION_TERMINAL_STATUSES
+                or task.parent_continuation_status != "pending"
+                or task_id in self._parent_continuations_inflight
+            ):
+                return
+            self._parent_continuations_inflight.add(task_id)
+            dispatching = copy.deepcopy(task)
+            dispatching.parent_continuation_status = "dispatching"
+            try:
+                task = self._commit_task_event_locked(
+                    task,
+                    dispatching,
+                    "parent_continuation_dispatching",
+                    {"terminalStatus": task.status},
+                )
+            except Exception:
+                self._clear_parent_continuation_inflight_locked(task_id)
+                raise
+            seed = task.params.get("_taskSeed")
+            event = {
+                "schema": "vrcforge.sub_agent_terminal.v1",
+                "subAgentTaskId": task.id,
+                "status": task.status,
+                "parentSessionId": task.parent_session_id,
+                "taskSeed": copy.deepcopy(seed) if isinstance(seed, dict) else None,
+                "summary": task.summary,
+                "error": task.error,
+                "result": copy.deepcopy(task.result) if isinstance(task.result, dict) else None,
+            }
+        try:
+            self._task_finished(event)
+        except Exception:
+            with self._lock:
+                self._clear_parent_continuation_inflight_locked(task_id)
+                current = self._tasks.get(task_id)
+                if current is not None and current.parent_continuation_status == "dispatching":
+                    interrupted = copy.deepcopy(current)
+                    interrupted.parent_continuation_status = "interrupted"
+                    try:
+                        self._commit_task_event_locked(
+                            current,
+                            interrupted,
+                            "parent_continuation_interrupted",
+                            {
+                                "terminalStatus": current.status,
+                                "reason": "callback_failed_after_dispatch",
+                            },
+                        )
+                    except Exception:
+                        pass
+            return
+        with self._lock:
+            self._clear_parent_continuation_inflight_locked(task_id)
+            current = self._tasks.get(task_id)
+            if current is None or current.parent_continuation_status != "dispatching":
+                return
+            delivered = copy.deepcopy(current)
+            delivered.parent_continuation_status = "delivered"
+            try:
+                self._commit_task_event_locked(
+                    current,
+                    delivered,
+                    "parent_continuation_delivered",
+                    {"terminalStatus": current.status},
+                )
+            except Exception:
+                # The durable dispatching marker deliberately survives. On
+                # restart it becomes interrupted instead of replaying a
+                # continuation that may already have produced side effects.
+                return
+
+    def _clear_parent_continuation_inflight_locked(self, task_id: str) -> None:
+        self._parent_continuations_inflight.discard(task_id)
+        self._parent_continuation_condition.notify_all()
 
     def _run_task_body(self, task_id: str) -> None:
         with self._lock:
@@ -395,12 +645,12 @@ class SubAgentTaskRegistry:
                 self._commit_cancelled_locked(current, "Sub-agent task was cancelled.")
                 return
             try:
-                next_task = self._completed_task(current, result, summary)
+                next_task = self._terminal_task_from_result(current, result, summary)
                 self._commit_task_event_locked(
                     current,
                     next_task,
-                    "completed",
-                    {"summary": summary},
+                    next_task.status,
+                    {"summary": summary, "error": next_task.error},
                     result=result,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve a durable sidecar before classifying failure.
@@ -428,6 +678,27 @@ class SubAgentTaskRegistry:
         next_task.handoff_status = "handoff_pending"
         return next_task
 
+    @classmethod
+    def _terminal_task_from_result(
+        cls,
+        task: SubAgentTask,
+        result: dict[str, Any],
+        summary: str,
+    ) -> SubAgentTask:
+        if result.get("ok") is not False:
+            return cls._completed_task(task, result, summary)
+        next_task = copy.deepcopy(task)
+        next_task.status = "failed"
+        next_task.result = copy.deepcopy(result)
+        next_task.result_available = True
+        next_task.result_unavailable = False
+        next_task.summary = summary
+        next_task.error = str(result.get("error") or summary or "Sub-agent task reported failure.")[:1000]
+        next_task.cancel_requested = False
+        next_task.stopped_at = utc_now()
+        next_task.handoff_status = "handoff_pending"
+        return next_task
+
     def _recover_completion_persistence_error_locked(self, task: SubAgentTask, error: Exception) -> None:
         """Prefer a durable result sidecar over a transient event-append error."""
 
@@ -443,7 +714,7 @@ class SubAgentTaskRegistry:
             # The sidecar may already be durable but temporarily unreadable.
             # Keep the in-memory projection active for a later startup retry.
             return
-        next_task = self._completed_task(task, result, summary)
+        next_task = self._terminal_task_from_result(task, result, summary)
         try:
             self._commit_task_event_locked(
                 task,
@@ -451,7 +722,7 @@ class SubAgentTaskRegistry:
                 "recovered",
                 {
                     "previousStatus": task.status,
-                    "terminalStatus": "completed",
+                    "terminalStatus": next_task.status,
                     "summary": summary,
                     "source": "result_sidecar_after_append_error",
                 },
@@ -526,6 +797,7 @@ class SubAgentTaskRegistry:
             "mergedAt": task.merged_at,
             "mergedChatId": task.merged_chat_id,
             "mergeDecision": task.merge_decision,
+            "parentContinuationStatus": task.parent_continuation_status,
             "resultAvailable": task.result_available,
             "resultUnavailable": task.result_unavailable,
             "params": redact_for_storage(task.params),
@@ -564,10 +836,17 @@ class SubAgentTaskRegistry:
             merged_at=str(snapshot.get("mergedAt") or ""),
             merged_chat_id=str(snapshot.get("mergedChatId") or ""),
             merge_decision=str(snapshot.get("mergeDecision") or ""),
+            parent_continuation_status=str(snapshot.get("parentContinuationStatus") or ""),
         )
 
     def _running_count_locked(self) -> int:
         return sum(1 for task in self._tasks.values() if task.status in _RUNNING_STATUSES)
+
+    def _ensure_accepting_locked(self) -> None:
+        if self._shutdown:
+            raise RuntimeError("Sub-agent task registry is shut down.")
+        if not self._accepting:
+            raise RuntimeError("Sub-agent task registry has not completed startup recovery.")
 
     def _commit_task_event_locked(
         self,
@@ -580,6 +859,12 @@ class SubAgentTaskRegistry:
     ) -> SubAgentTask:
         timestamp = utc_now()
         next_task = copy.deepcopy(next_task)
+        if (
+            next_task.status in _PARENT_CONTINUATION_TERMINAL_STATUSES
+            and isinstance(next_task.params.get("_taskSeed"), dict)
+            and not next_task.parent_continuation_status
+        ):
+            next_task.parent_continuation_status = "pending"
         next_task.revision = (current.revision if current else 0) + 1
         next_task.event_count = (current.event_count if current else 0) + 1
         next_task.updated_at = timestamp
@@ -697,14 +982,14 @@ class SubAgentTaskRegistry:
                 # A missing, corrupt, or foreign sidecar is not completion
                 # evidence. The ordinary restart reconciliation below owns it.
                 continue
-            next_task = self._completed_task(task, result, summary)
+            next_task = self._terminal_task_from_result(task, result, summary)
             self._commit_task_event_locked(
                 task,
                 next_task,
                 "recovered",
                 {
                     "previousStatus": task.status,
-                    "terminalStatus": "completed",
+                    "terminalStatus": next_task.status,
                     "summary": summary,
                     "source": "result_sidecar",
                 },
@@ -812,6 +1097,43 @@ class SubAgentTaskRegistry:
                 next_task.error = task.error or "Sub-agent cancellation completed during process restart."
                 next_task.stopped_at = utc_now()
                 self._commit_task_event_locked(task, next_task, "cancelled", {"reason": "process_restart"})
+
+    def _stage_existing_parent_continuations_locked(self) -> None:
+        """Persist pending delivery for terminal seeded tasks from older projections."""
+
+        for task in list(self._tasks.values()):
+            if (
+                task.status not in _PARENT_CONTINUATION_TERMINAL_STATUSES
+                or task.parent_continuation_status
+                or not isinstance(task.params.get("_taskSeed"), dict)
+            ):
+                continue
+            pending = copy.deepcopy(task)
+            pending.parent_continuation_status = "pending"
+            self._commit_task_event_locked(
+                task,
+                pending,
+                "parent_continuation_pending",
+                {"terminalStatus": task.status},
+            )
+
+    def _interrupt_dispatched_parent_continuations_locked(self) -> None:
+        """Fail closed after a crash in the continuation side-effect window."""
+
+        for task in list(self._tasks.values()):
+            if task.parent_continuation_status != "dispatching":
+                continue
+            interrupted = copy.deepcopy(task)
+            interrupted.parent_continuation_status = "interrupted"
+            self._commit_task_event_locked(
+                task,
+                interrupted,
+                "parent_continuation_interrupted",
+                {
+                    "terminalStatus": task.status,
+                    "reason": "process_restart_after_dispatch",
+                },
+            )
 
     def _revision_conflict(self, task: SubAgentTask) -> dict[str, Any]:
         return {

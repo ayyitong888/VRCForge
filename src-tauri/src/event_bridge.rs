@@ -173,7 +173,68 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
             event["done"] = serde_json::Value::Bool(value);
         }
     }
+    if event_type == "agentRuntimeTurn" {
+        if let Some(runtime_turn) = payload.get("payload").and_then(sanitize_runtime_turn_event) {
+            event["payload"] = runtime_turn;
+        }
+    }
     Some(event)
+}
+
+fn bounded_event_text(value: Option<&serde_json::Value>, limit: usize) -> String {
+    value
+        .and_then(|item| item.as_str())
+        .unwrap_or_default()
+        .chars()
+        .take(limit)
+        .collect()
+}
+
+fn sanitize_runtime_turn_event(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    let continuation_source = payload.get("continuationSource")?.as_str()?;
+    if payload.get("schema")?.as_str()? != "vrcforge.runtime_turn_event.v1"
+        || !matches!(continuation_source, "shell_process_finished" | "sub_agent_finished")
+    {
+        return None;
+    }
+    let session_id = bounded_event_text(payload.get("sessionId"), 180);
+    let turn_id = bounded_event_text(payload.get("turnId"), 180);
+    if session_id.is_empty() || turn_id.is_empty() {
+        return None;
+    }
+    let plan = payload.get("plan").and_then(|item| item.as_object());
+    let completion = plan
+        .and_then(|item| item.get("taskCompletion"))
+        .and_then(|item| item.as_object());
+    let evidence_action_ids: Vec<serde_json::Value> = completion
+        .and_then(|item| item.get("evidenceActionIds"))
+        .and_then(|item| item.as_array())
+        .into_iter()
+        .flatten()
+        .take(3)
+        .filter_map(|item| {
+            let bounded: String = item.as_str()?.chars().take(80).collect();
+            (!bounded.is_empty()).then(|| serde_json::Value::String(bounded))
+        })
+        .collect();
+    Some(serde_json::json!({
+        "schema": "vrcforge.runtime_turn_event.v1",
+        "continuationSource": continuation_source,
+        "sessionId": session_id,
+        "turnId": turn_id,
+        "clientTurnId": bounded_event_text(payload.get("clientTurnId"), 240),
+        "plan": {
+            "summary": bounded_event_text(plan.and_then(|item| item.get("summary")), 1200),
+            "reply": bounded_event_text(plan.and_then(|item| item.get("reply")), 6000),
+            "planner": bounded_event_text(plan.and_then(|item| item.get("planner")), 80),
+            "nextStep": bounded_event_text(plan.and_then(|item| item.get("nextStep")), 80),
+            "taskCompletion": {
+                "status": bounded_event_text(completion.and_then(|item| item.get("status")), 40),
+                "taskId": bounded_event_text(completion.and_then(|item| item.get("taskId")), 80),
+                "evidenceActionIds": evidence_action_ids,
+            }
+        }
+    }))
 }
 
 pub(crate) fn desktop_backend_event_allowed(event_type: &str) -> bool {
@@ -253,5 +314,70 @@ mod tests {
             structured_timestamp,
             serde_json::json!({"type": "agentMemoryReview"})
         );
+    }
+
+    #[test]
+    fn shell_task_continuation_forwards_only_the_bounded_chat_projection() {
+        let sanitized = sanitize_backend_event(serde_json::json!({
+            "type": "agentRuntimeTurn",
+            "payload": {
+                "schema": "vrcforge.runtime_turn_event.v1",
+                "continuationSource": "shell_process_finished",
+                "sessionId": "session-owner",
+                "turnId": "turn-terminal",
+                "clientTurnId": "client-terminal",
+                "secret": "must-not-cross",
+                "observe": {"path": "C:\\private"},
+                "plan": {
+                    "summary": "finished",
+                    "reply": "The background task finished.",
+                    "planner": "runtime",
+                    "nextStep": "done",
+                    "taskCompletion": {
+                        "status": "completed",
+                        "taskId": "task-1",
+                        "evidenceActionIds": ["action-1"]
+                    }
+                }
+            }
+        }))
+        .expect("terminal continuation should be forwarded");
+
+        assert_eq!(sanitized["type"], "agentRuntimeTurn");
+        assert_eq!(sanitized["payload"]["sessionId"], "session-owner");
+        assert_eq!(
+            sanitized["payload"]["plan"]["reply"],
+            "The background task finished."
+        );
+        assert!(sanitized["payload"].get("secret").is_none());
+        assert!(sanitized["payload"].get("observe").is_none());
+    }
+
+    #[test]
+    fn sub_agent_task_continuation_uses_the_same_bounded_chat_projection() {
+        let sanitized = sanitize_backend_event(serde_json::json!({
+            "type": "agentRuntimeTurn",
+            "payload": {
+                "schema": "vrcforge.runtime_turn_event.v1",
+                "continuationSource": "sub_agent_finished",
+                "sessionId": "session-owner",
+                "turnId": "turn-sub-agent",
+                "result": {"privateWorkerState": "must-not-cross"},
+                "plan": {
+                    "summary": "review finished",
+                    "reply": "The delegated review finished.",
+                    "planner": "runtime",
+                    "nextStep": "done"
+                }
+            }
+        }))
+        .expect("sub-agent continuation should be forwarded");
+
+        assert_eq!(
+            sanitized["payload"]["continuationSource"],
+            "sub_agent_finished"
+        );
+        assert_eq!(sanitized["payload"]["sessionId"], "session-owner");
+        assert!(sanitized["payload"].get("result").is_none());
     }
 }

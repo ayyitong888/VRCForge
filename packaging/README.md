@@ -67,7 +67,7 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-As of 2026-08-09, `1.4.0` remains the latest published stable package; check the
+As of 2026-08-10, `1.5.0` remains the latest published stable package; check the
 GitHub Releases page before preparing a later build. The Avatar
 Encryption / Anti-Rip addon remains a connector preview and is not bundled with
 the `v1.4.0` package. The public repo must not contain encryption
@@ -83,12 +83,12 @@ with approval, checkpoint, rollback, and proof gates.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 1.5.0 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.5.0/VRCForge_Windows_x64_1.5.0.zip `
+  -Version 1.5.1 `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.5.1/VRCForge_Windows_x64_1.5.1.zip `
   -UvDownloadSha256 ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 1.5.0
+  -Version 1.5.1
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -211,8 +211,8 @@ Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
 python scripts\smoke_stable_readiness_gate.py `
-  --version 1.5.0 `
-  --latest-stable 1.4.0 `
+  --version 1.5.1 `
+  --latest-stable 1.5.0 `
   --installer-smoke "<production-clean installer report>" `
   --upgrade-from-installer-sha256 58bf32ec8cb4f71dd6272db427dd0218e7161c5730314e9ae4f9516a50c02901 `
   --max-artifact-age-hours 24 `
@@ -221,7 +221,7 @@ python scripts\smoke_stable_readiness_gate.py `
 
 This gate checks current target-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
-pointers when they exist in the checkout. For the current `1.5.0` target release,
+pointers when they exist in the checkout. For the current `1.5.1` target release,
 the gate also checks that public docs distinguish source/target from the latest published release,
 direct avatar-encryption writers are not exposed, and the public surface is
 only the private-addon connector request interface with explicit approval,

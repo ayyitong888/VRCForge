@@ -184,7 +184,7 @@
     "modelProvider": "モデルプロバイダ",
     "diagnostics": "診断",
     "aboutTitle": "VRCForge について",
-    "aboutProduct": "VRCForge 1.5.0",
+    "aboutProduct": "VRCForge 1.5.1",
     "aboutMcp": "VRCForge 独自の MCP 2.0（2026-07-28）Core と 64 個の Unity ツール。",
     "aboutSafety": "すべての書き込みには承認とチェックポイントが必要です。ロールバックには別の承認が必要です。",
     "aboutLicense": "GPL-3.0-only。配布の詳細は同梱の NOTICE と DEPENDENCIES を参照してください。",

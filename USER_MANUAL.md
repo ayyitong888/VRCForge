@@ -5,8 +5,8 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.5.0`. Latest published stable release:
-`1.4.0` (`v1.4.0`).
+Current source / target release: `1.5.1`. Latest published stable release:
+`1.5.0` (`v1.5.0`).
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
@@ -310,7 +310,7 @@ alias key and identity map stay local and are never bundled.
 - VRChat SDK3 Avatar project
 - Windows x64 installer users do not need Python, Git, uv, or manual `pip install`
 - Source/debug users need Python, Node.js, Rust/Tauri tooling, and the package dependencies
-- The `v1.4.0` `VRCForge.unitypackage`, containing its VRCForge-owned MCP 2.0 Core (`2026-07-28`) and 64 advertised Unity tools
+- The `v1.5.0` `VRCForge.unitypackage`, containing its VRCForge-owned MCP 2.0 Core (`2026-07-28`) and 64 advertised Unity tools
 - An LLM provider account for AI-assisted features
 - Full dependency list: [DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -331,7 +331,7 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- `v1.4.0` 的 `VRCForge.unitypackage`，包含该版本的 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 64 个声明的 Unity 工具
+- `v1.5.0` 的 `VRCForge.unitypackage`，包含该版本的 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 64 个声明的 Unity 工具
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 

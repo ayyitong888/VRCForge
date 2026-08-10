@@ -55,6 +55,7 @@ from agent_gateway import (
     PROJECTED_SKILL_STATE_MAX_BYTES,
     PROJECTED_SKILL_STATE_NAME,
     PROJECTED_SKILL_STATE_SCHEMA,
+    WRAPPER_ONLY_WRITE_TARGETS,
     create_agent_mcp_app,
     ensure_dict,
     normalize_bool,
@@ -71,6 +72,7 @@ from desktop_computer_use_service import DESKTOP_BRIDGE_ACTION_TYPES
 from agent_question_service import (
     AgentQuestionServiceError,
 )
+from agent_runtime_event_projection import project_runtime_turn_event
 from agent_goal_service import AgentGoalServiceError
 from approval_auto_review import review_saved_project_category_approval
 from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
@@ -437,6 +439,7 @@ from runtime_planner_service import (
     PlannerTool,
     PlannerTurnMetadata,
     RuntimePlannerService,
+    planner_tool_input_contract,
 )
 from shader_vision_protection_service import (
     ProtectionWorkflowPorts,
@@ -2200,9 +2203,64 @@ STATUS_MONITOR_TASK: asyncio.Task[None] | None = None
 BACKGROUND_GOAL_MONITOR_TASK: asyncio.Task[None] | None = None
 BACKGROUND_GOAL_WAKE_DRAIN_TASKS: set[asyncio.Task[None]] = set()
 AGENT_MCP_INIT_TASK: asyncio.Task[None] | None = None
+SUB_AGENT_CONTINUATION_REPLAY_TASK: asyncio.Task[int] | None = None
 DASHBOARD_STATE: DashboardState | None = None
 DASHBOARD_RUNTIME = DashboardRuntimeState()
 memory_review_idle_gate = MemoryReviewIdleGate()
+
+
+def broadcast_runtime_turn_completed(payload: dict[str, Any]) -> None:
+    """Publish an app-owned async task continuation after its terminal event."""
+
+    projected = project_runtime_turn_event(payload)
+    if projected is None:
+        return
+    EVENT_BUS.broadcast_from_sync("agentRuntimeTurn", projected)
+    EVENT_BUS.broadcast_from_sync(
+        "agentRuntimeRuns",
+        AGENT_GATEWAY.runtime_runs.list_runs(
+            limit=30,
+            session_id=payload.get("sessionId") or payload.get("session_id") or "",
+        ),
+    )
+
+
+def _sub_agent_task_finished(event: dict[str, Any]) -> None:
+    """Project one durable worker terminal event back to its owning task."""
+
+    try:
+        EVENT_BUS.broadcast_from_sync("subAgentTasks", SUB_AGENT_COLLABORATION.list_tasks())
+        continuation = AGENT_GATEWAY.resume_runtime_task_after_sub_agent(event)
+        if continuation is not None:
+            broadcast_runtime_turn_completed(continuation)
+    except Exception:  # noqa: BLE001 - the durable worker result remains available for handoff.
+        AGENT_GATEWAY.record_interrupted_runtime_task(
+            task_seed=(
+                dict(event.get("taskSeed"))
+                if isinstance(event.get("taskSeed"), dict)
+                else None
+            ),
+            continuation_source="sub_agent_finished",
+            owned_id=str(event.get("subAgentTaskId") or ""),
+            summary=(
+                "The delegated task continuation was interrupted after dispatch began. "
+                "Its result may already have affected later planning; inspect the task before retrying."
+            ),
+        )
+        emit_log(
+            "warn",
+            "agent",
+            "Sub-agent task continuation had a bounded warning.",
+            {
+                "taskId": str(event.get("subAgentTaskId") or "")[:100],
+                "status": str(event.get("status") or "unknown")[:40],
+            },
+        )
+        # The registry owns durable retry.  Propagate the failure so it keeps
+        # this continuation pending instead of falsely recording delivery.
+        raise
+
+
 AGENT_GATEWAY = AgentGateway(
     config_path=AGENT_GATEWAY_CONFIG_PATH,
     audit_dir=AGENT_GATEWAY_AUDIT_DIR,
@@ -2213,6 +2271,7 @@ AGENT_GATEWAY = AgentGateway(
         {"changed": True},
     ),
     background_activity_started=memory_review_idle_gate.signal_activity,
+    runtime_turn_completed=broadcast_runtime_turn_completed,
 )
 RUNTIME_LANE_BUDGET = RuntimeLaneBudget()
 BACKGROUND_GOAL_PREFLIGHT = ProviderPreflightCache(
@@ -2275,6 +2334,7 @@ SUB_AGENT_COLLABORATION = SubAgentCollaborationService(
         lane_budget=RUNTIME_LANE_BUDGET,
         build_roles=build_sub_agent_roles,
         build_handlers=build_sub_agent_role_handlers,
+        task_finished=_sub_agent_task_finished,
     )
 )
 AGENT_MCP_MOUNT = AgentMcpMount()
@@ -2404,13 +2464,70 @@ async def authorize_local_requests(request: Request, call_next):
             )
 
 
+async def replay_sub_agent_parent_continuations() -> int:
+    """Replay safe never-dispatched task continuations off first paint."""
+
+    recovered = 0
+    try:
+        interrupted_sub_agents = await asyncio.to_thread(
+            SUB_AGENT_COLLABORATION.interrupted_parent_continuations
+        )
+        for event in interrupted_sub_agents:
+            AGENT_GATEWAY.record_interrupted_runtime_task(
+                task_seed=(
+                    dict(event.get("taskSeed"))
+                    if isinstance(event.get("taskSeed"), dict)
+                    else None
+                ),
+                continuation_source="sub_agent_finished",
+                owned_id=str(event.get("subAgentTaskId") or ""),
+                summary=(
+                    "VRCForge restarted after this delegated task continuation was claimed. "
+                    "Its result is ambiguous; inspect the task before retrying."
+                ),
+            )
+    except Exception as exc:  # noqa: BLE001 - the task remains visibly interrupted.
+        emit_log(
+            "warn",
+            "subagent",
+            "Interrupted sub-agent continuation projection had a warning.",
+            {"error": str(exc)},
+        )
+    try:
+        shell_result = await asyncio.to_thread(
+            AGENT_GATEWAY.reconcile_runtime_shell_continuations
+        )
+        recovered += int(shell_result.get("delivered") or 0)
+    except Exception as exc:  # noqa: BLE001 - interrupted state remains durable.
+        emit_log(
+            "warn",
+            "agent",
+            "Shell task continuation reconciliation had a warning.",
+            {"error": str(exc)},
+        )
+    try:
+        recovered += await asyncio.to_thread(
+            SUB_AGENT_COLLABORATION.replay_parent_continuations
+        )
+    except Exception as exc:  # noqa: BLE001 - pending state remains durable for the next process.
+        emit_log(
+            "warn",
+            "subagent",
+            "Sub-agent parent continuation replay had a warning.",
+            {"error": str(exc)},
+        )
+    return recovered
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     global STATUS_MONITOR_TASK
     global BACKGROUND_GOAL_MONITOR_TASK
     global AGENT_MCP_INIT_TASK
+    global SUB_AGENT_CONTINUATION_REPLAY_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    AGENT_GATEWAY.start_runtime_continuations()
     AGENT_GATEWAY.shell.start()
     BACKGROUND_GOAL_COORDINATOR.start()
     PROJECT_SNAPSHOT_SELECTION.load_project_snapshot_cache()
@@ -2419,9 +2536,21 @@ async def on_startup() -> None:
     await emit_safety_posture_snapshot("startup")
     if BACKEND_OWNER_LEASE.owned:
         try:
-            await asyncio.to_thread(SUB_AGENT_COLLABORATION.reconcile_startup, refresh_from_disk=True)
+            SUB_AGENT_COLLABORATION.start()
+            await asyncio.to_thread(
+                SUB_AGENT_COLLABORATION.reconcile_startup,
+                refresh_from_disk=True,
+                replay_parent_continuations=False,
+            )
         except Exception as exc:  # noqa: BLE001 - optional user-data recovery must not block startup.
             emit_log("warn", "subagent", "Sub-agent startup reconciliation had a warning.", {"error": str(exc)})
+        if (
+            SUB_AGENT_CONTINUATION_REPLAY_TASK is None
+            or SUB_AGENT_CONTINUATION_REPLAY_TASK.done()
+        ):
+            SUB_AGENT_CONTINUATION_REPLAY_TASK = asyncio.create_task(
+                replay_sub_agent_parent_continuations()
+            )
         try:
             await asyncio.to_thread(AGENT_GATEWAY.goal.reconcile_stale_agent_goal_deliveries)
             await asyncio.to_thread(
@@ -2471,8 +2600,70 @@ async def on_shutdown() -> None:
     global AGENT_MCP_INIT_TASK
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
+    global SUB_AGENT_CONTINUATION_REPLAY_TASK
 
     await emit_safety_posture_snapshot("normal_shutdown")
+
+    try:
+        continuation_shutdown = await asyncio.to_thread(
+            AGENT_GATEWAY.shutdown_runtime_continuations,
+            5.0,
+        )
+        if not continuation_shutdown.get("ok"):
+            emit_log(
+                "warn",
+                "agent",
+                "Runtime continuation shutdown reached its bounded deadline.",
+                {
+                    "timedOutShellSessionIds": (
+                        continuation_shutdown.get("timedOutShellSessionIds") or []
+                    )
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 - remaining app owners still require shutdown.
+        emit_log(
+            "warn",
+            "agent",
+            "Runtime continuation shutdown had a warning.",
+            {"error": str(exc)},
+        )
+
+    try:
+        sub_agent_shutdown = await asyncio.to_thread(
+            SUB_AGENT_COLLABORATION.shutdown,
+            5.0,
+        )
+        if not sub_agent_shutdown.get("ok"):
+            emit_log(
+                "warn",
+                "subagent",
+                "Sub-agent shutdown reached its bounded deadline.",
+                {
+                    "timedOutTaskIds": sub_agent_shutdown.get("timedOutTaskIds") or [],
+                    "timedOutContinuationTaskIds": (
+                        sub_agent_shutdown.get("timedOutContinuationTaskIds") or []
+                    ),
+                    "cancellationErrors": sub_agent_shutdown.get("cancellationErrors") or [],
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 - remaining app owners still require shutdown.
+        emit_log(
+            "warn",
+            "subagent",
+            "Sub-agent shutdown had a warning.",
+            {"error": str(exc)},
+        )
+
+    if SUB_AGENT_CONTINUATION_REPLAY_TASK is not None:
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(SUB_AGENT_CONTINUATION_REPLAY_TASK),
+                timeout=1.0,
+            )
+        except (asyncio.CancelledError, TimeoutError):
+            SUB_AGENT_CONTINUATION_REPLAY_TASK.cancel()
+            pass
+        SUB_AGENT_CONTINUATION_REPLAY_TASK = None
 
     try:
         shell_shutdown = await asyncio.to_thread(AGENT_GATEWAY.shell.shutdown)
@@ -2739,6 +2930,9 @@ def build_agentic_app_bootstrap_payload(
         # the approval's own exact projectRoot before execution.
         "approvals": approvals,
         "approvalsState": approval_snapshot["state"],
+        "runtimeContinuations": AGENT_GATEWAY.runtime_runs.list_runtime_continuations(
+            limit=64
+        ),
     }
     if defer_agent_catalog:
         payload["agentCatalogDeferred"] = True
@@ -13542,6 +13736,18 @@ def _runtime_planner_tool(tool: Any) -> PlannerTool:
         write=bool(tool.write),
         advanced=bool(tool.advanced),
         requires_user_activation=bool(tool.requires_user_activation),
+        input_contract=planner_tool_input_contract(str(tool.name)),
+    )
+
+
+def _runtime_planner_write_tool(handler: Any) -> PlannerTool:
+    return PlannerTool(
+        name=str(handler.name),
+        description=str(handler.description),
+        category="supervised-write",
+        write=True,
+        advanced=bool(handler.advanced),
+        input_contract=planner_tool_input_contract(str(handler.name)),
     )
 
 
@@ -13549,15 +13755,24 @@ class _RuntimePlannerCatalog:
     def read(self, exposure_layer: str) -> PlannerCatalogSnapshot:
         layer = normalize_exposure_layer(exposure_layer)
         gateway_config = AGENT_GATEWAY.ensure_config()
-        visible_tools = tuple(
+        visible_direct_tools = tuple(
             _runtime_planner_tool(tool)
             for tool in AGENT_GATEWAY._tools.values()
             if AGENT_GATEWAY._tool_visible(tool, gateway_config, layer)
         )
+        visible_write_tools = tuple(
+            _runtime_planner_write_tool(handler)
+            for handler in AGENT_GATEWAY._write_handlers.values()
+            if handler.name not in AGENT_GATEWAY._tools
+            and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
+            and gateway_config.allow_write_requests
+            and AGENT_GATEWAY._write_handler_visible(handler, gateway_config, layer)
+        )
+        visible_tools = (*visible_direct_tools, *visible_write_tools)
         routable_tools = tuple(
             _runtime_planner_tool(tool)
             for tool in AGENT_GATEWAY._tools.values()
-        )
+        ) + visible_write_tools
         skill_payloads = AGENT_GATEWAY.skills.build_skill_registry(
             gateway_config,
             RUNTIME_PLANNER_EXECUTION_LAYER,
@@ -19357,6 +19572,41 @@ def _expected_prefab_assets(plan_payload: dict[str, Any]) -> list[str]:
 
 
 
+def delegate_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Create one task-linked read-only worker without exposing its task seed."""
+
+    arguments = dict(params or {})
+    task_seed, runtime_session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
+    worker_params = ensure_dict(arguments.pop("params", None))
+    if isinstance(task_seed, dict) and task_seed:
+        worker_params["_taskSeed"] = dict(task_seed)
+    created = SUB_AGENT_COLLABORATION.create_task(
+        role=str(arguments.get("role") or "project_index_review"),
+        task=str(arguments.get("task") or arguments.get("prompt") or "Review the selected scope."),
+        display_name=str(arguments.get("displayName") or arguments.get("display_name") or "Manuka"),
+        parent_chat_id=str(arguments.get("parentChatId") or arguments.get("parent_chat_id") or ""),
+        parent_session_id=(
+            runtime_session_id
+            or str(arguments.get("parentSessionId") or arguments.get("parent_session_id") or "")
+        ),
+        project_path=str(
+            arguments.get("projectPath")
+            or arguments.get("projectRoot")
+            or arguments.get("project_path")
+            or ""
+        ),
+        params=worker_params,
+    )
+    task = ensure_dict(created.get("task"))
+    return {
+        "ok": True,
+        "status": "running",
+        "taskId": str(task.get("id") or ""),
+        "task": task,
+        "summary": "The delegated sub-agent task is running.",
+    }
+
+
 def register_agent_gateway_tools() -> None:
     def register_write_handler(
         name: str,
@@ -19422,6 +19672,12 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_progress_update", "Update one visible agent progress item title, summary, order, or status.", "plan/preview", lambda params: AGENT_GATEWAY.update_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_progress_delete", "Delete one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.delete_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_ask_user", "Ask the user a short question with selectable options while the agent task continues.", "plan/preview", lambda params: AGENT_GATEWAY.questions.create(params or {}))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_delegate_subagent",
+        "When to use: delegate one bounded read-only review or inspection task to a named VRCForge sub-agent role when parallel specialist work materially helps the current task. When NOT to use: do not delegate a trivial one-step read, any direct Unity write, or work whose result is not needed by the current task.",
+        "plan/preview",
+        delegate_sub_agent_runtime,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_classify_shell", "When to use: inspect how a proposed local Shell command will be routed before execution. When NOT to use: do not use it as proof that a command ran or that a write completed.", "read/debug", AGENT_GATEWAY.shell.classify)
     AGENT_GATEWAY.register_tool("vrcforge_execute_shell", "When to use: run a local host command, script, or bounded background/interactive process; possible Unity-project writes enter the selected permission mode and retain checkpoint/rollback protection. When NOT to use: do not use it for an already-started session or to bypass a dedicated VRCForge Unity tool.", "supervised-write", AGENT_GATEWAY.execute_shell_tool, write=True)
     AGENT_GATEWAY.register_tool("vrcforge_shell_process", "When to use: list, poll, read logs from, write to, send keys to, submit or paste into, kill, clear, or remove a Shell process that this agent already started; pass the returned sessionId and controlToken for external-agent sessions. When NOT to use: do not use it to start a new command, modify Unity assets through process input, or control another agent or turn's session.", "supervised-write", AGENT_GATEWAY.control_shell_tool, write=True)

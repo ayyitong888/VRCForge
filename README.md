@@ -2,7 +2,7 @@
 
 ![VRCForge — Local AI Workbench for VRChat Avatar Editing](docs/assets/social-preview.svg)
 
-[![Target](https://img.shields.io/badge/target-v1.5.0-4f46e5?style=flat-square)](docs/RELEASE_NOTES_1.5.0.md)
+[![Target](https://img.shields.io/badge/target-v1.5.1-4f46e5?style=flat-square)](docs/RELEASE_NOTES_1.5.1.md)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-22c55e?style=flat-square)](LICENSE)
 ![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 ![Status: Work in progress](https://img.shields.io/badge/status-WIP-f59e0b?style=flat-square)
@@ -23,8 +23,8 @@ Avatar 改动。
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source / target release: `1.5.0`. Latest published stable release:
-`1.4.0` (`v1.4.0`).
+Current source / target release: `1.5.1`. Latest published stable release:
+`1.5.0` (`v1.5.0`).
 
 Official repository: <https://github.com/ayyitong888/VRCForge>
 
@@ -68,7 +68,7 @@ memories, checkpoints, and unrelated assets must be preserved.
 Program files: `%ProgramFiles%\VRCForge`. User data:
 `%LOCALAPPDATA%\VRCForge\agentic-app` (preserved during update/uninstall).
 
-The portable zip (`VRCForge_Windows_x64_1.4.0.zip`) is also available for
+The portable zip (`VRCForge_Windows_x64_1.5.0.zip`) is also available for
 no-install/debug use.
 
 ---

@@ -69,6 +69,7 @@ import { useOptimizationWorkspaceController } from "./hooks/use-optimization-wor
 import { useProtectionWorkspaceController } from "./hooks/use-protection-workspace-controller";
 import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
+import { useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
 import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
@@ -765,6 +766,15 @@ export default function App() {
     [chats, pinnedProjectSet, projectItems],
   );
   chatSessionActionsRef.current = { selectProject, newConversation };
+  const deliverRuntimeTurnContinuation = useRuntimeTurnContinuationDelivery({
+    chats,
+    appendToChat,
+  });
+  useEffect(() => {
+    for (const continuation of bootstrap?.runtimeContinuations ?? []) {
+      deliverRuntimeTurnContinuation(continuation);
+    }
+  }, [bootstrap?.runtimeContinuations, chats, deliverRuntimeTurnContinuation]);
 
   function openTemporaryChat() {
     projectInitRef.current = true;
@@ -1568,6 +1578,9 @@ export default function App() {
         applyRuntimeDelta(event.payload as AgentRuntimeDeltaEvent);
         return;
       }
+      if (eventType === "agentRuntimeTurn") {
+        deliverRuntimeTurnContinuation(event.payload?.payload);
+      }
       if (bootstrapEvents.has(eventType)) {
         scheduleBootstrapRefresh();
       }
@@ -1620,7 +1633,7 @@ export default function App() {
         desktopEventSubAgentTimerRef.current = null;
       }
     };
-  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, activeProjectPath, workspaceDiffReviewOpen]);
+  }, [runtimeConnected, endpoint, sessionId, activeRuntimeProjectPath, activeProjectPath, workspaceDiffReviewOpen, deliverRuntimeTurnContinuation]);
 
   useEffect(() => {
     if (!runtimeConnected) {

@@ -1,5 +1,5 @@
 {
-  "schema": "vrcforge.agent_harness_matrix.v3",
+  "schema": "vrcforge.agent_harness_matrix.v4",
   "selectionCases": [
     {"id":"selection-compile-errors","prompt":"检查 Unity 当前的 C# 编译错误。","expectedTool":"vrcforge_get_compile_errors","forbiddenTools":["vrcforge_unity_status"]},
     {"id":"selection-materials","prompt":"扫描这个 avatar 的材质，并列出 shader。","expectedTool":"vrcforge_scan_materials","forbiddenTools":["vrcforge_list_avatars"]},
@@ -34,5 +34,67 @@
     {"id":"loop-unity-readback-passed","objective":"Create an object","claim":"exact","actions":[{"kind":"write","tool":"vrcforge_create_gameobject","write":true,"arguments":{"name":"Probe"},"result":{"ok":true,"status":"applied","persistedReadback":true,"sceneSaved":true}}],"expectedNextStep":"done","expectedTaskStatus":"completed"},
     {"id":"loop-multiple-actions-exact","objective":"Inspect materials and parameters","claim":"exact","actions":[{"kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}},{"kind":"skill","tool":"vrcforge_scan_parameters","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}}],"expectedNextStep":"done","expectedTaskStatus":"completed"},
     {"id":"loop-multiple-actions-partial","objective":"Inspect materials and parameters","claim":"first_only","actions":[{"kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}},{"kind":"skill","tool":"vrcforge_scan_parameters","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}}],"expectedNextStep":"completion_unverified","expectedTaskStatus":"completion_unverified"}
+  ],
+  "chainCases": [
+    {
+      "id": "chain-correction-supersedes-failure",
+      "objective": "Inspect the selected avatar materials",
+      "requirements": [{"kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Wrong"}}],
+      "actions": [
+        {"key":"wrong","kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Wrong"},"result":{"ok":false,"status":"failed","error":{"type":"input","code":"avatar_not_found","likelyCauses":["Wrong avatar path"],"nextActions":["Use the selected avatar path"],"retryable":true}}},
+        {"key":"fixed","correctionFor":"wrong","kind":"skill","tool":"vrcforge_scan_materials","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed","summary":"Materials scanned."}}
+      ],
+      "claim": "exact",
+      "expectedNextStep": "done",
+      "expectedTaskStatus": "completed",
+      "expectedActionStatuses": {"wrong":"superseded","fixed":"completed"},
+      "expectedErrorCodes": {"wrong":"avatar_not_found"}
+    },
+    {
+      "id": "chain-unrelated-success-does-not-clear-failure",
+      "objective": "Inspect materials",
+      "actions": [
+        {"key":"materials","kind":"skill","tool":"vrcforge_scan_materials","arguments":{},"result":{"ok":false,"status":"failed","error":{"type":"unity","code":"material_scan_failed","retryable":true}}},
+        {"key":"health","kind":"skill","tool":"vrcforge_health","arguments":{},"result":{"ok":true,"status":"executed"}}
+      ],
+      "claim": "exact",
+      "expectedNextStep": "tool_failed",
+      "expectedTaskStatus": "failed",
+      "expectedActionStatuses": {"materials":"failed","health":"completed"},
+      "expectedErrorCodes": {"materials":"material_scan_failed"}
+    },
+    {
+      "id": "chain-one-correction-does-not-hide-other-failure",
+      "objective": "Inspect materials and parameters",
+      "actions": [
+        {"key":"materials","kind":"skill","tool":"vrcforge_scan_materials","arguments":{},"result":{"ok":false,"status":"failed","error":{"type":"unity","code":"materials_failed"}}},
+        {"key":"parameters","kind":"skill","tool":"vrcforge_scan_parameters","arguments":{"avatarPath":"Wrong"},"result":{"ok":false,"status":"failed","error":{"type":"input","code":"parameters_target_failed"}}},
+        {"key":"parameters_fixed","correctionFor":"parameters","kind":"skill","tool":"vrcforge_scan_parameters","arguments":{"avatarPath":"Avatar"},"result":{"ok":true,"status":"executed"}}
+      ],
+      "claim": "exact",
+      "expectedNextStep": "tool_failed",
+      "expectedTaskStatus": "failed",
+      "expectedActionStatuses": {"materials":"failed","parameters":"superseded","parameters_fixed":"completed"}
+    },
+    {
+      "id": "chain-declared-verifier-blocks-false-success",
+      "objective": "Persist the Unity scene change",
+      "requirements": [{"kind":"write","tool":"fixture_unity_write","arguments":{"target":"Avatar"},"verificationProfile":"persisted_scene_write"}],
+      "actions": [{"key":"write","kind":"write","tool":"fixture_unity_write","write":true,"arguments":{"target":"Avatar"},"result":{"ok":true,"status":"applied","persistedReadback":true,"sceneSaved":false}}],
+      "claim": "exact",
+      "expectedNextStep": "needs_user_action",
+      "expectedTaskStatus": "needs_user_action",
+      "expectedActionStatuses": {"write":"needs_user_action"}
+    },
+    {
+      "id": "chain-declared-verifier-allows-persisted-result",
+      "objective": "Persist the Unity scene change",
+      "requirements": [{"kind":"write","tool":"fixture_unity_write","arguments":{"target":"Avatar"},"verificationProfile":"persisted_scene_write"}],
+      "actions": [{"key":"write","kind":"write","tool":"fixture_unity_write","write":true,"arguments":{"target":"Avatar"},"result":{"ok":true,"status":"applied","persistedReadback":true,"sceneSaved":true}}],
+      "claim": "exact",
+      "expectedNextStep": "done",
+      "expectedTaskStatus": "completed",
+      "expectedActionStatuses": {"write":"completed"}
+    }
   ]
 }

@@ -44,6 +44,21 @@ def test_maintenance_targets_and_locks_are_exposed_without_root_registry_access(
         assert True
 
 
+def test_service_forwards_bounded_registry_shutdown(tmp_path: Path) -> None:
+    registry = SubAgentTaskRegistry(tmp_path / "sub-agents", roles=[], handlers={})
+    service = SubAgentCollaborationService.from_registry_for_testing(registry)
+
+    assert service.shutdown(timeout_seconds=0) == {
+        "ok": True,
+        "shutdown": True,
+        "cancelRequestedTaskIds": [],
+        "joinedTaskIds": [],
+        "timedOutTaskIds": [],
+        "timedOutContinuationTaskIds": [],
+        "cancellationErrors": [],
+    }
+
+
 def test_service_has_no_dashboard_host_or_dynamic_lookup_seam() -> None:
     source = Path("sub_agent_collaboration_service.py").read_text(encoding="utf-8")
     dashboard_source = Path("dashboard_server.py").read_text(encoding="utf-8")

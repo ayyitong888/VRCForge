@@ -23,6 +23,18 @@ def _ensure_list(value: Any) -> list[Any]:
     return [value]
 
 
+def _public_event(value: dict[str, Any]) -> dict[str, Any]:
+    projected = dict(value)
+    projected.pop("continuationTaskSeed", None)
+    projected.pop("continuationTerminalEvent", None)
+    if projected.get("shellContinuationState"):
+        projected.pop("taskSeed", None)
+        projected.pop("result", None)
+        projected.pop("stdout", None)
+        projected.pop("stderr", None)
+    return projected
+
+
 @dataclass(frozen=True)
 class AgentRuntimeRunLedgerPorts:
     """Fixed capabilities for the app-owned runtime-run JSONL ledger.
@@ -91,7 +103,8 @@ class AgentRuntimeRunLedger:
         except OSError:
             return []
         events: list[dict[str, Any]] = []
-        for line in lines[-max(1, min(limit, 2000)) :]:
+        selected_lines = lines if int(limit) <= 0 else lines[-max(1, min(int(limit), 2000)) :]
+        for line in selected_lines:
             try:
                 payload = json.loads(line)
             except json.JSONDecodeError:
@@ -184,10 +197,179 @@ class AgentRuntimeRunLedger:
         return {
             "ok": True,
             "schema": "vrcforge.runtime_runs.v1",
-            "runs": [self._ports.redact(item) for item in runs],
-            "events": [self._ports.redact(item) for item in filtered_events[-max(1, min(limit, 200)) :]],
+            "runs": [self._ports.redact(_public_event(item)) for item in runs],
+            "events": [
+                self._ports.redact(_public_event(item))
+                for item in filtered_events[-max(1, min(limit, 200)) :]
+            ],
             "count": len(runs),
         }
+
+    def list_runtime_continuations(self, *, limit: int = 64) -> list[dict[str, Any]]:
+        """Return bounded durable chat projections for reconnect replay."""
+
+        events = self.read_events(limit=max(limit * 8, 100))
+        by_key: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for event in events:
+            continuation = event.get("continuationEvent")
+            if not isinstance(continuation, dict):
+                continue
+            session_id = str(continuation.get("sessionId") or "").strip()
+            turn_id = str(continuation.get("turnId") or "").strip()
+            client_turn_id = str(continuation.get("clientTurnId") or "").strip()
+            if not session_id or not turn_id:
+                continue
+            key = f"{session_id}:{client_turn_id or turn_id}"
+            if key not in by_key:
+                order.append(key)
+            by_key[key] = self._ports.redact(continuation)
+        selected = order[-max(1, min(int(limit), 200)) :]
+        return [by_key[key] for key in selected]
+
+    def shell_continuation_states(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """Return the latest private dispatch state for each Shell session."""
+
+        latest: dict[str, dict[str, Any]] = {}
+        for event in self.read_events(limit=0):
+            state = str(event.get("shellContinuationState") or "").strip()
+            session_id = str(event.get("shellSessionId") or "").strip()
+            if state in {"pending", "dispatching", "delivered", "interrupted"} and session_id:
+                latest[session_id] = event
+        values = list(latest.values())
+        if int(limit) <= 0:
+            return values
+        return values[-max(1, min(int(limit), 200)) :]
+
+    def stage_shell_continuation(
+        self,
+        *,
+        shell_session_id: str,
+        task_seed: dict[str, Any],
+        terminal_event: dict[str, Any],
+    ) -> bool:
+        """Durably stage one stable Shell terminal identity before dispatch."""
+
+        session_id = str(shell_session_id or "").strip()[:100]
+        if not session_id or not isinstance(task_seed, dict) or not isinstance(terminal_event, dict):
+            return False
+        terminal_session_id = str(terminal_event.get("shellSessionId") or "").strip()
+        if terminal_session_id and terminal_session_id != session_id:
+            return False
+        with self._ports.shared_state_lock:
+            if self._latest_shell_continuation_locked(session_id) is not None:
+                return False
+            self.append(
+                {
+                    "event": "runtime_shell_continuation_pending",
+                    "status": "pending",
+                    "shellContinuationState": "pending",
+                    "shellSessionId": session_id,
+                    "sessionId": str(terminal_event.get("runtimeSessionId") or "")[:180],
+                    "turnId": str(terminal_event.get("turnId") or "")[:180],
+                    "clientTurnId": str(terminal_event.get("clientTurnId") or "")[:240],
+                    "continuationTaskSeed": dict(task_seed),
+                    "continuationTerminalEvent": dict(terminal_event),
+                }
+            )
+        return True
+
+    def claim_shell_continuation(self, shell_session_id: str) -> dict[str, Any] | None:
+        """CAS one pending continuation to fsynced dispatching state."""
+
+        session_id = str(shell_session_id or "").strip()[:100]
+        if not session_id:
+            return None
+        with self._ports.shared_state_lock:
+            current = self._latest_shell_continuation_locked(session_id)
+            if current is None or current.get("shellContinuationState") != "pending":
+                return None
+            task_seed = current.get("continuationTaskSeed")
+            terminal_event = current.get("continuationTerminalEvent")
+            if not isinstance(task_seed, dict) or not isinstance(terminal_event, dict):
+                self._append_shell_continuation_state_locked(
+                    current,
+                    "interrupted",
+                    reason="durable_continuation_payload_missing",
+                )
+                return None
+            self._append_shell_continuation_state_locked(current, "dispatching")
+            return {
+                "shellSessionId": session_id,
+                "taskSeed": dict(task_seed),
+                "terminalEvent": dict(terminal_event),
+            }
+
+    def deliver_shell_continuation(self, shell_session_id: str) -> bool:
+        """Mark a claimed continuation delivered after its callback returns."""
+
+        return self._finish_shell_continuation(shell_session_id, "delivered")
+
+    def interrupt_shell_continuation(self, shell_session_id: str, *, reason: str) -> bool:
+        """Fail closed after a dispatch exception or abandoned process owner."""
+
+        return self._finish_shell_continuation(shell_session_id, "interrupted", reason=reason)
+
+    def _finish_shell_continuation(
+        self,
+        shell_session_id: str,
+        state: str,
+        *,
+        reason: str = "",
+    ) -> bool:
+        session_id = str(shell_session_id or "").strip()[:100]
+        if not session_id or state not in {"delivered", "interrupted"}:
+            return False
+        with self._ports.shared_state_lock:
+            current = self._latest_shell_continuation_locked(session_id)
+            if current is None or current.get("shellContinuationState") != "dispatching":
+                return False
+            self._append_shell_continuation_state_locked(current, state, reason=reason)
+        return True
+
+    def _latest_shell_continuation_locked(self, shell_session_id: str) -> dict[str, Any] | None:
+        for event in reversed(self.read_events(limit=0)):
+            if (
+                str(event.get("shellSessionId") or "").strip() == shell_session_id
+                and str(event.get("shellContinuationState") or "").strip()
+                in {"pending", "dispatching", "delivered", "interrupted"}
+            ):
+                return event
+        return None
+
+    def _append_shell_continuation_state_locked(
+        self,
+        current: dict[str, Any],
+        state: str,
+        *,
+        reason: str = "",
+    ) -> None:
+        self.append(
+            {
+                "event": f"runtime_shell_continuation_{state}",
+                "status": state,
+                "shellContinuationState": state,
+                "shellSessionId": str(current.get("shellSessionId") or "")[:100],
+                "sessionId": str(current.get("sessionId") or "")[:180],
+                "turnId": str(current.get("turnId") or "")[:180],
+                "clientTurnId": str(current.get("clientTurnId") or "")[:240],
+                **(
+                    {"continuationTaskSeed": dict(current["continuationTaskSeed"])}
+                    if isinstance(current.get("continuationTaskSeed"), dict)
+                    else {}
+                ),
+                **(
+                    {"continuationTerminalEvent": dict(current["continuationTerminalEvent"])}
+                    if isinstance(current.get("continuationTerminalEvent"), dict)
+                    else {}
+                ),
+                **(
+                    {"continuationInterruptedReason": self._ports.summarize_text(reason, 240)}
+                    if reason
+                    else {}
+                ),
+            }
+        )
 
     def build_run_from_turn(
         self,
@@ -207,6 +389,7 @@ class AgentRuntimeRunLedger:
         skill_payload: dict[str, Any] | None,
         write_payload: dict[str, Any] | None,
         approval_id: str,
+        continuation_event: dict[str, Any] | None = None,
         context_usage: dict[str, Any] | None = None,
         context_compaction: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -255,6 +438,8 @@ class AgentRuntimeRunLedger:
             record["contextUsage"] = context_usage
         if context_compaction:
             record["contextCompaction"] = context_compaction
+        if continuation_event:
+            record["continuationEvent"] = continuation_event
         return record
 
     @staticmethod

@@ -165,6 +165,7 @@ def service(
     approvals: FakeApprovals | None = None,
     processes: FakeProcessOwner | None = None,
     cancellation_requested=lambda _session, _turn, _client: False,
+    session_finished=lambda _event: None,
 ) -> tuple[AgentShellService, FakeApprovals, FakeProcessOwner, list[dict[str, Any]]]:
     approval_owner = approvals or FakeApprovals()
     process_owner = processes or FakeProcessOwner()
@@ -180,10 +181,73 @@ def service(
                 (path / marker).is_dir()
                 for marker in ("Assets", "Packages", "ProjectSettings")
             ),
+            session_finished=session_finished,
         ),
         process_ports=process_owner.ports(),
     )
     return shell, approval_owner, process_owner, audits
+
+
+@pytest.mark.parametrize(
+    "returned_status",
+    ["executed", "running"],
+)
+def test_shell_terminal_callback_has_one_owner_after_the_yield_decision(
+    tmp_path: Path,
+    returned_status: str,
+) -> None:
+    callbacks: list[dict[str, Any]] = []
+    captured: dict[str, Any] = {}
+    shell, _approvals, _processes, _audits = service(
+        tmp_path,
+        session_finished=callbacks.append,
+    )
+
+    class ImmediateSessionOwner:
+        def execute(self, **kwargs: Any) -> dict[str, Any]:
+            captured.update(kwargs)
+            kwargs["on_finished"](
+                {
+                    **kwargs["completion_context"],
+                    "shellSessionId": "shell-race-fixture",
+                    "status": "finished",
+                    "exitCode": 0,
+                    "result": {"ok": True, "exitCode": 0, "stdout": "finished"},
+                }
+            )
+            if returned_status == "running":
+                return {
+                    "ok": True,
+                    "status": "running",
+                    "sessionId": "shell-race-fixture",
+                    "session": {"sessionId": "shell-race-fixture", "status": "running"},
+                }
+            return {
+                "ok": True,
+                "status": "executed",
+                "sessionId": "shell-race-fixture",
+                "result": {"ok": True, "exitCode": 0},
+            }
+
+    shell._sessions = ImmediateSessionOwner()
+    task_seed = {"schema": "vrcforge.agent_task_loop.v2", "taskId": "task-race"}
+
+    result = shell.execute(
+        {
+            "command": "Get-ChildItem",
+            "cwd": str(tmp_path),
+            "workspace_root": str(tmp_path),
+            "yieldMs": 10,
+        },
+        task_context=task_seed,
+    )
+
+    assert result["status"] == "executed"
+    assert captured["completion_context"]["taskSeed"] == task_seed
+    assert callbacks == []
+    assert result["result"]["exitCode"] == 0
+    if returned_status == "running":
+        assert result["session"]["status"] == "finished"
 
 
 def approved_payload(root: Path, *, command: str = "Get-ChildItem", timeout: int = 120) -> dict[str, Any]:

@@ -22,6 +22,7 @@ from pydantic import ValidationError
 
 import dashboard_server
 import unity_status_service
+from agent_task_loop import canonical_action_id
 from path_to_skill import build_path_to_skill_source
 from agent_command_safety import normalize_filesystem_path
 from agent_gateway import (
@@ -1313,9 +1314,14 @@ class DashboardServerTests(unittest.TestCase):
         async def exercise() -> None:
             original_mcp_task = dashboard_server.AGENT_MCP_INIT_TASK
             original_status_task = dashboard_server.STATUS_MONITOR_TASK
+            original_replay_task = dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK
             dashboard_server.AGENT_MCP_INIT_TASK = None
             dashboard_server.STATUS_MONITOR_TASK = None
+            dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK = None
+            start_sub_agents = Mock()
             reconcile_sub_agents = Mock(return_value=True)
+            replay_parent_continuations = Mock(return_value=0)
+            reconcile_shell_continuations = Mock(return_value={"delivered": 0})
             try:
                 with (
                     patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
@@ -1324,7 +1330,16 @@ class DashboardServerTests(unittest.TestCase):
                     patch.object(
                         dashboard_server,
                         "SUB_AGENT_COLLABORATION",
-                        SimpleNamespace(reconcile_startup=reconcile_sub_agents),
+                        SimpleNamespace(
+                            start=start_sub_agents,
+                            reconcile_startup=reconcile_sub_agents,
+                            replay_parent_continuations=replay_parent_continuations,
+                        ),
+                    ),
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY,
+                        "reconcile_runtime_shell_continuations",
+                        reconcile_shell_continuations,
                     ),
                     patch.object(
                         dashboard_server.AGENT_GATEWAY.goal,
@@ -1333,12 +1348,24 @@ class DashboardServerTests(unittest.TestCase):
                     ) as reconcile_goal_deliveries,
                 ):
                     await dashboard_server.on_startup()
-                    reconcile_sub_agents.assert_called_once_with(refresh_from_disk=True)
+                    reconcile_sub_agents.assert_called_once_with(
+                        refresh_from_disk=True,
+                        replay_parent_continuations=False,
+                    )
+                    start_sub_agents.assert_called_once_with()
                     reconcile_goal_deliveries.assert_called_once_with()
                     self.assertIsNotNone(dashboard_server.AGENT_MCP_INIT_TASK)
                     self.assertFalse(dashboard_server.AGENT_MCP_INIT_TASK.done())
+                    self.assertIsNotNone(dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK)
+                    await dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK
+                    replay_parent_continuations.assert_called_once_with()
+                    reconcile_shell_continuations.assert_called_once_with()
             finally:
-                for task in (dashboard_server.AGENT_MCP_INIT_TASK, dashboard_server.STATUS_MONITOR_TASK):
+                for task in (
+                    dashboard_server.AGENT_MCP_INIT_TASK,
+                    dashboard_server.STATUS_MONITOR_TASK,
+                    dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK,
+                ):
                     if task is not None and not task.done():
                         task.cancel()
                         try:
@@ -1347,6 +1374,7 @@ class DashboardServerTests(unittest.TestCase):
                             pass
                 dashboard_server.AGENT_MCP_INIT_TASK = original_mcp_task
                 dashboard_server.STATUS_MONITOR_TASK = original_status_task
+                dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK = original_replay_task
 
         asyncio.run(exercise())
 
@@ -1413,9 +1441,14 @@ class DashboardServerTests(unittest.TestCase):
         async def exercise(sub_agent_error: Exception | None, goal_error: Exception | None) -> None:
             original_mcp_task = dashboard_server.AGENT_MCP_INIT_TASK
             original_status_task = dashboard_server.STATUS_MONITOR_TASK
+            original_replay_task = dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK
             dashboard_server.AGENT_MCP_INIT_TASK = None
             dashboard_server.STATUS_MONITOR_TASK = None
+            dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK = None
+            start_sub_agents = Mock()
             reconcile_sub_agents = Mock(side_effect=sub_agent_error)
+            replay_parent_continuations = Mock(return_value=0)
+            reconcile_shell_continuations = Mock(return_value={"delivered": 0})
             try:
                 with (
                     patch("dashboard_server.initialize_agent_mcp_mount", side_effect=slow_mcp_init),
@@ -1430,7 +1463,16 @@ class DashboardServerTests(unittest.TestCase):
                     patch.object(
                         dashboard_server,
                         "SUB_AGENT_COLLABORATION",
-                        SimpleNamespace(reconcile_startup=reconcile_sub_agents),
+                        SimpleNamespace(
+                            start=start_sub_agents,
+                            reconcile_startup=reconcile_sub_agents,
+                            replay_parent_continuations=replay_parent_continuations,
+                        ),
+                    ),
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY,
+                        "reconcile_runtime_shell_continuations",
+                        reconcile_shell_continuations,
                     ),
                     patch.object(
                         dashboard_server.AGENT_GATEWAY.goal,
@@ -1440,12 +1482,18 @@ class DashboardServerTests(unittest.TestCase):
                     patch("dashboard_server.emit_log") as emit_log,
                 ):
                     await dashboard_server.on_startup()
-                    reconcile_sub_agents.assert_called_once_with(refresh_from_disk=True)
+                    reconcile_sub_agents.assert_called_once_with(
+                        refresh_from_disk=True,
+                        replay_parent_continuations=False,
+                    )
+                    start_sub_agents.assert_called_once_with()
                     reconcile_goal_deliveries.assert_called_once_with()
                     self.assertIsNotNone(dashboard_server.AGENT_MCP_INIT_TASK)
                     self.assertFalse(dashboard_server.AGENT_MCP_INIT_TASK.done())
                     self.assertIsNotNone(dashboard_server.STATUS_MONITOR_TASK)
                     self.assertFalse(dashboard_server.STATUS_MONITOR_TASK.done())
+                    if dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK is not None:
+                        await dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK
                     warning_messages = [
                         call.args[2]
                         for call in emit_log.call_args_list
@@ -1473,8 +1521,14 @@ class DashboardServerTests(unittest.TestCase):
                             "Goal delivery startup reconciliation had a warning.",
                             {"error": str(goal_error)},
                         )
+                    replay_parent_continuations.assert_called_once_with()
+                    reconcile_shell_continuations.assert_called_once_with()
             finally:
-                for task in (dashboard_server.AGENT_MCP_INIT_TASK, dashboard_server.STATUS_MONITOR_TASK):
+                for task in (
+                    dashboard_server.AGENT_MCP_INIT_TASK,
+                    dashboard_server.STATUS_MONITOR_TASK,
+                    dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK,
+                ):
                     if task is not None and not task.done():
                         task.cancel()
                         try:
@@ -1483,6 +1537,7 @@ class DashboardServerTests(unittest.TestCase):
                             pass
                 dashboard_server.AGENT_MCP_INIT_TASK = original_mcp_task
                 dashboard_server.STATUS_MONITOR_TASK = original_status_task
+                dashboard_server.SUB_AGENT_CONTINUATION_REPLAY_TASK = original_replay_task
 
         for sub_agent_error, goal_error in (
             (RuntimeError("sub-agent disk unavailable"), None),
@@ -1513,6 +1568,17 @@ class DashboardServerTests(unittest.TestCase):
                     pending_count=0,
                 )
             )
+            continuation_shutdown = Mock(
+                return_value={"ok": True, "timedOutShellSessionIds": []}
+            )
+            sub_agent_shutdown = Mock(
+                return_value={
+                    "ok": True,
+                    "timedOutTaskIds": [],
+                    "timedOutContinuationTaskIds": [],
+                    "cancellationErrors": [],
+                }
+            )
             try:
                 with (
                     patch("dashboard_server.BACKEND_OWNER_LEASE", lease),
@@ -1525,10 +1591,22 @@ class DashboardServerTests(unittest.TestCase):
                         dashboard_server.AGENT_GATEWAY.desktop,
                         "stop_embedded_worker",
                     ),
+                    patch.object(
+                        dashboard_server.AGENT_GATEWAY,
+                        "shutdown_runtime_continuations",
+                        continuation_shutdown,
+                    ),
+                    patch.object(
+                        type(dashboard_server.SUB_AGENT_COLLABORATION),
+                        "shutdown",
+                        sub_agent_shutdown,
+                    ),
                 ):
                     await dashboard_server.on_shutdown()
                 lease.release.assert_not_called()
                 drain_shutdown.assert_awaited_once_with()
+                continuation_shutdown.assert_called_once_with(5.0)
+                sub_agent_shutdown.assert_called_once_with(5.0)
             finally:
                 (
                     dashboard_server.AGENT_MCP_INIT_TASK,
@@ -3239,6 +3317,19 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.MEMORY_REVIEW.adapter.list_tasks.__code__.co_names,
         )
 
+    def test_sub_agent_continuation_fault_propagates_to_durable_retry_owner(self) -> None:
+        event = {"subAgentTaskId": "retry-task", "status": "completed"}
+        with patch.object(
+            dashboard_server.EVENT_BUS,
+            "broadcast_from_sync",
+        ), patch.object(
+            dashboard_server.AGENT_GATEWAY,
+            "resume_runtime_task_after_sub_agent",
+            side_effect=RuntimeError("transient continuation failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "transient continuation failure"):
+                dashboard_server._sub_agent_task_finished(event)
+
     def test_sub_agent_routes_persist_parent_handoff_and_merge_revision(self) -> None:
         original_service = dashboard_server.SUB_AGENT_COLLABORATION
         with tempfile.TemporaryDirectory() as tmp:
@@ -3838,6 +3929,7 @@ class DashboardServerTests(unittest.TestCase):
                 lambda _params: {"ok": True, "status": "ready"},
             )
             prompts: list[str] = []
+            read_action_id = canonical_action_id("skill", "vrcforge_test_read", {})
 
             def fake_llm(prompt: str) -> dict[str, object]:
                 prompts.append(prompt)
@@ -3850,7 +3942,14 @@ class DashboardServerTests(unittest.TestCase):
                     }
                     input_tokens = 18_000
                 else:
-                    payload = {"action": "reply", "reply": "done after compacting"}
+                    payload = {
+                        "action": "reply",
+                        "reply": "done after compacting",
+                        "completion_claim": {
+                            "satisfied": True,
+                            "evidence_action_ids": [read_action_id],
+                        },
+                    }
                     input_tokens = 8_000
                 return {
                     "text": json.dumps(payload),
@@ -5858,7 +5957,22 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("turn_id", payload)
 
     def test_agent_runtime_run_ledger_records_message_turn(self) -> None:
-        with TestClient(dashboard_server.app) as client:
+        with (
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=_test_runtime_provider_config(),
+            ),
+            patch(
+                "dashboard_server.request_llm_plan_with_metadata",
+                return_value=LlmPlanResponse(
+                    text=json.dumps({"action": "reply", "reply": "hello from the fixture"}),
+                    usage={},
+                    reasoning={},
+                ),
+            ),
+            TestClient(dashboard_server.app) as client,
+        ):
             response = client.post(
                 "/api/app/agent/message",
                 json={
@@ -5885,6 +5999,7 @@ class DashboardServerTests(unittest.TestCase):
         runs = ledger["runs"]
         self.assertGreaterEqual(len(runs), 1)
         run = next(item for item in runs if item.get("turnId") == turn_payload["turnId"])
+        self.assertEqual(turn_payload["plan"]["nextStep"], "done")
         self.assertEqual(run["status"], "completed")
         self.assertEqual(run["clientTurnId"], "client-turn-1")
         self.assertEqual(run["providerLabel"], "DeepSeek")
@@ -6095,7 +6210,7 @@ class DashboardServerTests(unittest.TestCase):
             payload = gateway.runtime_message({"message": "exercise distinct failures"})
 
         self.assertEqual(len(payload["steps"]), 3)
-        self.assertEqual(payload["plan"]["nextStep"], "done")
+        self.assertEqual(payload["plan"]["nextStep"], "tool_failed")
         self.assertNotIn("loopSuppression", payload["plan"])
 
     def test_runtime_loop_never_executes_a_fourth_tool_call(self) -> None:
@@ -6579,6 +6694,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("ProjectA private memory", no_project_prompt)
         self.assertNotIn("ProjectB private memory", no_project_prompt)
 
+    def test_production_runtime_catalog_exposes_real_write_handlers_only_for_execution(self) -> None:
+        gateway = dashboard_server.AGENT_GATEWAY
+        config = replace(gateway.ensure_config(), allow_write_requests=True)
+        real_write_handlers = {
+            name
+            for name, handler in gateway._write_handlers.items()
+            if name not in gateway._tools
+            and name not in dashboard_server.WRAPPER_ONLY_WRITE_TARGETS
+            and not handler.advanced
+        }
+        self.assertTrue(real_write_handlers)
+
+        with patch.object(gateway, "ensure_config", return_value=config):
+            planning = dashboard_server._RuntimePlannerCatalog().read("planning")
+            execution = dashboard_server._RuntimePlannerCatalog().read("execution")
+
+        planning_visible = {tool.name for tool in planning.visible_tools}
+        planning_routable = {tool.name for tool in planning.routable_tools}
+        execution_tools = {tool.name: tool for tool in execution.visible_tools}
+        execution_routable = {tool.name for tool in execution.routable_tools}
+
+        self.assertTrue(real_write_handlers.isdisjoint(planning_visible))
+        self.assertTrue(real_write_handlers.isdisjoint(planning_routable))
+        self.assertTrue(
+            dashboard_server.WRAPPER_ONLY_WRITE_TARGETS.isdisjoint(execution_tools)
+        )
+        self.assertTrue(real_write_handlers.issubset(execution_tools))
+        self.assertTrue(real_write_handlers.issubset(execution_routable))
+        self.assertTrue(all(execution_tools[name].write for name in real_write_handlers))
+        self.assertTrue(
+            all(execution_tools[name].category == "supervised-write" for name in real_write_handlers)
+        )
+
     def test_llm_planner_prompt_uses_bounded_semantic_loop_observations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6671,7 +6819,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(payload["plan"]["shellNeeded"])
         self.assertTrue(payload["plan"]["skillNeeded"])
         self.assertEqual(payload["plan"]["skillTool"], "vrcforge_unity_status")
-        self.assertEqual(payload["plan"]["nextStep"], "call_skill")
+        self.assertEqual(payload["plan"]["nextStep"], "done")
+        self.assertEqual(payload["plan"]["taskCompletion"]["status"], "completed")
+        self.assertEqual(
+            payload["plan"]["taskCompletion"]["evidenceActionIds"],
+            [payload["steps"][0]["actionId"]],
+        )
         self.assertEqual(payload["skill"]["tool"], "vrcforge_unity_status")
         self.assertEqual(payload["skill"]["status"], "executed")
         self.assertIn("result", payload["skill"])
@@ -6960,6 +7113,8 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(low.status_code, 200)
                 self.assertEqual(low.json()["shell"]["status"], "executed")
                 self.assertEqual(low.json()["shell"]["classification"]["risk"], "low")
+                self.assertEqual(low.json()["plan"]["nextStep"], "done")
+                self.assertEqual(low.json()["plan"]["taskCompletion"]["status"], "completed")
 
                 high = client.post(
                     "/api/app/agent/message",
@@ -12646,7 +12801,9 @@ namespace VRCForge.Editor
         self.assertIn("[System.IO.FileShare]::Read", publish_script)
         self.assertIn("Get-StreamSha256 -Stream $guardStream", publish_script)
         self.assertNotIn("Get-FileHash -Algorithm SHA256 -LiteralPath $artifact", publish_script)
-        self.assertIn('"repos/{owner}/{repo}/releases/tags/$Tag"', publish_script)
+        self.assertIn('"repos/{owner}/{repo}/releases?per_page=100"', publish_script)
+        self.assertIn('@("api", "--paginate", "--slurp", $endpoint)', publish_script)
+        self.assertNotIn('"repos/{owner}/{repo}/releases/tags/$Tag"', publish_script)
         self.assertIn('"repos/{owner}/{repo}/releases/$ReleaseId"', publish_script)
         self.assertNotIn("gh release view", publish_script)
         self.assertIn('Get-RequiredProperty -InputObject $remoteEntries[0] -Name "digest"', publish_script)
