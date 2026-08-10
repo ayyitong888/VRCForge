@@ -325,6 +325,12 @@ class ProviderVisionSdkRunner:
             "model": config.model,
             "messages": [{"role": "user", "content": message_content}],
         }
+        # Ollama's OpenAI-compatible endpoint otherwise lets thinking-capable
+        # local models spend the entire bounded completion budget on hidden
+        # reasoning and return an empty visual result. This is a request-local
+        # output control; it does not alter the saved model or other providers.
+        if config.provider == "ollama":
+            vision_kwargs["reasoning_effort"] = "none"
         if self._policy.model_rejects_fixed_temperature(config.model):
             vision_kwargs["max_completion_tokens"] = 1024
         else:

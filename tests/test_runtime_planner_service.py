@@ -769,6 +769,7 @@ def test_deterministic_supervised_write_route_preserves_action_kind_across_expos
     "message",
     [
         "Capture front and back views for coverage.",
+        "Capture front, left, right, and back fixed-angle views, then audit all views for complete visual coverage.",
         "Take screenshots from several angles for a visual audit.",
         "请做多角度截图，对比正面、侧面和背面。",
         "把正面和背面分别拍下来。",
@@ -811,10 +812,38 @@ def test_multi_angle_capture_intent_selects_the_supervised_multi_capture(message
     assert plan["nextStep"] == "request_write"
 
 
+def test_direction_words_without_view_context_do_not_expand_one_screenshot_to_multi_capture() -> None:
+    single = tool(
+        "vrcforge_capture_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    multi = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(single, multi),
+        routable_tools=(single, multi),
+    )
+
+    plan = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot)).plan_agent_turn(
+        "Capture one screenshot of the left and right buttons.",
+        {},
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert plan["writeNeeded"] is True
+    assert plan["writeTool"] == "vrcforge_capture_screenshot"
+
+
 @pytest.mark.parametrize(
     "message",
     [
         "Capture front and back views, then run a visual audit.",
+        "Capture front, left, right, and back fixed-angle views, then audit all views for complete visual coverage.",
         "把正面和背面分别拍下来，然后做视觉审计。",
     ],
 )
@@ -881,7 +910,7 @@ def test_multi_capture_only_finishes_after_approval_but_explicit_visual_audit_co
         exposure_layer=EXPOSURE_LAYER_EXECUTION,
     )
     capture_and_audit = planner.plan_agent_turn(
-        "Capture front and back views, then visually verify them.",
+        "Capture front, left, right, and back fixed-angle views, then audit all views for complete visual coverage.",
         {},
         {},
         exposure_layer=EXPOSURE_LAYER_EXECUTION,

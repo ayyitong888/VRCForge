@@ -972,6 +972,32 @@ def has_multi_angle_capture_intent(lowered_text: str, original_text: str) -> boo
         ],
     ):
         return True
+    # A shared suffix is common in natural requests (for example, "front,
+    # left, right, and back fixed-angle views").  Count the distinct named
+    # directions only when the sentence also says they are views/angles; this
+    # keeps unrelated object labels such as "left and right buttons" from
+    # expanding one requested screenshot into a multi-capture write.
+    if re.search(r"\b(?:angles?|views?|perspectives?)\b", lowered_text):
+        direction_aliases = {
+            "front": "front",
+            "back": "back",
+            "rear": "back",
+            "left": "left",
+            "right": "right",
+            "top": "top",
+            "overhead": "top",
+            "bottom": "bottom",
+            "underside": "bottom",
+        }
+        named_directions = {
+            direction_aliases[token]
+            for token in re.findall(
+                r"\b(?:front|back|rear|left|right|top|bottom|overhead|underside)\b",
+                lowered_text,
+            )
+        }
+        if len(named_directions) >= 2:
+            return True
     named_angles = [
         "front view",
         "back view",
@@ -995,7 +1021,9 @@ def has_multi_angle_visual_audit_intent(
 ) -> bool:
     """Require an explicit review request in addition to multi-angle capture."""
 
-    return has_multi_angle_capture_intent(lowered_text, original_text) and has_any(
+    if not has_multi_angle_capture_intent(lowered_text, original_text):
+        return False
+    if has_any(
         lowered_text,
         original_text,
         [
@@ -1018,6 +1046,18 @@ def has_multi_angle_visual_audit_intent(
             "审查截图",
             "分析截图",
         ],
+    ):
+        return True
+    # Accept ordinary compositional wording instead of requiring one exact
+    # sentence: an explicit review verb plus the multi-view evidence it should
+    # inspect. The multi-angle predicate above remains the first boundary, so
+    # generic requests to review one screenshot do not acquire a second step.
+    return bool(
+        re.search(r"\b(?:audit|review|verify|inspect|analy[sz]e)\b", lowered_text)
+        and re.search(
+            r"\b(?:views?|angles?|screenshots?|captures?|images?|coverage)\b",
+            lowered_text,
+        )
     )
 
 

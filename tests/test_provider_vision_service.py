@@ -292,6 +292,54 @@ def test_provider_vision_sdk_runner_shapes_openai_request_through_typed_fake() -
     }
 
 
+def test_provider_vision_sdk_runner_disables_ollama_reasoning_for_bounded_visual_output() -> None:
+    calls: dict[str, object] = {}
+
+    class FakeOpenAI:
+        def __init__(self) -> None:
+            def create(**request: object) -> object:
+                calls["request"] = request
+                return types.SimpleNamespace(
+                    choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="local vision"))],
+                    usage=types.SimpleNamespace(prompt_tokens=4, completion_tokens=2, total_tokens=6),
+                )
+
+            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
+
+    sdk = ProviderVisionSdkPorts(
+        google_client=lambda _config, _vertex: pytest.fail("Google SDK port must not run"),
+        google_part_from_bytes=lambda _data, _mime: pytest.fail("Google SDK port must not run"),
+        anthropic_client=lambda _key: pytest.fail("Anthropic SDK port must not run"),
+        openai_client=lambda key, base_url, timeout: (
+            calls.update(client=(key, base_url, timeout)) or FakeOpenAI()
+        ),
+    )
+    runner = ProviderVisionSdkRunner(_policy(requires_key=False), sdk)
+
+    text, _usage = runner.run(
+        VisionModelConfig("ollama", "", "http://127.0.0.1:11434/v1", "qwen3.5:4b"),
+        "bounded local prompt",
+        [{"dataUrl": "data:image/png;base64,YQ=="}],
+    )
+
+    assert text == "local vision"
+    assert calls["request"] == {
+        "model": "qwen3.5:4b",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}},
+                    {"type": "text", "text": "bounded local prompt"},
+                ],
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 1024,
+        "reasoning_effort": "none",
+    }
+
+
 def test_provider_vision_sdk_runner_shapes_vertex_request_through_typed_fakes() -> None:
     calls: dict[str, object] = {}
 
