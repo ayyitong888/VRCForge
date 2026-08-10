@@ -2319,10 +2319,10 @@ class AgentLoopP0Tests(unittest.TestCase):
             dashboard_server.PROVIDER_CONFIGURATION,
             "current_api_config",
             return_value=SimpleNamespace(
-                provider="deepseek",
-                api_key="fixture-key",
+                provider="",
+                api_key="",
                 base_url="",
-                model="deepseek-v4-flash",
+                model="",
             ),
         ), patch.object(
             dashboard_server.PROVIDER_CONFIGURATION,

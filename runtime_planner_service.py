@@ -1064,22 +1064,58 @@ def has_multi_angle_visual_audit_intent(
 def managed_multi_capture_receipt(
     loop_state: list[dict[str, object]],
 ) -> str:
-    """Read only a successful Runtime-owned managed capture observation."""
+    """Read only a Runtime-owned capture or exact transient retry capability."""
 
     successful_statuses = {"applied", "completed", "executed", "ok", "pass"}
     for step in reversed(loop_state):
         if not isinstance(step, Mapping):
             continue
-        if str(step.get("tool") or "").strip() != "vrcforge_capture_multi_screenshot":
+        tool = str(step.get("tool") or "").strip()
+        result = ensure_dict(step.get("result"))
+        if tool == "vrcforge_vision_audit_multi":
+            retry_receipt = str(result.get("captureReceipt") or "").strip()
+            if (
+                retry_receipt
+                and len(retry_receipt) <= 256
+                and result.get("retryable") is True
+                and result.get("retainImages") is True
+            ):
+                return retry_receipt
+            # The prior capture receipt was already consumed by this audit.
+            # A permanent rejection or malformed result must not fall through
+            # and replay that stale one-time capability.
+            return ""
+        if tool != "vrcforge_capture_multi_screenshot":
             continue
         outcome = ensure_dict(step.get("outcome"))
         status = str(outcome.get("status") or step.get("status") or "").strip().lower()
         if status not in successful_statuses:
             continue
-        receipt = str(ensure_dict(step.get("result")).get("captureReceipt") or "").strip()
+        receipt = str(result.get("captureReceipt") or "").strip()
         if receipt and len(receipt) <= 256:
             return receipt
     return ""
+
+
+def managed_multi_visual_audit_consumed_without_retry(
+    loop_state: list[dict[str, object]],
+) -> bool:
+    """Return true after an audit consumed the capture without a retry receipt."""
+
+    for step in reversed(loop_state):
+        if not isinstance(step, Mapping):
+            continue
+        tool = str(step.get("tool") or "").strip()
+        if tool == "vrcforge_vision_audit_multi":
+            result = ensure_dict(step.get("result"))
+            return not bool(
+                str(result.get("captureReceipt") or "").strip()
+                and result.get("retryable") is True
+                and result.get("retainImages") is True
+            )
+        if tool == "vrcforge_capture_multi_screenshot":
+            return False
+    return False
 
 
 def ensure_list(value: object) -> list[object]:
@@ -1611,6 +1647,47 @@ class RuntimePlannerService:
             meta_plan = self._plan_runtime_meta_question(message, constraints_applied, params)
             if meta_plan is not None:
                 return meta_plan
+            if (
+                routing_message
+                and not command
+                and has_multi_angle_visual_audit_intent(
+                    routing_message.lower(), routing_message
+                )
+                and managed_multi_visual_audit_consumed_without_retry(loop_state)
+            ):
+                return {
+                    "summary": "The visual audit failed without a reusable image capability.",
+                    "reply": (
+                        "所选视觉模型未完成图片审核，原始图片已按失败策略丢弃。"
+                        "如需继续，请重新发图；若要重新截图，则需要重新批准一次截图操作。"
+                        if re.search(r"[\u4e00-\u9fff]", message)
+                        else (
+                            "The selected visual model did not complete the image audit, and the "
+                            "original images were discarded by the failure policy. Reattach images "
+                            "to continue, or approve a new capture if fresh screenshots are needed."
+                        )
+                    ),
+                    "planner": "deterministic-local",
+                    "plannerLabel": "",
+                    "deterministicTerminal": True,
+                    "userConstraintsApplied": constraints_applied,
+                    "shellNeeded": False,
+                    "shellCommand": "",
+                    "shellParams": {},
+                    "skillNeeded": False,
+                    "skillTool": "",
+                    "skillCategory": "",
+                    "skillParams": {},
+                    "writeNeeded": False,
+                    "writeTool": "",
+                    "writeParams": {},
+                    "continueLoop": False,
+                    "nextStep": "needs_user_action",
+                    "completionGate": {
+                        "status": "needs_user_action",
+                        "reason": "visual_audit_image_discarded",
+                    },
+                }
             # 写入意图（往模型里加对象/新建/创建）优先：先扫描→单模型自动选中→发起写入审批，
             # 而不是反问「加到哪个模型上」或只回一句「做了做了」。
             if routing_message and not command:
@@ -2566,7 +2643,8 @@ class RuntimePlannerService:
             if vision:
                 # 文本规划器本身看不到图片：这里回灌的是"带标签的委托分析结果"，
                 # 标签必须写明是哪个视觉模型产出的，避免规划器把它当成自己看到的。
-                if str(vision.get("status") or "") == "analyzed" and vision.get("text"):
+                vision_status = str(vision.get("status") or "")
+                if vision_status == "analyzed" and vision.get("text"):
                     label = " · ".join(
                         part
                         for part in (
@@ -2580,6 +2658,34 @@ class RuntimePlannerService:
                         "you cannot see the images yourself, this analysis is your only view of them):"
                     )
                     lines.append(summarize_text(str(vision.get("text") or ""), RUNTIME_VISION_ANALYSIS_MAX_CHARS))
+                elif vision_status == "error":
+                    label = " · ".join(
+                        part
+                        for part in (
+                            str(vision.get("providerLabel") or vision.get("provider") or "").strip(),
+                            str(vision.get("model") or "").strip(),
+                        )
+                        if part
+                    )
+                    retryable = bool(vision.get("retryable"))
+                    retained = retryable and bool(vision.get("retainImages"))
+                    disposition = (
+                        "The image payload is retained for a bounded retry."
+                        if retained
+                        else "The original image payload was discarded; a retry requires the user to attach it again."
+                    )
+                    lines.append(
+                        f"\nImage analysis failed through the selected visual provider/model "
+                        f"{label or 'unknown'} (source={vision.get('source') or 'unknown'}, "
+                        f"errorType={vision.get('errorType') or 'provider_failure'}, "
+                        f"retryable={'true' if retryable else 'false'})."
+                    )
+                    lines.append(
+                        summarize_text(str(vision.get("error") or "Visual provider request failed."), 500)
+                    )
+                    lines.append(
+                        "You cannot see the images yourself. " + disposition
+                    )
                 else:
                     lines.append(
                         "\nImage attachments are present, but no vision-capable model is available, "
@@ -2722,6 +2828,18 @@ class RuntimePlannerService:
                                 " | ".join(map(str, angles[:4])), 160
                             )
                         )
+                if (
+                    str(step.get("tool") or "") == "vrcforge_vision_audit_multi"
+                    and result.get("retryable") is True
+                    and result.get("retainImages") is True
+                ):
+                    retry_receipt = str(result.get("captureReceipt") or "").strip()
+                    if retry_receipt:
+                        fields.append(
+                            "visualRetryCaptureReceipt="
+                            + sanitize_planner_observation_text(retry_receipt, 256)
+                        )
+                        fields.append("visualRetryImagesRetained=true")
                 planner_evidence = result.get("plannerEvidence")
                 if isinstance(planner_evidence, dict):
                     fields.append(

@@ -44,6 +44,7 @@ import { RuntimeActivityPanel } from "./components/runtime/runtime-activity-pane
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
+import { TransientFailureToast } from "./components/ui/transient-failure-toast";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
 import { OnboardingLanguageGate } from "./components/onboarding/onboarding-language-gate";
 import {
@@ -72,6 +73,7 @@ import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
 import { useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
 import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
+import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
 import {
@@ -247,6 +249,11 @@ export default function App() {
   const [backendMessage, setBackendMessage] = useState("starting");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const {
+    notice: transientFailure,
+    showTransientFailure,
+    dismissTransientFailure,
+  } = useTransientFailureNotice();
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
   const [input, setInput] = useState("");
   const [activeProjectPath, setActiveProjectPath] = useState("");
@@ -829,6 +836,7 @@ export default function App() {
     refreshBackgroundGoals: () => setBackgroundGoalRefreshSignal((current) => current + 1),
     handleRuntimeSessionFailure,
     setError,
+    notifyFailure: showTransientFailure,
     prepareTurnContext,
     persistChatsNow,
   });
@@ -2374,7 +2382,9 @@ export default function App() {
     }
     setError("");
     if (!chatAvailable) {
-      setError(chatDisabledReason || t("chat.connectProviderBeforeSend"));
+      const message = chatDisabledReason || t("chat.connectProviderBeforeSend");
+      setError(message);
+      showTransientFailure("send", message);
       return;
     }
     if (editingMessage) {
@@ -2463,18 +2473,32 @@ export default function App() {
     }
     const remaining = Math.max(0, MAX_ATTACHMENTS_PER_TURN - attachments.length);
     if (remaining === 0) {
-      setError(t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN }));
+      const message = t("attachments.limitReached", { max: MAX_ATTACHMENTS_PER_TURN });
+      setError(message);
+      showTransientFailure("upload", message);
       return;
     }
     const selected = Array.from(files).slice(0, remaining);
     const chatId = ensureActiveChat();
     const nextAttachments: ChatAttachment[] = [];
     for (const file of selected) {
-      nextAttachments.push(await ingestChatAttachment(file, { endpoint, chatId }, t));
+      try {
+        const attachment = await ingestChatAttachment(file, { endpoint, chatId }, t);
+        nextAttachments.push(attachment);
+        if (attachment.error) {
+          showTransientFailure("upload", attachment.error);
+        }
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setError(message);
+        showTransientFailure("upload", message);
+      }
     }
     setAttachments((current) => [...current, ...nextAttachments].slice(0, MAX_ATTACHMENTS_PER_TURN));
     if (files.length > remaining) {
-      setError(t("attachments.limitOneTurn", { max: MAX_ATTACHMENTS_PER_TURN }));
+      const message = t("attachments.limitOneTurn", { max: MAX_ATTACHMENTS_PER_TURN });
+      setError(message);
+      showTransientFailure("upload", message);
     }
   }
 
@@ -3490,6 +3514,15 @@ export default function App() {
         onCancelDeleteChat={() => setDeleteTargetId("")}
         onConfirmDeleteChat={deleteChatPermanently}
       />
+
+      {transientFailure ? (
+        <TransientFailureToast
+          title={t(`notifications.${transientFailure.kind}Failed`)}
+          message={transientFailure.message}
+          dismissLabel={t("notifications.dismiss")}
+          onDismiss={dismissTransientFailure}
+        />
+      ) : null}
 
     </main>
   );

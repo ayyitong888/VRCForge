@@ -110,6 +110,7 @@ type UseChatRunControllerParams = {
   refreshBackgroundGoals: () => void;
   handleRuntimeSessionFailure: (message: string) => void;
   setError: (message: string) => void;
+  notifyFailure?: (kind: "vision" | "send", message: string) => void;
   prepareTurnContext?: (input: PrepareTurnContextInput) => Promise<PreparedTurnContext | null>;
   persistChatsNow?: () => Promise<void>;
 };
@@ -130,6 +131,7 @@ export function useChatRunController({
   refreshBackgroundGoals,
   handleRuntimeSessionFailure,
   setError,
+  notifyFailure,
   prepareTurnContext,
   persistChatsNow,
 }: UseChatRunControllerParams) {
@@ -194,7 +196,9 @@ export function useChatRunController({
   async function submitTurn(turn: QueuedTurn): Promise<SubmitTurnResult> {
     if (sendingRef.current) {
       if (queueRef.current.length >= MAX_QUEUED_TURNS) {
-        setError(t("chat.queueFull", { max: MAX_QUEUED_TURNS }));
+        const message = t("chat.queueFull", { max: MAX_QUEUED_TURNS });
+        setError(message);
+        notifyFailure?.("send", message);
         return "queue_full";
       }
       const ownerChatId = turn.chatId && getChatById(turn.chatId) ? turn.chatId : ensureActiveChat();
@@ -436,6 +440,49 @@ export function useChatRunController({
         computerUseVisualTheme: turn.computerUseVisualTheme,
         computerUseVisualAccent: turn.computerUseVisualAccent,
       });
+      const skillResult = response.skill?.tool === "vrcforge_vision_audit_multi"
+        && response.skill.result
+        && typeof response.skill.result === "object"
+        && !Array.isArray(response.skill.result)
+        ? response.skill.result as Record<string, unknown>
+        : undefined;
+      const managedVisualRows = Array.isArray(skillResult?.results) ? skillResult.results : [];
+      const managedVisualFailure = managedVisualRows
+        .map((row) => (
+          row && typeof row === "object" && !Array.isArray(row)
+            ? (row as Record<string, unknown>).providerError
+            : undefined
+        ))
+        .find((providerError) => (
+          providerError && typeof providerError === "object" && !Array.isArray(providerError)
+        )) as Record<string, unknown> | undefined;
+      if (!background && response.vision?.status === "error") {
+        const visualRoute = [
+          response.vision.providerLabel || response.vision.provider,
+          response.vision.model,
+        ].filter(Boolean).join(" · ");
+        const errorText = String(response.vision.error || t("notifications.visionFailed"));
+        const retryText = response.vision.retryable
+          ? t("notifications.visionRetryable")
+          : t("notifications.visionReattach");
+        notifyFailure?.(
+          "vision",
+          `${visualRoute ? `${visualRoute}: ` : ""}${errorText} ${retryText}`,
+        );
+      } else if (!background && managedVisualFailure) {
+        const visualRoute = [
+          managedVisualFailure.providerLabel || managedVisualFailure.provider,
+          managedVisualFailure.model,
+        ].filter(Boolean).join(" 路 ");
+        const errorText = String(managedVisualFailure.error || t("notifications.visionFailed"));
+        const retryText = managedVisualFailure.retryable === true
+          ? t("notifications.visionRetryable")
+          : t("notifications.visionReattach");
+        notifyFailure?.(
+          "vision",
+          `${visualRoute ? `${visualRoute}: ` : ""}${errorText} ${retryText}`,
+        );
+      }
       const providerUnavailable = response.backgroundGoalSkipped === true
         && response.status === "provider_unreachable"
         && Boolean(response.providerWarningKey);
@@ -671,6 +718,7 @@ export function useChatRunController({
       } else {
         setError(text);
       }
+      notifyFailure?.("send", text);
       return false;
     } finally {
       updateChat(chatId, (current) => {

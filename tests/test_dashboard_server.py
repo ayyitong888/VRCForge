@@ -1886,6 +1886,109 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("vision fallback notice should stay out", payload["plan"].get("reply", ""))
         self.assertEqual(payload["plan"].get("visionStatus"), "unconfigured")
 
+    def test_agent_runtime_message_discards_image_bytes_after_permanent_provider_rejection(self) -> None:
+        previous_hook = dashboard_server.AGENT_GATEWAY.vision_analyze_fn
+
+        def fake_vision(_message, _images):
+            return {
+                "status": "error",
+                "error": "image input is not supported",
+                "errorType": "provider_rejected",
+                "retryable": False,
+                "retainImages": False,
+                "provider": "deepseek",
+                "providerLabel": "DeepSeek",
+                "model": "deepseek-v4-flash",
+                "source": "main",
+            }
+
+        try:
+            dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "describe the attached image",
+                        "attachments": [
+                            {
+                                "id": "att-image-rejected",
+                                "name": "probe.png",
+                                "type": "image/png",
+                                "size": 68,
+                                "dataUrl": "data:image/png;base64,iVBORw0KGgo=",
+                                "payloadKind": "data_url",
+                            }
+                        ],
+                    },
+                )
+        finally:
+            dashboard_server.AGENT_GATEWAY.vision_analyze_fn = previous_hook
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["vision"]["status"], "error")
+        self.assertEqual(payload["vision"]["errorType"], "provider_rejected")
+        self.assertEqual(payload["vision"]["provider"], "deepseek")
+        self.assertEqual(payload["vision"]["model"], "deepseek-v4-flash")
+        self.assertFalse(payload["vision"]["retryable"])
+        self.assertFalse(payload["vision"]["retainImages"])
+        attachment = payload["attachments"][0]
+        self.assertNotIn("dataUrl", attachment)
+        self.assertEqual(attachment["payloadKind"], "metadata")
+        self.assertFalse(attachment["replayable"])
+        self.assertTrue(attachment["discardedAfterVisionError"])
+        self.assertEqual(payload["plan"].get("visionStatus"), "error")
+
+    def test_agent_runtime_message_retains_image_bytes_for_transient_provider_failure(self) -> None:
+        previous_hook = dashboard_server.AGENT_GATEWAY.vision_analyze_fn
+
+        def fake_vision(_message, _images):
+            return {
+                "status": "error",
+                "error": "service unavailable",
+                "errorType": "transient_provider_failure",
+                "retryable": True,
+                "retainImages": True,
+                "provider": "openai",
+                "providerLabel": "OpenAI",
+                "model": "gpt-4o",
+                "source": "visionProfile",
+            }
+
+        try:
+            dashboard_server.AGENT_GATEWAY.vision_analyze_fn = fake_vision
+            with TestClient(dashboard_server.app) as client:
+                response = client.post(
+                    "/api/app/agent/message",
+                    json={
+                        "message": "describe the attached image",
+                        "attachments": [
+                            {
+                                "id": "att-image-transient",
+                                "name": "probe.png",
+                                "type": "image/png",
+                                "size": 68,
+                                "dataUrl": "data:image/png;base64,iVBORw0KGgo=",
+                                "payloadKind": "data_url",
+                            }
+                        ],
+                    },
+                )
+        finally:
+            dashboard_server.AGENT_GATEWAY.vision_analyze_fn = previous_hook
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["vision"]["status"], "error")
+        self.assertEqual(payload["vision"]["errorType"], "transient_provider_failure")
+        self.assertTrue(payload["vision"]["retryable"])
+        self.assertTrue(payload["vision"]["retainImages"])
+        attachment = payload["attachments"][0]
+        self.assertEqual(attachment["payloadKind"], "data_url")
+        self.assertTrue(attachment["replayable"])
+        self.assertIn("dataUrl", attachment)
+        self.assertNotIn("discardedAfterVisionError", attachment)
+
     def test_agent_runtime_message_runs_off_event_loop(self) -> None:
         with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
             with TestClient(dashboard_server.app) as client:
@@ -16041,6 +16144,116 @@ namespace VRCForge.Editor
         self.assertEqual(observed, [b"original"])
         self.assertNotIn("imagePath", json.dumps(payload))
 
+    def test_managed_multi_vision_transient_failure_reissues_exact_retry_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            managed = Path(temp_dir) / "latest"
+            managed.mkdir()
+            image = managed / "vision_front.png"
+            image.write_bytes(b"original")
+            authority = dashboard_server.ManagedVisualCaptureAuthority(managed)
+            binding = {
+                "taskId": "task-1",
+                "sessionId": "session-1",
+                "approvalId": "approval-1",
+                "requestedActionId": "action-capture-1",
+            }
+            issued = authority.issue(
+                [{"imagePath": str(image), "angle": "front"}],
+                binding=binding,
+            )
+            provider_error = dashboard_server.VisionProviderRequestError(
+                {
+                    "status": "error",
+                    "provider": "deepseek",
+                    "providerLabel": "DeepSeek",
+                    "model": "deepseek-chat",
+                    "source": "main",
+                    "errorType": "transient_provider_failure",
+                    "retryable": True,
+                    "retainImages": True,
+                    "error": "HTTP 503 service unavailable",
+                }
+            )
+            with patch.object(
+                dashboard_server,
+                "MANAGED_VISUAL_CAPTURE_AUTHORITY",
+                authority,
+            ), patch(
+                "dashboard_server.run_provider_vision_audit_bytes",
+                side_effect=provider_error,
+            ):
+                payload = dashboard_server.audit_managed_avatar_multi_screenshot_sync(
+                    dashboard_server.ManagedVisionAuditMultiRequest(
+                        captureReceipt=issued["captureReceipt"]
+                    ),
+                    task_binding=binding,
+                )
+            retried = authority.consume(payload["captureReceipt"], binding=binding)
+
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["retryable"])
+        self.assertTrue(payload["retainImages"])
+        self.assertEqual(payload["captureEvidenceId"], issued["captureEvidenceId"])
+        self.assertEqual(retried["captureEvidenceId"], issued["captureEvidenceId"])
+        self.assertEqual(retried["images"][0]["imageBytes"], b"original")
+        self.assertEqual(
+            payload["results"][0]["providerError"]["errorType"],
+            "transient_provider_failure",
+        )
+        self.assertNotIn("imagePath", json.dumps(payload))
+
+    def test_managed_multi_vision_provider_rejection_discards_retry_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            managed = Path(temp_dir) / "latest"
+            managed.mkdir()
+            image = managed / "vision_front.png"
+            image.write_bytes(b"original")
+            authority = dashboard_server.ManagedVisualCaptureAuthority(managed)
+            binding = {
+                "taskId": "task-1",
+                "sessionId": "session-1",
+                "approvalId": "approval-1",
+                "requestedActionId": "action-capture-1",
+            }
+            issued = authority.issue(
+                [{"imagePath": str(image), "angle": "front"}],
+                binding=binding,
+            )
+            provider_error = dashboard_server.VisionProviderRequestError(
+                {
+                    "status": "error",
+                    "provider": "deepseek",
+                    "providerLabel": "DeepSeek",
+                    "model": "deepseek-chat",
+                    "source": "main",
+                    "errorType": "provider_rejected",
+                    "retryable": False,
+                    "retainImages": False,
+                    "error": "HTTP 400 images are not supported",
+                }
+            )
+            with patch.object(
+                dashboard_server,
+                "MANAGED_VISUAL_CAPTURE_AUTHORITY",
+                authority,
+            ), patch(
+                "dashboard_server.run_provider_vision_audit_bytes",
+                side_effect=provider_error,
+            ):
+                payload = dashboard_server.audit_managed_avatar_multi_screenshot_sync(
+                    dashboard_server.ManagedVisionAuditMultiRequest(
+                        captureReceipt=issued["captureReceipt"]
+                    ),
+                    task_binding=binding,
+                )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["retryable"])
+        self.assertFalse(payload["retainImages"])
+        self.assertNotIn("captureReceipt", payload)
+        self.assertEqual(payload["results"][0]["providerError"]["provider"], "deepseek")
+        self.assertNotIn("imagePath", json.dumps(payload))
+
     def test_agent_managed_vision_consumes_only_its_prior_capture_action(self) -> None:
         seed = {
             "taskId": "task-1",
@@ -16143,6 +16356,32 @@ namespace VRCForge.Editor
                 }
             ],
         )
+
+    def test_provider_vision_audit_preserves_selected_route_failure(self) -> None:
+        rejected = {
+            "status": "error",
+            "provider": "deepseek",
+            "providerLabel": "DeepSeek",
+            "model": "deepseek-chat",
+            "source": "main",
+            "errorType": "provider_rejected",
+            "retryable": False,
+            "retainImages": False,
+            "error": "HTTP 400 images are not supported",
+        }
+        with patch.object(
+            dashboard_server.PROVIDER_VISION,
+            "analyze_prompt",
+            return_value=rejected,
+        ):
+            with self.assertRaises(dashboard_server.VisionProviderRequestError) as raised:
+                dashboard_server.run_provider_vision_audit_bytes(b"verified-image")
+
+        self.assertEqual(raised.exception.details["provider"], "deepseek")
+        self.assertEqual(raised.exception.details["model"], "deepseek-chat")
+        self.assertEqual(raised.exception.details["source"], "main")
+        self.assertEqual(raised.exception.details["errorType"], "provider_rejected")
+        self.assertFalse(raised.exception.details["retainImages"])
     def test_normalize_vision_box_accepts_gemini_1000_scale(self) -> None:
         box = dashboard_server.normalize_vision_box({"x_min": 100, "y_min": 200, "x_max": 500, "y_max": 650})
         self.assertIsNotNone(box)

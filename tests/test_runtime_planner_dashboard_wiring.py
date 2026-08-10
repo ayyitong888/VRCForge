@@ -197,7 +197,7 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
                 model="deepseek-v4-flash",
             ),
             SimpleNamespace(provider="", api_key="", base_url="", model="", enabled=False),
-            False,
+            True,
         ),
         (
             SimpleNamespace(provider="openai", api_key="", base_url="", model="gpt-4o"),

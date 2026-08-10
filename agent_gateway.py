@@ -2900,9 +2900,10 @@ class AgentGateway:
 
         路由矩阵（见 docs/ROADMAP.local.md「Dedicated Vision Model Profile」）：
         - hook 返回 analyzed → 结果作为带标签的 vision run step 注入本轮；
-        - hook 返回 unconfigured / hook 缺失 → 诚实提示（绝不静默丢弃附件，
-          也绝不把图片原始字节发给不支持视觉的模型）；
-        - hook 抛错 → error 状态 + 有界错误信息，同样以提示收尾。
+        - hook 返回 unconfigured / hook 缺失 → 诚实提示；
+        - hook 返回 error → 保留 provider/model/source 和重试处置；明确拒图
+          会丢弃原始图片字节，只有瞬时 Provider 失败才保留供有界重试；
+        - hook 抛错 → 未分类 error 状态 + 有界错误信息，图片不保留。
         视觉调用的 token 用量只记录在返回的 payload/step 上，绝不写入
         文本规划器的聊天上下文用量。
         """
@@ -2933,9 +2934,12 @@ class AgentGateway:
                 **base,
                 "status": "error",
                 "error": summarize_text(str(exc), 500),
+                "errorType": "provider_failure",
+                "retryable": False,
+                "retainImages": False,
                 "notice": (
                     "（视觉模型调用失败，图片内容未能分析："
-                    f"{summarize_text(str(exc), 200)}。图片没有被静默丢弃，可稍后重试或检查视觉模型配置。）"
+                    f"{summarize_text(str(exc), 200)}。原始图片不会保留；请检查所选视觉模型配置后重新附图。）"
                 ),
             }
         result = ensure_dict(raw)
@@ -2952,6 +2956,29 @@ class AgentGateway:
                 "model": str(result.get("model") or ""),
                 "source": str(result.get("source") or "visionProfile"),
                 "usage": usage,
+            }
+        if status == "error":
+            error_type = str(result.get("errorType") or result.get("error_type") or "provider_failure")
+            retryable = bool(result.get("retryable")) and error_type == "transient_provider_failure"
+            retain_images = retryable and bool(result.get("retainImages") or result.get("retain_images"))
+            error = summarize_text(str(result.get("error") or "Visual provider request failed."), 500)
+            retry_notice = (
+                "图片已保留，可在稍后重试同一视觉请求。"
+                if retain_images
+                else "原始图片已从回灌上下文丢弃；如需重试请重新附图。"
+            )
+            return {
+                **base,
+                "status": "error",
+                "error": error,
+                "errorType": error_type,
+                "retryable": retryable,
+                "retainImages": retain_images,
+                "provider": str(result.get("provider") or ""),
+                "providerLabel": str(result.get("providerLabel") or result.get("provider_label") or ""),
+                "model": str(result.get("model") or ""),
+                "source": str(result.get("source") or ""),
+                "notice": f"（所选视觉 Provider/模型请求失败：{summarize_text(error, 200)}。{retry_notice}）",
             }
         reason = str(result.get("reason") or "no_vision_model")
         return {
@@ -3358,7 +3385,16 @@ class AgentGateway:
         image_attachments = runtime_image_attachments(attachments)
         if image_attachments:
             vision_payload = self._run_vision_analysis(message, image_attachments)
+            if (
+                str(vision_payload.get("status") or "") == "error"
+                and not bool(vision_payload.get("retainImages"))
+            ):
+                attachments, discarded_count = discard_runtime_image_payloads(attachments)
+                params["_runtimeAttachments"] = attachments
+                vision_payload["discardedImageCount"] = discarded_count
             turn_context = ensure_dict(observe.get("turn"))
+            if attachments:
+                turn_context["attachments"] = attachments
             turn_context["visionAnalysis"] = vision_payload
             observe["turn"] = turn_context
         reasoning_trace: dict[str, Any] = {}
@@ -3429,6 +3465,9 @@ class AgentGateway:
                     "source": vision_payload.get("source") or "",
                     "usage": ensure_dict(vision_payload.get("usage")),
                     "imageCount": vision_payload.get("imageCount") or 0,
+                    "errorType": vision_payload.get("errorType") or "",
+                    "retryable": bool(vision_payload.get("retryable")),
+                    "retainImages": bool(vision_payload.get("retainImages")),
                 }
             )
         # Suppress only an immediately repeated successful action. A distinct
@@ -6081,6 +6120,33 @@ def runtime_image_attachments(attachments: Any) -> list[dict[str, Any]]:
         if mime.startswith("image/") or data_url.startswith("data:image/"):
             images.append(attachment)
     return images
+
+
+def discard_runtime_image_payloads(
+    attachments: Any,
+) -> tuple[list[dict[str, Any]], int]:
+    """Drop only inline image bytes while retaining bounded attachment identity."""
+
+    projected: list[dict[str, Any]] = []
+    discarded_count = 0
+    for raw in ensure_list(attachments):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        data_url = str(item.get("dataUrl") or "")
+        mime = str(item.get("type") or "").strip().lower()
+        is_inline_image = (
+            str(item.get("payloadKind") or "") == "data_url"
+            and (mime.startswith("image/") or data_url.startswith("data:image/"))
+        )
+        if is_inline_image:
+            item.pop("dataUrl", None)
+            item["payloadKind"] = "metadata"
+            item["replayable"] = False
+            item["discardedAfterVisionError"] = True
+            discarded_count += 1
+        projected.append(item)
+    return projected, discarded_count
 
 
 

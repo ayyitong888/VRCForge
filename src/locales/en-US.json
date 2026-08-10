@@ -31,6 +31,14 @@
     "envNeedsAttention": "Environment needs attention",
     "envNeedsAttentionDesc": "Doctor can review {{errors}} error(s) and {{warnings}} warning(s) across the VRCForge environment."
   },
+  "notifications": {
+    "visionFailed": "Image analysis failed",
+    "uploadFailed": "File upload failed",
+    "sendFailed": "Message send failed",
+    "visionRetryable": "The image is retained for retry.",
+    "visionReattach": "Attach the image again before retrying.",
+    "dismiss": "Dismiss notification"
+  },
   "workspace": {
     "title": "Workspace",
     "refreshStatus": "Refresh Unity tools",

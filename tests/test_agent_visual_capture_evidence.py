@@ -112,6 +112,43 @@ def test_managed_capture_rejects_cross_task_consumption_without_burning_receipt(
     ] == issued["captureEvidenceId"]
 
 
+def test_transient_retry_reissues_same_capture_identity_and_hash(tmp_path: Path) -> None:
+    managed = tmp_path / "latest"
+    managed.mkdir()
+    image = managed / "front.png"
+    image.write_bytes(b"exact-image")
+    authority = ManagedVisualCaptureAuthority(managed)
+    issued = authority.issue([_capture(image, "front")], binding=TASK_BINDING)
+    consumed = authority.consume(issued["captureReceipt"], binding=TASK_BINDING)
+
+    reissued = authority.reissue_verified(consumed, binding=TASK_BINDING)
+    retried = authority.consume(reissued["captureReceipt"], binding=TASK_BINDING)
+
+    assert reissued["captureEvidenceId"] == issued["captureEvidenceId"]
+    assert retried["captureEvidenceId"] == issued["captureEvidenceId"]
+    assert retried["images"][0]["imageBytes"] == b"exact-image"
+    assert retried["images"][0]["sha256"] == consumed["images"][0]["sha256"]
+
+
+def test_transient_retry_rejects_cross_task_or_mutated_consumed_bytes(tmp_path: Path) -> None:
+    managed = tmp_path / "latest"
+    managed.mkdir()
+    image = managed / "front.png"
+    image.write_bytes(b"exact-image")
+    authority = ManagedVisualCaptureAuthority(managed)
+    issued = authority.issue([_capture(image, "front")], binding=TASK_BINDING)
+    consumed = authority.consume(issued["captureReceipt"], binding=TASK_BINDING)
+
+    with pytest.raises(ManagedVisualCaptureError, match="task binding"):
+        authority.reissue_verified(
+            consumed,
+            binding={**TASK_BINDING, "taskId": "task-other"},
+        )
+    consumed["images"][0]["imageBytes"] = b"tampered"
+    with pytest.raises(ManagedVisualCaptureError, match="bytes are invalid"):
+        authority.reissue_verified(consumed, binding=TASK_BINDING)
+
+
 def test_managed_capture_rejects_hard_links(tmp_path: Path) -> None:
     managed = tmp_path / "latest"
     managed.mkdir()

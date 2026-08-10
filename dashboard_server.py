@@ -13277,6 +13277,16 @@ def _audit_verified_avatar_images(
                 mime_type=mimetypes.guess_type(image_path)[0] or "image/png",
                 image_name=f"{angle}{Path(image_path).suffix or '.png'}",
             )
+        except VisionProviderRequestError as exc:
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "error": f"Image audit failed: {exc}",
+                    "providerError": dict(exc.details),
+                }
+            )
+            continue
         except Exception as exc:  # noqa: BLE001 - every Provider/image failure must fail this bounded audit closed.
             results.append({**base_result, "status": "failed", "error": f"Image audit failed: {exc}"})
             continue
@@ -13384,11 +13394,33 @@ def audit_managed_avatar_multi_screenshot_sync(
             tuple(str(item["angle"]) for item in images),
             include_paths=False,
         )
+        failed_results = [
+            item
+            for item in list(payload.get("results") or [])
+            if str(item.get("status") or "") == "failed"
+        ]
+        transient_provider_failure = bool(failed_results) and all(
+            isinstance(item.get("providerError"), Mapping)
+            and item["providerError"].get("retryable") is True
+            and item["providerError"].get("retainImages") is True
+            for item in failed_results
+        )
+        retry_capability = (
+            MANAGED_VISUAL_CAPTURE_AUTHORITY.reissue_verified(
+                evidence,
+                binding=task_binding,
+            )
+            if transient_provider_failure
+            else {}
+        )
         return {
             **payload,
             "captureEvidenceVerified": True,
             "captureEvidenceId": evidence["captureEvidenceId"],
             "evidence": evidence["evidence"],
+            "retryable": transient_provider_failure,
+            "retainImages": transient_provider_failure,
+            **retry_capability,
         }
     except (RuntimeError, ManagedVisualCaptureError) as exc:
         emit_log(
@@ -15417,6 +15449,34 @@ def validate_multi_vision_audit_result(value: Any) -> str:
     return ""
 
 
+class VisionProviderRequestError(RuntimeError):
+    """Bounded selected-route failure safe to expose to the Runtime loop."""
+
+    def __init__(self, analysis: Mapping[str, Any]) -> None:
+        provider = str(analysis.get("provider") or "").strip()[:80]
+        provider_label = str(analysis.get("providerLabel") or provider).strip()[:120]
+        model = str(analysis.get("model") or "").strip()[:180]
+        source = str(analysis.get("source") or "").strip()[:40]
+        error_type = str(analysis.get("errorType") or "provider_failure").strip()[:80]
+        retryable = bool(analysis.get("retryable")) and error_type == "transient_provider_failure"
+        retain_images = retryable and bool(analysis.get("retainImages"))
+        error = " ".join(
+            str(analysis.get("error") or analysis.get("reason") or "Visual provider request failed.").split()
+        )[:500]
+        self.details = {
+            "provider": provider,
+            "providerLabel": provider_label,
+            "model": model,
+            "source": source,
+            "errorType": error_type,
+            "retryable": retryable,
+            "retainImages": retain_images,
+            "error": error,
+        }
+        route = " · ".join(item for item in (provider_label or provider, model) if item)
+        super().__init__(f"{route + ': ' if route else ''}{error}")
+
+
 def run_provider_vision_audit_bytes(
     image_bytes: bytes,
     *,
@@ -15452,8 +15512,7 @@ def run_provider_vision_audit_bytes(
         ],
     )
     if str(analysis.get("status") or "") != "analyzed":
-        reason = str(analysis.get("reason") or "No visual provider is available.").strip()
-        raise RuntimeError(reason)
+        raise VisionProviderRequestError(analysis)
     payload = try_parse_json(str(analysis.get("text") or ""))
     if not isinstance(payload, dict):
         raise RuntimeError("Image analysis did not return valid JSON.")

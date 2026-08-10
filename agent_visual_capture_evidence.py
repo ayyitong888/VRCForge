@@ -262,6 +262,123 @@ class ManagedVisualCaptureAuthority:
             "evidence": [{"ref": evidence_id, "kind": "managed_visual_capture"}],
         }
 
+    def reissue_verified(
+        self,
+        consumed: Mapping[str, Any],
+        *,
+        binding: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Reissue one receipt for the exact bytes of consumed transient evidence.
+
+        This does not recapture or reopen the images. The next ``consume`` still
+        verifies every managed path against the original size and SHA-256 before
+        returning bytes, so a transient Provider failure cannot widen the task,
+        approval, action, or image scope.
+        """
+
+        raw_images = consumed.get("images")
+        if not isinstance(raw_images, Sequence) or isinstance(raw_images, (str, bytes)):
+            raise ManagedVisualCaptureError("Consumed visual evidence is missing its images.")
+        if not 1 <= len(raw_images) <= 4:
+            raise ManagedVisualCaptureError("Consumed visual evidence has an invalid image count.")
+
+        images: list[_ManagedImage] = []
+        for raw_image in raw_images:
+            if not isinstance(raw_image, Mapping):
+                raise ManagedVisualCaptureError("Consumed visual evidence contains an invalid image.")
+            image_bytes = raw_image.get("imageBytes")
+            sha256 = str(raw_image.get("sha256") or "").strip().casefold()
+            size = int(raw_image.get("size") or 0)
+            angle = str(raw_image.get("angle") or "").strip().casefold()
+            path = str(raw_image.get("imagePath") or "").strip()
+            if (
+                not isinstance(image_bytes, bytes)
+                or len(image_bytes) != size
+                or not 0 < size <= self._max_image_bytes
+                or hashlib.sha256(image_bytes).hexdigest() != sha256
+                or angle not in _ALLOWED_ANGLES
+                or not path
+            ):
+                raise ManagedVisualCaptureError("Consumed visual evidence bytes are invalid.")
+            images.append(
+                _ManagedImage(path=path, angle=angle, sha256=sha256, size=size)
+            )
+        if len({image.angle for image in images}) != len(images):
+            raise ManagedVisualCaptureError("Consumed visual evidence angles must be unique.")
+        if len({image.path.casefold() for image in images}) != len(images):
+            raise ManagedVisualCaptureError("Consumed visual evidence images must be distinct.")
+
+        task_id = str(binding.get("taskId") or "").strip()
+        session_id = str(binding.get("sessionId") or "").strip()
+        consumed_task_id = str(consumed.get("taskId") or "").strip()
+        consumed_session_id = str(consumed.get("sessionId") or "").strip()
+        approval_id = str(consumed.get("approvalId") or "").strip()
+        requested_action_id = str(consumed.get("captureActionId") or "").strip()
+        raw_action_ids = binding.get("captureActionIds")
+        expected_action_ids = {
+            str(item or "").strip()
+            for item in (
+                raw_action_ids
+                if isinstance(raw_action_ids, Sequence)
+                and not isinstance(raw_action_ids, (str, bytes))
+                else [binding.get("requestedActionId")]
+            )
+            if str(item or "").strip()
+        }
+        expected_approval_id = str(binding.get("approvalId") or "").strip()
+        if (
+            any(
+                not value or len(value) > 180
+                for value in (
+                    task_id,
+                    session_id,
+                    consumed_task_id,
+                    consumed_session_id,
+                    approval_id,
+                    requested_action_id,
+                )
+            )
+            or task_id != consumed_task_id
+            or session_id != consumed_session_id
+            or (expected_action_ids and requested_action_id not in expected_action_ids)
+            or (expected_approval_id and approval_id != expected_approval_id)
+        ):
+            raise ManagedVisualCaptureError("Consumed visual evidence task binding is invalid.")
+
+        evidence_id = str(consumed.get("captureEvidenceId") or "").strip()
+        project_digest = str(consumed.get("projectDigest") or "").strip().casefold()
+        avatar_digest = str(consumed.get("avatarDigest") or "").strip().casefold()
+        if (
+            not evidence_id.startswith("visual_")
+            or len(project_digest) != 64
+            or len(avatar_digest) != 64
+        ):
+            raise ManagedVisualCaptureError("Consumed visual evidence identity is invalid.")
+
+        now = float(self._clock())
+        token = secrets.token_urlsafe(32)
+        record = _CaptureRecord(
+            evidence_id=evidence_id,
+            issued_at=now,
+            expires_at=now + self._ttl_seconds,
+            project_digest=project_digest,
+            avatar_digest=avatar_digest,
+            task_id=task_id,
+            session_id=session_id,
+            approval_id=approval_id,
+            requested_action_id=requested_action_id,
+            images=tuple(images),
+        )
+        with self._lock:
+            self._prune_locked(now)
+            self._records[token] = record
+        return {
+            "captureReceipt": token,
+            "captureEvidenceId": evidence_id,
+            "angles": [image.angle for image in images],
+            "evidence": [{"ref": evidence_id, "kind": "managed_visual_capture"}],
+        }
+
     def consume(self, token: Any, *, binding: Mapping[str, Any]) -> dict[str, Any]:
         token_text = str(token or "").strip()
         if not token_text or len(token_text) > 256:
@@ -324,6 +441,8 @@ class ManagedVisualCaptureAuthority:
             "captureEvidenceId": record.evidence_id,
             "projectDigest": record.project_digest,
             "avatarDigest": record.avatar_digest,
+            "taskId": record.task_id,
+            "sessionId": record.session_id,
             "captureActionId": record.requested_action_id,
             "approvalId": record.approval_id,
             "images": verified,

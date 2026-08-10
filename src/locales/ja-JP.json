@@ -31,6 +31,14 @@
     "envNeedsAttention": "環境に注意が必要です",
     "envNeedsAttentionDesc": "Doctor が VRCForge 環境内の {{errors}} 件のエラーと {{warnings}} 件の警告を確認できます。"
   },
+  "notifications": {
+    "visionFailed": "画像解析に失敗しました",
+    "uploadFailed": "ファイルのアップロードに失敗しました",
+    "sendFailed": "メッセージの送信に失敗しました",
+    "visionRetryable": "画像は再試行用に保持されています。",
+    "visionReattach": "再試行する前に画像を再添付してください。",
+    "dismiss": "通知を閉じる"
+  },
   "workspace": {
     "title": "ワークスペース",
     "refreshStatus": "Unity ツールを更新",

@@ -487,6 +487,10 @@ export type AgentVisionAnalysis = {
   usage?: AgentContextUsage;
   reason?: string;
   error?: string;
+  errorType?: string;
+  retryable?: boolean;
+  retainImages?: boolean;
+  discardedImageCount?: number;
   notice?: string;
 };
 

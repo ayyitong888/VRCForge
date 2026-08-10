@@ -10,6 +10,7 @@ image channel.
 from __future__ import annotations
 
 import base64
+import binascii
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol, Sequence
@@ -47,6 +48,12 @@ VISION_CAPABLE_MODEL_MARKERS = (
     "llama-4",
 )
 VISION_CAPABLE_MODEL_RE = re.compile(r"(^|[-_/.])(o[134])([-_.]|$)|(^|[-_/.])vl([-_.]|$)")
+VISION_IMAGE_MAX_ITEMS = 8
+VISION_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+
+
+class VisionInputError(RuntimeError):
+    """The local image envelope is invalid and must never reach a Provider SDK."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,21 +152,10 @@ class ProviderVisionService:
 
         main = self._state.main_config()
         if main.provider and main.model:
-            # Unknown and newly released multimodal models remain eligible by
-            # default; do not rebuild a model-name allowlist.  DeepSeek's
-            # configured chat lane is a known text-only exception, so asking
-            # for screenshot approval before it can accept an image would only
-            # defer a deterministic failure until after the write.
-            if self._policy.normalize_provider_name(main.provider) == "deepseek":
-                return (
-                    None,
-                    "",
-                    (
-                        f"The main model ({self._policy.provider_display_name(main.provider)}) "
-                        "is known not to accept image input, and no enabled Vision Profile "
-                        "is available."
-                    ),
-                )
+            # Model-name capability hints are informational only.  The selected
+            # provider owns the authoritative answer: always send the image
+            # through its multimodal request channel and return any provider
+            # rejection as the bounded visual-action failure.
             if self._policy.provider_requires_api_key(main.provider) and not main.api_key.strip():
                 return (
                     None,
@@ -203,11 +199,25 @@ class ProviderVisionService:
         if config is None:
             return {"status": "unconfigured", "reason": reason}
 
-        text, usage = self._runner.run(config, prompt, images)
-        if not text.strip():
-            raise RuntimeError(
-                f"{self._policy.provider_display_name(config.provider)} returned an empty vision analysis."
-            )
+        try:
+            text, usage = self._runner.run(config, prompt, images)
+            if not text.strip():
+                raise RuntimeError(
+                    f"{self._policy.provider_display_name(config.provider)} returned an empty vision analysis."
+                )
+        except Exception as exc:  # noqa: BLE001 - provider failures are a typed visual result.
+            error_type, retryable, retain_images = classify_vision_provider_error(exc)
+            return {
+                "status": "error",
+                "error": bounded_provider_error_text(exc),
+                "errorType": error_type,
+                "retryable": retryable,
+                "retainImages": retain_images,
+                "provider": config.provider,
+                "providerLabel": self._policy.provider_display_name(config.provider),
+                "model": config.model,
+                "source": source,
+            }
         return {
             "status": "analyzed",
             "text": text,
@@ -234,6 +244,67 @@ class ProviderVisionService:
         )
 
 
+def bounded_provider_error_text(exc: Exception, limit: int = 500) -> str:
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def classify_vision_provider_error(exc: Exception) -> tuple[str, bool, bool]:
+    """Classify whether the exact image payload may be retained for retry."""
+
+    if isinstance(exc, VisionInputError):
+        return "input_invalid", False, False
+
+    status_code: int | None = None
+    for candidate in (
+        getattr(exc, "status_code", None),
+        getattr(exc, "status", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+    ):
+        try:
+            status_code = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        break
+
+    message = bounded_provider_error_text(exc).casefold()
+    class_name = type(exc).__name__.casefold()
+    transient_markers = (
+        "timeout",
+        "timed out",
+        "connection",
+        "rate limit",
+        "temporarily unavailable",
+        "service unavailable",
+        "gateway timeout",
+        "connection reset",
+    )
+    if (
+        isinstance(exc, (TimeoutError, ConnectionError))
+        or status_code in {408, 429}
+        or (status_code is not None and 500 <= status_code <= 599)
+        or any(marker in class_name or marker in message for marker in transient_markers)
+    ):
+        return "transient_provider_failure", True, True
+
+    rejection_markers = (
+        "image input is not supported",
+        "does not support image",
+        "images are not supported",
+        "unsupported image",
+        "vision is not supported",
+        "multimodal is not supported",
+        "unsupported content type",
+    )
+    if (
+        (status_code is not None and 400 <= status_code <= 499)
+        or any(marker in message for marker in rejection_markers)
+    ):
+        return "provider_rejected", False, False
+
+    return "provider_failure", False, False
+
+
 class ProviderVisionSdkRunner:
     """Perform one bounded multimodal SDK request for the selected provider."""
 
@@ -252,6 +323,12 @@ class ProviderVisionSdkRunner:
         images: Sequence[dict[str, Any]],
     ) -> tuple[str, dict[str, Any]]:
         self._policy.validate_provider_api_key(config.api_key)
+        if len(images) > VISION_IMAGE_MAX_ITEMS:
+            raise VisionInputError(
+                f"Visual analysis accepts at most {VISION_IMAGE_MAX_ITEMS} image attachments."
+            )
+        if any(bool(item.get("truncated")) for item in images):
+            raise VisionInputError("Truncated image attachments cannot be sent for visual analysis.")
         decoded = [split_image_data_url(str(item.get("dataUrl") or "")) for item in images]
         if not decoded:
             raise RuntimeError("No image payloads to analyze.")
@@ -424,15 +501,23 @@ def split_image_data_url(data_url: str) -> tuple[str, str]:
 
     value = str(data_url or "")
     if not value.startswith("data:"):
-        raise RuntimeError("Attachment payload is not a data URL.")
+        raise VisionInputError("Attachment payload is not a data URL.")
     header, _, payload = value.partition(",")
     if not payload:
-        raise RuntimeError("Attachment data URL has no payload.")
+        raise VisionInputError("Attachment data URL has no payload.")
     mime = header[5:].split(";", 1)[0].strip().lower() or "image/png"
     if not mime.startswith("image/"):
-        raise RuntimeError(f"Attachment data URL is not an image ({mime}).")
+        raise VisionInputError(f"Attachment data URL is not an image ({mime}).")
     if "base64" not in header:
-        raise RuntimeError("Attachment data URL is not base64-encoded.")
+        raise VisionInputError("Attachment data URL is not base64-encoded.")
+    try:
+        decoded = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise VisionInputError("Image attachment base64 payload is invalid.") from exc
+    if len(decoded) > VISION_IMAGE_MAX_BYTES:
+        raise VisionInputError(
+            f"Image attachment exceeds the {VISION_IMAGE_MAX_BYTES // (1024 * 1024)} MB visual input limit."
+        )
     return mime, payload
 
 

@@ -31,6 +31,14 @@
     "envNeedsAttention": "環境需要關注",
     "envNeedsAttentionDesc": "體檢可以複查 VRCForge 環境中的 {{errors}} 個錯誤和 {{warnings}} 個警告。"
   },
+  "notifications": {
+    "visionFailed": "圖片識別失敗",
+    "uploadFailed": "檔案上傳失敗",
+    "sendFailed": "對話傳送失敗",
+    "visionRetryable": "圖片已保留，可以重試。",
+    "visionReattach": "重試前請重新附加圖片。",
+    "dismiss": "關閉通知"
+  },
   "workspace": {
     "title": "工作區",
     "refreshStatus": "刷新 Unity 工具",

@@ -13,6 +13,7 @@ from provider_vision_service import (
     ProviderVisionStatePorts,
     VisionModelConfig,
     VisionProfileConfig,
+    VisionInputError,
     build_vision_analysis_prompt,
     extract_openai_usage,
     split_image_data_url,
@@ -35,6 +36,25 @@ class _Runner:
     ) -> tuple[str, dict[str, object]]:
         self.calls.append((config, prompt, images))
         return self.text, {"exact": False}
+
+
+class _FailingRunner:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
+    def run(
+        self,
+        _config: VisionModelConfig,
+        _prompt: str,
+        _images: list[dict[str, object]],
+    ) -> tuple[str, dict[str, object]]:
+        raise self.error
+
+
+class _ProviderHttpError(RuntimeError):
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 def _policy(*, requires_key: bool = True) -> ProviderVisionPolicyPorts:
@@ -147,6 +167,110 @@ def test_provider_vision_service_uses_unlisted_main_model_when_no_profile_is_act
     assert runner.calls[0][0] is main
 
 
+def test_provider_vision_service_attempts_deepseek_main_image_channel_without_preflight_block() -> None:
+    main = VisionModelConfig(
+        "deepseek",
+        "safe-key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+    )
+    runner = _Runner()
+    service = _service(main, VisionProfileConfig("", "", "", "", False), runner)
+    images = [{"name": "front.png", "dataUrl": "data:image/png;base64,YQ=="}]
+
+    assert service.capability() == {
+        "available": True,
+        "provider": "deepseek",
+        "providerLabel": "deepseek",
+        "model": "deepseek-v4-flash",
+        "source": "main",
+    }
+    result = service.analyze("inspect", images)
+
+    assert result["status"] == "analyzed"
+    assert result["provider"] == "deepseek"
+    assert result["source"] == "main"
+    assert runner.calls[0][0] is main
+    assert runner.calls[0][2] is images
+
+
+def test_provider_vision_service_marks_explicit_image_rejection_non_retryable() -> None:
+    service = _service(
+        VisionModelConfig(
+            "deepseek",
+            "safe-key",
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+        ),
+        VisionProfileConfig("", "", "", "", False),
+        _FailingRunner(_ProviderHttpError(400, "image input is not supported")),
+    )
+
+    assert service.analyze(
+        "inspect",
+        [{"name": "front.png", "dataUrl": "data:image/png;base64,YQ=="}],
+    ) == {
+        "status": "error",
+        "error": "image input is not supported",
+        "errorType": "provider_rejected",
+        "retryable": False,
+        "retainImages": False,
+        "provider": "deepseek",
+        "providerLabel": "deepseek",
+        "model": "deepseek-v4-flash",
+        "source": "main",
+    }
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("request timed out"),
+        _ProviderHttpError(429, "rate limit exceeded"),
+        _ProviderHttpError(503, "service unavailable"),
+    ],
+)
+def test_provider_vision_service_retains_images_only_for_transient_provider_failures(
+    error: Exception,
+) -> None:
+    service = _service(
+        VisionModelConfig("openai", "safe-key", "https://api.openai.com/v1", "gpt-4o"),
+        VisionProfileConfig("", "", "", "", False),
+        _FailingRunner(error),
+    )
+
+    result = service.analyze(
+        "inspect",
+        [{"name": "front.png", "dataUrl": "data:image/png;base64,YQ=="}],
+    )
+
+    assert result["status"] == "error"
+    assert result["errorType"] == "transient_provider_failure"
+    assert result["retryable"] is True
+    assert result["retainImages"] is True
+    assert result["provider"] == "openai"
+    assert result["model"] == "gpt-4o"
+    assert result["source"] == "main"
+
+
+def test_provider_vision_service_marks_invalid_image_payload_non_retryable() -> None:
+    service = _service(
+        VisionModelConfig("openai", "safe-key", "https://api.openai.com/v1", "gpt-4o"),
+        VisionProfileConfig("", "", "", "", False),
+        _FailingRunner(VisionInputError("Image attachment base64 payload is invalid.")),
+    )
+
+    result = service.analyze(
+        "inspect",
+        [{"name": "broken.png", "dataUrl": "data:image/png;base64,%%%"}],
+    )
+
+    assert result["status"] == "error"
+    assert result["errorType"] == "input_invalid"
+    assert result["retryable"] is False
+    assert result["retainImages"] is False
+
+
 def test_provider_vision_service_does_not_hide_invalid_enabled_profile_with_main_fallback() -> None:
     main = VisionModelConfig("openai", "main-key", "https://main.example/v1", "gpt-4o")
     profile = VisionProfileConfig("anthropic", "", "", "claude-sonnet-4-5", True)
@@ -246,14 +370,6 @@ def test_provider_vision_service_falls_back_only_to_enabled_configured_profile()
             VisionProfileConfig("", "", "", "", False),
             "The main model (OpenAI) has no API key.",
         ),
-        (
-            VisionModelConfig("deepseek", "safe-key", "", "deepseek-chat"),
-            VisionProfileConfig("", "", "", "", False),
-            (
-                "The main model (deepseek) is known not to accept image input, "
-                "and no enabled Vision Profile is available."
-            ),
-        ),
     ],
 )
 def test_provider_vision_service_returns_honest_unconfigured_status(
@@ -290,14 +406,22 @@ def test_provider_vision_service_retains_informational_model_capability_hint() -
     assert service.model_supports_vision("custom", "text-only") is False
 
 
-def test_provider_vision_service_rejects_empty_provider_result() -> None:
+def test_provider_vision_service_returns_typed_empty_provider_result() -> None:
     service = _service(
         VisionModelConfig("openai", "key", "", "gpt-4o"),
         VisionProfileConfig("", "", "", "", False),
         _Runner("  "),
     )
-    with pytest.raises(RuntimeError, match="OpenAI returned an empty vision analysis"):
-        service.analyze("look", [{"name": "image"}])
+    result = service.analyze("look", [{"name": "image"}])
+
+    assert result["status"] == "error"
+    assert result["provider"] == "openai"
+    assert result["model"] == "gpt-4o"
+    assert result["source"] == "main"
+    assert result["errorType"] == "provider_failure"
+    assert result["retryable"] is False
+    assert result["retainImages"] is False
+    assert "empty vision analysis" in result["error"]
 
 
 def test_provider_vision_pure_contracts_are_bounded_and_unchanged() -> None:
@@ -306,6 +430,8 @@ def test_provider_vision_pure_contracts_are_bounded_and_unchanged() -> None:
         split_image_data_url("data:text/plain;base64,YQ==")
     with pytest.raises(RuntimeError, match="not base64-encoded"):
         split_image_data_url("data:image/png,YQ==")
+    with pytest.raises(RuntimeError, match="base64 payload is invalid"):
+        split_image_data_url("data:image/png;base64,%%%")
 
     prompt = build_vision_analysis_prompt(
         "x" * 2500,
@@ -381,6 +507,75 @@ def test_provider_vision_sdk_runner_shapes_openai_request_through_typed_fake() -
         "temperature": 0,
         "max_tokens": 1024,
     }
+
+
+def test_provider_vision_sdk_runner_sends_deepseek_image_and_preserves_provider_error() -> None:
+    calls: dict[str, object] = {}
+
+    class FakeOpenAI:
+        def __init__(self) -> None:
+            def create(**request: object) -> object:
+                calls["request"] = request
+                raise RuntimeError("provider rejected image input")
+
+            self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
+
+    sdk = ProviderVisionSdkPorts(
+        google_client=lambda _config, _vertex: pytest.fail("Google SDK port must not run"),
+        google_part_from_bytes=lambda _data, _mime: pytest.fail("Google SDK port must not run"),
+        anthropic_client=lambda _key: pytest.fail("Anthropic SDK port must not run"),
+        openai_client=lambda key, base_url, timeout: (
+            calls.update(client=(key, base_url, timeout)) or FakeOpenAI()
+        ),
+    )
+    runner = ProviderVisionSdkRunner(_policy(), sdk)
+
+    with pytest.raises(RuntimeError, match="provider rejected image input"):
+        runner.run(
+            VisionModelConfig(
+                "deepseek",
+                "safe-key",
+                "https://api.deepseek.com",
+                "deepseek-v4-flash",
+            ),
+            "inspect the captured view",
+            [{"dataUrl": "data:image/png;base64,YQ=="}],
+        )
+
+    assert calls["client"] == ("safe-key", "https://api.deepseek.com", 60.0)
+    request = calls["request"]
+    assert isinstance(request, dict)
+    assert request["model"] == "deepseek-v4-flash"
+    assert request["messages"][0]["content"] == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,YQ=="}},
+        {"type": "text", "text": "inspect the captured view"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        {"dataUrl": "data:image/png;base64,%%%"},
+        {"dataUrl": "data:image/png;base64,YQ==", "truncated": True},
+    ],
+)
+def test_provider_vision_sdk_runner_rejects_invalid_or_truncated_image_before_sdk(
+    image: dict[str, object],
+) -> None:
+    sdk = ProviderVisionSdkPorts(
+        google_client=lambda _config, _vertex: pytest.fail("SDK must not run"),
+        google_part_from_bytes=lambda _data, _mime: pytest.fail("SDK must not run"),
+        anthropic_client=lambda _key: pytest.fail("SDK must not run"),
+        openai_client=lambda _key, _url, _timeout: pytest.fail("SDK must not run"),
+    )
+    runner = ProviderVisionSdkRunner(_policy(), sdk)
+
+    with pytest.raises(VisionInputError):
+        runner.run(
+            VisionModelConfig("openai", "safe-key", "https://api.openai.com/v1", "gpt-4o"),
+            "inspect",
+            [image],
+        )
 
 
 def test_provider_vision_sdk_runner_disables_ollama_reasoning_for_bounded_visual_output() -> None:

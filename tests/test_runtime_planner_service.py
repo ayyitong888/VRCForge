@@ -890,6 +890,98 @@ def test_managed_multi_capture_receipt_routes_the_explicit_visual_audit_as_the_f
     assert plan["nextStep"] == "call_skill"
 
 
+def test_transient_visual_audit_reuses_only_the_reissued_exact_receipt() -> None:
+    capture = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    audit = tool("vrcforge_vision_audit_multi")
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(capture, audit),
+        routable_tools=(capture, audit),
+    )
+    planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
+    base_state = [
+        {
+            "tool": "vrcforge_capture_multi_screenshot",
+            "kind": "write",
+            "status": "applied",
+            "result": {"captureReceipt": "consumed-original"},
+            "outcome": {"status": "ok"},
+        }
+    ]
+
+    transient = planner._local_plan_agent_turn(
+        "Capture front and back views, then run a visual audit.",
+        {},
+        {},
+        loop_state=[
+            *base_state,
+            {
+                "tool": "vrcforge_vision_audit_multi",
+                "kind": "skill",
+                "status": "failed",
+                "result": {
+                    "captureReceipt": "reissued-exact-retry",
+                    "retryable": True,
+                    "retainImages": True,
+                },
+                "outcome": {"status": "failed"},
+            },
+        ],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+    permanent = planner._local_plan_agent_turn(
+        "Capture front and back views, then run a visual audit.",
+        {},
+        {},
+        loop_state=[
+            *base_state,
+            {
+                "tool": "vrcforge_vision_audit_multi",
+                "kind": "skill",
+                "status": "failed",
+                "result": {
+                    "retryable": False,
+                    "retainImages": False,
+                },
+                "outcome": {"status": "failed"},
+            },
+        ],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert transient["skillTool"] == "vrcforge_vision_audit_multi"
+    assert transient["skillParams"] == {"captureReceipt": "reissued-exact-retry"}
+    assert permanent["skillNeeded"] is False
+    assert permanent["writeNeeded"] is False
+    assert permanent["nextStep"] == "needs_user_action"
+    assert permanent["completionGate"]["reason"] == "visual_audit_image_discarded"
+
+
+def test_transient_visual_audit_observation_exposes_only_opaque_retry_capability() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_vision_audit_multi",
+            "kind": "skill",
+            "status": "failed",
+            "result": {
+                "captureReceipt": "opaque-retry-capability",
+                "retryable": True,
+                "retainImages": True,
+                "privatePath": "D:/private/front.png",
+            },
+            "outcome": {"status": "failed", "summary": "HTTP 503"},
+        }
+    )
+
+    assert "visualRetryCaptureReceipt=opaque-retry-capability" in observation
+    assert "visualRetryImagesRetained=true" in observation
+    assert "privatePath" not in observation
+    assert "D:/private" not in observation
+
+
 def test_multi_capture_only_finishes_after_approval_but_explicit_visual_audit_continues() -> None:
     capture = tool(
         "vrcforge_capture_multi_screenshot",
