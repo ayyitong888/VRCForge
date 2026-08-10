@@ -7036,7 +7036,19 @@ class DashboardServerTests(unittest.TestCase):
         }
         self.assertTrue(real_write_handlers)
 
-        with patch.object(gateway, "ensure_config", return_value=config):
+        with patch.object(
+            gateway,
+            "ensure_config",
+            return_value=config,
+        ), patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_api_config",
+            return_value=SimpleNamespace(
+                provider="gemini",
+                api_key="fixture-key",
+                model="gemini-fixture",
+            ),
+        ):
             planning = dashboard_server._RuntimePlannerCatalog().read("planning")
             execution = dashboard_server._RuntimePlannerCatalog().read("execution")
 

@@ -1405,6 +1405,52 @@ class RuntimePlannerService:
                 == "vrcforge_capture_multi_screenshot"
                 and has_multi_angle_visual_audit_intent(lowered_message, message)
             )
+            if route_requires_follow_up:
+                visual_audit_route = self._runtime_skill_route(
+                    "vrcforge_vision_audit_multi",
+                    {},
+                    "visual audit capability preflight",
+                    exposure_layer=exposure_layer,
+                )
+                if not visual_audit_route.get("visible"):
+                    reply = (
+                        "这个请求包含多角度视觉审计，但当前没有可用的视觉模型配置。"
+                        "请先在设置中把主 Provider 配置为 Google AI Studio（Gemini）"
+                        "并保存可用的 API Key；"
+                        "本轮没有请求或生成截图。"
+                        if re.search(r"[\u4e00-\u9fff]", message)
+                        else (
+                            "This request includes a multi-angle visual audit, but no usable "
+                            "vision model is configured. Configure the main Provider as Google "
+                            "AI Studio (Gemini) with a usable API key first. No screenshot was "
+                            "requested or captured."
+                        )
+                    )
+                    return {
+                        "summary": "Visual audit capability is unavailable before capture.",
+                        "reply": reply,
+                        "planner": "deterministic-local",
+                        "plannerLabel": "",
+                        "deterministicTerminal": True,
+                        "userConstraintsApplied": constraints_applied,
+                        "shellNeeded": False,
+                        "shellCommand": "",
+                        "shellParams": {},
+                        "skillNeeded": False,
+                        "skillTool": "",
+                        "skillCategory": "",
+                        "skillParams": {},
+                        "writeNeeded": False,
+                        "writeTool": "",
+                        "writeParams": {},
+                        "continueLoop": False,
+                        "expectedResult": "No capture occurs until visual audit capability is available.",
+                        "nextStep": "needs_user_action",
+                        "completionGate": {
+                            "status": "needs_user_action",
+                            "reason": "visual_audit_unavailable",
+                        },
+                    }
             normalized_exposure = normalize_exposure_layer(exposure_layer)
             summary = "Observed runtime state and prepared the next action."
             if command:

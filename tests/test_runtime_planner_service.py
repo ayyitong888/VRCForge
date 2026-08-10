@@ -772,14 +772,15 @@ def test_multi_angle_capture_intent_selects_the_supervised_multi_capture(message
         category="supervised-write",
         write=True,
     )
+    audit = tool("vrcforge_vision_audit_multi")
     catalog = FakeCatalog(
         planning=PlannerCatalogSnapshot(
-            visible_tools=(),
-            routable_tools=(single, multi),
+            visible_tools=(audit,),
+            routable_tools=(single, multi, audit),
         ),
         execution=PlannerCatalogSnapshot(
-            visible_tools=(single, multi),
-            routable_tools=(single, multi),
+            visible_tools=(single, multi, audit),
+            routable_tools=(single, multi, audit),
         ),
     )
 
@@ -853,9 +854,10 @@ def test_multi_capture_only_finishes_after_approval_but_explicit_visual_audit_co
         category="supervised-write",
         write=True,
     )
+    audit = tool("vrcforge_vision_audit_multi")
     snapshot = PlannerCatalogSnapshot(
-        visible_tools=(capture,),
-        routable_tools=(capture,),
+        visible_tools=(capture, audit),
+        routable_tools=(capture, audit),
     )
     planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
 
@@ -876,6 +878,41 @@ def test_multi_capture_only_finishes_after_approval_but_explicit_visual_audit_co
     assert capture_only["continueLoop"] is False
     assert capture_and_audit["writeTool"] == "vrcforge_capture_multi_screenshot"
     assert capture_and_audit["continueLoop"] is True
+
+
+def test_visual_audit_request_stops_before_capture_when_the_audit_capability_is_hidden() -> None:
+    capture = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    audit = tool("vrcforge_vision_audit_multi")
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(),
+            routable_tools=(capture, audit),
+        ),
+        execution=PlannerCatalogSnapshot(
+            visible_tools=(capture,),
+            routable_tools=(capture, audit),
+        ),
+    )
+
+    plan = service(catalog=catalog).plan_agent_turn(
+        "Capture front and back views, then run a visual audit.",
+        {},
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert plan["deterministicTerminal"] is True
+    assert plan["writeNeeded"] is False
+    assert plan["skillNeeded"] is False
+    assert plan["nextStep"] == "needs_user_action"
+    assert plan["completionGate"] == {
+        "status": "needs_user_action",
+        "reason": "visual_audit_unavailable",
+    }
 
 
 def test_single_capture_and_capture_status_keep_distinct_action_kinds() -> None:

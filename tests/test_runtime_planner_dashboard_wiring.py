@@ -120,11 +120,13 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
         name
         for name, tool in gateway._tools.items()
         if gateway._tool_runtime_visible(tool, config, EXPOSURE_LAYER_PLANNING)
+        and dashboard_server._runtime_planner_provider_capability_visible(tool)
     }
     expected_execution = {
         name
         for name, tool in gateway._tools.items()
         if gateway._tool_runtime_visible(tool, config, EXPOSURE_LAYER_EXECUTION)
+        and dashboard_server._runtime_planner_provider_capability_visible(tool)
     }
     routable_writes = {
         name
@@ -156,3 +158,47 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
     planning_routable = {item.name: item for item in planning.routable_tools}
     assert all(planning_routable[name].write for name in routable_writes)
     assert not routable_writes.intersection(item.name for item in planning.visible_tools)
+
+
+@pytest.mark.parametrize(
+    ("provider_config", "expected_visible"),
+    [
+        (
+            SimpleNamespace(
+                provider="gemini",
+                api_key="fixture-key",
+                model="gemini-fixture",
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                provider="deepseek",
+                api_key="fixture-key",
+                model="deepseek-v4-flash",
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(provider="gemini", api_key="", model="gemini-fixture"),
+            False,
+        ),
+    ],
+)
+def test_catalog_exposes_visual_audit_only_when_its_actual_provider_can_run(
+    provider_config: SimpleNamespace,
+    expected_visible: bool,
+) -> None:
+    with patch.object(
+        dashboard_server.PROVIDER_CONFIGURATION,
+        "current_api_config",
+        return_value=provider_config,
+    ):
+        planning = dashboard_server._RuntimePlannerCatalog().read(
+            EXPOSURE_LAYER_PLANNING
+        )
+
+    visible = {item.name for item in planning.visible_tools}
+    routable = {item.name for item in planning.routable_tools}
+    assert ("vrcforge_vision_audit_multi" in visible) is expected_visible
+    assert "vrcforge_vision_audit_multi" in routable

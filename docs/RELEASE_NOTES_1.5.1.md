@@ -56,6 +56,11 @@ Core with its fixed 64-tool contract.
   capture receipt exactly once, runs the multi-angle verifier, and binds both
   action IDs before Runtime can mark the task complete. The write is never
   replayed while transitioning to visual review.
+- Made the visual-audit tool capability-aware in Runtime planning. If its
+  current Google AI Studio handler has no usable Gemini configuration, the tool
+  remains internally classifiable but is hidden from model-visible exposure,
+  and a capture-plus-audit request stops before creating a screenshot approval
+  with an actionable configuration message.
 - Expanded the lightweight selection Harness from 13 to 16 cases and made
   action kind plus exposure layer part of each selection contract. The App
   projects action kind from host-owned tool metadata and binds it into the

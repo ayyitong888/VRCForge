@@ -2138,7 +2138,15 @@ class AgentLoopP0Tests(unittest.TestCase):
         project = self._unity_project()
         message = "Capture front and back views, then run a visual audit."
 
-        with patch(
+        with patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_api_config",
+            return_value=SimpleNamespace(
+                provider="gemini",
+                api_key="fixture-key",
+                model="gemini-fixture",
+            ),
+        ), patch(
             "dashboard_server.request_llm_plan_with_metadata",
             side_effect=AssertionError("the managed capture chain must remain deterministic"),
         ) as request_model:
@@ -2279,6 +2287,54 @@ class AgentLoopP0Tests(unittest.TestCase):
                 for item in continuation["task"]["requirements"]
             ],
             ["canonical_tool_result", "multi_angle_visual"],
+        )
+
+    def test_visual_audit_without_provider_capability_creates_no_capture_approval(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        approval_count = len(gateway.approval_transactions.list_approvals())
+
+        with patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_api_config",
+            return_value=SimpleNamespace(
+                provider="deepseek",
+                api_key="fixture-key",
+                model="deepseek-v4-flash",
+            ),
+        ), patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=AssertionError("missing visual capability must fail before Provider sampling"),
+        ) as request_model, patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+        ) as execute_skill:
+            result = gateway.runtime_message(
+                {
+                    "message": "Capture front and back views, then run a visual audit.",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": "visual-capability-preflight-session",
+                    "client_turn_id": "visual-capability-preflight-turn",
+                }
+            )
+
+        request_model.assert_not_called()
+        execute_skill.assert_not_called()
+        self.assertEqual(
+            len(gateway.approval_transactions.list_approvals()),
+            approval_count,
+        )
+        self.assertNotIn("write", result)
+        self.assertEqual(result.get("steps", []), [])
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action")
+        self.assertEqual(
+            result["plan"]["completionGate"],
+            {
+                "status": "needs_user_action",
+                "reason": "visual_audit_unavailable",
+            },
         )
 
     def test_execution_preflight_revalidates_schema_and_calls_no_handler(self) -> None:

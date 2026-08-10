@@ -14219,6 +14219,28 @@ def _runtime_planner_write_tool(handler: Any) -> PlannerTool:
     )
 
 
+_RUNTIME_PLANNER_GEMINI_AUDIT_TOOLS = frozenset(
+    {"vrcforge_vision_audit", "vrcforge_vision_audit_multi"}
+)
+
+
+def _runtime_planner_provider_capability_visible(tool: Any) -> bool:
+    """Hide direct Gemini audit tools unless their actual handler can run."""
+
+    tool_name = str(getattr(tool, "name", "") or "")
+    if tool_name not in _RUNTIME_PLANNER_GEMINI_AUDIT_TOOLS:
+        return True
+    try:
+        config = PROVIDER_CONFIGURATION.current_api_config()
+    except Exception:  # noqa: BLE001 - capability exposure must fail closed.
+        return False
+    return bool(
+        str(getattr(config, "provider", "") or "").strip() == "gemini"
+        and str(getattr(config, "api_key", "") or "").strip()
+        and str(getattr(config, "model", "") or "").strip()
+    )
+
+
 class _RuntimePlannerCatalog:
     def read(self, exposure_layer: str) -> PlannerCatalogSnapshot:
         layer = normalize_exposure_layer(exposure_layer)
@@ -14227,6 +14249,7 @@ class _RuntimePlannerCatalog:
             _runtime_planner_tool(tool)
             for tool in AGENT_GATEWAY._tools.values()
             if AGENT_GATEWAY._tool_runtime_visible(tool, gateway_config, layer)
+            and _runtime_planner_provider_capability_visible(tool)
         )
         visible_write_tools = tuple(
             _runtime_planner_write_tool(handler)
