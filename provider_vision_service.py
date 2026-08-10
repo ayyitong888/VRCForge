@@ -145,6 +145,21 @@ class ProviderVisionService:
 
         main = self._state.main_config()
         if main.provider and main.model:
+            # Unknown and newly released multimodal models remain eligible by
+            # default; do not rebuild a model-name allowlist.  DeepSeek's
+            # configured chat lane is a known text-only exception, so asking
+            # for screenshot approval before it can accept an image would only
+            # defer a deterministic failure until after the write.
+            if self._policy.normalize_provider_name(main.provider) == "deepseek":
+                return (
+                    None,
+                    "",
+                    (
+                        f"The main model ({self._policy.provider_display_name(main.provider)}) "
+                        "is known not to accept image input, and no enabled Vision Profile "
+                        "is available."
+                    ),
+                )
             if self._policy.provider_requires_api_key(main.provider) and not main.api_key.strip():
                 return (
                     None,

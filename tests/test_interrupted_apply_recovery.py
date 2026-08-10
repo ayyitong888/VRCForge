@@ -228,6 +228,14 @@ class InterruptedApplyRecoveryTests(unittest.TestCase):
             self.assertEqual(checkpoint["status"], "failed")
             self.assertEqual(checkpoint["code"], "unsaved_open_scene")
             self.assertNotIn("strategy", checkpoint)
+            self.assertEqual(
+                applied["outcome"]["error"]["code"],
+                "unsaved_open_scene",
+            )
+            self.assertIn(
+                "Save every open scene",
+                applied["outcome"]["summary"],
+            )
             self.assertEqual(calls, [])
 
 

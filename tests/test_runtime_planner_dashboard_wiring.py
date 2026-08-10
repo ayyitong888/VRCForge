@@ -204,6 +204,16 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
             SimpleNamespace(provider="", api_key="", base_url="", model="", enabled=False),
             False,
         ),
+        (
+            SimpleNamespace(
+                provider="custom",
+                api_key="fixture-key",
+                base_url="https://future.example/v1",
+                model="future-multimodal-model",
+            ),
+            SimpleNamespace(provider="", api_key="", base_url="", model="", enabled=False),
+            True,
+        ),
     ],
 )
 def test_catalog_exposes_visual_audit_for_any_configured_vision_capability(

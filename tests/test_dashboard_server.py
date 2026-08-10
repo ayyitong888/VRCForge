@@ -13486,6 +13486,30 @@ namespace VRCForge.Editor
         self.assertEqual(normalized["code"], "unsaved_open_scene")
         self.assertIn("Save every open scene", normalized["error"])
 
+    def test_checkpoint_result_explains_managed_peer_rejection(self) -> None:
+        result = dashboard_server.McpResult(
+            exit_code=1,
+            stdout="",
+            stderr="",
+            payload={
+                "isError": True,
+                "structuredContent": {
+                    "success": False,
+                    "code": "managed_peer_ineligible",
+                },
+            },
+        )
+
+        normalized = dashboard_server.normalize_unity_checkpoint_result(
+            result,
+            Path("C:/UnityProject"),
+        )
+
+        self.assertFalse(normalized["ok"])
+        self.assertEqual(normalized["code"], "managed_peer_ineligible")
+        self.assertIn("matching packaged VRCForge App", normalized["error"])
+        self.assertIn("Unity package", normalized["error"])
+
     def test_provider_config_default_path_is_outside_source_root(self) -> None:
         if os.environ.get("VRCFORGE_CONFIG_PATH") or os.environ.get("VRCFORGE_CONFIG_DIR"):
             self.skipTest("config location is explicitly overridden")

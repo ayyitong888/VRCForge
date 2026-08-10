@@ -17310,10 +17310,21 @@ def normalize_unity_checkpoint_result(
     )
     if rejected:
         code = str(structured.get("code") or "unity_checkpoint_prepare_failed")
+        default_message = {
+            "managed_peer_ineligible": (
+                "Unity rejected the safety request because the connected backend is not the "
+                "matching packaged VRCForge App. Restart the packaged App and confirm that its "
+                "version matches the imported Unity package before retrying."
+            ),
+            "app_process_binding_invalid": (
+                "Unity rejected the safety request because the packaged App process identity "
+                "changed. Restart the matching packaged VRCForge App before retrying."
+            ),
+        }.get(code, "Unity rejected checkpoint preparation.")
         message = str(
             data.get("message")
             or structured.get("error")
-            or "Unity rejected checkpoint preparation."
+            or default_message
         )
         return {
             **data,

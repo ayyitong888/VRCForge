@@ -246,6 +246,14 @@ def test_provider_vision_service_falls_back_only_to_enabled_configured_profile()
             VisionProfileConfig("", "", "", "", False),
             "The main model (OpenAI) has no API key.",
         ),
+        (
+            VisionModelConfig("deepseek", "safe-key", "", "deepseek-chat"),
+            VisionProfileConfig("", "", "", "", False),
+            (
+                "The main model (deepseek) is known not to accept image input, "
+                "and no enabled Vision Profile is available."
+            ),
+        ),
     ],
 )
 def test_provider_vision_service_returns_honest_unconfigured_status(

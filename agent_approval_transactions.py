@@ -1264,13 +1264,36 @@ class AgentApprovalTransactionService:
                     "executionId": execution_id,
                     "unityCoreCallAudits": [dict(audit) for audit in core_call_audits],
                 }
+            failure_result = result
+            if failure_result is None:
+                checkpoint_failure = ensure_dict(checkpoint)
+                if checkpoint_failure.get("ok") is False:
+                    failure_result = {
+                        "ok": False,
+                        "status": "failed",
+                        "error": {
+                            "type": "checkpoint",
+                            "code": str(
+                                checkpoint_failure.get("code")
+                                or "unity_checkpoint_prepare_failed"
+                            ),
+                            "summary": str(
+                                checkpoint_failure.get("error")
+                                or "The pre-write checkpoint failed."
+                            ),
+                        },
+                    }
+                else:
+                    failure_result = {
+                        "ok": False,
+                        "status": "failed",
+                        "error": str(exc),
+                    }
             if str(completion_outcome.get("status") or "").casefold() != "failed":
                 completion_outcome = ensure_dict(
                     redact_sensitive(
                         normalize_agent_tool_result(
-                            result
-                            if result is not None
-                            else {"ok": False, "status": "failed", "error": str(exc)},
+                            failure_result,
                             fallback_summary=f"{write_handler.description} failed.",
                             write=True,
                         )
@@ -1285,11 +1308,7 @@ class AgentApprovalTransactionService:
             if task_completion is None:
                 task_completion = approval_completion(
                     ensure_dict(approval.get("taskContext")),
-                    raw_result=(
-                        result
-                        if result is not None
-                        else {"ok": False, "status": "failed", "error": str(exc)}
-                    ),
+                    raw_result=failure_result,
                     outcome=completion_outcome,
                 )
             with self._ports.state.shared_state_lock:
