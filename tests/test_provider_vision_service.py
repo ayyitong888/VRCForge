@@ -86,6 +86,80 @@ def test_provider_vision_service_selects_vision_capable_main_model() -> None:
     assert "avatar.png" in runner.calls[0][1]
 
 
+def test_provider_vision_service_prefers_enabled_profile_over_vision_capable_main() -> None:
+    main = VisionModelConfig("openai", "main-key", "https://main.example/v1", "gpt-4o")
+    profile = VisionProfileConfig(
+        "anthropic",
+        "vision-key",
+        "",
+        "claude-sonnet-4-5",
+        True,
+    )
+    runner = _Runner()
+    service = _service(main, profile, runner)
+
+    result = service.analyze("inspect", [{"name": "avatar.png"}])
+
+    assert result["source"] == "visionProfile"
+    assert result["provider"] == "anthropic"
+    assert runner.calls[0][0] == VisionModelConfig(
+        "anthropic",
+        "vision-key",
+        "",
+        "claude-sonnet-4-5",
+    )
+
+
+def test_provider_vision_service_uses_main_when_configured_profile_is_disabled() -> None:
+    main = VisionModelConfig("openai", "main-key", "https://main.example/v1", "gpt-4o")
+    profile = VisionProfileConfig(
+        "anthropic",
+        "vision-key",
+        "",
+        "claude-sonnet-4-5",
+        False,
+    )
+    runner = _Runner()
+    service = _service(main, profile, runner)
+
+    result = service.analyze("inspect", [{"name": "avatar.png"}])
+
+    assert result["source"] == "main"
+    assert result["provider"] == "openai"
+    assert runner.calls[0][0] is main
+
+
+def test_provider_vision_service_uses_unlisted_main_model_when_no_profile_is_active() -> None:
+    main = VisionModelConfig(
+        "custom",
+        "main-key",
+        "https://future.example/v1",
+        "future-multimodal-model",
+    )
+    runner = _Runner()
+    service = _service(main, VisionProfileConfig("", "", "", "", False), runner)
+
+    result = service.analyze("inspect", [{"name": "avatar.png"}])
+
+    assert result["source"] == "main"
+    assert result["provider"] == "custom"
+    assert result["model"] == "future-multimodal-model"
+    assert runner.calls[0][0] is main
+
+
+def test_provider_vision_service_does_not_hide_invalid_enabled_profile_with_main_fallback() -> None:
+    main = VisionModelConfig("openai", "main-key", "https://main.example/v1", "gpt-4o")
+    profile = VisionProfileConfig("anthropic", "", "", "claude-sonnet-4-5", True)
+    runner = _Runner()
+    service = _service(main, profile, runner)
+
+    assert service.analyze("inspect", [{"name": "avatar.png"}]) == {
+        "status": "unconfigured",
+        "reason": "The vision profile (anthropic) has no API key.",
+    }
+    assert runner.calls == []
+
+
 def test_provider_vision_service_exposes_provider_neutral_capability_and_exact_prompt() -> None:
     main = VisionModelConfig(
         "openai",
@@ -150,29 +224,38 @@ def test_provider_vision_service_falls_back_only_to_enabled_configured_profile()
 
 
 @pytest.mark.parametrize(
-    ("profile", "reason"),
+    ("main", "profile", "reason"),
     [
         (
+            VisionModelConfig("", "", "", ""),
             VisionProfileConfig("", "", "", "", False),
-            "Main model is not vision-capable and no vision profile is configured.",
+            "No enabled vision profile or main model is configured.",
         ),
         (
+            VisionModelConfig("", "", "", ""),
             VisionProfileConfig("gemini", "key", "", "gemini-2.5-flash", False),
             "The configured vision profile is disabled in settings.",
         ),
         (
+            VisionModelConfig("deepseek", "safe-key", "", "deepseek-chat"),
             VisionProfileConfig("gemini", "", "", "gemini-2.5-flash", True),
             "The vision profile (Google AI Studio) has no API key.",
+        ),
+        (
+            VisionModelConfig("openai", "", "", "gpt-4o"),
+            VisionProfileConfig("", "", "", "", False),
+            "The main model (OpenAI) has no API key.",
         ),
     ],
 )
 def test_provider_vision_service_returns_honest_unconfigured_status(
+    main: VisionModelConfig,
     profile: VisionProfileConfig,
     reason: str,
 ) -> None:
     runner = _Runner()
     service = _service(
-        VisionModelConfig("deepseek", "safe-key", "", "deepseek-chat"),
+        main,
         profile,
         runner,
     )
@@ -184,7 +267,7 @@ def test_provider_vision_service_returns_honest_unconfigured_status(
     assert runner.calls == []
 
 
-def test_provider_vision_service_preserves_conservative_model_policy() -> None:
+def test_provider_vision_service_retains_informational_model_capability_hint() -> None:
     service = _service(
         VisionModelConfig("openai", "key", "", "gpt-4o"),
         VisionProfileConfig("", "", "", "", False),

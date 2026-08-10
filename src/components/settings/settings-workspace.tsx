@@ -16,6 +16,7 @@ import type {
   VisionConfig,
 } from "../../lib/api";
 import { EXECUTION_MODES, executionModeLabel, permissionVisualState } from "../../lib/permission-ui";
+import { hasSavedProviderKey } from "../../lib/provider-key-state";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -215,7 +216,7 @@ export function SettingsWorkspace({
 }: SettingsWorkspaceProps) {
   const { t } = useTranslation();
   const currentPermissionVisual = permissionVisualState(permission);
-  const visionKeySaved = Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider);
+  const visionKeySaved = hasSavedProviderKey(visionProvider, visionConfig);
   const visibleSection: SettingsSection = activeSection === "developer" && !developerOptionsEnabled ? "general" : activeSection;
   const updateDeveloperOptions = async (enabled: boolean, developerChallengeId?: string) => {
     await onDeveloperOptionsChange(enabled, developerChallengeId);

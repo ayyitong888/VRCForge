@@ -178,6 +178,93 @@ def test_configuration_resolves_same_provider_saved_key_then_revalidates(
     assert validated == ["", "old-api-key", "", "old-vision-key"]
 
 
+def test_configuration_persists_and_reuses_keys_for_each_provider_and_lane(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.json"
+    _write_old_document(path)
+    owner = _owner(path)
+
+    owner.save_api_config(
+        ProviderApiConfig(
+            provider="anthropic",
+            api_key="anthropic-main-key",
+            base_url="https://anthropic.example/v1",
+            model="claude-main",
+        )
+    )
+    owner.save_vision_config(
+        ProviderVisionConfig(
+            provider="gemini",
+            api_key="gemini-vision-key",
+            base_url="https://gemini.example/v1",
+            model="gemini-vision",
+            enabled=True,
+        )
+    )
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["provider_keys"] == {
+        "api": {
+            "anthropic": "anthropic-main-key",
+            "openai": "old-api-key",
+        },
+        "vision": {
+            "gemini": "gemini-vision-key",
+            "openai": "old-vision-key",
+        },
+    }
+
+    reopened = _owner(path)
+    assert reopened.resolve_api_request(
+        ApiRequest(provider="openai", model="openai-next")
+    ).api_key == "old-api-key"
+    assert reopened.resolve_vision_request(
+        VisionRequest(provider="openai", model="openai-vision-next")
+    ).api_key == "old-vision-key"
+    assert reopened.resolve_api_request(
+        ApiRequest(provider="gemini", model="gemini-main")
+    ).api_key == "gemini-vision-key"
+    assert reopened.resolve_vision_request(
+        VisionRequest(provider="anthropic", model="claude-vision")
+    ).api_key == "anthropic-main-key"
+
+
+def test_configuration_projects_saved_provider_ids_without_projecting_any_saved_key(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "api": {
+                    "provider": "openai",
+                    "api_key": "openai-current-secret",
+                    "model": "gpt-4o",
+                },
+                "provider_keys": {
+                    "api": {"anthropic": "anthropic-secret"},
+                    "vision": {"gemini": "gemini-secret"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    owner = _owner(path)
+
+    api_projection = owner.serialize_app_api_config()
+    vision_projection = owner.serialize_app_vision_config()
+    projected_text = json.dumps(
+        {"apiConfig": api_projection, "visionConfig": vision_projection},
+        sort_keys=True,
+    )
+
+    assert api_projection["savedKeyProviders"] == ["anthropic", "gemini", "openai"]
+    assert vision_projection["savedKeyProviders"] == ["anthropic", "gemini", "openai"]
+    for secret in ("openai-current-secret", "anthropic-secret", "gemini-secret"):
+        assert secret not in projected_text
+
+
 def test_configuration_revalidates_invalid_saved_key_and_never_returns_it(
     tmp_path: Path,
 ) -> None:

@@ -2,8 +2,9 @@
 
 This module owns no configuration persistence, route, Gateway, process, file,
 or approval lifecycle.  Callers provide the app-lifetime configuration and
-provider-policy ports explicitly.  Image bytes are sent only after the routing
-policy has selected a vision-capable main model or an enabled Vision profile.
+provider-policy ports explicitly.  Image bytes prefer an enabled independent
+Vision profile; without one they use the configured main model as the default
+image channel.
 """
 
 from __future__ import annotations
@@ -120,40 +121,47 @@ class ProviderVisionService:
     def _resolve_route(
         self,
     ) -> tuple[VisionModelConfig | None, str, str]:
+        profile = self._state.profile_config()
+        if profile.configured and profile.enabled:
+            if self._policy.provider_requires_api_key(profile.provider) and not profile.api_key.strip():
+                return (
+                    None,
+                    "",
+                    (
+                        f"The vision profile ({self._policy.provider_display_name(profile.provider)}) "
+                        "has no API key."
+                    ),
+                )
+            return (
+                VisionModelConfig(
+                    provider=profile.provider,
+                    api_key=profile.api_key,
+                    base_url=profile.base_url,
+                    model=profile.model,
+                ),
+                "visionProfile",
+                "",
+            )
+
         main = self._state.main_config()
-        main_key_ok = bool(main.api_key.strip()) or not self._policy.provider_requires_api_key(
-            main.provider
-        )
-        if main.model and main_key_ok and self.model_supports_vision(main.provider, main.model):
+        if main.provider and main.model:
+            if self._policy.provider_requires_api_key(main.provider) and not main.api_key.strip():
+                return (
+                    None,
+                    "",
+                    (
+                        f"The main model ({self._policy.provider_display_name(main.provider)}) "
+                        "has no API key."
+                    ),
+                )
             return main, "main", ""
 
-        profile = self._state.profile_config()
-        if not profile.configured:
-            return (
-                None,
-                "",
-                "Main model is not vision-capable and no vision profile is configured.",
-            )
-        if not profile.enabled:
+        if profile.configured:
             return None, "", "The configured vision profile is disabled in settings."
-        if self._policy.provider_requires_api_key(profile.provider) and not profile.api_key.strip():
-            return (
-                None,
-                "",
-                (
-                    f"The vision profile ({self._policy.provider_display_name(profile.provider)}) "
-                    "has no API key."
-                ),
-            )
         return (
-            VisionModelConfig(
-                provider=profile.provider,
-                api_key=profile.api_key,
-                base_url=profile.base_url,
-                model=profile.model,
-            ),
-            "visionProfile",
+            None,
             "",
+            "No enabled vision profile or main model is configured.",
         )
 
     def capability(self) -> dict[str, Any]:
@@ -196,6 +204,8 @@ class ProviderVisionService:
         }
 
     def model_supports_vision(self, provider: str, model: str) -> bool:
+        """Return an informational name hint; routing never rejects unknown models."""
+
         provider = self._policy.normalize_provider_name(provider)
         model_id = str(model or "").strip().lower()
         if provider in {"gemini", "vertexai"}:

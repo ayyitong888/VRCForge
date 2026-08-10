@@ -1,9 +1,11 @@
 """Typed Provider configuration ownership for app composition.
 
-The owner keeps the API and Vision sections behind one app-lifetime reentrant
-lock.  A save writes both sections atomically and publishes the new in-memory
-state only after the disk commit succeeds.  Callers inject persistence and
-provider policy explicitly; this module has no Dashboard or route dependency.
+The owner keeps the API, Vision and lane-specific provider-key history behind
+one app-lifetime reentrant lock.  A save writes them atomically and publishes
+the new in-memory state only after the disk commit succeeds.  Safe projections
+expose provider IDs with saved credentials, never credential values.  Callers
+inject persistence and provider policy explicitly; this module has no
+Dashboard or route dependency.
 """
 
 from __future__ import annotations
@@ -310,13 +312,20 @@ class ProviderConfigurationService:
         self,
         request: ProviderApiConfigRequestPort,
     ) -> ProviderApiConfig:
-        """Normalize a request, reuse only a same-provider key, then revalidate."""
+        """Normalize a request, reuse the provider's saved key, then revalidate."""
 
         config = self.normalize_api_request(request)
         if not config.api_key.strip():
-            saved = self.current_api_config()
-            if saved.provider == config.provider and saved.api_key.strip():
-                config = replace(config, api_key=saved.api_key)
+            with self._lock:
+                saved = self.current_api_config()
+                api_keys, vision_keys = self._load_provider_key_maps_locked()
+                saved_key = (
+                    saved.api_key
+                    if saved.provider == config.provider and saved.api_key.strip()
+                    else api_keys.get(config.provider) or vision_keys.get(config.provider) or ""
+                )
+            if saved_key:
+                config = replace(config, api_key=saved_key)
         self._policy.validate_provider_api_key(config.api_key)
         return config
 
@@ -324,15 +333,81 @@ class ProviderConfigurationService:
         self,
         request: ProviderVisionConfigRequestPort,
     ) -> ProviderVisionConfig:
-        """Normalize a Vision request with the same saved-key contract."""
+        """Normalize a Vision request with the same provider-key contract."""
 
         config = self.normalize_vision_request(request)
         if config.provider and not config.api_key.strip():
-            saved = self.current_vision_config()
-            if saved.provider == config.provider and saved.api_key.strip():
-                config = replace(config, api_key=saved.api_key)
+            with self._lock:
+                saved = self.current_vision_config()
+                api_keys, vision_keys = self._load_provider_key_maps_locked()
+                saved_key = (
+                    saved.api_key
+                    if saved.provider == config.provider and saved.api_key.strip()
+                    else vision_keys.get(config.provider) or api_keys.get(config.provider) or ""
+                )
+            if saved_key:
+                config = replace(config, api_key=saved_key)
         self._policy.validate_provider_api_key(config.api_key)
         return config
+
+    def _load_provider_key_maps_locked(
+        self,
+        document: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        config_document = document if document is not None else self._load_config_document_locked()
+        raw_provider_keys = config_document.get("provider_keys")
+        provider_keys = raw_provider_keys if isinstance(raw_provider_keys, dict) else {}
+
+        def normalized_map(value: Any) -> dict[str, str]:
+            result: dict[str, str] = {}
+            if not isinstance(value, dict):
+                return result
+            for raw_provider, raw_key in value.items():
+                if not isinstance(raw_key, str) or not raw_key.strip():
+                    continue
+                try:
+                    provider = self._policy.normalize_provider_name(str(raw_provider))
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    continue
+                if provider:
+                    result[provider] = raw_key.strip()
+            return result
+
+        api_keys = normalized_map(provider_keys.get("api"))
+        vision_keys = normalized_map(provider_keys.get("vision"))
+
+        def merge_section(target: dict[str, str], value: Any) -> None:
+            if not isinstance(value, dict):
+                return
+            raw_provider = str(value.get("provider") or "").strip()
+            raw_key = str(value.get("api_key") or "").strip()
+            if not raw_provider or not raw_key:
+                return
+            try:
+                provider = self._policy.normalize_provider_name(raw_provider)
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                return
+            if provider:
+                target[provider] = raw_key
+
+        def merge_config(
+            target: dict[str, str],
+            config: ProviderApiConfig | ProviderVisionConfig | None,
+        ) -> None:
+            if config is not None and config.provider and config.api_key.strip():
+                target[config.provider] = config.api_key.strip()
+
+        # Legacy current-section credentials remain authoritative for their lane.
+        merge_section(api_keys, config_document.get("api"))
+        merge_section(vision_keys, config_document.get("vision"))
+        merge_config(api_keys, self._api_config)
+        merge_config(vision_keys, self._vision_config)
+        return api_keys, vision_keys
+
+    def _saved_key_providers(self) -> list[str]:
+        with self._lock:
+            api_keys, vision_keys = self._load_provider_key_maps_locked()
+            return sorted(set(api_keys) | set(vision_keys))
 
     def _validated_key(self, value: str) -> str:
         self._policy.validate_provider_api_key(value)
@@ -353,10 +428,20 @@ class ProviderConfigurationService:
         """Persist both sections, then publish both in-memory values."""
 
         with self._lock:
+            document = self._load_config_document_locked()
             committed_api = self._api_config or self._load_initial_api_config_locked()
             committed_vision = self._vision_config or self._load_initial_vision_config_locked()
             api = api_config if api_config is not None else committed_api
             vision = vision_config if vision_config is not None else committed_vision
+            api_keys, vision_keys = self._load_provider_key_maps_locked(document)
+            for target, config in (
+                (api_keys, committed_api),
+                (vision_keys, committed_vision),
+                (api_keys, api),
+                (vision_keys, vision),
+            ):
+                if config.provider and config.api_key.strip():
+                    target[config.provider] = config.api_key.strip()
             api_descriptor = self._policy.provider_config_descriptor(api)
             payload: dict[str, Any] = {
                 "api": {
@@ -366,7 +451,11 @@ class ProviderConfigurationService:
                     "model": api.model,
                     "api_type": api_descriptor["api_type"],
                     "thinking_level": api.thinking_level,
-                }
+                },
+                "provider_keys": {
+                    "api": api_keys,
+                    "vision": vision_keys,
+                },
             }
             if vision.provider:
                 payload["vision"] = {
@@ -422,6 +511,7 @@ class ProviderConfigurationService:
             "usesBaseUrl": config.provider not in {"anthropic", "gemini"},
             "authHeader": self._policy.provider_auth_label(config.provider),
             "apiKeyRequired": self._policy.provider_requires_api_key(config.provider),
+            "savedKeyProviders": self._saved_key_providers(),
         }
 
     def serialize_vision_config(self, include_secret: bool) -> dict[str, Any]:
@@ -444,6 +534,7 @@ class ProviderConfigurationService:
                 if config.provider
                 else False
             ),
+            "savedKeyProviders": self._saved_key_providers(),
         }
 
     def serialize_app_api_config(self) -> dict[str, Any]:

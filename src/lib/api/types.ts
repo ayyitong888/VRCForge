@@ -141,6 +141,7 @@ export type ApiConfig = {
   providerLabel?: string;
   api_key?: string;
   apiKeyPresent: boolean;
+  savedKeyProviders?: string[];
   base_url?: string;
   model?: string;
   /** Requested provider transport; absent is a legacy configuration. */
@@ -164,6 +165,7 @@ export type VisionConfig = {
   providerLabel?: string;
   api_key?: string;
   apiKeyPresent: boolean;
+  savedKeyProviders?: string[];
   base_url?: string;
   model?: string;
   enabled: boolean;

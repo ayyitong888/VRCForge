@@ -12,6 +12,7 @@ import {
   updateVisionConfig,
 } from "../lib/api";
 import { defaultBaseUrlForProvider, defaultModelForProvider, providerDisplayName, providerNeedsApiKey } from "../lib/provider-ui";
+import { hasSavedProviderKey } from "../lib/provider-key-state";
 
 type ApiConfig = AppBootstrap["apiConfig"];
 type VisionConfig = AppBootstrap["visionConfig"];
@@ -117,7 +118,7 @@ export function useProviderSettings({
     setVisionEnabled(visionConfig.enabled !== false);
   }, [visionConfig?.provider, visionConfig?.base_url, visionConfig?.model, visionConfig?.enabled]);
 
-  const apiKeySaved = Boolean(apiConfig?.apiKeyPresent && (apiConfig?.provider || "") === apiProvider);
+  const apiKeySaved = hasSavedProviderKey(apiProvider, apiConfig, visionConfig);
   const savedProvider = apiConfig?.provider || apiProvider;
   const savedProviderLabel = apiConfig?.providerLabel || providerDisplayName(savedProvider);
   const savedModel = apiConfig?.model || apiModel || defaultModelForProvider(savedProvider);
@@ -197,7 +198,7 @@ export function useProviderSettings({
 
   async function saveVisionProfile(event?: FormEvent) {
     event?.preventDefault();
-    const visionKeySaved = Boolean(visionConfig?.apiKeyPresent && (visionConfig?.provider || "") === visionProvider);
+    const visionKeySaved = hasSavedProviderKey(visionProvider, visionConfig, apiConfig);
     if (visionProvider && !visionModel.trim()) {
       return;
     }
