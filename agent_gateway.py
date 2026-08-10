@@ -3816,7 +3816,29 @@ class AgentGateway:
             if not command:
                 command = str(plan.get("shellCommand") or "").strip()
             shell_step_params = ensure_dict(plan.get("shellParams"))
+            shell_protection_scope = ""
             if command and not project_root:
+                shell_protection_scope = str(
+                    self.shell.classify(
+                        {
+                            **shell_step_params,
+                            "command": command,
+                            "cwd": shell_step_params.get("cwd") or params.get("cwd") or "",
+                            "workspace_root": (
+                                params.get("workspace_root")
+                                or params.get("workspaceRoot")
+                                or ""
+                            ),
+                            "projectRoot": "",
+                        }
+                    ).get("protectionScope")
+                    or ""
+                )
+            if (
+                command
+                and not project_root
+                and shell_protection_scope != "unity_project"
+            ):
                 # Projectless chat uses the complete host Shell lane.  Freeze
                 # the effective defaults before deriving action identity,
                 # completion requirements, execution, and the async task seed.

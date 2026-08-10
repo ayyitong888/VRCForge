@@ -34,11 +34,21 @@ def test_offline_agent_harness_runs_the_real_runtime_selection_and_completion_ga
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     report = json.loads(completed.stdout)
-    assert report["schema"] == "vrcforge.agent_harness_report.v5"
+    assert report["schema"] == "vrcforge.agent_harness_report.v6"
     assert report["accepted"] is True
     assert report["releaseAccepted"] is False
     assert report["toolsExecuted"] is False
-    assert report["selection"]["passed"] == report["selection"]["total"] == 16
+    assert report["selection"]["passed"] == report["selection"]["total"] == 40
+    assert report["selection"]["positive"] == {
+        "passed": 20,
+        "total": 20,
+        "correctRate": 1.0,
+    }
+    assert report["selection"]["negative"] == {
+        "zeroToolCalls": 20,
+        "total": 20,
+        "allZeroToolCalls": True,
+    }
     assert report["completion"]["passed"] == report["completion"]["total"] == 7
     assert report["loop"]["passed"] == report["loop"]["total"] == 9
     assert report["chain"]["passed"] == report["chain"]["total"] == 6
@@ -58,6 +68,7 @@ def test_agent_harness_rejects_duplicate_case_ids(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("mutation", "error"),
     [
+        (lambda case: case.pop("kind"), "requires kind positive or negative"),
         (lambda case: case.pop("expectedActionKind"), "requires expectedActionKind"),
         (
             lambda case: case.update(
@@ -79,6 +90,72 @@ def test_agent_harness_selection_contract_requires_action_kind_and_write_exposur
 
     with pytest.raises(AgentHarnessError, match=error):
         load_agent_harness_matrix(invalid)
+
+
+def test_agent_harness_selection_contract_accepts_an_exact_zero_call_case() -> None:
+    matrix = load_agent_harness_matrix(MATRIX)
+    negative = next(case for case in matrix["selectionCases"] if case["kind"] == "negative")
+
+    assert negative["expectedTool"] == ""
+    assert negative["expectedActionKind"] == "none"
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        {"toolCalls": ["vrcforge_capture_screenshot"], "actionKind": "write"},
+        {"toolCalls": [], "actionKind": "skill"},
+    ],
+)
+def test_agent_harness_negative_case_requires_exactly_zero_calls_and_none_kind(
+    selection: dict[str, object],
+) -> None:
+    matrix = load_agent_harness_matrix(MATRIX)
+    one_case = copy.deepcopy(matrix)
+    one_case["selectionCases"] = [
+        next(case for case in one_case["selectionCases"] if case["kind"] == "negative")
+    ]
+    one_case["completionCases"] = [one_case["completionCases"][0]]
+
+    report = evaluate_agent_harness(
+        one_case,
+        select_tool=lambda _prompt, _layer: selection,
+    )
+
+    assert report["selection"]["cases"][0]["passed"] is False
+
+
+def test_agent_harness_positive_threshold_allows_one_miss_but_not_two() -> None:
+    matrix = load_agent_harness_matrix(MATRIX)
+    positive_prompts = [
+        case["prompt"] for case in matrix["selectionCases"] if case["kind"] == "positive"
+    ]
+
+    def evaluate_with_misses(missed_prompts: set[str]) -> dict[str, object]:
+        cases_by_prompt = {case["prompt"]: case for case in matrix["selectionCases"]}
+
+        def select(prompt: str, _layer: str) -> dict[str, object]:
+            case = cases_by_prompt[prompt]
+            if case["kind"] == "negative":
+                return {"toolCalls": [], "actionKind": "none"}
+            if prompt in missed_prompts:
+                return {"toolCalls": ["fixture-wrong-tool"], "actionKind": "skill"}
+            return {
+                "toolCalls": [case["expectedTool"]],
+                "actionKind": case["expectedActionKind"],
+            }
+
+        return evaluate_agent_harness(matrix, select_tool=select)
+
+    one_miss = evaluate_with_misses({positive_prompts[0]})
+    two_misses = evaluate_with_misses(set(positive_prompts[:2]))
+
+    assert one_miss["selection"]["positive"]["correctRate"] == 0.95
+    assert one_miss["selection"]["accepted"] is True
+    assert one_miss["accepted"] is True
+    assert two_misses["selection"]["positive"]["correctRate"] == 0.9
+    assert two_misses["selection"]["accepted"] is False
+    assert two_misses["accepted"] is False
 
 
 def test_real_journey_request_requires_an_authenticated_app_backend(tmp_path: Path) -> None:
@@ -272,8 +349,10 @@ def test_agent_harness_reports_a_wrong_selection_without_running_a_tool() -> Non
     assert report["selection"]["cases"] == [
         {
             "id": "selection-compile-errors",
+            "kind": "positive",
             "passed": False,
             "selectedTool": "vrcforge_health",
+            "selectedTools": ["vrcforge_health"],
             "expectedTool": "vrcforge_get_compile_errors",
             "selectedActionKind": "skill",
             "expectedActionKind": "skill",
@@ -324,7 +403,7 @@ def test_all_selection_cases_reject_a_dynamically_rotated_wrong_tool() -> None:
         select_tool=lambda prompt, _layer: wrong_by_prompt[prompt],
     )
 
-    assert report["selection"]["total"] == len(cases) == 16
+    assert report["selection"]["total"] == len(cases) == 40
     assert report["selection"]["passed"] == 0
     assert all(not case["passed"] for case in report["selection"]["cases"])
 
@@ -371,7 +450,10 @@ def test_production_harness_guards_do_not_embed_fixture_answers() -> None:
     assert "tests/fixtures/agent_harness_matrix.json" not in production_sources
     for case in matrix["selectionCases"]:
         assert case["id"] not in production_sources
-        assert case["prompt"] not in production_sources
+        # A one-token keyword such as "screenshot" necessarily appears in
+        # real tool names/descriptions; longer fixture answers must not.
+        if len(case["prompt"].split()) > 1 or not case["prompt"].isascii():
+            assert case["prompt"] not in production_sources
 
 
 def test_agent_harness_does_not_treat_selection_receipts_as_end_to_end_release_evidence() -> None:

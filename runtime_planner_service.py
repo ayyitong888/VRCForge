@@ -711,6 +711,185 @@ def extract_avatar_paths(result: object) -> list[str]:
 def has_any(lowered_text: str, original_text: str, needles: list[str]) -> bool:
     return any((needle.lower() in lowered_text) if needle.isascii() else (needle in original_text) for needle in needles)
 
+
+def runtime_tool_intent_text(message: str) -> str:
+    """Keep deterministic routing on the user's actionable words only.
+
+    This is intentionally a small lexical boundary, not a second planner. It
+    removes clearly quoted/meta requests and negated clauses before the
+    deterministic keyword fallback sees tool names.
+    """
+
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    lowered = text.casefold()
+    if has_any(
+        lowered,
+        text,
+        [
+            "translate",
+            "translation",
+            "rewrite",
+            "rephrase",
+            "repeat verbatim",
+            "quote exactly",
+            "example code",
+            "code example",
+            "name suggestion",
+            "conceptually",
+            "翻译",
+            "改写",
+            "改得更",
+            "润色",
+            "原样复述",
+            "原样重复",
+            "示例代码",
+            "代码示例",
+            "名称建议",
+            "从概念上",
+        ],
+    ):
+        return ""
+    if (
+        has_any(lowered, text, ["can you", "are you able", "你能", "是否能"])
+        and has_any(
+            lowered,
+            text,
+            ["do not", "don't", "not now", "不要", "请别", "先不", "现在不"],
+        )
+    ):
+        return ""
+    if (
+        has_any(lowered, text, ["manual", "手动"])
+        and has_any(lowered, text, ["plan", "steps", "计划", "步骤"])
+    ):
+        return ""
+    if (
+        has_any(lowered, text, ["if ", "hypothetical", "如果", "假设"])
+        and has_any(
+            lowered,
+            text,
+            ["generally", "usually", "would you", "一般", "通常", "会怎么"],
+        )
+    ):
+        return ""
+    if has_any(
+        lowered,
+        text,
+        [
+            "do not call any tool",
+            "do not call tools",
+            "don't call any tool",
+            "don't call tools",
+            "without calling a tool",
+            "do not execute any tool",
+            "don't execute any tool",
+            "no action is requested",
+            "no operation is requested",
+            "不要调用任何工具",
+            "不要调用工具",
+            "不调用工具",
+            "无需调用工具",
+            "不要执行任何工具",
+            "不要执行工具",
+            "先不要执行工具",
+            "没有要求你执行",
+            "不需要执行操作",
+        ],
+    ):
+        return ""
+
+    unquoted = re.sub(
+        r"`[^`\n]*`|\"[^\"\n]*\"|“[^”\n]*”|‘[^’\n]*’",
+        " ",
+        text,
+    )
+    negation_markers = (
+        "do not ",
+        "don't ",
+        "without ",
+        "no need to ",
+        "not now",
+        " not ",
+        "不要",
+        "不用",
+        "无需",
+        "先不",
+        "现在不",
+    )
+    active_clauses: list[str] = []
+    for clause in re.split(r"[,，;；。.!?！？\n]+", unquoted):
+        candidate = clause.strip()
+        if not candidate:
+            continue
+        candidate_lower = candidate.casefold()
+        positions = [
+            candidate_lower.find(marker.casefold())
+            for marker in negation_markers
+            if candidate_lower.find(marker.casefold()) >= 0
+        ]
+        if re.match(r"^(?:请)?别", candidate):
+            positions.append(0)
+        if positions:
+            candidate = candidate[: min(positions)].strip()
+        if candidate:
+            active_clauses.append(candidate)
+    actionable = " ".join(active_clauses).strip()
+    if not actionable:
+        return ""
+    actionable_lower = actionable.casefold()
+    english_action = re.search(
+        r"\b(?:check|inspect|scan|read|list|show|calculate|compute|take|capture|"
+        r"photograph|get|find|validate|audit|analy[sz]e|review|verify|create|add|"
+        r"delete|remove|move|set|change|update|import|export|run|start|stop|open)\b",
+        actionable_lower,
+    )
+    chinese_action_markers = [
+        "检查",
+        "查看",
+        "扫描",
+        "读取",
+        "列出",
+        "列一下",
+        "列目录",
+        "计算",
+        "拍",
+        "请做",
+        "分别截图",
+        "进行截图",
+        "帮我截图",
+        "请截图",
+        "查找",
+        "获取",
+        "验证",
+        "审计",
+        "分析",
+        "审查",
+        "创建",
+        "新建",
+        "添加",
+        "删除",
+        "移动",
+        "设置",
+        "修改",
+        "更新",
+        "导入",
+        "导出",
+        "运行",
+        "启动",
+        "停止",
+        "打开",
+        "开工程",
+    ]
+    return (
+        actionable
+        if english_action
+        or has_any(actionable_lower, actionable, chinese_action_markers)
+        else ""
+    )
+
+
 def ensure_dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
@@ -1365,23 +1544,51 @@ class RuntimePlannerService:
         ) -> dict[str, object]:
             loop_state = loop_state or []
             constraints_applied = bool(observe.get("userConstraints", {}).get("enabled"))
-            command = extract_shell_command_candidate(message, params)
+            stripped_message = str(message or "").strip()
+            lowered_message_text = stripped_message.casefold()
+            direct_shell_syntax = bool(
+                lowered_message_text in {"git status", "git log", "ls", "dir"}
+                or lowered_message_text.startswith("/shell ")
+                or lowered_message_text.startswith("shell:")
+                or (
+                    stripped_message.startswith("```")
+                    and stripped_message.endswith("```")
+                )
+                or bool(re.fullmatch(r"`[^`\n]+`", stripped_message))
+            )
+            explicit_action = bool(
+                params.get("skill_tool")
+                or params.get("skillTool")
+                or params.get("tool_name")
+                or params.get("toolName")
+                or params.get("shell_command")
+                or params.get("shellCommand")
+                or extract_skill_invocation(message)
+                or direct_shell_syntax
+            )
+            routing_message = message if explicit_action else runtime_tool_intent_text(message)
+            command = extract_shell_command_candidate(routing_message, params)
             meta_plan = self._plan_runtime_meta_question(message, constraints_applied, params)
             if meta_plan is not None:
                 return meta_plan
             # 写入意图（往模型里加对象/新建/创建）优先：先扫描→单模型自动选中→发起写入审批，
             # 而不是反问「加到哪个模型上」或只回一句「做了做了」。
-            if not command:
-                write_plan = self._plan_write_intent(message, params, loop_state, constraints_applied)
+            if routing_message and not command:
+                write_plan = self._plan_write_intent(
+                    routing_message,
+                    params,
+                    loop_state,
+                    constraints_applied,
+                )
                 if write_plan is not None:
                     return write_plan
-            lowered_message = message.lower()
+            lowered_message = routing_message.lower()
             visual_audit_receipt = managed_multi_capture_receipt(loop_state)
             skill_route = None
             if (
                 not command
                 and visual_audit_receipt
-                and has_multi_angle_visual_audit_intent(lowered_message, message)
+                and has_multi_angle_visual_audit_intent(lowered_message, routing_message)
             ):
                 skill_route = {
                     "tool": "vrcforge_vision_audit_multi",
@@ -1389,7 +1596,7 @@ class RuntimePlannerService:
                     "reason": "managed multi-angle visual audit continuation",
                 }
             if skill_route is None and not command:
-                skill_route = self._match_runtime_skill(message, params)
+                skill_route = self._match_runtime_skill(routing_message, params)
             if skill_route is not None:
                 skill_route = self._runtime_skill_route(
                     str(skill_route.get("tool") or ""),
@@ -1403,7 +1610,7 @@ class RuntimePlannerService:
                 route_is_write
                 and str(skill_route.get("tool") or "")
                 == "vrcforge_capture_multi_screenshot"
-                and has_multi_angle_visual_audit_intent(lowered_message, message)
+                and has_multi_angle_visual_audit_intent(lowered_message, routing_message)
             )
             if route_requires_follow_up:
                 visual_audit_route = self._runtime_skill_route(
@@ -1415,14 +1622,13 @@ class RuntimePlannerService:
                 if not visual_audit_route.get("visible"):
                     reply = (
                         "这个请求包含多角度视觉审计，但当前没有可用的视觉模型配置。"
-                        "请先在设置中把主 Provider 配置为 Google AI Studio（Gemini）"
-                        "并保存可用的 API Key；"
+                        "请先在设置中配置任一支持图像输入的主模型或视觉 Profile；"
                         "本轮没有请求或生成截图。"
                         if re.search(r"[\u4e00-\u9fff]", message)
                         else (
                             "This request includes a multi-angle visual audit, but no usable "
-                            "vision model is configured. Configure the main Provider as Google "
-                            "AI Studio (Gemini) with a usable API key first. No screenshot was "
+                            "vision model is configured. Configure any vision-capable main model "
+                            "or Vision Profile first. No screenshot was "
                             "requested or captured."
                         )
                     )
@@ -2625,6 +2831,11 @@ class RuntimePlannerService:
                 invocation_name, invocation_args = direct_invocation
                 invocation_params = {**skill_params, "arguments": invocation_args, "rawArguments": invocation_args}
                 return self._runtime_skill_route(invocation_name, invocation_params, "direct skill invocation")
+
+            text = runtime_tool_intent_text(text)
+            if not text:
+                return None
+            lowered = text.lower()
 
             know_yourself_requested = has_any(
                 lowered,

@@ -9,8 +9,8 @@ from agent_tool_result_contract import completion_gate_plan, normalize_agent_too
 from agent_task_loop import AgentTaskLoop
 
 
-AGENT_HARNESS_MATRIX_SCHEMA = "vrcforge.agent_harness_matrix.v5"
-AGENT_HARNESS_REPORT_SCHEMA = "vrcforge.agent_harness_report.v5"
+AGENT_HARNESS_MATRIX_SCHEMA = "vrcforge.agent_harness_matrix.v6"
+AGENT_HARNESS_REPORT_SCHEMA = "vrcforge.agent_harness_report.v6"
 AGENT_HARNESS_JOURNEY_SCHEMA = "vrcforge.agent_harness_journey.v1"
 _COMPLETION_STATUSES = frozenset({"ok", "failed", "needs_user_action"})
 
@@ -36,10 +36,19 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
         raise AgentHarnessError("loopCases must be a non-empty list")
     if not isinstance(chain_cases, list) or not chain_cases:
         raise AgentHarnessError("chainCases must be a non-empty list")
+    positive_threshold = value.get("positiveThreshold")
+    if (
+        not isinstance(positive_threshold, (int, float))
+        or isinstance(positive_threshold, bool)
+        or not 0 < float(positive_threshold) <= 1
+    ):
+        raise AgentHarnessError("positiveThreshold must be a number in (0, 1]")
 
     seen_ids: set[str] = set()
+    selection_counts = {"positive": 0, "negative": 0}
     for case in selection_cases:
         case_id = _case_id(case, seen_ids)
+        case_kind = str(case.get("kind") or "").strip().lower()
         prompt = case.get("prompt")
         expected_tool = case.get("expectedTool")
         expected_action_kind = str(case.get("expectedActionKind") or "").strip().lower()
@@ -47,11 +56,22 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
         exposure_layer = str(case.get("exposureLayer") or "planning")
         if not isinstance(prompt, str) or not prompt.strip():
             raise AgentHarnessError(f"selection case {case_id} requires a prompt")
-        if not isinstance(expected_tool, str) or not expected_tool.strip():
-            raise AgentHarnessError(f"selection case {case_id} requires expectedTool")
-        if expected_action_kind not in {"skill", "write"}:
+        if case_kind not in selection_counts:
             raise AgentHarnessError(
-                f"selection case {case_id} requires expectedActionKind skill or write"
+                f"selection case {case_id} requires kind positive or negative"
+            )
+        if not isinstance(expected_tool, str):
+            raise AgentHarnessError(f"selection case {case_id} requires string expectedTool")
+        if case_kind == "positive":
+            if not expected_tool.strip():
+                raise AgentHarnessError(f"selection case {case_id} requires expectedTool")
+            if expected_action_kind not in {"skill", "write"}:
+                raise AgentHarnessError(
+                    f"selection case {case_id} requires expectedActionKind skill or write"
+                )
+        elif expected_tool.strip() or expected_action_kind != "none":
+            raise AgentHarnessError(
+                f"selection case {case_id} negative cases require zero tool and action kind none"
             )
         if not isinstance(forbidden_tools, list) or any(
             not isinstance(item, str) or not item.strip() for item in forbidden_tools
@@ -65,8 +85,13 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
             raise AgentHarnessError(
                 f"selection case {case_id} must expose writes only in execution"
             )
+        selection_counts[case_kind] += 1
+        case["kind"] = case_kind
+        case["expectedTool"] = expected_tool.strip()
         case["expectedActionKind"] = expected_action_kind
         case["exposureLayer"] = exposure_layer
+    if selection_counts["positive"] < 20 or selection_counts["negative"] < 20:
+        raise AgentHarnessError("selectionCases require at least 20 positive and 20 negative cases")
 
     for case in completion_cases:
         case_id = _case_id(case, seen_ids)
@@ -192,16 +217,23 @@ def evaluate_agent_harness(
             except Exception:
                 provider_evidence_valid = False
         forbidden_tools = tuple(str(item) for item in case.get("forbiddenTools", []))
-        passed = (
-            selected_tool == case["expectedTool"]
-            and selected_tool not in forbidden_tools
-            and selected_action_kind == case["expectedActionKind"]
-        )
+        case_kind = str(case["kind"])
+        if case_kind == "negative":
+            passed = not selected_calls and selected_action_kind == "none"
+        else:
+            passed = (
+                len(selected_calls) == 1
+                and selected_tool == case["expectedTool"]
+                and selected_tool not in forbidden_tools
+                and selected_action_kind == case["expectedActionKind"]
+            )
         selection_results.append(
             {
                 "id": case["id"],
+                "kind": case_kind,
                 "passed": passed,
                 "selectedTool": selected_tool,
+                "selectedTools": selected_calls,
                 "expectedTool": case["expectedTool"],
                 "selectedActionKind": selected_action_kind,
                 "expectedActionKind": case["expectedActionKind"],
@@ -373,11 +405,24 @@ def evaluate_agent_harness(
         )
 
     selection_passed = sum(1 for item in selection_results if item["passed"])
+    positive_results = [item for item in selection_results if item["kind"] == "positive"]
+    negative_results = [item for item in selection_results if item["kind"] == "negative"]
+    positive_passed = sum(1 for item in positive_results if item["passed"])
+    positive_threshold = float(matrix.get("positiveThreshold") or 1.0)
+    positive_correct_rate = (
+        positive_passed / len(positive_results) if positive_results else 0.0
+    )
+    negative_zero_calls = all(item["passed"] for item in negative_results)
+    selection_accepted = bool(
+        positive_results
+        and positive_correct_rate >= positive_threshold
+        and negative_zero_calls
+    )
     completion_passed = sum(1 for item in completion_results if item["passed"])
     loop_passed = sum(1 for item in loop_results if item["passed"])
     chain_passed = sum(1 for item in chain_results if item["passed"])
     accepted = (
-        selection_passed == len(selection_results)
+        selection_accepted
         and completion_passed == len(completion_results)
         and loop_passed == len(loop_results)
         and chain_passed == len(chain_results)
@@ -432,8 +477,20 @@ def evaluate_agent_harness(
             "cases": journey_results,
         },
         "selection": {
+            "accepted": selection_accepted,
             "passed": selection_passed,
             "total": len(selection_results),
+            "positiveThreshold": positive_threshold,
+            "positive": {
+                "passed": positive_passed,
+                "total": len(positive_results),
+                "correctRate": positive_correct_rate,
+            },
+            "negative": {
+                "zeroToolCalls": sum(1 for item in negative_results if item["passed"]),
+                "total": len(negative_results),
+                "allZeroToolCalls": negative_zero_calls,
+            },
             "cases": selection_results,
         },
         "completion": {

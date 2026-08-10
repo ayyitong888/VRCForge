@@ -7490,7 +7490,6 @@ class DashboardServerTests(unittest.TestCase):
                         "shell_command": "Set-Content -Path Assets/agent-loop.txt -Value hi -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
-                        "projectPath": workspace,
                     },
                 )
                 self.assertEqual(high.status_code, 200)

@@ -46,12 +46,13 @@ def _planner_for_matrix(matrix: dict[str, object]) -> RuntimePlannerService:
     action_kinds: dict[str, str] = {}
     names: set[str] = set()
     for case in matrix["selectionCases"]:
-        name = str(case["expectedTool"])
+        name = str(case["expectedTool"]).strip()
         action_kind = str(case["expectedActionKind"])
-        names.add(name)
-        previous = action_kinds.setdefault(name, action_kind)
-        if previous != action_kind:
-            raise ValueError(f"Harness tool {name} has conflicting action kinds")
+        if name:
+            names.add(name)
+            previous = action_kinds.setdefault(name, action_kind)
+            if previous != action_kind:
+                raise ValueError(f"Harness tool {name} has conflicting action kinds")
         for item in case.get("forbiddenTools", []):
             names.add(str(item))
     for name in names:

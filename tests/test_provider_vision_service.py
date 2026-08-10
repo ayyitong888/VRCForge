@@ -112,15 +112,15 @@ def test_provider_vision_service_exposes_provider_neutral_capability_and_exact_p
     assert runner.calls[0][1] == "return the audit JSON"
 
 
-def test_provider_vision_capability_accepts_an_enabled_non_gemini_profile() -> None:
+def test_provider_vision_capability_accepts_an_enabled_profile_without_a_model_allowlist() -> None:
     runner = _Runner()
     service = _service(
         VisionModelConfig("deepseek", "safe-key", "", "deepseek-chat"),
         VisionProfileConfig(
-            "anthropic",
+            "custom",
             "vision-key",
-            "",
-            "claude-sonnet-4",
+            "https://vision.example/v1",
+            "future-multimodal-model",
             True,
         ),
         runner,
@@ -128,9 +128,9 @@ def test_provider_vision_capability_accepts_an_enabled_non_gemini_profile() -> N
 
     assert service.capability() == {
         "available": True,
-        "provider": "anthropic",
-        "providerLabel": "anthropic",
-        "model": "claude-sonnet-4",
+        "provider": "custom",
+        "providerLabel": "custom",
+        "model": "future-multimodal-model",
         "source": "visionProfile",
     }
 

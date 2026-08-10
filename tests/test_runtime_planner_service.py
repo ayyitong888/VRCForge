@@ -926,6 +926,9 @@ def test_visual_audit_request_stops_before_capture_when_the_audit_capability_is_
         "status": "needs_user_action",
         "reason": "visual_audit_unavailable",
     }
+    assert "Gemini" not in plan["reply"]
+    assert "Google" not in plan["reply"]
+    assert "vision-capable main model or Vision Profile" in plan["reply"]
 
 
 def test_single_capture_and_capture_status_keep_distinct_action_kinds() -> None:
@@ -960,6 +963,55 @@ def test_single_capture_and_capture_status_keep_distinct_action_kinds() -> None:
     assert status_plan["skillNeeded"] is True
     assert status_plan["skillTool"] == "vrcforge_capture_status"
     assert status_plan["writeNeeded"] is False
+
+
+@pytest.mark.parametrize(
+    ("message", "exposure_layer"),
+    [
+        ("Translate 'scan avatar materials'; do not inspect the project.", EXPOSURE_LAYER_PLANNING),
+        ("Rewrite this more politely: take one current screenshot.", EXPOSURE_LAYER_EXECUTION),
+        ("I scanned the avatar materials yesterday; no action is requested now.", EXPOSURE_LAYER_PLANNING),
+        ("Give me a manual FX Animator plan without reading the project.", EXPOSURE_LAYER_PLANNING),
+        ("screenshot", EXPOSURE_LAYER_EXECUTION),
+    ],
+)
+def test_deterministic_keyword_router_keeps_non_actionable_context_text_only(
+    message: str,
+    exposure_layer: str,
+) -> None:
+    materials = tool("vrcforge_scan_materials")
+    fx = tool("vrcforge_scan_fx_animator")
+    capture = tool(
+        "vrcforge_capture_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    planning = PlannerCatalogSnapshot(
+        visible_tools=(materials, fx),
+        routable_tools=(materials, fx, capture),
+    )
+    execution = PlannerCatalogSnapshot(
+        visible_tools=(materials, fx, capture),
+        routable_tools=(materials, fx, capture),
+    )
+
+    plan = service(
+        catalog=FakeCatalog(planning=planning, execution=execution)
+    ).plan_agent_turn(
+        message,
+        {},
+        {},
+        exposure_layer=exposure_layer,
+    )
+
+    assert plan["skillNeeded"] is False
+    assert plan["writeNeeded"] is False
+    assert plan["nextStep"] not in {
+        "call_skill",
+        "request_write",
+        "enter_execution",
+        "classify_shell",
+    }
 
 
 @pytest.mark.parametrize(
