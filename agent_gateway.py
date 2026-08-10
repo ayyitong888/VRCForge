@@ -94,6 +94,11 @@ ToolHandler = Callable[[dict[str, Any]], Any]
 RiskLevelResolver = Callable[[dict[str, Any]], str]
 ManualApprovalResolver = Callable[[dict[str, Any], Any], str]
 CheckpointPrepareHandler = Callable[[Path, dict[str, Any]], dict[str, Any]]
+CompletionVerificationPrepareHandler = Callable[[dict[str, Any]], dict[str, Any]]
+CompletionVerificationFinalizeHandler = Callable[
+    [dict[str, Any], dict[str, Any], Any],
+    Any,
+]
 WriteRequestPreparer = Callable[
     [dict[str, Any], Any],
     tuple[dict[str, Any], Any],
@@ -277,6 +282,9 @@ class AgentWriteHandler:
     request_preparer: WriteRequestPreparer | None = None
     manual_approval_resolver: ManualApprovalResolver | None = None
     checkpoint_prepare_handler: CheckpointPrepareHandler | None = None
+    verification_profile: str = ""
+    verification_prepare_handler: CompletionVerificationPrepareHandler | None = None
+    verification_finalize_handler: CompletionVerificationFinalizeHandler | None = None
     requires_approved_execution_context: bool = False
     approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None
     # A category may be remembered only when the handler opts in.  This keeps
@@ -302,6 +310,7 @@ RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview"}
 # 命中上限时不静默收尾，而是诚实告知「到步数上限、先汇报、可继续」（见循环 else 分支）。
 RUNTIME_AGENT_MAX_STEPS = 25
 RUNTIME_AGENT_MAX_TOOL_CALLS = 3
+RUNTIME_PLANNER_ARGUMENT_MAX_ATTEMPTS = 2
 EXPOSURE_LAYER_PLANNING = "planning"
 EXPOSURE_LAYER_EXECUTION = "execution"
 RUNTIME_BLOCKED_SKILLS = {
@@ -315,6 +324,7 @@ RUNTIME_BLOCKED_SKILLS = {
 EXTERNAL_AGENT_INTERNAL_TOOLS = {
     "vrcforge_apply_approved",
     "vrcforge_execute_approved_shell",
+    "vrcforge_vision_audit_multi",
 }
 USER_CONSTRAINTS_INLINE_CHARACTER_LIMIT = 4000
 USER_CONSTRAINTS_PREVIEW_CHARACTER_LIMIT = 240
@@ -2191,7 +2201,10 @@ class AgentGateway:
             tool_agent_name: str,
             tool_owner_id: str,
         ) -> Any:
-            if tool.name == "vrcforge_delegate_subagent":
+            if tool.name in {
+                "vrcforge_delegate_subagent",
+                "vrcforge_vision_audit_multi",
+            }:
                 tool_params = dict(tool_params)
                 tool_params["_runtimeTaskLinkAuthority"] = _RUNTIME_TASK_LINK_AUTHORITY
             agent_token = self._tool_agent_context.set(tool_agent_name)
@@ -2210,7 +2223,7 @@ class AgentGateway:
                 prepare_runtime_skill=self.skills.prepare_runtime_skill,
                 package_audit_context=lambda skill: self._runtime_skill_package_audit_context_locked(skill),
                 computer_use_model_invocable=self._desktop.computer_use_model_invocable,
-                tool_visible=self._tool_visible,
+                tool_visible=self._tool_runtime_visible,
                 tool_params_audit=self._tool_params_audit,
                 read_user_constraints=self.read_user_constraints,
                 inject_user_constraints=self._inject_user_constraints,
@@ -3339,6 +3352,9 @@ class AgentGateway:
             turn_context["visionAnalysis"] = vision_payload
             observe["turn"] = turn_context
         reasoning_trace: dict[str, Any] = {}
+        prior_provider_request_count = (
+            task_loop.provider_request_count if continuation_context else 0
+        )
         context_usage: dict[str, Any] = {}
         self._runtime_session_state.set_stream_context(
             {
@@ -3384,7 +3400,9 @@ class AgentGateway:
         )
         if continuation_observation:
             loop_state.append(continuation_observation)
-        steps: list[dict[str, Any]] = []
+        steps: list[dict[str, Any]] = (
+            task_loop.historical_steps() if continuation_context else []
+        )
         if vision_payload is not None:
             # 带标签的视觉分析 run step：记录真实执行的 provider/model 与该次
             # 调用自己的 token 用量（不进聊天 contextUsage）。
@@ -3403,7 +3421,10 @@ class AgentGateway:
                     "imageCount": vision_payload.get("imageCount") or 0,
                 }
             )
-        successful_actions: set[tuple[str, str]] = set()
+        # Suppress only an immediately repeated successful action. A distinct
+        # successful action is a state-observation boundary, so A -> B -> A is
+        # allowed for read-after-change verification within the bounded budget.
+        last_successful_action_id = ""
         repeated_failure_guard = RepeatedFailureGuard()
         shell_payload: dict[str, Any] | None = None
         skill_payload: dict[str, Any] | None = None
@@ -3423,27 +3444,17 @@ class AgentGateway:
         remaining_action: dict[str, Any] | None = None
         runtime_compaction: dict[str, Any] | None = None
         runtime_compaction_attempted = False
+        planner_argument_failures = 0
+        unresolved_planner_argument_failure: dict[str, Any] | None = None
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
         unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
         unresolved_completion_action_keys: dict[str, tuple[str, str]] = {}
-        completed_continuation_action_ids: set[str] = set()
         if continuation_context and str(continuation_completion.get("status") or "").casefold() == "completed":
             completed_requested_action_id = str(
                 continuation_context.get("requestedActionId") or ""
             ).strip()
             if completed_requested_action_id:
-                completed_continuation_action_ids.add(completed_requested_action_id)
-            successful_actions.add(
-                (
-                    "write",
-                    json.dumps(
-                        ensure_dict(ensure_dict(task_continuation).get("arguments")),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        default=str,
-                    ),
-                )
-            )
+                last_successful_action_id = completed_requested_action_id
 
         def discard_runtime_compaction_for_cancel() -> None:
             nonlocal runtime_compaction
@@ -3453,9 +3464,84 @@ class AgentGateway:
             if runtime_compaction is not None:
                 runtime_compaction = planner_policy.runtime_compaction_cancelled_view(runtime_compaction)
 
+        def record_planner_argument_failure(
+            *,
+            action_kind: str,
+            tool_name: str,
+            action_id: str,
+            validation: dict[str, Any],
+        ) -> bool:
+            nonlocal planner_argument_failures, unresolved_planner_argument_failure
+            planner_argument_failures += 1
+            issues = [
+                {
+                    "path": summarize_text(str(item.get("path") or ""), 120),
+                    "code": summarize_text(str(item.get("code") or ""), 80),
+                    "expected": summarize_text(str(item.get("expected") or ""), 120),
+                }
+                for item in ensure_list(validation.get("issues"))[:8]
+                if isinstance(item, dict)
+            ]
+            summary = summarize_text(
+                str(
+                    validation.get("summary")
+                    or "Tool arguments do not match the registered shallow schema."
+                ),
+                600,
+            )
+            outcome = normalize_agent_tool_result(
+                {
+                    "ok": False,
+                    "status": "failed",
+                    "error": {
+                        "type": "input",
+                        "code": "planner_invalid_response",
+                        "summary": summary,
+                        "likelyCauses": [summary],
+                        "nextActions": [
+                            "Correct the tool arguments to match the registered schema before retrying."
+                        ],
+                        "retryable": True,
+                    },
+                },
+                fallback_summary=summary,
+                write=action_kind == "write",
+            )
+            loop_state.append(
+                {
+                    "tool": tool_name,
+                    "kind": action_kind,
+                    "actionId": action_id,
+                    "status": "failed",
+                    "result": {
+                        "code": "planner_invalid_response",
+                        "summary": summary,
+                        "issues": issues,
+                    },
+                    "outcome": outcome,
+                }
+            )
+            steps.append(
+                {
+                    "index": len(steps),
+                    "kind": "planner_validation",
+                    "tool": tool_name,
+                    "summary": summary,
+                    "status": "failed",
+                }
+            )
+            unresolved_planner_argument_failure = {
+                "actionKind": action_kind,
+                "tool": tool_name,
+                "actionId": action_id,
+                "summary": summary,
+            }
+            return planner_argument_failures >= RUNTIME_PLANNER_ARGUMENT_MAX_ATTEMPTS
+
         if bool(params.get("_computerUseRequested")) and not self._runtime_session_state.desktop_bootstrap_completed(
             session_id
         ):
+            bootstrap_tool = "vrcforge_agent_desktop_action"
             bootstrap_params: dict[str, Any] = {
                 "action": "computer_use",
                 "prompt": "Discover applications and windows for this user-started Computer Use turn.",
@@ -3472,19 +3558,59 @@ class AgentGateway:
             if project_root:
                 bootstrap_params["projectRoot"] = project_root
             bootstrap_payload = self._runtime_skill_executor.execute(
-                "vrcforge_agent_desktop_action",
+                bootstrap_tool,
                 bootstrap_params,
                 agent_name,
                 owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
             )
             tool_calls_used += 1
             skill_payload = bootstrap_payload
+            bootstrap_action_id = canonical_action_id(
+                "skill",
+                bootstrap_tool,
+                bootstrap_params,
+            )
+            task_loop.require_action(
+                kind="skill",
+                tool=bootstrap_tool,
+                arguments=bootstrap_params,
+                verification_profile="canonical_tool_result",
+            )
+            bootstrap_outcome = ensure_dict(bootstrap_payload.get("outcome"))
+            if str(bootstrap_outcome.get("status") or "").strip().casefold() == "ok":
+                # A successful canonical tool envelope is the verifier for this
+                # read-only bootstrap. Record that result explicitly so the
+                # authenticated journey can distinguish it from an unverified
+                # caller-supplied action.
+                bootstrap_outcome = {
+                    **bootstrap_outcome,
+                    "verification": {
+                        "state": "passed",
+                        "checks": [
+                            {"kind": "canonical_tool_result", "state": "passed"}
+                        ],
+                    },
+                }
+            bootstrap_action = task_loop.record_action(
+                kind="skill",
+                tool=bootstrap_tool,
+                arguments=bootstrap_params,
+                raw_result=bootstrap_payload,
+                outcome=bootstrap_outcome,
+                action_id=bootstrap_action_id,
+                pre_provider=True,
+            )
+            bootstrap_payload["outcome"] = bootstrap_action["outcome"]
+            if bootstrap_action.get("status") == "completed":
+                last_successful_action_id = bootstrap_action_id
             bootstrap_step: dict[str, Any] = {
-                "tool": "vrcforge_agent_desktop_action",
+                "tool": bootstrap_tool,
                 "kind": "skill",
+                "actionId": bootstrap_action_id,
+                "preProvider": True,
                 "status": bootstrap_payload.get("status"),
                 "result": bootstrap_payload.get("result"),
-                "outcome": bootstrap_payload.get("outcome"),
+                "outcome": bootstrap_action["outcome"],
             }
             bootstrap_vision = self._desktop_action_vision_analysis(message, bootstrap_payload.get("result"))
             if bootstrap_vision is not None:
@@ -3500,9 +3626,11 @@ class AgentGateway:
                 {
                     "index": len(steps),
                     "kind": "skill",
-                    "tool": "vrcforge_agent_desktop_action",
+                    "tool": bootstrap_tool,
                     "summary": "Discovered the initial desktop applications and windows.",
                     "status": bootstrap_payload.get("status") or "",
+                    "actionId": bootstrap_action_id,
+                    "preProvider": True,
                 }
             )
 
@@ -3606,6 +3734,36 @@ class AgentGateway:
             if first_plan is None:
                 first_plan = plan
 
+            planner_argument_validation = ensure_dict(plan.get("argumentValidation"))
+            if (
+                planner_argument_validation
+                and planner_argument_validation.get("ok") is not True
+            ):
+                correction_exhausted = record_planner_argument_failure(
+                    action_kind=str(
+                        planner_argument_validation.get("actionKind") or "skill"
+                    ),
+                    tool_name=str(planner_argument_validation.get("tool") or ""),
+                    action_id=str(
+                        planner_argument_validation.get("actionId") or ""
+                    ),
+                    validation=planner_argument_validation,
+                )
+                if correction_exhausted:
+                    last_plan = {
+                        **plan,
+                        "summary": "The model repeated invalid tool arguments.",
+                        "reply": (
+                            "The model returned invalid tool arguments twice, so VRCForge stopped "
+                            "without executing the tool. Retry with corrected parameters."
+                        ),
+                        "plannerFailed": True,
+                        "continueLoop": False,
+                        "nextStep": "planner_failed",
+                    }
+                    break
+                continue
+
             planned_tool_name = str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
             planned_tool = self._tools.get(planned_tool_name)
             planning_selected_write = bool(
@@ -3656,7 +3814,13 @@ class AgentGateway:
                 action_kind = "write"
                 action_key = (
                     "write",
-                    json.dumps(plan.get("writeParams"), ensure_ascii=False, sort_keys=True, default=str),
+                    f"{plan.get('writeTool')}::"
+                    + json.dumps(
+                        plan.get("writeParams"),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        default=str,
+                    ),
                 )
             elif plan.get("skillNeeded") and plan.get("skillTool"):
                 action_kind = "skill"
@@ -3725,10 +3889,10 @@ class AgentGateway:
                 }
                 break
 
-            # A successful action is never replayed within the same turn. A
-            # failed action may be retried, but only until the bounded failure
-            # guard observes the same tool, arguments, and failure class three
-            # times in succession.
+            # Only a consecutive semantic replay is suppressed. A distinct
+            # successful action moves the observation boundary and permits the
+            # same read again for verification. Failed actions remain governed
+            # by the bounded repeated-failure guard below.
             planned_tool = str(
                 plan.get("writeTool")
                 or plan.get("skillTool")
@@ -3741,15 +3905,48 @@ class AgentGateway:
                 if action_kind == "skill"
                 else {"command": command, **shell_step_params}
             )
+            if action_kind in {"skill", "write"}:
+                execution_argument_validation = self.runtime_planner.validate_tool_arguments(
+                    planned_tool,
+                    planned_arguments,
+                    exposure_layer=runtime_exposure_layer,
+                )
+                if execution_argument_validation.get("ok") is not True:
+                    correction_exhausted = record_planner_argument_failure(
+                        action_kind=action_kind,
+                        tool_name=planned_tool,
+                        action_id=planner_policy.planner_argument_validation_id(
+                            action_kind,
+                            planned_tool,
+                            planned_arguments,
+                        ),
+                        validation=execution_argument_validation,
+                    )
+                    if correction_exhausted:
+                        last_plan = {
+                            **plan,
+                            "summary": "The model repeated invalid tool arguments.",
+                            "reply": (
+                                "The model returned invalid tool arguments twice, so VRCForge stopped "
+                                "without executing the tool. Retry with corrected parameters."
+                            ),
+                            "plannerFailed": True,
+                            "plannerFailure": {
+                                "code": "planner_invalid_response",
+                                "phase": "post_tool" if loop_state else "initial",
+                                "retryable": True,
+                            },
+                            "continueLoop": False,
+                            "nextStep": "planner_failed",
+                        }
+                        break
+                    continue
             planned_action_id = canonical_action_id(
                 action_kind,
                 planned_tool,
                 planned_arguments,
             )
-            if (
-                action_key in successful_actions
-                or planned_action_id in completed_continuation_action_ids
-            ):
+            if planned_action_id == last_successful_action_id:
                 break
 
             completion_requirement = ensure_dict(plan.get("completionRequirement"))
@@ -3827,6 +4024,7 @@ class AgentGateway:
                         requested_kind="shell",
                         requested_tool="shell",
                         requested_arguments={"command": command, **shell_step_params},
+                        provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     ),
                 )
@@ -3835,11 +4033,18 @@ class AgentGateway:
                 # not enter model context or durable chat/run projections.
                 step_payload.pop("controlToken", None)
                 if not isinstance(step_payload.get("outcome"), dict):
-                    step_payload["outcome"] = normalize_agent_tool_result(
+                    shell_failure_fallback = "Shell command did not complete successfully."
+                    shell_outcome = normalize_agent_tool_result(
                         step_payload,
-                        fallback_summary="Shell command did not complete successfully.",
+                        fallback_summary=shell_failure_fallback,
                         write=False,
                     )
+                    if (
+                        shell_outcome.get("status") == "ok"
+                        and shell_outcome.get("summary") == shell_failure_fallback
+                    ):
+                        shell_outcome["summary"] = "Shell command completed successfully."
+                    step_payload["outcome"] = shell_outcome
                 shell_payload = step_payload
                 shell_observation = (
                     summarize_owned_shell_result(step_payload.get("result"))
@@ -3872,6 +4077,7 @@ class AgentGateway:
                         exposure_layer=runtime_exposure_layer,
                         requested_tool=step_tool,
                         requested_arguments=action_arguments,
+                        provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     ),
                 )
@@ -3904,6 +4110,18 @@ class AgentGateway:
                         requested_kind="skill",
                         requested_tool=step_tool,
                         requested_arguments=action_arguments,
+                        provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
+                        continue_after_approval=bool(plan.get("continueLoop")),
+                    )
+                if step_tool == "vrcforge_vision_audit_multi":
+                    step_params["_runtimeSessionId"] = session_id
+                    step_params["_taskSeed"] = task_loop.approval_seed(
+                        tool_calls_used=tool_calls_used,
+                        exposure_layer=runtime_exposure_layer,
+                        requested_kind="skill",
+                        requested_tool=step_tool,
+                        requested_arguments=action_arguments,
+                        provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
                 if step_tool == "vrcforge_agent_desktop_action" or step_tool.startswith("vrcforge_progress_") or step_tool == "vrcforge_ask_user":
@@ -4141,7 +4359,16 @@ class AgentGateway:
                     break
             else:
                 repeated_failure_guard.record_success()
-                successful_actions.add(action_key)
+                last_successful_action_id = planned_action_id
+                if (
+                    unresolved_planner_argument_failure is not None
+                    and task_action.get("status") == "completed"
+                    and action_kind
+                    == str(unresolved_planner_argument_failure.get("actionKind") or "")
+                    and step_tool
+                    == str(unresolved_planner_argument_failure.get("tool") or "")
+                ):
+                    unresolved_planner_argument_failure = None
 
             if step_waits_for_approval:
                 break  # 进入审批等待 → 本轮收尾。
@@ -4169,6 +4396,12 @@ class AgentGateway:
 
         reasoning_trace = ensure_dict(reasoning_trace)
         context_usage = ensure_dict(context_usage)
+        if prior_provider_request_count:
+            context_usage["priorRequestCount"] = prior_provider_request_count
+            context_usage["requestCount"] = (
+                prior_provider_request_count
+                + int(context_usage.get("requestCount") or 0)
+            )
         first_plan = first_plan or last_plan or {}
         # 单步（含纯回复/未连接）保持与历史一致的顶层 plan 形状；多步才综合成 loop 计划。
         terminal_override = str(last_plan.get("nextStep") or "") in {
@@ -4205,6 +4438,31 @@ class AgentGateway:
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
 
         terminal_status = str(top_plan.get("nextStep") or "").strip()
+        if unresolved_planner_argument_failure is not None and terminal_status not in {
+            "cancelled",
+            "context_compaction_required",
+            "loop_suppressed",
+        }:
+            top_plan = {
+                **top_plan,
+                "summary": "The model did not complete a valid correction for rejected tool arguments.",
+                "reply": (
+                    "The proposed tool arguments were invalid and no corrected tool action completed, "
+                    "so this task is not marked done."
+                ),
+                "plannerFailed": True,
+                "plannerFailure": {
+                    "code": "planner_invalid_response",
+                    "phase": "post_tool",
+                    "retryable": True,
+                },
+                "unresolvedArgumentValidation": dict(
+                    unresolved_planner_argument_failure
+                ),
+                "continueLoop": False,
+                "nextStep": "planner_failed",
+            }
+            terminal_status = "planner_failed"
         if unresolved_completion_outcomes and terminal_status not in {
             "cancelled",
             "context_compaction_required",
@@ -5477,9 +5735,19 @@ class AgentGateway:
         config: AgentGatewayConfig,
         exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
     ) -> bool:
-        exposure_layer = normalize_exposure_layer(exposure_layer)
         if tool.name in EXTERNAL_AGENT_INTERNAL_TOOLS:
             return False
+        return self._tool_runtime_visible(tool, config, exposure_layer)
+
+    def _tool_runtime_visible(
+        self,
+        tool: AgentTool,
+        config: AgentGatewayConfig,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+    ) -> bool:
+        """Apply permission visibility without exposing task-internal tools via MCP."""
+
+        exposure_layer = normalize_exposure_layer(exposure_layer)
         if tool.advanced and not self.roslyn_available(config):
             return False
         if tool.write and not config.allow_write_requests:

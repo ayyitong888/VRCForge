@@ -34,7 +34,7 @@ _TERMINAL_BYPASS_STEPS = frozenset(
         "waiting_for_tool",
     }
 )
-_VERIFICATION_PROFILES: dict[str, tuple[tuple[str, bool], ...]] = {
+_VERIFICATION_PROFILES: dict[str, tuple[tuple[str, Any], ...]] = {
     # The tool-result contract itself is the registered baseline verifier for
     # read actions and host Shell commands that have no stronger postcondition.
     "canonical_tool_result": (),
@@ -42,9 +42,23 @@ _VERIFICATION_PROFILES: dict[str, tuple[tuple[str, bool], ...]] = {
         ("persistedReadback", True),
         ("sceneSaved", True),
     ),
+    "persisted_scene_write_console": (
+        ("persistedReadback", True),
+        ("sceneSaved", True),
+        ("consoleVerified", True),
+    ),
+    "multi_angle_visual": (
+        ("visualVerified", True),
+        ("coverageComplete", True),
+        ("captureEvidenceVerified", True),
+    ),
+    "shell_exit_zero": (("exitCode", 0),),
 }
 _TOOL_DEFAULT_VERIFICATION_PROFILE = {
-    "vrcforge_create_gameobject": "persisted_scene_write",
+    "vrcforge_create_gameobject": "persisted_scene_write_console",
+    "vrcforge_capture_multi_screenshot": "canonical_tool_result",
+    "vrcforge_vision_audit_multi": "multi_angle_visual",
+    "shell": "shell_exit_zero",
 }
 
 
@@ -134,19 +148,20 @@ def _running_state(value: Any) -> str:
     return ""
 
 
-def _field_state(value: Any, field_name: str) -> bool | None:
+_FIELD_MISSING = object()
+
+
+def _field_value(value: Any, field_name: str) -> Any:
     for view in _mapping_views(value):
         if field_name in view:
-            field_value = view.get(field_name)
-            if isinstance(field_value, bool):
-                return field_value
-            return None
-    return None
+            return view.get(field_name)
+    return _FIELD_MISSING
 
 
 def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
     verification = value.get("verification")
     error = value.get("error")
+    evidence = value.get("evidence")
     bounded_error: dict[str, Any] | None = None
     if isinstance(error, Mapping):
         bounded_error = {
@@ -176,6 +191,15 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
         "status": _bounded_text(value.get("status"), 40),
         "summary": _bounded_text(value.get("summary"), 600),
         "error": bounded_error,
+        "evidence": [
+            {
+                key: _bounded_text(item.get(key), 160)
+                for key in ("ref", "kind", "sha256")
+                if _bounded_text(item.get(key), 160)
+            }
+            for item in (list(evidence)[:12] if isinstance(evidence, (list, tuple)) else [])
+            if isinstance(item, Mapping) and _bounded_text(item.get("ref"), 160)
+        ],
         "verification": (
             {
                 "state": _bounded_text(verification.get("state"), 40),
@@ -221,6 +245,8 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
     superseded_by = _bounded_text(value.get("supersededBy"), 80)
     if status == "superseded" and superseded_by:
         result["supersededBy"] = superseded_by
+    if value.get("preProvider") is True:
+        result["preProvider"] = True
     return result
 
 
@@ -301,6 +327,8 @@ def apply_declared_verification(
     )
     if _status(bounded.get("status")) != "ok":
         return bounded
+    if _running_state(raw_result):
+        return bounded
     if declared_profile and profile not in _VERIFICATION_PROFILES:
         return {
             "status": "needs_user_action",
@@ -324,8 +352,14 @@ def apply_declared_verification(
     checks: list[dict[str, str]] = []
     failed: list[str] = []
     for field_name, expected in requirements:
-        actual = _field_state(raw_result, field_name)
-        state = "passed" if actual is expected else "failed"
+        actual = _field_value(raw_result, field_name)
+        state = (
+            "passed"
+            if actual is not _FIELD_MISSING
+            and type(actual) is type(expected)
+            and actual == expected
+            else "failed"
+        )
         checks.append({"kind": field_name, "state": state})
         if state == "failed":
             failed.append(field_name)
@@ -406,6 +440,10 @@ def approval_task_context(
             else None
         ),
         "toolCallsUsed": max(0, min(int(seed.get("toolCallsUsed") or 0), 3)),
+        "providerRequestCount": max(
+            0,
+            min(int(seed.get("providerRequestCount") or 0), 100),
+        ),
         "continueAfterApproval": seed.get("continueAfterApproval") is True,
         "exposureLayer": (
             "execution"
@@ -419,6 +457,11 @@ def approval_task_context(
             if (bounded := _bounded_action(item)) is not None
         ],
         "priorRequirements": prior_requirements,
+        "managedVisualCaptureActionIds": [
+            bounded
+            for item in list(seed.get("managedVisualCaptureActionIds") or [])[:2]
+            if (bounded := _bounded_text(item, 80))
+        ],
         "skillPolicy": _bounded_skill_policy(seed.get("skillPolicy")),
         "skillContext": _bounded_skill_context(seed.get("skillContext")),
         "history": _bounded_history(seed.get("history")),
@@ -568,6 +611,51 @@ def prepare_approval_task_continuation(
         }
     requested_arguments = context.get("requestedArguments")
     approval_arguments = approval.get("arguments")
+    task_continuation: dict[str, Any] = {
+        "source": "approval_finished",
+        "context": dict(context),
+        "completion": dict(completion),
+        "approvalId": approval_id,
+        "arguments": dict(
+            requested_arguments
+            if isinstance(requested_arguments, Mapping) and requested_arguments
+            else approval_arguments
+            if isinstance(approval_arguments, Mapping)
+            else {}
+        ),
+        "execution": dict(execution),
+        "terminalPlan": terminal_plan,
+    }
+    execution_result = execution.get("result")
+    execution_result = execution_result if isinstance(execution_result, Mapping) else {}
+    capture_data = execution_result.get("data")
+    capture_data = capture_data if isinstance(capture_data, Mapping) else execution_result
+    capture_receipt = _bounded_text(capture_data.get("captureReceipt"), 256)
+    if (
+        _bounded_text(context.get("tool"), 160) == "vrcforge_capture_multi_screenshot"
+        and capture_receipt
+    ):
+        task_continuation["plannerObservation"] = {
+            "tool": "vrcforge_capture_multi_screenshot",
+            "kind": "write",
+            "status": _status(execution.get("status")),
+            "result": {
+                "captureReceipt": capture_receipt,
+                "captureEvidenceId": _bounded_text(
+                    capture_data.get("captureEvidenceId"), 160
+                ),
+                "angles": [
+                    _bounded_text(item, 32)
+                    for item in (
+                        list(capture_data.get("angles") or [])[:4]
+                        if isinstance(capture_data.get("angles"), (list, tuple))
+                        else []
+                    )
+                    if _bounded_text(item, 32)
+                ],
+            },
+            "outcome": _bounded_outcome(outcome),
+        }
     return {
         "params": params,
         "agentName": (
@@ -575,20 +663,7 @@ def prepare_approval_task_continuation(
             or _bounded_text(approval.get("agentName"), 160)
             or "desktop-agent"
         ),
-        "taskContinuation": {
-            "context": dict(context),
-            "completion": dict(completion),
-            "approvalId": approval_id,
-            "arguments": dict(
-                requested_arguments
-                if isinstance(requested_arguments, Mapping) and requested_arguments
-                else approval_arguments
-                if isinstance(approval_arguments, Mapping)
-                else {}
-            ),
-            "execution": dict(execution),
-            "terminalPlan": terminal_plan,
-        },
+        "taskContinuation": task_continuation,
     }
 
 
@@ -784,12 +859,14 @@ class AgentTaskLoop:
     model: str = ""
     context_limit: int | None = None
     tool_calls_used: int = 0
+    provider_request_count: int = 0
     exposure_layer: str = "planning"
     history: list[dict[str, Any]] = field(default_factory=list)
     _actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     _requirements: dict[str, dict[str, Any]] = field(default_factory=dict)
     _skill_policy: dict[str, Any] = field(default_factory=dict)
     _skill_context: dict[str, Any] = field(default_factory=dict)
+    _managed_visual_capture_action_ids: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.objective = _bounded_text(self.objective, 600)
@@ -799,6 +876,10 @@ class AgentTaskLoop:
             self.objective,
         )
         self.tool_calls_used = max(0, min(int(self.tool_calls_used or 0), 3))
+        self.provider_request_count = max(
+            0,
+            min(int(self.provider_request_count or 0), 100),
+        )
         self.exposure_layer = (
             "execution" if _status(self.exposure_layer) == "execution" else "planning"
         )
@@ -826,6 +907,10 @@ class AgentTaskLoop:
                 else None
             ),
             tool_calls_used=max(0, min(int(context.get("toolCallsUsed") or 0), 3)),
+            provider_request_count=max(
+                0,
+                min(int(context.get("providerRequestCount") or 0), 100),
+            ),
             exposure_layer=str(context.get("exposureLayer") or "execution"),
             history=_bounded_history(context.get("history")),
         )
@@ -835,6 +920,13 @@ class AgentTaskLoop:
         for item in list(context.get("priorRequirements") or [])[:3]:
             if isinstance(item, Mapping) and (bounded := _bounded_requirement(item)) is not None:
                 loop._requirements[bounded["requirementId"]] = bounded
+        loop._managed_visual_capture_action_ids = list(
+            dict.fromkeys(
+                bounded
+                for item in list(context.get("managedVisualCaptureActionIds") or [])[:2]
+                if (bounded := _bounded_text(item, 80))
+            )
+        )
         loop._skill_context = _bounded_skill_context(context.get("skillContext"))
         loop._skill_policy = _bounded_skill_policy(
             context.get("skillPolicy") or loop._skill_context
@@ -854,7 +946,24 @@ class AgentTaskLoop:
         )
         if current is not None:
             loop._actions[current["actionId"]] = current
+            if (
+                current["tool"] == "vrcforge_capture_multi_screenshot"
+                and current["status"] == "completed"
+            ):
+                loop._remember_managed_visual_capture(current["actionId"])
         return loop
+
+    def _remember_managed_visual_capture(self, action_id: Any) -> None:
+        bounded = _bounded_text(action_id, 80)
+        if not bounded:
+            return
+        self._managed_visual_capture_action_ids = [
+            item
+            for item in self._managed_visual_capture_action_ids
+            if item != bounded
+        ]
+        self._managed_visual_capture_action_ids.append(bounded)
+        self._managed_visual_capture_action_ids = self._managed_visual_capture_action_ids[-2:]
 
     def approval_seed(
         self,
@@ -865,6 +974,7 @@ class AgentTaskLoop:
         requested_kind: str = "write",
         requested_arguments: Mapping[str, Any] | None = None,
         continue_after_approval: bool = True,
+        provider_request_count: int | None = None,
     ) -> dict[str, Any]:
         effective_kind = _bounded_text(requested_kind, 32) or "write"
         effective_tool = _bounded_text(requested_tool, 160)
@@ -889,9 +999,23 @@ class AgentTaskLoop:
                     3,
                 ),
             ),
+            "providerRequestCount": max(
+                0,
+                min(
+                    int(
+                        self.provider_request_count
+                        if provider_request_count is None
+                        else provider_request_count
+                    ),
+                    100,
+                ),
+            ),
             "exposureLayer": exposure_layer or self.exposure_layer,
             "actions": [dict(item) for item in self._actions.values()][-3:],
             "requirements": [dict(item) for item in self._requirements.values()][-3:],
+            "managedVisualCaptureActionIds": list(
+                self._managed_visual_capture_action_ids
+            ),
             "skillPolicy": dict(self._skill_policy),
             "skillContext": dict(self._skill_context),
             "history": _bounded_history(self.history),
@@ -942,6 +1066,7 @@ class AgentTaskLoop:
         outcome: Mapping[str, Any],
         action_id: str = "",
         correction_for_action_id: str = "",
+        pre_provider: bool = False,
     ) -> dict[str, Any]:
         action_id = _bounded_text(action_id, 80) or canonical_action_id(kind, tool, arguments)
         correction_id = _bounded_text(correction_for_action_id, 80)
@@ -1005,9 +1130,13 @@ class AgentTaskLoop:
             "attempts": attempts,
             "outcome": effective,
         }
+        if pre_provider:
+            record["preProvider"] = True
         if running_state:
             record["runtimeStatus"] = running_state
         self._actions[action_id] = record
+        if tool == "vrcforge_capture_multi_screenshot" and lifecycle == "completed":
+            self._remember_managed_visual_capture(action_id)
         result = dict(record)
         if accepted_correction_id:
             result["correctedActionId"] = accepted_correction_id
@@ -1021,6 +1150,10 @@ class AgentTaskLoop:
         arguments: Any | None = None,
         verification_profile: str = "",
     ) -> dict[str, Any]:
+        effective_profile = _bounded_text(verification_profile, 80) or _TOOL_DEFAULT_VERIFICATION_PROFILE.get(
+            str(tool or "").strip(),
+            "canonical_tool_result" if _status(kind) == "skill" else "",
+        )
         requirement = _bounded_requirement(
             {
                 "kind": kind,
@@ -1030,7 +1163,7 @@ class AgentTaskLoop:
                     if arguments is not None
                     else ""
                 ),
-                "verificationProfile": verification_profile,
+                "verificationProfile": effective_profile,
             }
         )
         if requirement is None:
@@ -1086,6 +1219,32 @@ class AgentTaskLoop:
             for action in self._actions.values()
             if _status(action.get("status")) == "completed"
         ]
+
+    def historical_steps(self) -> list[dict[str, Any]]:
+        """Project only bounded action identity for a resumed Runtime turn."""
+
+        steps: list[dict[str, Any]] = []
+        for action in self._actions.values():
+            lifecycle = _status(action.get("status"))
+            outcome = action.get("outcome")
+            outcome_status = (
+                _status(outcome.get("status"))
+                if isinstance(outcome, Mapping)
+                else ""
+            )
+            status = outcome_status if lifecycle == "superseded" else lifecycle
+            step = {
+                "index": len(steps),
+                "kind": _bounded_text(action.get("kind"), 32),
+                "tool": _bounded_text(action.get("tool"), 160),
+                "status": status,
+                "actionId": _bounded_text(action.get("actionId"), 80),
+                "historical": True,
+            }
+            if action.get("preProvider") is True:
+                step["preProvider"] = True
+            steps.append(step)
+        return steps
 
     def snapshot(self, status_override: str = "") -> dict[str, Any]:
         statuses = {

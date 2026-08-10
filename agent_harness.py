@@ -9,8 +9,9 @@ from agent_tool_result_contract import completion_gate_plan, normalize_agent_too
 from agent_task_loop import AgentTaskLoop
 
 
-AGENT_HARNESS_MATRIX_SCHEMA = "vrcforge.agent_harness_matrix.v4"
-AGENT_HARNESS_REPORT_SCHEMA = "vrcforge.agent_harness_report.v4"
+AGENT_HARNESS_MATRIX_SCHEMA = "vrcforge.agent_harness_matrix.v5"
+AGENT_HARNESS_REPORT_SCHEMA = "vrcforge.agent_harness_report.v5"
+AGENT_HARNESS_JOURNEY_SCHEMA = "vrcforge.agent_harness_journey.v1"
 _COMPLETION_STATUSES = frozenset({"ok", "failed", "needs_user_action"})
 
 
@@ -41,12 +42,17 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
         case_id = _case_id(case, seen_ids)
         prompt = case.get("prompt")
         expected_tool = case.get("expectedTool")
+        expected_action_kind = str(case.get("expectedActionKind") or "").strip().lower()
         forbidden_tools = case.get("forbiddenTools", [])
         exposure_layer = str(case.get("exposureLayer") or "planning")
         if not isinstance(prompt, str) or not prompt.strip():
             raise AgentHarnessError(f"selection case {case_id} requires a prompt")
         if not isinstance(expected_tool, str) or not expected_tool.strip():
             raise AgentHarnessError(f"selection case {case_id} requires expectedTool")
+        if expected_action_kind not in {"skill", "write"}:
+            raise AgentHarnessError(
+                f"selection case {case_id} requires expectedActionKind skill or write"
+            )
         if not isinstance(forbidden_tools, list) or any(
             not isinstance(item, str) or not item.strip() for item in forbidden_tools
         ):
@@ -55,6 +61,11 @@ def load_agent_harness_matrix(path: Path) -> dict[str, Any]:
             raise AgentHarnessError(f"selection case {case_id} forbids its expected tool")
         if exposure_layer not in {"planning", "execution"}:
             raise AgentHarnessError(f"selection case {case_id} has invalid exposureLayer")
+        if expected_action_kind == "write" and exposure_layer != "execution":
+            raise AgentHarnessError(
+                f"selection case {case_id} must expose writes only in execution"
+            )
+        case["expectedActionKind"] = expected_action_kind
         case["exposureLayer"] = exposure_layer
 
     for case in completion_cases:
@@ -149,6 +160,9 @@ def evaluate_agent_harness(
     verify_selection: Callable[[str, Mapping[str, Any], str], bool] | None = None,
     selection_source: str = "offline-runtime",
     trusted_selection_receipts: bool = False,
+    runtime_journeys: list[Mapping[str, Any]] | None = None,
+    verify_runtime_journey: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+    trusted_runtime_journey_receipts: bool = False,
 ) -> dict[str, Any]:
     selection_results: list[dict[str, Any]] = []
     for case in matrix["selectionCases"]:
@@ -157,12 +171,16 @@ def evaluate_agent_harness(
         raw_selection = select_tool(prompt, exposure_layer)
         if isinstance(raw_selection, Mapping):
             raw_calls = raw_selection.get("toolCalls") or raw_selection.get("tool_calls") or []
+            selected_action_kind = str(
+                raw_selection.get("actionKind") or raw_selection.get("action_kind") or ""
+            ).strip().lower()
             selected_calls = (
                 [str(item).strip() for item in raw_calls if str(item).strip()]
                 if isinstance(raw_calls, list)
                 else []
             )
         else:
+            selected_action_kind = "skill" if str(raw_selection or "").strip() else ""
             selected_calls = [str(raw_selection).strip()] if str(raw_selection or "").strip() else []
         selected_tool = selected_calls[0] if len(selected_calls) == 1 else ""
         provider_evidence_valid = False
@@ -174,13 +192,19 @@ def evaluate_agent_harness(
             except Exception:
                 provider_evidence_valid = False
         forbidden_tools = tuple(str(item) for item in case.get("forbiddenTools", []))
-        passed = selected_tool == case["expectedTool"] and selected_tool not in forbidden_tools
+        passed = (
+            selected_tool == case["expectedTool"]
+            and selected_tool not in forbidden_tools
+            and selected_action_kind == case["expectedActionKind"]
+        )
         selection_results.append(
             {
                 "id": case["id"],
                 "passed": passed,
                 "selectedTool": selected_tool,
                 "expectedTool": case["expectedTool"],
+                "selectedActionKind": selected_action_kind,
+                "expectedActionKind": case["expectedActionKind"],
                 "exposureLayer": exposure_layer,
                 "providerEvidenceValid": provider_evidence_valid,
             }
@@ -361,18 +385,52 @@ def evaluate_agent_harness(
     provider_evidence_valid = bool(selection_results) and all(
         item["providerEvidenceValid"] for item in selection_results
     )
-    release_accepted = bool(
+    selection_receipt_accepted = bool(
         accepted and trusted_selection_receipts and provider_evidence_valid
+    )
+    journey_results = [
+        _evaluate_runtime_journey(
+            item,
+            verify_runtime_journey=verify_runtime_journey,
+        )
+        for item in list(runtime_journeys or [])
+    ]
+    runtime_journey_accepted = bool(
+        trusted_runtime_journey_receipts
+        and journey_results
+        and all(item["accepted"] for item in journey_results)
+    )
+    tools_executed = bool(
+        runtime_journey_accepted
+        and any(item["toolExecutions"] > 0 for item in journey_results)
+    )
+    external_verification_accepted = bool(
+        runtime_journey_accepted
+        and any(item["externalVerificationAccepted"] for item in journey_results)
+    )
+    release_accepted = bool(
+        selection_receipt_accepted
+        and tools_executed
+        and external_verification_accepted
     )
     return {
         "schema": AGENT_HARNESS_REPORT_SCHEMA,
         "accepted": accepted,
         "releaseAccepted": release_accepted,
+        "selectionReceiptAccepted": selection_receipt_accepted,
+        "runtimeJourneyAccepted": runtime_journey_accepted,
+        "externalVerificationAccepted": external_verification_accepted,
         "selectionOnly": False,
-        "toolsExecuted": False,
+        "toolsExecuted": tools_executed,
         "selectionSource": str(selection_source or "offline-runtime")[:200],
         "trustedSelectionReceipts": bool(trusted_selection_receipts),
         "providerEvidenceValid": provider_evidence_valid,
+        "trustedRuntimeJourneyReceipts": bool(trusted_runtime_journey_receipts),
+        "runtimeJourneys": {
+            "passed": sum(1 for item in journey_results if item["accepted"]),
+            "total": len(journey_results),
+            "cases": journey_results,
+        },
         "selection": {
             "passed": selection_passed,
             "total": len(selection_results),
@@ -394,6 +452,81 @@ def evaluate_agent_harness(
             "cases": chain_results,
         },
     }
+
+
+def _evaluate_runtime_journey(
+    value: Mapping[str, Any],
+    *,
+    verify_runtime_journey: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    authenticated: Mapping[str, Any] = {}
+    if verify_runtime_journey is not None:
+        try:
+            verified = verify_runtime_journey(value)
+            if isinstance(verified, Mapping):
+                authenticated = verified
+        except Exception:
+            authenticated = {}
+    receipt_valid = bool(authenticated)
+    schema = str(authenticated.get("schema") or "")
+    tool_executions = max(0, int(authenticated.get("toolExecutions") or 0))
+    provider_requests = max(0, int(authenticated.get("providerRequestCount") or 0))
+    result_refeeds = max(0, int(authenticated.get("resultRefeedCount") or 0))
+    next_step = str(authenticated.get("nextStep") or "")
+    task_status = str(authenticated.get("taskStatus") or "")
+    completed_action_ids = _bounded_action_ids(authenticated.get("completedActionIds"))
+    evidence_action_ids = _bounded_action_ids(authenticated.get("evidenceActionIds"))
+    verification_profiles = _bounded_verification_values(
+        authenticated.get("verificationProfiles")
+    )
+    verification_states = _bounded_verification_values(
+        authenticated.get("verificationStates")
+    )
+    external_verification_accepted = bool(
+        verification_profiles
+        and len(verification_profiles) == len(verification_states)
+        and all(state == "passed" for state in verification_states)
+        and any(profile != "canonical_tool_result" for profile in verification_profiles)
+    )
+    accepted = bool(
+        schema == AGENT_HARNESS_JOURNEY_SCHEMA
+        and receipt_valid
+        and tool_executions > 0
+        and provider_requests >= 2
+        and result_refeeds > 0
+        and next_step == "done"
+        and task_status == "completed"
+        and completed_action_ids
+        and evidence_action_ids == completed_action_ids
+        and external_verification_accepted
+    )
+    return {
+        "id": str(authenticated.get("id") or "")[:160],
+        "accepted": accepted,
+        "receiptValid": receipt_valid,
+        "toolExecutions": tool_executions,
+        "providerRequestCount": provider_requests,
+        "resultRefeedCount": result_refeeds,
+        "nextStep": next_step,
+        "taskStatus": task_status,
+        "completedActionIds": completed_action_ids,
+        "evidenceActionIds": evidence_action_ids,
+        "verificationProfiles": verification_profiles,
+        "verificationStates": verification_states,
+        "externalVerificationAccepted": external_verification_accepted,
+    }
+
+
+def _bounded_action_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item)[:160] for item in value[:3] if str(item).startswith("action_")]
+
+
+def _bounded_verification_values(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip()[:80] for item in value[:6] if str(item).strip()]
 
 
 def _case_id(case: Any, seen_ids: set[str]) -> str:

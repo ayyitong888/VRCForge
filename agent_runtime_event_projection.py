@@ -8,7 +8,7 @@ from typing import Any
 
 RUNTIME_TURN_EVENT_SCHEMA = "vrcforge.runtime_turn_event.v1"
 RUNTIME_CONTINUATION_SOURCES = frozenset(
-    {"shell_process_finished", "sub_agent_finished"}
+    {"approval_finished", "shell_process_finished", "sub_agent_finished"}
 )
 
 
@@ -34,7 +34,7 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
     completion = completion if isinstance(completion, Mapping) else {}
     evidence = completion.get("evidenceActionIds")
     evidence = evidence if isinstance(evidence, list) else []
-    return {
+    result = {
         "schema": RUNTIME_TURN_EVENT_SCHEMA,
         "continuationSource": source,
         "sessionId": session_id,
@@ -56,3 +56,9 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
             },
         },
     }
+    receipt = payload.get("harnessJourneyReceipt")
+    if isinstance(receipt, Mapping):
+        # Receipts contain only the already-bounded safe journey projection and
+        # a process-local authentication envelope; raw results never enter it.
+        result["harnessJourneyReceipt"] = dict(receipt)
+    return result

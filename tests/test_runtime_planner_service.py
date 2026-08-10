@@ -20,7 +20,9 @@ from runtime_planner_service import (
     PlannerTurnMetadata,
     RuntimePlannerService,
     latest_loop_step_needs_model_correction,
+    planner_tool_input_schema,
     planner_safe_tool_result_fields,
+    validate_planner_tool_arguments,
 )
 
 
@@ -272,6 +274,29 @@ def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
     assert "privateDump" not in observation
 
 
+def test_capture_approval_observation_exposes_only_opaque_visual_capability() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_capture_multi_screenshot",
+            "kind": "write",
+            "status": "applied",
+            "result": {
+                "captureReceipt": "opaque-managed-capability",
+                "captureEvidenceId": "visual_123",
+                "angles": ["front", "back"],
+                "privatePath": "D:/private/vision_front.png",
+            },
+            "outcome": {"status": "ok", "summary": "captured"},
+        }
+    )
+
+    assert "captureReceipt=opaque-managed-capability" in observation
+    assert "captureEvidenceId=visual_123" in observation
+    assert "captureAngles=front | back" in observation
+    assert "privatePath" not in observation
+    assert "D:/private" not in observation
+
+
 def test_failed_deterministic_tool_feedback_invokes_model_correction_once() -> None:
     catalog = FakeCatalog(
         planning=PlannerCatalogSnapshot(
@@ -409,6 +434,126 @@ def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() 
     assert "inputs={projectPath?:string, avatarPath?:string}" in tool_line
 
 
+def test_multi_angle_visual_tool_requires_managed_capture_receipt() -> None:
+    schema = planner_tool_input_schema("vrcforge_vision_audit_multi")
+
+    assert schema["required"] == ["captureReceipt"]
+    assert validate_planner_tool_arguments(
+        schema,
+        {"captureReceipt": "opaque-managed-capability"},
+    )["ok"] is True
+    assert validate_planner_tool_arguments(schema, {})["issues"] == [
+        {"path": "captureReceipt", "code": "missing_required", "expected": "present"}
+    ]
+
+
+def test_shallow_tool_schema_validates_required_type_enum_and_closed_extras() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "mode": {"type": "string", "enum": ["safe", "force"]},
+            "count": {"type": "integer"},
+        },
+        "required": ["name", "mode"],
+        "additionalProperties": False,
+    }
+
+    assert validate_planner_tool_arguments(
+        schema, {"name": "Probe", "mode": "safe", "count": 2}
+    )["ok"] is True
+    missing = validate_planner_tool_arguments(schema, {"mode": "safe"})
+    wrong_type = validate_planner_tool_arguments(
+        schema, {"name": "Probe", "mode": "safe", "count": True}
+    )
+    wrong_enum = validate_planner_tool_arguments(
+        schema, {"name": "Probe", "mode": "unsafe"}
+    )
+    unknown = validate_planner_tool_arguments(
+        schema, {"name": "Probe", "mode": "safe", "surprise": 1}
+    )
+
+    assert missing["issues"] == [
+        {"path": "name", "code": "missing_required", "expected": "present"}
+    ]
+    assert wrong_type["issues"] == [
+        {"path": "count", "code": "wrong_type", "expected": "integer"}
+    ]
+    assert wrong_enum["issues"] == [
+        {"path": "mode", "code": "enum", "expected": "one of the declared values"}
+    ]
+    assert unknown["issues"] == [
+        {"path": "surprise", "code": "unknown_property", "expected": "declared property"}
+    ]
+    assert all(
+        result["code"] == "planner_invalid_response"
+        for result in (missing, wrong_type, wrong_enum, unknown)
+    )
+
+
+def test_shallow_schema_allows_unknown_fields_unless_explicitly_closed() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+        "additionalProperties": True,
+    }
+
+    assert validate_planner_tool_arguments(
+        schema, {"name": "Probe", "acceptedByHandler": True}
+    )["ok"] is True
+
+
+def test_llm_tool_schema_failure_returns_a_correctable_non_execution_plan() -> None:
+    schema_tool = PlannerTool(
+        name="vrcforge_schema_fixture",
+        description="Inspect the fixture.",
+        category="read/debug",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "mode": {"type": "string", "enum": ["safe", "force"]},
+            },
+            "required": ["name", "mode"],
+            "additionalProperties": False,
+        },
+    )
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(schema_tool,),
+            routable_tools=(schema_tool,),
+        )
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "skill",
+                    "skill_tool": schema_tool.name,
+                    "skill_params": {"name": "Probe", "mode": "unsafe"},
+                }
+            )
+        )
+    )
+
+    plan = service(catalog=catalog, model=model)._llm_plan_agent_turn(
+        "inspect the fixture",
+        {},
+        [],
+        exposure_layer=EXPOSURE_LAYER_PLANNING,
+    )
+
+    assert plan is not None
+    assert plan["nextStep"] == "planner_invalid_response"
+    assert plan["continueLoop"] is True
+    assert plan["skillNeeded"] is False
+    assert plan["argumentValidation"]["code"] == "planner_invalid_response"
+    assert plan["argumentValidation"]["issues"][0]["code"] == "enum"
+    assert "mode:string[enum=safe|force]" in model.prompts[0]
+    assert "additionalProperties=false" in model.prompts[0]
+
+
 def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() -> None:
     catalog = FakeCatalog(
         planning=PlannerCatalogSnapshot(
@@ -431,7 +576,7 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
     assert scan["completionRequirement"] == {
         "kind": "write",
         "tool": "vrcforge_create_gameobject",
-        "verificationProfile": "persisted_scene_write",
+        "verificationProfile": "persisted_scene_write_console",
     }
 
     resolved = planner.plan_agent_turn(
@@ -520,8 +665,8 @@ def test_llm_execution_layer_has_a_first_class_supervised_write_action() -> None
     assert plan["nextStep"] == "request_write"
 
 
-def test_llm_skill_action_rejects_visible_supervised_write_tool() -> None:
-    write_tool = tool("vrcforge_create_gameobject", category="supervised-write", write=True)
+def test_llm_skill_action_returns_correctable_kind_mismatch_for_any_supervised_write() -> None:
+    write_tool = tool("fixture-supervised-write", category="supervised-write", write=True)
     catalog = FakeCatalog(
         execution=PlannerCatalogSnapshot(
             visible_tools=(write_tool,),
@@ -533,7 +678,7 @@ def test_llm_skill_action_rejects_visible_supervised_write_tool() -> None:
             json.dumps(
                 {
                     "action": "skill",
-                    "skill_tool": "vrcforge_create_gameobject",
+                    "skill_tool": "fixture-supervised-write",
                     "skill_params": {"name": "Probe"},
                 }
             )
@@ -548,10 +693,142 @@ def test_llm_skill_action_rejects_visible_supervised_write_tool() -> None:
     )
 
     assert plan is not None
-    assert plan["plannerFailed"] is True
-    assert plan["plannerFailure"]["code"] == "planner_invalid_response"
+    validation = plan["argumentValidation"]
+    assert validation["ok"] is False
+    assert validation["actionKind"] == "skill"
+    assert validation["tool"] == "fixture-supervised-write"
+    assert validation["issues"] == [
+        {
+            "path": "action",
+            "code": "wrong_action_kind",
+            "expected": "write",
+        }
+    ]
     assert plan["skillNeeded"] is False
     assert plan["writeNeeded"] is False
+    assert plan["continueLoop"] is True
+    assert plan["nextStep"] == "planner_invalid_response"
+
+
+def test_deterministic_supervised_write_route_preserves_action_kind_across_exposure_layers() -> None:
+    write_tool = tool("fixture-supervised-write", category="supervised-write", write=True)
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(),
+            routable_tools=(write_tool,),
+        ),
+        execution=PlannerCatalogSnapshot(
+            visible_tools=(write_tool,),
+            routable_tools=(write_tool,),
+        ),
+    )
+    planner = service(catalog=catalog)
+    request = {
+        "skill_tool": "fixture-supervised-write",
+        "skill_params": {"name": "Probe"},
+    }
+
+    planning = planner.plan_agent_turn(
+        "Run the explicitly selected supervised operation.",
+        request,
+        {},
+        exposure_layer=EXPOSURE_LAYER_PLANNING,
+    )
+    execution = planner.plan_agent_turn(
+        "Run the explicitly selected supervised operation.",
+        request,
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert planning["enterExecution"] is True
+    assert planning["skillNeeded"] is False
+    assert planning["writeNeeded"] is False
+    assert planning["nextStep"] == "enter_execution"
+    assert execution["skillNeeded"] is False
+    assert execution["writeNeeded"] is True
+    assert execution["writeTool"] == "fixture-supervised-write"
+    assert execution["writeParams"] == {"name": "Probe"}
+    assert execution["nextStep"] == "request_write"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Capture front and back views for coverage.",
+        "Take screenshots from several angles for a visual audit.",
+        "请做多角度截图，对比正面、侧面和背面。",
+        "把正面和背面分别拍下来。",
+    ],
+)
+def test_multi_angle_capture_intent_selects_the_supervised_multi_capture(message: str) -> None:
+    single = tool(
+        "vrcforge_capture_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    multi = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(),
+            routable_tools=(single, multi),
+        ),
+        execution=PlannerCatalogSnapshot(
+            visible_tools=(single, multi),
+            routable_tools=(single, multi),
+        ),
+    )
+
+    plan = service(catalog=catalog).plan_agent_turn(
+        message,
+        {},
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert plan["skillNeeded"] is False
+    assert plan["writeNeeded"] is True
+    assert plan["writeTool"] == "vrcforge_capture_multi_screenshot"
+    assert plan["writeTool"] != "vrcforge_capture_screenshot"
+    assert plan["nextStep"] == "request_write"
+
+
+def test_single_capture_and_capture_status_keep_distinct_action_kinds() -> None:
+    single = tool(
+        "vrcforge_capture_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    status_tool = tool("vrcforge_capture_status")
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(single, status_tool),
+        routable_tools=(single, status_tool),
+    )
+    planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
+
+    single_plan = planner.plan_agent_turn(
+        "Capture one current screenshot.",
+        {},
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+    status_plan = planner.plan_agent_turn(
+        "Read the current capture status for play mode.",
+        {},
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert single_plan["writeNeeded"] is True
+    assert single_plan["writeTool"] == "vrcforge_capture_screenshot"
+    assert single_plan["skillNeeded"] is False
+    assert status_plan["skillNeeded"] is True
+    assert status_plan["skillTool"] == "vrcforge_capture_status"
+    assert status_plan["writeNeeded"] is False
 
 
 @pytest.mark.parametrize(

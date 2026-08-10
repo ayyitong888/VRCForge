@@ -49,6 +49,113 @@ def approved_write(
     return gateway.approval_transactions.apply_approved({"approval_id": approval_id})
 
 
+def test_approved_write_runs_declared_completion_verifier_around_handler(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    calls: list[str] = []
+
+    def checkpoint(_path):
+        calls.append("checkpoint")
+        return {"ok": True}
+
+    gateway.approval_transactions.checkpoint_prepare_handler = checkpoint
+
+    def prepare(arguments):
+        calls.append("prepare")
+        assert arguments["projectRoot"] == str(project)
+        return {"diagnosticIds": ["before"]}
+
+    def handler(_arguments):
+        calls.append("handler")
+        return {"ok": True, "persistedReadback": True, "sceneSaved": True}
+
+    def finalize(_arguments, baseline, result):
+        calls.append("finalize")
+        assert baseline == {"diagnosticIds": ["before"]}
+        return {**result, "consoleVerified": True}
+
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_test_verified_write",
+        "Verified write",
+        "high",
+        handler,
+        verification_profile="persisted_scene_write_console",
+        verification_prepare_handler=prepare,
+        verification_finalize_handler=finalize,
+    )
+    request = gateway.approval_transactions.create_apply_request(
+        {
+            "target_tool": "vrcforge_test_verified_write",
+            "arguments": {"projectRoot": str(project)},
+        }
+    )
+    approval_id = request["approval"]["id"]
+    gateway.approval_transactions.approve(approval_id)
+
+    execution = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+
+    assert calls == ["prepare", "checkpoint", "handler", "finalize"]
+    assert execution["result"]["consoleVerified"] is True
+
+
+def test_failed_verification_baseline_never_starts_handler_or_recovery(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    calls: list[str] = []
+
+    def checkpoint(_path):
+        calls.append("checkpoint")
+        return {"ok": True}
+
+    gateway.approval_transactions.checkpoint_prepare_handler = checkpoint
+
+    def prepare(_arguments):
+        calls.append("prepare")
+        raise RuntimeError("Unity diagnostics are still compiling")
+
+    def handler(_arguments):
+        calls.append("handler")
+        return {"ok": True, "persistedReadback": True, "sceneSaved": True}
+
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_test_baseline_failure",
+        "Verified write",
+        "high",
+        handler,
+        verification_profile="persisted_scene_write_console",
+        verification_prepare_handler=prepare,
+        verification_finalize_handler=lambda _arguments, _baseline, result: result,
+    )
+    request = gateway.approval_transactions.create_apply_request(
+        {
+            "target_tool": "vrcforge_test_baseline_failure",
+            "arguments": {"projectRoot": str(project)},
+        }
+    )
+    approval_id = request["approval"]["id"]
+    gateway.approval_transactions.approve(approval_id)
+
+    execution = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+
+    assert execution["ok"] is False
+    assert execution["status"] == "failed"
+    assert calls == ["prepare"]
+    assert gateway.checkpoint_recovery._active_apply_recoveries() == []
+
+
+def test_declared_completion_verifier_requires_both_handlers(tmp_path: Path) -> None:
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    with pytest.raises(ValueError, match="requires prepare and finalize"):
+        gateway.approval_transactions.register_write_handler(
+            "vrcforge_test_invalid_verifier",
+            "Invalid verifier",
+            "high",
+            lambda _arguments: {"ok": True},
+            verification_profile="persisted_scene_write_console",
+            verification_prepare_handler=lambda _arguments: {},
+        )
+
+
 def _core_result(*, pending: bool = False) -> dict[str, object]:
     structured: dict[str, object] = {"success": True}
     if pending:

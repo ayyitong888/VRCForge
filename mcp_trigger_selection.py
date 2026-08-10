@@ -48,6 +48,10 @@ class SelectionReceiptAuthority:
         calls = result.get("toolCalls")
         if not isinstance(calls, list) or any(not isinstance(item, str) for item in calls):
             raise RuntimeError("selection receipt requires validated toolCalls")
+        provided_action_kind = str(result.get("actionKind") or "").strip().lower()
+        action_kind = _selection_action_kind(calls, tools)
+        if provided_action_kind and provided_action_kind != action_kind:
+            raise RuntimeError("selection receipt requires the host-projected actionKind")
         now = int(time.time())
         payload = {
             "schema": "vrcforge.mcp_selection_receipt.v1",
@@ -62,7 +66,9 @@ class SelectionReceiptAuthority:
             "visibleToolsHash": tools_hash,
             "visibleToolCount": len(tools),
             "requestDigest": self._digest({"message": str(message), "visibleToolsHash": tools_hash}),
-            "responseDigest": self._digest({"toolCalls": calls}),
+            "responseDigest": self._digest(
+                {"toolCalls": calls, "actionKind": action_kind}
+            ),
             "issuedAt": now,
             "expiresAt": now + self._ttl_seconds,
         }
@@ -90,6 +96,7 @@ class SelectionReceiptAuthority:
         calls = result.get("toolCalls")
         if not isinstance(evidence, Mapping) or not isinstance(calls, list):
             return False
+        provided_action_kind = str(result.get("actionKind") or "").strip().lower()
         current_binding = {
             "provider": str(provider or "").strip(),
             "model": str(model or "").strip(),
@@ -122,6 +129,9 @@ class SelectionReceiptAuthority:
             ):
                 return False
             tools, tools_hash = _canonical_tools(visible_tools)
+            action_kind = _selection_action_kind(calls, tools)
+            if provided_action_kind and provided_action_kind != action_kind:
+                return False
             allowed_evidence_keys = {"source", *payload.keys(), "signature"}
             if set(evidence) != allowed_evidence_keys:
                 return False
@@ -130,7 +140,9 @@ class SelectionReceiptAuthority:
                 "visibleToolsHash": tools_hash,
                 "visibleToolCount": len(tools),
                 "requestDigest": self._digest({"message": str(message), "visibleToolsHash": tools_hash}),
-                "responseDigest": self._digest({"toolCalls": calls}),
+                "responseDigest": self._digest(
+                    {"toolCalls": calls, "actionKind": action_kind}
+                ),
             }
             public_evidence = {key: evidence.get(key) for key in allowed_evidence_keys}
             expected_evidence = {"source": "dashboard-selection-receipt", **expected, "signature": signature}
@@ -170,6 +182,32 @@ def normalize_exposure_layer(value: Any) -> str:
     if layer not in {"planning", "execution"}:
         raise ValueError("exposureLayer must be planning or execution")
     return layer
+
+
+def _selection_action_kind(
+    calls: Sequence[str],
+    tools: Sequence[Mapping[str, Any]],
+) -> str:
+    if not calls:
+        return "none"
+    if len(calls) != 1:
+        raise RuntimeError("selection action kind requires at most one tool")
+    selected = next(
+        (tool for tool in tools if str(tool.get("name") or "") == str(calls[0])),
+        None,
+    )
+    if selected is None:
+        raise RuntimeError("selection action kind requires a known tool")
+    metadata = selected.get("_meta") if isinstance(selected.get("_meta"), Mapping) else {}
+    explicit = str(metadata.get("actionKind") or "").strip().lower()
+    if explicit in {"skill", "write"}:
+        return explicit
+    annotations = (
+        selected.get("annotations")
+        if isinstance(selected.get("annotations"), Mapping)
+        else {}
+    )
+    return "write" if annotations.get("readOnlyHint") is False else "skill"
 
 
 def tools_for_exposure_layer(
@@ -241,6 +279,7 @@ def plan_mcp_tool_selection(
         raise RuntimeError("selection provider returned an unknown or multi-tool result")
     return {
         "toolCalls": selected,
+        "actionKind": _selection_action_kind(selected, tools),
         "providerEvidence": {
             "source": "dashboard-llm-plan",
             "provider": provider,

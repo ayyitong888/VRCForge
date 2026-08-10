@@ -24,6 +24,8 @@ from agent_gateway import (
     ApprovedUnityExecutionPlanBuilder,
     CHECKPOINT_RECORD_SCHEMA,
     CheckpointPrepareHandler,
+    CompletionVerificationFinalizeHandler,
+    CompletionVerificationPrepareHandler,
     EXPOSURE_LAYER_EXECUTION,
     LOCAL_STATE_CHECKPOINT_SCOPE,
     LOCAL_STATE_CHECKPOINT_TARGETS,
@@ -223,11 +225,19 @@ class AgentApprovalTransactionService:
         request_preparer: WriteRequestPreparer | None = None,
         manual_approval_resolver: ManualApprovalResolver | None = None,
         checkpoint_prepare_handler: CheckpointPrepareHandler | None = None,
+        verification_profile: str = "",
+        verification_prepare_handler: CompletionVerificationPrepareHandler | None = None,
+        verification_finalize_handler: CompletionVerificationFinalizeHandler | None = None,
         requires_approved_execution_context: bool = False,
         approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None,
         approval_category: str = "",
         allow_future_category: bool = False,
     ) -> None:
+        bounded_verification_profile = str(verification_profile or "").strip()[:80]
+        if bounded_verification_profile and (
+            verification_prepare_handler is None or verification_finalize_handler is None
+        ):
+            raise ValueError("A declared write verification profile requires prepare and finalize handlers.")
         self._ports.state.write_handlers[name] = AgentWriteHandler(
             name=name,
             description=description,
@@ -238,6 +248,9 @@ class AgentApprovalTransactionService:
             request_preparer=request_preparer,
             manual_approval_resolver=manual_approval_resolver,
             checkpoint_prepare_handler=checkpoint_prepare_handler,
+            verification_profile=bounded_verification_profile,
+            verification_prepare_handler=verification_prepare_handler,
+            verification_finalize_handler=verification_finalize_handler,
             requires_approved_execution_context=requires_approved_execution_context,
             approved_execution_plan_builder=approved_execution_plan_builder,
             approval_category=str(approval_category or "").strip(),
@@ -961,6 +974,7 @@ class AgentApprovalTransactionService:
         result: Any = None
         completion_outcome: dict[str, Any] = {}
         task_completion: dict[str, Any] | None = None
+        verification_baseline: dict[str, Any] = {}
         try:
             user_constraints = self._ports.read_user_constraints()
             arguments = self._inject_user_constraints_for_apply(
@@ -975,6 +989,16 @@ class AgentApprovalTransactionService:
                     separators=(",", ":"),
                 )
             )
+            if write_handler.verification_prepare_handler is not None:
+                # The pre-write verifier must finish before a recovery record
+                # claims that handler execution may have mutated the project.
+                # A failed/unstable baseline is therefore a clean no-write
+                # failure, not an interrupted apply that blocks later writes.
+                verification_arguments = dict(arguments)
+                verification_arguments.pop("_vrcforge_approved_execution", None)
+                verification_baseline = ensure_dict(
+                    write_handler.verification_prepare_handler(verification_arguments)
+                )
             classification = ensure_dict(arguments.get("classification_snapshot"))
             requires_checkpoint = not (
                 target_tool == "vrcforge_shell_execute" and classification.get("readOnly") is True
@@ -1018,6 +1042,8 @@ class AgentApprovalTransactionService:
                                 arguments,
                                 handler_arguments_digest,
                                 ensure_dict(approval.get("approvedUnityExecutionPlan")),
+                                verification_baseline,
+                                ensure_dict(approval.get("taskContext")),
                             )
             elif requires_checkpoint and target_tool in LOCAL_STATE_CHECKPOINT_TARGETS:
                 if not self._ports.state.skill_package_write_lock_bound:
@@ -1080,6 +1106,8 @@ class AgentApprovalTransactionService:
                                     ensure_dict(
                                         approval.get("approvedUnityExecutionPlan")
                                     ),
+                                    verification_baseline,
+                                    ensure_dict(approval.get("taskContext")),
                                 )
             else:
                 if requires_checkpoint:
@@ -1116,6 +1144,8 @@ class AgentApprovalTransactionService:
                         arguments,
                         handler_arguments_digest,
                         ensure_dict(approval.get("approvedUnityExecutionPlan")),
+                        verification_baseline,
+                        ensure_dict(approval.get("taskContext")),
                     )
             if core_call_audits:
                 request_trace = {
@@ -1458,11 +1488,20 @@ class AgentApprovalTransactionService:
         arguments: dict[str, Any],
         handler_arguments_digest: str,
         frozen_execution_plan: dict[str, Any],
+        verification_baseline: dict[str, Any],
+        task_context: dict[str, Any],
     ) -> Any:
         handler_arguments = dict(arguments)
         handler_arguments.pop("_vrcforge_approved_execution", None)
         if not write_handler.requires_approved_execution_context:
-            return write_handler.handler(handler_arguments)
+            result = write_handler.handler(handler_arguments)
+            if write_handler.verification_finalize_handler is not None:
+                result = write_handler.verification_finalize_handler(
+                    dict(handler_arguments),
+                    dict(verification_baseline),
+                    result,
+                )
+            return result
         checkpoint_id = str(ensure_dict(checkpoint).get("id") or "").strip()
         if not checkpoint or checkpoint.get("ok") is not True or not checkpoint_id:
             raise AgentGatewayError(
@@ -1507,6 +1546,12 @@ class AgentApprovalTransactionService:
             "issuedAtUnixMs": now_ms,
             "expiresAtUnixMs": now_ms + 60_000,
         }
+        for key in ("taskId", "sessionId", "actionId"):
+            value = str(task_context.get(key) or "").strip()
+            if value:
+                execution_context[
+                    "requestedActionId" if key == "actionId" else key
+                ] = value
         execution_plan = create_approved_unity_execution_plan(
             execution_context,
             frozen_execution_plan,
@@ -1521,6 +1566,12 @@ class AgentApprovalTransactionService:
             raise AgentGatewayError(
                 "The approved Unity execution plan was not consumed exactly.",
                 status_code=409,
+            )
+        if write_handler.verification_finalize_handler is not None:
+            result = write_handler.verification_finalize_handler(
+                dict(handler_arguments),
+                dict(verification_baseline),
+                result,
             )
         return result
 

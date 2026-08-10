@@ -6,6 +6,7 @@ from agent_task_loop import (
     approval_completion,
     approval_task_context,
     canonical_action_id,
+    prepare_approval_task_continuation,
     prepare_sub_agent_task_continuation,
     rejected_approval_completion,
 )
@@ -335,6 +336,47 @@ def test_same_background_action_can_finish_before_the_completion_claim() -> None
     assert gated["task"]["status"] == "completed"
 
 
+def test_shell_completion_requires_the_runtime_owned_zero_exit_verifier() -> None:
+    loop = AgentTaskLoop("run the host check")
+    arguments = {"command": "Write-Output ok"}
+    requirement = loop.require_action(kind="shell", tool="shell", arguments=arguments)
+
+    passed = loop.record_action(
+        kind="shell",
+        tool="shell",
+        arguments=arguments,
+        raw_result={"ok": True, "status": "finished", "result": {"exitCode": 0}},
+        outcome=ok_outcome("host check completed"),
+    )
+
+    assert requirement["verificationProfile"] == "shell_exit_zero"
+    assert passed["status"] == "completed"
+    assert passed["outcome"]["verification"] == {
+        "state": "passed",
+        "checks": [{"kind": "exitCode", "state": "passed"}],
+    }
+
+
+def test_shell_zero_exit_verifier_does_not_turn_a_running_process_terminal() -> None:
+    loop = AgentTaskLoop("run the worker")
+    arguments = {"command": "python worker.py"}
+    loop.require_action(kind="shell", tool="shell", arguments=arguments)
+
+    running = loop.record_action(
+        kind="shell",
+        tool="shell",
+        arguments=arguments,
+        raw_result={
+            "ok": True,
+            "status": "running",
+            "session": {"sessionId": "shell-1", "status": "running"},
+        },
+        outcome=ok_outcome("worker started"),
+    )
+
+    assert running["status"] == "running"
+
+
 def test_deterministic_single_read_completes_from_its_exact_result() -> None:
     loop = AgentTaskLoop("list avatars")
     loop.require_action(kind="skill", tool="vrcforge_list_avatars", arguments={})
@@ -486,7 +528,7 @@ def test_structured_failure_survives_the_task_projection_for_the_next_plan() -> 
     }
 
 
-def test_create_gameobject_requires_persisted_scene_readback() -> None:
+def test_create_gameobject_requires_persisted_scene_readback_and_stable_console() -> None:
     loop = AgentTaskLoop("create one object")
     failed = loop.record_action(
         kind="write",
@@ -500,6 +542,26 @@ def test_create_gameobject_requires_persisted_scene_readback() -> None:
     assert failed["outcome"]["verification"]["state"] == "needs_user_action"
     assert loop.gate_terminal({"planner": "runtime", "nextStep": "done"})["nextStep"] == "needs_user_action"
 
+    console_failed_loop = AgentTaskLoop("create one object")
+    console_failed = console_failed_loop.record_action(
+        kind="write",
+        tool="vrcforge_create_gameobject",
+        arguments={"name": "Probe"},
+        raw_result={
+            "ok": True,
+            "status": "applied",
+            "persistedReadback": True,
+            "sceneSaved": True,
+            "consoleVerified": False,
+        },
+        outcome=ok_outcome("created"),
+    )
+    assert console_failed["status"] == "needs_user_action"
+    assert console_failed["outcome"]["verification"]["checks"][-1] == {
+        "kind": "consoleVerified",
+        "state": "failed",
+    }
+
     verified_loop = AgentTaskLoop("create one object")
     verified = verified_loop.record_action(
         kind="write",
@@ -511,6 +573,7 @@ def test_create_gameobject_requires_persisted_scene_readback() -> None:
             "gameObjectPath": "Probe",
             "persistedReadback": True,
             "sceneSaved": True,
+            "consoleVerified": True,
         },
         outcome=ok_outcome("created"),
     )
@@ -542,6 +605,30 @@ def test_declared_verification_profile_is_executed_for_the_required_action() -> 
         {"kind": "persistedReadback", "state": "passed"},
         {"kind": "sceneSaved", "state": "failed"},
     ]
+
+
+def test_multi_angle_visual_requires_managed_capture_evidence_verification() -> None:
+    loop = AgentTaskLoop("visually verify the managed capture")
+    arguments = {"captureReceipt": "opaque-receipt"}
+    loop.require_action(
+        kind="skill",
+        tool="vrcforge_vision_audit_multi",
+        arguments=arguments,
+        verification_profile="multi_angle_visual",
+    )
+    missing = loop.record_action(
+        kind="skill",
+        tool="vrcforge_vision_audit_multi",
+        arguments=arguments,
+        raw_result={"ok": True, "visualVerified": True, "coverageComplete": True},
+        outcome=ok_outcome("visual audit passed"),
+    )
+
+    assert missing["status"] == "needs_user_action"
+    assert missing["outcome"]["verification"]["checks"][-1] == {
+        "kind": "captureEvidenceVerified",
+        "state": "failed",
+    }
 
 
 def test_unknown_declared_verification_profile_fails_closed() -> None:
@@ -600,6 +687,7 @@ def test_approval_context_binds_identity_and_verifies_terminal_result() -> None:
             "gameObjectPath": "Probe",
             "persistedReadback": True,
             "sceneSaved": True,
+            "consoleVerified": True,
         },
         outcome=ok_outcome("created"),
     )
@@ -677,6 +765,58 @@ def test_approval_continuation_restores_prior_actions_budget_and_identity() -> N
     assert resumed.skill_policy_block_reason("vrcforge_shell_execute") == "skill_tool_disallowed"
 
 
+def test_capture_approval_continuation_returns_only_bounded_receipt_to_planner() -> None:
+    loop = AgentTaskLoop(
+        "capture and visually verify",
+        session_id="session-visual",
+        client_turn_id="turn-visual",
+    )
+    arguments = {"angles": ["front", "back"]}
+    context = approval_task_context(
+        loop.approval_seed(
+            requested_tool="vrcforge_capture_multi_screenshot",
+            requested_arguments=arguments,
+        ),
+        tool="vrcforge_capture_multi_screenshot",
+        arguments=arguments,
+    )
+    assert context is not None
+    completion = approval_completion(
+        context,
+        raw_result={
+            "ok": True,
+            "evidence": [{"ref": "visual_123", "kind": "managed_visual_capture"}],
+        },
+        outcome=ok_outcome("captured"),
+    )
+    assert completion is not None
+    prepared = prepare_approval_task_continuation(
+        {"id": "approval-visual", "taskContext": context},
+        {
+            "status": "applied",
+            "taskCompletion": completion,
+            "result": {
+                "data": {
+                    "captureReceipt": "opaque-capability",
+                    "captureEvidenceId": "visual_123",
+                    "angles": ["front", "back"],
+                },
+                "privatePath": "D:/private/vision_front.png",
+            },
+        },
+    )
+
+    assert prepared is not None
+    assert prepared["taskContinuation"]["source"] == "approval_finished"
+    observation = prepared["taskContinuation"]["plannerObservation"]
+    assert observation["result"] == {
+        "captureReceipt": "opaque-capability",
+        "captureEvidenceId": "visual_123",
+        "angles": ["front", "back"],
+    }
+    assert "privatePath" not in str(observation)
+
+
 def test_skill_context_is_bounded_in_task_and_approval_continuations() -> None:
     loop = AgentTaskLoop("follow the loaded skill", session_id="session-1")
     loop.activate_skill_policy(
@@ -740,3 +880,156 @@ def test_rejected_approval_is_a_terminal_needs_user_action_outcome() -> None:
     assert completion is not None
     assert completion["status"] == "needs_user_action"
     assert completion["outcome"]["status"] == "needs_user_action"
+
+
+def test_read_only_skill_requirement_defaults_to_canonical_verification() -> None:
+    loop = AgentTaskLoop("inspect the desktop", session_id="session-1")
+
+    requirement = loop.require_action(
+        kind="skill",
+        tool="vrcforge_agent_desktop_action",
+        arguments={"action": "list_windows"},
+    )
+
+    assert requirement["verificationProfile"] == "canonical_tool_result"
+
+
+def test_resumed_task_projects_bounded_historical_action_identity() -> None:
+    loop = AgentTaskLoop("inspect then continue", session_id="session-1")
+    arguments = {"action": "computer_use"}
+    requirement = loop.require_action(
+        kind="skill",
+        tool="vrcforge_agent_desktop_action",
+        arguments=arguments,
+    )
+    loop.record_action(
+        kind="skill",
+        tool="vrcforge_agent_desktop_action",
+        arguments=arguments,
+        raw_result={"ok": True},
+        outcome=ok_outcome("desktop ready"),
+        action_id=requirement["actionId"],
+        pre_provider=True,
+    )
+
+    steps = loop.historical_steps()
+
+    assert steps == [
+        {
+            "index": 0,
+            "kind": "skill",
+            "tool": "vrcforge_agent_desktop_action",
+            "status": "completed",
+            "actionId": requirement["actionId"],
+            "historical": True,
+            "preProvider": True,
+        }
+    ]
+
+
+def test_provider_request_count_survives_an_async_task_boundary() -> None:
+    loop = AgentTaskLoop("continue after approval", session_id="session-1")
+    seed = loop.approval_seed(
+        requested_tool="vrcforge_capture_multi_screenshot",
+        requested_arguments={"angles": ["front", "back"]},
+        provider_request_count=2,
+    )
+    context = approval_task_context(
+        seed,
+        tool="vrcforge_capture_multi_screenshot",
+        arguments={"angles": ["front", "back"]},
+    )
+    assert context is not None
+    completion = approval_completion(
+        context,
+        raw_result={"ok": True},
+        outcome=ok_outcome("captured"),
+    )
+    assert completion is not None
+
+    resumed = AgentTaskLoop.from_approval_context(context, completion)
+
+    assert resumed.provider_request_count == 2
+    assert resumed.approval_seed()["providerRequestCount"] == 2
+
+
+def test_managed_capture_identity_survives_beyond_the_bounded_action_window() -> None:
+    loop = AgentTaskLoop("capture, inspect, then audit", session_id="session-visual")
+    capture_arguments = {"angles": ["front", "back"]}
+    capture_requirement = loop.require_action(
+        kind="write",
+        tool="vrcforge_capture_multi_screenshot",
+        arguments=capture_arguments,
+    )
+    capture = loop.record_action(
+        kind="write",
+        tool="vrcforge_capture_multi_screenshot",
+        arguments=capture_arguments,
+        raw_result={"ok": True},
+        outcome={
+            **ok_outcome("captured"),
+            "evidence": [{"ref": "visual-1", "kind": "managed_visual_capture"}],
+        },
+        action_id=capture_requirement["actionId"],
+    )
+    for index in range(3):
+        arguments = {"probe": index}
+        requirement = loop.require_action(
+            kind="skill",
+            tool=f"vrcforge_read_probe_{index}",
+            arguments=arguments,
+        )
+        loop.record_action(
+            kind="skill",
+            tool=f"vrcforge_read_probe_{index}",
+            arguments=arguments,
+            raw_result={"ok": True},
+            outcome=ok_outcome(f"probe {index}"),
+            action_id=requirement["actionId"],
+        )
+
+    seed = loop.approval_seed()
+    context = approval_task_context(
+        seed,
+        tool="vrcforge_vision_audit_multi",
+        arguments={"captureReceipt": "opaque"},
+    )
+
+    assert capture["actionId"] not in {
+        item["actionId"] for item in seed["actions"]
+    }
+    assert seed["managedVisualCaptureActionIds"] == [capture["actionId"]]
+    assert context is not None
+    assert context["managedVisualCaptureActionIds"] == [capture["actionId"]]
+
+
+def test_visual_capture_and_audit_use_registered_completion_verifiers() -> None:
+    loop = AgentTaskLoop("capture and visually audit", session_id="session-visual")
+    capture = loop.require_action(
+        kind="write",
+        tool="vrcforge_capture_multi_screenshot",
+        arguments={"angles": ["front", "back"]},
+    )
+    visual = loop.require_action(
+        kind="skill",
+        tool="vrcforge_vision_audit_multi",
+        arguments={"captureReceipt": "opaque"},
+    )
+
+    assert capture["verificationProfile"] == "canonical_tool_result"
+    assert visual["verificationProfile"] == "multi_angle_visual"
+
+    incomplete = loop.record_action(
+        kind="skill",
+        tool="vrcforge_vision_audit_multi",
+        arguments={"captureReceipt": "opaque"},
+        raw_result={
+            "ok": True,
+            "visualVerified": True,
+            "coverageComplete": True,
+        },
+        outcome=ok_outcome("partial audit"),
+        action_id=visual["actionId"],
+    )
+    assert incomplete["status"] == "needs_user_action"
+    assert incomplete["outcome"]["verification"]["state"] == "needs_user_action"

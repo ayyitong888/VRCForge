@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
-from threading import Lock, RLock, Thread
+from threading import Event, Lock, RLock, Thread
 from typing import Any, Callable, Literal, Mapping
 from urllib.parse import urlsplit
 
@@ -43,6 +43,12 @@ from pydantic import BaseModel, Field
 
 from bounded_process import BoundedProcessResult, run_bounded_process
 from agent_command_safety import normalize_filesystem_path
+from agent_completion_verifier import UnityConsoleCompletionVerifier
+from agent_harness_journey import JourneyReceiptError, RuntimeJourneyReceiptAuthority
+from agent_visual_capture_evidence import (
+    ManagedVisualCaptureAuthority,
+    ManagedVisualCaptureError,
+)
 
 try:
     import psutil
@@ -182,6 +188,7 @@ from prepared_unity_execution import (
     prepared_call,
     prepared_evidence,
 )
+from approved_unity_execution import current_approved_unity_execution
 from prepared_file_imports import (
     capture_directory,
     capture_regular_file,
@@ -607,6 +614,10 @@ def app_auth_disabled_for_test_process() -> bool:
 APP_SESSION_TOKEN = resolve_app_session_token()
 APP_AUTH_REQUIRED = bool(APP_SESSION_TOKEN) and not app_auth_disabled_for_test_process()
 MCP_TRIGGER_SELECTION_RECEIPTS = SelectionReceiptAuthority(ttl_seconds=900, max_receipts=256)
+AGENT_HARNESS_JOURNEY_RECEIPTS = RuntimeJourneyReceiptAuthority(
+    default_ttl_seconds=300,
+    max_outstanding=256,
+)
 APP_DASHBOARD_SESSION_COOKIE = "vrcforge_dashboard_session"
 APP_INTERNAL_SHUTDOWN_PATH = "/api/app/runtime/shutdown"
 PRIMITIVE_BASIS_LIVE_SESSION = (
@@ -784,6 +795,10 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 DASHBOARD_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+MANAGED_VISUAL_CAPTURE_AUTHORITY = ManagedVisualCaptureAuthority(
+    DASHBOARD_ARTIFACTS_DIR / "latest",
+    trusted_anchor=ARTIFACTS_DIR,
+)
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1260,8 +1275,21 @@ class VisionCaptureMultiRequest(ConnectionRequest):
     require_play_mode: bool = False
 
 
-class VisionAuditMultiRequest(ConnectionRequest):
-    image_paths: list[str] = Field(default_factory=list)
+class VisionAuditMultiRequest(BaseModel):
+    image_paths: list[str] = Field(default_factory=list, alias="imagePaths")
+    angles: list[str] = Field(default_factory=list)
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+
+class AgentVisionAuditRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+
+class ManagedVisionAuditMultiRequest(BaseModel):
+    capture_receipt: str = Field(alias="captureReceipt", min_length=1, max_length=256)
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
 
 
 class AgentToolRequest(BaseModel):
@@ -1298,6 +1326,10 @@ class AgentRuntimeMessageRequest(BaseModel):
     computer_use_visual_accent: str | None = Field(default=None, alias="computerUseVisualAccent")
 
     model_config = {"populate_by_name": True}
+
+
+class AgentHarnessJourneyReceiptRequest(BaseModel):
+    receipt: dict[str, Any]
 
 
 class AgentRuntimeCancelRequest(BaseModel):
@@ -2209,10 +2241,59 @@ DASHBOARD_RUNTIME = DashboardRuntimeState()
 memory_review_idle_gate = MemoryReviewIdleGate()
 
 
+def attach_agent_harness_journey_receipt(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach a receipt only after the complete Runtime-owned journey validates."""
+
+    if isinstance(payload.get("harnessJourneyReceipt"), dict):
+        return payload
+    try:
+        receipt = AGENT_HARNESS_JOURNEY_RECEIPTS.issue(payload)
+    except JourneyReceiptError:
+        return payload
+    return {**payload, "harnessJourneyReceipt": receipt}
+
+
+def persist_runtime_turn_journey_receipt(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Persist only the safe terminal projection after a receipt is issued."""
+
+    projected = project_runtime_turn_event(payload)
+    if projected is None:
+        return None
+    if isinstance(projected.get("harnessJourneyReceipt"), dict):
+        completion = ensure_dict(ensure_dict(projected.get("plan")).get("taskCompletion"))
+        try:
+            AGENT_GATEWAY.runtime_runs.append(
+                {
+                    "event": "runtime_turn_journey_receipt_issued",
+                    "status": str(completion.get("status") or "completed")[:40],
+                    "sessionId": projected["sessionId"],
+                    "turnId": projected["turnId"],
+                    "clientTurnId": projected.get("clientTurnId") or "",
+                    "continuationEvent": projected,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - task completion must remain visible.
+            try:
+                emit_log(
+                    "warning",
+                    "agent",
+                    "Harness journey receipt persistence failed; publishing the task result without release evidence.",
+                    {"errorType": type(exc).__name__},
+                    essential=True,
+                )
+            except Exception:  # noqa: BLE001 - logging cannot suppress task completion.
+                pass
+            projected = dict(projected)
+            projected.pop("harnessJourneyReceipt", None)
+    return projected
+
+
 def broadcast_runtime_turn_completed(payload: dict[str, Any]) -> None:
     """Publish an app-owned async task continuation after its terminal event."""
 
-    projected = project_runtime_turn_event(payload)
+    projected = persist_runtime_turn_journey_receipt(
+        attach_agent_harness_journey_receipt(payload)
+    )
     if projected is None:
         return
     EVENT_BUS.broadcast_from_sync("agentRuntimeTurn", projected)
@@ -2527,6 +2608,7 @@ async def on_startup() -> None:
     global SUB_AGENT_CONTINUATION_REPLAY_TASK
 
     EVENT_BUS.set_loop(asyncio.get_running_loop())
+    _RUNTIME_PLANNER_MODEL.start()
     AGENT_GATEWAY.start_runtime_continuations()
     AGENT_GATEWAY.shell.start()
     BACKGROUND_GOAL_COORDINATOR.start()
@@ -2603,6 +2685,23 @@ async def on_shutdown() -> None:
     global SUB_AGENT_CONTINUATION_REPLAY_TASK
 
     await emit_safety_posture_snapshot("normal_shutdown")
+
+    try:
+        provider_shutdown = await asyncio.to_thread(_RUNTIME_PLANNER_MODEL.shutdown, 1.0)
+        if not provider_shutdown.get("ok"):
+            emit_log(
+                "warn",
+                "agent",
+                "Runtime Provider planning shutdown reached its bounded deadline.",
+                {"pendingOwnerIds": provider_shutdown.get("pendingOwnerIds") or []},
+            )
+    except Exception as exc:  # noqa: BLE001 - remaining app owners still require shutdown.
+        emit_log(
+            "warn",
+            "agent",
+            "Runtime Provider planning shutdown had a warning.",
+            {"error": str(exc)},
+        )
 
     try:
         continuation_shutdown = await asyncio.to_thread(
@@ -3320,6 +3419,7 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
                 runtime_params,
                 agent_name=runtime_request.agent_name,
             )
+        payload = attach_agent_harness_journey_receipt(payload)
     except BackgroundGoalDeliveryError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except AgentGatewayError as exc:
@@ -3336,6 +3436,41 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
     if runtime_request.goal_delivery_id:
         await broadcast_background_goal_state({})
     return payload
+
+
+@app.post("/api/app/agent/harness/journey")
+async def issue_agent_harness_journey(
+    runtime_request: AgentRuntimeMessageRequest,
+) -> dict[str, Any]:
+    """Run one explicit App-owned task and return only a short-lived safe receipt."""
+
+    payload = await app_agent_runtime_message(runtime_request)
+    receipt = payload.get("harnessJourneyReceipt")
+    if not isinstance(receipt, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "journey_not_terminal",
+                "message": "The Runtime task has not produced an authenticated terminal journey yet.",
+            },
+        )
+    return {"ok": True, "receipt": receipt}
+
+
+@app.post("/api/app/agent/harness/journey/verify")
+def verify_agent_harness_journey(
+    request: AgentHarnessJourneyReceiptRequest,
+) -> dict[str, Any]:
+    """Consume one process-owned journey receipt and return its safe projection."""
+
+    try:
+        journey = AGENT_HARNESS_JOURNEY_RECEIPTS.verify(request.receipt)
+    except JourneyReceiptError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    return {"ok": True, "journey": journey}
 
 
 def agent_runtime_request_payload(
@@ -4474,6 +4609,15 @@ async def app_agent_approve_and_execute(
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     continuation = ensure_dict(payload.get("continuation"))
     if continuation:
+        continuation = attach_agent_harness_journey_receipt(continuation)
+        persisted = persist_runtime_turn_journey_receipt(continuation)
+        if isinstance(continuation.get("harnessJourneyReceipt"), dict) and not isinstance(
+            ensure_dict(persisted).get("harnessJourneyReceipt"),
+            dict,
+        ):
+            continuation = dict(continuation)
+            continuation.pop("harnessJourneyReceipt", None)
+        payload["continuation"] = continuation
         await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
         await EVENT_BUS.broadcast(
             "agentRuntimeRuns",
@@ -4530,6 +4674,15 @@ async def app_agent_reject(
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
     continuation = ensure_dict(payload.get("continuation"))
     if continuation:
+        continuation = attach_agent_harness_journey_receipt(continuation)
+        persisted = persist_runtime_turn_journey_receipt(continuation)
+        if isinstance(continuation.get("harnessJourneyReceipt"), dict) and not isinstance(
+            ensure_dict(persisted).get("harnessJourneyReceipt"),
+            dict,
+        ):
+            continuation = dict(continuation)
+            continuation.pop("harnessJourneyReceipt", None)
+        payload["continuation"] = continuation
         await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
         await EVENT_BUS.broadcast(
             "agentRuntimeRuns",
@@ -9136,8 +9289,10 @@ def create_app_support_bundle(request: SupportBundleRequest) -> dict[str, Any]:
 
 
 @app.get("/api/app/tools/registry")
-def read_app_tool_registry() -> dict[str, Any]:
-    return AGENT_GATEWAY.build_tool_registry()
+def read_app_tool_registry(
+    exposure_layer: Literal["planning", "execution"] = "execution",
+) -> dict[str, Any]:
+    return AGENT_GATEWAY.build_tool_registry(exposure_layer=exposure_layer)
 
 
 @app.get("/api/agent/manifest")
@@ -12847,8 +13002,37 @@ def capture_avatar_multi_screenshot_approved_sync(arguments: dict[str, Any]) -> 
         for angle in angles
     ]
     payload = _execute_prepared_scene_view_capture(arguments, request, expected_calls, angles)
+    settings = load_dashboard_settings(request)
+    execution_plan = current_approved_unity_execution()
+    execution_context = execution_plan.diagnostic_context() if execution_plan else {}
+    binding = {
+        key: str(execution_context.get(key) or "").strip()
+        for key in ("taskId", "sessionId", "approvalId", "requestedActionId")
+    }
+    capability = (
+        MANAGED_VISUAL_CAPTURE_AUTHORITY.issue(
+            payload["captures"],
+            project_path=settings.unity_project_path,
+            avatar_path=request.avatar_path,
+            binding=binding,
+        )
+        if all(binding.values())
+        else {}
+    )
     emit_log("success", "vision", "Multi-angle screenshots captured through approval.", {"angles": angles, "count": len(payload["captures"])})
-    return payload
+    return {
+        **payload,
+        **capability,
+        "data": (
+            {
+                "captureReceipt": capability["captureReceipt"],
+                "captureEvidenceId": capability["captureEvidenceId"],
+                "angles": capability["angles"],
+            }
+            if capability
+            else {"angles": angles}
+        ),
+    }
 
 
 def read_vision_capture_status_sync(request: VisionCaptureStatusRequest) -> dict[str, Any]:
@@ -12867,15 +13051,18 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
         if not image_path:
             raise RuntimeError("No screenshot is available yet. Capture a screenshot before running image analysis.")
 
-        image_file = resolve_local_path(image_path)
-        if not image_file.exists():
-            raise RuntimeError(f"Screenshot file does not exist: {image_file}")
+        managed_image = MANAGED_VISUAL_CAPTURE_AUTHORITY.read_managed_image(image_path)
+        image_file = Path(str(managed_image["imagePath"]))
 
         api_config = PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True)
         if api_config.get("provider") != "gemini":
             raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
 
-        result = run_gemini_vision_audit(api_config, image_file)
+        result = run_gemini_vision_audit_bytes(
+            api_config,
+            managed_image["imageBytes"],
+            mime_type=mimetypes.guess_type(str(image_file))[0] or "image/png",
+        )
         save_vision_audit_artifact("vision_audit.json", {"imagePath": str(image_file), "audit": result})
         emit_log("success", "vision", "Image analysis completed.", {"status": result.get("status")})
         return {
@@ -12884,9 +13071,15 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
             "imageUrl": to_artifact_url(str(image_file)),
             "audit": result,
         }
-    except RuntimeError as exc:
+    except (RuntimeError, ManagedVisualCaptureError) as exc:
         emit_log("error", "vision", "Failed to run image analysis.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
+
+
+def audit_latest_managed_screenshot_for_agent(params: dict[str, Any]) -> dict[str, Any]:
+    AgentVisionAuditRequest(**(params or {}))
+    payload = audit_avatar_screenshot_sync(VisionAuditRequest())
+    return {"ok": payload["ok"], "audit": payload["audit"]}
 
 
 def apply_parameter_optimization_sync(request: ParameterApplyOptimizationRequest) -> dict[str, Any]:
@@ -13065,32 +13258,185 @@ _ANGLE_CAMERA_ROTATIONS: dict[str, tuple[float, float, float]] = {
 }
 
 
+def _audit_verified_avatar_images(
+    verified_images: list[dict[str, Any]],
+    angles: tuple[str, ...],
+    *,
+    include_paths: bool,
+) -> dict[str, Any]:
+    api_config = PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True)
+    if api_config.get("provider") != "gemini":
+        raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
+
+    results: list[dict[str, Any]] = []
+    for angle, image in zip(angles, verified_images, strict=True):
+        image_path = str(image.get("imagePath") or "")
+        base_result = {"angle": angle}
+        if include_paths:
+            base_result.update(
+                {
+                    "imagePath": image_path,
+                    "imageUrl": to_artifact_url(image_path),
+                }
+            )
+        try:
+            audit = run_gemini_vision_audit_bytes(
+                api_config,
+                image["imageBytes"],
+                mime_type=mimetypes.guess_type(image_path)[0] or "image/png",
+            )
+        except Exception as exc:  # noqa: BLE001 - every Provider/image failure must fail this bounded audit closed.
+            results.append({**base_result, "status": "failed", "error": f"Image audit failed: {exc}"})
+            continue
+        audit_error = validate_multi_vision_audit_result(audit)
+        if audit_error:
+            results.append(
+                {
+                    **base_result,
+                    "status": "failed",
+                    "error": audit_error,
+                    "audit": audit if isinstance(audit, dict) else {},
+                }
+            )
+            continue
+        results.append({**base_result, "status": str(audit["status"]), "audit": audit})
+
+    covered_angles = {
+        str(result.get("angle") or "")
+        for result in results
+        if str(result.get("status") or "") in {"pass", "clipping"}
+    }
+    coverage_complete = (
+        len(results) == len(angles)
+        and covered_angles == set(angles)
+        and all(str(result.get("status") or "") in {"pass", "clipping"} for result in results)
+    )
+    overall_status = (
+        "failed"
+        if not coverage_complete
+        else "clipping"
+        if any(result.get("status") == "clipping" for result in results)
+        else "pass"
+    )
+    ok = coverage_complete
+    emit_log(
+        "success" if ok else "error",
+        "vision",
+        "Multi-image analysis completed." if ok else "Multi-image analysis failed closed.",
+        {"imageCount": len(results), "angleCount": len(angles), "overallStatus": overall_status},
+    )
+    return {
+        "ok": ok,
+        "overallStatus": overall_status,
+        "angles": list(angles),
+        "coverageComplete": coverage_complete,
+        "visualVerified": bool(coverage_complete and overall_status == "pass"),
+        "visualVerification": {
+            "profile": "multi_angle_visual",
+            "status": "passed" if coverage_complete and overall_status == "pass" else "failed",
+            "summary": (
+                "Every frozen angle passed the visual audit."
+                if coverage_complete and overall_status == "pass"
+                else "The frozen multi-angle visual audit did not pass completely."
+            ),
+        },
+        "results": results,
+    }
+
+
 def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict[str, Any]:
     try:
-        image_paths = request.image_paths
+        image_paths = tuple(str(path).strip() for path in request.image_paths)
         if not image_paths:
             raise RuntimeError("No image paths provided for multi-image audit.")
-
-        api_config = PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True)
-        if api_config.get("provider") != "gemini":
-            raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
-
-        results: list[dict[str, Any]] = []
-        for path_str in image_paths:
-            image_file = resolve_local_path(path_str)
-            if not image_file.exists():
-                results.append({"imagePath": path_str, "error": f"File not found: {image_file}"})
-                continue
-            audit = run_gemini_vision_audit(api_config, image_file)
-            results.append({"imagePath": str(image_file), "imageUrl": to_artifact_url(str(image_file)), "audit": audit})
-
-        overall_status = "clipping" if any(r.get("audit", {}).get("status") == "clipping" for r in results) else "pass"
-        save_vision_audit_artifact("vision_audit_multi.json", {"overallStatus": overall_status, "results": results})
-        emit_log("success", "vision", "Multi-image analysis completed.", {"imageCount": len(results), "overallStatus": overall_status})
-        return {"ok": True, "overallStatus": overall_status, "results": results}
-    except RuntimeError as exc:
+        if any(not path for path in image_paths):
+            raise RuntimeError("Multi-image audit paths must be non-empty strings.")
+        if len(image_paths) > 4:
+            raise RuntimeError("Multi-image audit supports at most four frozen image paths.")
+        raw_angles = list(request.angles)
+        angles = tuple(_normalize_capture_angles(raw_angles))
+        if len(angles) != len(raw_angles):
+            raise RuntimeError("Multi-image audit angles must be unique.")
+        if len(image_paths) != len(angles):
+            raise RuntimeError("Multi-image audit requires exactly one frozen image path per angle.")
+        verified_images = [
+            MANAGED_VISUAL_CAPTURE_AUTHORITY.read_managed_image(path)
+            for path in image_paths
+        ]
+        normalized_paths = [
+            os.path.normcase(str(item["imagePath"])) for item in verified_images
+        ]
+        if len(set(normalized_paths)) != len(normalized_paths):
+            raise RuntimeError("Multi-image audit requires a distinct frozen image for every angle.")
+        return _audit_verified_avatar_images(verified_images, angles, include_paths=True)
+    except (RuntimeError, ManagedVisualCaptureError) as exc:
         emit_log("error", "vision", "Failed to run multi-image analysis.", {"error": str(exc)})
         raise to_http_exception(exc) from exc
+
+
+def audit_managed_avatar_multi_screenshot_sync(
+    request: ManagedVisionAuditMultiRequest,
+    *,
+    task_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Audit exactly one task-owned managed capture capability."""
+
+    try:
+        evidence = MANAGED_VISUAL_CAPTURE_AUTHORITY.consume(
+            request.capture_receipt,
+            binding=task_binding,
+        )
+        images = list(evidence["images"])
+        payload = _audit_verified_avatar_images(
+            images,
+            tuple(str(item["angle"]) for item in images),
+            include_paths=False,
+        )
+        return {
+            **payload,
+            "captureEvidenceVerified": True,
+            "captureEvidenceId": evidence["captureEvidenceId"],
+            "evidence": evidence["evidence"],
+        }
+    except (RuntimeError, ManagedVisualCaptureError) as exc:
+        emit_log(
+            "error",
+            "vision",
+            "Managed multi-image analysis was rejected.",
+            {"error": str(exc)},
+        )
+        raise to_http_exception(exc) from exc
+
+
+def audit_managed_avatar_multi_screenshot_for_agent(
+    params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Consume a receipt only from the in-process task that owns it."""
+
+    arguments = dict(params or {})
+    task_seed, runtime_session_id = AGENT_GATEWAY.consume_runtime_task_link(arguments)
+    if not task_seed or not runtime_session_id:
+        raise RuntimeError("Managed visual evidence requires its owning Runtime task.")
+    task_id = str(task_seed.get("taskId") or "").strip()
+    seeded_session_id = str(task_seed.get("sessionId") or "").strip()
+    capture_action_ids = [
+        str(item or "").strip()
+        for item in list(task_seed.get("managedVisualCaptureActionIds") or [])[:2]
+        if str(item or "").strip()
+    ]
+    if not task_id or not seeded_session_id or seeded_session_id != runtime_session_id:
+        raise RuntimeError("Managed visual evidence task identity is invalid.")
+    if not capture_action_ids:
+        raise RuntimeError("Managed visual evidence is not bound to a completed capture action.")
+    request = ManagedVisionAuditMultiRequest(**arguments)
+    return audit_managed_avatar_multi_screenshot_sync(
+        request,
+        task_binding={
+            "taskId": task_id,
+            "sessionId": runtime_session_id,
+            "captureActionIds": capture_action_ids,
+        },
+    )
 
 
 def _resolve_avatar_tuning_live_context(
@@ -13558,9 +13904,76 @@ class _RuntimePlannerProviderTurnBinding:
         return config
 
 
+class RuntimePlannerProviderCancelledError(RuntimeError):
+    """The owning runtime turn cancelled an in-flight Provider planning call."""
+
+
+@dataclass
+class _RuntimePlannerProviderCall:
+    owner_id: str
+    done: Event = field(default_factory=Event)
+    cancellation: Event = field(default_factory=Event)
+    thread: Thread | None = None
+    response: Any = None
+    error: BaseException | None = None
+
+
 class _RuntimePlannerModel:
+    """Own bounded Provider request workers for the App runtime lifetime.
+
+    Each worker is authorized only for its frozen Provider request. The worker
+    owns no Unity transaction or tool execution, reuses the already-bound
+    Provider credential, and remains tracked until the SDK call exits. Python's
+    synchronous third-party SDK calls cannot be force-killed safely, so Stop is
+    cooperative through the stream callback and admission stays capacity-bound.
+    """
+
+    _MAX_ACTIVE_CALLS = 4
+    _POLL_SECONDS = 0.01
+    _CANCEL_JOIN_SECONDS = 0.25
+
     def __init__(self, turn: _RuntimePlannerProviderTurnBinding) -> None:
         self._turn = turn
+        self._lock = RLock()
+        self._active_calls: dict[str, _RuntimePlannerProviderCall] = {}
+        self._accepting = True
+
+    def start(self) -> None:
+        with self._lock:
+            self._accepting = True
+
+    def active_call_count(self) -> int:
+        with self._lock:
+            return len(self._active_calls)
+
+    def shutdown(self, timeout_seconds: float = 1.0) -> dict[str, Any]:
+        with self._lock:
+            self._accepting = False
+            calls = list(self._active_calls.values())
+            for call in calls:
+                call.cancellation.set()
+        deadline = time.monotonic() + max(0.0, min(float(timeout_seconds), 5.0))
+        for call in calls:
+            thread = call.thread
+            if thread is None:
+                continue
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(remaining)
+        with self._lock:
+            pending = sorted(self._active_calls)
+        return {
+            "ok": not pending,
+            "activeCount": len(calls),
+            "pendingOwnerIds": pending,
+        }
+
+    @staticmethod
+    def _runtime_cancel_requested(context: Mapping[str, str]) -> bool:
+        return AGENT_GATEWAY.runtime_sessions.cancel_requested(
+            session_id=str(context.get("sessionId") or ""),
+            turn_id=str(context.get("turnId") or ""),
+            client_turn_id=str(context.get("clientTurnId") or ""),
+        )
 
     def plan(self, prompt: str) -> PlannerModelResult:
         config = self._turn.current_config()
@@ -13572,8 +13985,19 @@ class _RuntimePlannerModel:
             if part
         )
         stream_state = {"raw": "", "field": "", "text": ""}
+        context = AGENT_GATEWAY.runtime_sessions.stream_context()
+        owner_id = str(
+            context.get("clientTurnId")
+            or context.get("turnId")
+            or context.get("sessionId")
+            or f"provider-plan-{secrets.token_hex(8)}"
+        )
+        owner = _RuntimePlannerProviderCall(owner_id=owner_id)
 
         def stream_callback(delta: str) -> None:
+            if owner.cancellation.is_set() or self._runtime_cancel_requested(context):
+                owner.cancellation.set()
+                raise RuntimePlannerProviderCancelledError("Provider planning was cancelled by the runtime turn owner.")
             stream_state["raw"] += delta
             field_name, text = extract_streaming_dialogue_text(stream_state["raw"])
             if not text:
@@ -13588,7 +14012,6 @@ class _RuntimePlannerModel:
                 return
             text_delta = text[len(stream_state["text"]) :]
             stream_state["text"] = text
-            context = AGENT_GATEWAY.runtime_sessions.stream_context()
             client_turn_id = str(context.get("clientTurnId") or "").strip()
             if not client_turn_id:
                 return
@@ -13602,12 +14025,57 @@ class _RuntimePlannerModel:
                 },
             )
 
-        response = request_llm_plan_with_metadata(
-            PROVIDER_TEXT_PROBE.probe_settings(config),
-            prompt,
-            stream_callback=stream_callback,
-        )
-        context = AGENT_GATEWAY.runtime_sessions.stream_context()
+        settings = PROVIDER_TEXT_PROBE.probe_settings(config)
+
+        def run_provider_request() -> None:
+            try:
+                owner.response = request_llm_plan_with_metadata(
+                    settings,
+                    prompt,
+                    stream_callback=stream_callback,
+                )
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the owning runtime thread.
+                owner.error = exc
+            finally:
+                with self._lock:
+                    self._active_calls.pop(owner.owner_id, None)
+                owner.done.set()
+
+        with self._lock:
+            if not self._accepting:
+                raise RuntimeError("Runtime Provider planning is shutting down.")
+            if len(self._active_calls) >= self._MAX_ACTIVE_CALLS:
+                raise RuntimeError("The bounded Runtime Provider planning capacity is full.")
+            if owner.owner_id in self._active_calls:
+                raise RuntimeError("A Provider planning call already belongs to this runtime turn.")
+            owner.thread = Thread(
+                target=run_provider_request,
+                name=f"vrcforge-provider-plan-{owner.owner_id[:24]}",
+                daemon=True,
+            )
+            self._active_calls[owner.owner_id] = owner
+            try:
+                owner.thread.start()
+            except BaseException:
+                self._active_calls.pop(owner.owner_id, None)
+                raise
+
+        while not owner.done.wait(self._POLL_SECONDS):
+            if self._runtime_cancel_requested(context):
+                owner.cancellation.set()
+                owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                raise RuntimePlannerProviderCancelledError(
+                    "Provider planning was cancelled by the runtime turn owner."
+                )
+        if owner.cancellation.is_set() or self._runtime_cancel_requested(context):
+            raise RuntimePlannerProviderCancelledError(
+                "Provider planning was cancelled by the runtime turn owner."
+            )
+        if owner.error is not None:
+            if isinstance(owner.error, Exception):
+                raise owner.error
+            raise RuntimeError("Provider planning failed outside the Exception hierarchy.")
+        response = owner.response
         if context.get("clientTurnId"):
             EVENT_BUS.broadcast_from_sync(
                 "agentRuntimeDelta",
@@ -13758,7 +14226,7 @@ class _RuntimePlannerCatalog:
         visible_direct_tools = tuple(
             _runtime_planner_tool(tool)
             for tool in AGENT_GATEWAY._tools.values()
-            if AGENT_GATEWAY._tool_visible(tool, gateway_config, layer)
+            if AGENT_GATEWAY._tool_runtime_visible(tool, gateway_config, layer)
         )
         visible_write_tools = tuple(
             _runtime_planner_write_tool(handler)
@@ -13768,11 +14236,17 @@ class _RuntimePlannerCatalog:
             and gateway_config.allow_write_requests
             and AGENT_GATEWAY._write_handler_visible(handler, gateway_config, layer)
         )
+        routable_write_tools = tuple(
+            _runtime_planner_write_tool(handler)
+            for handler in AGENT_GATEWAY._write_handlers.values()
+            if handler.name not in AGENT_GATEWAY._tools
+            and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
+        )
         visible_tools = (*visible_direct_tools, *visible_write_tools)
         routable_tools = tuple(
             _runtime_planner_tool(tool)
             for tool in AGENT_GATEWAY._tools.values()
-        ) + visible_write_tools
+        ) + routable_write_tools
         skill_payloads = AGENT_GATEWAY.skills.build_skill_registry(
             gateway_config,
             RUNTIME_PLANNER_EXECUTION_LAYER,
@@ -14859,9 +15333,26 @@ def normalize_vision_box(raw_box: Any) -> dict[str, float] | None:
 def normalize_vision_audit_payload(payload: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(payload)
     status = str(normalized.get("status") or "").strip().lower()
-    issues_raw = normalized.get("issues") or []
+    raw_summary = normalized.get("summary")
+    raw_issues = normalized.get("issues")
+    raw_annotations = next(
+        (
+            normalized.get(key)
+            for key in ("annotations", "regions", "boxes")
+            if key in normalized
+        ),
+        None,
+    )
+    contract_complete = (
+        status in {"pass", "clipping"}
+        and isinstance(raw_summary, str)
+        and bool(raw_summary.strip())
+        and isinstance(raw_issues, list)
+        and isinstance(raw_annotations, list)
+    )
+    issues_raw = raw_issues or []
     issues = [str(item.get("summary") or item.get("label") or item) if isinstance(item, dict) else str(item) for item in issues_raw]
-    annotations_raw = normalized.get("annotations") or normalized.get("regions") or normalized.get("boxes") or []
+    annotations_raw = raw_annotations or []
 
     annotations: list[dict[str, Any]] = []
     if isinstance(annotations_raw, list):
@@ -14881,16 +15372,48 @@ def normalize_vision_audit_payload(payload: dict[str, Any]) -> dict[str, Any]:
             )
 
     if status not in {"pass", "clipping"}:
-        status = "clipping" if annotations or issues else "pass"
+        status = "unknown"
 
     normalized["status"] = status
-    normalized["summary"] = str(normalized.get("summary") or ("检测到穿模风险" if status == "clipping" else "未发现明显穿模"))
+    normalized["summary"] = str(
+        normalized.get("summary")
+        or (
+            "Visual clipping risk was detected."
+            if status == "clipping"
+            else "No obvious visual clipping risk was detected."
+            if status == "pass"
+            else "The image audit returned an unknown or incomplete status."
+        )
+    )
     normalized["issues"] = issues
     normalized["annotations"] = annotations
+    normalized["contractComplete"] = contract_complete
     return normalized
 
 
-def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dict[str, Any]:
+def validate_multi_vision_audit_result(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "Image audit returned a non-object result."
+    if value.get("contractComplete") is not True:
+        return "Image audit returned an incomplete result contract."
+    status = str(value.get("status") or "").strip().lower()
+    if status not in {"pass", "clipping"}:
+        return f"Image audit returned an unknown status: {status or '<empty>'}."
+    if not isinstance(value.get("summary"), str) or not str(value.get("summary") or "").strip():
+        return "Image audit did not return a summary."
+    if not isinstance(value.get("issues"), list) or not isinstance(value.get("annotations"), list):
+        return "Image audit did not return complete issue and annotation lists."
+    return ""
+
+
+def run_gemini_vision_audit_bytes(
+    api_config: dict[str, Any],
+    image_bytes: bytes,
+    *,
+    mime_type: str = "image/png",
+) -> dict[str, Any]:
+    """Send only bytes already read through the managed evidence authority."""
+
     try:
         from google import genai
         from google.genai import types
@@ -14901,10 +15424,12 @@ def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dic
     model = str(api_config.get("model") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
     if not api_key:
         raise RuntimeError("Google AI Studio API key is empty. Save a Google AI Studio provider config before running image analysis.")
+    if not isinstance(image_bytes, bytes) or not image_bytes:
+        raise RuntimeError("Managed image bytes are unavailable.")
+    if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
+        raise RuntimeError("Managed image MIME type is invalid.")
 
-    mime_type = mimetypes.guess_type(str(image_path))[0] or "image/png"
     client = genai.Client(api_key=api_key)
-    image_bytes = image_path.read_bytes()
     prompt = (
         "你是 VRChat Avatar 视觉质检助手。检查这张 Avatar 截图是否存在明显穿模、衣物穿插、头发穿插或严重视觉问题。"
         "如果发现问题，请给出可定位区域，坐标使用相对图片宽高的 0 到 1 小数。"
@@ -14925,6 +15450,16 @@ def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dic
     if not isinstance(payload, dict):
         raise RuntimeError("Image analysis did not return valid JSON.")
     return normalize_vision_audit_payload(payload)
+
+
+def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dict[str, Any]:
+    """Compatibility wrapper for trusted callers that do not hold a receipt."""
+
+    return run_gemini_vision_audit_bytes(
+        api_config,
+        image_path.read_bytes(),
+        mime_type=mimetypes.guess_type(str(image_path))[0] or "image/png",
+    )
 
 
 def build_event_message(event_type: str, payload: Any) -> dict[str, Any]:
@@ -16570,14 +17105,43 @@ def request_agent_restore_last_backup(params: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_agent_compile_errors(params: dict[str, Any]) -> dict[str, Any]:
-    settings = load_dashboard_settings(build_agent_connection_request(params))
+    request_params = dict(params)
+    verifier_timeout = request_params.pop("_completionVerifierTimeoutSeconds", None)
+    settings = load_dashboard_settings(build_agent_connection_request(request_params))
+    if isinstance(verifier_timeout, int) and not isinstance(verifier_timeout, bool):
+        settings.unity_mcp_retries = 1
+        settings.unity_mcp_retry_backoff_seconds = 0.0
+        settings.unity_mcp_timeout_seconds = max(1, min(verifier_timeout, 20))
     arguments: dict[str, Any] = {}
-    if params.get("maxErrors") is not None:
-        arguments["maxErrors"] = int(params["maxErrors"])
-    if params.get("includeConsoleFallback") is not None:
-        arguments["includeConsoleFallback"] = bool(params["includeConsoleFallback"])
+    if request_params.get("maxErrors") is not None:
+        arguments["maxErrors"] = int(request_params["maxErrors"])
+    if request_params.get("includeConsoleFallback") is not None:
+        arguments["includeConsoleFallback"] = bool(request_params["includeConsoleFallback"])
     result = invoke_unity_mcp(settings, "vrc_get_compile_errors", arguments)
     return {"ok": True, "result": serialize_result(result)}
+
+
+UNITY_CONSOLE_COMPLETION_VERIFIER = UnityConsoleCompletionVerifier(read_agent_compile_errors)
+
+
+def prepare_persisted_scene_console_verification(arguments: dict[str, Any]) -> dict[str, Any]:
+    return UNITY_CONSOLE_COMPLETION_VERIFIER.capture_baseline(
+        "persisted_scene_write_console",
+        arguments,
+    )
+
+
+def finalize_persisted_scene_console_verification(
+    arguments: dict[str, Any],
+    baseline: dict[str, Any],
+    result: Any,
+) -> dict[str, Any]:
+    return UNITY_CONSOLE_COMPLETION_VERIFIER.finalize(
+        "persisted_scene_write_console",
+        arguments,
+        baseline,
+        result,
+    )
 
 
 def prepare_unity_checkpoint_sync(project_root: Path) -> dict[str, Any]:
@@ -19730,7 +20294,18 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_scan_animation_bindings", "Scan animation clip bindings for an avatar or animator controller.", "read/debug", scan_animation_bindings_sync)
     AGENT_GATEWAY.register_tool("vrcforge_scan_avatar_controls", "Scan expression menu controls and linked parameters for an avatar.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_avatar_controls)
     AGENT_GATEWAY.register_tool("vrcforge_scan_wardrobe", "Detect int-exclusive wardrobe(s) by reconciling an expression Int parameter, menu toggle values, FX Any-State Equals transitions, per-clip object on/off toggles, and Write Defaults.", "read/debug", WARDROBE_OUTFIT_WORKFLOWS.scan_wardrobe)
-    AGENT_GATEWAY.register_tool("vrcforge_scan_parameters", "Scan expression parameter usage for an avatar.", "read/debug", scan_avatar_parameters_gateway_sync)
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_scan_parameters",
+        (
+            "When to use: Inspect an avatar's VRChat Expression Parameters asset, including "
+            "parameter usage, cost, and linked animator or menu references.\n"
+            "When NOT to use: Do not use to inspect FX Animator layers/states or expression "
+            "menu controls; use their dedicated read tools instead.\n"
+            "Negative example: Read the FX Animator state machine."
+        ),
+        "read/debug",
+        scan_avatar_parameters_gateway_sync,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_run_validation_report", "Run the read-only vrcforge.validation.v1 report across compile, SDK, avatar, hierarchy, parameters, menu, FX, bindings, materials, performance, plugin, MCP, package, and residue checks.", "read/debug", build_validation_report_sync)
     AGENT_GATEWAY.register_tool("vrcforge_build_test_readiness", "Run the read-only Build & Test readiness gate without building, publishing, or repairing automatically.", "read/debug", build_test_readiness_sync)
     AGENT_GATEWAY.register_tool("vrcforge_optimization_plan", "Build the read-only vrcforge.optimization.v1 model optimization dashboard plan and recommended step order without modifying the Unity project.", "plan/preview", OPTIMIZATION.build_plan)
@@ -19850,10 +20425,31 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_preview_interrupted_apply_recovery", "Preview the checkpoint restore path for an interrupted approved write.", "plan/preview", lambda params: AGENT_GATEWAY.checkpoint_recovery.preview_interrupted_apply_recovery(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_export_interrupted_apply_incident_bundle", "Export a local incident bundle for an interrupted approved write.", "read/debug", lambda params: AGENT_GATEWAY.checkpoint_recovery.export_interrupted_apply_incident_bundle(params or {}))
     AGENT_GATEWAY.register_tool("vrcforge_capture_status", "Read current Play Mode / Gesture Manager capture status.", "read/debug", lambda params: SHADER_VISION_PROTECTION.read_vision_capture_status(VisionCaptureStatusRequest(**params)))
-    AGENT_GATEWAY.register_tool("vrcforge_vision_audit", "Run advisory Vision audit on a captured screenshot.", "read/debug", lambda params: SHADER_VISION_PROTECTION.audit_avatar_screenshot(VisionAuditRequest(**params)))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_vision_audit",
+        "When to use: run an advisory Vision audit on the latest VRCForge-managed screenshot. When NOT to use: do not provide or upload an arbitrary local image path. Negative example: do not use this tool to inspect a file outside the VRCForge capture directory.",
+        "read/debug",
+        audit_latest_managed_screenshot_for_agent,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_vision_audit_multi",
+        (
+            "Audit one frozen fixed-angle avatar capture produced by the approved VRCForge capture tool. "
+            "When to use: when that tool returned a captureReceipt and the task needs complete multi-angle visual coverage. "
+            "When NOT to use: do not provide local paths, reuse an old receipt, capture screenshots, or audit a partial image set. "
+            "Negative example: do not call this tool with imagePaths from the user's filesystem."
+        ),
+        "read/debug",
+        audit_managed_avatar_multi_screenshot_for_agent,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_scan_thry_avatar_performance", "Call VRC Avatar Performance Tools / Thry read-only VRAM and mesh memory calculator for an avatar.", "read/debug", scan_thry_avatar_performance_sync)
     AGENT_GATEWAY.register_tool("vrcforge_read_recent_logs", "Read recent VRCForge dashboard logs.", "read/debug", lambda params: {"ok": True, "logs": recent_log_snapshot()[-int(params.get("limit", 80)):], "agentLogs": AGENT_GATEWAY.approval_transactions.recent_audit_logs(limit=int(params.get("limit", 80)))})
-    AGENT_GATEWAY.register_tool("vrcforge_get_compile_errors", "Read C# compile errors from the last Unity compilation pass.", "read/debug", read_agent_compile_errors)
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_get_compile_errors",
+        "When to use: read the stable Unity C# compile error and warning snapshot before or after a change. When NOT to use: do not use it to change scripts, clear Console rows, or claim compilation passed while Unity is still compiling. Negative example: do not call this tool merely because the user mentioned C# without asking to inspect the current project.",
+        "read/debug",
+        read_agent_compile_errors,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_get_property", "Read a single field/property value from a component on a scene GameObject.", "read/debug", read_component_property_sync)
     AGENT_GATEWAY.register_tool("vrcforge_get_gameobject", "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components.", "read/debug", get_gameobject_sync)
     AGENT_GATEWAY.register_tool("vrcforge_find_assets", "Search the project for assets by query/type/folder.", "read/debug", find_assets_sync)
@@ -19933,7 +20529,9 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_capture_screenshot",
-        "Capture one fixed dashboard scene-view artifact through VRCForge approval and checkpoint controls.",
+        "Capture one fixed dashboard scene-view artifact through VRCForge approval and checkpoint controls. "
+        "When to use: the task asks for one current view or one screenshot. "
+        "When NOT to use: the task asks for multiple angles, coverage, comparison, or a multi-angle visual audit.",
         "medium",
         capture_avatar_screenshot_approved_sync,
         request_preparer=prepare_capture_screenshot_request,
@@ -19942,7 +20540,9 @@ def register_agent_gateway_tools() -> None:
     )
     register_write_handler(
         "vrcforge_capture_multi_screenshot",
-        "Capture up to four fixed-angle dashboard scene-view artifacts through VRCForge approval and checkpoint controls.",
+        "Capture up to four fixed-angle dashboard scene-view artifacts through VRCForge approval and checkpoint controls. "
+        "When to use: the task asks for two or more named angles, full view coverage, comparison, or a multi-angle visual audit. "
+        "When NOT to use: the task asks for only one current view or one screenshot.",
         "medium",
         capture_avatar_multi_screenshot_approved_sync,
         request_preparer=prepare_capture_multi_screenshot_request,
@@ -20208,6 +20808,9 @@ def register_agent_gateway_tools() -> None:
         create_gameobject_sync,
         approval_category="scene-object-create",
         allow_future_category=True,
+        verification_profile="persisted_scene_write_console",
+        verification_prepare_handler=prepare_persisted_scene_console_verification,
+        verification_finalize_handler=finalize_persisted_scene_console_verification,
     )
     register_write_handler(
         "vrcforge_rename_gameobject",
@@ -21032,10 +21635,11 @@ AGENT_GATEWAY.approval_transactions.scoped_approval_reviewer = _review_saved_pro
 register_agent_gateway_tools()
 
 _RUNTIME_PLANNER_TURN = _RuntimePlannerProviderTurnBinding()
+_RUNTIME_PLANNER_MODEL = _RuntimePlannerModel(_RUNTIME_PLANNER_TURN)
 RUNTIME_PLANNER = RuntimePlannerService(
     catalog=_RuntimePlannerCatalog(),
     desktop=_RuntimePlannerDesktopObservation(),
-    model=_RuntimePlannerModel(_RUNTIME_PLANNER_TURN),
+    model=_RUNTIME_PLANNER_MODEL,
     compactor=_RuntimePlannerCompactor(_RUNTIME_PLANNER_TURN),
     turn=_RUNTIME_PLANNER_TURN,
 )

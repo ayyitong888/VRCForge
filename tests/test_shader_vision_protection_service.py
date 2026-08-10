@@ -290,7 +290,6 @@ def test_dashboard_routes_and_mcp_entries_use_the_typed_controller_only() -> Non
         "preview_shader_apply",
         "preview_material_shader_assignment",
         "read_vision_capture_status",
-        "audit_avatar_screenshot",
         "build_protection_research_report",
         "scan_protection_candidates",
         "plan_protection",
@@ -300,6 +299,10 @@ def test_dashboard_routes_and_mcp_entries_use_the_typed_controller_only() -> Non
         "request_protection_remove",
     ):
         assert f"SHADER_VISION_PROTECTION.{method}" in tool_source
+    assert "audit_latest_managed_screenshot_for_agent" in tool_source
+    assert "audit_avatar_screenshot_sync(VisionAuditRequest())" in functions[
+        "audit_latest_managed_screenshot_for_agent"
+    ]
 
 
 def test_dashboard_keeps_only_approved_execution_roots_and_raw_capture_request_port() -> None:

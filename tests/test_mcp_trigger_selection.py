@@ -92,6 +92,40 @@ def test_selection_only_metadata_binds_provider_model_and_frozen_tools() -> None
     assert len(result["providerEvidence"]["visibleToolsHash"]) == 64
 
 
+def test_selection_only_projects_action_kind_from_host_owned_tool_metadata() -> None:
+    skill_result = plan_mcp_tool_selection(
+        "Read Main Camera",
+        TOOLS,
+        provider="configured-provider",
+        model="configured-model",
+        request_text=lambda _prompt: Response('{"toolCalls":["vrc_get_gameobject"]}'),
+    )
+    write_result = plan_mcp_tool_selection(
+        "Create an object",
+        [*TOOLS, WRITE_TOOL],
+        provider="configured-provider",
+        model="configured-model",
+        request_text=lambda _prompt: Response('{"toolCalls":["vrc_create_gameobject"]}'),
+    )
+
+    assert skill_result["actionKind"] == "skill"
+    assert write_result["actionKind"] == "write"
+
+
+def test_app_tool_registry_preserves_default_and_honors_exposure_query(monkeypatch) -> None:
+    observed: list[str] = []
+
+    def build_registry(*, exposure_layer: str = "execution") -> dict[str, str]:
+        observed.append(exposure_layer)
+        return {"exposureLayer": exposure_layer}
+
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "build_tool_registry", build_registry)
+
+    assert dashboard_server.read_app_tool_registry() == {"exposureLayer": "execution"}
+    assert dashboard_server.read_app_tool_registry("planning") == {"exposureLayer": "planning"}
+    assert observed == ["execution", "planning"]
+
+
 def test_process_owned_receipt_binds_request_response_and_is_one_use() -> None:
     authority = SelectionReceiptAuthority()
     result = plan_mcp_tool_selection(
@@ -116,7 +150,7 @@ def test_process_owned_receipt_binds_request_response_and_is_one_use() -> None:
 
 def test_process_owned_receipt_rejects_tamper_without_consuming_valid_receipt() -> None:
     authority = SelectionReceiptAuthority()
-    result = {"toolCalls": ["vrc_get_gameobject"]}
+    result = {"toolCalls": ["vrc_get_gameobject"], "actionKind": "skill"}
     result["providerEvidence"] = authority.issue(
         "Read Main Camera",
         TOOLS,
@@ -129,12 +163,15 @@ def test_process_owned_receipt_rejects_tamper_without_consuming_valid_receipt() 
     result["toolCalls"] = []
     assert authority.verify_and_consume("Read Main Camera", TOOLS, result, **RECEIPT_BINDING) is False
     result["toolCalls"] = ["vrc_get_gameobject"]
+    result["actionKind"] = "write"
+    assert authority.verify_and_consume("Read Main Camera", TOOLS, result, **RECEIPT_BINDING) is False
+    result["actionKind"] = "skill"
     assert authority.verify_and_consume("Read Main Camera", TOOLS, result, **RECEIPT_BINDING) is True
 
 
 def test_process_owned_receipt_rejects_changed_provider_configuration_without_consuming() -> None:
     authority = SelectionReceiptAuthority()
-    result = {"toolCalls": ["vrc_get_gameobject"]}
+    result = {"toolCalls": ["vrc_get_gameobject"], "actionKind": "skill"}
     result["providerEvidence"] = authority.issue(
         "Read Main Camera",
         TOOLS,
@@ -158,7 +195,7 @@ def test_exposure_layer_filters_writes_and_is_bound_into_receipts() -> None:
     }
 
     authority = SelectionReceiptAuthority()
-    result = {"toolCalls": ["vrc_create_gameobject"]}
+    result = {"toolCalls": ["vrc_create_gameobject"], "actionKind": "write"}
     result["providerEvidence"] = authority.issue(
         "Create an object",
         visible,
@@ -279,7 +316,7 @@ def test_app_selection_routes_require_app_session_and_consume_typed_receipt(monk
     config = dashboard_server.PROVIDER_CONFIGURATION.current_api_config()
     binding = dashboard_server.mcp_trigger_selection_config_binding(config)
     authority = SelectionReceiptAuthority()
-    result = {"toolCalls": ["vrc_get_gameobject"]}
+    result = {"toolCalls": ["vrc_get_gameobject"], "actionKind": "skill"}
     result["providerEvidence"] = authority.issue(
         "Read Main Camera",
         TOOLS,

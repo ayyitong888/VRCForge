@@ -91,6 +91,7 @@ from runtime_planner_service import (
     RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS,
     RuntimePlannerService,
 )
+from scripts.evaluate_agent_harness import _find_runtime_receipt
 from skill_packages import SkillPackageError, SkillPackageService
 from skill_package_controller import SkillPackageController
 from skill_package_projection import (
@@ -471,6 +472,10 @@ def fake_dashboard_shell_process_ports(
 
 class DashboardServerTests(unittest.TestCase):
     def setUp(self) -> None:
+        # TestClient shutdown closes the process-owned Provider planner. Each
+        # unittest method models a fresh live App process, so reopen that owner
+        # explicitly instead of weakening production shutdown fail-closed.
+        dashboard_server._RUNTIME_PLANNER_MODEL.start()
         dashboard_server.DASHBOARD_RUNTIME.manual_undo_stack.clear()
         dashboard_server.DASHBOARD_RUNTIME.current_avatar_path = ""
         dashboard_server.DASHBOARD_RUNTIME.current_avatar_name = ""
@@ -6079,6 +6084,149 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["plan"]["nextStep"], "cancelled")
         self.assertEqual(payload["plan"]["reply"], "Request cancelled.")
 
+    def test_agent_runtime_stop_cooperatively_cancels_blocked_provider_owner(self) -> None:
+        client_turn_id = "client-cancel-blocked-provider"
+        started = threading.Event()
+        result: dict[str, object] = {}
+        errors: list[BaseException] = []
+        baseline_owners = dashboard_server._RUNTIME_PLANNER_MODEL.active_call_count()
+
+        def fake_request(_settings, _prompt, *, stream_callback=None) -> LlmPlanResponse:
+            started.set()
+            while True:
+                if stream_callback is not None:
+                    stream_callback("")
+                time.sleep(0.005)
+
+        def run_turn() -> None:
+            try:
+                result.update(
+                    dashboard_server.AGENT_GATEWAY.runtime_message(
+                        {
+                            "message": "wait inside provider planning",
+                            "session_id": "sess-cancel-blocked-provider",
+                            "clientTurnId": client_turn_id,
+                        }
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 - surfaced in the assertion thread.
+                errors.append(exc)
+
+        with (
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=_test_runtime_provider_config(),
+            ),
+            patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_request),
+        ):
+            caller = threading.Thread(target=run_turn, daemon=True)
+            caller.start()
+            self.assertTrue(started.wait(1.0))
+            dashboard_server.AGENT_GATEWAY.request_runtime_cancel(
+                {"clientTurnId": client_turn_id, "reason": "user_stop"}
+            )
+            caller.join(1.0)
+
+        self.assertFalse(caller.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(result["plan"]["nextStep"], "cancelled")
+        self.assertFalse(result.get("steps"))
+        self.assertEqual(
+            dashboard_server._RUNTIME_PLANNER_MODEL.active_call_count(),
+            baseline_owners,
+        )
+
+    def test_runtime_stop_waits_for_write_transaction_then_blocks_next_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3.22f1\n",
+                encoding="utf-8",
+            )
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
+            client_turn_id = "client-cancel-after-write"
+            write_tool = "vrcforge_test_transactional_write"
+            next_tool = "vrcforge_test_must_not_run_after_write_stop"
+            calls: list[str] = []
+
+            def finish_write(_params: dict) -> dict:
+                calls.append(write_tool)
+                gateway.request_runtime_cancel(
+                    {"clientTurnId": client_turn_id, "reason": "user_stop"}
+                )
+                return {"ok": True, "status": "applied", "readbackVerified": True}
+
+            gateway.register_tool(write_tool, "Transactional write fixture.", "write", lambda _params: {}, write=True)
+            gateway.approval_transactions.register_write_handler(
+                write_tool,
+                "Transactional write fixture.",
+                "low",
+                finish_write,
+            )
+            gateway.register_tool(
+                next_tool,
+                "Must not run after Stop.",
+                "read/debug",
+                lambda _params: calls.append(next_tool) or {"ok": True, "status": "executed"},
+            )
+            config = gateway.ensure_config()
+            config.execution_mode = "roslyn_full_auto"
+            config.roslyn_risk_acknowledged = True
+            config.allow_roslyn_advanced = True
+            gateway.save_config(config)
+            planner_calls = 0
+
+            def respond(_prompt: str) -> PlannerModelResult:
+                nonlocal planner_calls
+                planner_calls += 1
+                if planner_calls == 1:
+                    return PlannerModelResult(text=json.dumps({"action": "enter_execution"}))
+                if planner_calls == 2:
+                    return PlannerModelResult(
+                        text=json.dumps(
+                            {
+                                "action": "write",
+                                "write_tool": write_tool,
+                                "write_params": {
+                                    "target": "same",
+                                    "projectRoot": str(project),
+                                },
+                            }
+                        )
+                    )
+                return PlannerModelResult(
+                    text=json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": next_tool,
+                            "skill_params": {},
+                        }
+                    )
+                )
+
+            bind_test_runtime_planner(gateway, respond)
+            payload = gateway.runtime_message(
+                {
+                    "message": "finish the write and then inspect",
+                    "clientTurnId": client_turn_id,
+                    "projectRoot": str(project),
+                }
+            )
+
+        self.assertEqual(calls, [write_tool])
+        self.assertEqual(planner_calls, 2)
+        self.assertEqual(payload["plan"]["nextStep"], "cancelled")
+        self.assertEqual(
+            [step["tool"] for step in payload["steps"] if step["kind"] == "write"],
+            [write_tool],
+        )
+
     def test_background_runtime_propagates_provider_failure_while_interactive_is_typed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6144,6 +6292,188 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("private-workspace-name", serialized)
         self.assertIn("<redacted>", serialized)
         self.assertIn("<path redacted>", serialized)
+
+    def test_runtime_loop_allows_same_read_after_distinct_successful_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            calls: list[str] = []
+            first_tool = "vrcforge_test_repeatable_read"
+            second_tool = "vrcforge_test_observation_boundary"
+            arguments = {"target": "same"}
+            gateway.register_tool(
+                first_tool,
+                "Repeatable read fixture.",
+                "read/debug",
+                lambda _params: calls.append(first_tool) or {"ok": True, "status": "executed"},
+            )
+            gateway.register_tool(
+                second_tool,
+                "Observation boundary fixture.",
+                "read/debug",
+                lambda _params: calls.append(second_tool) or {"ok": True, "status": "executed"},
+            )
+            plans = iter(
+                [
+                    {
+                        "summary": "read once",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": first_tool,
+                        "skillParams": arguments,
+                        "continueLoop": True,
+                    },
+                    {
+                        "summary": "observe another source",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": second_tool,
+                        "skillParams": {},
+                        "continueLoop": True,
+                    },
+                    {
+                        "summary": "read again after state observation changed",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": first_tool,
+                        "skillParams": arguments,
+                        "continueLoop": True,
+                    },
+                    PlannerModelResult(
+                        text=json.dumps(
+                            {
+                                "action": "reply",
+                                "reply": "Verified.",
+                                "completion_claim": {
+                                    "satisfied": True,
+                                    "evidence_action_ids": [
+                                        canonical_action_id("skill", first_tool, arguments),
+                                        canonical_action_id("skill", second_tool, {}),
+                                    ],
+                                },
+                            }
+                        )
+                    ),
+                ]
+            )
+            bind_test_runtime_planner(gateway, lambda _prompt: next(plans))
+
+            payload = gateway.runtime_message({"message": "read, observe, then verify the same read"})
+
+        self.assertEqual(calls, [first_tool, second_tool, first_tool])
+        self.assertEqual(len(payload["steps"]), 3)
+        self.assertEqual(payload["plan"]["nextStep"], "done")
+
+    def test_runtime_loop_suppresses_only_consecutive_successful_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            calls: list[str] = []
+            tool = "vrcforge_test_consecutive_success"
+            plan = {
+                "summary": "repeat the same read",
+                "planner": "test",
+                "nextStep": "call_skill",
+                "skillNeeded": True,
+                "skillTool": tool,
+                "skillParams": {"target": "same"},
+                "continueLoop": True,
+            }
+            gateway.register_tool(
+                tool,
+                "Consecutive success fixture.",
+                "read/debug",
+                lambda _params: calls.append(tool) or {"ok": True, "status": "executed"},
+            )
+            bind_test_runtime_planner(gateway, lambda _prompt: plan)
+
+            payload = gateway.runtime_message({"message": "repeat the exact same read"})
+
+        self.assertEqual(calls, [tool])
+        self.assertEqual(len(payload["steps"]), 1)
+        self.assertEqual(payload["plan"]["nextStep"], "completion_unverified")
+
+    def test_runtime_loop_distinguishes_two_write_tools_with_same_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            calls: list[str] = []
+            first_tool = "vrcforge_test_write_identity_a"
+            second_tool = "vrcforge_test_write_identity_b"
+            (root / "Assets").mkdir()
+            (root / "Packages").mkdir()
+            (root / "ProjectSettings").mkdir()
+            (root / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3.22f1\n",
+                encoding="utf-8",
+            )
+            arguments = {"target": "same", "projectRoot": str(root)}
+            gateway.approval_transactions.checkpoint_prepare_handler = lambda _root: {"ok": True}
+            for tool in (first_tool, second_tool):
+                gateway.register_tool(tool, "Write identity fixture.", "write", lambda _params: {}, write=True)
+                gateway.approval_transactions.register_write_handler(
+                    tool,
+                    "Write identity fixture.",
+                    "low",
+                    lambda _params, current=tool: calls.append(current)
+                    or {"ok": True, "status": "applied", "readbackVerified": True},
+                )
+            config = gateway.ensure_config()
+            config.execution_mode = "roslyn_full_auto"
+            config.roslyn_risk_acknowledged = True
+            config.allow_roslyn_advanced = True
+            gateway.save_config(config)
+            responses = iter(
+                [
+                    PlannerModelResult(text=json.dumps({"action": "enter_execution"})),
+                    PlannerModelResult(
+                        text=json.dumps(
+                            {
+                                "action": "write",
+                                "write_tool": first_tool,
+                                "write_params": arguments,
+                            }
+                        )
+                    ),
+                    PlannerModelResult(
+                        text=json.dumps(
+                            {
+                                "action": "write",
+                                "write_tool": second_tool,
+                                "write_params": arguments,
+                            }
+                        )
+                    ),
+                    PlannerModelResult(
+                        text=json.dumps(
+                            {
+                                "action": "reply",
+                                "reply": "Both writes completed.",
+                                "completion_claim": {
+                                    "satisfied": True,
+                                    "evidence_action_ids": [
+                                        canonical_action_id("write", first_tool, arguments),
+                                        canonical_action_id("write", second_tool, arguments),
+                                    ],
+                                },
+                            }
+                        )
+                    ),
+                ]
+            )
+            bind_test_runtime_planner(gateway, lambda _prompt: next(responses))
+
+            payload = gateway.runtime_message({"message": "run two distinct writes with the same parameters"})
+
+        self.assertEqual(calls, [first_tool, second_tool])
+        self.assertEqual(
+            [step["tool"] for step in payload["steps"] if step["kind"] == "write"],
+            [first_tool, second_tool],
+        )
+        self.assertEqual(payload["plan"]["nextStep"], "done")
 
     def test_runtime_loop_suppresses_only_three_identical_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6694,9 +7024,9 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("ProjectA private memory", no_project_prompt)
         self.assertNotIn("ProjectB private memory", no_project_prompt)
 
-    def test_production_runtime_catalog_exposes_real_write_handlers_only_for_execution(self) -> None:
+    def test_production_runtime_catalog_hides_planning_writes_but_preserves_their_kind(self) -> None:
         gateway = dashboard_server.AGENT_GATEWAY
-        config = replace(gateway.ensure_config(), allow_write_requests=True)
+        config = replace(gateway.ensure_config(), enabled=True, allow_write_requests=True)
         real_write_handlers = {
             name
             for name, handler in gateway._write_handlers.items()
@@ -6711,17 +7041,31 @@ class DashboardServerTests(unittest.TestCase):
             execution = dashboard_server._RuntimePlannerCatalog().read("execution")
 
         planning_visible = {tool.name for tool in planning.visible_tools}
-        planning_routable = {tool.name for tool in planning.routable_tools}
+        planning_routable = {tool.name: tool for tool in planning.routable_tools}
         execution_tools = {tool.name: tool for tool in execution.visible_tools}
         execution_routable = {tool.name for tool in execution.routable_tools}
+        with patch.object(gateway, "ensure_config", return_value=config):
+            external_planning = {
+                item["name"] for item in gateway.build_manifest("planning")["tools"]
+            }
+            with self.assertRaisesRegex(AgentGatewayError, "Unknown or unavailable"):
+                gateway.call_tool(
+                    "vrcforge_vision_audit_multi",
+                    {"captureReceipt": "external-receipt"},
+                    agent_name="external-agent",
+                )
 
         self.assertTrue(real_write_handlers.isdisjoint(planning_visible))
-        self.assertTrue(real_write_handlers.isdisjoint(planning_routable))
+        self.assertTrue(real_write_handlers.issubset(planning_routable))
+        self.assertTrue(all(planning_routable[name].write for name in real_write_handlers))
         self.assertTrue(
             dashboard_server.WRAPPER_ONLY_WRITE_TARGETS.isdisjoint(execution_tools)
         )
         self.assertTrue(real_write_handlers.issubset(execution_tools))
         self.assertTrue(real_write_handlers.issubset(execution_routable))
+        self.assertNotIn("vrcforge_vision_audit_multi", external_planning)
+        self.assertIn("vrcforge_vision_audit_multi", execution_tools)
+        self.assertIn("vrcforge_vision_audit_multi", execution_routable)
         self.assertTrue(all(execution_tools[name].write for name in real_write_handlers))
         self.assertTrue(
             all(execution_tools[name].category == "supervised-write" for name in real_write_handlers)
@@ -7311,6 +7655,11 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(all("Negative example:" in tool["description"] for tool in payload["tools"]))
         self.assertIn("vrcforge_agent_observe", tool_names)
         self.assertIn("vrcforge_agent_message", tool_names)
+        parameters_tool = next(
+            tool for tool in payload["tools"] if tool["name"] == "vrcforge_scan_parameters"
+        )
+        self.assertIn("Expression Parameters asset", parameters_tool["description"])
+        self.assertIn("FX Animator layers/states", parameters_tool["description"])
         self.assertNotIn("vrcforge_agent_desktop_action", tool_names)
         self.assertIn("vrcforge_progress_replace", tool_names)
         self.assertIn("vrcforge_progress_update", tool_names)
@@ -15360,6 +15709,354 @@ namespace VRCForge.Editor
             response = client.post("/api/vision/audit-multi", json={"image_paths": []})
         self.assertEqual(response.status_code, 400)
 
+    def test_audit_multi_rejects_unmanaged_paths_before_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "serialize_api_config",
+                return_value={"provider": "gemini"},
+            ), patch("dashboard_server.run_gemini_vision_audit_bytes") as mock_audit:
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/vision/audit-multi",
+                        json={
+                            "imagePaths": [
+                                str(root / "missing-front.png"),
+                                str(root / "missing-back.png"),
+                            ],
+                            "angles": ["front", "back"],
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 400)
+        mock_audit.assert_not_called()
+
+    def test_audit_multi_complete_angle_coverage_is_the_only_pass_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "latest"
+            root.mkdir()
+            authority = dashboard_server.ManagedVisualCaptureAuthority(root)
+            front = root / "front.png"
+            back = root / "back.png"
+            front.write_bytes(b"front")
+            back.write_bytes(b"back")
+            completed_audit = dashboard_server.normalize_vision_audit_payload(
+                {
+                    "status": "pass",
+                    "summary": "No visible clipping.",
+                    "issues": [],
+                    "annotations": [],
+                }
+            )
+            with patch.object(
+                dashboard_server,
+                "MANAGED_VISUAL_CAPTURE_AUTHORITY",
+                authority,
+            ), patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "serialize_api_config",
+                return_value={"provider": "gemini"},
+            ), patch(
+                "dashboard_server.run_gemini_vision_audit_bytes",
+                side_effect=[dict(completed_audit), dict(completed_audit)],
+            ) as mock_audit, patch("dashboard_server.save_vision_audit_artifact") as mock_save:
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/vision/audit-multi",
+                        json={
+                            "imagePaths": [str(front), str(back)],
+                            "angles": ["front", "back"],
+                        },
+                    )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["overallStatus"], "pass")
+        self.assertTrue(payload["coverageComplete"])
+        self.assertTrue(payload["visualVerified"])
+        self.assertEqual(payload["visualVerification"]["profile"], "multi_angle_visual")
+        self.assertEqual([item["status"] for item in payload["results"]], ["pass", "pass"])
+        self.assertEqual(mock_audit.call_count, 2)
+        mock_save.assert_not_called()
+
+    def test_audit_multi_provider_exception_unknown_or_incomplete_result_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            managed = Path(temp_dir) / "latest"
+            managed.mkdir()
+            authority = dashboard_server.ManagedVisualCaptureAuthority(managed)
+            image = managed / "front.png"
+            image.write_bytes(b"front")
+            invalid_results = (
+                RuntimeError("provider unavailable"),
+                dashboard_server.normalize_vision_audit_payload(
+                    {
+                        "status": "unknown",
+                        "summary": "Uncertain.",
+                        "issues": [],
+                        "annotations": [],
+                    }
+                ),
+                dashboard_server.normalize_vision_audit_payload(
+                    {
+                        "status": "pass",
+                        "summary": "Missing required arrays.",
+                    }
+                ),
+            )
+            for invalid_result in invalid_results:
+                with self.subTest(invalid_result=type(invalid_result).__name__), patch.object(
+                    dashboard_server,
+                    "MANAGED_VISUAL_CAPTURE_AUTHORITY",
+                    authority,
+                ), patch.object(
+                    dashboard_server.PROVIDER_CONFIGURATION,
+                    "serialize_api_config",
+                    return_value={"provider": "gemini"},
+                ), patch(
+                    "dashboard_server.run_gemini_vision_audit_bytes",
+                    side_effect=invalid_result if isinstance(invalid_result, Exception) else None,
+                    return_value=invalid_result if isinstance(invalid_result, dict) else None,
+                ):
+                    payload = dashboard_server.audit_avatar_multi_screenshot_sync(
+                        dashboard_server.VisionAuditMultiRequest(
+                            imagePaths=[str(image)],
+                            angles=["front"],
+                        )
+                    )
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["overallStatus"], "failed")
+                self.assertFalse(payload["coverageComplete"])
+
+    def test_audit_multi_requires_exact_unique_angle_and_image_coverage(self) -> None:
+        request_schema = dashboard_server.VisionAuditMultiRequest.model_json_schema()
+        self.assertEqual(set(request_schema["properties"]), {"imagePaths", "angles"})
+        agent_schema = dashboard_server.ManagedVisionAuditMultiRequest.model_json_schema()
+        self.assertEqual(set(agent_schema["properties"]), {"captureReceipt"})
+        with self.assertRaises(ValidationError):
+            dashboard_server.ManagedVisionAuditMultiRequest(
+                imagePaths=["private.png"], angles=["front"]
+            )
+        with TestClient(dashboard_server.app) as client:
+            mismatch = client.post(
+                "/api/vision/audit-multi",
+                json={"imagePaths": ["front.png", "back.png"], "angles": ["front"]},
+            )
+            duplicate = client.post(
+                "/api/vision/audit-multi",
+                json={"imagePaths": ["same.png", "same.png"], "angles": ["front", "back"]},
+            )
+        self.assertEqual(mismatch.status_code, 400)
+        self.assertEqual(duplicate.status_code, 400)
+
+    def test_multi_vision_audit_agent_tool_is_internal_to_the_runtime_loop(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        headers = {"Authorization": f"Bearer {config.token}"}
+
+        with TestClient(dashboard_server.app) as client:
+            manifest = client.get(
+                "/api/agent/manifest?exposure_layer=planning",
+                headers=headers,
+            ).json()
+            registry = client.get(
+                "/api/agent/tools/registry?exposure_layer=planning",
+                headers=headers,
+            ).json()
+
+        self.assertNotIn(
+            "vrcforge_vision_audit_multi",
+            {item["name"] for item in manifest["tools"]},
+        )
+        self.assertNotIn(
+            "vrcforge_vision_audit_multi",
+            {item["name"] for item in registry["tools"]},
+        )
+
+    def test_managed_multi_vision_audit_consumes_exact_capture_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            managed = Path(temp_dir) / "latest"
+            managed.mkdir()
+            front = managed / "vision_front.png"
+            back = managed / "vision_back.png"
+            front.write_bytes(b"front")
+            back.write_bytes(b"back")
+            authority = dashboard_server.ManagedVisualCaptureAuthority(managed)
+            binding = {
+                "taskId": "task-1",
+                "sessionId": "session-1",
+                "approvalId": "approval-1",
+                "requestedActionId": "action-capture-1",
+            }
+            issued = authority.issue(
+                [
+                    {"imagePath": str(front), "angle": "front"},
+                    {"imagePath": str(back), "angle": "back"},
+                ],
+                binding=binding,
+            )
+            completed_audit = dashboard_server.normalize_vision_audit_payload(
+                {"status": "pass", "summary": "clear", "issues": [], "annotations": []}
+            )
+            with patch.object(
+                dashboard_server,
+                "MANAGED_VISUAL_CAPTURE_AUTHORITY",
+                authority,
+            ), patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "serialize_api_config",
+                return_value={"provider": "gemini"},
+            ), patch(
+                "dashboard_server.run_gemini_vision_audit_bytes",
+                side_effect=[dict(completed_audit), dict(completed_audit)],
+            ) as mock_audit:
+                payload = dashboard_server.audit_managed_avatar_multi_screenshot_sync(
+                    dashboard_server.ManagedVisionAuditMultiRequest(
+                        captureReceipt=issued["captureReceipt"]
+                    ),
+                    task_binding=binding,
+                )
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["captureEvidenceVerified"])
+        self.assertEqual(payload["captureEvidenceId"], issued["captureEvidenceId"])
+        self.assertEqual(payload["evidence"], issued["evidence"])
+        self.assertEqual(mock_audit.call_count, 2)
+        self.assertNotIn("imagePath", json.dumps(payload))
+
+    def test_external_agent_cannot_call_the_task_internal_multi_vision_tool(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        with patch("dashboard_server.run_gemini_vision_audit_bytes") as mock_audit:
+            with self.assertRaisesRegex(AgentGatewayError, "Unknown or unavailable"):
+                dashboard_server.AGENT_GATEWAY.call_tool(
+                    "vrcforge_vision_audit_multi",
+                    {"imagePaths": ["D:/private.png"], "angles": ["front"]},
+                )
+
+        mock_audit.assert_not_called()
+
+    def test_completion_console_reader_clamps_core_timeout_and_disables_retries(self) -> None:
+        settings = SimpleNamespace(
+            unity_mcp_retries=3,
+            unity_mcp_retry_backoff_seconds=2.0,
+            unity_mcp_timeout_seconds=600,
+        )
+        core_result = SimpleNamespace(exit_code=0, stdout="{}", stderr="", payload=None)
+        with patch(
+            "dashboard_server.load_dashboard_settings",
+            return_value=settings,
+        ), patch(
+            "dashboard_server.invoke_unity_mcp",
+            return_value=core_result,
+        ) as invoke:
+            dashboard_server.read_agent_compile_errors(
+                {
+                    "maxErrors": 200,
+                    "includeConsoleFallback": True,
+                    "_completionVerifierTimeoutSeconds": 7,
+                }
+            )
+
+        bounded_settings = invoke.call_args.args[0]
+        self.assertEqual(bounded_settings.unity_mcp_timeout_seconds, 7)
+        self.assertEqual(bounded_settings.unity_mcp_retries, 1)
+        self.assertEqual(bounded_settings.unity_mcp_retry_backoff_seconds, 0.0)
+
+    def test_managed_multi_vision_provider_receives_verified_bytes_not_reopened_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            managed = Path(temp_dir) / "latest"
+            managed.mkdir()
+            image = managed / "vision_front.png"
+            image.write_bytes(b"original")
+            authority = dashboard_server.ManagedVisualCaptureAuthority(managed)
+            binding = {
+                "taskId": "task-1",
+                "sessionId": "session-1",
+                "approvalId": "approval-1",
+                "requestedActionId": "action-capture-1",
+            }
+            issued = authority.issue(
+                [{"imagePath": str(image), "angle": "front"}],
+                binding=binding,
+            )
+            observed: list[bytes] = []
+
+            def audit_bytes(_config, image_bytes, **_kwargs):
+                image.write_bytes(b"replacement")
+                observed.append(image_bytes)
+                return dashboard_server.normalize_vision_audit_payload(
+                    {"status": "pass", "summary": "clear", "issues": [], "annotations": []}
+                )
+
+            with patch.object(
+                dashboard_server,
+                "MANAGED_VISUAL_CAPTURE_AUTHORITY",
+                authority,
+            ), patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "serialize_api_config",
+                return_value={"provider": "gemini"},
+            ), patch(
+                "dashboard_server.run_gemini_vision_audit_bytes",
+                side_effect=audit_bytes,
+            ):
+                payload = dashboard_server.audit_managed_avatar_multi_screenshot_sync(
+                    dashboard_server.ManagedVisionAuditMultiRequest(
+                        captureReceipt=issued["captureReceipt"]
+                    ),
+                    task_binding=binding,
+                )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(observed, [b"original"])
+        self.assertNotIn("imagePath", json.dumps(payload))
+
+    def test_agent_managed_vision_consumes_only_its_prior_capture_action(self) -> None:
+        seed = {
+            "taskId": "task-1",
+            "sessionId": "session-1",
+            "actions": [],
+            "managedVisualCaptureActionIds": ["action-capture-1"],
+        }
+        with patch.object(
+            dashboard_server.AGENT_GATEWAY,
+            "consume_runtime_task_link",
+            return_value=(seed, "session-1"),
+        ), patch(
+            "dashboard_server.audit_managed_avatar_multi_screenshot_sync",
+            return_value={"ok": True},
+        ) as audit:
+            payload = dashboard_server.audit_managed_avatar_multi_screenshot_for_agent(
+                {"captureReceipt": "receipt-1"}
+            )
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            audit.call_args.kwargs["task_binding"],
+            {
+                "taskId": "task-1",
+                "sessionId": "session-1",
+                "captureActionIds": ["action-capture-1"],
+            },
+        )
+
+    def test_agent_single_vision_tool_cannot_supply_local_path(self) -> None:
+        config = dashboard_server.AGENT_GATEWAY.ensure_config()
+        config.enabled = True
+        dashboard_server.AGENT_GATEWAY.save_config(config)
+        with patch("dashboard_server.run_gemini_vision_audit_bytes") as mock_audit:
+            payload = dashboard_server.AGENT_GATEWAY.call_tool(
+                "vrcforge_vision_audit",
+                {"image_path": "D:/private.png"},
+            )
+
+        self.assertFalse(payload["ok"])
+        mock_audit.assert_not_called()
+
     def test_normalize_vision_audit_payload_keeps_position_annotations(self) -> None:
         payload = dashboard_server.normalize_vision_audit_payload(
             {
@@ -15616,6 +16313,170 @@ class MaterialMagentaValidationTests(unittest.TestCase):
 
         self.assertFalse([item for item in findings if item.get("severity") == "Error"])
         self.assertTrue([item for item in findings if item.get("severity") == "Info"])
+
+
+def test_app_harness_journey_routes_return_only_process_authenticated_safe_fields(
+    monkeypatch,
+) -> None:
+    runtime_payload = {"ok": True, "secretRuntimeField": "must-not-leave-the-route"}
+    receipt = {"schema": "vrcforge.agent_harness_journey_receipt.v1", "receiptId": "r1"}
+    safe_journey = {
+        "schema": "vrcforge.agent_harness_journey.v1",
+        "id": "turn-1",
+        "toolExecutions": 1,
+    }
+
+    class Authority:
+        def verify(self, supplied):
+            assert supplied == receipt
+            return safe_journey
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "app_agent_runtime_message",
+        AsyncMock(return_value={**runtime_payload, "harnessJourneyReceipt": receipt}),
+    )
+    monkeypatch.setattr(dashboard_server, "AGENT_HARNESS_JOURNEY_RECEIPTS", Authority())
+
+    issued = asyncio.run(
+        dashboard_server.issue_agent_harness_journey(
+            dashboard_server.AgentRuntimeMessageRequest(message="run the explicit journey")
+        )
+    )
+    verified = dashboard_server.verify_agent_harness_journey(
+        dashboard_server.AgentHarnessJourneyReceiptRequest(receipt=receipt)
+    )
+
+    assert issued == {"ok": True, "receipt": receipt}
+    assert "secretRuntimeField" not in issued
+    assert verified == {"ok": True, "journey": safe_journey}
+
+
+def test_terminal_runtime_payload_can_attach_one_authenticated_journey_receipt(
+    monkeypatch,
+) -> None:
+    payload = {"ok": True, "turnId": "turn-1"}
+    receipt = {"schema": "vrcforge.agent_harness_journey_receipt.v1", "receiptId": "r1"}
+
+    class Authority:
+        def issue(self, supplied):
+            assert supplied is payload
+            return receipt
+
+    monkeypatch.setattr(dashboard_server, "AGENT_HARNESS_JOURNEY_RECEIPTS", Authority())
+
+    attached = dashboard_server.attach_agent_harness_journey_receipt(payload)
+
+    assert attached == {**payload, "harnessJourneyReceipt": receipt}
+    assert payload == {"ok": True, "turnId": "turn-1"}
+
+
+def test_approval_terminal_journey_receipt_is_durable_for_exact_task_polling(
+    monkeypatch,
+) -> None:
+    receipt = {
+        "schema": "vrcforge.agent_harness_journey_receipt.v1",
+        "receiptId": "r1",
+        "expiresAtMs": int(time.time() * 1000) + 60_000,
+    }
+    payload = {
+        "continuationSource": "approval_finished",
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "clientTurnId": "client-1:shell:s1",
+        "plan": {
+            "nextStep": "done",
+            "taskCompletion": {
+                "status": "completed",
+                "taskId": "task-1",
+                "evidenceActionIds": ["action-1"],
+            },
+        },
+        "harnessJourneyReceipt": receipt,
+    }
+
+    class Ledger:
+        def __init__(self) -> None:
+            self.events: list[dict] = []
+
+        def append(self, event: dict) -> None:
+            self.events.append(event)
+
+    ledger = Ledger()
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "_runtime_run_ledger", ledger)
+
+    projected = dashboard_server.persist_runtime_turn_journey_receipt(payload)
+    bootstrap = {
+        "runtimeContinuations": [ledger.events[-1]["continuationEvent"]]
+    }
+
+    assert projected is not None
+    assert ledger.events[-1]["event"] == "runtime_turn_journey_receipt_issued"
+    assert _find_runtime_receipt(
+        bootstrap,
+        session_id="session-1",
+        task_id="task-1",
+    ) == receipt
+    assert _find_runtime_receipt(
+        bootstrap,
+        session_id="session-1",
+        task_id="task-other",
+    ) is None
+
+
+def test_terminal_task_still_broadcasts_when_journey_receipt_persistence_fails(
+    monkeypatch,
+) -> None:
+    payload = {
+        "continuationSource": "shell_process_finished",
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "clientTurnId": "client-1:shell:s1",
+        "plan": {
+            "nextStep": "done",
+            "taskCompletion": {
+                "status": "completed",
+                "taskId": "task-1",
+                "evidenceActionIds": ["action-1"],
+            },
+        },
+        "harnessJourneyReceipt": {
+            "schema": "vrcforge.agent_harness_journey_receipt.v1",
+            "receiptId": "r1",
+            "expiresAtMs": int(time.time() * 1000) + 60_000,
+        },
+    }
+
+    class BrokenLedger:
+        def append(self, _event: dict) -> None:
+            raise OSError("disk full")
+
+        def list_runs(self, **_kwargs) -> list[dict]:
+            return []
+
+    broadcasts: list[tuple[str, object]] = []
+    monkeypatch.setattr(dashboard_server.AGENT_GATEWAY, "_runtime_run_ledger", BrokenLedger())
+    monkeypatch.setattr(
+        dashboard_server.EVENT_BUS,
+        "broadcast_from_sync",
+        lambda event_type, event_payload: broadcasts.append((event_type, event_payload)),
+    )
+
+    dashboard_server.broadcast_runtime_turn_completed(payload)
+
+    runtime_broadcasts = [
+        (event_type, event_payload)
+        for event_type, event_payload in broadcasts
+        if event_type.startswith("agentRuntime")
+    ]
+    assert [event_type for event_type, _ in runtime_broadcasts] == [
+        "agentRuntimeTurn",
+        "agentRuntimeRuns",
+    ]
+    terminal = runtime_broadcasts[0][1]
+    assert isinstance(terminal, dict)
+    assert terminal["plan"]["taskCompletion"]["status"] == "completed"
+    assert "harnessJourneyReceipt" not in terminal
 
 
 if __name__ == "__main__":

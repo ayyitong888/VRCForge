@@ -25,6 +25,12 @@ RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS = 600
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH = 2
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS = 12
 RUNTIME_VISION_ANALYSIS_MAX_CHARS = 4_000
+_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES = 24
+_PLANNER_TOOL_SCHEMA_MAX_ENUM_ITEMS = 16
+_PLANNER_TOOL_SCHEMA_MAX_ISSUES = 8
+_PLANNER_TOOL_SCHEMA_TYPES = frozenset(
+    {"string", "integer", "number", "boolean", "object", "array"}
+)
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_get_compile_errors": ("projectPath?:string", "maxErrors?:integer"),
@@ -38,6 +44,7 @@ _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_scan_thry_avatar_performance": ("projectPath?:string", "avatarPath?:string"),
     "vrcforge_read_avatar_descriptor": ("projectPath?:string", "avatarPath?:string"),
     "vrcforge_scan_avatar_items": ("projectPath?:string", "avatarPath?:string"),
+    "vrcforge_vision_audit_multi": ("captureReceipt:string",),
     "vrcforge_create_gameobject": (
         "projectPath?:string",
         "name:string",
@@ -58,6 +65,210 @@ class PlannerProviderNotConfiguredError(RuntimeError):
     """The selected planner lane has no usable credential/configuration."""
 
 
+def planner_tool_input_contract(name: str) -> tuple[str, ...]:
+    return _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS.get(str(name or "").strip(), ())
+
+
+def _contract_shallow_schema(input_contract: tuple[str, ...]) -> dict[str, object]:
+    properties: dict[str, dict[str, object]] = {}
+    required: list[str] = []
+    for declaration in input_contract[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
+        match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_]*)(\?)?:(string|integer|number|boolean|object|array)",
+            str(declaration or "").strip(),
+        )
+        if match is None:
+            continue
+        name, optional, value_type = match.groups()
+        properties[name] = {"type": value_type}
+        if not optional:
+            required.append(name)
+    if not properties:
+        return {}
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        # The legacy string contracts are intentionally partial hints. They
+        # must not start rejecting accepted handler fields until a registration
+        # explicitly declares a closed schema.
+        "additionalProperties": True,
+    }
+
+
+def bounded_planner_tool_schema(value: object) -> dict[str, object]:
+    """Project the supported shallow JSON-schema subset without becoming a DSL."""
+
+    if not isinstance(value, Mapping) or str(value.get("type") or "object") != "object":
+        return {}
+    raw_properties = value.get("properties")
+    properties: dict[str, dict[str, object]] = {}
+    if isinstance(raw_properties, Mapping):
+        for raw_name, raw_spec in list(raw_properties.items())[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
+            name = str(raw_name or "").strip()[:120]
+            if not name or not isinstance(raw_spec, Mapping):
+                continue
+            value_type = str(raw_spec.get("type") or "").strip().casefold()
+            if value_type not in _PLANNER_TOOL_SCHEMA_TYPES:
+                continue
+            spec: dict[str, object] = {"type": value_type}
+            raw_enum = raw_spec.get("enum")
+            if isinstance(raw_enum, (list, tuple)):
+                enum_values: list[object] = []
+                for item in raw_enum[:_PLANNER_TOOL_SCHEMA_MAX_ENUM_ITEMS]:
+                    if item is None or isinstance(item, (bool, int, float, str)):
+                        bounded = item[:160] if isinstance(item, str) else item
+                        if bounded not in enum_values:
+                            enum_values.append(bounded)
+                if enum_values:
+                    spec["enum"] = enum_values
+            properties[name] = spec
+    if not properties:
+        return {}
+    raw_required = value.get("required")
+    required = []
+    if isinstance(raw_required, (list, tuple)):
+        for item in raw_required[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
+            name = str(item or "").strip()
+            if name in properties and name not in required:
+                required.append(name)
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": value.get("additionalProperties") is not False,
+    }
+
+
+def planner_tool_input_schema(name: str) -> dict[str, object]:
+    return bounded_planner_tool_schema(
+        _contract_shallow_schema(planner_tool_input_contract(name))
+    )
+
+
+def _matches_planner_schema_type(value: object, value_type: str) -> bool:
+    if value_type == "string":
+        return isinstance(value, str)
+    if value_type == "boolean":
+        return isinstance(value, bool)
+    if value_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if value_type == "number":
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        )
+    if value_type == "object":
+        return isinstance(value, Mapping)
+    if value_type == "array":
+        return isinstance(value, list)
+    return False
+
+
+def validate_planner_tool_arguments(
+    schema: object,
+    arguments: object,
+) -> dict[str, object]:
+    """Validate only required/type/enum/closed-extra constraints, deterministically."""
+
+    bounded_schema = bounded_planner_tool_schema(schema)
+    if not bounded_schema:
+        return {"ok": True, "code": "", "summary": "", "issues": []}
+    if not isinstance(arguments, Mapping):
+        return {
+            "ok": False,
+            "code": "planner_invalid_response",
+            "summary": "Tool arguments must be a JSON object.",
+            "issues": [{"path": "$", "code": "wrong_type", "expected": "object"}],
+        }
+
+    issues: list[dict[str, str]] = []
+    properties = bounded_schema.get("properties")
+    property_map = properties if isinstance(properties, Mapping) else {}
+    required = bounded_schema.get("required")
+    for name in required if isinstance(required, list) else []:
+        if name not in arguments:
+            issues.append(
+                {"path": str(name), "code": "missing_required", "expected": "present"}
+            )
+            if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
+                break
+    if len(issues) < _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
+        for raw_name, raw_value in arguments.items():
+            name = str(raw_name)
+            raw_spec = property_map.get(name)
+            if not isinstance(raw_spec, Mapping):
+                if bounded_schema.get("additionalProperties") is False:
+                    issues.append(
+                        {"path": name[:120], "code": "unknown_property", "expected": "declared property"}
+                    )
+                if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
+                    break
+                continue
+            if raw_value is None and name not in required:
+                # Request models commonly project omitted optional fields as
+                # explicit nulls before deterministic routing. Preserve that
+                # established behavior while keeping required fields strict.
+                continue
+            value_type = str(raw_spec.get("type") or "")
+            if not _matches_planner_schema_type(raw_value, value_type):
+                issues.append(
+                    {"path": name[:120], "code": "wrong_type", "expected": value_type}
+                )
+            elif isinstance(raw_spec.get("enum"), list) and raw_value not in raw_spec["enum"]:
+                issues.append(
+                    {"path": name[:120], "code": "enum", "expected": "one of the declared values"}
+                )
+            if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
+                break
+    if not issues:
+        return {"ok": True, "code": "", "summary": "", "issues": []}
+    return {
+        "ok": False,
+        "code": "planner_invalid_response",
+        "summary": "Tool arguments do not match the registered shallow schema.",
+        "issues": issues,
+    }
+
+
+def planner_argument_validation_id(
+    action_kind: str,
+    tool_name: str,
+    arguments: object,
+) -> str:
+    encoded = json.dumps(
+        arguments,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    digest = hashlib.sha256(
+        f"{action_kind}\0{tool_name}\0{encoded}".encode("utf-8")
+    ).hexdigest()[:24]
+    return f"planner_validation_{digest}"
+
+
+def planner_tool_schema_prompt(schema: object) -> str:
+    bounded_schema = bounded_planner_tool_schema(schema)
+    properties = bounded_schema.get("properties")
+    if not isinstance(properties, Mapping):
+        return ""
+    required = set(bounded_schema.get("required") or [])
+    declarations: list[str] = []
+    for name, raw_spec in properties.items():
+        if not isinstance(raw_spec, Mapping):
+            continue
+        declaration = f"{name}{'' if name in required else '?'}:{raw_spec.get('type')}"
+        enum_values = raw_spec.get("enum")
+        if isinstance(enum_values, list) and enum_values:
+            declaration += "[enum=" + "|".join(str(item) for item in enum_values) + "]"
+        declarations.append(declaration)
+    suffix = " additionalProperties=false" if bounded_schema.get("additionalProperties") is False else ""
+    return (" inputs={" + ", ".join(declarations) + "}" + suffix) if declarations else ""
+
+
 @dataclass(frozen=True, slots=True)
 class PlannerTool:
     name: str
@@ -67,10 +278,17 @@ class PlannerTool:
     advanced: bool = False
     requires_user_activation: bool = False
     input_contract: tuple[str, ...] = ()
+    input_schema: Mapping[str, object] = field(default_factory=dict)
 
-
-def planner_tool_input_contract(name: str) -> tuple[str, ...]:
-    return _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS.get(str(name or "").strip(), ())
+    def __post_init__(self) -> None:
+        contract = tuple(self.input_contract or planner_tool_input_contract(self.name))[
+            :_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES
+        ]
+        schema = bounded_planner_tool_schema(
+            self.input_schema or _contract_shallow_schema(contract)
+        )
+        object.__setattr__(self, "input_contract", contract)
+        object.__setattr__(self, "input_schema", MappingProxyType(schema))
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,6 +754,61 @@ def latest_loop_step_needs_model_correction(
                 resolved_action_ids.add(corrected_action_id)
     return False
 
+
+def has_multi_angle_capture_intent(lowered_text: str, original_text: str) -> bool:
+    if has_any(
+        lowered_text,
+        original_text,
+        [
+            "multi-angle",
+            "multi angle",
+            "multiple angles",
+            "several angles",
+            "different angles",
+            "all angles",
+            "four angles",
+            "4 angles",
+            "two angles",
+            "2 angles",
+            "angle coverage",
+            "view coverage",
+            "full coverage",
+            "several views",
+            "multiple views",
+            "different views",
+            "compare views",
+            "view comparison",
+            "多角度",
+            "多个角度",
+            "不同角度",
+            "四角度",
+            "四个角度",
+            "两个角度",
+            "全角度",
+            "多视角",
+            "多个视角",
+            "视角覆盖",
+            "完整覆盖",
+            "对比视角",
+        ],
+    ):
+        return True
+    named_angles = [
+        "front view",
+        "back view",
+        "left side",
+        "right side",
+        "front and back",
+        "front, side",
+        "front side",
+        "正面",
+        "背面",
+        "左侧",
+        "右侧",
+        "侧面",
+    ]
+    return sum(1 for angle in named_angles if angle in lowered_text or angle in original_text) >= 2
+
 def ensure_list(value: object) -> list[object]:
     if isinstance(value, list):
         return value
@@ -808,7 +1081,13 @@ class RuntimePlannerService:
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
         ) -> dict[str, object]:
             loop_state = loop_state or []
-            local_plan = self._local_plan_agent_turn(message, params, observe, loop_state)
+            local_plan = self._local_plan_agent_turn(
+                message,
+                params,
+                observe,
+                loop_state,
+                exposure_layer=exposure_layer,
+            )
             correction_needed = latest_loop_step_needs_model_correction(loop_state)
             # 关键词命中（明确的技能/命令/写入意图）直接走确定性路径：快、稳定、可测试。
             # A failed/needs-user-action tool observation must be shown to the
@@ -817,6 +1096,7 @@ class RuntimePlannerService:
                 local_plan.get("shellNeeded")
                 or local_plan.get("skillNeeded")
                 or local_plan.get("writeNeeded")
+                or local_plan.get("enterExecution")
             ):
                 return local_plan
             # 确定性兜底已经给出明确的终止答复（例如「多个模型让用户选」「没找到模型」），
@@ -944,6 +1224,45 @@ class RuntimePlannerService:
             return plan
 
     @staticmethod
+    def _planner_argument_error_plan(
+            *,
+            base: Mapping[str, object],
+            action_kind: str,
+            tool_name: str,
+            arguments: object,
+            validation: Mapping[str, object],
+            phase: str,
+        ) -> dict[str, object]:
+            return {
+                **dict(base),
+                "summary": str(
+                    validation.get("summary")
+                    or "Tool arguments do not match the registered shallow schema."
+                ),
+                "reply": "",
+                "argumentValidation": {
+                    "ok": False,
+                    "code": "planner_invalid_response",
+                    "actionKind": str(action_kind or "")[:32],
+                    "tool": str(tool_name or "")[:160],
+                    "actionId": planner_argument_validation_id(
+                        action_kind,
+                        tool_name,
+                        arguments,
+                    ),
+                    "summary": str(validation.get("summary") or "")[:600],
+                    "issues": list(validation.get("issues") or [])[:_PLANNER_TOOL_SCHEMA_MAX_ISSUES],
+                },
+                "plannerFailure": {
+                    "code": "planner_invalid_response",
+                    "phase": phase,
+                    "retryable": True,
+                },
+                "continueLoop": True,
+                "nextStep": "planner_invalid_response",
+            }
+
+    @staticmethod
     def _planner_failure_code(exc: Exception) -> str:
             if isinstance(exc, PlannerProviderNotConfiguredError):
                 return "provider_not_configured"
@@ -961,12 +1280,34 @@ class RuntimePlannerService:
                 return "provider_connection_failed"
             return "provider_request_failed"
 
+    def validate_tool_arguments(
+            self,
+            tool_name: str,
+            arguments: object,
+            *,
+            exposure_layer: str,
+        ) -> dict[str, object]:
+            catalog = self._catalog.read(exposure_layer)
+            tool = next(
+                (
+                    item
+                    for item in (*catalog.visible_tools, *catalog.routable_tools)
+                    if item.name == str(tool_name or "").strip()
+                ),
+                None,
+            )
+            if tool is None:
+                return {"ok": True, "code": "", "summary": "", "issues": []}
+            return validate_planner_tool_arguments(tool.input_schema, arguments)
+
     def _local_plan_agent_turn(
             self,
             message: str,
             params: dict[str, object],
             observe: dict[str, object],
             loop_state: list[dict[str, object]] | None = None,
+            *,
+            exposure_layer: str = EXPOSURE_LAYER_PLANNING,
         ) -> dict[str, object]:
             loop_state = loop_state or []
             constraints_applied = bool(observe.get("userConstraints", {}).get("enabled"))
@@ -981,9 +1322,23 @@ class RuntimePlannerService:
                 if write_plan is not None:
                     return write_plan
             skill_route = self._match_runtime_skill(message, params) if not command else None
+            if skill_route is not None:
+                skill_route = self._runtime_skill_route(
+                    str(skill_route.get("tool") or ""),
+                    ensure_dict(skill_route.get("params")),
+                    str(skill_route.get("reason") or "deterministic route"),
+                    exposure_layer=exposure_layer,
+                )
+            route_is_write = bool(skill_route and skill_route.get("write"))
+            route_is_visible = bool(skill_route and skill_route.get("visible"))
+            normalized_exposure = normalize_exposure_layer(exposure_layer)
             summary = "Observed runtime state and prepared the next action."
             if command:
                 summary = "Prepared a shell step for the requested task."
+            elif route_is_write and normalized_exposure == EXPOSURE_LAYER_PLANNING:
+                summary = "Enter execution mode for the explicit supervised operation."
+            elif route_is_write:
+                summary = f"Prepared supervised execution for {skill_route['tool']}."
             elif skill_route:
                 summary = f"Prepared {skill_route['tool']} skill call."
             elif "health" in message.lower() or "健康" in message:
@@ -996,19 +1351,51 @@ class RuntimePlannerService:
                 "userConstraintsApplied": constraints_applied,
                 "shellNeeded": bool(command),
                 "shellCommand": command,
-                "skillNeeded": bool(skill_route),
-                "skillTool": skill_route.get("tool") if skill_route else "",
-                "skillCategory": skill_route.get("category") if skill_route else "",
-                "skillParams": skill_route.get("params") if skill_route else {},
-                "skillReason": skill_route.get("reason") if skill_route else "",
-                "writeNeeded": False,
-                "writeTool": "",
-                "writeParams": {},
+                "skillNeeded": bool(skill_route) and not route_is_write,
+                "skillTool": skill_route.get("tool") if skill_route and not route_is_write else "",
+                "skillCategory": skill_route.get("category") if skill_route and not route_is_write else "",
+                "skillParams": skill_route.get("params") if skill_route and not route_is_write else {},
+                "skillReason": skill_route.get("reason") if skill_route and not route_is_write else "",
+                "writeNeeded": bool(route_is_write and route_is_visible and normalized_exposure == EXPOSURE_LAYER_EXECUTION),
+                "writeTool": skill_route.get("tool") if route_is_write and route_is_visible and normalized_exposure == EXPOSURE_LAYER_EXECUTION else "",
+                "writeParams": skill_route.get("params") if route_is_write and route_is_visible and normalized_exposure == EXPOSURE_LAYER_EXECUTION else {},
                 # 单次读技能/命令即可满足请求时，turn 到此完成，不再无谓地多跑一圈。
-                "continueLoop": False,
-                "expectedResult": "Shell output will be returned inline." if command else "Runtime observation is available.",
-                "nextStep": "classify_shell" if command else "call_skill" if skill_route else "await_user_instruction",
+                "continueLoop": bool(route_is_write),
+                "expectedResult": (
+                    "Shell output will be returned inline."
+                    if command
+                    else "Write tools will become visible without executing a tool."
+                    if route_is_write and normalized_exposure == EXPOSURE_LAYER_PLANNING
+                    else "The supervised write result will be returned inline."
+                    if route_is_write and route_is_visible
+                    else "Runtime observation is available."
+                ),
+                "nextStep": (
+                    "classify_shell"
+                    if command
+                    else "enter_execution"
+                    if route_is_write and normalized_exposure == EXPOSURE_LAYER_PLANNING
+                    else "request_write"
+                    if route_is_write and route_is_visible
+                    else "needs_user_action"
+                    if route_is_write
+                    else "call_skill"
+                    if skill_route
+                    else "await_user_instruction"
+                ),
             }
+            if route_is_write and normalized_exposure == EXPOSURE_LAYER_PLANNING:
+                plan["enterExecution"] = True
+            elif route_is_write and not route_is_visible:
+                plan.update(
+                    {
+                        "deterministicTerminal": True,
+                        "reply": (
+                            "The requested supervised operation is unavailable under the current "
+                            "write-permission and tool-exposure state."
+                        ),
+                    }
+                )
             return plan
 
     def _plan_runtime_meta_question(
@@ -1139,7 +1526,7 @@ class RuntimePlannerService:
             write_requirement = {
                 "kind": "write",
                 "tool": "vrcforge_create_gameobject",
-                "verificationProfile": "persisted_scene_write",
+                "verificationProfile": "persisted_scene_write_console",
             }
 
             # 1) 用户已显式给出目标模型/对象路径 → 直接发起写入审批。
@@ -1405,6 +1792,28 @@ class RuntimePlannerService:
                     (tool for tool in catalog.visible_tools if tool.name == skill_tool),
                     None,
                 )
+                if visible_tool is not None and visible_tool.write:
+                    return self._planner_argument_error_plan(
+                        base=base,
+                        action_kind="skill",
+                        tool_name=skill_tool,
+                        arguments=skill_params,
+                        validation={
+                            "ok": False,
+                            "summary": (
+                                "The selected tool is a supervised write. Use the write action "
+                                "contract instead of calling it as a read skill."
+                            ),
+                            "issues": [
+                                {
+                                    "path": "action",
+                                    "code": "wrong_action_kind",
+                                    "expected": "write",
+                                }
+                            ],
+                        },
+                        phase=phase,
+                    )
                 known_tool = bool(skill_tool) and visible_tool is not None and not visible_tool.write
                 if visible_tool is None:
                     known_tool = bool(skill_tool) and (
@@ -1415,6 +1824,20 @@ class RuntimePlannerService:
                         )
                     )
                 if known_tool:
+                    if visible_tool is not None:
+                        argument_validation = validate_planner_tool_arguments(
+                            visible_tool.input_schema,
+                            skill_params,
+                        )
+                        if argument_validation.get("ok") is not True:
+                            return self._planner_argument_error_plan(
+                                base=base,
+                                action_kind="skill",
+                                tool_name=skill_tool,
+                                arguments=skill_params,
+                                validation=argument_validation,
+                                phase=phase,
+                            )
                     route = self._runtime_skill_route(
                         skill_tool,
                         skill_params,
@@ -1444,6 +1867,19 @@ class RuntimePlannerService:
                     None,
                 )
                 if known_write_tool is not None:
+                    argument_validation = validate_planner_tool_arguments(
+                        known_write_tool.input_schema,
+                        write_params,
+                    )
+                    if argument_validation.get("ok") is not True:
+                        return self._planner_argument_error_plan(
+                            base=base,
+                            action_kind="write",
+                            tool_name=write_tool,
+                            arguments=write_params,
+                            validation=argument_validation,
+                            phase=phase,
+                        )
                     return {
                         **base,
                         "summary": summary or f"Prepared supervised execution for {write_tool}.",
@@ -1887,6 +2323,31 @@ class RuntimePlannerService:
                             + summarize_text(str(vision.get("reason") or vision.get("error") or "pixels were not analyzed"), 300)
                         )
             if isinstance(result, dict):
+                if str(step.get("tool") or "") == "vrcforge_capture_multi_screenshot":
+                    capture_receipt = str(result.get("captureReceipt") or "").strip()
+                    if capture_receipt:
+                        fields.append(
+                            "captureReceipt="
+                            + sanitize_planner_observation_text(capture_receipt, 256)
+                        )
+                    capture_evidence_id = str(
+                        result.get("captureEvidenceId") or ""
+                    ).strip()
+                    if capture_evidence_id:
+                        fields.append(
+                            "captureEvidenceId="
+                            + sanitize_planner_observation_text(
+                                capture_evidence_id, 160
+                            )
+                        )
+                    angles = result.get("angles")
+                    if isinstance(angles, list) and angles:
+                        fields.append(
+                            "captureAngles="
+                            + sanitize_planner_observation_text(
+                                " | ".join(map(str, angles[:4])), 160
+                            )
+                        )
                 planner_evidence = result.get("plannerEvidence")
                 if isinstance(planner_evidence, dict):
                     fields.append(
@@ -1949,11 +2410,7 @@ class RuntimePlannerService:
                 if tool.advanced:
                     flags.append("advanced")
                 suffix = f"（{','.join(flags)}）" if flags else ""
-                input_contract = (
-                    " inputs={" + ", ".join(tool.input_contract) + "}"
-                    if tool.input_contract
-                    else ""
-                )
+                input_contract = planner_tool_schema_prompt(tool.input_schema)
                 tool_lines.append(
                     f"- {tool.name}{suffix}{input_contract}: "
                     f"{planner_tool_usage_description(tool.name, tool.description, write=tool.write)}"
@@ -2103,10 +2560,28 @@ class RuntimePlannerService:
             ):
                 return self._runtime_skill_route("vrcforge_skill_manifest", skill_params, "skill manifest")
 
-            if has_any(lowered, text, ["screenshot", "capture", "截图", "拍照", "截屏"]):
-                return self._runtime_skill_route("vrcforge_capture_screenshot", skill_params, "screenshot capture")
+            multi_angle_capture_intent = has_multi_angle_capture_intent(lowered, text)
+            capture_requested = has_any(
+                lowered,
+                text,
+                ["screenshot", "screenshots", "capture", "截图", "拍照", "截屏"],
+            )
+            if not capture_requested and multi_angle_capture_intent:
+                capture_requested = has_any(
+                    lowered,
+                    text,
+                    ["take ", "photograph", "拍"],
+                )
+            if capture_requested and multi_angle_capture_intent:
+                return self._runtime_skill_route(
+                    "vrcforge_capture_multi_screenshot",
+                    skill_params,
+                    "multi-angle screenshot capture",
+                )
             if has_any(lowered, text, ["gesture", "play mode", "game view", "捕获状态", "截图状态"]):
                 return self._runtime_skill_route("vrcforge_capture_status", skill_params, "capture status")
+            if capture_requested:
+                return self._runtime_skill_route("vrcforge_capture_screenshot", skill_params, "screenshot capture")
             if has_any(lowered, text, ["skill", "skills", "能力库"]):
                 if has_any(lowered, text, ["check", "validate", "validation", "inspect"]):
                     return self._runtime_skill_route("vrcforge_skill_check", skill_params, "skill registry check")
@@ -2260,6 +2735,7 @@ class RuntimePlannerService:
         ) -> dict[str, object]:
             catalog = self._catalog.read(exposure_layer)
             tool = next((item for item in catalog.routable_tools if item.name == tool_name), None)
+            visible = next((item for item in catalog.visible_tools if item.name == tool_name), None)
             if tool is None:
                 normalized_name = normalize_skill_id(tool_name)
                 registry_skill = next(
@@ -2271,10 +2747,16 @@ class RuntimePlannerService:
                     "category": registry_skill.category if registry_skill else "",
                     "params": dict(params),
                     "reason": reason,
+                    "actionKind": "skill",
+                    "write": False,
+                    "visible": visible is not None,
                 }
             return {
                 "tool": tool_name,
                 "category": tool.category,
                 "params": dict(params),
                 "reason": reason,
+                "actionKind": "write" if tool.write else "skill",
+                "write": bool(tool.write),
+                "visible": visible is not None,
             }

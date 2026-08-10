@@ -42,7 +42,8 @@ def test_screenshot_tools_are_registered_as_approved_context_writes_not_direct_r
         assert tool_name in dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS
         handler = dashboard_server.AGENT_GATEWAY._write_handlers[tool_name]
         assert handler.checkpoint_prepare_handler is dashboard_server.prepare_authoritative_unity_checkpoint_sync
-    assert 'AGENT_GATEWAY.register_tool("vrcforge_vision_audit"' in SOURCE
+    assert "vrcforge_vision_audit" in dashboard_server.AGENT_GATEWAY._tools
+    assert "vrcforge_vision_audit_multi" in dashboard_server.AGENT_GATEWAY._tools
 
 
 def test_single_capture_preparer_freezes_only_the_fixed_dashboard_output_path() -> None:
@@ -117,6 +118,64 @@ def test_single_capture_handler_accepts_windows_slash_normalization_and_requires
 
     assert result["ok"] is True
     assert Path(result["imagePath"]) == output_path.resolve()
+
+
+def test_multi_capture_handler_issues_one_task_owned_managed_receipt(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
+    managed = tmp_path / "latest"
+    managed.mkdir(parents=True)
+    authority = dashboard_server.ManagedVisualCaptureAuthority(managed)
+    monkeypatch.setattr(dashboard_server, "MANAGED_VISUAL_CAPTURE_AUTHORITY", authority)
+    binding = {
+        "taskId": "task-1",
+        "sessionId": "session-1",
+        "approvalId": "approval-1",
+        "requestedActionId": "action-capture-1",
+    }
+    monkeypatch.setattr(
+        dashboard_server,
+        "current_approved_unity_execution",
+        lambda: SimpleNamespace(diagnostic_context=lambda: dict(binding)),
+    )
+    prepared, _preview = dashboard_server.prepare_capture_multi_screenshot_request(
+        {"angles": ["front", "back"], "avatar_path": "Scene/Hero"}, None
+    )
+    for angle in ("front", "back"):
+        (managed / f"vision_{angle}.png").write_bytes(angle.encode("ascii"))
+
+    monkeypatch.setattr(
+        dashboard_server,
+        "load_dashboard_settings",
+        lambda _request: SimpleNamespace(unity_project_path="D:/Unity/Project"),
+    )
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        lambda _settings, _tool, arguments: dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"imagePath": arguments["outputPath"]}},
+        ),
+    )
+
+    result = dashboard_server.capture_avatar_multi_screenshot_approved_sync(prepared)
+    consumed = authority.consume(result["captureReceipt"], binding=binding)
+
+    assert result["ok"] is True
+    assert result["captureEvidenceId"] == consumed["captureEvidenceId"]
+    assert result["data"]["angles"] == ["front", "back"]
+    assert result["evidence"] == consumed["evidence"]
+
+
+def test_dashboard_multi_audit_sends_exact_angles_with_managed_paths() -> None:
+    dashboard_source = (ROOT / "dashboard" / "app.js").read_text(encoding="utf-8")
+    audit_source = dashboard_source[
+        dashboard_source.index("async function auditMultiVision"):
+        dashboard_source.index("function onVisionAngleTabClick")
+    ]
+    assert "image_paths: state.multiScreenshots.map" in audit_source
+    assert "angles: state.multiScreenshots.map(item => item.angle)" in audit_source
 
 
 @pytest.mark.parametrize("dimension", [255, 2049])

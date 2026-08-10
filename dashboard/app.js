@@ -2810,7 +2810,8 @@ async function auditMultiVision() {
   
   const payload = await postJson("/api/vision/audit-multi", {
     ...buildConnectionPayload(),
-    image_paths: state.multiScreenshots.map(item => urlToArtifactPath(item.imageUrl))
+    image_paths: state.multiScreenshots.map(item => urlToArtifactPath(item.imageUrl)),
+    angles: state.multiScreenshots.map(item => item.angle)
   });
   
   const isPass = payload.overallStatus === "pass";

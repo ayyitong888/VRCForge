@@ -21,6 +21,40 @@ Core with its fixed 64-tool contract.
 - Preserved structured, bounded error causes and next actions so the model can
   correct a failed call without treating an unrelated successful tool as proof
   that the task is complete.
+- Added shallow tool input contracts at both planning and execution boundaries.
+  Invalid model arguments are returned as bounded correction evidence without
+  invoking the target handler.
+- Added process-authenticated, one-use runtime journey receipts so release-gate
+  evaluation can distinguish a real App tool/result/completion loop from
+  caller-supplied or selection-only evidence.
+- Added declared verification profiles for successful Shell exit, stable Unity
+  Console diagnostic deltas, persisted scene writes, and complete multi-angle
+  visual review. Console and visual evidence are required only by actions that
+  explicitly declare those profiles.
+- Bound managed visual evidence to the exact Runtime task, approved capture
+  action, immutable image bytes, and one-use receipt. Link, junction, reparse,
+  hard-link, changed-byte, local-path, and cross-task inputs fail closed; the
+  visual verifier remains internal to the App task loop rather than appearing
+  as a directly callable external tool.
+- Persisted authenticated terminal receipts in the existing bounded Runtime
+  continuation ledger so release evaluation can follow an approval or
+  background task to completion after reconnect. Polling and Unity Console
+  readback now pass their remaining deadline to each underlying read instead
+  of allowing one retrying call to exceed the declared wait.
+- Preserved the canonical `skill` or supervised `write` identity across
+  deterministic routing and exposure changes. Planning can classify a hidden
+  write target without exposing it to the model, while execution still routes
+  that target through the normal approval transaction instead of a Skill
+  executor.
+- Split single-view capture, capture-status inspection, and multi-angle capture
+  intent before the generic screenshot fallback. Named angles and coverage
+  requests now select the approved fixed-angle capture path, while one current
+  view remains a separate approved action.
+- Expanded the lightweight selection Harness from 13 to 16 cases and made
+  action kind plus exposure layer part of each selection contract. The App
+  projects action kind from host-owned tool metadata and binds it into the
+  one-use selection receipt, so a correct tool name with the wrong execution
+  lane no longer passes acceptance.
 
 ## Safety and scope
 

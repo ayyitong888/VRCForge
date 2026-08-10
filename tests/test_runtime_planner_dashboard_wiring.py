@@ -119,14 +119,28 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
     expected_planning = {
         name
         for name, tool in gateway._tools.items()
-        if gateway._tool_visible(tool, config, EXPOSURE_LAYER_PLANNING)
+        if gateway._tool_runtime_visible(tool, config, EXPOSURE_LAYER_PLANNING)
     }
     expected_execution = {
         name
         for name, tool in gateway._tools.items()
-        if gateway._tool_visible(tool, config, EXPOSURE_LAYER_EXECUTION)
+        if gateway._tool_runtime_visible(tool, config, EXPOSURE_LAYER_EXECUTION)
     }
-    expected_routable = set(gateway._tools)
+    routable_writes = {
+        name
+        for name in gateway._write_handlers
+        if name not in gateway._tools
+        and name not in dashboard_server.WRAPPER_ONLY_WRITE_TARGETS
+    }
+    visible_execution_writes = {
+        name
+        for name, handler in gateway._write_handlers.items()
+        if name in routable_writes
+        and config.allow_write_requests
+        and gateway._write_handler_visible(handler, config, EXPOSURE_LAYER_EXECUTION)
+    }
+    expected_execution.update(visible_execution_writes)
+    expected_routable = set(gateway._tools) | routable_writes
     expected_skills = {
         str(item.get("name") or "")
         for item in gateway.skills.build_skill_registry(config, EXPOSURE_LAYER_EXECUTION)["skills"]
@@ -139,6 +153,6 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
     assert {item.name for item in execution.routable_tools} == expected_routable
     assert {item.name for item in planning.skills} == expected_skills
     assert {item.name for item in execution.skills} == expected_skills
-    assert not (set(gateway._write_handlers) - expected_routable).intersection(
-        item.name for item in planning.routable_tools
-    )
+    planning_routable = {item.name: item for item in planning.routable_tools}
+    assert all(planning_routable[name].write for name in routable_writes)
+    assert not routable_writes.intersection(item.name for item in planning.visible_tools)

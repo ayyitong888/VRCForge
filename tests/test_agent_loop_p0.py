@@ -35,6 +35,11 @@ from runtime_planner_service import detect_avatar_write_intent
 class AgentLoopP0Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.gateway = dashboard_server.AGENT_GATEWAY
+        # TestClient shutdown closes the process-owned Provider planner. Each
+        # unittest method models a fresh live App process, so reopen that owner
+        # explicitly instead of weakening production shutdown fail-closed.
+        dashboard_server._RUNTIME_PLANNER_MODEL.start()
+        self.gateway.shell.start()
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.original_paths = (self.gateway.config_path, self.gateway.audit_dir)
@@ -46,6 +51,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.original_create_checkpoint_prepare = self.gateway._write_handlers[
             "vrcforge_create_gameobject"
         ].checkpoint_prepare_handler
+        self.original_create_verification_prepare = self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].verification_prepare_handler
+        self.original_create_verification_finalize = self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].verification_finalize_handler
         self.gateway.configure_paths(root / "agent_gateway.json", root / "agent_gateway")
         config = self.gateway.ensure_config()
         config.enabled = True
@@ -56,12 +67,26 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.gateway._write_handlers[
             "vrcforge_create_gameobject"
         ].checkpoint_prepare_handler = lambda _root, _arguments: {"ok": True}
+        self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].verification_prepare_handler = lambda _arguments: {"diagnosticIds": []}
+        self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].verification_finalize_handler = (
+            lambda _arguments, _baseline, result: {**result, "consoleVerified": True}
+        )
 
     def tearDown(self) -> None:
         self.gateway.approval_transactions.checkpoint_prepare_handler = self.original_prepare
         self.gateway._write_handlers[
             "vrcforge_create_gameobject"
         ].checkpoint_prepare_handler = self.original_create_checkpoint_prepare
+        self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].verification_prepare_handler = self.original_create_verification_prepare
+        self.gateway._write_handlers[
+            "vrcforge_create_gameobject"
+        ].verification_finalize_handler = self.original_create_verification_finalize
         self.gateway.configure_paths(*self.original_paths)
         if not self.original_runtime_continuation_accepting:
             self.gateway.shutdown_runtime_continuations(0)
@@ -318,6 +343,11 @@ class AgentLoopP0Tests(unittest.TestCase):
                 "claim": continuation["plan"].get("completionClaim"),
             },
         )
+        self.assertEqual(
+            [step["actionId"] for step in continuation["steps"] if step.get("kind") in {"skill", "write", "shell"}],
+            [action["actionId"] for action in continuation["task"]["actions"]],
+        )
+        self.assertTrue(continuation["steps"][0]["historical"])
         mock_invoke.assert_called_once()
 
     def test_approved_unity_shell_resumes_the_same_task_without_replaying_the_command(self) -> None:
@@ -455,7 +485,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertIsNotNone(context)
         completion = approval_completion(
             context,
-            raw_result={"ok": True, "persistedReadback": True, "sceneSaved": True},
+            raw_result={
+                "ok": True,
+                "persistedReadback": True,
+                "sceneSaved": True,
+                "consoleVerified": True,
+            },
             outcome={
                 "status": "ok",
                 "summary": "created",
@@ -1257,6 +1292,172 @@ class AgentLoopP0Tests(unittest.TestCase):
         requirement = original["task"]["requirements"][0]
         completed = original["task"]["actions"][-1]
         self.assertEqual(requirement["actionId"], completed["actionId"])
+        self.assertEqual(requirement["verificationProfile"], "shell_exit_zero")
+        self.assertEqual(completed["outcome"]["verification"]["state"], "passed")
+        self.assertEqual(
+            completed["outcome"]["summary"],
+            "Shell command completed successfully.",
+        )
+
+    def test_nonzero_shell_exit_without_error_text_never_gets_success_summary(self) -> None:
+        gateway = self.gateway
+        plans = iter(
+            [
+                {
+                    "planner": "test",
+                    "summary": "Run the failing host command.",
+                    "shellNeeded": True,
+                    "shellCommand": "exit 7",
+                    "shellParams": {},
+                    "continueLoop": True,
+                    "nextStep": "call_shell",
+                },
+                {
+                    "planner": "test",
+                    "summary": "Report the failed command.",
+                    "reply": "The command failed.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                },
+            ]
+        )
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=lambda *_args, **_kwargs: next(plans),
+        ), patch.object(
+            gateway.shell,
+            "execute",
+            return_value={
+                "ok": False,
+                "status": "executed",
+                "result": {"ok": False, "exitCode": 7},
+            },
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "run a failing host command",
+                    "session_id": "nonzero-shell-summary-session",
+                    "client_turn_id": "nonzero-shell-summary-turn",
+                }
+            )
+
+        outcome = result["shell"]["outcome"]
+        self.assertEqual(outcome["status"], "failed")
+        self.assertEqual(
+            outcome["summary"],
+            "Shell command did not complete successfully.",
+        )
+        self.assertNotEqual(outcome["summary"], "Shell command completed successfully.")
+        self.assertEqual(result["plan"]["nextStep"], "tool_failed")
+
+    def test_computer_use_bootstrap_has_exact_task_action_identity(self) -> None:
+        gateway = self.gateway
+        session_id = "desktop-bootstrap-identity-session"
+        client_turn_id = "desktop-bootstrap-identity-turn"
+        bootstrap_tool = "vrcforge_agent_desktop_action"
+        bootstrap_params = {
+            "action": "computer_use",
+            "prompt": "Discover applications and windows for this user-started Computer Use turn.",
+            "sessionId": session_id,
+            "clientTurnId": client_turn_id,
+            "params": {
+                "operation": "sequence",
+                "steps": [
+                    {"operation": "list_apps", "limit": 80},
+                    {"operation": "list_windows", "limit": 30},
+                ],
+            },
+        }
+        bootstrap_action_id = canonical_action_id(
+            "skill",
+            bootstrap_tool,
+            bootstrap_params,
+        )
+        observed_loop_state: list[dict] = []
+
+        def terminal_reply(
+            _message,
+            _params,
+            _observe,
+            _history=None,
+            *,
+            loop_state=None,
+            **_kwargs,
+        ):
+            observed_loop_state.extend(list(loop_state or []))
+            return {
+                "planner": "llm",
+                "summary": "The desktop bootstrap completed.",
+                "reply": "The desktop bootstrap completed.",
+                "continueLoop": False,
+                "nextStep": "done",
+                "completionClaim": {
+                    "satisfied": True,
+                    "evidenceActionIds": [bootstrap_action_id],
+                },
+            }
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=terminal_reply,
+        ), patch.object(
+            gateway.desktop,
+            "consume_computer_use_turn_grant",
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            return_value={
+                "ok": True,
+                "status": "executed",
+                "tool": bootstrap_tool,
+                "result": {"applications": [], "windows": []},
+                "outcome": {
+                    "schema": "vrcforge.tool_result.v1",
+                    "status": "ok",
+                    "summary": "Desktop bootstrap completed.",
+                    "data": {},
+                    "error": None,
+                    "evidence": [],
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            },
+        ) as execute_skill:
+            result = gateway.runtime_message(
+                {
+                    "message": "inspect the desktop",
+                    "session_id": session_id,
+                    "client_turn_id": client_turn_id,
+                    "_computerUseRequested": True,
+                }
+            )
+
+        execute_skill.assert_called_once()
+        self.assertEqual(execute_skill.call_args.args[1], bootstrap_tool)
+        self.assertEqual(execute_skill.call_args.args[2], bootstrap_params)
+        self.assertEqual(result["steps"][0]["actionId"], bootstrap_action_id)
+        self.assertEqual(observed_loop_state[0]["actionId"], bootstrap_action_id)
+        self.assertEqual(result["plan"]["nextStep"], "done", result)
+        self.assertEqual(
+            result["plan"]["taskCompletion"]["evidenceActionIds"],
+            [bootstrap_action_id],
+        )
+        requirement = result["task"]["requirements"][0]
+        action = result["task"]["actions"][0]
+        self.assertEqual(requirement["actionId"], bootstrap_action_id)
+        self.assertEqual(requirement["tool"], bootstrap_tool)
+        self.assertEqual(requirement["verificationProfile"], "canonical_tool_result")
+        self.assertEqual(action["actionId"], bootstrap_action_id)
+        self.assertEqual(action["tool"], bootstrap_tool)
+        self.assertEqual(action["status"], "completed")
+        self.assertEqual(action["outcome"]["verification"]["state"], "passed")
+        self.assertEqual(
+            gateway.runtime_sessions.get_session(session_id)["desktopBootstrapToolCalls"],
+            1,
+        )
 
     def test_post_tool_provider_failure_preserves_skill_result_and_marks_run_failed(self) -> None:
         gateway = self.gateway
@@ -1731,6 +1932,408 @@ class AgentLoopP0Tests(unittest.TestCase):
         actions = result["task"]["actions"]
         self.assertEqual(actions[0]["status"], "superseded")
         self.assertEqual(actions[0]["supersededBy"], corrected_action_id)
+
+    def test_llm_schema_failure_is_refed_for_correction_without_handler_call(self) -> None:
+        gateway = self.gateway
+        prompts: list[str] = []
+        responses = iter(
+            [
+                SimpleNamespace(
+                    text=json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": "vrcforge_scan_materials",
+                            "skill_params": {"avatarPath": 42},
+                        }
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text=json.dumps(
+                        {
+                            "action": "reply",
+                            "reply": "The invalid tool arguments were not executed.",
+                        }
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+            ]
+        )
+
+        def fake_llm(*args, **_kwargs):
+            prompts.append(str(args[1]))
+            return next(responses)
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=fake_llm,
+        ), patch.object(
+            gateway.runtime_planner,
+            "_local_plan_agent_turn",
+            return_value={},
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+        ) as execute_skill:
+            result = gateway.runtime_message(
+                {
+                    "message": "inspect the selected avatar materials",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "session_id": "schema-refeed-session",
+                    "client_turn_id": "schema-refeed-turn",
+                }
+            )
+
+        execute_skill.assert_not_called()
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("planner_invalid_response", prompts[1])
+        self.assertIn("planner_validation_", prompts[1])
+        self.assertEqual(result["plan"]["nextStep"], "planner_failed")
+        self.assertEqual(
+            result["plan"]["plannerFailure"]["code"],
+            "planner_invalid_response",
+        )
+        self.assertEqual(result["steps"][0]["kind"], "planner_validation")
+        self.assertEqual(result["steps"][0]["tool"], "vrcforge_scan_materials")
+        self.assertEqual(result["steps"][0]["status"], "failed")
+
+    def test_supervised_write_misclassified_as_skill_is_refed_then_requests_approval(self) -> None:
+        gateway = self.gateway
+        prompts: list[str] = []
+        angles = ["front", "side_left", "side_right", "back"]
+        responses = iter(
+            [
+                SimpleNamespace(
+                    text=json.dumps(
+                        {
+                            "action": "enter_execution",
+                            "summary": "The task requires supervised capture.",
+                        }
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text=json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": "vrcforge_capture_multi_screenshot",
+                            "skill_params": {"angles": angles},
+                        }
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text=json.dumps(
+                        {
+                            "action": "write",
+                            "write_tool": "vrcforge_capture_multi_screenshot",
+                            "write_params": {"angles": angles},
+                        }
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+            ]
+        )
+
+        def fake_llm(*args, **_kwargs):
+            prompts.append(str(args[1]))
+            return next(responses)
+
+        project = self._unity_project()
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=fake_llm,
+        ), patch.object(
+            gateway.runtime_planner,
+            "_local_plan_agent_turn",
+            return_value={},
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+        ) as execute_skill:
+            result = gateway.runtime_message(
+                {
+                    "message": "Capture several views and verify their coverage.",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": "write-kind-correction-session",
+                    "client_turn_id": "write-kind-correction-turn",
+                }
+            )
+
+        execute_skill.assert_not_called()
+        self.assertEqual(len(prompts), 3)
+        self.assertIn("The selected tool is a supervised write", prompts[2])
+        self.assertIn("planner_validation_", prompts[2])
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
+        self.assertEqual(result["write"]["status"], "approval_pending")
+        approval_id = result["write"]["approvalId"]
+        approval = next(
+            item
+            for item in gateway.approval_transactions.list_approvals()
+            if item["id"] == approval_id
+        )
+        self.assertEqual(approval["targetTool"], "vrcforge_capture_multi_screenshot")
+        self.assertEqual(approval["status"], "pending")
+        self.assertEqual(
+            [step["kind"] for step in result["steps"]],
+            ["phase", "planner_validation", "write"],
+        )
+        self.assertEqual(result["steps"][1]["status"], "failed")
+
+    def test_deterministic_multi_angle_capture_enters_execution_and_requests_write_approval(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=AssertionError("deterministic capture intent must not sample the Provider"),
+        ) as request_model, patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+        ) as execute_skill:
+            result = gateway.runtime_message(
+                {
+                    "message": "Capture front and back views for full coverage.",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": "deterministic-multi-capture-session",
+                    "client_turn_id": "deterministic-multi-capture-turn",
+                }
+            )
+
+        request_model.assert_not_called()
+        execute_skill.assert_not_called()
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
+        self.assertEqual(result["write"]["status"], "approval_pending")
+        approval_id = result["write"]["approvalId"]
+        approval = next(
+            item
+            for item in gateway.approval_transactions.list_approvals()
+            if item["id"] == approval_id
+        )
+        self.assertEqual(approval["targetTool"], "vrcforge_capture_multi_screenshot")
+        self.assertEqual(approval["status"], "pending")
+        self.assertEqual(
+            [(step["kind"], step["status"]) for step in result["steps"]],
+            [("phase", "entered_execution"), ("write", "approval_pending")],
+        )
+
+    def test_execution_preflight_revalidates_schema_and_calls_no_handler(self) -> None:
+        gateway = self.gateway
+        plans = iter(
+            [
+                {
+                    "planner": "llm",
+                    "summary": "Inspect materials with invalid arguments.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_scan_materials",
+                    "skillParams": {"avatarPath": ["not", "a", "string"]},
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                },
+                {
+                    "planner": "llm",
+                    "summary": "Stop after the rejected arguments.",
+                    "reply": "The invalid tool arguments were not executed.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                },
+            ]
+        )
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=lambda *_args, **_kwargs: next(plans),
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+        ) as execute_skill:
+            result = gateway.runtime_message(
+                {
+                    "message": "inspect materials",
+                    "session_id": "schema-preflight-session",
+                    "client_turn_id": "schema-preflight-turn",
+                }
+            )
+
+        execute_skill.assert_not_called()
+        self.assertEqual(result["plan"]["nextStep"], "planner_failed")
+        self.assertEqual(
+            result["plan"]["plannerFailure"]["code"],
+            "planner_invalid_response",
+        )
+        self.assertEqual(len(result["steps"]), 1)
+        self.assertEqual(result["steps"][0]["kind"], "planner_validation")
+        self.assertEqual(result["steps"][0]["tool"], "vrcforge_scan_materials")
+
+    def test_schema_failure_requires_a_real_valid_action_before_exact_completion(self) -> None:
+        gateway = self.gateway
+        valid_arguments = {"avatarPath": "Avatar"}
+        completed_action_id = canonical_action_id(
+            "skill",
+            "vrcforge_scan_materials",
+            valid_arguments,
+        )
+        prompts: list[str] = []
+        responses = iter(
+            [
+                SimpleNamespace(
+                    text=json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": "vrcforge_scan_materials",
+                            "skill_params": {"avatarPath": 42},
+                        }
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text=json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": "vrcforge_scan_materials",
+                            "skill_params": valid_arguments,
+                        }
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text=json.dumps(
+                        {
+                            "action": "reply",
+                            "reply": "The valid scan completed.",
+                            "completion_claim": {
+                                "satisfied": True,
+                                "evidence_action_ids": [completed_action_id],
+                            },
+                        }
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+            ]
+        )
+        executed: list[dict[str, object]] = []
+
+        def fake_llm(*args, **_kwargs):
+            prompts.append(str(args[1]))
+            return next(responses)
+
+        def execute_skill(_owner, tool, params, agent_name=None, owner_id=""):
+            self.assertEqual(tool, "vrcforge_scan_materials")
+            executed.append(dict(params))
+            return {
+                "ok": True,
+                "tool": tool,
+                "status": "executed",
+                "result": {"ok": True, "materials": []},
+                "outcome": {
+                    "status": "ok",
+                    "summary": "materials scanned",
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=fake_llm,
+        ), patch.object(
+            gateway.runtime_planner,
+            "_local_plan_agent_turn",
+            return_value={},
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            side_effect=execute_skill,
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "inspect the selected avatar materials",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "session_id": "schema-valid-correction-session",
+                    "client_turn_id": "schema-valid-correction-turn",
+                }
+            )
+
+        self.assertEqual(executed, [valid_arguments])
+        self.assertEqual(len(prompts), 3)
+        self.assertIn("planner_invalid_response", prompts[1])
+        self.assertIn("materials scanned", prompts[2])
+        self.assertEqual(result["plan"]["nextStep"], "done")
+        self.assertEqual(
+            result["plan"]["taskCompletion"]["evidenceActionIds"],
+            [completed_action_id],
+        )
+
+    def test_repeated_schema_failure_stops_after_one_correction_without_handler_call(self) -> None:
+        gateway = self.gateway
+        planner_calls = 0
+
+        def invalid_llm(*_args, **_kwargs):
+            nonlocal planner_calls
+            planner_calls += 1
+            return SimpleNamespace(
+                text=json.dumps(
+                    {
+                        "action": "skill",
+                        "skill_tool": "vrcforge_scan_materials",
+                        "skill_params": {"avatarPath": planner_calls},
+                    }
+                ),
+                usage={},
+                reasoning={},
+            )
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=invalid_llm,
+        ), patch.object(
+            gateway.runtime_planner,
+            "_local_plan_agent_turn",
+            return_value={},
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+        ) as execute_skill:
+            result = gateway.runtime_message(
+                {
+                    "message": "inspect materials with bounded schema correction",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "session_id": "schema-bounded-session",
+                    "client_turn_id": "schema-bounded-turn",
+                }
+            )
+
+        execute_skill.assert_not_called()
+        self.assertEqual(planner_calls, 2)
+        self.assertEqual(result["plan"]["nextStep"], "planner_failed")
+        self.assertEqual(
+            result["plan"]["plannerFailure"]["code"],
+            "planner_invalid_response",
+        )
+        self.assertEqual(len(result["steps"]), 2)
 
     def test_unrelated_diagnostic_success_does_not_clear_the_original_failure(self) -> None:
         gateway = self.gateway
