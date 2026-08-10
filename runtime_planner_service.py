@@ -1912,28 +1912,36 @@ class RuntimePlannerService:
                     (tool for tool in catalog.visible_tools if tool.name == skill_tool),
                     None,
                 )
-                if visible_tool is not None and visible_tool.write:
-                    return self._planner_argument_error_plan(
-                        base=base,
-                        action_kind="skill",
-                        tool_name=skill_tool,
-                        arguments=skill_params,
-                        validation={
-                            "ok": False,
-                            "summary": (
-                                "The selected tool is a supervised write. Use the write action "
-                                "contract instead of calling it as a read skill."
-                            ),
-                            "issues": [
-                                {
-                                    "path": "action",
-                                    "code": "wrong_action_kind",
-                                    "expected": "write",
-                                }
-                            ],
-                        },
-                        phase=phase,
-                    )
+                routable_tool = next(
+                    (tool for tool in catalog.routable_tools if tool.name == skill_tool),
+                    None,
+                )
+                selected_tool = visible_tool or routable_tool
+                if selected_tool is not None and selected_tool.write:
+                    return {
+                        **self._planner_argument_error_plan(
+                            base=base,
+                            action_kind="skill",
+                            tool_name=skill_tool,
+                            arguments=skill_params,
+                            validation={
+                                "ok": False,
+                                "summary": (
+                                    "The selected tool is a supervised write. Use the write action "
+                                    "contract instead of calling it as a read skill."
+                                ),
+                                "issues": [
+                                    {
+                                        "path": "action",
+                                        "code": "wrong_action_kind",
+                                        "expected": "write",
+                                    }
+                                ],
+                            },
+                            phase=phase,
+                        ),
+                        "enterExecution": exposure_layer == EXPOSURE_LAYER_PLANNING,
+                    }
                 known_tool = bool(skill_tool) and visible_tool is not None and not visible_tool.write
                 if visible_tool is None:
                     known_tool = bool(skill_tool) and (

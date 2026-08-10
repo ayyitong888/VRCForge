@@ -2142,9 +2142,20 @@ class AgentLoopP0Tests(unittest.TestCase):
             dashboard_server.PROVIDER_CONFIGURATION,
             "current_api_config",
             return_value=SimpleNamespace(
-                provider="gemini",
+                provider="openai",
                 api_key="fixture-key",
-                model="gemini-fixture",
+                base_url="",
+                model="gpt-4o",
+            ),
+        ), patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_vision_config",
+            return_value=SimpleNamespace(
+                provider="",
+                api_key="",
+                base_url="",
+                model="",
+                enabled=False,
             ),
         ), patch(
             "dashboard_server.request_llm_plan_with_metadata",
@@ -2199,6 +2210,11 @@ class AgentLoopP0Tests(unittest.TestCase):
             terminal_approval = {
                 **stored_approval,
                 "status": "applied",
+            }
+            execution["approval"] = terminal_approval
+            execution["checkpoint"] = {
+                "id": "checkpoint-managed-visual",
+                "ok": True,
             }
             approval_count = len(gateway.approval_transactions.list_approvals())
 
@@ -2273,6 +2289,11 @@ class AgentLoopP0Tests(unittest.TestCase):
                 "vrcforge_vision_audit_multi",
             ],
         )
+        capture_transaction = continuation["task"]["actions"][0]["writeTransaction"]
+        self.assertEqual(capture_transaction["approvalId"], approval_id)
+        self.assertEqual(capture_transaction["checkpointId"], "checkpoint-managed-visual")
+        self.assertEqual(capture_transaction["actionId"], capture_action_id)
+        self.assertEqual(capture_transaction["taskId"], initial["task"]["taskId"])
         self.assertEqual(
             [step["tool"] for step in continuation["steps"]],
             [
@@ -2300,7 +2321,18 @@ class AgentLoopP0Tests(unittest.TestCase):
             return_value=SimpleNamespace(
                 provider="deepseek",
                 api_key="fixture-key",
+                base_url="",
                 model="deepseek-v4-flash",
+            ),
+        ), patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_vision_config",
+            return_value=SimpleNamespace(
+                provider="",
+                api_key="",
+                base_url="",
+                model="",
+                enabled=False,
             ),
         ), patch(
             "dashboard_server.request_llm_plan_with_metadata",
@@ -2386,6 +2418,64 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(len(result["steps"]), 1)
         self.assertEqual(result["steps"][0]["kind"], "planner_validation")
         self.assertEqual(result["steps"][0]["tool"], "vrcforge_scan_materials")
+
+    def test_hidden_write_misreported_as_skill_gets_one_execution_layer_correction(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        provider_results = iter(
+            [
+                SimpleNamespace(
+                    text=(
+                        '{"action":"skill","skill_tool":"vrcforge_create_gameobject",'
+                        '"skill_params":{"name":"Probe"}}'
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+                SimpleNamespace(
+                    text=(
+                        '{"action":"write","write_tool":"vrcforge_create_gameobject",'
+                        '"write_params":{"name":"Probe"}}'
+                    ),
+                    usage={},
+                    reasoning={},
+                ),
+            ]
+        )
+        approval_count = len(gateway.approval_transactions.list_approvals())
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=lambda *_args, **_kwargs: next(provider_results),
+        ) as request_model:
+            result = gateway.runtime_message(
+                {
+                    "message": "Apply the requested project change.",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": "wrong-kind-correction-session",
+                    "client_turn_id": "wrong-kind-correction-turn",
+                }
+            )
+
+        self.assertEqual(request_model.call_count, 2)
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action")
+        self.assertEqual(result["write"]["status"], "approval_pending")
+        self.assertEqual(result["write"]["tool"], "vrcforge_create_gameobject")
+        self.assertEqual(
+            len(gateway.approval_transactions.list_approvals()),
+            approval_count + 1,
+        )
+        self.assertEqual(
+            [(step["kind"], step["status"]) for step in result["steps"]],
+            [
+                ("planner_validation", "failed"),
+                ("phase", "entered_execution"),
+                ("write", "approval_pending"),
+            ],
+        )
 
     def test_schema_failure_requires_a_real_valid_action_before_exact_completion(self) -> None:
         gateway = self.gateway

@@ -13054,14 +13054,10 @@ def audit_avatar_screenshot_sync(request: VisionAuditRequest) -> dict[str, Any]:
         managed_image = MANAGED_VISUAL_CAPTURE_AUTHORITY.read_managed_image(image_path)
         image_file = Path(str(managed_image["imagePath"]))
 
-        api_config = PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True)
-        if api_config.get("provider") != "gemini":
-            raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
-
-        result = run_gemini_vision_audit_bytes(
-            api_config,
+        result = run_provider_vision_audit_bytes(
             managed_image["imageBytes"],
             mime_type=mimetypes.guess_type(str(image_file))[0] or "image/png",
+            image_name=image_file.name,
         )
         save_vision_audit_artifact("vision_audit.json", {"imagePath": str(image_file), "audit": result})
         emit_log("success", "vision", "Image analysis completed.", {"status": result.get("status")})
@@ -13264,10 +13260,6 @@ def _audit_verified_avatar_images(
     *,
     include_paths: bool,
 ) -> dict[str, Any]:
-    api_config = PROVIDER_CONFIGURATION.serialize_api_config(include_secret=True)
-    if api_config.get("provider") != "gemini":
-        raise RuntimeError("Image analysis currently requires the dashboard provider to be set to Google AI Studio.")
-
     results: list[dict[str, Any]] = []
     for angle, image in zip(angles, verified_images, strict=True):
         image_path = str(image.get("imagePath") or "")
@@ -13280,10 +13272,10 @@ def _audit_verified_avatar_images(
                 }
             )
         try:
-            audit = run_gemini_vision_audit_bytes(
-                api_config,
+            audit = run_provider_vision_audit_bytes(
                 image["imageBytes"],
                 mime_type=mimetypes.guess_type(image_path)[0] or "image/png",
+                image_name=f"{angle}{Path(image_path).suffix or '.png'}",
             )
         except Exception as exc:  # noqa: BLE001 - every Provider/image failure must fail this bounded audit closed.
             results.append({**base_result, "status": "failed", "error": f"Image audit failed: {exc}"})
@@ -14219,26 +14211,22 @@ def _runtime_planner_write_tool(handler: Any) -> PlannerTool:
     )
 
 
-_RUNTIME_PLANNER_GEMINI_AUDIT_TOOLS = frozenset(
+_RUNTIME_PLANNER_VISUAL_AUDIT_TOOLS = frozenset(
     {"vrcforge_vision_audit", "vrcforge_vision_audit_multi"}
 )
 
 
 def _runtime_planner_provider_capability_visible(tool: Any) -> bool:
-    """Hide direct Gemini audit tools unless their actual handler can run."""
+    """Hide visual audit tools unless one configured visual provider can run."""
 
     tool_name = str(getattr(tool, "name", "") or "")
-    if tool_name not in _RUNTIME_PLANNER_GEMINI_AUDIT_TOOLS:
+    if tool_name not in _RUNTIME_PLANNER_VISUAL_AUDIT_TOOLS:
         return True
     try:
-        config = PROVIDER_CONFIGURATION.current_api_config()
+        capability = PROVIDER_VISION.capability()
     except Exception:  # noqa: BLE001 - capability exposure must fail closed.
         return False
-    return bool(
-        str(getattr(config, "provider", "") or "").strip() == "gemini"
-        and str(getattr(config, "api_key", "") or "").strip()
-        and str(getattr(config, "model", "") or "").strip()
-    )
+    return capability.get("available") is True
 
 
 class _RuntimePlannerCatalog:
@@ -15429,30 +15417,19 @@ def validate_multi_vision_audit_result(value: Any) -> str:
     return ""
 
 
-def run_gemini_vision_audit_bytes(
-    api_config: dict[str, Any],
+def run_provider_vision_audit_bytes(
     image_bytes: bytes,
     *,
     mime_type: str = "image/png",
+    image_name: str = "avatar.png",
 ) -> dict[str, Any]:
-    """Send only bytes already read through the managed evidence authority."""
+    """Send managed bytes through the selected provider-neutral visual lane."""
 
-    try:
-        from google import genai
-        from google.genai import types
-    except ImportError as exc:
-        raise RuntimeError("The google-genai package is not installed.") from exc
-
-    api_key = str(api_config.get("api_key") or "").strip()
-    model = str(api_config.get("model") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-    if not api_key:
-        raise RuntimeError("Google AI Studio API key is empty. Save a Google AI Studio provider config before running image analysis.")
     if not isinstance(image_bytes, bytes) or not image_bytes:
         raise RuntimeError("Managed image bytes are unavailable.")
     if not isinstance(mime_type, str) or not mime_type.startswith("image/"):
         raise RuntimeError("Managed image MIME type is invalid.")
 
-    client = genai.Client(api_key=api_key)
     prompt = (
         "你是 VRChat Avatar 视觉质检助手。检查这张 Avatar 截图是否存在明显穿模、衣物穿插、头发穿插或严重视觉问题。"
         "如果发现问题，请给出可定位区域，坐标使用相对图片宽高的 0 到 1 小数。"
@@ -15461,28 +15438,26 @@ def run_gemini_vision_audit_bytes(
         '"annotations":[{"label":"区域名","reason":"原因","severity":"low|medium|high",'
         '"box":{"x":0.1,"y":0.2,"width":0.3,"height":0.2}}]}'
     )
-    response = client.models.generate_content(
-        model=model,
-        contents=[
-            prompt,
-            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+    safe_name = Path(str(image_name or "avatar.png")).name[:160] or "avatar.png"
+    analysis = PROVIDER_VISION.analyze_prompt(
+        prompt,
+        [
+            {
+                "name": safe_name,
+                "dataUrl": (
+                    f"data:{mime_type};base64,"
+                    f"{base64.b64encode(image_bytes).decode('ascii')}"
+                ),
+            }
         ],
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
     )
-    payload = try_parse_json(getattr(response, "text", "") or "")
+    if str(analysis.get("status") or "") != "analyzed":
+        reason = str(analysis.get("reason") or "No visual provider is available.").strip()
+        raise RuntimeError(reason)
+    payload = try_parse_json(str(analysis.get("text") or ""))
     if not isinstance(payload, dict):
         raise RuntimeError("Image analysis did not return valid JSON.")
     return normalize_vision_audit_payload(payload)
-
-
-def run_gemini_vision_audit(api_config: dict[str, Any], image_path: Path) -> dict[str, Any]:
-    """Compatibility wrapper for trusted callers that do not hold a receipt."""
-
-    return run_gemini_vision_audit_bytes(
-        api_config,
-        image_path.read_bytes(),
-        mime_type=mimetypes.guess_type(str(image_path))[0] or "image/png",
-    )
 
 
 def build_event_message(event_type: str, payload: Any) -> dict[str, Any]:

@@ -56,6 +56,11 @@ def project_runtime_turn_event(payload: Mapping[str, Any] | None) -> dict[str, A
             },
         },
     }
+    projected_completion = result["plan"]["taskCompletion"]
+    for key, limit in (("actionId", 80), ("kind", 32), ("tool", 160)):
+        bounded = _text(completion.get(key), limit)
+        if bounded:
+            projected_completion[key] = bounded
     receipt = payload.get("harnessJourneyReceipt")
     if isinstance(receipt, Mapping):
         # Receipts contain only the already-bounded safe journey projection and

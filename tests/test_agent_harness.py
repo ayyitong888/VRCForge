@@ -410,21 +410,45 @@ def test_agent_harness_release_requires_a_verified_real_gateway_journey() -> Non
     one_case["completionCases"] = [one_case["completionCases"][0]]
     one_case["loopCases"] = [one_case["loopCases"][0]]
     action_id = "action_0123456789abcdef"
+    task_id = "task_0123456789abcdef"
+    session_id = "session-live-unity-write"
+    write_transaction = {
+        "schema": "vrcforge.approved_write_transaction.v1",
+        "status": "applied",
+        "approvalId": "approval-live-unity-write",
+        "checkpointId": "checkpoint-live-unity-write",
+        "checkpointVerified": True,
+        "taskId": task_id,
+        "sessionId": session_id,
+        "actionId": action_id,
+        "kind": "write",
+        "tool": "fixture_unity_write",
+    }
     journey = {
         "schema": "vrcforge.agent_harness_journey.v1",
         "id": "live-unity-write",
-        "toolExecutions": 2,
-        "providerRequestCount": 3,
-        "resultRefeedCount": 2,
+        "sessionId": session_id,
+        "taskId": task_id,
+        "toolExecutions": 1,
+        "providerRequestCount": 2,
+        "resultRefeedCount": 1,
         "nextStep": "done",
         "taskStatus": "completed",
         "completedActionIds": [action_id],
         "evidenceActionIds": [action_id],
-        "verificationProfiles": [
-            "persisted_scene_write_console",
-            "multi_angle_visual",
+        "verificationProfiles": ["persisted_scene_write_console"],
+        "verificationStates": ["passed"],
+        "completedActions": [
+            {
+                "actionId": action_id,
+                "kind": "write",
+                "tool": "fixture_unity_write",
+                "verificationProfiles": ["persisted_scene_write_console"],
+                "verificationStates": ["passed"],
+                "writeTransaction": write_transaction,
+            }
         ],
-        "verificationStates": ["passed", "passed"],
+        "writeTransactionCount": 1,
         "receipt": {"id": "one-use-runtime-journey"},
     }
 
@@ -459,6 +483,8 @@ def test_agent_harness_release_requires_a_verified_real_gateway_journey() -> Non
         {"taskStatus": "failed"},
         {"evidenceActionIds": ["action_other"]},
         {"verificationProfiles": ["canonical_tool_result"]},
+        {"completedActions": []},
+        {"writeTransactionCount": 0},
     ],
 )
 def test_agent_harness_runtime_journey_fails_closed(mutation: dict[str, object]) -> None:
@@ -467,6 +493,8 @@ def test_agent_harness_runtime_journey_fails_closed(mutation: dict[str, object])
     journey: dict[str, object] = {
         "schema": "vrcforge.agent_harness_journey.v1",
         "id": "live-unity-write",
+        "sessionId": "session-live-unity-write",
+        "taskId": "task-live-unity-write",
         "toolExecutions": 1,
         "providerRequestCount": 2,
         "resultRefeedCount": 1,
@@ -476,6 +504,28 @@ def test_agent_harness_runtime_journey_fails_closed(mutation: dict[str, object])
         "evidenceActionIds": [action_id],
         "verificationProfiles": ["persisted_scene_write_console"],
         "verificationStates": ["passed"],
+        "completedActions": [
+            {
+                "actionId": action_id,
+                "kind": "write",
+                "tool": "fixture_unity_write",
+                "verificationProfiles": ["persisted_scene_write_console"],
+                "verificationStates": ["passed"],
+                "writeTransaction": {
+                    "schema": "vrcforge.approved_write_transaction.v1",
+                    "status": "applied",
+                    "approvalId": "approval-live-unity-write",
+                    "checkpointId": "checkpoint-live-unity-write",
+                    "checkpointVerified": True,
+                    "taskId": "task-live-unity-write",
+                    "sessionId": "session-live-unity-write",
+                    "actionId": action_id,
+                    "kind": "write",
+                    "tool": "fixture_unity_write",
+                },
+            }
+        ],
+        "writeTransactionCount": 1,
     }
     journey.update(mutation)
 

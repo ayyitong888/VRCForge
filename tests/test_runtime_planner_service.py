@@ -665,9 +665,19 @@ def test_llm_execution_layer_has_a_first_class_supervised_write_action() -> None
     assert plan["nextStep"] == "request_write"
 
 
-def test_llm_skill_action_returns_correctable_kind_mismatch_for_any_supervised_write() -> None:
+@pytest.mark.parametrize(
+    "exposure_layer",
+    [EXPOSURE_LAYER_PLANNING, EXPOSURE_LAYER_EXECUTION],
+)
+def test_llm_skill_action_returns_correctable_kind_mismatch_for_any_supervised_write(
+    exposure_layer: str,
+) -> None:
     write_tool = tool("fixture-supervised-write", category="supervised-write", write=True)
     catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(),
+            routable_tools=(write_tool,),
+        ),
         execution=PlannerCatalogSnapshot(
             visible_tools=(write_tool,),
             routable_tools=(write_tool,),
@@ -689,7 +699,7 @@ def test_llm_skill_action_returns_correctable_kind_mismatch_for_any_supervised_w
         "create Probe",
         {},
         [],
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+        exposure_layer=exposure_layer,
     )
 
     assert plan is not None
@@ -706,6 +716,9 @@ def test_llm_skill_action_returns_correctable_kind_mismatch_for_any_supervised_w
     ]
     assert plan["skillNeeded"] is False
     assert plan["writeNeeded"] is False
+    assert plan.get("enterExecution") is (
+        exposure_layer == EXPOSURE_LAYER_PLANNING
+    )
     assert plan["continueLoop"] is True
     assert plan["nextStep"] == "planner_invalid_response"
 

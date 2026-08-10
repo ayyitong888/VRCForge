@@ -117,41 +117,69 @@ class ProviderVisionService:
         self._policy = policy
         self._runner = runner
 
-    def analyze(self, message: str, images: list[dict[str, Any]]) -> dict[str, Any]:
+    def _resolve_route(
+        self,
+    ) -> tuple[VisionModelConfig | None, str, str]:
         main = self._state.main_config()
-        main_key_ok = bool(main.api_key.strip()) or not self._policy.provider_requires_api_key(main.provider)
+        main_key_ok = bool(main.api_key.strip()) or not self._policy.provider_requires_api_key(
+            main.provider
+        )
         if main.model and main_key_ok and self.model_supports_vision(main.provider, main.model):
-            config = main
-            source = "main"
-        else:
-            profile = self._state.profile_config()
-            if not profile.configured:
-                return {
-                    "status": "unconfigured",
-                    "reason": "Main model is not vision-capable and no vision profile is configured.",
-                }
-            if not profile.enabled:
-                return {
-                    "status": "unconfigured",
-                    "reason": "The configured vision profile is disabled in settings.",
-                }
-            if self._policy.provider_requires_api_key(profile.provider) and not profile.api_key.strip():
-                return {
-                    "status": "unconfigured",
-                    "reason": (
-                        f"The vision profile ({self._policy.provider_display_name(profile.provider)}) "
-                        "has no API key."
-                    ),
-                }
-            config = VisionModelConfig(
+            return main, "main", ""
+
+        profile = self._state.profile_config()
+        if not profile.configured:
+            return (
+                None,
+                "",
+                "Main model is not vision-capable and no vision profile is configured.",
+            )
+        if not profile.enabled:
+            return None, "", "The configured vision profile is disabled in settings."
+        if self._policy.provider_requires_api_key(profile.provider) and not profile.api_key.strip():
+            return (
+                None,
+                "",
+                (
+                    f"The vision profile ({self._policy.provider_display_name(profile.provider)}) "
+                    "has no API key."
+                ),
+            )
+        return (
+            VisionModelConfig(
                 provider=profile.provider,
                 api_key=profile.api_key,
                 base_url=profile.base_url,
                 model=profile.model,
-            )
-            source = "visionProfile"
+            ),
+            "visionProfile",
+            "",
+        )
 
-        prompt = build_vision_analysis_prompt(message, images)
+    def capability(self) -> dict[str, Any]:
+        """Return bounded provider-neutral availability without exposing secrets."""
+
+        config, source, reason = self._resolve_route()
+        if config is None:
+            return {"available": False, "reason": reason}
+        return {
+            "available": True,
+            "provider": config.provider,
+            "providerLabel": self._policy.provider_display_name(config.provider),
+            "model": config.model,
+            "source": source,
+        }
+
+    def analyze(self, message: str, images: list[dict[str, Any]]) -> dict[str, Any]:
+        return self.analyze_prompt(build_vision_analysis_prompt(message, images), images)
+
+    def analyze_prompt(self, prompt: str, images: list[dict[str, Any]]) -> dict[str, Any]:
+        """Run one exact caller-owned prompt through the selected visual provider."""
+
+        config, source, reason = self._resolve_route()
+        if config is None:
+            return {"status": "unconfigured", "reason": reason}
+
         text, usage = self._runner.run(config, prompt, images)
         if not text.strip():
             raise RuntimeError(

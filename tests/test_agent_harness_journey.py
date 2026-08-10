@@ -15,9 +15,34 @@ from agent_task_loop import AgentTaskLoop
 
 
 TASK_SCHEMA = "vrcforge.agent_task_loop.v2"
+WRITE_TRANSACTION_SCHEMA = "vrcforge.approved_write_transaction.v1"
+
+
+def _write_transaction(
+    *,
+    task_id: str,
+    session_id: str,
+    action_id: str,
+    tool: str,
+    suffix: str,
+) -> dict:
+    return {
+        "schema": WRITE_TRANSACTION_SCHEMA,
+        "status": "applied",
+        "approvalId": f"approval_{suffix}",
+        "checkpointId": f"checkpoint_{suffix}",
+        "checkpointVerified": True,
+        "taskId": task_id,
+        "sessionId": session_id,
+        "actionId": action_id,
+        "kind": "write",
+        "tool": tool,
+    }
 
 
 def _runtime_journey() -> dict:
+    task_id = "task_real_123"
+    session_id = "sess_real_123"
     read_action = "action_read_verified"
     write_action = "action_write_verified"
     capture_action = "action_capture_verified"
@@ -25,7 +50,7 @@ def _runtime_journey() -> dict:
     visual_evidence = {"ref": "visual_capture_123", "kind": "managed_visual_capture"}
     return {
         "ok": True,
-        "sessionId": "sess_real_123",
+        "sessionId": session_id,
         "turnId": "turn_real_456",
         "clientTurnId": "client_real_789",
         "message": "do not place raw prompts in receipts",
@@ -65,6 +90,7 @@ def _runtime_journey() -> dict:
         ],
         "task": {
             "schema": TASK_SCHEMA,
+            "taskId": task_id,
             "status": "completed",
             "actions": [
                 {
@@ -83,6 +109,13 @@ def _runtime_journey() -> dict:
                     "kind": "write",
                     "tool": "fixture_unity_write",
                     "status": "completed",
+                    "writeTransaction": _write_transaction(
+                        task_id=task_id,
+                        session_id=session_id,
+                        action_id=write_action,
+                        tool="fixture_unity_write",
+                        suffix="write",
+                    ),
                     "outcome": {
                         "status": "ok",
                         "summary": "write completed",
@@ -94,6 +127,13 @@ def _runtime_journey() -> dict:
                     "kind": "write",
                     "tool": "vrcforge_capture_multi_screenshot",
                     "status": "completed",
+                    "writeTransaction": _write_transaction(
+                        task_id=task_id,
+                        session_id=session_id,
+                        action_id=capture_action,
+                        tool="vrcforge_capture_multi_screenshot",
+                        suffix="capture",
+                    ),
                     "outcome": {
                         "status": "ok",
                         "summary": "managed capture completed",
@@ -241,6 +281,52 @@ class RuntimeJourneyProjectionTests(unittest.TestCase):
             projected["completedActions"][1]["verificationProfiles"],
             ["persisted_scene_write_console"],
         )
+        self.assertEqual(projected["writeTransactionCount"], 2)
+        self.assertEqual(
+            projected["completedActions"][1]["writeTransaction"]["actionId"],
+            "action_write_verified",
+        )
+        self.assertEqual(
+            projected["completedActions"][2]["writeTransaction"]["approvalId"],
+            "approval_capture",
+        )
+
+    def test_rejects_missing_mismatched_or_reused_write_transaction_identity(self) -> None:
+        cases: list[dict] = []
+
+        missing = _runtime_journey()
+        missing["task"]["actions"][1].pop("writeTransaction")
+        cases.append(missing)
+
+        mismatched = _runtime_journey()
+        mismatched["task"]["actions"][1]["writeTransaction"]["actionId"] = (
+            "action_other_write"
+        )
+        cases.append(mismatched)
+
+        wrong_checkpoint_state = _runtime_journey()
+        wrong_checkpoint_state["task"]["actions"][1]["writeTransaction"][
+            "checkpointVerified"
+        ] = False
+        cases.append(wrong_checkpoint_state)
+
+        reused = _runtime_journey()
+        reused["task"]["actions"][2]["writeTransaction"]["approvalId"] = (
+            reused["task"]["actions"][1]["writeTransaction"]["approvalId"]
+        )
+        cases.append(reused)
+
+        for response in cases:
+            with self.subTest(response=response["task"]["actions"]):
+                with self.assertRaises(JourneyReceiptError) as raised:
+                    project_runtime_journey(response)
+                self.assertIn(
+                    raised.exception.code,
+                    {
+                        "journey_write_transaction_invalid",
+                        "journey_write_transaction_reused",
+                    },
+                )
 
     def test_pre_provider_desktop_bootstrap_has_exact_count_exception(self) -> None:
         response = _runtime_journey()
@@ -460,7 +546,22 @@ class RuntimeJourneyProjectionTests(unittest.TestCase):
             kind="write",
             tool="vrcforge_capture_multi_screenshot",
             arguments=capture_arguments,
-            raw_result={"ok": True},
+            raw_result={
+                "ok": True,
+                "status": "applied",
+                "approval": {
+                    "id": "approval_real_visual",
+                    "status": "applied",
+                    "taskContext": {
+                        "taskId": loop.task_id,
+                        "sessionId": loop.session_id,
+                        "actionId": capture_requirement["actionId"],
+                        "kind": "write",
+                        "tool": "vrcforge_capture_multi_screenshot",
+                    },
+                },
+                "checkpoint": {"id": "checkpoint_real_visual", "ok": True},
+            },
             outcome={"status": "ok", "summary": "captured", "evidence": evidence},
             action_id=capture_requirement["actionId"],
         )

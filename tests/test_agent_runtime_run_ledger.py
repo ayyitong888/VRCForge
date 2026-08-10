@@ -344,7 +344,10 @@ def test_gateway_dispatch_failure_and_restart_owned_dispatching_never_replay_she
     gateway = AgentGateway(tmp_path / "config.json", tmp_path / "audit")
     failed_id = "shell-durable-failed"
     abandoned_id = "shell-durable-dispatching"
+    expected_actions: dict[str, str] = {}
     for shell_session_id in (failed_id, abandoned_id):
+        requested_action_id = f"action_{shell_session_id.replace('-', '_')}"
+        expected_actions[shell_session_id] = requested_action_id
         assert gateway.runtime_runs.stage_shell_continuation(
             shell_session_id=shell_session_id,
             task_seed={
@@ -352,6 +355,9 @@ def test_gateway_dispatch_failure_and_restart_owned_dispatching_never_replay_she
                 "taskId": shell_session_id,
                 "sessionId": "session-interrupted",
                 "clientTurnId": f"client-{shell_session_id}",
+                "requestedActionId": requested_action_id,
+                "requestedKind": "shell",
+                "requestedTool": "shell",
             },
             terminal_event={
                 "shellSessionId": shell_session_id,
@@ -382,6 +388,15 @@ def test_gateway_dispatch_failure_and_restart_owned_dispatching_never_replay_she
     assert {
         turn["sessionId"] for turn in interrupted_turns
     } == {"session-interrupted"}
+    assert {
+        turn["plan"]["taskCompletion"]["actionId"] for turn in interrupted_turns
+    } == set(expected_actions.values())
+    assert {
+        turn["plan"]["taskCompletion"]["kind"] for turn in interrupted_turns
+    } == {"shell"}
+    assert {
+        turn["plan"]["taskCompletion"]["tool"] for turn in interrupted_turns
+    } == {"shell"}
     assert len(gateway.runtime_runs.list_runtime_continuations(limit=64)) == 2
     states = {
         item["shellSessionId"]: item["shellContinuationState"]

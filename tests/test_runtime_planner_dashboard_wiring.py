@@ -161,13 +161,31 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
 
 
 @pytest.mark.parametrize(
-    ("provider_config", "expected_visible"),
+    ("provider_config", "vision_config", "expected_visible"),
     [
         (
             SimpleNamespace(
-                provider="gemini",
+                provider="openai",
                 api_key="fixture-key",
-                model="gemini-fixture",
+                base_url="",
+                model="gpt-4o",
+            ),
+            SimpleNamespace(provider="", api_key="", base_url="", model="", enabled=False),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                provider="deepseek",
+                api_key="fixture-key",
+                base_url="",
+                model="deepseek-v4-flash",
+            ),
+            SimpleNamespace(
+                provider="anthropic",
+                api_key="vision-key",
+                base_url="",
+                model="claude-sonnet-4",
+                enabled=True,
             ),
             True,
         ),
@@ -175,24 +193,32 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
             SimpleNamespace(
                 provider="deepseek",
                 api_key="fixture-key",
+                base_url="",
                 model="deepseek-v4-flash",
             ),
+            SimpleNamespace(provider="", api_key="", base_url="", model="", enabled=False),
             False,
         ),
         (
-            SimpleNamespace(provider="gemini", api_key="", model="gemini-fixture"),
+            SimpleNamespace(provider="openai", api_key="", base_url="", model="gpt-4o"),
+            SimpleNamespace(provider="", api_key="", base_url="", model="", enabled=False),
             False,
         ),
     ],
 )
-def test_catalog_exposes_visual_audit_only_when_its_actual_provider_can_run(
+def test_catalog_exposes_visual_audit_for_any_configured_vision_capability(
     provider_config: SimpleNamespace,
+    vision_config: SimpleNamespace,
     expected_visible: bool,
 ) -> None:
     with patch.object(
         dashboard_server.PROVIDER_CONFIGURATION,
         "current_api_config",
         return_value=provider_config,
+    ), patch.object(
+        dashboard_server.PROVIDER_CONFIGURATION,
+        "current_vision_config",
+        return_value=vision_config,
     ):
         planning = dashboard_server._RuntimePlannerCatalog().read(
             EXPOSURE_LAYER_PLANNING

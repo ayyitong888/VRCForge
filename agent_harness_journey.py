@@ -23,6 +23,7 @@ from typing import Any
 
 JOURNEY_SCHEMA = "vrcforge.agent_harness_journey.v1"
 JOURNEY_RECEIPT_SCHEMA = "vrcforge.agent_harness_journey_receipt.v1"
+WRITE_TRANSACTION_SCHEMA = "vrcforge.approved_write_transaction.v1"
 _MAX_ACTIONS = 25
 _MAX_ID_LENGTH = 180
 _MAX_TOOL_LENGTH = 160
@@ -177,6 +178,64 @@ def _managed_visual_evidence_refs(action: Mapping[str, Any]) -> list[str]:
     return refs
 
 
+def _approved_write_transaction(
+    action: Mapping[str, Any],
+    *,
+    task_id: str,
+    session_id: str,
+    action_id: str,
+    kind: str,
+    tool: str,
+) -> dict[str, Any]:
+    raw_transaction = action.get("writeTransaction")
+    if not isinstance(raw_transaction, Mapping):
+        _fail(
+            "journey_write_transaction_invalid",
+            "A completed write must retain one applied approval and verified checkpoint transaction.",
+        )
+    transaction = raw_transaction
+    if (
+        str(transaction.get("schema") or "").strip() != WRITE_TRANSACTION_SCHEMA
+        or _status(transaction.get("status")) != "applied"
+        or transaction.get("checkpointVerified") is not True
+    ):
+        _fail(
+            "journey_write_transaction_invalid",
+            "A completed write must retain one applied approval and verified checkpoint transaction.",
+        )
+    approval_id = _identifier(
+        transaction.get("approvalId"),
+        "task.actions.writeTransaction.approvalId",
+    )
+    checkpoint_id = _identifier(
+        transaction.get("checkpointId"),
+        "task.actions.writeTransaction.checkpointId",
+    )
+    exact_identity = {
+        "taskId": task_id,
+        "sessionId": session_id,
+        "actionId": action_id,
+        "kind": kind,
+        "tool": tool,
+    }
+    if any(
+        str(transaction.get(field) or "").strip() != expected
+        for field, expected in exact_identity.items()
+    ):
+        _fail(
+            "journey_write_transaction_invalid",
+            "The write transaction must match the exact task, session, action, kind, and tool.",
+        )
+    return {
+        "schema": WRITE_TRANSACTION_SCHEMA,
+        "status": "applied",
+        "approvalId": approval_id,
+        "checkpointId": checkpoint_id,
+        "checkpointVerified": True,
+        **exact_identity,
+    }
+
+
 def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any]:
     """Project and validate the safe receipt fields from one Runtime response.
 
@@ -211,6 +270,7 @@ def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any
     if _status(task.get("status")) != "completed":
         _fail("journey_not_completed", "The Runtime task is not completed.")
     task_schema = _identifier(task.get("schema"), "task.schema", limit=100)
+    task_id = _identifier(task.get("taskId"), "task.taskId", limit=80)
     if str(completion.get("schema") or "").strip() != task_schema:
         _fail("journey_completion_mismatch", "Task and completion schemas do not match.")
 
@@ -225,6 +285,9 @@ def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any
     superseded_action_ids: list[str] = []
     managed_capture_refs: set[str] = set()
     verified_visual_refs: set[str] = set()
+    approval_ids: set[str] = set()
+    checkpoint_ids: set[str] = set()
+    write_transaction_count = 0
     for action_index, raw_action in enumerate(actions):
         action = _mapping(raw_action, "task.actions[]")
         action_status = _status(action.get("status"))
@@ -280,6 +343,32 @@ def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any
         if action_id in completed_action_ids:
             _fail("journey_action_identity_invalid", "Completed action IDs must be unique.")
         profiles, states = _declared_verifications(action, requirements)
+        write_transaction: dict[str, Any] | None = None
+        if kind == "write":
+            write_transaction = _approved_write_transaction(
+                action,
+                task_id=task_id,
+                session_id=session_id,
+                action_id=action_id,
+                kind=kind,
+                tool=tool,
+            )
+            if (
+                write_transaction["approvalId"] in approval_ids
+                or write_transaction["checkpointId"] in checkpoint_ids
+            ):
+                _fail(
+                    "journey_write_transaction_reused",
+                    "Approval and checkpoint identities may bind to only one completed write.",
+                )
+            approval_ids.add(write_transaction["approvalId"])
+            checkpoint_ids.add(write_transaction["checkpointId"])
+            write_transaction_count += 1
+        elif action.get("writeTransaction") is not None:
+            _fail(
+                "journey_write_transaction_invalid",
+                "Only a write action may carry an approved write transaction.",
+            )
         visual_refs = _managed_visual_evidence_refs(action)
         if tool == "vrcforge_capture_multi_screenshot":
             if len(visual_refs) != 1:
@@ -303,15 +392,16 @@ def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any
         completed_action_ids.append(action_id)
         verification_profiles.extend(profiles)
         verification_states.extend(states)
-        completed_actions.append(
-            {
-                "actionId": action_id,
-                "kind": kind,
-                "tool": tool,
-                "verificationProfiles": profiles,
-                "verificationStates": states,
-            }
-        )
+        completed_action = {
+            "actionId": action_id,
+            "kind": kind,
+            "tool": tool,
+            "verificationProfiles": profiles,
+            "verificationStates": states,
+        }
+        if write_transaction is not None:
+            completed_action["writeTransaction"] = write_transaction
+        completed_actions.append(completed_action)
 
     declared_profile_count = sum(
         1
@@ -403,6 +493,7 @@ def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any
         "schema": JOURNEY_SCHEMA,
         "id": turn_id,
         "sessionId": session_id,
+        "taskId": task_id,
         "turnId": turn_id,
         "clientTurnId": client_turn_id,
         "actualToolExecutionCount": actual_tool_execution_count,
@@ -420,6 +511,7 @@ def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any
         "verificationProfiles": verification_profiles,
         "verificationStates": verification_states,
         "completedActions": completed_actions,
+        "writeTransactionCount": write_transaction_count,
     }
 
 

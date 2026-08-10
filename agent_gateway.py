@@ -3106,6 +3106,9 @@ class AgentGateway:
             ),
             1200,
         )
+        requested_action_id = str(seed.get("requestedActionId") or "").strip()[:80]
+        requested_kind = str(seed.get("requestedKind") or "").strip()[:32]
+        requested_tool = str(seed.get("requestedTool") or "").strip()[:160]
         projected = project_runtime_turn_event(
             {
                 "continuationSource": source,
@@ -3120,6 +3123,9 @@ class AgentGateway:
                     "taskCompletion": {
                         "status": "needs_user_action",
                         "taskId": str(seed.get("taskId") or "")[:80],
+                        "actionId": requested_action_id,
+                        "kind": requested_kind,
+                        "tool": requested_tool,
                         "evidenceActionIds": [],
                     },
                 },
@@ -3134,6 +3140,9 @@ class AgentGateway:
                 "sessionId": session_id,
                 "turnId": projected["turnId"],
                 "clientTurnId": client_turn_id,
+                "actionId": requested_action_id,
+                "kind": requested_kind,
+                "tool": requested_tool,
                 "continuationEvent": projected,
             }
         )
@@ -3321,6 +3330,7 @@ class AgentGateway:
             task_loop = AgentTaskLoop.from_approval_context(
                 continuation_context,
                 continuation_completion,
+                execution=ensure_dict(task_continuation).get("execution"),
             )
         else:
             task_loop = AgentTaskLoop(
@@ -3463,6 +3473,30 @@ class AgentGateway:
                 context_usage.update(runtime_compaction_usage_checkpoint)
             if runtime_compaction is not None:
                 runtime_compaction = planner_policy.runtime_compaction_cancelled_view(runtime_compaction)
+
+        def enter_runtime_execution() -> bool:
+            nonlocal runtime_exposure_layer
+            if runtime_exposure_layer != EXPOSURE_LAYER_PLANNING:
+                return False
+            runtime_exposure_layer = EXPOSURE_LAYER_EXECUTION
+            loop_state.append(
+                {
+                    "tool": "exposure_layer",
+                    "kind": "phase",
+                    "status": "entered_execution",
+                    "result": {"exposureLayer": runtime_exposure_layer},
+                }
+            )
+            steps.append(
+                {
+                    "index": len(steps),
+                    "kind": "phase",
+                    "tool": "exposure_layer",
+                    "summary": "Entered execution mode after an explicit project-change request.",
+                    "status": "entered_execution",
+                }
+            )
+            return True
 
         def record_planner_argument_failure(
             *,
@@ -3749,6 +3783,8 @@ class AgentGateway:
                     ),
                     validation=planner_argument_validation,
                 )
+                if plan.get("enterExecution") is True:
+                    enter_runtime_execution()
                 if correction_exhausted:
                     last_plan = {
                         **plan,
@@ -3772,24 +3808,7 @@ class AgentGateway:
                 or (planned_tool is not None and planned_tool.write)
             )
             if runtime_exposure_layer == EXPOSURE_LAYER_PLANNING and planning_selected_write:
-                runtime_exposure_layer = EXPOSURE_LAYER_EXECUTION
-                loop_state.append(
-                    {
-                        "tool": "exposure_layer",
-                        "kind": "phase",
-                        "status": "entered_execution",
-                        "result": {"exposureLayer": runtime_exposure_layer},
-                    }
-                )
-                steps.append(
-                    {
-                        "index": len(steps),
-                        "kind": "phase",
-                        "tool": "exposure_layer",
-                        "summary": "Entered execution mode after an explicit project-change request.",
-                        "status": "entered_execution",
-                    }
-                )
+                enter_runtime_execution()
                 continue
 
             # 仅首步采用调用方直接给的 shell 命令，避免后续步骤反复重放同一条命令。

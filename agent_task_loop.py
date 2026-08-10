@@ -19,6 +19,7 @@ from agent_tool_result_contract import completion_gate_plan, normalize_agent_too
 
 TASK_LOOP_SCHEMA = "vrcforge.agent_task_loop.v2"
 TASK_APPROVAL_CONTEXT_SCHEMA = "vrcforge.agent_task_approval.v1"
+WRITE_TRANSACTION_SCHEMA = "vrcforge.approved_write_transaction.v1"
 _RUNNING_STATUSES = frozenset(
     {"accepted", "in_progress", "queued", "running", "started", "starting"}
 )
@@ -247,7 +248,79 @@ def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
         result["supersededBy"] = superseded_by
     if value.get("preProvider") is True:
         result["preProvider"] = True
+    transaction = _bounded_write_transaction(value.get("writeTransaction"))
+    if transaction is not None:
+        result["writeTransaction"] = transaction
     return result
+
+
+def _bounded_write_transaction(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    transaction = {
+        "schema": _bounded_text(value.get("schema"), 80),
+        "status": _status(value.get("status")),
+        "approvalId": _bounded_text(value.get("approvalId"), 180),
+        "checkpointId": _bounded_text(value.get("checkpointId"), 180),
+        "checkpointVerified": value.get("checkpointVerified") is True,
+        "taskId": _bounded_text(value.get("taskId"), 80),
+        "sessionId": _bounded_text(value.get("sessionId"), 180),
+        "actionId": _bounded_text(value.get("actionId"), 80),
+        "kind": _bounded_text(value.get("kind"), 32),
+        "tool": _bounded_text(value.get("tool"), 160),
+    }
+    if (
+        transaction["schema"] != WRITE_TRANSACTION_SCHEMA
+        or transaction["status"] != "applied"
+        or not transaction["approvalId"]
+        or not transaction["checkpointId"]
+        or transaction["checkpointVerified"] is not True
+        or not transaction["taskId"]
+        or not transaction["sessionId"]
+        or not transaction["actionId"]
+        or transaction["kind"] != "write"
+        or not transaction["tool"]
+    ):
+        return None
+    return transaction
+
+
+def _write_transaction_from_execution(
+    execution: Any,
+    *,
+    task_id: str,
+    session_id: str,
+    action_id: str,
+    kind: str,
+    tool: str,
+) -> dict[str, Any] | None:
+    if not isinstance(execution, Mapping) or _bounded_text(kind, 32) != "write":
+        return None
+    approval = execution.get("approval")
+    if not isinstance(approval, Mapping):
+        return None
+    checkpoint = execution.get("checkpoint")
+    if not isinstance(checkpoint, Mapping):
+        checkpoint = approval.get("checkpoint")
+    if not isinstance(checkpoint, Mapping):
+        return None
+    context = approval.get("taskContext")
+    if not isinstance(context, Mapping):
+        context = {}
+    return _bounded_write_transaction(
+        {
+            "schema": WRITE_TRANSACTION_SCHEMA,
+            "status": approval.get("status") or execution.get("status"),
+            "approvalId": approval.get("id"),
+            "checkpointId": checkpoint.get("id"),
+            "checkpointVerified": checkpoint.get("ok") is True,
+            "taskId": context.get("taskId") or task_id,
+            "sessionId": context.get("sessionId") or session_id,
+            "actionId": context.get("requestedActionId") or context.get("actionId") or action_id,
+            "kind": context.get("kind") or kind,
+            "tool": context.get("tool") or approval.get("targetTool") or tool,
+        }
+    )
 
 
 def _bounded_requirement(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -889,6 +962,8 @@ class AgentTaskLoop:
         cls,
         context: Mapping[str, Any],
         completion: Mapping[str, Any],
+        *,
+        execution: Mapping[str, Any] | None = None,
     ) -> AgentTaskLoop:
         loop = cls(
             _bounded_text(context.get("objective"), 600),
@@ -932,18 +1007,27 @@ class AgentTaskLoop:
             context.get("skillPolicy") or loop._skill_context
         )
         completion_outcome = completion.get("outcome")
-        current = _bounded_action(
-            {
-                "actionId": completion.get("actionId") or context.get("actionId"),
-                "kind": _bounded_text(context.get("kind"), 32) or "write",
-                "tool": completion.get("tool") or context.get("tool"),
-                "status": completion.get("status"),
-                "attempts": 1,
-                "outcome": (
-                    completion_outcome if isinstance(completion_outcome, Mapping) else {}
-                ),
-            }
+        current_seed = {
+            "actionId": completion.get("actionId") or context.get("actionId"),
+            "kind": _bounded_text(context.get("kind"), 32) or "write",
+            "tool": completion.get("tool") or context.get("tool"),
+            "status": completion.get("status"),
+            "attempts": 1,
+            "outcome": (
+                completion_outcome if isinstance(completion_outcome, Mapping) else {}
+            ),
+        }
+        transaction = _write_transaction_from_execution(
+            execution,
+            task_id=loop.task_id,
+            session_id=loop.session_id,
+            action_id=_bounded_text(current_seed["actionId"], 80),
+            kind=_bounded_text(current_seed["kind"], 32),
+            tool=_bounded_text(current_seed["tool"], 160),
         )
+        if transaction is not None:
+            current_seed["writeTransaction"] = transaction
+        current = _bounded_action(current_seed)
         if current is not None:
             loop._actions[current["actionId"]] = current
             if (
@@ -1130,6 +1214,16 @@ class AgentTaskLoop:
             "attempts": attempts,
             "outcome": effective,
         }
+        transaction = _write_transaction_from_execution(
+            raw_result,
+            task_id=self.task_id,
+            session_id=self.session_id,
+            action_id=action_id,
+            kind=_bounded_text(kind, 32),
+            tool=_bounded_text(tool, 160),
+        )
+        if transaction is not None:
+            record["writeTransaction"] = transaction
         if pre_provider:
             record["preProvider"] = True
         if running_state:

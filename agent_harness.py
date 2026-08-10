@@ -482,11 +482,33 @@ def _evaluate_runtime_journey(
     verification_states = _bounded_verification_values(
         authenticated.get("verificationStates")
     )
+    task_id = str(authenticated.get("taskId") or "").strip()[:80]
+    session_id = str(authenticated.get("sessionId") or "").strip()[:180]
+    (
+        completed_actions,
+        action_verification_bound,
+        derived_write_transaction_count,
+        action_profiles,
+        action_states,
+    ) = _bounded_completed_actions(
+        authenticated.get("completedActions"),
+        task_id=task_id,
+        session_id=session_id,
+    )
+    declared_write_transaction_count = authenticated.get("writeTransactionCount")
+    write_transaction_accepted = bool(
+        isinstance(declared_write_transaction_count, int)
+        and not isinstance(declared_write_transaction_count, bool)
+        and declared_write_transaction_count == derived_write_transaction_count
+        and action_verification_bound
+    )
     external_verification_accepted = bool(
         verification_profiles
         and len(verification_profiles) == len(verification_states)
         and all(state == "passed" for state in verification_states)
         and any(profile != "canonical_tool_result" for profile in verification_profiles)
+        and action_profiles == verification_profiles
+        and action_states == verification_states
     )
     accepted = bool(
         schema == AGENT_HARNESS_JOURNEY_SCHEMA
@@ -498,6 +520,9 @@ def _evaluate_runtime_journey(
         and task_status == "completed"
         and completed_action_ids
         and evidence_action_ids == completed_action_ids
+        and [item["actionId"] for item in completed_actions] == completed_action_ids
+        and action_verification_bound
+        and write_transaction_accepted
         and external_verification_accepted
     )
     return {
@@ -509,24 +534,116 @@ def _evaluate_runtime_journey(
         "resultRefeedCount": result_refeeds,
         "nextStep": next_step,
         "taskStatus": task_status,
+        "taskId": task_id,
+        "sessionId": session_id,
         "completedActionIds": completed_action_ids,
         "evidenceActionIds": evidence_action_ids,
+        "completedActions": completed_actions,
         "verificationProfiles": verification_profiles,
         "verificationStates": verification_states,
+        "actionVerificationBound": action_verification_bound,
         "externalVerificationAccepted": external_verification_accepted,
+        "writeTransactionAccepted": write_transaction_accepted,
+        "writeTransactionCount": derived_write_transaction_count,
     }
 
 
 def _bounded_action_ids(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [str(item)[:160] for item in value[:3] if str(item).startswith("action_")]
+    return [str(item)[:160] for item in value[:25] if str(item).startswith("action_")]
 
 
 def _bounded_verification_values(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
-    return [str(item).strip()[:80] for item in value[:6] if str(item).strip()]
+    return [str(item).strip()[:80] for item in value[:50] if str(item).strip()]
+
+
+def _bounded_completed_actions(
+    value: Any,
+    *,
+    task_id: str,
+    session_id: str,
+) -> tuple[list[dict[str, Any]], bool, int, list[str], list[str]]:
+    if not isinstance(value, list) or not value or len(value) > 25 or not task_id or not session_id:
+        return [], False, 0, [], []
+    completed: list[dict[str, Any]] = []
+    action_ids: set[str] = set()
+    approval_ids: set[str] = set()
+    checkpoint_ids: set[str] = set()
+    all_profiles: list[str] = []
+    all_states: list[str] = []
+    write_count = 0
+    for raw_action in value:
+        if not isinstance(raw_action, Mapping):
+            return [], False, 0, [], []
+        action_id = str(raw_action.get("actionId") or "").strip()[:80]
+        kind = str(raw_action.get("kind") or "").strip()[:32]
+        tool = str(raw_action.get("tool") or "").strip()[:160]
+        profiles = _bounded_verification_values(raw_action.get("verificationProfiles"))
+        states = _bounded_verification_values(raw_action.get("verificationStates"))
+        if (
+            not action_id.startswith("action_")
+            or action_id in action_ids
+            or kind not in {"shell", "skill", "write"}
+            or not tool
+            or not profiles
+            or len(profiles) != len(states)
+            or any(state != "passed" for state in states)
+        ):
+            return [], False, 0, [], []
+        action_ids.add(action_id)
+        bounded_action = {
+            "actionId": action_id,
+            "kind": kind,
+            "tool": tool,
+            "verificationProfiles": profiles,
+            "verificationStates": states,
+        }
+        transaction = raw_action.get("writeTransaction")
+        if kind == "write":
+            if not isinstance(transaction, Mapping):
+                return [], False, 0, [], []
+            approval_id = str(transaction.get("approvalId") or "").strip()[:180]
+            checkpoint_id = str(transaction.get("checkpointId") or "").strip()[:180]
+            if (
+                str(transaction.get("schema") or "").strip()
+                != "vrcforge.approved_write_transaction.v1"
+                or str(transaction.get("status") or "").strip() != "applied"
+                or transaction.get("checkpointVerified") is not True
+                or not approval_id
+                or not checkpoint_id
+                or approval_id in approval_ids
+                or checkpoint_id in checkpoint_ids
+                or str(transaction.get("taskId") or "").strip() != task_id
+                or str(transaction.get("sessionId") or "").strip() != session_id
+                or str(transaction.get("actionId") or "").strip() != action_id
+                or str(transaction.get("kind") or "").strip() != kind
+                or str(transaction.get("tool") or "").strip() != tool
+            ):
+                return [], False, 0, [], []
+            approval_ids.add(approval_id)
+            checkpoint_ids.add(checkpoint_id)
+            bounded_action["writeTransaction"] = {
+                "schema": "vrcforge.approved_write_transaction.v1",
+                "status": "applied",
+                "approvalId": approval_id,
+                "checkpointId": checkpoint_id,
+                "checkpointVerified": True,
+                "taskId": task_id,
+                "sessionId": session_id,
+                "actionId": action_id,
+                "kind": kind,
+                "tool": tool,
+            }
+            write_count += 1
+        elif transaction is not None:
+            return [], False, 0, [], []
+        completed.append(bounded_action)
+        all_profiles.extend(profiles)
+        all_states.extend(states)
+    return completed, True, write_count, all_profiles, all_states
 
 
 def _case_id(case: Any, seen_ids: set[str]) -> str:

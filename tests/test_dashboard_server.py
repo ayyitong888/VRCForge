@@ -7044,9 +7044,20 @@ class DashboardServerTests(unittest.TestCase):
             dashboard_server.PROVIDER_CONFIGURATION,
             "current_api_config",
             return_value=SimpleNamespace(
-                provider="gemini",
+                provider="openai",
                 api_key="fixture-key",
-                model="gemini-fixture",
+                base_url="",
+                model="gpt-4o",
+            ),
+        ), patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_vision_config",
+            return_value=SimpleNamespace(
+                provider="",
+                api_key="",
+                base_url="",
+                model="",
+                enabled=False,
             ),
         ):
             planning = dashboard_server._RuntimePlannerCatalog().read("planning")
@@ -15724,11 +15735,7 @@ namespace VRCForge.Editor
     def test_audit_multi_rejects_unmanaged_paths_before_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            with patch.object(
-                dashboard_server.PROVIDER_CONFIGURATION,
-                "serialize_api_config",
-                return_value={"provider": "gemini"},
-            ), patch("dashboard_server.run_gemini_vision_audit_bytes") as mock_audit:
+            with patch("dashboard_server.run_provider_vision_audit_bytes") as mock_audit:
                 with TestClient(dashboard_server.app) as client:
                     response = client.post(
                         "/api/vision/audit-multi",
@@ -15765,12 +15772,8 @@ namespace VRCForge.Editor
                 dashboard_server,
                 "MANAGED_VISUAL_CAPTURE_AUTHORITY",
                 authority,
-            ), patch.object(
-                dashboard_server.PROVIDER_CONFIGURATION,
-                "serialize_api_config",
-                return_value={"provider": "gemini"},
             ), patch(
-                "dashboard_server.run_gemini_vision_audit_bytes",
+                "dashboard_server.run_provider_vision_audit_bytes",
                 side_effect=[dict(completed_audit), dict(completed_audit)],
             ) as mock_audit, patch("dashboard_server.save_vision_audit_artifact") as mock_save:
                 with TestClient(dashboard_server.app) as client:
@@ -15822,12 +15825,8 @@ namespace VRCForge.Editor
                     dashboard_server,
                     "MANAGED_VISUAL_CAPTURE_AUTHORITY",
                     authority,
-                ), patch.object(
-                    dashboard_server.PROVIDER_CONFIGURATION,
-                    "serialize_api_config",
-                    return_value={"provider": "gemini"},
                 ), patch(
-                    "dashboard_server.run_gemini_vision_audit_bytes",
+                    "dashboard_server.run_provider_vision_audit_bytes",
                     side_effect=invalid_result if isinstance(invalid_result, Exception) else None,
                     return_value=invalid_result if isinstance(invalid_result, dict) else None,
                 ):
@@ -15916,12 +15915,8 @@ namespace VRCForge.Editor
                 dashboard_server,
                 "MANAGED_VISUAL_CAPTURE_AUTHORITY",
                 authority,
-            ), patch.object(
-                dashboard_server.PROVIDER_CONFIGURATION,
-                "serialize_api_config",
-                return_value={"provider": "gemini"},
             ), patch(
-                "dashboard_server.run_gemini_vision_audit_bytes",
+                "dashboard_server.run_provider_vision_audit_bytes",
                 side_effect=[dict(completed_audit), dict(completed_audit)],
             ) as mock_audit:
                 payload = dashboard_server.audit_managed_avatar_multi_screenshot_sync(
@@ -15942,7 +15937,7 @@ namespace VRCForge.Editor
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
-        with patch("dashboard_server.run_gemini_vision_audit_bytes") as mock_audit:
+        with patch("dashboard_server.run_provider_vision_audit_bytes") as mock_audit:
             with self.assertRaisesRegex(AgentGatewayError, "Unknown or unavailable"):
                 dashboard_server.AGENT_GATEWAY.call_tool(
                     "vrcforge_vision_audit_multi",
@@ -15997,7 +15992,7 @@ namespace VRCForge.Editor
             )
             observed: list[bytes] = []
 
-            def audit_bytes(_config, image_bytes, **_kwargs):
+            def audit_bytes(image_bytes, **_kwargs):
                 image.write_bytes(b"replacement")
                 observed.append(image_bytes)
                 return dashboard_server.normalize_vision_audit_payload(
@@ -16008,12 +16003,8 @@ namespace VRCForge.Editor
                 dashboard_server,
                 "MANAGED_VISUAL_CAPTURE_AUTHORITY",
                 authority,
-            ), patch.object(
-                dashboard_server.PROVIDER_CONFIGURATION,
-                "serialize_api_config",
-                return_value={"provider": "gemini"},
             ), patch(
-                "dashboard_server.run_gemini_vision_audit_bytes",
+                "dashboard_server.run_provider_vision_audit_bytes",
                 side_effect=audit_bytes,
             ):
                 payload = dashboard_server.audit_managed_avatar_multi_screenshot_sync(
@@ -16060,7 +16051,7 @@ namespace VRCForge.Editor
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
-        with patch("dashboard_server.run_gemini_vision_audit_bytes") as mock_audit:
+        with patch("dashboard_server.run_provider_vision_audit_bytes") as mock_audit:
             payload = dashboard_server.AGENT_GATEWAY.call_tool(
                 "vrcforge_vision_audit",
                 {"image_path": "D:/private.png"},
@@ -16091,6 +16082,44 @@ namespace VRCForge.Editor
         self.assertAlmostEqual(payload["annotations"][0]["box"]["x"], 0.1)
         self.assertAlmostEqual(payload["annotations"][0]["box"]["width"], 0.3)
 
+    def test_provider_vision_audit_sends_verified_bytes_through_selected_capability(self) -> None:
+        analyzed = {
+            "status": "analyzed",
+            "text": json.dumps(
+                {
+                    "status": "pass",
+                    "summary": "No visible clipping.",
+                    "issues": [],
+                    "annotations": [],
+                }
+            ),
+            "provider": "openai",
+            "model": "gpt-4o",
+            "source": "main",
+        }
+        with patch.object(
+            dashboard_server.PROVIDER_VISION,
+            "analyze_prompt",
+            return_value=analyzed,
+        ) as analyze:
+            payload = dashboard_server.run_provider_vision_audit_bytes(
+                b"verified-image",
+                mime_type="image/png",
+                image_name="front.png",
+            )
+
+        self.assertEqual(payload["status"], "pass")
+        prompt, images = analyze.call_args.args
+        self.assertIn("只输出 JSON", prompt)
+        self.assertEqual(
+            images,
+            [
+                {
+                    "name": "front.png",
+                    "dataUrl": "data:image/png;base64,dmVyaWZpZWQtaW1hZ2U=",
+                }
+            ],
+        )
     def test_normalize_vision_box_accepts_gemini_1000_scale(self) -> None:
         box = dashboard_server.normalize_vision_box({"x_min": 100, "y_min": 200, "x_max": 500, "y_max": 650})
         self.assertIsNotNone(box)

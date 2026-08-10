@@ -86,6 +86,55 @@ def test_provider_vision_service_selects_vision_capable_main_model() -> None:
     assert "avatar.png" in runner.calls[0][1]
 
 
+def test_provider_vision_service_exposes_provider_neutral_capability_and_exact_prompt() -> None:
+    main = VisionModelConfig(
+        "openai",
+        "safe-key",
+        "https://provider.example/v1",
+        "gpt-4o",
+    )
+    runner = _Runner('{"status":"pass"}')
+    service = _service(main, VisionProfileConfig("", "", "", "", False), runner)
+    images = [{"name": "avatar.png", "dataUrl": "data:image/png;base64,YQ=="}]
+
+    capability = service.capability()
+    result = service.analyze_prompt("return the audit JSON", images)
+
+    assert capability == {
+        "available": True,
+        "provider": "openai",
+        "providerLabel": "OpenAI",
+        "model": "gpt-4o",
+        "source": "main",
+    }
+    assert result["provider"] == "openai"
+    assert result["text"] == '{"status":"pass"}'
+    assert runner.calls[0][1] == "return the audit JSON"
+
+
+def test_provider_vision_capability_accepts_an_enabled_non_gemini_profile() -> None:
+    runner = _Runner()
+    service = _service(
+        VisionModelConfig("deepseek", "safe-key", "", "deepseek-chat"),
+        VisionProfileConfig(
+            "anthropic",
+            "vision-key",
+            "",
+            "claude-sonnet-4",
+            True,
+        ),
+        runner,
+    )
+
+    assert service.capability() == {
+        "available": True,
+        "provider": "anthropic",
+        "providerLabel": "anthropic",
+        "model": "claude-sonnet-4",
+        "source": "visionProfile",
+    }
+
+
 def test_provider_vision_service_falls_back_only_to_enabled_configured_profile() -> None:
     main = VisionModelConfig("deepseek", "safe-key", "", "deepseek-chat")
     runner = _Runner()
