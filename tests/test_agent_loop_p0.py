@@ -2127,9 +2127,158 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertEqual(approval["targetTool"], "vrcforge_capture_multi_screenshot")
         self.assertEqual(approval["status"], "pending")
+        self.assertFalse(approval["taskContext"]["continueAfterApproval"])
         self.assertEqual(
             [(step["kind"], step["status"]) for step in result["steps"]],
             [("phase", "entered_execution"), ("write", "approval_pending")],
+        )
+
+    def test_approved_multi_capture_runs_bound_visual_audit_without_replaying_write(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        message = "Capture front and back views, then run a visual audit."
+
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=AssertionError("the managed capture chain must remain deterministic"),
+        ) as request_model:
+            initial = gateway.runtime_message(
+                {
+                    "message": message,
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": "managed-visual-chain-session",
+                    "client_turn_id": "managed-visual-chain-turn",
+                }
+            )
+
+            approval_id = initial["approvalId"]
+            stored_approval = gateway._approvals[approval_id]
+            task_context = stored_approval["taskContext"]
+            capture_action_id = task_context["requestedActionId"]
+            self.assertTrue(task_context["continueAfterApproval"])
+
+            capture_result = {
+                "ok": True,
+                "captureReceipt": "managed-visual-receipt",
+                "captureEvidenceId": "visual-fixture",
+                "angles": ["front", "back"],
+                "evidence": [
+                    {"ref": "visual-fixture", "kind": "managed_visual_capture"}
+                ],
+            }
+            capture_outcome = {
+                "status": "ok",
+                "summary": "The approved multi-angle capture completed.",
+                "evidence": [
+                    {"ref": "visual-fixture", "kind": "managed_visual_capture"}
+                ],
+                "verification": {"state": "not_required", "checks": []},
+            }
+            completion = approval_completion(
+                task_context,
+                raw_result=capture_result,
+                outcome=capture_outcome,
+            )
+            self.assertIsNotNone(completion)
+            execution = {
+                "status": "applied",
+                "result": capture_result,
+                "taskCompletion": completion,
+            }
+            terminal_approval = {
+                **stored_approval,
+                "status": "applied",
+            }
+            approval_count = len(gateway.approval_transactions.list_approvals())
+
+            def execute_visual_audit(
+                _owner,
+                tool_name,
+                params,
+                agent_name=None,
+                owner_id="",
+            ):
+                self.assertEqual(tool_name, "vrcforge_vision_audit_multi")
+                self.assertEqual(params["captureReceipt"], "managed-visual-receipt")
+                self.assertEqual(params["_runtimeSessionId"], "managed-visual-chain-session")
+                self.assertIn(
+                    capture_action_id,
+                    params["_taskSeed"]["managedVisualCaptureActionIds"],
+                )
+                return {
+                    "tool": tool_name,
+                    "status": "executed",
+                    "result": {
+                        "ok": True,
+                        "visualVerified": True,
+                        "coverageComplete": True,
+                        "captureEvidenceVerified": True,
+                        "captureEvidenceId": "visual-fixture",
+                        "evidence": [
+                            {
+                                "ref": "visual-fixture",
+                                "kind": "managed_visual_capture",
+                            }
+                        ],
+                    },
+                    "outcome": {
+                        "status": "ok",
+                        "summary": "Every frozen angle passed the visual audit.",
+                        "evidence": [
+                            {
+                                "ref": "visual-fixture",
+                                "kind": "managed_visual_capture",
+                            }
+                        ],
+                        "verification": {"state": "not_required", "checks": []},
+                    },
+                }
+
+            with patch.object(
+                type(gateway.runtime_skills),
+                "execute",
+                autospec=True,
+                side_effect=execute_visual_audit,
+            ) as execute_skill:
+                continuation = gateway.resume_runtime_task_after_approval(
+                    terminal_approval,
+                    execution,
+                )
+
+        request_model.assert_not_called()
+        execute_skill.assert_called_once()
+        self.assertIsNotNone(continuation)
+        self.assertEqual(
+            len(gateway.approval_transactions.list_approvals()),
+            approval_count,
+        )
+        self.assertEqual(continuation["task"]["taskId"], initial["task"]["taskId"])
+        self.assertEqual(continuation["plan"]["nextStep"], "done", continuation)
+        self.assertEqual(continuation["task"]["status"], "completed")
+        self.assertEqual(
+            [action["tool"] for action in continuation["task"]["actions"]],
+            [
+                "vrcforge_capture_multi_screenshot",
+                "vrcforge_vision_audit_multi",
+            ],
+        )
+        self.assertEqual(
+            [step["tool"] for step in continuation["steps"]],
+            [
+                "vrcforge_capture_multi_screenshot",
+                "vrcforge_vision_audit_multi",
+            ],
+        )
+        self.assertTrue(continuation["steps"][0]["historical"])
+        self.assertEqual(
+            [
+                item["verificationProfile"]
+                for item in continuation["task"]["requirements"]
+            ],
+            ["canonical_tool_result", "multi_angle_visual"],
         )
 
     def test_execution_preflight_revalidates_schema_and_calls_no_handler(self) -> None:

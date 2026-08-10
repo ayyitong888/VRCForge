@@ -809,6 +809,60 @@ def has_multi_angle_capture_intent(lowered_text: str, original_text: str) -> boo
     ]
     return sum(1 for angle in named_angles if angle in lowered_text or angle in original_text) >= 2
 
+
+def has_multi_angle_visual_audit_intent(
+    lowered_text: str,
+    original_text: str,
+) -> bool:
+    """Require an explicit review request in addition to multi-angle capture."""
+
+    return has_multi_angle_capture_intent(lowered_text, original_text) and has_any(
+        lowered_text,
+        original_text,
+        [
+            "visual audit",
+            "vision audit",
+            "visually verify",
+            "visual verification",
+            "audit the screenshots",
+            "audit the views",
+            "analyze the screenshots",
+            "analyse the screenshots",
+            "inspect the screenshots",
+            "review the screenshots",
+            "verify their coverage",
+            "verify the coverage",
+            "视觉审计",
+            "视觉检查",
+            "视觉验证",
+            "检查截图",
+            "审查截图",
+            "分析截图",
+        ],
+    )
+
+
+def managed_multi_capture_receipt(
+    loop_state: list[dict[str, object]],
+) -> str:
+    """Read only a successful Runtime-owned managed capture observation."""
+
+    successful_statuses = {"applied", "completed", "executed", "ok", "pass"}
+    for step in reversed(loop_state):
+        if not isinstance(step, Mapping):
+            continue
+        if str(step.get("tool") or "").strip() != "vrcforge_capture_multi_screenshot":
+            continue
+        outcome = ensure_dict(step.get("outcome"))
+        status = str(outcome.get("status") or step.get("status") or "").strip().lower()
+        if status not in successful_statuses:
+            continue
+        receipt = str(ensure_dict(step.get("result")).get("captureReceipt") or "").strip()
+        if receipt and len(receipt) <= 256:
+            return receipt
+    return ""
+
+
 def ensure_list(value: object) -> list[object]:
     if isinstance(value, list):
         return value
@@ -1321,7 +1375,21 @@ class RuntimePlannerService:
                 write_plan = self._plan_write_intent(message, params, loop_state, constraints_applied)
                 if write_plan is not None:
                     return write_plan
-            skill_route = self._match_runtime_skill(message, params) if not command else None
+            lowered_message = message.lower()
+            visual_audit_receipt = managed_multi_capture_receipt(loop_state)
+            skill_route = None
+            if (
+                not command
+                and visual_audit_receipt
+                and has_multi_angle_visual_audit_intent(lowered_message, message)
+            ):
+                skill_route = {
+                    "tool": "vrcforge_vision_audit_multi",
+                    "params": {"captureReceipt": visual_audit_receipt},
+                    "reason": "managed multi-angle visual audit continuation",
+                }
+            if skill_route is None and not command:
+                skill_route = self._match_runtime_skill(message, params)
             if skill_route is not None:
                 skill_route = self._runtime_skill_route(
                     str(skill_route.get("tool") or ""),
@@ -1331,6 +1399,12 @@ class RuntimePlannerService:
                 )
             route_is_write = bool(skill_route and skill_route.get("write"))
             route_is_visible = bool(skill_route and skill_route.get("visible"))
+            route_requires_follow_up = bool(
+                route_is_write
+                and str(skill_route.get("tool") or "")
+                == "vrcforge_capture_multi_screenshot"
+                and has_multi_angle_visual_audit_intent(lowered_message, message)
+            )
             normalized_exposure = normalize_exposure_layer(exposure_layer)
             summary = "Observed runtime state and prepared the next action."
             if command:
@@ -1360,7 +1434,7 @@ class RuntimePlannerService:
                 "writeTool": skill_route.get("tool") if route_is_write and route_is_visible and normalized_exposure == EXPOSURE_LAYER_EXECUTION else "",
                 "writeParams": skill_route.get("params") if route_is_write and route_is_visible and normalized_exposure == EXPOSURE_LAYER_EXECUTION else {},
                 # 单次读技能/命令即可满足请求时，turn 到此完成，不再无谓地多跑一圈。
-                "continueLoop": bool(route_is_write),
+                "continueLoop": route_requires_follow_up,
                 "expectedResult": (
                     "Shell output will be returned inline."
                     if command

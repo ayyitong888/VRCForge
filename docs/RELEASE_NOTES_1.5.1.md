@@ -50,6 +50,12 @@ Core with its fixed 64-tool contract.
   intent before the generic screenshot fallback. Named angles and coverage
   requests now select the approved fixed-angle capture path, while one current
   view remains a separate approved action.
+- Made approved multi-angle capture continuation stage-aware. A capture-only
+  request now finishes from its verified approval result; when the original
+  request explicitly asks for visual review, the same task consumes the managed
+  capture receipt exactly once, runs the multi-angle verifier, and binds both
+  action IDs before Runtime can mark the task complete. The write is never
+  replayed while transitioning to visual review.
 - Expanded the lightweight selection Harness from 13 to 16 cases and made
   action kind plus exposure layer part of each selection contract. The App
   projects action kind from host-owned tool metadata and binds it into the

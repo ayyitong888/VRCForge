@@ -797,6 +797,87 @@ def test_multi_angle_capture_intent_selects_the_supervised_multi_capture(message
     assert plan["nextStep"] == "request_write"
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Capture front and back views, then run a visual audit.",
+        "把正面和背面分别拍下来，然后做视觉审计。",
+    ],
+)
+def test_managed_multi_capture_receipt_routes_the_explicit_visual_audit_as_the_final_step(
+    message: str,
+) -> None:
+    capture = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    audit = tool("vrcforge_vision_audit_multi")
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(capture, audit),
+        routable_tools=(capture, audit),
+    )
+    planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
+
+    plan = planner.plan_agent_turn(
+        message,
+        {},
+        {},
+        loop_state=[
+            {
+                "tool": "vrcforge_capture_multi_screenshot",
+                "kind": "write",
+                "status": "applied",
+                "result": {
+                    "captureReceipt": "managed-receipt",
+                    "captureEvidenceId": "visual-fixture",
+                    "angles": ["front", "back"],
+                },
+                "outcome": {"status": "ok"},
+            }
+        ],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert plan["writeNeeded"] is False
+    assert plan["skillNeeded"] is True
+    assert plan["skillTool"] == "vrcforge_vision_audit_multi"
+    assert plan["skillParams"] == {"captureReceipt": "managed-receipt"}
+    assert plan["continueLoop"] is False
+    assert plan["nextStep"] == "call_skill"
+
+
+def test_multi_capture_only_finishes_after_approval_but_explicit_visual_audit_continues() -> None:
+    capture = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(capture,),
+        routable_tools=(capture,),
+    )
+    planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
+
+    capture_only = planner.plan_agent_turn(
+        "Capture front and back views for comparison.",
+        {},
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+    capture_and_audit = planner.plan_agent_turn(
+        "Capture front and back views, then visually verify them.",
+        {},
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert capture_only["writeTool"] == "vrcforge_capture_multi_screenshot"
+    assert capture_only["continueLoop"] is False
+    assert capture_and_audit["writeTool"] == "vrcforge_capture_multi_screenshot"
+    assert capture_and_audit["continueLoop"] is True
+
+
 def test_single_capture_and_capture_status_keep_distinct_action_kinds() -> None:
     single = tool(
         "vrcforge_capture_screenshot",
