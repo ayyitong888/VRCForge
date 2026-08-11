@@ -4706,15 +4706,27 @@ async function seedAndActivateContextualRuntimeChat(cdp) {
   await reloadRenderer(cdp);
   const activation = await waitForEval(
     cdp,
-    `(() => {
-      const wanted = ${JSON.stringify(chat.title)};
-      const sidebar = document.querySelector("aside");
-      const leaf = Array.from((sidebar || document).querySelectorAll("*"))
-        .find((node) => node.children.length === 0 && String(node.textContent || "").trim() === wanted);
-      const target = leaf?.closest("button, [role='button'], a, li, div");
-      if (!target) return { ok: false, reason: "contextual chat was not rendered" };
-      target.click();
-      return { ok: true };
+    `(async () => {
+      const sleep = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
+      const chatId = ${JSON.stringify(chat.id)};
+      const deadline = Date.now() + 30000;
+      while (Date.now() < deadline) {
+        const row = document.querySelector('[data-vrcforge-chat-id="' + CSS.escape(chatId) + '"]');
+        const target = row?.querySelector(':scope > button');
+        if (target) {
+          target.click();
+          while (Date.now() < deadline) {
+            const current = document.querySelector('[data-vrcforge-chat-id="' + CSS.escape(chatId) + '"]');
+            if (current?.getAttribute("data-vrcforge-chat-active") === "true") {
+              return { ok: true };
+            }
+            await sleep(50);
+          }
+          return { ok: false, reason: "contextual chat did not become active" };
+        }
+        await sleep(50);
+      }
+      return { ok: false, reason: "contextual chat was not rendered" };
     })()`,
     45000,
   );
@@ -4902,7 +4914,7 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
           'button[data-vrcforge-save-operation-as-skill][data-vrcforge-save-operation-tool="vrcforge_build_test_readiness"]',
         );
         if (target) {
-          checks.operationOutsideEnvironmentPanel = Boolean(environmentPanel && !environmentPanel.contains(target));
+          checks.operationOutsideEnvironmentPanel = !environmentPanel || !environmentPanel.contains(target);
           if (checks.operationOutsideEnvironmentPanel) break;
         }
         await sleep(200);
@@ -4913,7 +4925,14 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
           .map((button) => button.getAttribute("data-vrcforge-save-operation-tool") || "")
           .filter((value) => /^vrcforge_[a-z0-9_]+$/.test(value))
           .slice(0, 10);
-        return { ok: false, failureStage: "save-operation-button", checks, observedTools };
+        const observedRuns = [...document.querySelectorAll('[data-vrcforge-runtime-run-tool]')]
+          .slice(0, 10)
+          .map((row) => ({
+            tool: row.getAttribute("data-vrcforge-runtime-run-tool") || "",
+            status: row.getAttribute("data-vrcforge-runtime-run-status") || "",
+            capturable: row.getAttribute("data-vrcforge-runtime-run-capturable") === "true",
+          }));
+        return { ok: false, failureStage: "save-operation-button", checks, observedTools, observedRuns };
       }
       target.click();
       while (Date.now() < deadline) {
@@ -4965,6 +4984,7 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
   report.diagnostics.pathToSkill.contextualPrefill = {
     ...(result?.checks || {}),
     observedTools: Array.isArray(result?.observedTools) ? result.observedTools : [],
+    observedRuns: Array.isArray(result?.observedRuns) ? result.observedRuns : [],
     completed: result?.ok === true,
     failureStage: ["save-operation-button", "prefill-render"].includes(result?.failureStage)
       ? result.failureStage

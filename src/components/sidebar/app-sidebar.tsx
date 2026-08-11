@@ -275,6 +275,7 @@ export function AppSidebar({
                     : projectChats.map((chat) => (
                         <SidebarChat
                           key={chat.id}
+                          chatId={chat.id}
                           title={chat.title || t("sidebar.newChat")}
                           meta={chatSidebar.times.get(chat.id) || ""}
                           active={activeView === "chat" && chat.id === activeChatId}
@@ -309,6 +310,7 @@ export function AppSidebar({
             chatSidebar.temporaryChats.map((chat) => (
               <SidebarChat
                 key={chat.id}
+                chatId={chat.id}
                 title={chat.title || t("sidebar.newChat")}
                 meta={chatSidebar.times.get(chat.id) || ""}
                 active={activeView === "chat" && chat.id === activeChatId}

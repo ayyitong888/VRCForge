@@ -17,6 +17,10 @@ const sidebarSource = await readFile(
   new URL("../src/components/sidebar/app-sidebar.tsx", import.meta.url),
   "utf8",
 );
+const sidebarPrimitiveSource = await readFile(
+  new URL("../src/components/sidebar/sidebar.tsx", import.meta.url),
+  "utf8",
+);
 const pathToSkillSource = await readFile(
   new URL("../src/components/skills/path-to-skill-capture-panel.tsx", import.meta.url),
   "utf8",
@@ -42,10 +46,14 @@ for (const marker of [
 }
 
 assert.ok(runtimeSource.includes("data-vrcforge-save-operation-tool="));
+assert.ok(runtimeSource.includes("data-vrcforge-runtime-run-capturable="));
 assert.ok(runtimeActivitySource.includes("RuntimeRunRow"));
 assert.ok(runtimeActivitySource.includes("data-vrcforge-runtime-activity-panel"));
 assert.ok(sidebarSource.includes('semanticId="skills"'));
 assert.ok(sidebarSource.includes("data-vrcforge-sidebar-nav={semanticId}"));
+assert.ok(sidebarSource.includes("chatId={chat.id}"));
+assert.ok(sidebarPrimitiveSource.includes("data-vrcforge-chat-id={chatId || undefined}"));
+assert.ok(sidebarPrimitiveSource.includes('data-vrcforge-chat-active={active ? "true" : "false"}'));
 for (const marker of [
   'data-vrcforge-path-to-skill-panel="true"',
   "data-vrcforge-path-to-skill-package-id",
@@ -60,6 +68,8 @@ for (const selector of [
   "[data-vrcforge-skill-audit-row]",
   "[data-vrcforge-skill-audit-field]",
   "[data-vrcforge-save-operation-tool=",
+  "[data-vrcforge-chat-id=",
+  "[data-vrcforge-runtime-run-tool]",
   "[data-vrcforge-sidebar-nav=",
   "[data-vrcforge-path-to-skill-panel=",
   "[data-vrcforge-path-to-skill-preview]",

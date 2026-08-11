@@ -142,6 +142,7 @@ export function SidebarProject({
 }
 
 export function SidebarChat({
+  chatId,
   title,
   meta,
   active = false,
@@ -157,6 +158,7 @@ export function SidebarChat({
   onRenameChange,
   onRenameCommit,
 }: {
+  chatId?: string;
   title: string;
   meta?: string;
   active?: boolean;
@@ -197,6 +199,8 @@ export function SidebarChat({
   }
   return (
     <div
+      data-vrcforge-chat-id={chatId || undefined}
+      data-vrcforge-chat-active={active ? "true" : "false"}
       onContextMenu={onContextMenu}
       className={cn(
         "group flex h-9 w-full min-w-0 items-center rounded-md text-sm transition-colors",

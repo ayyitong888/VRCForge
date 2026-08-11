@@ -89,7 +89,12 @@ export function RuntimeRunRow({
     provider || model ? `${provider}${provider && model ? " / " : ""}${model}` : "",
   ].filter(Boolean);
   return (
-    <div className="grid min-w-0 grid-cols-[14px_minmax(0,1fr)_auto] gap-2 rounded-md px-1 py-1.5 text-xs hover:bg-muted/70">
+    <div
+      data-vrcforge-runtime-run-tool={run.skillTool || run.writeTool || run.targetTool || ""}
+      data-vrcforge-runtime-run-status={status}
+      data-vrcforge-runtime-run-capturable={capturedSummary ? "true" : "false"}
+      className="grid min-w-0 grid-cols-[14px_minmax(0,1fr)_auto] gap-2 rounded-md px-1 py-1.5 text-xs hover:bg-muted/70"
+    >
       <div className="pt-1">
         <span className={cn("block h-3 w-3 rounded-full", runtimeRunStatusClass(status))} />
       </div>
