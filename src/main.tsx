@@ -7,7 +7,7 @@ async function main() {
   const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
   metrics.mainModuleStartedMs ??= Math.round(performance.now());
   metrics.startupShellRequestedMs ??= Math.round(performance.now());
-  const startupShellPainted = new Promise<void>((resolve) => {
+  const startupShellPainted = ((window as any).__vrcforgeStartupShellPaintedPromise ??= new Promise<void>((resolve) => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         metrics.startupShellPaintedMs ??= Math.round(performance.now());
@@ -15,7 +15,7 @@ async function main() {
         resolve();
       });
     });
-  });
+  }));
 
   const appModule = import("./App");
   const [, { default: App }] = await Promise.all([initializeI18n(), appModule, startupShellPainted]);
