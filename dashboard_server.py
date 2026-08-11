@@ -19200,6 +19200,7 @@ def build_validation_report_sync(params: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "ok": counts["Error"] == 0,
+        "toolExecutionStatus": "completed",
         "schema": "vrcforge.validation.v1",
         "readOnly": True,
         "autoFix": False,
@@ -19340,6 +19341,7 @@ def build_test_readiness_sync(params: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "ok": status != "blocked",
+        "toolExecutionStatus": "completed",
         "schema": "vrcforge.build_test_readiness.v1",
         "readOnly": True,
         "autoBuild": False,

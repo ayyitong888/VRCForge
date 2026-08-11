@@ -30,6 +30,9 @@ _NEEDS_ACTION_STATUSES = frozenset(
 _TOP_LEVEL_PENDING_STATUSES = frozenset(
     {"pending", "approval_pending", "queued_for_approval"}
 )
+_SUCCESSFUL_EXECUTION_STATUSES = frozenset(
+    {"ok", "success", "executed", "completed", "passed"}
+)
 _KNOWN_NESTED_KEYS = (
     "structuredContent",
     "result",
@@ -270,10 +273,24 @@ def normalize_agent_tool_result(
     verification, verification_needs_action = _verification(views, write=write)
 
     failed_view: Mapping[str, Any] | None = None
+    top_level_execution_status = _status(
+        views[0].get("toolExecutionStatus") if views else None
+    )
     needs_action = verification_needs_action or bool(
-        views and _status(views[0].get("status")) in _TOP_LEVEL_PENDING_STATUSES
+        views
+        and top_level_execution_status not in _SUCCESSFUL_EXECUTION_STATUSES
+        and _status(views[0].get("status")) in _TOP_LEVEL_PENDING_STATUSES
     )
     for view in views:
+        execution_status = _status(view.get("toolExecutionStatus"))
+        if execution_status in _FAILED_STATUSES:
+            failed_view = view
+            break
+        if execution_status in _NEEDS_ACTION_STATUSES or execution_status in _TOP_LEVEL_PENDING_STATUSES:
+            needs_action = True
+            continue
+        if execution_status in _SUCCESSFUL_EXECUTION_STATUSES:
+            continue
         status = _status(view.get("status"))
         if status in _FAILED_STATUSES:
             failed_view = view

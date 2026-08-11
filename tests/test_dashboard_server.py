@@ -5517,6 +5517,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["schema"], "vrcforge.validation.v1")
+        self.assertEqual(payload["toolExecutionStatus"], "completed")
         self.assertTrue(payload["readOnly"])
         self.assertFalse(payload["autoFix"])
         self.assertTrue(payload["ok"])
@@ -5619,6 +5620,28 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(payload["rules"]["noUnattendedVrchatSdkPublish"])
         self.assertTrue(all(item.get("requiresPreviewApprovalCheckpointValidationRollback") for item in payload["suggestedFixPlans"]))
         self.assertNotIn(r"C:\Private\UnityProject".lower(), json.dumps(payload).lower())
+
+    def test_build_test_readiness_marks_generation_complete_when_domain_gate_is_blocked(self) -> None:
+        validation = {
+            "ok": False,
+            "toolExecutionStatus": "completed",
+            "summary": {"severityCounts": {"Error": 1, "Warning": 0, "Suggestion": 0}},
+            "gate": {"enabled": True, "status": "blocked", "blockingFindingIds": ["compile.1"]},
+            "sections": [],
+            "findings": [],
+        }
+        with (
+            patch("dashboard_server.build_validation_report_sync", return_value=validation),
+            patch(
+                "dashboard_server.PACKAGE_INSTALL_WORKFLOWS.diagnose_install",
+                return_value={"ok": True, "symptoms": [], "suggestedFixPlans": []},
+            ),
+        ):
+            payload = dashboard_server.build_test_readiness_sync({})
+
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["toolExecutionStatus"], "completed")
 
     def test_provider_test_vision_is_explicit_skip_without_project_upload(self) -> None:
         with TestClient(dashboard_server.app) as client:

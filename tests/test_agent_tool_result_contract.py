@@ -179,6 +179,24 @@ def test_verified_or_read_only_results_stay_lightweight() -> None:
     assert completion_gate_plan({"nextStep": "done"}, read_only) is None
 
 
+def test_explicit_execution_status_separates_report_generation_from_domain_gate() -> None:
+    outcome = normalize_agent_tool_result(
+        {
+            "ok": False,
+            "status": "blocked",
+            "toolExecutionStatus": "completed",
+            "schema": "vrcforge.build_test_readiness.v1",
+            "summary": "The report was generated and found blocking project issues.",
+        },
+        fallback_summary="Generate the read-only readiness report.",
+        write=False,
+    )
+
+    assert outcome["status"] == "ok"
+    assert outcome["summary"] == "The report was generated and found blocking project issues."
+    assert outcome["verification"] == {"state": "not_required", "checks": []}
+
+
 def test_deferred_visual_proof_only_blocks_when_visual_verification_is_required() -> None:
     deferred = {
         "ok": True,
