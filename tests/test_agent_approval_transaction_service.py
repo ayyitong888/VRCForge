@@ -49,7 +49,7 @@ def test_approval_transaction_service_owns_no_second_state_or_runtime_resource()
         assert service._ports.skills.write_lock is gateway.skills.write_lock
 
 
-def test_approval_transaction_internal_calls_stay_inside_the_owner() -> None:
+def test_pending_approval_does_not_expire_without_a_user_decision() -> None:
     with tempfile.TemporaryDirectory() as temp_dir:
         gateway = _gateway(Path(temp_dir))
         gateway._approvals["patched"] = {
@@ -60,7 +60,30 @@ def test_approval_transaction_internal_calls_stay_inside_the_owner() -> None:
         }
         approvals = gateway.approval_transactions.list_approvals(include_expired=True)
         assert approvals[0]["id"] == "patched"
-        assert approvals[0]["status"] == "expired"
+        assert approvals[0]["status"] == "pending"
+        assert "expiresAt" not in approvals[0]
+
+
+def test_new_pending_approval_has_no_timeout() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        gateway = _gateway(Path(temp_dir))
+        gateway.approval_transactions.register_write_handler(
+            "vrcforge_fixture_write",
+            "Write a fixture.",
+            "medium",
+            lambda _arguments: {"ok": True},
+        )
+
+        requested = gateway.approval_transactions.create_apply_request(
+            {
+                "target_tool": "vrcforge_fixture_write",
+                "arguments": {"projectRoot": str(Path(temp_dir) / "Project")},
+            }
+        )
+
+        assert requested["status"] == "pending"
+        assert requested["approval"]["status"] == "pending"
+        assert "expiresAt" not in requested["approval"]
 
 
 def test_approval_transaction_hooks_remain_late_bound_after_construction() -> None:

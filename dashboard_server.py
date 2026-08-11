@@ -20605,6 +20605,8 @@ def register_agent_gateway_tools() -> None:
         request_preparer=prepare_capture_screenshot_request,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
+        approval_category="visual-capture",
+        allow_future_category=True,
     )
     register_write_handler(
         "vrcforge_capture_multi_screenshot",
@@ -20616,6 +20618,8 @@ def register_agent_gateway_tools() -> None:
         request_preparer=prepare_capture_multi_screenshot_request,
         requires_approved_execution_context=True,
         approved_execution_plan_builder=build_prepared_execution_plan,
+        approval_category="visual-capture",
+        allow_future_category=True,
     )
     register_write_handler(
         "vrcforge_apply_blendshapes",

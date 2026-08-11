@@ -39,9 +39,13 @@ def test_screenshot_tools_are_registered_as_approved_context_writes_not_direct_r
         assert "request_preparer=" in block
         assert "requires_approved_execution_context=True" in block
         assert "approved_execution_plan_builder=build_prepared_execution_plan" in block
+        assert 'approval_category="visual-capture"' in block
+        assert "allow_future_category=True" in block
         assert tool_name in dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS
         handler = dashboard_server.AGENT_GATEWAY._write_handlers[tool_name]
         assert handler.checkpoint_prepare_handler is dashboard_server.prepare_authoritative_unity_checkpoint_sync
+        assert handler.approval_category == "visual-capture"
+        assert handler.allow_future_category is True
     assert "vrcforge_vision_audit" in dashboard_server.AGENT_GATEWAY._tools
     assert "vrcforge_vision_audit_multi" in dashboard_server.AGENT_GATEWAY._tools
 

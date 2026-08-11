@@ -103,6 +103,94 @@ def test_manual_allow_once_never_calls_reviewer(tmp_path: Path) -> None:
     assert gateway.ensure_config().project_category_allow_rules == []
 
 
+def test_agent_proposed_visual_capture_can_remember_exact_project_category(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    calls: list[list[str]] = []
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_capture_multi_screenshot",
+        "Capture fixed-angle views.",
+        "medium",
+        lambda arguments: calls.append(list(arguments["angles"])) or {"ok": True},
+        approval_category="visual-capture",
+        allow_future_category=True,
+    )
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _project: {"ok": True}
+    project = tmp_path / "Project"
+    (project / "Assets").mkdir(parents=True)
+    (project / "Packages").mkdir()
+    (project / "ProjectSettings").mkdir()
+    (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+    (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+        "m_EditorVersion: 2022.3",
+        encoding="utf-8",
+    )
+    task_context = {
+        "schema": "vrcforge.agent_task_loop.v2",
+        "objective": "Capture front and back views.",
+        "projectRoot": str(project),
+        "taskId": "task-capture",
+    }
+    request = {
+        "target_tool": "vrcforge_capture_multi_screenshot",
+        "arguments": {"angles": ["front", "back"]},
+        "requires_explicit_approval": True,
+        "disable_auto_approval": True,
+    }
+
+    first = gateway.approval_transactions.create_apply_request(
+        request,
+        task_context=task_context,
+    )
+
+    assert first["approval"]["requiresExplicitApproval"] is True
+    assert first["approval"]["allowFutureEligible"] is True
+    assert first["approval"]["projectRoot"] == str(project)
+    remembered = gateway.approval_transactions.approve_with_project_category_rule(
+        first["approval"]["id"],
+        expected_project_root=str(project),
+    )
+    assert remembered["ok"] is True
+
+    gateway.approval_transactions.scoped_approval_reviewer = lambda _approval: "allow_auto"
+    second = gateway.approval_transactions.create_apply_request(
+        {
+            **request,
+            "arguments": {
+                "angles": ["front", "back"],
+                "projectRoot": str(project),
+            },
+        },
+        task_context=task_context,
+    )
+
+    assert second["status"] == "executed", second
+    assert second["scopedRuleAutoApproved"] is True
+    assert calls == [["front", "back"]]
+
+
+def test_future_category_option_requires_an_exact_project_root(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_capture_screenshot",
+        "Capture one view.",
+        "medium",
+        lambda _arguments: {"ok": True},
+        approval_category="visual-capture",
+        allow_future_category=True,
+    )
+
+    pending = gateway.approval_transactions.create_apply_request(
+        {
+            "target_tool": "vrcforge_capture_screenshot",
+            "arguments": {"width": 960, "height": 960},
+            "requires_explicit_approval": True,
+        }
+    )
+
+    assert pending["status"] == "pending"
+    assert "allowFutureEligible" not in pending["approval"]
+
+
 def test_external_mcp_pending_request_invokes_refresh_callback(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
     gateway.approval_transactions.register_write_handler(

@@ -5,7 +5,7 @@ import json
 import secrets
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import AbstractContextManager
 from typing import Any, Callable, Mapping
@@ -53,7 +53,6 @@ from agent_gateway import (
     normalize_execution_mode,
     normalize_exposure_layer,
     normalize_risk_level,
-    parse_iso_datetime,
     redact_sensitive,
     stable_hash,
     summarize_params,
@@ -665,7 +664,7 @@ class AgentApprovalTransactionService:
                     "targetTool": target_tool,
                 }
             )
-        if execution_mode == "approval" and not requires_explicit_for_mode:
+        if execution_mode == "approval":
             stored_approval = self._ports.state.approvals.get(str(approval.get("id") or ""), approval)
             scoped_rule = self._matching_project_category_allow_rule(stored_approval, write_handler, config)
             if scoped_rule is not None:
@@ -773,8 +772,6 @@ class AgentApprovalTransactionService:
         config: AgentGatewayConfig | None = None,
     ) -> dict[str, str] | None:
         if not self._ports.write_handler_allows_future_category(write_handler, approval):
-            return None
-        if bool(approval.get("requiresExplicitApproval")):
             return None
         project_root = self._approval_project_root(approval)
         project_key = normalize_filesystem_path(project_root) if project_root else ""
@@ -2093,12 +2090,10 @@ class AgentApprovalTransactionService:
     ) -> dict[str, Any]:
         self._ports.signal_background_activity("pending_approval")
         now = datetime.now(timezone.utc)
-        config = self._ports.ensure_config()
-        permission_context = self.permission_audit_context(config)
+        permission_context = self.permission_audit_context()
         approval = {
             "id": f"appr_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(4)}",
             "createdAt": now.isoformat(),
-            "expiresAt": (now + timedelta(seconds=config.approval_timeout_seconds)).isoformat(),
             "agentName": agent_name,
             "targetTool": target_tool,
             "reason": reason,
@@ -2124,7 +2119,7 @@ class AgentApprovalTransactionService:
         project_root = self._approval_project_root(approval)
         if project_root:
             approval["projectRoot"] = project_root
-        if allow_future_eligible:
+        if allow_future_eligible and project_root:
             approval["allowFutureEligible"] = True
         if user_constraints and user_constraints.content:
             approval["userConstraintsApplied"] = True
@@ -2136,8 +2131,14 @@ class AgentApprovalTransactionService:
 
     def _approval_project_root(self, approval: dict[str, Any]) -> str:
         arguments = ensure_dict(approval.get("arguments"))
+        task_context = ensure_dict(approval.get("taskContext"))
         for key in ("projectRoot", "project_root", "projectPath", "project_path"):
-            value = str(arguments.get(key) or approval.get(key) or "").strip()
+            value = str(
+                arguments.get(key)
+                or approval.get(key)
+                or task_context.get(key)
+                or ""
+            ).strip()
             if value:
                 return value
         return ""
@@ -2264,11 +2265,11 @@ class AgentApprovalTransactionService:
             return payload
 
     def _refresh_approval_expiry(self, approval: dict[str, Any]) -> dict[str, Any]:
-        if approval.get("status") != "pending":
-            return approval
-        expires_at = parse_iso_datetime(str(approval.get("expiresAt") or ""))
-        if expires_at and expires_at < datetime.now(timezone.utc):
-            approval["status"] = "expired"
+        if approval.get("status") == "pending" and "expiresAt" in approval:
+            # Pending approval is a durable user decision point.  Legacy
+            # records may still carry the old ten-minute deadline; remove it
+            # instead of silently turning the visible card into an expiry.
+            approval.pop("expiresAt", None)
             self._ports.state.approvals[str(approval.get("id"))] = approval
         return approval
 
