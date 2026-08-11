@@ -1086,7 +1086,7 @@ export default function App() {
         showApprovalNotification(
           approval,
           t("approval.notificationTitle"),
-          t("approval.notificationBody", { target: presentation.title }),
+          t("approval.notificationBody", { summary: presentation.notificationSummary }),
           t("approval.approveOnce"),
           t("approval.reject"),
         );
