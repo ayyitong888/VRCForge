@@ -33,6 +33,7 @@ class ApiRequest:
     model: str | None = None
     api_type: str | None = None
     thinking_level: str = ""
+    context_window: int = 0
 
 
 @dataclass
@@ -263,6 +264,25 @@ def test_configuration_projects_saved_provider_ids_without_projecting_any_saved_
     assert vision_projection["savedKeyProviders"] == ["anthropic", "gemini", "openai"]
     for secret in ("openai-current-secret", "anthropic-secret", "gemini-secret"):
         assert secret not in projected_text
+
+
+def test_configuration_persists_and_projects_user_context_window_cap(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.json"
+    _write_old_document(path)
+    owner = _owner(path)
+
+    assert owner.current_api_config().context_window == 0
+    resolved = owner.resolve_api_request(ApiRequest(context_window=128_000))
+    owner.save_api_config(resolved)
+
+    assert json.loads(path.read_text(encoding="utf-8"))["api"]["context_window"] == 128_000
+    assert owner.serialize_app_api_config()["contextWindow"] == 128_000
+    assert _owner(path).current_api_config().context_window == 128_000
+
+    with pytest.raises(ValueError, match="at least 4000"):
+        owner.resolve_api_request(ApiRequest(context_window=1024))
 
 
 def test_configuration_revalidates_invalid_saved_key_and_never_returns_it(

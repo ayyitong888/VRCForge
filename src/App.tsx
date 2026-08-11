@@ -391,6 +391,8 @@ export default function App() {
     setApiModel,
     apiType,
     setApiType,
+    apiContextWindow,
+    setApiContextWindow,
     selectedModelCapabilities,
     selectedModelCapabilitySource,
     apiThinkingLevel,
@@ -1161,11 +1163,25 @@ export default function App() {
     if (!apiConfig && !smokeMode) {
       return undefined;
     }
-    const nextUsage = buildContextUsageFromRuntime(latestContextUsage, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, t);
+    const nextUsage = buildContextUsageFromRuntime(
+      latestContextUsage,
+      providerSnapshot.provider,
+      providerSnapshot.model,
+      currentModelInfo,
+      t,
+      apiConfig?.contextWindow,
+    );
     if (nextUsage?.source === "provider_usage") {
       return nextUsage;
     }
-    const cachedUsage = buildContextUsageFromRuntime(activeChat?.contextUsageCache, providerSnapshot.provider, providerSnapshot.model, currentModelInfo, t);
+    const cachedUsage = buildContextUsageFromRuntime(
+      activeChat?.contextUsageCache,
+      providerSnapshot.provider,
+      providerSnapshot.model,
+      currentModelInfo,
+      t,
+      apiConfig?.contextWindow,
+    );
     if (cachedUsage?.source === "provider_usage") {
       return { ...cachedUsage, cached: true };
     }
@@ -2146,7 +2162,7 @@ export default function App() {
       setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
       return true;
     }
-    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo);
+    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     const turn: QueuedTurn = {
       id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: message,
@@ -2203,7 +2219,7 @@ export default function App() {
       setError(t("chat.noPreviousUserMessage"));
       return;
     }
-    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo);
+    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     const turn: QueuedTurn = {
       id: `retry-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: userItem.text,
@@ -2293,7 +2309,7 @@ export default function App() {
       }
       targetEndpoint = readyEndpoint;
     }
-    const limit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo);
+    const limit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     await runContextCompaction({
       chatId: activeChat.id,
       endpoint: targetEndpoint,
@@ -2431,7 +2447,7 @@ export default function App() {
       message = task;
       computerUseRequested = true;
     }
-    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo);
+    const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     const turn: QueuedTurn = {
       id: `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: message,
@@ -3199,6 +3215,7 @@ export default function App() {
               apiBaseUrl={apiBaseUrl}
               apiModel={apiModel}
               apiType={apiType}
+              apiContextWindow={apiContextWindow}
               selectedModelCapabilities={selectedModelCapabilities}
               selectedModelCapabilitySource={selectedModelCapabilitySource}
               apiThinkingLevel={apiThinkingLevel}
@@ -3256,6 +3273,7 @@ export default function App() {
               onApiBaseUrlChange={setApiBaseUrl}
               onApiModelChange={setApiModel}
               onApiTypeChange={setApiType}
+              onApiContextWindowChange={setApiContextWindow}
               onApiThinkingLevelChange={setApiThinkingLevel}
               onSaveApiProvider={saveApiProvider}
               onVisionProviderChange={handleVisionProviderChange}

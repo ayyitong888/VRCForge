@@ -12,6 +12,7 @@ type ProviderSetupProps = {
   baseUrl: string;
   model: string;
   apiType: ProviderApiType;
+  contextWindow: string;
   modelCapabilities?: readonly string[];
   capabilitySource?: string;
   /** Backend-resolved reasoning variant; `default` sends no override. */
@@ -32,6 +33,7 @@ type ProviderSetupProps = {
   onBaseUrlChange: (value: string) => void;
   onModelChange: (value: string) => void;
   onApiTypeChange: (value: ProviderApiType) => void;
+  onContextWindowChange: (value: string) => void;
   onThinkingLevelChange: (value: string) => void;
   onSubmit: (event?: FormEvent) => void;
 };
@@ -62,6 +64,7 @@ export function ProviderSetup({
   baseUrl,
   model,
   apiType,
+  contextWindow,
   modelCapabilities,
   capabilitySource,
   thinkingLevel,
@@ -81,6 +84,7 @@ export function ProviderSetup({
   onBaseUrlChange,
   onModelChange,
   onApiTypeChange,
+  onContextWindowChange,
   onThinkingLevelChange,
   onSubmit,
 }: ProviderSetupProps) {
@@ -92,6 +96,15 @@ export function ProviderSetup({
   const hasModelList = models.length > 0;
   const capabilities = providerCapabilities(modelCapabilities, capabilitySource);
   const apiTypeOptions = supportedApiTypeOptions(provider, model);
+  const selectedModelInfo = models.find((item) => item.id === model);
+  const detectedContextWindow = firstPositiveContextWindow(selectedModelInfo);
+  const contextWindowK = contextWindow.trim() ? Number(contextWindow) : 0;
+  const contextWindowValid = !contextWindow.trim()
+    || (Number.isInteger(contextWindowK) && contextWindowK >= 4 && contextWindowK <= 10_000);
+  const sliderMax = Math.min(10_000, Math.max(1_000, Math.ceil((detectedContextWindow || 0) / 1000), contextWindowK || 0));
+  const sliderValue = contextWindowValid && contextWindowK > 0
+    ? Math.min(sliderMax, contextWindowK)
+    : Math.min(sliderMax, Math.max(4, Math.ceil((detectedContextWindow || 128_000) / 1000)));
 
   return (
     <form onSubmit={onSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-composer">
@@ -190,6 +203,46 @@ export function ProviderSetup({
             <div className="mt-1.5 text-xs text-muted-foreground">{i18n.t("provider.fetchedModels", { count: models.length })}</div>
           ) : null}
         </SettingsFieldLabel>
+        <SettingsFieldLabel label={i18n.t("provider.contextWindow")}>
+          <div className="grid gap-2">
+            <input
+              type="range"
+              min={4}
+              max={sliderMax}
+              step={1}
+              value={sliderValue}
+              onChange={(event) => onContextWindowChange(event.target.value)}
+              aria-label={i18n.t("provider.contextWindow")}
+              className="w-full accent-primary"
+            />
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="relative min-w-0 flex-1">
+                <input
+                  type="number"
+                  min={4}
+                  max={10_000}
+                  step={1}
+                  value={contextWindow}
+                  onChange={(event) => onContextWindowChange(event.target.value)}
+                  placeholder={i18n.t("provider.contextWindowAuto")}
+                  aria-label={i18n.t("provider.contextWindowInput")}
+                  className="h-10 w-full rounded-md border border-border bg-background px-3 pr-10 text-sm outline-none placeholder:text-muted-foreground/60 focus:border-primary"
+                />
+                <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-muted-foreground">K</span>
+              </div>
+              <Button type="button" variant="outline" className="h-10 shrink-0" disabled={!contextWindow} onClick={() => onContextWindowChange("")}>
+                {i18n.t("provider.contextWindowAuto")}
+              </Button>
+            </div>
+          </div>
+          <div className={`mt-1.5 text-xs ${contextWindowValid ? "text-muted-foreground" : "text-destructive/80"}`}>
+            {contextWindowValid
+              ? i18n.t("provider.contextWindowHint", {
+                  detected: detectedContextWindow ? `${Math.ceil(detectedContextWindow / 1000)}K` : i18n.t("provider.contextWindowUnknown"),
+                })
+              : i18n.t("provider.contextWindowInvalid")}
+          </div>
+        </SettingsFieldLabel>
         <SettingsFieldLabel label={i18n.t("provider.apiType")}>
           <select
             value={apiTypeOptions.includes(apiType) ? apiType : "auto"}
@@ -242,13 +295,22 @@ export function ProviderSetup({
           {testingProvider === "vision" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Eye className="h-4 w-4" />}
           Vision
         </Button>
-        <Button disabled={!runtimeConnected || saving || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
+        <Button disabled={!runtimeConnected || saving || !contextWindowValid || (providerNeedsApiKey(provider) && !apiKey.trim() && !keySaved) || !model.trim()} type="submit">
           {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
           {i18n.t("common.save")}
         </Button>
       </div>
     </form>
   );
+}
+
+function firstPositiveContextWindow(model: ProviderModelInfo | undefined): number | undefined {
+  for (const value of [model?.inputTokenLimit, model?.contextWindow, model?.maxInputTokens]) {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function supportedApiTypeOptions(provider: string, model: string): ProviderApiType[] {
@@ -301,6 +363,7 @@ export function VisionProfileSetup({
             <option value="gemini">Google AI Studio</option>
             <option value="anthropic">Anthropic</option>
             <option value="openai">OpenAI</option>
+            <option value="deepseek">DeepSeek</option>
             <option value="openrouter">OpenRouter</option>
             <option value="ollama">Ollama</option>
             <option value="vertexai">Vertex AI</option>

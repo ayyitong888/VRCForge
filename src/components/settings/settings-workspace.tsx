@@ -47,6 +47,7 @@ type SettingsWorkspaceProps = {
   apiBaseUrl: string;
   apiModel: string;
   apiType: ProviderApiType;
+  apiContextWindow: string;
   selectedModelCapabilities?: readonly string[];
   selectedModelCapabilitySource?: string;
   apiThinkingLevel: string;
@@ -96,6 +97,7 @@ type SettingsWorkspaceProps = {
   onApiBaseUrlChange: (value: string) => void;
   onApiModelChange: (value: string) => void;
   onApiTypeChange: (value: ProviderApiType) => void;
+  onApiContextWindowChange: (value: string) => void;
   onApiThinkingLevelChange: (value: string) => void;
   onSaveApiProvider: (event?: FormEvent) => void;
   onVisionProviderChange: (value: string) => void;
@@ -140,6 +142,7 @@ export function SettingsWorkspace({
   apiBaseUrl,
   apiModel,
   apiType,
+  apiContextWindow,
   selectedModelCapabilities,
   selectedModelCapabilitySource,
   apiThinkingLevel,
@@ -189,6 +192,7 @@ export function SettingsWorkspace({
   onApiBaseUrlChange,
   onApiModelChange,
   onApiTypeChange,
+  onApiContextWindowChange,
   onApiThinkingLevelChange,
   onSaveApiProvider,
   onVisionProviderChange,
@@ -367,6 +371,7 @@ export function SettingsWorkspace({
               baseUrl={apiBaseUrl}
               model={apiModel}
               apiType={apiType}
+              contextWindow={apiContextWindow}
               modelCapabilities={selectedModelCapabilities}
               capabilitySource={selectedModelCapabilitySource}
               thinkingLevel={apiThinkingLevel}
@@ -386,6 +391,7 @@ export function SettingsWorkspace({
               onBaseUrlChange={onApiBaseUrlChange}
               onModelChange={onApiModelChange}
               onApiTypeChange={onApiTypeChange}
+              onContextWindowChange={onApiContextWindowChange}
               onThinkingLevelChange={onApiThinkingLevelChange}
               onSubmit={onSaveApiProvider}
             />

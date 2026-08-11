@@ -47,6 +47,8 @@ pub(crate) struct DesktopProviderConfigRequest {
     api_type: Option<String>,
     #[serde(default, alias = "thinkingLevel")]
     thinking_level: Option<String>,
+    #[serde(default, alias = "contextWindow")]
+    context_window: Option<u64>,
     #[serde(default, alias = "timeoutMs")]
     timeout_ms: Option<u64>,
 }
@@ -509,6 +511,12 @@ pub fn update_api_config(
             object.insert(
                 "thinking_level".to_string(),
                 serde_json::Value::String(thinking_level),
+            );
+        }
+        if let Some(context_window) = request.context_window {
+            object.insert(
+                "context_window".to_string(),
+                serde_json::Value::Number(context_window.into()),
             );
         }
     }

@@ -53,6 +53,7 @@ export function useProviderSettings({
   const [apiBaseUrl, setApiBaseUrl] = useState("");
   const [apiModel, setApiModel] = useState("gemini-2.5-flash");
   const [apiType, setApiType] = useState<ProviderApiType>("auto");
+  const [apiContextWindow, setApiContextWindow] = useState("");
   // Provider default (send nothing) is distinct from an explicit `none` variant.
   const [apiThinkingLevel, setApiThinkingLevel] = useState("default");
   const [reasoningVariants, setReasoningVariants] = useState<ProviderReasoningVariants | null>(null);
@@ -78,10 +79,11 @@ export function useProviderSettings({
     setApiBaseUrl(apiConfig.base_url || "");
     setApiModel(apiConfig.model || defaultModelForProvider(apiConfig.provider || "gemini"));
     setApiType(apiConfig.api_type || apiConfig.apiType || "auto");
+    setApiContextWindow(apiConfig.contextWindow ? String(Math.round(apiConfig.contextWindow / 1000)) : "");
     setApiThinkingLevel(apiConfig.thinking_level || "default");
     setModelOptions([]);
     setModelOptionsScope(null);
-  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model, apiConfig?.api_type, apiConfig?.apiType, apiConfig?.thinking_level]);
+  }, [apiConfig?.provider, apiConfig?.base_url, apiConfig?.model, apiConfig?.api_type, apiConfig?.apiType, apiConfig?.thinking_level, apiConfig?.contextWindow]);
 
   useEffect(() => {
     let cancelled = false;
@@ -144,7 +146,13 @@ export function useProviderSettings({
 
   async function saveApiProvider(event?: FormEvent) {
     event?.preventDefault();
-    if (!apiProvider || !apiModel || (providerNeedsApiKey(apiProvider) && !apiKey.trim() && !apiKeySaved)) {
+    const normalizedContextWindow = normalizeContextWindowK(apiContextWindow);
+    if (
+      normalizedContextWindow === null
+      || !apiProvider
+      || !apiModel
+      || (providerNeedsApiKey(apiProvider) && !apiKey.trim() && !apiKeySaved)
+    ) {
       return;
     }
     setSavingApiConfig(true);
@@ -161,6 +169,7 @@ export function useProviderSettings({
         model: apiModel.trim(),
         api_type: apiType,
         thinking_level: apiThinkingLevel === "default" ? "" : apiThinkingLevel,
+        context_window: normalizedContextWindow,
       });
       setApiKey("");
       await refresh(targetEndpoint);
@@ -326,6 +335,8 @@ export function useProviderSettings({
     setApiModel: handleApiModelChange,
     apiType,
     setApiType,
+    apiContextWindow,
+    setApiContextWindow,
     selectedModelCapabilities,
     selectedModelCapabilitySource,
     apiThinkingLevel,
@@ -362,4 +373,15 @@ export function useProviderSettings({
     loadModels,
     runProviderTest,
   };
+}
+
+function normalizeContextWindowK(value: string): number | null {
+  if (!value.trim()) {
+    return 0;
+  }
+  const thousands = Number(value);
+  if (!Number.isInteger(thousands) || thousands < 4 || thousands > 10_000) {
+    return null;
+  }
+  return thousands * 1000;
 }

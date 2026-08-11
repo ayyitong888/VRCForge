@@ -978,6 +978,9 @@ class ApiConfigRequest(BaseModel):
     api_type: str | None = None
     # Model-aware reasoning variant; empty means provider default/no override.
     thinking_level: str = ""
+    # 0 keeps provider/model auto-detection. A positive value is a user cap;
+    # it never expands a smaller provider-advertised window.
+    context_window: int = Field(default=0, ge=0, le=10_000_000)
 
 
 class ApiModelListRequest(ApiConfigRequest):

@@ -118,6 +118,25 @@ test("provider metadata resolves a real limit and occupancy prefers peak then la
   assert.equal(legacy.inputTokenSource, "legacy");
 });
 
+test("a user context cap can shrink but never expand the provider window", () => {
+  assert.deepEqual(
+    policy.resolveContextLimit("custom", "model", { contextWindow: 1_000_000 }, 128_000),
+    { limit: 128_000, known: true, source: "user" },
+  );
+  assert.deepEqual(
+    policy.resolveContextLimit("custom", "model", { contextWindow: 128_000 }, 1_000_000),
+    { limit: 128_000, known: true, source: "provider" },
+  );
+  assert.deepEqual(
+    policy.resolveContextLimit("deepseek", "deepseek-v4-pro", undefined, 96_000),
+    { limit: 96_000, known: true, source: "user" },
+  );
+  assert.deepEqual(
+    policy.resolveContextLimit("unlisted", "unknown-model", undefined, 64_000),
+    { limit: 64_000, known: true, source: "user" },
+  );
+});
+
 test("usage from another provider or model is never reused after a model switch", () => {
   const usage = {
     exact: true,
@@ -462,7 +481,7 @@ test("compaction telemetry is bounded and restart normalization rejects unbounde
 test("conversation meter delegates occupancy and threshold semantics to the pure policy", async () => {
   const conversationSource = await readFile(path.join(root, "src/lib/conversation-utils.ts"), "utf8");
   assert.ok(conversationSource.includes("resolveContextInputTokens(usage)"));
-  assert.ok(conversationSource.includes("resolveContextLimit(provider, model, modelInfo)"));
+  assert.ok(conversationSource.includes("resolveContextLimit(provider, model, modelInfo, userContextWindow)"));
   assert.ok(conversationSource.includes("ratio >= CONTEXT_AUTO_COMPACT_RATIO"));
   assert.ok(!conversationSource.includes("const CONTEXT_AUTO_COMPACT_RATIO = 0.92"));
 });

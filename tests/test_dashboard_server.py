@@ -13709,6 +13709,7 @@ namespace VRCForge.Editor
                     api_key="anthropic-secret",
                     base_url="https://ignored.example.com",
                     model="claude-opus-4-6",
+                    context_window=128_000,
                 )
             )
             owner.save_api_config(config)
@@ -13720,10 +13721,13 @@ namespace VRCForge.Editor
             self.assertEqual(payload["apiConfig"]["provider"], "anthropic")
             self.assertEqual(payload["apiConfig"]["base_url"], "")
             self.assertEqual(payload["effective"]["model"], "claude-opus-4-6")
+            self.assertEqual(payload["apiConfig"]["contextWindow"], 128_000)
+            self.assertEqual(payload["effective"]["contextWindow"], 128_000)
             self.assertTrue(config_path.exists())
             saved_payload = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertEqual(saved_payload["api"]["provider"], "anthropic")
             self.assertEqual(saved_payload["api"]["base_url"], "")
+            self.assertEqual(saved_payload["api"]["context_window"], 128_000)
 
     def test_provider_config_save_preserves_invalid_source_in_verified_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

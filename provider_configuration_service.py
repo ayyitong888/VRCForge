@@ -43,6 +43,7 @@ class ProviderApiConfigRequestPort(Protocol):
     model: str | None
     api_type: str | None
     thinking_level: str
+    context_window: int
 
 
 class ProviderVisionConfigRequestPort(Protocol):
@@ -61,6 +62,7 @@ class ProviderApiConfig:
     model: str
     api_type: str | None = None
     thinking_level: str = ""
+    context_window: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +205,10 @@ class ProviderConfigurationService:
                     section.get("api_type"),
                 )[0],
                 thinking_level=self._policy.normalize_reasoning_effort(raw_thinking_level),
+                context_window=self._normalize_context_window(
+                    section.get("context_window"),
+                    strict=False,
+                ),
             )
 
         try:
@@ -285,6 +291,10 @@ class ProviderConfigurationService:
             model=model,
             api_type=requested_api_type,
             thinking_level=thinking_level,
+            context_window=self._normalize_context_window(
+                getattr(request, "context_window", 0),
+                strict=True,
+            ),
         )
 
     def normalize_vision_request(
@@ -451,6 +461,7 @@ class ProviderConfigurationService:
                     "model": api.model,
                     "api_type": api_descriptor["api_type"],
                     "thinking_level": api.thinking_level,
+                    "context_window": api.context_window,
                 },
                 "provider_keys": {
                     "api": api_keys,
@@ -508,6 +519,7 @@ class ProviderConfigurationService:
             "model": config.model,
             **self._policy.provider_config_descriptor(config),
             "thinking_level": config.thinking_level,
+            "contextWindow": config.context_window,
             "usesBaseUrl": config.provider not in {"anthropic", "gemini"},
             "authHeader": self._policy.provider_auth_label(config.provider),
             "apiKeyRequired": self._policy.provider_requires_api_key(config.provider),
@@ -554,6 +566,7 @@ class ProviderConfigurationService:
             "providerLabel": self._policy.provider_display_name(config.provider),
             "model": config.model,
             "baseUrl": config.base_url,
+            "contextWindow": config.context_window,
             **self._policy.provider_config_descriptor(config),
             "authHeader": self._policy.provider_auth_label(config.provider),
             "apiKeyRequired": self._policy.provider_requires_api_key(config.provider),
@@ -566,3 +579,23 @@ class ProviderConfigurationService:
         if len(value) <= 8:
             return "*" * len(value)
         return f"{value[:4]}{'*' * max(len(value) - 8, 4)}{value[-4:]}"
+
+    @staticmethod
+    def _normalize_context_window(value: Any, *, strict: bool) -> int:
+        try:
+            parsed = int(value or 0)
+        except (TypeError, ValueError):
+            if strict:
+                raise ValueError("Context window must be 0 (automatic) or a whole number.")
+            return 0
+        if parsed == 0:
+            return 0
+        if parsed < 4_000:
+            if strict:
+                raise ValueError("Context window must be at least 4000 tokens, or 0 for automatic.")
+            return 0
+        if parsed > 10_000_000:
+            if strict:
+                raise ValueError("Context window cannot exceed 10000000 tokens.")
+            return 0
+        return parsed

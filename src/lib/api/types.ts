@@ -155,6 +155,8 @@ export type ApiConfig = {
   modelRegistrySchema?: string;
   /** Model-aware reasoning variant; empty means provider default (no override). */
   thinking_level?: string;
+  /** User-selected effective context cap in tokens; 0/absent keeps auto detection. */
+  contextWindow?: number;
   usesBaseUrl?: boolean;
   authHeader?: string;
   apiKeyRequired: boolean;

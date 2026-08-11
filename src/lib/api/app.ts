@@ -278,7 +278,7 @@ export async function requestChatAttachmentImport(
 
 export async function updateApiConfig(
   endpoint: string,
-  config: { provider: string; api_key: string; base_url?: string; model?: string; api_type?: ProviderApiType; thinking_level?: string },
+  config: { provider: string; api_key: string; base_url?: string; model?: string; api_type?: ProviderApiType; thinking_level?: string; context_window: number },
 ) {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<{ ok?: boolean; apiConfig: ApiConfig; visionConfig?: VisionConfig }>("update_api_config", {

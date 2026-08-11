@@ -51,11 +51,12 @@ export function buildContextUsageFromRuntime(
   model = "",
   modelInfo: ProviderModelInfo | undefined,
   t: TFunction,
+  userContextWindow?: number,
 ): ContextUsage | undefined {
   if (!usage) {
     return undefined;
   }
-  const contextLimit = resolveContextLimit(provider, model, modelInfo);
+  const contextLimit = resolveContextLimit(provider, model, modelInfo, userContextWindow);
   const limit = contextLimit.known ? contextLimit.limit : CONTEXT_TOKEN_LIMIT_DISPLAY_ESTIMATE;
   const resolvedInput = resolveContextInputTokens(usage);
   const legacyTotal = numberOrNull(usage.totalTokens);

@@ -17,7 +17,7 @@ const MAX_DURABLE_STATE_FIELD_CHARACTERS = 128;
 export type ContextCompactionLevel = "below" | "prefire" | "compact" | "hard-limit";
 export type ContextInputTokenSource = "peak" | "last" | "legacy";
 
-export type ContextLimitSource = "provider" | "known" | "unknown";
+export type ContextLimitSource = "user" | "provider" | "known" | "unknown";
 
 export type ContextLimitResolution = {
   limit: number;
@@ -331,13 +331,18 @@ export function resolveContextLimit(
   provider: string,
   model: string,
   modelInfo?: ContextModelInfo,
+  userContextWindow?: number,
 ): ContextLimitResolution {
+  const userLimit = positiveNumber(userContextWindow);
   const providerLimit = firstPositiveNumber(
     modelInfo?.inputTokenLimit,
     modelInfo?.contextWindow,
     modelInfo?.maxInputTokens,
   );
   if (providerLimit !== undefined) {
+    if (userLimit !== undefined && userLimit < providerLimit) {
+      return { limit: userLimit, known: true, source: "user" };
+    }
     return { limit: providerLimit, known: true, source: "provider" };
   }
 
@@ -345,7 +350,13 @@ export function resolveContextLimit(
     `${normalizeContextProvider(provider)}:${normalizeModelId(model)}`
   ];
   if (knownLimit !== undefined) {
+    if (userLimit !== undefined && userLimit < knownLimit) {
+      return { limit: userLimit, known: true, source: "user" };
+    }
     return { limit: knownLimit, known: true, source: "known" };
+  }
+  if (userLimit !== undefined) {
+    return { limit: userLimit, known: true, source: "user" };
   }
   return { limit: 0, known: false, source: "unknown" };
 }
