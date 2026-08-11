@@ -41,6 +41,7 @@ from agent_gateway import (
     WRAPPER_ONLY_WRITE_TARGETS,
     WRITE_PATH_KEY_MARKERS,
     WriteRequestPreparer,
+    atomic_write_json,
     bind_approved_unity_execution,
     capture_unity_mcp_core_call_audits,
     create_approved_unity_execution_plan,
@@ -61,6 +62,11 @@ from agent_gateway import (
     utc_now_iso,
     validate_frozen_approved_unity_execution_plan,
 )
+
+
+PENDING_APPROVAL_SNAPSHOT_SCHEMA = "vrcforge.pending-approvals.v1"
+PENDING_APPROVAL_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
+PENDING_APPROVAL_SNAPSHOT_MAX_ITEMS = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +173,108 @@ class AgentApprovalTransactionService:
         self._apply_lifecycle_observer: Callable[[str, dict[str, Any]], Any] | None = None
         self._checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
         self._scoped_approval_reviewer: Callable[[dict[str, Any]], str] | None = None
+        self._restore_pending_approvals()
+
+    def _pending_approval_snapshot_path(self) -> Path:
+        """Return the host-private, pending-only approval proposal snapshot.
+
+        The file lives beside the existing approval audit under the backend's
+        user-data directory.  It is owned by the backend process, contains no
+        authorization token, and grants no execution capability: the existing
+        authenticated approval endpoint and exact approval transaction remain
+        the only way to move a restored proposal out of ``pending``.
+        """
+
+        return self._ports.audit_log_path().with_name("pending-approvals.json")
+
+    def _restore_pending_approvals(self) -> None:
+        path = self._pending_approval_snapshot_path()
+        if not path.exists():
+            return
+        try:
+            if path.stat().st_size > PENDING_APPROVAL_SNAPSHOT_MAX_BYTES:
+                raise ValueError("pending approval snapshot exceeds the size limit")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("pending approval snapshot must be an object")
+            if payload.get("schema") != PENDING_APPROVAL_SNAPSHOT_SCHEMA:
+                raise ValueError("pending approval snapshot schema is invalid")
+            stored = payload.get("approvals")
+            if not isinstance(stored, list):
+                raise ValueError("pending approval snapshot approvals must be a list")
+            if len(stored) > PENDING_APPROVAL_SNAPSHOT_MAX_ITEMS:
+                raise ValueError("pending approval snapshot has too many items")
+            restored: dict[str, dict[str, Any]] = {}
+            for raw in stored:
+                if not isinstance(raw, dict):
+                    raise ValueError("pending approval snapshot item must be an object")
+                approval = dict(raw)
+                approval_id = str(approval.get("id") or "").strip()
+                target_tool = str(approval.get("targetTool") or "").strip()
+                created_at = str(approval.get("createdAt") or "").strip()
+                if (
+                    not approval_id.startswith("appr_")
+                    or len(approval_id) > 160
+                    or not target_tool
+                    or len(target_tool) > 160
+                    or not created_at
+                    or approval.get("status") != "pending"
+                    or not isinstance(approval.get("arguments"), dict)
+                    or approval_id in restored
+                ):
+                    raise ValueError("pending approval snapshot item is invalid")
+                if any(
+                    key in approval
+                    for key in (
+                        "approvedAt",
+                        "appliedAt",
+                        "applyingAt",
+                        "failedAt",
+                        "rejectedAt",
+                    )
+                ):
+                    raise ValueError("pending approval snapshot contains a terminal field")
+                approval.pop("expiresAt", None)
+                restored[approval_id] = approval
+            self._ports.state.approvals.update(restored)
+            if restored:
+                self._ports.append_audit(
+                    {
+                        "event": "pending_approvals_restored",
+                        "approvalIds": sorted(restored),
+                        "count": len(restored),
+                    }
+                )
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            # Corrupt or oversized state never becomes an executable proposal.
+            # Preserve the file for Doctor/user inspection and keep startup live.
+            self._ports.append_audit(
+                {
+                    "event": "pending_approval_snapshot_invalid",
+                    "error": summarize_text(str(exc), 300),
+                }
+            )
+
+    def _persist_pending_approvals_locked(self) -> None:
+        pending = [
+            dict(item)
+            for item in self._ports.state.approvals.values()
+            if item.get("status") == "pending"
+        ]
+        pending.sort(key=lambda item: str(item.get("createdAt") or ""))
+        if len(pending) > PENDING_APPROVAL_SNAPSHOT_MAX_ITEMS:
+            raise ValueError("too many pending approvals to persist safely")
+        snapshot = {
+            "schema": PENDING_APPROVAL_SNAPSHOT_SCHEMA,
+            "updatedAt": utc_now_iso(),
+            "approvals": pending,
+        }
+        if (
+            len(json.dumps(snapshot, ensure_ascii=False).encode("utf-8"))
+            > PENDING_APPROVAL_SNAPSHOT_MAX_BYTES
+        ):
+            raise ValueError("pending approval snapshot exceeds the size limit")
+        atomic_write_json(self._pending_approval_snapshot_path(), snapshot)
 
     @property
     def apply_lifecycle_observer(self) -> Callable[[str, dict[str, Any]], Any] | None:
@@ -2126,6 +2234,14 @@ class AgentApprovalTransactionService:
             approval["userConstraintsPath"] = str(user_constraints.path)
         with self._ports.state.shared_state_lock:
             self._ports.state.approvals[approval["id"]] = approval
+            try:
+                self._persist_pending_approvals_locked()
+            except (OSError, UnicodeError, TypeError, ValueError) as exc:
+                self._ports.state.approvals.pop(approval["id"], None)
+                raise AgentGatewayError(
+                    "Pending approval could not be persisted safely.",
+                    status_code=500,
+                ) from exc
             self._ports.append_audit({"event": "approval_requested", "approval": approval, **permission_context})
         return redact_sensitive(dict(approval))
 
@@ -2189,9 +2305,18 @@ class AgentApprovalTransactionService:
                 return {"ok": False, "approval": approval, "message": f"Approval is {approval.get('status')}."}
             if approval.get("status") == "expired":
                 return {"ok": False, "approval": approval, "message": "Approval has expired."}
+            previous = dict(approval)
             approval["status"] = status
             approval[f"{status}At"] = utc_now_iso()
             self._ports.state.approvals[approval_id] = approval
+            try:
+                self._persist_pending_approvals_locked()
+            except (OSError, UnicodeError, TypeError, ValueError) as exc:
+                self._ports.state.approvals[approval_id] = previous
+                raise AgentGatewayError(
+                    "Approval decision could not be persisted safely.",
+                    status_code=500,
+                ) from exc
             permission_context = self.permission_audit_context()
             self._ports.append_audit({"event": f"approval_{status}", "approval": approval, **permission_context})
             self._runtime_run_append(
@@ -2239,11 +2364,20 @@ class AgentApprovalTransactionService:
             status = str(approval.get("status") or "")
             if status != "pending":
                 return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {status}."}
+            previous = dict(approval)
             approval["status"] = "revision_requested"
             approval["revisionRequestedAt"] = utc_now_iso()
             approval["revisionReason"] = reason.strip()
             approval["revisionNote"] = note.strip()
             self._ports.state.approvals[approval_id] = approval
+            try:
+                self._persist_pending_approvals_locked()
+            except (OSError, UnicodeError, TypeError, ValueError) as exc:
+                self._ports.state.approvals[approval_id] = previous
+                raise AgentGatewayError(
+                    "Approval revision could not be persisted safely.",
+                    status_code=500,
+                ) from exc
             self._ports.append_audit({"event": "approval_revision_requested", "approval": approval})
             self._runtime_run_append(
                 {
@@ -2269,8 +2403,18 @@ class AgentApprovalTransactionService:
             # Pending approval is a durable user decision point.  Legacy
             # records may still carry the old ten-minute deadline; remove it
             # instead of silently turning the visible card into an expiry.
+            legacy_expiry = approval.get("expiresAt")
             approval.pop("expiresAt", None)
             self._ports.state.approvals[str(approval.get("id"))] = approval
+            try:
+                self._persist_pending_approvals_locked()
+            except (OSError, UnicodeError, TypeError, ValueError) as exc:
+                approval["expiresAt"] = legacy_expiry
+                self._ports.state.approvals[str(approval.get("id"))] = approval
+                raise AgentGatewayError(
+                    "Pending approval migration could not be persisted safely.",
+                    status_code=500,
+                ) from exc
         return approval
 
     def _load_approval_from_audit(self, approval_id: str) -> dict[str, Any] | None:

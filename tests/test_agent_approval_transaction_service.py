@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import tempfile
 from pathlib import Path
 
@@ -84,6 +85,84 @@ def test_new_pending_approval_has_no_timeout() -> None:
         assert requested["status"] == "pending"
         assert requested["approval"]["status"] == "pending"
         assert "expiresAt" not in requested["approval"]
+
+
+def test_pending_approval_survives_gateway_restart_until_user_decides() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        first = _gateway(root)
+        first.approval_transactions.register_write_handler(
+            "vrcforge_fixture_write",
+            "Write a fixture.",
+            "medium",
+            lambda _arguments: {"ok": True},
+        )
+        requested = first.approval_transactions.create_apply_request(
+            {
+                "target_tool": "vrcforge_fixture_write",
+                "arguments": {
+                    "projectRoot": str(root / "Project"),
+                    "value": "exact persisted proposal",
+                },
+            }
+        )
+        approval_id = requested["approval"]["id"]
+
+        reopened = _gateway(root)
+        restored = reopened.approval_transactions.list_approvals(
+            include_expired=False
+        )
+
+        assert [item["id"] for item in restored] == [approval_id]
+        assert restored[0]["status"] == "pending"
+        assert restored[0]["targetTool"] == "vrcforge_fixture_write"
+        assert restored[0]["projectRoot"] == str(root / "Project")
+        assert "expiresAt" not in restored[0]
+
+        rejected = reopened.approval_transactions.reject(approval_id)
+        assert rejected["ok"] is True
+        assert rejected["approval"]["status"] == "rejected"
+
+        after_decision = _gateway(root)
+        assert after_decision.approval_transactions.list_approvals(
+            include_expired=False
+        ) == []
+
+
+def test_corrupt_or_terminal_pending_snapshot_never_restores_execution_state() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        audit = root / "audit"
+        audit.mkdir(parents=True)
+        (audit / "pending-approvals.json").write_text(
+            json.dumps(
+                {
+                    "schema": "vrcforge.pending-approvals.v1",
+                    "approvals": [
+                        {
+                            "id": "appr_tampered",
+                            "createdAt": "2026-08-11T00:00:00+00:00",
+                            "targetTool": "vrcforge_fixture_write",
+                            "status": "pending",
+                            "approvedAt": "2026-08-11T00:00:01+00:00",
+                            "arguments": {"value": "must-not-restore"},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        reopened = _gateway(root)
+
+        assert reopened.approval_transactions.list_approvals(
+            include_expired=False
+        ) == []
+        audit_events = [
+            json.loads(line)
+            for line in reopened.audit_log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        assert audit_events[-1]["event"] == "pending_approval_snapshot_invalid"
 
 
 def test_approval_transaction_hooks_remain_late_bound_after_construction() -> None:

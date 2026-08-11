@@ -3086,7 +3086,7 @@ class DashboardServerTests(unittest.TestCase):
         )
         broadcast.assert_awaited_once_with({})
 
-    def test_restart_closes_unrecoverable_linked_approval(self) -> None:
+    def test_restart_keeps_linked_goal_blocked_on_restored_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config.json", root / "audit")
@@ -3124,9 +3124,16 @@ class DashboardServerTests(unittest.TestCase):
             reopened = AgentGateway(root / "config.json", root / "audit")
             recovery = reopened.goal.reconcile_agent_goal_watchdogs()
 
-            self.assertEqual(recovery["deliveries"][-1]["status"], "failed")
-            self.assertEqual(recovery["deliveries"][-1]["failureLabel"], "approval_recovery_required")
-            self.assertEqual(reopened.goal.project_goals()[goal["goalId"]]["wakeCount"], 1)
+            self.assertEqual(recovery["deliveries"], [])
+            restored = reopened.approval_transactions.list_approvals(
+                include_expired=False
+            )
+            self.assertEqual([item["id"] for item in restored], [approval["id"]])
+            delivery = reopened.goal.project_deliveries()[delivery_id]
+            self.assertEqual(delivery["status"], "blocked")
+            self.assertEqual(delivery["blockedKind"], "approval")
+            self.assertEqual(delivery["approvalId"], approval["id"])
+            self.assertEqual(reopened.goal.project_goals()[goal["goalId"]]["wakeCount"], 0)
 
     def test_agent_goal_projection_keeps_creation_fields_beyond_legacy_tail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
