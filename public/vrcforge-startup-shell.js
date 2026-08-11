@@ -3,11 +3,11 @@
   metrics.startupShellRequestedMs ??= Math.round(performance.now());
   window.__vrcforgeStartupShellPaintedPromise ??= new Promise(function (resolve) {
     window.requestAnimationFrame(function () {
-      window.requestAnimationFrame(function () {
+      window.setTimeout(function () {
         metrics.startupShellPaintedMs ??= Math.round(performance.now());
         document.documentElement.dataset.vrcforgeStartupShell = "ready";
         resolve();
-      });
+      }, 0);
     });
   });
 })();

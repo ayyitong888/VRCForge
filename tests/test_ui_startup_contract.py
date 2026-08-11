@@ -212,7 +212,8 @@ def test_startup_loads_app_and_locale_in_parallel_and_records_visible_shell() ->
     assert index_source.index("/vrcforge-startup-shell.js") < index_source.index("/src/main.tsx")
     assert "__vrcforgeStartupShellPaintedPromise" in startup_shell_source
     assert "startupShellPaintedMs" in startup_shell_source
-    assert startup_shell_source.count("window.requestAnimationFrame") >= 2
+    assert startup_shell_source.count("window.requestAnimationFrame") == 1
+    assert "window.setTimeout" in startup_shell_source
     assert "flushSync" not in main_source
     assert main_source.index("await Promise.all") < main_source.index("ReactDOM.createRoot")
     assert "__vrcforgeStartupShellPaintedPromise" in main_source
