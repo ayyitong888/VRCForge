@@ -24,7 +24,7 @@
   "openApi": {
     "pathCount": 214,
     "schemaCount": 127,
-    "sha256WithoutRuntimeVersion": "44d636855aa4ac021299d133a27cd952d65e819d4991e142267a8ab14227ac50"
+    "sha256WithoutRuntimeVersion": "03fbe749aa009dc5d2a013e638a6c99e35b0b45e843591e4a97e0ff88f1dd41b"
   },
   "events": {
     "envelopeKeys": [

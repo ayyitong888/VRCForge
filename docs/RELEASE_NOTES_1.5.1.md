@@ -1,8 +1,8 @@
-# VRCForge 1.5.1 (Unreleased)
+# VRCForge 1.5.1
 
-This source line is under development. No 1.5.1 package, tag, Draft, or public
-Release is claimed by this document. The latest published stable release is
-1.5.0.
+VRCForge 1.5.1 strengthens the Agent tool loop, durable approval continuity,
+visual-review routing, and user-visible Runtime state while preserving the
+existing supervised Unity write boundary.
 
 The Unity integration remains the self-contained VRCForge MCP 2.0 (`2026-07-28`)
 Core with its fixed 64-tool contract.
@@ -56,13 +56,33 @@ Core with its fixed 64-tool contract.
   capture receipt exactly once, runs the multi-angle verifier, and binds both
   action IDs before Runtime can mark the task complete. The write is never
   replayed while transitioning to visual review.
-- Made the visual-audit tool capability-aware in Runtime planning. If its
-  current Google AI Studio handler has no usable Gemini configuration, the tool
-  remains internally classifiable but is hidden from model-visible exposure,
-  and a capture-plus-audit request stops before creating a screenshot approval
-  with an actionable configuration message.
-- Expanded the lightweight selection Harness from 13 to 16 cases and made
-  action kind plus exposure layer part of each selection contract. The App
+- Made visual review Provider-neutral. An enabled independent Vision Profile
+  is preferred; otherwise the configured main model receives the image through
+  its Provider channel. VRCForge does not reject DeepSeek or another configured
+  route from a model-name allowlist, does not silently switch Provider, and
+  returns the selected Provider's real error when image input is rejected.
+- Split visual failures by Provider outcome. Explicit 4xx/unsupported-image
+  responses discard the raw image and keep a bounded error summary; timeout,
+  connection, 429, and 5xx failures preserve only the exact bound image receipt
+  for a controlled retry. Upload, chat-send, and visual failures also surface
+  in a dismissible lower-center notification.
+- Persisted API credentials per Provider across main/Vision switches without
+  projecting key values back to the App. A dedicated Vision Profile remains
+  optional, and the same saved Provider key can be reused across lanes when no
+  lane-specific override exists.
+- Restored pending approvals as durable, non-expiring decisions. Restart keeps
+  the exact bottom conversation card without carrying an execution capability;
+  eligible fixed-angle capture approvals retain the explicit allow-similar
+  split action, while destructive or unscoped writes remain ineligible.
+- Restored the Agent-owned TODO list to the upper-right workspace rail and kept
+  its scoped list/create/update/delete/replace Skill operations separate from
+  inline Runtime execution history.
+- Added an effective context-window cap in Model settings with a synchronized
+  slider and K-token numeric input. A manual value can reduce the working
+  window to keep attention focused, but it cannot expand a smaller detected
+  Provider limit; Auto restores Provider/model detection.
+- Expanded the lightweight selection Harness to 40 positive/negative cases and
+  made action kind plus exposure layer part of each selection contract. The App
   projects action kind from host-owned tool metadata and binds it into the
   one-use selection receipt, so a correct tool name with the wrong execution
   lane no longer passes acceptance.
