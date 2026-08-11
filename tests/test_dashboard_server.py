@@ -5696,8 +5696,22 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual(len(probe_calls), 1)
-        self.assertTrue(probe_calls[0][2])
+        self.assertEqual(len(probe_calls), 2)
+        self.assertEqual(
+            {(call[0].provider, call[0].model, call[0].api_type) for call in probe_calls},
+            {
+                ("openai", "gpt-4.1-mini", "responses"),
+                ("openai", "gpt-4.1-mini", "chat_completions"),
+            },
+        )
+        self.assertTrue(all(call[2] for call in probe_calls))
+        self.assertEqual(
+            {(attempt["model"], attempt["apiType"], attempt["status"]) for attempt in payload["attempts"]},
+            {
+                ("gpt-4.1-mini", "responses", "verified"),
+                ("gpt-4.1-mini", "chat_completions", "verified"),
+            },
+        )
         self.assertNotIn("provider-secret", json.dumps(payload))
 
     def test_read_avatars_sync_reports_execution_mode_without_name_error(self) -> None:

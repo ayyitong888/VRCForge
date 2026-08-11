@@ -93,16 +93,11 @@ export function ProviderSetup({
   const supportsReasoning = supportedReasoningVariants.length > 0;
   const hasUnsupportedReasoningVariant =
     thinkingLevel !== "default" && !supportedReasoningVariants.some((variant) => variant.key === thinkingLevel);
-  const displayModels = provider === "deepseek"
-    ? [
-        { id: "deepseek-auto", label: i18n.t("provider.deepseekAutoModel") } as ProviderModelInfo,
-        ...models.filter((item) => item.id !== "deepseek-auto"),
-      ]
-    : models;
+  const deepseekAutoNegotiation = provider === "deepseek" && model === "deepseek-auto";
   const hasModelList = models.length > 0;
   const capabilities = providerCapabilities(modelCapabilities, capabilitySource);
   const apiTypeOptions = supportedApiTypeOptions(provider, model);
-  const selectedModelInfo = displayModels.find((item) => item.id === model);
+  const selectedModelInfo = models.find((item) => item.id === model);
   const detectedContextWindow = firstPositiveContextWindow(selectedModelInfo);
   const contextWindowK = contextWindow.trim() ? Number(contextWindow) : 0;
   const contextWindowValid = !contextWindow.trim()
@@ -165,20 +160,41 @@ export function ProviderSetup({
             />
           </SettingsFieldLabel>
         ) : null}
+        {provider === "deepseek" ? (
+          <SettingsFieldLabel label={i18n.t("provider.deepseekAutoNegotiation")}>
+            <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-border bg-background px-3 py-3">
+              <input
+                type="checkbox"
+                checked={deepseekAutoNegotiation}
+                onChange={(event) => onModelChange(event.target.checked ? "deepseek-auto" : "deepseek-v4-flash")}
+                aria-label={i18n.t("provider.deepseekAutoNegotiation")}
+                className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
+              />
+              <span className="min-w-0">
+                <span className="block text-sm font-medium text-foreground">{i18n.t("provider.deepseekAutoNegotiation")}</span>
+                <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{i18n.t("provider.deepseekAutoNegotiationHint")}</span>
+              </span>
+            </label>
+          </SettingsFieldLabel>
+        ) : null}
         <SettingsFieldLabel label={i18n.t("provider.model")}>
           <div className="flex min-w-0 items-center gap-2">
-            {hasModelList ? (
+            {deepseekAutoNegotiation ? (
+              <div className="flex h-10 w-full min-w-0 items-center rounded-md border border-border bg-muted px-3 text-sm text-muted-foreground">
+                {i18n.t("provider.deepseekAutoRoute")}
+              </div>
+            ) : hasModelList ? (
               <select
-                value={displayModels.some((item) => item.id === model) ? model : ""}
+                value={models.some((item) => item.id === model) ? model : ""}
                 onChange={(event) => onModelChange(event.target.value)}
                 className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
               >
-                {!displayModels.some((item) => item.id === model) ? (
+                {!models.some((item) => item.id === model) ? (
                   <option value="" disabled>
                     {i18n.t("provider.selectModel")}
                   </option>
                 ) : null}
-                {displayModels.map((item) => (
+                {models.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.label || item.id}
                   </option>
