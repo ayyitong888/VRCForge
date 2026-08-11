@@ -59,12 +59,30 @@ _TOOL_SCHEMA = {
         "additionalProperties": False,
         "required": ["action"],
         "properties": {
-            "action": {"type": "string", "enum": ["reply", "skill", "shell"]},
+            "action": {
+                "type": "string",
+                "enum": ["reply", "skill", "shell", "enter_execution", "write"],
+            },
             "summary": {"type": "string"},
             "reply": {"type": "string"},
             "skill_tool": {"type": "string"},
-            "skill_params": {"type": "object"},
+            "skill_params": {"type": "object", "additionalProperties": True},
             "shell_command": {"type": "string"},
+            "shell_params": {"type": "object", "additionalProperties": True},
+            "write_tool": {"type": "string"},
+            "write_params": {"type": "object", "additionalProperties": True},
+            "correction_for_action_id": {"type": "string"},
+            "completion_claim": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "satisfied": {"type": "boolean"},
+                    "evidence_action_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
         },
     },
 }
@@ -149,8 +167,16 @@ class DeepSeekResponsesAdapter:
         if tool_calls:
             if not planner_mode:
                 raise RuntimeError("DeepSeek Responses probe returned an unexpected tool call.")
-            non_reasoning = [item for item in output if str(_value(item, "type") or "") != "reasoning"]
-            if len(tool_calls) != 1 or len(non_reasoning) != 1:
+            unexpected = [
+                item
+                for item in output
+                if str(_value(item, "type") or "")
+                not in {"reasoning", "message", "function_call"}
+            ]
+            # DeepSeek may emit one explanatory message before the authoritative
+            # planner function call.  Ignore that text, but still fail closed on
+            # multiple calls or any unknown output item.
+            if len(tool_calls) != 1 or unexpected:
                 raise RuntimeError("DeepSeek Responses returned an invalid planner tool call.")
             return ProviderRuntimeResponse(text=self.parse_tool_call(tool_calls[0]), usage=_usage(response), reasoning_summary=_summaries(output))
         text = str(_value(response, "output_text") or "")
@@ -172,22 +198,62 @@ class DeepSeekResponsesAdapter:
             raise RuntimeError("DeepSeek Responses planner arguments are invalid.") from exc
         if not isinstance(arguments, dict):
             raise RuntimeError("DeepSeek Responses planner action is invalid.")
-        allowed = {"action", "summary", "reply", "skill_tool", "skill_params", "shell_command"}
+        allowed = {
+            "action",
+            "summary",
+            "reply",
+            "skill_tool",
+            "skill_params",
+            "shell_command",
+            "shell_params",
+            "write_tool",
+            "write_params",
+            "correction_for_action_id",
+            "completion_claim",
+        }
         if set(arguments) - allowed:
             raise RuntimeError("DeepSeek Responses planner action is invalid.")
         action = arguments.get("action")
-        if not isinstance(action, str) or action not in {"reply", "skill", "shell"}:
+        if not isinstance(action, str) or action not in {
+            "reply",
+            "skill",
+            "shell",
+            "enter_execution",
+            "write",
+        }:
             raise RuntimeError("DeepSeek Responses planner action is invalid.")
-        for text_key in ("summary", "reply", "skill_tool", "shell_command"):
+        for text_key in (
+            "summary",
+            "reply",
+            "skill_tool",
+            "shell_command",
+            "write_tool",
+            "correction_for_action_id",
+        ):
             if text_key in arguments and not isinstance(arguments[text_key], str):
                 raise RuntimeError("DeepSeek Responses planner action is invalid.")
-        if "skill_params" in arguments and not isinstance(arguments["skill_params"], dict):
-            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+        for params_key in ("skill_params", "shell_params", "write_params"):
+            if params_key in arguments and not isinstance(arguments[params_key], dict):
+                raise RuntimeError("DeepSeek Responses planner action is invalid.")
+        if "completion_claim" in arguments:
+            claim = arguments["completion_claim"]
+            if not isinstance(claim, dict) or set(claim) - {"satisfied", "evidence_action_ids"}:
+                raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            if "satisfied" in claim and not isinstance(claim["satisfied"], bool):
+                raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            evidence_ids = claim.get("evidence_action_ids")
+            if evidence_ids is not None and (
+                not isinstance(evidence_ids, list)
+                or not all(isinstance(item, str) for item in evidence_ids)
+            ):
+                raise RuntimeError("DeepSeek Responses planner action is invalid.")
         if action == "reply" and not (str(arguments.get("reply") or "").strip() or str(arguments.get("summary") or "").strip()):
             raise RuntimeError("DeepSeek Responses planner action is invalid.")
         if action == "skill" and not str(arguments.get("skill_tool") or "").strip():
             raise RuntimeError("DeepSeek Responses planner action is invalid.")
         if action == "shell" and not str(arguments.get("shell_command") or "").strip():
+            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+        if action == "write" and not str(arguments.get("write_tool") or "").strip():
             raise RuntimeError("DeepSeek Responses planner action is invalid.")
         return json.dumps(arguments, ensure_ascii=False)
 

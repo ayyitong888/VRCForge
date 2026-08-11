@@ -76,6 +76,20 @@ def test_nonstream_message_sends_stateless_input_and_safe_payload() -> None:
     assert call["instructions"] == "system"
     assert call["store"] is False and call["reasoning"] == {"effort": "low"}
     assert call["tools"][0]["name"] == "vrcforge_plan_action"
+    planner_parameters = call["tools"][0]["parameters"]
+    assert set(planner_parameters["properties"]["action"]["enum"]) == {
+        "reply",
+        "skill",
+        "shell",
+        "enter_execution",
+        "write",
+    }
+    assert {
+        "write_tool",
+        "write_params",
+        "completion_claim",
+        "correction_for_action_id",
+    } <= set(planner_parameters["properties"])
     assert "safe-key" not in str(call)
 
 
@@ -291,6 +305,83 @@ def test_function_call_is_normalized_but_not_executed() -> None:
     response = adapter.send_request(ProviderRuntimeRequest(model="deepseek-v4-flash", prompt="p", instructions="s"))
     assert response.text == '{"action": "skill", "skill_tool": "vrc_list"}'
     assert response.usage["reasoning_tokens"] == 1
+
+
+def test_write_function_call_matches_runtime_planner_contract() -> None:
+    result = {
+        "output": [
+            {
+                "type": "function_call",
+                "name": "vrcforge_plan_action",
+                "arguments": json.dumps(
+                    {
+                        "action": "write",
+                        "summary": "Capture four managed views.",
+                        "reply": "I will request approval for the capture.",
+                        "write_tool": "vrcforge_capture_multi_screenshot",
+                        "write_params": {"angles": ["front", "left", "right", "back"]},
+                    }
+                ),
+            }
+        ]
+    }
+    adapter, _holder = adapter_for(result)
+
+    response = adapter.send_request(
+        ProviderRuntimeRequest(model="deepseek-v4-flash", prompt="p", instructions="s")
+    )
+
+    assert json.loads(response.text) == {
+        "action": "write",
+        "summary": "Capture four managed views.",
+        "reply": "I will request approval for the capture.",
+        "write_tool": "vrcforge_capture_multi_screenshot",
+        "write_params": {"angles": ["front", "left", "right", "back"]},
+    }
+
+
+def test_streamed_planner_function_call_can_follow_non_authoritative_message() -> None:
+    final = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "I checked the tool result."}],
+            },
+            {
+                "type": "function_call",
+                "name": "vrcforge_plan_action",
+                "arguments": json.dumps(
+                    {
+                        "action": "reply",
+                        "reply": "The managed visual audit is complete.",
+                        "completion_claim": {
+                            "satisfied": True,
+                            "evidence_action_ids": ["action-capture", "action-audit"],
+                        },
+                    }
+                ),
+            },
+        ],
+        "usage": {"input_tokens": 8, "output_tokens": 4, "total_tokens": 12},
+    }
+    adapter, _holder = adapter_for(
+        [{"type": "response.completed", "response": final}]
+    )
+
+    response = adapter.send_request(
+        ProviderRuntimeRequest(
+            model="deepseek-v4-flash",
+            prompt="p",
+            instructions="s",
+            stream_callback=lambda _delta: None,
+        )
+    )
+
+    assert json.loads(response.text)["completion_claim"]["evidence_action_ids"] == [
+        "action-capture",
+        "action-audit",
+    ]
+    assert response.usage["total_tokens"] == 12
 
 
 @pytest.mark.parametrize("item", [
