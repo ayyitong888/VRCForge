@@ -27,6 +27,7 @@ import {
   requestAgentRunCancel,
   sendAgentMessage,
 } from "../lib/api";
+import { projectVisionFailureNotice } from "../lib/vision-failure-notice";
 
 export const MAX_QUEUED_TURNS = 8;
 export const MAX_BACKGROUND_TURNS = 2;
@@ -440,48 +441,11 @@ export function useChatRunController({
         computerUseVisualTheme: turn.computerUseVisualTheme,
         computerUseVisualAccent: turn.computerUseVisualAccent,
       });
-      const skillResult = response.skill?.tool === "vrcforge_vision_audit_multi"
-        && response.skill.result
-        && typeof response.skill.result === "object"
-        && !Array.isArray(response.skill.result)
-        ? response.skill.result as Record<string, unknown>
-        : undefined;
-      const managedVisualRows = Array.isArray(skillResult?.results) ? skillResult.results : [];
-      const managedVisualFailure = managedVisualRows
-        .map((row) => (
-          row && typeof row === "object" && !Array.isArray(row)
-            ? (row as Record<string, unknown>).providerError
-            : undefined
-        ))
-        .find((providerError) => (
-          providerError && typeof providerError === "object" && !Array.isArray(providerError)
-        )) as Record<string, unknown> | undefined;
-      if (!background && response.vision?.status === "error") {
-        const visualRoute = [
-          response.vision.providerLabel || response.vision.provider,
-          response.vision.model,
-        ].filter(Boolean).join(" · ");
-        const errorText = String(response.vision.error || t("notifications.visionFailed"));
-        const retryText = response.vision.retryable
-          ? t("notifications.visionRetryable")
-          : t("notifications.visionReattach");
-        notifyFailure?.(
-          "vision",
-          `${visualRoute ? `${visualRoute}: ` : ""}${errorText} ${retryText}`,
-        );
-      } else if (!background && managedVisualFailure) {
-        const visualRoute = [
-          managedVisualFailure.providerLabel || managedVisualFailure.provider,
-          managedVisualFailure.model,
-        ].filter(Boolean).join(" 路 ");
-        const errorText = String(managedVisualFailure.error || t("notifications.visionFailed"));
-        const retryText = managedVisualFailure.retryable === true
-          ? t("notifications.visionRetryable")
-          : t("notifications.visionReattach");
-        notifyFailure?.(
-          "vision",
-          `${visualRoute ? `${visualRoute}: ` : ""}${errorText} ${retryText}`,
-        );
+      if (!background) {
+        const visualFailureNotice = projectVisionFailureNotice(response, (key) => t(key));
+        if (visualFailureNotice) {
+          notifyFailure?.(visualFailureNotice.kind, visualFailureNotice.message);
+        }
       }
       const providerUnavailable = response.backgroundGoalSkipped === true
         && response.status === "provider_unreachable"
