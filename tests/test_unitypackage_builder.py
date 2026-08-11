@@ -66,6 +66,10 @@ FROZEN_SOURCE_META_GUIDS = {
     "Assets/VRCForge/Editor/PrimitiveBasisLiveGuard.cs": "990e1e58a5aa4913bb734a9cdd7eea3a",
 }
 
+RELEASE_PAIRING_ASSET_GUIDS = {
+    "Assets/VRCForge/Editor/MCP/VRCForgeMcpTrustedRelease.json": "2b1fe687d6f68a50dab7b4a3bd4e2c25",
+}
+
 DOCUMENTATION_PATHS = {
     "Assets/VRCForge/Documentation",
     "Assets/VRCForge/Documentation/README.txt",
@@ -81,7 +85,7 @@ EXCLUDED_PACKAGE_ROOTS = (
     "Assets/VRCForge/Generated",
 )
 
-GUID_MANIFEST_SHA256 = "3a3cff6932c8a72773a353ea1c1f4f8f64ef9df80ad29ac1f6c885e566e75e04"
+GUID_MANIFEST_SHA256 = "6bb92d68a99d648e3179a8de74320c8ae89b333a1a56105588d5edfde6734cbe"
 
 
 def test_public_guid_manifest_pins_the_published_1_3_6_common_paths() -> None:
@@ -93,9 +97,10 @@ def test_public_guid_manifest_pins_the_published_1_3_6_common_paths() -> None:
     assert manifest["schema"] == "vrcforge.unitypackage-guid-manifest.v1"
     entries = manifest["entries"]
     entry_map = {entry["path"]: entry["guid"] for entry in entries}
-    assert len(entries) == 72
+    assert len(entries) == 73
     assert {path: entry_map[path] for path in PUBLISHED_1_3_6_COMMON_GUIDS} == PUBLISHED_1_3_6_COMMON_GUIDS
     assert {path: entry_map[path] for path in FROZEN_SOURCE_META_GUIDS} == FROZEN_SOURCE_META_GUIDS
+    assert {path: entry_map[path] for path in RELEASE_PAIRING_ASSET_GUIDS} == RELEASE_PAIRING_ASSET_GUIDS
     assert not any(
         path == excluded or path.startswith(f"{excluded}/")
         for path in entry_map
@@ -429,8 +434,8 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
     manifest = json.loads((repo_root / "packaging" / "unitypackage_guid_manifest.json").read_text(encoding="utf-8"))
     manifest_guids = {entry["path"]: entry["guid"] for entry in manifest["entries"]}
     assert packaged_guids == manifest_guids
-    assert len(packaged_paths) == 72
-    assert len(file_paths) == 65
+    assert len(packaged_paths) == 73
+    assert len(file_paths) == 66
     assert len(directory_paths) == 7
     assert not any(
         path == excluded or path.startswith(f"{excluded}/")
@@ -444,6 +449,7 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
         path: packaged_guids[path] for path in PUBLISHED_1_3_6_COMMON_GUIDS
     } == PUBLISHED_1_3_6_COMMON_GUIDS
     assert {path: packaged_guids[path] for path in FROZEN_SOURCE_META_GUIDS} == FROZEN_SOURCE_META_GUIDS
+    assert {path: packaged_guids[path] for path in RELEASE_PAIRING_ASSET_GUIDS} == RELEASE_PAIRING_ASSET_GUIDS
     source_cs = {
         "Assets/VRCForge/" + path.relative_to(repo_root / "Assets" / "VRCForge").as_posix()
         for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")

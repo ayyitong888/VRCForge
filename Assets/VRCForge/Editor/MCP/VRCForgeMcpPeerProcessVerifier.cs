@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Newtonsoft.Json.Linq;
+using UnityEngine;
 
 namespace VRCForge.Editor
 {
@@ -296,9 +297,9 @@ namespace VRCForge.Editor
                 return false;
             }
 
-            var expectedDesktopDigest = VRCForgeMcpTrustedRelease.DesktopSha256;
-            var expectedBackendDigest = VRCForgeMcpTrustedRelease.BackendSha256;
-            if (!IsLowerSha256(expectedDesktopDigest) || !IsLowerSha256(expectedBackendDigest))
+            string expectedDesktopDigest;
+            string expectedBackendDigest;
+            if (!TryReadTrustedReleaseDigests(out expectedDesktopDigest, out expectedBackendDigest))
             {
                 return false;
             }
@@ -316,6 +317,44 @@ namespace VRCForge.Editor
             var files = manifest["files"] as JObject;
             return VerifyIntegrityEntry(files, "desktop", "VRCForge.exe", expectedParent, expectedDesktopDigest)
                 && VerifyIntegrityEntry(files, "backend", "backend/vrcforge_backend.exe", expectedBackend, expectedBackendDigest);
+        }
+
+        private static bool TryReadTrustedReleaseDigests(
+            out string expectedDesktopDigest,
+            out string expectedBackendDigest)
+        {
+            expectedDesktopDigest = null;
+            expectedBackendDigest = null;
+            try
+            {
+                var projectRoot = Path.GetDirectoryName(Path.GetFullPath(Application.dataPath));
+                if (string.IsNullOrEmpty(projectRoot))
+                {
+                    return false;
+                }
+                var manifestPath = Path.GetFullPath(Path.Combine(
+                    projectRoot,
+                    VRCForgeMcpTrustedRelease.AssetPath.Replace('/', Path.DirectorySeparatorChar)));
+                if (!IsRegularFileWithoutReparse(manifestPath))
+                {
+                    return false;
+                }
+                var manifest = JObject.Parse(File.ReadAllText(manifestPath));
+                if (manifest.Count != 3
+                    || !string.Equals((string)manifest["schema"], "vrcforge.trusted-release.v1", StringComparison.Ordinal))
+                {
+                    return false;
+                }
+                expectedDesktopDigest = (string)manifest["desktopSha256"];
+                expectedBackendDigest = (string)manifest["backendSha256"];
+                return IsLowerSha256(expectedDesktopDigest) && IsLowerSha256(expectedBackendDigest);
+            }
+            catch (Exception)
+            {
+                expectedDesktopDigest = null;
+                expectedBackendDigest = null;
+                return false;
+            }
         }
 
         private static bool VerifyIntegrityEntry(

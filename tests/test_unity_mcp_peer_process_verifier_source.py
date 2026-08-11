@@ -21,8 +21,11 @@ def test_peer_verifier_is_windows_owner_pid_fail_closed_contract() -> None:
     assert 'Path.Combine(root, "backend", "vrcforge_backend.exe")' in source
     assert 'Path.Combine(root, "payload-integrity.json")' in source
     assert '"vrcforge.payload-integrity.v1"' in source
-    assert "VRCForgeMcpTrustedRelease.DesktopSha256" in source
-    assert "VRCForgeMcpTrustedRelease.BackendSha256" in source
+    assert "VRCForgeMcpTrustedRelease.AssetPath" in source
+    assert 'manifest["desktopSha256"]' in source
+    assert 'manifest["backendSha256"]' in source
+    assert "manifest.Count != 3" in source
+    assert "Properties().Count()" not in source
     assert 'VerifyIntegrityEntry(files, "desktop", "VRCForge.exe", expectedParent, expectedDesktopDigest)' in source
     assert 'VerifyIntegrityEntry(files, "backend", "backend/vrcforge_backend.exe", expectedBackend, expectedBackendDigest)' in source
     assert "ConstantTimeTextEquals(manifestDigest, releaseDigest)" in source
@@ -49,6 +52,22 @@ def test_peer_verifier_never_uses_caller_claims_or_development_fallbacks() -> No
 
 def test_source_tree_keeps_managed_peer_lane_unbound_until_release_pairing() -> None:
     trusted_release = (SOURCE.parent / "VRCForgeMcpTrustedRelease.cs").read_text(encoding="utf-8")
+    trusted_release_data = (SOURCE.parent / "VRCForgeMcpTrustedRelease.json").read_text(encoding="utf-8")
 
-    assert 'internal const string DesktopSha256 = "";' in trusted_release
-    assert 'internal const string BackendSha256 = "";' in trusted_release
+    assert 'internal const string AssetPath = "Assets/VRCForge/Editor/MCP/VRCForgeMcpTrustedRelease.json";' in trusted_release
+    assert "DesktopSha256" not in trusted_release
+    assert "BackendSha256" not in trusted_release
+    assert '"schema": "vrcforge.trusted-release.v1"' in trusted_release_data
+    assert '"desktopSha256": ""' in trusted_release_data
+    assert '"backendSha256": ""' in trusted_release_data
+
+
+def test_peer_verifier_reads_release_pairing_from_runtime_asset_not_compiled_constants() -> None:
+    source = SOURCE.read_text(encoding="utf-8")
+
+    assert "VRCForgeMcpTrustedRelease.AssetPath" in source
+    assert '"vrcforge.trusted-release.v1"' in source
+    assert 'manifest["desktopSha256"]' in source
+    assert 'manifest["backendSha256"]' in source
+    assert "VRCForgeMcpTrustedRelease.DesktopSha256" not in source
+    assert "VRCForgeMcpTrustedRelease.BackendSha256" not in source

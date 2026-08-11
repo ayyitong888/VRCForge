@@ -885,22 +885,15 @@ try {
     if ($trustedDesktopSha256 -notmatch '^[0-9a-f]{64}$' -or $trustedBackendSha256 -notmatch '^[0-9a-f]{64}$') {
         throw "The paired VRCForge desktop/backend SHA-256 values are invalid."
     }
-    $trustedReleaseSourcePath = Join-Path $vrcforgeCorePayloadRoot "Editor\MCP\VRCForgeMcpTrustedRelease.cs"
-    $trustedReleaseSource = @"
-namespace VRCForge.Editor
-{
-    // Generated only in the staged release payload. Do not copy these values
-    // back into the source tree.
-    internal static class VRCForgeMcpTrustedRelease
-    {
-        internal const string DesktopSha256 = "$trustedDesktopSha256";
-        internal const string BackendSha256 = "$trustedBackendSha256";
-    }
-}
-"@
+    $trustedReleaseDataPath = Join-Path $vrcforgeCorePayloadRoot "Editor\MCP\VRCForgeMcpTrustedRelease.json"
+    $trustedReleaseData = [ordered]@{
+        schema = "vrcforge.trusted-release.v1"
+        desktopSha256 = $trustedDesktopSha256
+        backendSha256 = $trustedBackendSha256
+    } | ConvertTo-Json -Depth 2
     [System.IO.File]::WriteAllText(
-        $trustedReleaseSourcePath,
-        $trustedReleaseSource + [Environment]::NewLine,
+        $trustedReleaseDataPath,
+        $trustedReleaseData + [Environment]::NewLine,
         [System.Text.UTF8Encoding]::new($false))
 
     if ([string]::IsNullOrWhiteSpace($UnityPackagePath)) {

@@ -12268,7 +12268,9 @@ class DashboardServerTests(unittest.TestCase):
     def test_release_payload_excludes_dynamic_unity_mcp_execution_files(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
         self.assertIn("Assets\\VRCForge", script)
-        self.assertIn("Editor\\MCP\\VRCForgeMcpTrustedRelease.cs", script)
+        self.assertIn("Editor\\MCP\\VRCForgeMcpTrustedRelease.json", script)
+        self.assertNotIn("$trustedReleaseSourcePath", script)
+        self.assertNotIn("internal const string DesktopSha256", script)
         self.assertIn("build_unitypackage.ps1", script)
         self.assertIn("VRCForge.unitypackage", script)
         self.assertNotIn("Editor\\Tools\\ExecuteCode.cs", script)

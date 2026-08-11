@@ -48,6 +48,7 @@
     { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpSourceMigration.cs", "guid": "50e025b801d71f294fd27e0836495946" },
     { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpToolContract.cs", "guid": "0f2deb37e891ea663ae249d72ab1287e" },
     { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpTrustedRelease.cs", "guid": "3e93945bf8684c27886af32aacb460ea" },
+    { "path": "Assets/VRCForge/Editor/MCP/VRCForgeMcpTrustedRelease.json", "guid": "2b1fe687d6f68a50dab7b4a3bd4e2c25" },
     { "path": "Assets/VRCForge/Editor/MaterialShaderTool.cs", "guid": "d3a7994c864100402964384d1e5fc6b8" },
     { "path": "Assets/VRCForge/Editor/MaterialTuningApplier.cs", "guid": "7cf23143450547e49085e10ec70d0d90" },
     { "path": "Assets/VRCForge/Editor/McpBridgeBootstrap.cs", "guid": "a9954f97ccf74dfbb14eb1adf88df02d" },

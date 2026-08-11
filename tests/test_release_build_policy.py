@@ -622,7 +622,7 @@ def test_release_pairs_unity_core_with_exact_desktop_and_backend_payloads() -> N
 
     desktop_hash = source.index("$trustedDesktopSha256 =")
     backend_hash = source.index("$trustedBackendSha256 =")
-    generated_core = source.index("$trustedReleaseSourcePath =")
+    generated_core = source.index("$trustedReleaseDataPath =")
     package_build = source.index(
         "-SourceAssetsPath $vrcforgeCorePayloadRoot -OutputPath $UnityPackagePath"
     )
@@ -630,8 +630,11 @@ def test_release_pairs_unity_core_with_exact_desktop_and_backend_payloads() -> N
 
     assert desktop_hash < generated_core < package_build < manifest
     assert backend_hash < generated_core
-    assert 'internal const string DesktopSha256 = "$trustedDesktopSha256";' in source
-    assert 'internal const string BackendSha256 = "$trustedBackendSha256";' in source
+    assert 'schema = "vrcforge.trusted-release.v1"' in source
+    assert "desktopSha256 = $trustedDesktopSha256" in source
+    assert "backendSha256 = $trustedBackendSha256" in source
+    assert "VRCForgeMcpTrustedRelease.json" in source
+    assert "$trustedReleaseSourcePath" not in source
     assert "sha256 = $trustedDesktopSha256" in source
     assert "sha256 = $trustedBackendSha256" in source
     assert '-SourceAssetsPath "Assets\\VRCForge"' not in source
