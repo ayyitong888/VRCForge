@@ -79,6 +79,7 @@ for (const selector of [
 }
 assert.ok(probeSource.includes("seedAndActivateContextualRuntimeChat"));
 assert.ok(probeSource.includes("session_id: sessionId"));
+assert.ok(probeSource.includes("if (!activityPanel.querySelector('[data-vrcforge-current-run-ledger]'))"));
 assert.ok(probeSource.includes("activityPanel.querySelector(':scope > button')?.click()"));
 assert.ok(probeSource.includes("operationOutsideEnvironmentPanel"));
 

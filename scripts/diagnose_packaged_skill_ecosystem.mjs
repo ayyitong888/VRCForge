@@ -4905,7 +4905,9 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
         checks.activityPanelFound = Boolean(activityPanel);
         checks.environmentPanelFound = Boolean(environmentPanel);
         if (activityPanel && !activityPanelOpened) {
-          activityPanel.querySelector(':scope > button')?.click();
+          if (!activityPanel.querySelector('[data-vrcforge-current-run-ledger]')) {
+            activityPanel.querySelector(':scope > button')?.click();
+          }
           activityPanelOpened = true;
           checks.activityPanelOpened = true;
           await sleep(100);
