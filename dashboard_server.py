@@ -13413,8 +13413,18 @@ def audit_managed_avatar_multi_screenshot_sync(
             if transient_provider_failure
             else {}
         )
+        failure_projection = (
+            _managed_visual_failure_projection(
+                failed_results,
+                retryable=transient_provider_failure,
+                retain_images=transient_provider_failure,
+            )
+            if failed_results
+            else {}
+        )
         return {
             **payload,
+            **failure_projection,
             "captureEvidenceVerified": True,
             "captureEvidenceId": evidence["captureEvidenceId"],
             "evidence": evidence["evidence"],
@@ -13430,6 +13440,95 @@ def audit_managed_avatar_multi_screenshot_sync(
             {"error": str(exc)},
         )
         raise to_http_exception(exc) from exc
+
+
+def _managed_visual_failure_projection(
+    failed_results: list[dict[str, Any]],
+    *,
+    retryable: bool,
+    retain_images: bool,
+) -> dict[str, Any]:
+    """Project one bounded Provider failure without retaining image payloads."""
+
+    first = failed_results[0] if failed_results else {}
+    provider_error = (
+        dict(first.get("providerError"))
+        if isinstance(first.get("providerError"), Mapping)
+        else {}
+    )
+    provider = str(provider_error.get("provider") or "").strip()[:80]
+    provider_label = str(
+        provider_error.get("providerLabel") or provider
+    ).strip()[:120]
+    model = str(provider_error.get("model") or "").strip()[:180]
+    source = str(provider_error.get("source") or "").strip()[:40]
+    error_type = str(
+        provider_error.get("errorType") or "visual_audit_failed"
+    ).strip()[:80]
+    error_text = " ".join(
+        str(
+            provider_error.get("error")
+            or first.get("error")
+            or "Visual provider request failed."
+        ).split()
+    )[:500]
+    route = " · ".join(
+        item for item in (provider_label or provider, model) if item
+    )
+    route_context = ", ".join(
+        item
+        for item in (
+            f"source={source}" if source else "",
+            f"errorType={error_type}",
+        )
+        if item
+    )
+    disposition = "retained_for_bounded_retry" if retryable and retain_images else "discarded"
+    disposition_text = (
+        "The managed images were retained for one bounded retry."
+        if disposition == "retained_for_bounded_retry"
+        else "Original images were discarded."
+    )
+    prefix = f"{route} " if route else ""
+    if route_context:
+        prefix += f"({route_context}): "
+    summary = f"{prefix}{error_text}. {disposition_text}"[:600]
+    next_actions = (
+        ["Retry once with the reissued managed capture receipt."]
+        if disposition == "retained_for_bounded_retry"
+        else ["Reattach images, or approve a fresh managed capture before retrying."]
+    )
+    planner_evidence = {
+        "schema": "vrcforge.visual_provider_failure.v1",
+        "provider": provider,
+        "providerLabel": provider_label,
+        "model": model,
+        "source": source,
+        "errorType": error_type,
+        "error": error_text,
+        "retryable": bool(retryable),
+        "retainImages": bool(retain_images),
+        "disposition": disposition,
+    }
+    return {
+        "status": "failed" if retryable else "needs_user_action",
+        "summary": summary,
+        "error": {
+            "type": error_type,
+            "code": error_type,
+            "summary": summary,
+            "likelyCauses": [],
+            "nextActions": next_actions,
+            "retryable": bool(retryable),
+            "provider": provider,
+            "providerLabel": provider_label,
+            "model": model,
+            "source": source,
+            "retainImages": bool(retain_images),
+            "disposition": disposition,
+        },
+        "plannerEvidence": planner_evidence,
+    }
 
 
 def audit_managed_avatar_multi_screenshot_for_agent(
@@ -20298,11 +20397,55 @@ def register_agent_gateway_tools() -> None:
         write=True,
         requires_user_activation=True,
     )
-    AGENT_GATEWAY.register_tool("vrcforge_progress_list", "List the current agent progress items for a session or project.", "read/debug", lambda params: AGENT_GATEWAY.list_agent_progress(limit=int(ensure_dict(params or {}).get("limit") or 50), session_id=str(ensure_dict(params or {}).get("sessionId") or ensure_dict(params or {}).get("session_id") or ""), project_root=str(ensure_dict(params or {}).get("projectRoot") or ensure_dict(params or {}).get("project_root") or ensure_dict(params or {}).get("projectPath") or "")))
-    AGENT_GATEWAY.register_tool("vrcforge_progress_replace", "Replace the visible agent progress list, similar to a TodoWrite plan update.", "plan/preview", lambda params: AGENT_GATEWAY.replace_agent_progress(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_progress_create", "Create one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.create_agent_progress(params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_progress_update", "Update one visible agent progress item title, summary, order, or status.", "plan/preview", lambda params: AGENT_GATEWAY.update_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
-    AGENT_GATEWAY.register_tool("vrcforge_progress_delete", "Delete one visible agent progress item.", "plan/preview", lambda params: AGENT_GATEWAY.delete_agent_progress(str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""), params or {}))
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_progress_list",
+        "List the current user-visible TODO items shown in the upper-right workspace rail for this session or project.",
+        "read/debug",
+        lambda params: AGENT_GATEWAY.list_agent_progress(
+            limit=int(ensure_dict(params or {}).get("limit") or 50),
+            session_id=str(
+                ensure_dict(params or {}).get("sessionId")
+                or ensure_dict(params or {}).get("session_id")
+                or ""
+            ),
+            project_root=str(
+                ensure_dict(params or {}).get("projectRoot")
+                or ensure_dict(params or {}).get("project_root")
+                or ensure_dict(params or {}).get("projectPath")
+                or ""
+            ),
+        ),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_progress_replace",
+        "Replace the complete user-visible TODO list shown in the upper-right workspace rail when a multi-step task needs a fresh plan.",
+        "plan/preview",
+        lambda params: AGENT_GATEWAY.replace_agent_progress(params or {}),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_progress_create",
+        "Create one user-visible TODO item in the upper-right workspace rail without replacing the existing list.",
+        "plan/preview",
+        lambda params: AGENT_GATEWAY.create_agent_progress(params or {}),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_progress_update",
+        "Update one user-visible TODO item's title, summary, order, or status in the upper-right workspace rail as the task changes.",
+        "plan/preview",
+        lambda params: AGENT_GATEWAY.update_agent_progress(
+            str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""),
+            params or {},
+        ),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_progress_delete",
+        "Delete one obsolete user-visible TODO item from the upper-right workspace rail.",
+        "plan/preview",
+        lambda params: AGENT_GATEWAY.delete_agent_progress(
+            str(ensure_dict(params or {}).get("progressId") or ensure_dict(params or {}).get("id") or ""),
+            params or {},
+        ),
+    )
     AGENT_GATEWAY.register_tool("vrcforge_ask_user", "Ask the user a short question with selectable options while the agent task continues.", "plan/preview", lambda params: AGENT_GATEWAY.questions.create(params or {}))
     AGENT_GATEWAY.register_tool(
         "vrcforge_delegate_subagent",

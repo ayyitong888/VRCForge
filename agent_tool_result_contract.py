@@ -112,7 +112,7 @@ def _structured_error(views: list[Mapping[str, Any]]) -> dict[str, Any]:
             ),
             None,
         )
-    return {
+    projected = {
         "type": error_type,
         "code": code,
         "likelyCauses": _bounded_text_list(source.get("likelyCauses")),
@@ -120,6 +120,36 @@ def _structured_error(views: list[Mapping[str, Any]]) -> dict[str, Any]:
         "retryable": retryable_value,
         "summary": str(source.get("summary") or source.get("message") or "").strip()[:600],
     }
+    for key, limit in (
+        ("provider", 80),
+        ("providerLabel", 120),
+        ("model", 180),
+        ("source", 40),
+        ("disposition", 80),
+    ):
+        value = source.get(key)
+        if isinstance(value, str) and value.strip():
+            projected[key] = value.strip()[:limit]
+    retain_images = source.get("retainImages")
+    if isinstance(retain_images, bool):
+        projected["retainImages"] = retain_images
+    return projected
+
+
+def _structured_error_route_fields(projected_error: Mapping[str, Any]) -> dict[str, Any]:
+    route: dict[str, Any] = {}
+    for key in (
+        "provider",
+        "providerLabel",
+        "model",
+        "source",
+        "retainImages",
+        "disposition",
+    ):
+        value = projected_error.get(key)
+        if value not in (None, ""):
+            route[key] = value
+    return route
 
 
 def _verification(
@@ -274,6 +304,7 @@ def normalize_agent_tool_result(
                 if isinstance(projected_error["retryable"], bool)
                 else False
             ),
+            **_structured_error_route_fields(projected_error),
         }
     elif needs_action:
         status = "needs_user_action"
@@ -307,6 +338,7 @@ def normalize_agent_tool_result(
                 if isinstance(projected_error["retryable"], bool)
                 else False
             ),
+            **_structured_error_route_fields(projected_error),
         }
     else:
         status = "ok"

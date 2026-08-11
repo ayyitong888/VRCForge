@@ -124,6 +124,7 @@
     "runStatusPending": "待处理",
     "runStatusUnknown": "未知",
     "progress": "进度",
+    "todo": "待办",
     "questions": "待回答",
     "noProgress": "暂无计划",
     "progressPending": "待开始",

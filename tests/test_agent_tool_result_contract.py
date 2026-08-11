@@ -65,6 +65,53 @@ def test_structured_tool_error_preserves_only_bounded_correction_fields() -> Non
     assert "rawDump" not in str(outcome)
 
 
+def test_visual_provider_error_preserves_bounded_route_and_image_disposition() -> None:
+    outcome = normalize_agent_tool_result(
+        {
+            "ok": False,
+            "status": "needs_user_action",
+            "summary": (
+                "DeepSeek · deepseek-chat (source=main, errorType=provider_rejected): "
+                "HTTP 400 images are not supported. Original images were discarded."
+            ),
+            "error": {
+                "type": "provider_rejected",
+                "code": "provider_rejected",
+                "summary": "HTTP 400 images are not supported",
+                "retryable": False,
+                "provider": "deepseek",
+                "providerLabel": "DeepSeek",
+                "model": "deepseek-chat",
+                "source": "main",
+                "retainImages": False,
+                "disposition": "discarded",
+                "rawResponse": "must-not-be-projected",
+            },
+        },
+        fallback_summary="Audit the managed images.",
+        write=False,
+    )
+
+    assert outcome["status"] == "needs_user_action"
+    assert "HTTP 400 images are not supported" in outcome["summary"]
+    assert outcome["error"] == {
+        "type": "provider_rejected",
+        "code": "provider_rejected",
+        "likelyCauses": [],
+        "nextActions": [
+            "Inspect the tool result and complete the required verification."
+        ],
+        "retryable": False,
+        "provider": "deepseek",
+        "providerLabel": "DeepSeek",
+        "model": "deepseek-chat",
+        "source": "main",
+        "retainImages": False,
+        "disposition": "discarded",
+    }
+    assert "rawResponse" not in str(outcome)
+
+
 def test_unverified_write_requires_user_action_and_blocks_completion_claim() -> None:
     outcome = normalize_agent_tool_result(
         {

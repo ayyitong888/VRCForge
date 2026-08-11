@@ -1,7 +1,9 @@
 import { Box, Boxes, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import type { AgentProgress } from "../../lib/api";
 import { cn } from "../../lib/utils";
+import { AgentTodoPanel } from "./agent-todo-panel";
 import { RuntimeInfoRow, StatusDot } from "./runtime-sidebar-ui";
 
 type ComponentStatus = { status: string; message?: string } | null | undefined;
@@ -22,6 +24,7 @@ export function RightRuntimeSidebar({
   unityBridgeComponent,
   unityInstanceComponent,
   unityToolsComponent,
+  agentProgress,
   approvalsLoaded,
   pendingApprovals,
   refreshUnityStatus,
@@ -40,6 +43,7 @@ export function RightRuntimeSidebar({
   unityBridgeComponent: ComponentStatus;
   unityInstanceComponent: ComponentStatus;
   unityToolsComponent: ComponentStatus;
+  agentProgress: AgentProgress[];
   approvalsLoaded: boolean;
   pendingApprovals: number;
   refreshUnityStatus: () => void | Promise<void>;
@@ -87,6 +91,8 @@ export function RightRuntimeSidebar({
       </div>
 
       <div className="app-scrollbar min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        <AgentTodoPanel progress={agentProgress} />
+
         <div className="rounded-xl border border-border/80 bg-background/65 px-3 py-2 shadow-sm">
           <div data-vrcforge-status="project">
             <RuntimeInfoRow

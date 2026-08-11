@@ -208,6 +208,46 @@ def test_direct_tool_result_contract_rejects_inner_failure_and_unverified_comple
     assert requested["approvalId"] == "approval-1"
 
 
+def test_direct_visual_failure_uses_provider_error_not_tool_description() -> None:
+    visual = FakeTool(
+        name="vrcforge_vision_audit_multi",
+        description="Generic visual tool description that must not replace the Provider error.",
+        handler=lambda _params: {
+            "ok": False,
+            "status": "needs_user_action",
+            "summary": (
+                "DeepSeek · deepseek-chat (source=main, errorType=provider_rejected): "
+                "HTTP 400 images are not supported. Original images were discarded."
+            ),
+            "error": {
+                "type": "provider_rejected",
+                "code": "provider_rejected",
+                "summary": "HTTP 400 images are not supported",
+                "retryable": False,
+                "provider": "deepseek",
+                "providerLabel": "DeepSeek",
+                "model": "deepseek-chat",
+                "source": "main",
+                "retainImages": False,
+                "disposition": "discarded",
+            },
+        },
+    )
+    executor, events = make_executor(tools={visual.name: visual})
+
+    result = executor.execute(visual.name, {"captureReceipt": "opaque"}, "agent")
+
+    assert result["status"] == "needs_user_action"
+    assert result["outcome"]["status"] == "needs_user_action"
+    assert "HTTP 400 images are not supported" in result["outcome"]["summary"]
+    assert "Generic visual tool description" not in result["outcome"]["summary"]
+    assert result["outcome"]["error"]["provider"] == "deepseek"
+    assert result["outcome"]["error"]["model"] == "deepseek-chat"
+    assert result["outcome"]["error"]["source"] == "main"
+    assert result["outcome"]["error"]["retainImages"] is False
+    assert events[-1][1]["status"] == "needs_user_action"
+
+
 def test_blocked_invisible_and_user_activated_tools_keep_existing_policy() -> None:
     blocked = FakeTool(name="blocked-tool")
     write = FakeTool(name="write-tool", category="advanced", write=True)

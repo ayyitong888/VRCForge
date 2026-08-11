@@ -3671,7 +3671,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(created.status_code, 200)
         self.assertEqual([option["id"] for option in created.json()["question"]["options"]], ["a", "b", "c", "d"])
 
-    def test_agent_progress_and_question_tools_are_callable_but_computer_use_needs_app_turn(self) -> None:
+    def test_agent_todo_crud_and_question_tools_are_callable_but_computer_use_needs_app_turn(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
@@ -3687,6 +3687,58 @@ class DashboardServerTests(unittest.TestCase):
                         "sessionId": "sess-tool-progress",
                         "projectRoot": "ProjectA",
                         "items": [{"id": "tool-step", "title": "Tool-visible progress", "status": "in_progress"}],
+                    },
+                },
+            )
+            created = client.post(
+                "/api/agent/tool/vrcforge_progress_create",
+                headers=headers,
+                json={
+                    "agentName": "pytest-agent",
+                    "params": {
+                        "sessionId": "sess-tool-progress",
+                        "projectRoot": "ProjectA",
+                        "title": "Agent-created TODO",
+                        "status": "pending",
+                        "order": 2,
+                    },
+                },
+            )
+            progress_id = created.json()["result"]["progress"]["progressId"]
+            listed = client.post(
+                "/api/agent/tool/vrcforge_progress_list",
+                headers=headers,
+                json={
+                    "agentName": "pytest-agent",
+                    "params": {
+                        "sessionId": "sess-tool-progress",
+                        "projectRoot": "ProjectA",
+                    },
+                },
+            )
+            updated = client.post(
+                "/api/agent/tool/vrcforge_progress_update",
+                headers=headers,
+                json={
+                    "agentName": "pytest-agent",
+                    "params": {
+                        "sessionId": "sess-tool-progress",
+                        "projectRoot": "ProjectA",
+                        "progressId": progress_id,
+                        "status": "completed",
+                        "summary": "Updated through the Agent Skill entrypoint.",
+                    },
+                },
+            )
+            deleted = client.post(
+                "/api/agent/tool/vrcforge_progress_delete",
+                headers=headers,
+                json={
+                    "agentName": "pytest-agent",
+                    "params": {
+                        "sessionId": "sess-tool-progress",
+                        "projectRoot": "ProjectA",
+                        "progressId": progress_id,
                     },
                 },
             )
@@ -3722,6 +3774,13 @@ class DashboardServerTests(unittest.TestCase):
             snapshot = client.get("/api/app/runtime/snapshot", params={"sessionId": "sess-tool-progress", "projectRoot": "ProjectA"})
 
         self.assertEqual(progress.status_code, 200)
+        self.assertEqual(created.status_code, 200)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["result"]["count"], 2)
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()["result"]["progress"]["status"], "completed")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json()["result"]["progress"]["status"], "deleted")
         self.assertEqual(question.status_code, 200)
         self.assertEqual(desktop_action.status_code, 200)
         self.assertFalse(desktop_action.json()["ok"])
@@ -7793,9 +7852,17 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Expression Parameters asset", parameters_tool["description"])
         self.assertIn("FX Animator layers/states", parameters_tool["description"])
         self.assertNotIn("vrcforge_agent_desktop_action", tool_names)
-        self.assertIn("vrcforge_progress_replace", tool_names)
-        self.assertIn("vrcforge_progress_update", tool_names)
-        self.assertIn("vrcforge_progress_delete", tool_names)
+        todo_tool_names = {
+            "vrcforge_progress_list",
+            "vrcforge_progress_replace",
+            "vrcforge_progress_create",
+            "vrcforge_progress_update",
+            "vrcforge_progress_delete",
+        }
+        self.assertTrue(todo_tool_names.issubset(tool_names))
+        todo_tools = [tool for tool in payload["tools"] if tool["name"] in todo_tool_names]
+        self.assertTrue(all("user-visible TODO" in tool["description"] for tool in todo_tools))
+        self.assertTrue(all("upper-right workspace rail" in tool["description"] for tool in todo_tools))
         self.assertIn("vrcforge_ask_user", tool_names)
         self.assertIn("vrcforge_classify_shell", tool_names)
         self.assertIn("vrcforge_execute_shell", tool_names)
@@ -16261,6 +16328,45 @@ namespace VRCForge.Editor
         self.assertFalse(payload["retainImages"])
         self.assertNotIn("captureReceipt", payload)
         self.assertEqual(payload["results"][0]["providerError"]["provider"], "deepseek")
+        self.assertEqual(payload["status"], "needs_user_action")
+        self.assertIn("DeepSeek", payload["summary"])
+        self.assertIn("deepseek-chat", payload["summary"])
+        self.assertIn("HTTP 400 images are not supported", payload["summary"])
+        self.assertIn("discarded", payload["summary"])
+        self.assertEqual(
+            payload["error"],
+            {
+                "type": "provider_rejected",
+                "code": "provider_rejected",
+                "summary": payload["summary"],
+                "likelyCauses": [],
+                "nextActions": [
+                    "Reattach images, or approve a fresh managed capture before retrying."
+                ],
+                "retryable": False,
+                "provider": "deepseek",
+                "providerLabel": "DeepSeek",
+                "model": "deepseek-chat",
+                "source": "main",
+                "retainImages": False,
+                "disposition": "discarded",
+            },
+        )
+        self.assertEqual(
+            payload["plannerEvidence"],
+            {
+                "schema": "vrcforge.visual_provider_failure.v1",
+                "provider": "deepseek",
+                "providerLabel": "DeepSeek",
+                "model": "deepseek-chat",
+                "source": "main",
+                "errorType": "provider_rejected",
+                "error": "HTTP 400 images are not supported",
+                "retryable": False,
+                "retainImages": False,
+                "disposition": "discarded",
+            },
+        )
         self.assertNotIn("imagePath", json.dumps(payload))
 
     def test_agent_managed_vision_consumes_only_its_prior_capture_action(self) -> None:

@@ -124,6 +124,7 @@
     "runStatusPending": "pending",
     "runStatusUnknown": "unknown",
     "progress": "Progress",
+    "todo": "Todo",
     "questions": "Questions",
     "noProgress": "No plan yet",
     "progressPending": "pending",

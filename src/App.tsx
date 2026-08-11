@@ -3345,7 +3345,6 @@ export default function App() {
               activityPanel={
                 sessionId ? (
                   <RuntimeActivityPanel
-                    progress={agentProgress}
                     runs={runtimeRuns}
                     error={runtimeRunsError}
                     onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
@@ -3407,6 +3406,7 @@ export default function App() {
               unityBridgeComponent={unityBridgeComponent}
               unityInstanceComponent={unityInstanceComponent}
               unityToolsComponent={unityToolsComponent}
+              agentProgress={agentProgress}
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
               refreshUnityStatus={refreshUnityStatus}

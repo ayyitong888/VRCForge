@@ -188,6 +188,18 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
             ],
             "retryable": error.get("retryable") is True,
         }
+        for key, limit in (
+            ("provider", 80),
+            ("providerLabel", 120),
+            ("model", 180),
+            ("source", 40),
+            ("disposition", 80),
+        ):
+            text = _bounded_text(error.get(key), limit)
+            if text:
+                bounded_error[key] = text
+        if isinstance(error.get("retainImages"), bool):
+            bounded_error["retainImages"] = error["retainImages"]
     return {
         "status": _bounded_text(value.get("status"), 40),
         "summary": _bounded_text(value.get("summary"), 600),

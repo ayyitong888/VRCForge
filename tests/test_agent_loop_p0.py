@@ -2310,6 +2310,147 @@ class AgentLoopP0Tests(unittest.TestCase):
             ["canonical_tool_result", "multi_angle_visual"],
         )
 
+    def test_permanent_visual_provider_rejection_refeeds_route_and_discards_images(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        message = "Capture front and back views, then run a visual audit."
+
+        with patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_api_config",
+            return_value=SimpleNamespace(
+                provider="deepseek",
+                api_key="fixture-key",
+                base_url="https://api.deepseek.com",
+                model="deepseek-chat",
+            ),
+        ), patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_vision_config",
+            return_value=SimpleNamespace(
+                provider="",
+                api_key="",
+                base_url="",
+                model="",
+                enabled=False,
+            ),
+        ), patch(
+            "dashboard_server.request_llm_plan_with_metadata",
+            side_effect=AssertionError("a permanent visual rejection must terminate deterministically"),
+        ) as request_model:
+            initial = gateway.runtime_message(
+                {
+                    "message": message,
+                    "provider": "deepseek",
+                    "model": "deepseek-chat",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
+                    "session_id": "managed-visual-rejection-session",
+                    "client_turn_id": "managed-visual-rejection-turn",
+                }
+            )
+
+            approval_id = initial["approvalId"]
+            stored_approval = gateway._approvals[approval_id]
+            task_context = stored_approval["taskContext"]
+            capture_result = {
+                "ok": True,
+                "captureReceipt": "managed-rejected-visual-receipt",
+                "captureEvidenceId": "visual-rejected-fixture",
+                "angles": ["front", "back"],
+                "evidence": [
+                    {"ref": "visual-rejected-fixture", "kind": "managed_visual_capture"}
+                ],
+            }
+            completion = approval_completion(
+                task_context,
+                raw_result=capture_result,
+                outcome={
+                    "status": "ok",
+                    "summary": "The approved multi-angle capture completed.",
+                    "evidence": capture_result["evidence"],
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            )
+            self.assertIsNotNone(completion)
+            terminal_approval = {**stored_approval, "status": "applied"}
+            execution = {
+                "status": "applied",
+                "result": capture_result,
+                "taskCompletion": completion,
+                "approval": terminal_approval,
+                "checkpoint": {"id": "checkpoint-managed-visual-rejected", "ok": True},
+            }
+            provider_summary = (
+                "DeepSeek · deepseek-chat (source=main, errorType=provider_rejected): "
+                "HTTP 400 images are not supported. Original images were discarded."
+            )
+
+            def execute_visual_audit(
+                _owner,
+                tool_name,
+                params,
+                agent_name=None,
+                owner_id="",
+            ):
+                self.assertEqual(tool_name, "vrcforge_vision_audit_multi")
+                self.assertEqual(params["captureReceipt"], "managed-rejected-visual-receipt")
+                return {
+                    "ok": True,
+                    "status": "needs_user_action",
+                    "tool": tool_name,
+                    "result": {
+                        "ok": False,
+                        "status": "needs_user_action",
+                        "summary": provider_summary,
+                        "retryable": False,
+                        "retainImages": False,
+                    },
+                    "outcome": {
+                        "status": "needs_user_action",
+                        "summary": provider_summary,
+                        "error": {
+                            "type": "provider_rejected",
+                            "code": "provider_rejected",
+                            "retryable": False,
+                            "provider": "deepseek",
+                            "providerLabel": "DeepSeek",
+                            "model": "deepseek-chat",
+                            "source": "main",
+                            "retainImages": False,
+                            "disposition": "discarded",
+                        },
+                        "evidence": [],
+                        "verification": {"state": "not_required", "checks": []},
+                    },
+                }
+
+            with patch.object(
+                type(gateway.runtime_skills),
+                "execute",
+                autospec=True,
+                side_effect=execute_visual_audit,
+            ) as execute_skill:
+                continuation = gateway.resume_runtime_task_after_approval(
+                    terminal_approval,
+                    execution,
+                )
+
+        request_model.assert_not_called()
+        execute_skill.assert_called_once()
+        self.assertIsNotNone(continuation)
+        self.assertEqual(continuation["plan"]["nextStep"], "needs_user_action", continuation)
+        self.assertEqual(continuation["task"]["status"], "needs_user_action")
+        self.assertEqual(continuation["plan"]["reply"], provider_summary)
+        self.assertNotIn("Audit one frozen fixed-angle", continuation["plan"]["reply"])
+        audit_action = continuation["task"]["actions"][-1]
+        self.assertEqual(audit_action["tool"], "vrcforge_vision_audit_multi")
+        self.assertEqual(audit_action["status"], "needs_user_action")
+        self.assertEqual(audit_action["outcome"]["error"]["provider"], "deepseek")
+        self.assertEqual(audit_action["outcome"]["error"]["model"], "deepseek-chat")
+        self.assertFalse(audit_action["outcome"]["error"]["retainImages"])
+        self.assertEqual(audit_action["outcome"]["error"]["disposition"], "discarded")
+
     def test_visual_audit_without_provider_capability_creates_no_capture_approval(self) -> None:
         gateway = self.gateway
         project = self._unity_project()

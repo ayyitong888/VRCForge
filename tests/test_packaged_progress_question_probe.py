@@ -122,9 +122,11 @@ def test_question_probe_contract_covers_auth_scope_redaction_and_restart() -> No
     assert 'appApi("/api/app/agent/progress/replace", {' in source
     assert "Array.from({ length: 8 }" in source
     assert "optionScroller.scrollHeight > optionScroller.clientHeight" in source
-    assert "progressInActivityPanel" in source
+    assert "progressInTodoPanel" in source
+    assert 'document.querySelector("[data-vrcforge-agent-todo]")' in source
     assert 'document.querySelector("[data-vrcforge-runtime-activity-panel]")' in source
-    assert "environmentPanelFound && activityPanelFound && !activityInsideEnvironment" in source
+    assert "environmentPanelFound && todoPanelFound && todoInsideEnvironment && !activityInsideEnvironment" in source
+    assert "!progressInActivityPanel" in source
     assert "questionInRightRail" in source
     assert "recommendedVisible" in source
     assert "phase.clickOption = await evalValue" in source
