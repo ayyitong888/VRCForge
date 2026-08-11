@@ -76,6 +76,13 @@ const requiredPackageSupportFiles = new Map([
   ["outfit-naming-helper", ["workflows/outfit-naming-helper.json"]],
   ["optimizer-report-helper", ["workflows/optimizer-report-helper.json"]],
 ]);
+const requiredUnityMcpFixtureRelativePaths = [
+  "Assets/VRCForge/Core/MCP/VRCForgeCommandAttribute.cs",
+  "Assets/VRCForge/Core/MCP/VRCForgeInputAttribute.cs",
+  "Assets/VRCForge/Core/MCP/VRCForgeToolRegistry.cs",
+  "Assets/VRCForge/Core/MCP/VRCForgeToolResult.cs",
+  "Assets/VRCForge/Editor/MCP/VRCForgeMcpCoreServer.cs",
+];
 const exampleSlugs = [
   "validation-report-extension",
   "material-preset-pack",
@@ -2132,6 +2139,12 @@ async function writeIsolatedFixtures() {
     writeFile(resolve(projectRoot, "Packages", "manifest.json"), "{\"dependencies\":{}}\n", "utf8"),
     writeFile(resolve(projectRoot, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: packaged-fixture\n", "utf8"),
   ]);
+  for (const relativePath of requiredUnityMcpFixtureRelativePaths) {
+    const sourcePath = resolve(packagedRoot, "unity_plugin", relativePath);
+    const targetPath = resolve(projectRoot, relativePath);
+    await mkdir(dirname(targetPath), { recursive: true });
+    await writeFile(targetPath, await readFile(sourcePath));
+  }
 
   const fakeCli = `param([Parameter(ValueFromRemainingArguments = $true)][string[]]$CliArgs)
 $toolName = ''
@@ -5031,6 +5044,9 @@ async function exerciseAuditUi(
       const rowSignatures = () => rowElements().map((row) => JSON.stringify(rowSemanticValue(row)));
       const statusText = () => String(status.textContent || "").trim();
       const next = root.querySelector('button[data-vrcforge-skill-audit-next]');
+      const expectedGovernanceRows = ${JSON.stringify(expectedImportedGovernanceRows)};
+      const auditRowsReady = await waitFor(() => rowElements().length === 10 && next && !next.disabled, 15000);
+      if (!auditRowsReady) return { ok: false, reason: "audit rows did not become pageable" };
       const pageOne = rowSignatures();
       const initialStatus = statusText();
       const paginationAvailable = pageOne.length === 10 && next && !next.disabled;
@@ -5050,7 +5066,9 @@ async function exerciseAuditUi(
         select.dispatchEvent(new Event("change", { bubbles: true }));
       }
       const filterLiveUpdated = Boolean(importOption)
-        && await waitFor(() => statusText() && statusText() !== beforeFilterStatus);
+        && await waitFor(() => statusText()
+          && statusText() !== beforeFilterStatus
+          && eventValues().length === expectedGovernanceRows.length, 15000);
       const filteredTitles = eventValues();
       const filteredRows = rowSignatures();
       const filteredRowElements = rowElements();
@@ -5058,7 +5076,6 @@ async function exerciseAuditUi(
         && filteredTitles.length > 0
         && filteredTitles.every((value) => value === "skill_package_imported")
         && JSON.stringify(filteredRows) !== JSON.stringify(pageOne);
-      const expectedGovernanceRows = ${JSON.stringify(expectedImportedGovernanceRows)};
       const expectedGovernanceComplete = expectedGovernanceRows.length >= 4
         && expectedGovernanceRows.every((item) =>
           Array.isArray(item.identityValues)
@@ -5090,7 +5107,8 @@ async function exerciseAuditUi(
 
       nativeSelectSetter.call(select, "");
       select.dispatchEvent(new Event("change", { bubbles: true }));
-      await waitFor(() => eventValues().some((value) => value !== "skill_package_imported"));
+      await waitFor(() => rowElements().length === 10
+        && eventValues().some((value) => value !== "skill_package_imported"), 15000);
       const nativeInputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
       const beforeSearchRows = rowSignatures();
       const beforeSearchStatus = statusText();

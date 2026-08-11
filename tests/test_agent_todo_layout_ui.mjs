@@ -18,6 +18,7 @@ assert.match(todo, /workspace\.todo/);
 assert.match(todo, /progress\.map/);
 assert.match(sidebar, /<AgentTodoPanel progress=\{agentProgress\}/);
 assert.match(sidebar, /data-vrcforge-project-workbench/);
+assert.match(sidebar, /data-vrcforge-environment-status=\{projectWorkspace \? undefined : true\}/);
 assert.match(sidebar, /title=\{t\("workspace\.progress"\)\}/);
 assert.match(sidebar, /title=\{projectWorkspaceLabel\}/);
 assert.match(sidebar, /title=\{t\("workspace\.context"\)\}/);

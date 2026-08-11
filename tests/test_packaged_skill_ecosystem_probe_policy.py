@@ -69,3 +69,22 @@ def test_packaged_skill_probe_uses_explicit_app_quit_for_normal_shutdown() -> No
     assert "no unverified process was terminated" in source
     assert "CloseMainWindow" not in close
     assert "requestManagedBackendShutdown" not in close
+
+
+def test_packaged_skill_probe_seeds_current_mcp2_fixture_and_waits_for_audit_rows() -> None:
+    source = (
+        ROOT / "scripts" / "diagnose_packaged_skill_ecosystem.mjs"
+    ).read_text(encoding="utf-8")
+
+    assert "requiredUnityMcpFixtureRelativePaths" in source
+    for required in (
+        "VRCForgeCommandAttribute.cs",
+        "VRCForgeInputAttribute.cs",
+        "VRCForgeToolRegistry.cs",
+        "VRCForgeToolResult.cs",
+        "VRCForgeMcpCoreServer.cs",
+    ):
+        assert required in source
+    assert "auditRowsReady" in source
+    assert "rowElements().length === 10" in source
+    assert "eventValues().length === expectedGovernanceRows.length" in source
