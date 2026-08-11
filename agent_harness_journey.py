@@ -273,6 +273,16 @@ def project_runtime_journey(runtime_message: Mapping[str, Any]) -> dict[str, Any
     task_id = _identifier(task.get("taskId"), "task.taskId", limit=80)
     if str(completion.get("schema") or "").strip() != task_schema:
         _fail("journey_completion_mismatch", "Task and completion schemas do not match.")
+    completion_task_id = _identifier(
+        completion.get("taskId"),
+        "plan.taskCompletion.taskId",
+        limit=80,
+    )
+    if completion_task_id != task_id:
+        _fail(
+            "journey_completion_mismatch",
+            "Task and completion identities do not match.",
+        )
 
     actions = _list(task.get("actions"), "task.actions")
     requirements = _list(task.get("requirements"), "task.requirements")

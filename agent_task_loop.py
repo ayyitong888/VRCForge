@@ -1518,6 +1518,7 @@ class AgentTaskLoop:
         gated["nextStep"] = "done"
         gated["taskCompletion"] = {
             "schema": TASK_LOOP_SCHEMA,
+            "taskId": self.task_id,
             "status": "completed",
             "evidenceActionIds": completed_ids,
         }

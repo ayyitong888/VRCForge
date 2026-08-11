@@ -934,6 +934,43 @@ def latest_loop_step_needs_model_correction(
     return False
 
 
+def multi_angle_visual_journey_requires_provider(
+    message: str,
+    loop_state: list[dict[str, object]],
+    local_plan: Mapping[str, object],
+    exposure_layer: str,
+) -> bool:
+    """Keep an explicit capture-to-audit journey inside the Provider loop."""
+
+    if normalize_exposure_layer(exposure_layer) != EXPOSURE_LAYER_EXECUTION:
+        return False
+    intent = runtime_tool_intent_text(message)
+    if not intent or not has_multi_angle_visual_audit_intent(intent.casefold(), intent):
+        return False
+    completion_gate = local_plan.get("completionGate")
+    if isinstance(completion_gate, Mapping) and str(
+        completion_gate.get("reason") or ""
+    ).strip() == "visual_audit_unavailable":
+        return False
+    planned_tool = str(
+        local_plan.get("writeTool") or local_plan.get("skillTool") or ""
+    ).strip()
+    if planned_tool in {
+        "vrcforge_capture_multi_screenshot",
+        "vrcforge_vision_audit_multi",
+    }:
+        return True
+    for step in reversed(loop_state):
+        if not isinstance(step, Mapping):
+            continue
+        if str(step.get("tool") or "").strip() in {
+            "vrcforge_capture_multi_screenshot",
+            "vrcforge_vision_audit_multi",
+        }:
+            return True
+    return False
+
+
 def has_multi_angle_capture_intent(lowered_text: str, original_text: str) -> bool:
     if has_any(
         lowered_text,
@@ -1398,10 +1435,18 @@ class RuntimePlannerService:
                 exposure_layer=exposure_layer,
             )
             correction_needed = latest_loop_step_needs_model_correction(loop_state)
+            visual_journey_requires_provider = (
+                multi_angle_visual_journey_requires_provider(
+                    message,
+                    loop_state,
+                    local_plan,
+                    exposure_layer,
+                )
+            )
             # 关键词命中（明确的技能/命令/写入意图）直接走确定性路径：快、稳定、可测试。
             # A failed/needs-user-action tool observation must be shown to the
             # model before deterministic routing can replay the same action.
-            if not correction_needed and (
+            if not correction_needed and not visual_journey_requires_provider and (
                 local_plan.get("shellNeeded")
                 or local_plan.get("skillNeeded")
                 or local_plan.get("writeNeeded")
@@ -1410,7 +1455,11 @@ class RuntimePlannerService:
                 return local_plan
             # 确定性兜底已经给出明确的终止答复（例如「多个模型让用户选」「没找到模型」），
             # 这是确定结论，不交给 LLM 再编一遍。
-            if not correction_needed and local_plan.get("deterministicTerminal"):
+            if (
+                not correction_needed
+                and not visual_journey_requires_provider
+                and local_plan.get("deterministicTerminal")
+            ):
                 return local_plan
             # 本地规划没认出意图时，尝试 LLM 规划。
             llm_plan = self._llm_plan_agent_turn(
@@ -1723,6 +1772,45 @@ class RuntimePlannerService:
                 )
             route_is_write = bool(skill_route and skill_route.get("write"))
             route_is_visible = bool(skill_route and skill_route.get("visible"))
+            if (
+                visual_audit_receipt
+                and skill_route
+                and str(skill_route.get("tool") or "")
+                == "vrcforge_vision_audit_multi"
+                and not route_is_visible
+            ):
+                return {
+                    "summary": "Visual audit capability became unavailable after capture.",
+                    "reply": (
+                        "The approved multi-angle capture completed, but no visual model is "
+                        "currently configured. Configure the main model or Vision Profile, then "
+                        "continue; the capture has not been sent to a visual model."
+                    ),
+                    "planner": "deterministic-local",
+                    "plannerLabel": "",
+                    "deterministicTerminal": True,
+                    "userConstraintsApplied": constraints_applied,
+                    "shellNeeded": False,
+                    "shellCommand": "",
+                    "shellParams": {},
+                    "skillNeeded": False,
+                    "skillTool": "",
+                    "skillCategory": "",
+                    "skillParams": {},
+                    "writeNeeded": False,
+                    "writeTool": "",
+                    "writeParams": {},
+                    "continueLoop": False,
+                    "expectedResult": (
+                        "The managed capture remains unconsumed until visual audit capability "
+                        "is available."
+                    ),
+                    "nextStep": "needs_user_action",
+                    "completionGate": {
+                        "status": "needs_user_action",
+                        "reason": "visual_audit_unavailable",
+                    },
+                }
             route_requires_follow_up = bool(
                 route_is_write
                 and str(skill_route.get("tool") or "")

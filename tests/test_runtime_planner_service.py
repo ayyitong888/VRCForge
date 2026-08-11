@@ -798,7 +798,7 @@ def test_multi_angle_capture_intent_selects_the_supervised_multi_capture(message
         ),
     )
 
-    plan = service(catalog=catalog).plan_agent_turn(
+    plan = service(catalog=catalog)._local_plan_agent_turn(
         message,
         {},
         {},
@@ -862,7 +862,7 @@ def test_managed_multi_capture_receipt_routes_the_explicit_visual_audit_as_the_f
     )
     planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
 
-    plan = planner.plan_agent_turn(
+    plan = planner._local_plan_agent_turn(
         message,
         {},
         {},
@@ -888,6 +888,156 @@ def test_managed_multi_capture_receipt_routes_the_explicit_visual_audit_as_the_f
     assert plan["skillParams"] == {"captureReceipt": "managed-receipt"}
     assert plan["continueLoop"] is False
     assert plan["nextStep"] == "call_skill"
+
+
+def test_explicit_multi_angle_audit_execution_selection_is_provider_owned() -> None:
+    capture = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    audit = tool("vrcforge_vision_audit_multi")
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(capture, audit),
+        routable_tools=(capture, audit),
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "write",
+                    "write_tool": "vrcforge_capture_multi_screenshot",
+                    "write_params": {},
+                    "summary": "Capture the approved fixed-angle views.",
+                }
+            )
+        )
+    )
+
+    plan = service(
+        catalog=FakeCatalog(planning=snapshot, execution=snapshot),
+        model=model,
+    ).plan_agent_turn(
+        "Capture front and back views, then run a visual audit.",
+        {},
+        {},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert len(model.prompts) == 1
+    assert plan["planner"] == "llm"
+    assert plan["writeTool"] == "vrcforge_capture_multi_screenshot"
+    assert plan["continueLoop"] is True
+
+
+def test_successful_multi_angle_audit_result_is_refed_for_provider_completion() -> None:
+    capture = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    audit = tool("vrcforge_vision_audit_multi")
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(capture, audit),
+        routable_tools=(capture, audit),
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "reply",
+                    "reply": "The fixed-angle visual audit passed.",
+                    "completion_claim": {
+                        "satisfied": True,
+                        "evidence_action_ids": ["capture-action", "audit-action"],
+                    },
+                }
+            )
+        )
+    )
+    loop_state = [
+        {
+            "tool": "vrcforge_capture_multi_screenshot",
+            "kind": "write",
+            "actionId": "capture-action",
+            "status": "applied",
+            "result": {"captureReceipt": "consumed-capture"},
+            "outcome": {"status": "ok"},
+        },
+        {
+            "tool": "vrcforge_vision_audit_multi",
+            "kind": "skill",
+            "actionId": "audit-action",
+            "status": "executed",
+            "result": {"visualVerified": True, "coverageComplete": True},
+            "outcome": {"status": "ok"},
+        },
+    ]
+
+    plan = service(
+        catalog=FakeCatalog(planning=snapshot, execution=snapshot),
+        model=model,
+    ).plan_agent_turn(
+        "Capture front and back views, then run a visual audit.",
+        {},
+        {},
+        loop_state=loop_state,
+        context_usage={"requestCount": 2},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert len(model.prompts) == 1
+    assert "vrcforge_vision_audit_multi" in model.prompts[0]
+    assert plan["planner"] == "llm"
+    assert plan["nextStep"] == "done"
+
+
+def test_visual_provider_loss_after_capture_stops_before_model_resample() -> None:
+    capture = tool(
+        "vrcforge_capture_multi_screenshot",
+        category="supervised-write",
+        write=True,
+    )
+    audit = tool("vrcforge_vision_audit_multi")
+    model = FakeModel(PlannerModelResult('{"action":"reply","reply":"skip audit"}'))
+    planner = service(
+        catalog=FakeCatalog(
+            planning=PlannerCatalogSnapshot(
+                visible_tools=(),
+                routable_tools=(capture, audit),
+            ),
+            execution=PlannerCatalogSnapshot(
+                visible_tools=(capture,),
+                routable_tools=(capture, audit),
+            ),
+        ),
+        model=model,
+    )
+
+    plan = planner.plan_agent_turn(
+        "Capture front and back views, then run a visual audit.",
+        {},
+        {},
+        loop_state=[
+            {
+                "tool": "vrcforge_capture_multi_screenshot",
+                "kind": "write",
+                "status": "applied",
+                "result": {"captureReceipt": "managed-receipt"},
+                "outcome": {"status": "ok"},
+            }
+        ],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert model.prompts == []
+    assert plan["nextStep"] == "needs_user_action"
+    assert plan["completionGate"] == {
+        "status": "needs_user_action",
+        "reason": "visual_audit_unavailable",
+    }
+    assert plan["writeNeeded"] is False
+    assert plan["skillNeeded"] is False
 
 
 def test_transient_visual_audit_reuses_only_the_reissued_exact_receipt() -> None:
@@ -1123,13 +1273,13 @@ def test_multi_capture_only_finishes_after_approval_but_explicit_visual_audit_co
     )
     planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
 
-    capture_only = planner.plan_agent_turn(
+    capture_only = planner._local_plan_agent_turn(
         "Capture front and back views for comparison.",
         {},
         {},
         exposure_layer=EXPOSURE_LAYER_EXECUTION,
     )
-    capture_and_audit = planner.plan_agent_turn(
+    capture_and_audit = planner._local_plan_agent_turn(
         "Capture front, left, right, and back fixed-angle views, then audit all views for complete visual coverage.",
         {},
         {},

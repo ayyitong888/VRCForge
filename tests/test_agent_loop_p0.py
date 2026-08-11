@@ -23,13 +23,15 @@ from fastapi.testclient import TestClient
 
 import dashboard_server
 from approved_unity_execution import current_approved_unity_execution
+from agent_harness_journey import RuntimeJourneyReceiptAuthority
 from agent_task_loop import (
     AgentTaskLoop,
     approval_completion,
     approval_task_context,
     canonical_action_id,
 )
-from runtime_planner_service import detect_avatar_write_intent
+from provider_configuration_service import ProviderApiConfig
+from runtime_planner_service import PlannerModelResult, detect_avatar_write_intent
 
 
 class AgentLoopP0Tests(unittest.TestCase):
@@ -342,6 +344,10 @@ class AgentLoopP0Tests(unittest.TestCase):
                 "actions": continuation["task"].get("actions"),
                 "claim": continuation["plan"].get("completionClaim"),
             },
+        )
+        self.assertEqual(
+            continuation["plan"]["taskCompletion"]["taskId"],
+            initial["task"]["taskId"],
         )
         self.assertEqual(
             [step["actionId"] for step in continuation["steps"] if step.get("kind") in {"skill", "write", "shell"}],
@@ -2137,11 +2143,59 @@ class AgentLoopP0Tests(unittest.TestCase):
         gateway = self.gateway
         project = self._unity_project()
         message = "Capture front and back views, then run a visual audit."
+        capture_arguments: dict[str, object] = {}
+        audit_arguments = {"captureReceipt": "managed-visual-receipt"}
+        capture_action_id = canonical_action_id(
+            "write",
+            "vrcforge_capture_multi_screenshot",
+            capture_arguments,
+        )
+        audit_action_id = canonical_action_id(
+            "skill",
+            "vrcforge_vision_audit_multi",
+            audit_arguments,
+        )
+        planner_prompts: list[str] = []
+
+        def plan_visual_journey(prompt):
+            planner_prompts.append(str(prompt))
+            if len(planner_prompts) == 1:
+                payload = {
+                    "action": "write",
+                    "write_tool": "vrcforge_capture_multi_screenshot",
+                    "write_params": capture_arguments,
+                    "summary": "Capture the approved fixed-angle views.",
+                }
+            elif len(planner_prompts) == 2:
+                payload = {
+                    "action": "skill",
+                    "skill_tool": "vrcforge_vision_audit_multi",
+                    "skill_params": audit_arguments,
+                    "summary": "Audit the managed fixed-angle capture.",
+                }
+            else:
+                payload = {
+                    "action": "reply",
+                    "reply": "Every frozen angle passed the visual audit.",
+                    "completion_claim": {
+                        "satisfied": True,
+                        "evidence_action_ids": [
+                            capture_action_id,
+                            audit_action_id,
+                        ],
+                    },
+                }
+            return PlannerModelResult(
+                text=json.dumps(payload),
+                usage={},
+                reasoning={},
+                planner_label="OpenAI · gpt-4o",
+            )
 
         with patch.object(
             dashboard_server.PROVIDER_CONFIGURATION,
             "current_api_config",
-            return_value=SimpleNamespace(
+            return_value=ProviderApiConfig(
                 provider="openai",
                 api_key="fixture-key",
                 base_url="",
@@ -2157,9 +2211,10 @@ class AgentLoopP0Tests(unittest.TestCase):
                 model="",
                 enabled=False,
             ),
-        ), patch(
-            "dashboard_server.request_llm_plan_with_metadata",
-            side_effect=AssertionError("the managed capture chain must remain deterministic"),
+        ), patch.object(
+            dashboard_server._RUNTIME_PLANNER_MODEL,
+            "plan",
+            side_effect=plan_visual_journey,
         ) as request_model:
             initial = gateway.runtime_message(
                 {
@@ -2173,10 +2228,11 @@ class AgentLoopP0Tests(unittest.TestCase):
                 }
             )
 
+            self.assertIn("approvalId", initial)
             approval_id = initial["approvalId"]
             stored_approval = gateway._approvals[approval_id]
             task_context = stored_approval["taskContext"]
-            capture_action_id = task_context["requestedActionId"]
+            self.assertEqual(task_context["requestedActionId"], capture_action_id)
             self.assertTrue(task_context["continueAfterApproval"])
 
             capture_result = {
@@ -2272,7 +2328,9 @@ class AgentLoopP0Tests(unittest.TestCase):
                     execution,
                 )
 
-        request_model.assert_not_called()
+        self.assertEqual(request_model.call_count, 3)
+        self.assertIn("captureReceipt=managed-visual-receipt", planner_prompts[1])
+        self.assertIn("vrcforge_vision_audit_multi", planner_prompts[2])
         execute_skill.assert_called_once()
         self.assertIsNotNone(continuation)
         self.assertEqual(
@@ -2282,6 +2340,11 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(continuation["task"]["taskId"], initial["task"]["taskId"])
         self.assertEqual(continuation["plan"]["nextStep"], "done", continuation)
         self.assertEqual(continuation["task"]["status"], "completed")
+        self.assertEqual(continuation["plan"]["planner"], "llm")
+        self.assertEqual(
+            continuation["plan"]["taskCompletion"]["taskId"],
+            initial["task"]["taskId"],
+        )
         self.assertEqual(
             [action["tool"] for action in continuation["task"]["actions"]],
             [
@@ -2309,16 +2372,46 @@ class AgentLoopP0Tests(unittest.TestCase):
             ],
             ["canonical_tool_result", "multi_angle_visual"],
         )
+        authority = RuntimeJourneyReceiptAuthority(secret=b"v" * 32)
+        receipt = authority.issue(continuation)
+        journey = authority.verify(receipt)
+        self.assertEqual(journey["taskId"], initial["task"]["taskId"])
+        self.assertEqual(journey["providerRequestCount"], 3)
+        self.assertEqual(journey["resultRefeedCount"], 2)
 
     def test_permanent_visual_provider_rejection_refeeds_route_and_discards_images(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
         message = "Capture front and back views, then run a visual audit."
+        planner_prompts: list[str] = []
+
+        def plan_visual_failure(prompt):
+            planner_prompts.append(str(prompt))
+            if len(planner_prompts) == 1:
+                payload = {
+                    "action": "write",
+                    "write_tool": "vrcforge_capture_multi_screenshot",
+                    "write_params": {},
+                    "summary": "Capture the approved fixed-angle views.",
+                }
+            else:
+                payload = {
+                    "action": "skill",
+                    "skill_tool": "vrcforge_vision_audit_multi",
+                    "skill_params": {
+                        "captureReceipt": "managed-rejected-visual-receipt"
+                    },
+                    "summary": "Audit the managed fixed-angle capture.",
+                }
+            return PlannerModelResult(
+                text=json.dumps(payload),
+                planner_label="DeepSeek · deepseek-chat",
+            )
 
         with patch.object(
             dashboard_server.PROVIDER_CONFIGURATION,
             "current_api_config",
-            return_value=SimpleNamespace(
+            return_value=ProviderApiConfig(
                 provider="deepseek",
                 api_key="fixture-key",
                 base_url="https://api.deepseek.com",
@@ -2334,9 +2427,10 @@ class AgentLoopP0Tests(unittest.TestCase):
                 model="",
                 enabled=False,
             ),
-        ), patch(
-            "dashboard_server.request_llm_plan_with_metadata",
-            side_effect=AssertionError("a permanent visual rejection must terminate deterministically"),
+        ), patch.object(
+            dashboard_server._RUNTIME_PLANNER_MODEL,
+            "plan",
+            side_effect=plan_visual_failure,
         ) as request_model:
             initial = gateway.runtime_message(
                 {
@@ -2436,7 +2530,8 @@ class AgentLoopP0Tests(unittest.TestCase):
                     execution,
                 )
 
-        request_model.assert_not_called()
+        self.assertEqual(request_model.call_count, 2)
+        self.assertIn("captureReceipt=managed-rejected-visual-receipt", planner_prompts[1])
         execute_skill.assert_called_once()
         self.assertIsNotNone(continuation)
         self.assertEqual(continuation["plan"]["nextStep"], "needs_user_action", continuation)

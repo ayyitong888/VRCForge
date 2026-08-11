@@ -190,6 +190,7 @@ def _runtime_journey() -> dict:
             "nextStep": "done",
             "taskCompletion": {
                 "schema": TASK_SCHEMA,
+                "taskId": task_id,
                 "status": "completed",
                 "evidenceActionIds": [read_action, write_action, capture_action, visual_action],
             },
@@ -424,6 +425,20 @@ class RuntimeJourneyProjectionTests(unittest.TestCase):
                 response.pop(field)
                 with self.assertRaisesRegex(JourneyReceiptError, field):
                     project_runtime_journey(response)
+
+    def test_rejects_missing_or_mismatched_completion_task_identity(self) -> None:
+        for completion_task_id in ("", "task_other"):
+            with self.subTest(completion_task_id=completion_task_id):
+                response = _runtime_journey()
+                response["plan"]["taskCompletion"]["taskId"] = completion_task_id
+                with self.assertRaises(JourneyReceiptError) as raised:
+                    project_runtime_journey(response)
+                self.assertEqual(
+                    raised.exception.code,
+                    "journey_completion_mismatch"
+                    if completion_task_id
+                    else "journey_identity_missing",
+                )
 
     def test_rejects_zero_later_provider_sample(self) -> None:
         response = _runtime_journey()

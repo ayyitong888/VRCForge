@@ -109,6 +109,76 @@ def test_model_and_compactor_share_the_exact_bound_config_without_projecting_sec
     assert "fixture-secret-key" not in repr(compact_call)
 
 
+def test_model_worker_routes_three_visual_journey_samples_through_one_turn_owner() -> None:
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    model = dashboard_server._RuntimePlannerModel(binding)
+    config = fixture_config()
+    prompts: list[str] = []
+    settings_seen: list[object] = []
+    responses = iter(
+        [
+            '{"action":"write","write_tool":"vrcforge_capture_multi_screenshot","write_params":{}}',
+            '{"action":"skill","skill_tool":"vrcforge_vision_audit_multi","skill_params":{"captureReceipt":"receipt"}}',
+            '{"action":"reply","reply":"done","completion_claim":{"satisfied":true,"evidence_action_ids":["capture","audit"]}}',
+        ]
+    )
+
+    def request(settings, prompt: str, *, stream_callback=None) -> LlmPlanResponse:
+        settings_seen.append(settings)
+        prompts.append(prompt)
+        return LlmPlanResponse(text=next(responses), reasoning={}, usage={})
+
+    turn_context = {
+        "sessionId": "visual-worker-session",
+        "turnId": "visual-worker-turn",
+        "clientTurnId": "visual-worker-client-turn",
+    }
+    with (
+        patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_api_config",
+            return_value=config,
+        ) as current_api_config,
+        patch.object(
+            dashboard_server,
+            "request_llm_plan_with_metadata",
+            side_effect=request,
+        ) as request_model,
+        patch.object(
+            type(dashboard_server.AGENT_GATEWAY.runtime_sessions),
+            "stream_context",
+            return_value=turn_context,
+        ),
+        patch.object(
+            type(dashboard_server.AGENT_GATEWAY.runtime_sessions),
+            "cancel_requested",
+            return_value=False,
+        ),
+        patch.object(dashboard_server.EVENT_BUS, "broadcast_from_sync"),
+    ):
+        with binding.bind(
+            {
+                "provider": "custom",
+                "model": "fixture-model",
+                "_requestedContextLimit": 64_000,
+            }
+        ):
+            results = [model.plan(f"visual-journey-sample-{index}") for index in range(3)]
+
+    current_api_config.assert_called_once_with()
+    assert request_model.call_count == 3
+    assert prompts == [
+        "visual-journey-sample-0",
+        "visual-journey-sample-1",
+        "visual-journey-sample-2",
+    ]
+    assert len(settings_seen) == 3
+    assert all(settings.llm_provider == config.provider for settings in settings_seen)
+    assert all(settings.llm_model == config.model for settings in settings_seen)
+    assert all(result.planner_label.endswith(config.model) for result in results)
+    assert model.active_call_count() == 0
+
+
 def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() -> None:
     catalog = dashboard_server._RuntimePlannerCatalog()
     planning = catalog.read(EXPOSURE_LAYER_PLANNING)
