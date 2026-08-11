@@ -318,7 +318,7 @@ export function RuntimeSection({
       <div className="mb-2 flex w-full items-center justify-between gap-2">
         <button type="button" className="flex min-w-0 flex-1 items-center gap-1.5 text-left" onClick={onToggle}>
           {collapsed ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
-          <span className="truncate text-xs font-semibold uppercase text-muted-foreground">{title}</span>
+          <span className="truncate text-sm font-semibold text-foreground">{title}</span>
         </button>
         <span className="flex shrink-0 items-center gap-1">
           {action}

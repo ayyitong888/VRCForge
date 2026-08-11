@@ -74,9 +74,13 @@ Core with its fixed 64-tool contract.
   the exact bottom conversation card without carrying an execution capability;
   eligible fixed-angle capture approvals retain the explicit allow-similar
   split action, while destructive or unscoped writes remain ineligible.
-- Restored the Agent-owned TODO list to the upper-right workspace rail and kept
-  its scoped list/create/update/delete/replace Skill operations separate from
-  inline Runtime execution history.
+- Restored the project conversation's upper-right work rail as a lightweight,
+  collapsible Progress / project / Context surface. Agent-owned TODO items,
+  Runtime run history, sub-agent work, project and Unity status, changes,
+  memories, and Skills stay beside the conversation instead of consuming the
+  center transcript. The rail remains lazy-mounted after the usable center and
+  adds no startup fetch or polling path; TODO list/create/update/delete/replace
+  Skill operations remain separate from Runtime execution history.
 - Added an effective context-window cap in Model settings with a synchronized
   slider and K-token numeric input. A manual value can reduce the working
   window to keep attention focused, but it cannot expand a smaller detected

@@ -18,7 +18,9 @@ type ScopedPendingApprovalCardProps = {
 
 export function ScopedPendingApprovalCard({ approvals, actions, disabled, onApprove, onReject, onModifyApproval }: ScopedPendingApprovalCardProps) {
   const { t } = useTranslation();
-  const visibleApprovals = approvals.filter((approval) => !["approve", "reject"].includes(actions[approval.id] || ""));
+  const visibleApprovals = approvals.filter(
+    (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
+  );
 
   if (visibleApprovals.length === 0) {
     return null;

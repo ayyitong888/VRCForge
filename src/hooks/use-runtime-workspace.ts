@@ -19,7 +19,7 @@ import {
   refreshUnityReadiness,
 } from "../lib/api";
 import { isTauriRuntime } from "../lib/app-runtime";
-import { markdownSmokeGoals, markdownSmokeMemories } from "../lib/markdown-smoke";
+import { isProjectWorkbenchSmokeMode, markdownSmokeGoals, markdownSmokeMemories, markdownSmokeProgress, markdownSmokeRuns } from "../lib/markdown-smoke";
 
 type UseRuntimeWorkspaceParams = {
   endpoint: string;
@@ -53,14 +53,14 @@ export function useRuntimeWorkspace({
   const [workspaceDiffReviewOpen, setWorkspaceDiffReviewOpen] = useState(false);
   const [loadingWorkspaceDiffPatch, setLoadingWorkspaceDiffPatch] = useState(false);
   const [loadingUnityStatus, setLoadingUnityStatus] = useState(false);
-  const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>([]);
+  const [runtimeRuns, setRuntimeRuns] = useState<AgentRuntimeRun[]>(() => markdownSmokeRuns());
   const [runtimeRunsError, setRuntimeRunsError] = useState("");
   const [desktopActions, setDesktopActions] = useState<AgentDesktopAction[]>([]);
   const [activeDesktopActions, setActiveDesktopActions] = useState<AgentDesktopAction[]>([]);
   const [desktopBridge, setDesktopBridge] = useState<DesktopBridgeStatus | null>(null);
   const [cancellingDesktopActionIds, setCancellingDesktopActionIds] = useState<string[]>([]);
   const [agentGoals, setAgentGoals] = useState<AgentGoal[]>(() => markdownSmokeGoals());
-  const [agentProgress, setAgentProgress] = useState<AgentProgress[]>([]);
+  const [agentProgress, setAgentProgress] = useState<AgentProgress[]>(() => markdownSmokeProgress());
   const [agentQuestions, setAgentQuestions] = useState<AgentQuestion[]>([]);
   const [agentMemory, setAgentMemory] = useState<AgentMemory[]>(() => markdownSmokeMemories());
   const [memoryReviewUnreadCount, setMemoryReviewUnreadCount] = useState(0);
@@ -83,6 +83,9 @@ export function useRuntimeWorkspace({
   const runtimeSnapshotInFlightRef = useRef(new Map<string, Promise<DesktopRuntimeSnapshot>>());
 
   function clearScopedRuntimeProjection() {
+    if (isProjectWorkbenchSmokeMode()) {
+      return;
+    }
     setRuntimeRuns([]);
     setRuntimeRunsError("");
     setDesktopActions([]);

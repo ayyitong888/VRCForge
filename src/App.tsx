@@ -797,7 +797,7 @@ export default function App() {
   const latestEditableUserItemId = latestConversationItemId(conversation, (item) => item.type === "user");
   const latestRetryableItemId = latestConversationItemId(conversation, isRetryableConversationItem);
   const pendingApprovalItems = (agentApprovals ?? []).filter(
-    (item) => item.status === "pending" || item.status === "approved",
+    (item) => item.status === "pending",
   );
   const pendingApprovals = pendingApprovalItems.length;
   const {
@@ -2940,6 +2940,35 @@ export default function App() {
     onError: setError,
   });
 
+  const projectChatWorkspace = activeView === "chat" && Boolean(activeChat?.projectPath);
+  const runtimeActivityPanel = sessionId ? (
+    <RuntimeActivityPanel
+      runs={runtimeRuns}
+      error={runtimeRunsError}
+      onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
+    />
+  ) : undefined;
+  const subAgentActivityPanel = (
+    <SubAgentPanel
+      tasks={activeSubAgentTasks}
+      loading={loadingSubAgents}
+      error={subAgentError}
+      selected={
+        selectedSubAgentPanelOpen
+        && selectedSubAgent
+        && activeSubAgentTasks.some((task) => task.id === selectedSubAgent.id)
+          ? selectedSubAgent
+          : null
+      }
+      onInspect={(taskId) => void inspectSubAgentTask(taskId)}
+      onCancel={(taskId) => void cancelSubAgentTask(taskId)}
+      onRetry={(taskId) => void retrySubAgentTask(taskId)}
+      onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
+      onAdoptNextAction={adoptSubAgentNextAction}
+      onCloseInspect={() => setSelectedSubAgentPanelOpen(false)}
+    />
+  );
+
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
       <div className="grid h-screen" style={{ gridTemplateColumns: workspaceGridColumns }}>
@@ -3360,35 +3389,8 @@ export default function App() {
               onImportAttachment={(attachment) => void importVaultAttachment(attachment)}
               onOpenSettings={() => openSettingsSection("models")}
               onOpenDoctor={() => void openDoctor()}
-              activityPanel={
-                sessionId ? (
-                  <RuntimeActivityPanel
-                    runs={runtimeRuns}
-                    error={runtimeRunsError}
-                    onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
-                  />
-                ) : null
-              }
-              subAgentPanel={
-                <SubAgentPanel
-                  tasks={activeSubAgentTasks}
-                  loading={loadingSubAgents}
-                  error={subAgentError}
-                  selected={
-                    selectedSubAgentPanelOpen
-                    && selectedSubAgent
-                    && activeSubAgentTasks.some((task) => task.id === selectedSubAgent.id)
-                      ? selectedSubAgent
-                      : null
-                  }
-                  onInspect={(taskId) => void inspectSubAgentTask(taskId)}
-                  onCancel={(taskId) => void cancelSubAgentTask(taskId)}
-                  onRetry={(taskId) => void retrySubAgentTask(taskId)}
-                  onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
-                  onAdoptNextAction={adoptSubAgentNextAction}
-                  onCloseInspect={() => setSelectedSubAgentPanelOpen(false)}
-                />
-              }
+              activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}
+              subAgentPanel={projectChatWorkspace ? undefined : subAgentActivityPanel}
             />
           )}
           {activeView !== "chat" ? (
@@ -3418,6 +3420,7 @@ export default function App() {
               hasEnvironmentAttention={hasEnvironmentAttention}
               hasStartupIssue={hasStartupIssue}
               workspaceProjectLabel={workspaceProjectLabel}
+              projectWorkspaceLabel={activeProjectName || shortPath(activeChat?.projectPath || "") || workspaceProjectLabel}
               selectedProjectComponent={selectedProjectComponent}
               backendComponent={backendComponent}
               mcpPackageComponent={mcpPackageComponent}
@@ -3425,6 +3428,15 @@ export default function App() {
               unityInstanceComponent={unityInstanceComponent}
               unityToolsComponent={unityToolsComponent}
               agentProgress={agentProgress}
+              projectWorkspace={projectChatWorkspace}
+              activityPanel={projectChatWorkspace ? runtimeActivityPanel : undefined}
+              subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}
+              runtimeActivityCount={runtimeRuns.length + (runtimeRunsError ? 1 : 0)}
+              subAgentCount={activeSubAgentTasks.length}
+              workspaceDiff={workspaceDiff}
+              agentGoals={agentGoals}
+              agentMemory={agentMemory}
+              skills={skills}
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
               refreshUnityStatus={refreshUnityStatus}

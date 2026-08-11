@@ -22,12 +22,19 @@ def test_startup_restores_project_without_activating_historical_chat() -> None:
     assert "expandProjectGroup" not in restore_effect
 
 
-def test_right_sidebar_is_a_status_surface_not_an_activity_history() -> None:
+def test_project_chat_uses_a_lazy_workbench_while_quick_chat_keeps_the_status_surface() -> None:
     source = _read("src/components/runtime/runtime-sidebar.tsx")
     app = _read("src/App.tsx")
 
     for required in (
         'data-vrcforge-environment-status',
+        'data-vrcforge-project-workbench',
+        'data-vrcforge-project-workbench-activity',
+        'title={t("workspace.progress")}',
+        'title={projectWorkspaceLabel}',
+        'title={t("workspace.context")}',
+        "{activityPanel}",
+        "{subAgentPanel}",
         'data-vrcforge-status="project"',
         'data-vrcforge-status="core"',
         'data-vrcforge-status="mcp-core"',
@@ -44,25 +51,30 @@ def test_right_sidebar_is_a_status_surface_not_an_activity_history() -> None:
     ):
         assert required in source
 
-    for removed in (
+    for deliberately_still_excluded_from_the_lazy_rail in (
         "RuntimeRunRow",
         "RuntimeReviewEvidenceRow",
         "RuntimeFileReferenceRow",
         "RuntimeDiffFileRow",
         "RuntimeScheduleRow",
-        't("workspace.progress")',
         't("workspace.runLedger")',
         't("workspace.desktopActions")',
         't("workspace.reviewEvidence")',
         't("workspace.filesSeen")',
-        't("workspace.subAgents")',
         "providerComponent",
         "providerCompactLabel",
+        "fetch(",
+        "useRuntimeWorkspace",
     ):
-        assert removed not in source
+        assert deliberately_still_excluded_from_the_lazy_rail not in source
 
     assert "authoritativeSelectedProjectPath" in app
     assert "workspaceProjectLabel = authoritativeSelectedProjectPath" in app
+    assert 'const AsyncRightRuntimeSidebar = lazy' in app
+    assert 'const projectChatWorkspace = activeView === "chat" && Boolean(activeChat?.projectPath)' in app
+    assert "activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}" in app
+    assert "projectWorkspace={projectChatWorkspace}" in app
+    assert "activityPanel={projectChatWorkspace ? runtimeActivityPanel : undefined}" in app
     assert 'const backendStatus = backendComponent?.status || "unknown"' in source
     assert 'runtimeConnected ? t("workspace.online") : t("workspace.notLoaded")' in source
 
@@ -129,7 +141,7 @@ def test_active_desktop_safety_state_survives_scope_changes_without_loading_hist
     assert "setActiveDesktopActions([])" not in no_session_body
 
 
-def test_runtime_and_subagent_details_are_on_demand_in_the_center_workspace() -> None:
+def test_runtime_and_subagent_details_move_to_the_project_workbench_without_duplication() -> None:
     app = _read("src/App.tsx")
     chat = _read("src/components/chat/chat-workspace.tsx")
     activity = _read("src/components/runtime/runtime-activity-panel.tsx")
@@ -140,6 +152,12 @@ def test_runtime_and_subagent_details_are_on_demand_in_the_center_workspace() ->
     assert "subAgentPanel={" in app
     assert "{activityPanel}" in chat
     assert "{subAgentPanel}" in chat
+    assert "{activityPanel}" in _read("src/components/runtime/runtime-sidebar.tsx")
+    assert "{subAgentPanel}" in _read("src/components/runtime/runtime-sidebar.tsx")
+    assert "activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}" in app
+    assert "subAgentPanel={projectChatWorkspace ? undefined : subAgentActivityPanel}" in app
+    assert "activityPanel={projectChatWorkspace ? runtimeActivityPanel : undefined}" in app
+    assert "subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}" in app
     assert "data-vrcforge-runtime-activity-panel" in activity
     assert "RuntimeRunRow" in activity
 

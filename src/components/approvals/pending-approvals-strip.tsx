@@ -16,7 +16,9 @@ type PendingApprovalsStripProps = {
 };
 
 export function PendingApprovalsStrip({ approvals, actions, loading, onApprove, onReject }: PendingApprovalsStripProps) {
-  const visibleApprovals = approvals.filter((approval) => !["approve", "reject"].includes(actions[approval.id] || ""));
+  const visibleApprovals = approvals.filter(
+    (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
+  );
   if (visibleApprovals.length === 0) {
     return null;
   }

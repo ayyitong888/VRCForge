@@ -1,4 +1,4 @@
-import type { AgentGoal, AgentMemory, AgentRuntimeResponse, SubAgentTask } from "./api";
+import type { AgentGoal, AgentMemory, AgentProgress, AgentRuntimeResponse, AgentRuntimeRun, SubAgentTask } from "./api";
 import type { ChatThread } from "./chat-types";
 
 export function isMarkdownSmokeMode(): boolean {
@@ -23,6 +23,10 @@ function isSubAgentContextSmokeMode(): boolean {
 
 function isContextMeterSmokeMode(): boolean {
   return isMarkdownSmokeMode() && markdownSmokeCase() === "context-meter";
+}
+
+export function isProjectWorkbenchSmokeMode(): boolean {
+  return isMarkdownSmokeMode() && markdownSmokeCase() === "project-workbench";
 }
 
 function markdownSmokeContextPercent(): number {
@@ -128,7 +132,7 @@ export function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeCha
         id: chatId,
         sessionId: "markdown-smoke-session",
         title: "Markdown smoke",
-        projectPath: "",
+        projectPath: isProjectWorkbenchSmokeMode() ? "D:\\VRCForge\\fixture-project" : "",
         items: [
           {
             id: "markdown-smoke-user",
@@ -159,7 +163,7 @@ export function createMarkdownSmokeChatState(): { chats: ChatThread[]; activeCha
 }
 
 export function createSubAgentContextSmokeTask(): SubAgentTask | null {
-  if (!isSubAgentContextSmokeMode()) {
+  if (!isSubAgentContextSmokeMode() && !isProjectWorkbenchSmokeMode()) {
     return null;
   }
   return {
@@ -168,7 +172,8 @@ export function createSubAgentContextSmokeTask(): SubAgentTask | null {
     displayName: "New session question",
     task: "Review the selected conversation excerpt in a scoped sub-agent thread.",
     parentSessionId: "markdown-smoke-session",
-    projectPath: "",
+    parentChatId: isProjectWorkbenchSmokeMode() ? "markdown-smoke-chat" : undefined,
+    projectPath: isProjectWorkbenchSmokeMode() ? "D:\\VRCForge\\fixture-project" : "",
     toolProfile: "read-only",
     status: "completed",
     createdAt: "2026-07-03T00:00:00Z",
@@ -208,7 +213,7 @@ export function markdownSmokeAgentNotes(): string {
 }
 
 export function markdownSmokeGoals(): AgentGoal[] {
-  if (!isSubAgentContextSmokeMode()) {
+  if (!isSubAgentContextSmokeMode() && !isProjectWorkbenchSmokeMode()) {
     return [];
   }
   return [
@@ -223,7 +228,7 @@ export function markdownSmokeGoals(): AgentGoal[] {
 }
 
 export function markdownSmokeMemories(): AgentMemory[] {
-  if (!isSubAgentContextSmokeMode()) {
+  if (!isSubAgentContextSmokeMode() && !isProjectWorkbenchSmokeMode()) {
     return [];
   }
   return [
@@ -233,6 +238,44 @@ export function markdownSmokeMemories(): AgentMemory[] {
       kind: "constraint",
       text: "Context usage must include real prompt inputs: recent chat, current draft, attachments, project instructions, goals, and memories.",
       status: "active",
+    },
+  ];
+}
+
+export function markdownSmokeProgress(): AgentProgress[] {
+  if (!isProjectWorkbenchSmokeMode()) {
+    return [];
+  }
+  return [
+    {
+      progressId: "workbench-layout",
+      title: "Move project work into the right rail",
+      summary: "Progress, runtime activity, and context stay visible beside the conversation.",
+      status: "in_progress",
+      order: 1,
+    },
+    {
+      progressId: "workbench-verify",
+      title: "Verify the project workspace layout",
+      status: "pending",
+      order: 2,
+    },
+  ];
+}
+
+export function markdownSmokeRuns(): AgentRuntimeRun[] {
+  if (!isProjectWorkbenchSmokeMode()) {
+    return [];
+  }
+  return [
+    {
+      id: "workbench-run",
+      status: "running",
+      messageSummary: "Project workspace visual verification",
+      providerLabel: "Smoke",
+      model: "layout-fixture",
+      projectRoot: "D:\\VRCForge\\fixture-project",
+      stepCount: 2,
     },
   ];
 }
