@@ -2289,6 +2289,97 @@ class RuntimePlannerService:
                                 validation=argument_validation,
                                 phase=phase,
                             )
+                    if skill_tool == "vrcforge_vision_audit_multi":
+                        active_capture_receipt = managed_multi_capture_receipt(
+                            loop_state or []
+                        )
+                        supplied_capture_receipt = str(
+                            skill_params.get("captureReceipt") or ""
+                        ).strip()
+                        if not active_capture_receipt:
+                            if managed_multi_visual_audit_consumed_without_retry(
+                                loop_state or []
+                            ):
+                                latest_error = ""
+                                for prior_step in reversed(loop_state or []):
+                                    if not isinstance(prior_step, Mapping):
+                                        continue
+                                    if (
+                                        str(prior_step.get("tool") or "")
+                                        != "vrcforge_vision_audit_multi"
+                                    ):
+                                        continue
+                                    prior_result = ensure_dict(prior_step.get("result"))
+                                    latest_error = sanitize_planner_observation_text(
+                                        prior_result.get("error")
+                                        or prior_result.get("reason")
+                                        or "Visual provider request failed.",
+                                        300,
+                                    )
+                                    break
+                                reply_text = (
+                                    "The visual audit failed and the original images were discarded "
+                                    "by the failure policy."
+                                )
+                                if latest_error:
+                                    reply_text += f" Provider result: {latest_error}"
+                                reply_text += (
+                                    " Reattach images to continue, or approve a new capture if fresh "
+                                    "screenshots are needed."
+                                )
+                                return {
+                                    **base,
+                                    "summary": "The visual audit failed without a reusable image capability.",
+                                    "reply": reply_text,
+                                    "continueLoop": False,
+                                    "nextStep": "needs_user_action",
+                                    "completionGate": {
+                                        "status": "needs_user_action",
+                                        "reason": "visual_audit_image_discarded",
+                                    },
+                                }
+                            return self._planner_argument_error_plan(
+                                base=base,
+                                action_kind="skill",
+                                tool_name=skill_tool,
+                                arguments=skill_params,
+                                validation={
+                                    "ok": False,
+                                    "summary": (
+                                        "No current Runtime-owned managed capture receipt is available."
+                                    ),
+                                    "issues": [
+                                        {
+                                            "path": "captureReceipt",
+                                            "code": "runtime_capability_unavailable",
+                                            "expected": "successful managed capture result",
+                                        }
+                                    ],
+                                },
+                                phase=phase,
+                            )
+                        if supplied_capture_receipt != active_capture_receipt:
+                            return self._planner_argument_error_plan(
+                                base=base,
+                                action_kind="skill",
+                                tool_name=skill_tool,
+                                arguments=skill_params,
+                                validation={
+                                    "ok": False,
+                                    "summary": (
+                                        "The capture receipt is stale or already consumed. Use only "
+                                        "the current Runtime-owned retry capability."
+                                    ),
+                                    "issues": [
+                                        {
+                                            "path": "captureReceipt",
+                                            "code": "stale_runtime_capability",
+                                            "expected": "current runtime-owned capture receipt",
+                                        }
+                                    ],
+                                },
+                                phase=phase,
+                            )
                     route = self._runtime_skill_route(
                         skill_tool,
                         skill_params,
@@ -2710,7 +2801,12 @@ class RuntimePlannerService:
                         lines.append(f"- [{goal.get('status')}] {summarize_text(str(goal.get('title')), 240)} {summarize_text(str(goal.get('summary') or ''), 360)}")
             return "\n".join(lines)
 
-    def _llm_loop_step_observation(self, step: dict[str, object]) -> str:
+    def _llm_loop_step_observation(
+        self,
+        step: dict[str, object],
+        *,
+        allowed_multi_capture_receipt: str | None = None,
+    ) -> str:
             result = step.get("result")
             fields: list[str] = []
             action_id = str(step.get("actionId") or "").strip()
@@ -2805,7 +2901,10 @@ class RuntimePlannerService:
             if isinstance(result, dict):
                 if str(step.get("tool") or "") == "vrcforge_capture_multi_screenshot":
                     capture_receipt = str(result.get("captureReceipt") or "").strip()
-                    if capture_receipt:
+                    if capture_receipt and (
+                        allowed_multi_capture_receipt is None
+                        or capture_receipt == allowed_multi_capture_receipt
+                    ):
                         fields.append(
                             "captureReceipt="
                             + sanitize_planner_observation_text(capture_receipt, 256)
@@ -2915,12 +3014,18 @@ class RuntimePlannerService:
                     history_lines.append(f"{role}: {text}")
             history_block = "\n".join(history_lines) if history_lines else "（无）"
             step_lines: list[str] = []
+            allowed_multi_capture_receipt = managed_multi_capture_receipt(
+                loop_state or []
+            )
             for index, step in enumerate(loop_state or [], start=1):
                 if not isinstance(step, dict):
                     continue
                 label = str(step.get("tool") or step.get("kind") or "step")
                 status = str(step.get("status") or "")
-                observation_text = self._llm_loop_step_observation(step)
+                observation_text = self._llm_loop_step_observation(
+                    step,
+                    allowed_multi_capture_receipt=allowed_multi_capture_receipt,
+                )
                 line = f"{index}. {label}"
                 if status:
                     line += f"（{status}）"

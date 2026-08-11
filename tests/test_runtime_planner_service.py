@@ -982,6 +982,134 @@ def test_transient_visual_audit_observation_exposes_only_opaque_retry_capability
     assert "D:/private" not in observation
 
 
+def test_provider_cannot_replay_consumed_visual_capture_receipt_after_permanent_failure() -> None:
+    audit = tool("vrcforge_vision_audit_multi")
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(audit,),
+        routable_tools=(audit,),
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "skill",
+                    "skill_tool": "vrcforge_vision_audit_multi",
+                    "skill_params": {"captureReceipt": "consumed-original"},
+                }
+            )
+        )
+    )
+    planner = service(
+        catalog=FakeCatalog(planning=snapshot, execution=snapshot),
+        model=model,
+    )
+
+    plan = planner._llm_plan_agent_turn(
+        "Capture front and back views, then run a visual audit.",
+        {},
+        [],
+        loop_state=[
+            {
+                "tool": "vrcforge_capture_multi_screenshot",
+                "kind": "write",
+                "status": "applied",
+                "result": {"captureReceipt": "consumed-original"},
+                "outcome": {"status": "ok"},
+            },
+            {
+                "tool": "vrcforge_vision_audit_multi",
+                "kind": "skill",
+                "status": "failed",
+                "result": {
+                    "error": "selected provider rejected image input",
+                    "retryable": False,
+                    "retainImages": False,
+                },
+                "outcome": {"status": "failed"},
+            },
+        ],
+        context_usage={"requestCount": 1},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert len(model.prompts) == 1
+    assert "selected provider rejected image input" in model.prompts[0]
+    assert "captureReceipt=consumed-original" not in model.prompts[0]
+    assert plan is not None
+    assert plan["skillNeeded"] is False
+    assert plan["writeNeeded"] is False
+    assert plan["nextStep"] == "needs_user_action"
+    assert plan["completionGate"]["reason"] == "visual_audit_image_discarded"
+
+
+def test_provider_stale_visual_receipt_gets_typed_correction_for_exact_reissue() -> None:
+    audit = tool("vrcforge_vision_audit_multi")
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(audit,),
+        routable_tools=(audit,),
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "skill",
+                    "skill_tool": "vrcforge_vision_audit_multi",
+                    "skill_params": {"captureReceipt": "consumed-original"},
+                }
+            )
+        )
+    )
+    planner = service(
+        catalog=FakeCatalog(planning=snapshot, execution=snapshot),
+        model=model,
+    )
+
+    plan = planner._llm_plan_agent_turn(
+        "Retry the visual audit after the transient provider failure.",
+        {},
+        [],
+        loop_state=[
+            {
+                "tool": "vrcforge_capture_multi_screenshot",
+                "kind": "write",
+                "status": "applied",
+                "result": {"captureReceipt": "consumed-original"},
+                "outcome": {"status": "ok"},
+            },
+            {
+                "tool": "vrcforge_vision_audit_multi",
+                "kind": "skill",
+                "status": "failed",
+                "result": {
+                    "captureReceipt": "reissued-exact-retry",
+                    "error": "HTTP 503",
+                    "retryable": True,
+                    "retainImages": True,
+                },
+                "outcome": {"status": "failed"},
+            },
+        ],
+        context_usage={"requestCount": 1},
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert len(model.prompts) == 1
+    assert "visualRetryCaptureReceipt=reissued-exact-retry" in model.prompts[0]
+    assert "captureReceipt=consumed-original" not in model.prompts[0]
+    assert plan is not None
+    assert plan["skillNeeded"] is False
+    assert plan["argumentValidation"]["ok"] is False
+    assert plan["argumentValidation"]["issues"] == [
+        {
+            "path": "captureReceipt",
+            "code": "stale_runtime_capability",
+            "expected": "current runtime-owned capture receipt",
+        }
+    ]
+    assert plan["continueLoop"] is True
+    assert plan["nextStep"] == "planner_invalid_response"
+
+
 def test_multi_capture_only_finishes_after_approval_but_explicit_visual_audit_continues() -> None:
     capture = tool(
         "vrcforge_capture_multi_screenshot",
