@@ -12,7 +12,7 @@ export function defaultModelForProvider(provider: string): string {
     case "anthropic":
       return "claude-opus-4-6";
     case "deepseek":
-      return "deepseek-v4-flash";
+      return "deepseek-auto";
     case "openrouter":
       return "openai/gpt-4.1-mini";
     case "openai":

@@ -93,10 +93,16 @@ export function ProviderSetup({
   const supportsReasoning = supportedReasoningVariants.length > 0;
   const hasUnsupportedReasoningVariant =
     thinkingLevel !== "default" && !supportedReasoningVariants.some((variant) => variant.key === thinkingLevel);
+  const displayModels = provider === "deepseek"
+    ? [
+        { id: "deepseek-auto", label: i18n.t("provider.deepseekAutoModel") } as ProviderModelInfo,
+        ...models.filter((item) => item.id !== "deepseek-auto"),
+      ]
+    : models;
   const hasModelList = models.length > 0;
   const capabilities = providerCapabilities(modelCapabilities, capabilitySource);
   const apiTypeOptions = supportedApiTypeOptions(provider, model);
-  const selectedModelInfo = models.find((item) => item.id === model);
+  const selectedModelInfo = displayModels.find((item) => item.id === model);
   const detectedContextWindow = firstPositiveContextWindow(selectedModelInfo);
   const contextWindowK = contextWindow.trim() ? Number(contextWindow) : 0;
   const contextWindowValid = !contextWindow.trim()
@@ -163,16 +169,16 @@ export function ProviderSetup({
           <div className="flex min-w-0 items-center gap-2">
             {hasModelList ? (
               <select
-                value={models.some((item) => item.id === model) ? model : ""}
+                value={displayModels.some((item) => item.id === model) ? model : ""}
                 onChange={(event) => onModelChange(event.target.value)}
                 className="h-10 w-full min-w-0 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
               >
-                {!models.some((item) => item.id === model) ? (
+                {!displayModels.some((item) => item.id === model) ? (
                   <option value="" disabled>
                     {i18n.t("provider.selectModel")}
                   </option>
                 ) : null}
-                {models.map((item) => (
+                {displayModels.map((item) => (
                   <option key={item.id} value={item.id}>
                     {item.label || item.id}
                   </option>
@@ -315,9 +321,18 @@ function firstPositiveContextWindow(model: ProviderModelInfo | undefined): numbe
 
 function supportedApiTypeOptions(provider: string, model: string): ProviderApiType[] {
   if (provider === "deepseek") {
-    return model.trim().toLowerCase() === "deepseek-v4-flash"
+    if (model.trim() === "deepseek-auto") {
+      return ["auto"];
+    }
+    return model.trim() === "deepseek-v4-flash"
       ? ["auto", "responses", "chat_completions"]
       : ["auto", "chat_completions"];
+  }
+  if (provider === "custom") {
+    return ["auto", "responses", "chat_completions", "messages", "generate_content"];
+  }
+  if (provider === "openai") {
+    return ["auto", "responses", "chat_completions"];
   }
   if (provider === "gemini" || provider === "vertexai") {
     return ["auto", "generate_content"];

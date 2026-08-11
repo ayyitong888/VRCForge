@@ -117,6 +117,29 @@ def test_provider_test_invalid_structured_response_is_warning() -> None:
     assert "did not validate" in result["message"]
 
 
+def test_provider_test_deepseek_auto_probes_flash_and_pro_and_reports_recommendation() -> None:
+    probe = FakeProbe(['{"ok": true}', '{"ok": true}', RuntimeError("safe-key must not leak")])
+    result = _service(probe).run(
+        Request(
+            provider="deepseek",
+            model="deepseek-auto",
+            api_type="auto",
+            capability="structured",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["recommendedModel"] == "deepseek-v4-flash"
+    assert result["recommendedApiType"] == "responses"
+    assert [(call[0].model, call[0].api_type) for call in probe.calls] == [
+        ("deepseek-v4-flash", "responses"),
+        ("deepseek-v4-pro", "chat_completions"),
+        ("deepseek-v4-flash", "chat_completions"),
+    ]
+    assert result["attempts"][0]["status"] == "verified"
+    assert "safe-key" not in str(result["attempts"])
+
+
 def test_provider_test_vision_is_honestly_skipped_without_sdk_call() -> None:
     probe = FakeProbe([])
     result = _service(probe).run(Request(capability="vision"))
@@ -199,7 +222,7 @@ def test_probe_runner_openai_uses_fake_sdk_and_production_request_shape() -> Non
             responses_adapter=lambda _key, _url: pytest.fail("unexpected responses adapter"),
             google_client=lambda _config, _location: pytest.fail("unexpected Google SDK"),
             google_types=lambda: pytest.fail("unexpected Google types"),
-            anthropic_client=lambda _key: pytest.fail("unexpected Anthropic SDK"),
+            anthropic_client=lambda _key, _url: pytest.fail("unexpected Anthropic SDK"),
             openai_client=lambda key, url, timeout: (
                 observed.update(openai_client=(key, url, timeout))
                 or SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
@@ -255,8 +278,8 @@ def test_probe_runner_responses_google_and_anthropic_use_only_fake_sdks() -> Non
             or SimpleNamespace(models=SimpleNamespace(generate_content=google_generate))
         ),
         google_types=lambda: "fake-google-types",
-        anthropic_client=lambda key: (
-            observed.update(anthropic_client=key)
+        anthropic_client=lambda key, url: (
+            observed.update(anthropic_client=(key, url))
             or SimpleNamespace(messages=SimpleNamespace(create=anthropic_create))
         ),
         openai_client=lambda _key, _url, _timeout: pytest.fail("unexpected OpenAI SDK"),
@@ -276,7 +299,7 @@ def test_probe_runner_responses_google_and_anthropic_use_only_fake_sdks() -> Non
         "",
         "projects/project-a/locations/us-test1",
         "gemini-model",
-        "chat_completions",
+        "generate_content",
         "high",
     )
     anthropic = ProviderApiConfig(
@@ -284,7 +307,7 @@ def test_probe_runner_responses_google_and_anthropic_use_only_fake_sdks() -> Non
         "safe-key",
         "",
         "claude-model",
-        "chat_completions",
+        "messages",
     )
 
     assert runner.probe(responses, "probe", structured=True) == "responses fake"
@@ -294,4 +317,53 @@ def test_probe_runner_responses_google_and_anthropic_use_only_fake_sdks() -> Non
     assert observed["runtime_request"]["structured_output"] is True
     assert observed["google_client"] == ("vertexai", ("project-a", "us-test1"))
     assert observed["google_request"]["config"] == {"thinking": "fake"}
-    assert observed["anthropic_client"] == "safe-key"
+    assert observed["anthropic_client"] == ("safe-key", "")
+
+
+def test_probe_runner_custom_site_routes_each_explicit_protocol_without_silent_chat_fallback() -> None:
+    observed: list[tuple[str, str]] = []
+
+    class FakeResponses:
+        def send_request(self, _request: Any) -> Any:
+            observed.append(("responses", "https://custom.example/v1"))
+            return SimpleNamespace(text="responses")
+
+    sdk = ProviderProbeSdkPorts(
+        responses_adapter=lambda _key, url: FakeResponses(),
+        google_client=lambda config, _location: (
+            observed.append(("generate_content", config.base_url))
+            or SimpleNamespace(models=SimpleNamespace(generate_content=lambda **_kwargs: SimpleNamespace(text="google")))
+        ),
+        google_types=lambda: "types",
+        anthropic_client=lambda _key, url: (
+            observed.append(("messages", url))
+            or SimpleNamespace(messages=SimpleNamespace(create=lambda **_kwargs: SimpleNamespace(content=[SimpleNamespace(text="messages")])))
+        ),
+        openai_client=lambda _key, url, _timeout: (
+            observed.append(("chat_completions", str(url)))
+            or SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_kwargs: SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="chat"))]))))
+        ),
+    )
+    runner = ProviderTextProbeRunner(_probe_policy({}), sdk)
+
+    for api_type, expected in (
+        ("responses", "responses"),
+        ("chat_completions", "chat"),
+        ("messages", "messages"),
+        ("generate_content", "google"),
+    ):
+        config = ProviderApiConfig(
+            "custom",
+            "safe-key",
+            "https://custom.example/v1",
+            "site-model",
+            api_type,
+        )
+        assert runner.probe(config, "probe") == expected
+
+    assert observed == [
+        ("responses", "https://custom.example/v1"),
+        ("chat_completions", "https://custom.example/v1"),
+        ("messages", "https://custom.example/v1"),
+        ("generate_content", "https://custom.example/v1"),
+    ]

@@ -8,13 +8,22 @@ import os
 import re
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
 from pydantic import BaseModel, Field, ValidationError
 from model_provider_adapters import normalize_provider_api_type, validate_provider_api_key
-from provider_runtime_adapters import DeepSeekResponsesAdapter, ProviderRuntimeRequest
+from provider_endpoint_policy import endpoint_for_protocol, normalize_provider_endpoint
+from provider_protocol_negotiation import (
+    ProviderProtocolCandidate,
+)
+from provider_protocol_runtime import execute_provider_protocol_negotiation
+from provider_runtime_adapters import (
+    DeepSeekResponsesAdapter,
+    OpenAIResponsesAdapter,
+    ProviderRuntimeRequest,
+)
 from approved_unity_execution import (
     ApprovedUnityExecutionError,
     ApprovedUnityExecutionPlan,
@@ -29,7 +38,7 @@ DEFAULT_MIN_CONFIDENCE = 0.65
 DEFAULT_MVP_EXPORT_PATH = Path("examples/mvp_blendshapes_export.json")
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEFAULT_DEEPSEEK_MODEL = "deepseek-auto"
 DEFAULT_OPENROUTER_MODEL = "openai/gpt-4.1-mini"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-4-6"
 DEFAULT_OLLAMA_MODEL = "llama3.2"
@@ -459,7 +468,9 @@ def normalize_base_url(base_url: Any, provider: str, default_base_url: str) -> s
         return ""
 
     resolved = str(base_url if base_url is not None else default_base_url).strip()
-    return resolved.rstrip("/")
+    if normalized == "vertexai":
+        return resolved.rstrip("/")
+    return normalize_provider_endpoint(resolved, allow_empty=False)
 
 
 def provider_requires_api_key(provider: str) -> bool:
@@ -1341,42 +1352,83 @@ def request_llm_plan_with_metadata(
 ) -> LlmPlanResponse:
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
-    _requested_api_type, resolved_api_type = normalize_provider_api_type(
+    requested_api_type, _resolved_api_type = normalize_provider_api_type(
         provider, settings.llm_model, getattr(settings, "llm_api_type", None)
     )
-    if resolved_api_type == "responses":
-        return request_deepseek_responses_plan_with_metadata(
+    def dispatch(
+        candidate: ProviderProtocolCandidate,
+        candidate_stream_callback: Callable[[str], None] | None,
+    ) -> LlmPlanResponse:
+        candidate_settings = replace(
+            settings,
+            llm_provider=candidate.provider,
+            llm_model=candidate.model,
+            llm_api_type=candidate.api_type,
+        )
+        return _request_llm_protocol_with_metadata(
+            candidate_settings,
+            candidate.api_type,
+            prompt,
+            image_paths,
+            candidate_stream_callback,
+        )
+
+    return execute_provider_protocol_negotiation(
+        provider=provider,
+        model=settings.llm_model,
+        requested_api_type=requested_api_type,
+        dispatch=dispatch,
+        stream_callback=stream_callback,
+    )
+
+
+def _request_llm_protocol_with_metadata(
+    settings: Settings,
+    api_type: str,
+    prompt: str,
+    image_paths: Sequence[str | Path],
+    stream_callback: Callable[[str], None] | None,
+) -> LlmPlanResponse:
+    if api_type == "responses":
+        return request_responses_plan_with_metadata(
             settings,
             prompt,
             reference_image_paths=image_paths,
             stream_callback=stream_callback,
         )
-    if provider == "gemini":
-        return request_gemini_plan_with_metadata(settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback)
-    if provider == "vertexai":
-        return request_vertex_ai_plan_with_metadata(settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback)
-    if provider == "anthropic":
-        return request_anthropic_plan_with_metadata(settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback)
-
+    if api_type == "generate_content":
+        if normalize_provider_name(settings.llm_provider) == "vertexai":
+            return request_vertex_ai_plan_with_metadata(
+                settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
+            )
+        return request_gemini_plan_with_metadata(
+            settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
+        )
+    if api_type == "messages":
+        return request_anthropic_plan_with_metadata(
+            settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
+        )
     return request_openai_compatible_plan_with_metadata(
-        settings,
-        prompt,
-        reference_image_paths=image_paths,
-        stream_callback=stream_callback,
+        settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
     )
 
 
-def request_deepseek_responses_plan_with_metadata(
+def request_responses_plan_with_metadata(
     settings: Settings,
     prompt: str,
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
     client_factory: Callable[..., Any] | None = None,
 ) -> LlmPlanResponse:
-    """Use the stateless Responses transport without executing model tool calls."""
+    """Use one configured Responses endpoint without executing returned calls."""
 
     image_paths = normalize_reference_image_paths(reference_image_paths=reference_image_paths)
-    adapter = DeepSeekResponsesAdapter(
+    adapter_type = (
+        DeepSeekResponsesAdapter
+        if normalize_provider_name(settings.llm_provider) == "deepseek"
+        else OpenAIResponsesAdapter
+    )
+    adapter = adapter_type(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
         client_factory=client_factory,
@@ -1387,22 +1439,39 @@ def request_deepseek_responses_plan_with_metadata(
             model=settings.llm_model,
             prompt=prompt,
             instructions=llm_system_instruction(settings),
-            reasoning_effort=_deepseek_responses_reasoning_effort(settings),
+            reasoning_effort=_responses_reasoning_effort(settings),
             max_output_tokens=llm_max_output_tokens(settings),
             reference_image_paths=tuple(str(path) for path in image_paths),
             stream_callback=stream_callback,
         )
     )
+    source = f"{normalize_provider_name(settings.llm_provider)}-responses"
     reasoning = extract_llm_reasoning_trace(
         {"output": [{"type": "reasoning", "summary": summary} for summary in response.reasoning_summary]},
         settings,
-        source="deepseek-responses",
+        source=source,
     )
-    usage = extract_llm_token_usage({"usage": response.usage}, settings, source="deepseek-responses")
+    usage = extract_llm_token_usage({"usage": response.usage}, settings, source=source)
     return LlmPlanResponse(text=response.text, reasoning=reasoning, usage=usage)
 
 
-def _deepseek_responses_reasoning_effort(settings: Settings) -> str:
+def request_deepseek_responses_plan_with_metadata(
+    settings: Settings,
+    prompt: str,
+    reference_image_paths: Sequence[str | Path] | None = None,
+    stream_callback: Callable[[str], None] | None = None,
+    client_factory: Callable[..., Any] | None = None,
+) -> LlmPlanResponse:
+    return request_responses_plan_with_metadata(
+        settings,
+        prompt,
+        reference_image_paths=reference_image_paths,
+        stream_callback=stream_callback,
+        client_factory=client_factory,
+    )
+
+
+def _responses_reasoning_effort(settings: Settings) -> str:
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
     supported = reasoning_effort_variants("deepseek", settings.llm_model, settings.llm_api_type)
     return level if level in supported else ""
@@ -1459,6 +1528,7 @@ def request_gemini_plan_with_metadata(
         or normalize_reasoning_effort(settings.gemini_thinking_level)
         or llm_max_output_tokens(settings) is not None
         or bool(str(settings.llm_system_instruction or "").strip())
+        or normalize_provider_name(settings.llm_provider) == "custom"
     ):
         try:
             from google.genai import types as genai_types
@@ -1470,7 +1540,17 @@ def request_gemini_plan_with_metadata(
         contents = [prompt, *image_parts]
 
     generate_config = build_gemini_generate_config(settings, genai_types) if genai_types is not None else None
-    client = genai.Client(api_key=settings.llm_api_key)
+    client_kwargs: dict[str, Any] = {"api_key": settings.llm_api_key}
+    if normalize_provider_name(settings.llm_provider) == "custom":
+        if genai_types is None:
+            raise RuntimeError("The installed google-genai package does not expose custom endpoint options.")
+        import httpx
+
+        client_kwargs["http_options"] = genai_types.HttpOptions(
+            baseUrl=normalize_provider_endpoint(settings.llm_base_url),
+            httpxClient=httpx.Client(follow_redirects=False),
+        )
+    client = genai.Client(**client_kwargs)
     try:
         if stream_callback is not None and not image_paths:
             chunks: list[str] = []
@@ -1503,6 +1583,10 @@ def request_gemini_plan_with_metadata(
         )
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(format_multimodal_error(exc, settings, bool(image_paths), "Gemini")) from exc
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
 
 def request_vertex_ai_plan(
@@ -2041,6 +2125,7 @@ def request_openai_compatible_plan_with_metadata(
 
     try:
         from openai import OpenAI
+        import httpx
     except ImportError as exc:
         raise RuntimeError(
             "The 'openai' package is not installed. Run pip install -r requirements.txt and try again."
@@ -2057,9 +2142,11 @@ def request_openai_compatible_plan_with_metadata(
             ],
         ]
 
+    http_client = httpx.Client(follow_redirects=False)
     client = OpenAI(
         api_key=settings.llm_api_key or "ollama",
         base_url=settings.llm_base_url,
+        http_client=http_client,
         **_llm_sdk_retry_kwargs(settings),
     )
     try:
@@ -2143,6 +2230,9 @@ def request_openai_compatible_plan_with_metadata(
         if image_paths:
             raise RuntimeError(format_multimodal_error(exc, settings, True, provider_display_name(settings.llm_provider))) from exc
         raise RuntimeError(format_openai_compatible_error(exc, settings)) from exc
+    finally:
+        _close_provider_client(client)
+        http_client.close()
 
 
 def request_anthropic_plan(
@@ -2169,6 +2259,7 @@ def request_anthropic_plan_with_metadata(
     validate_provider_api_key(settings.llm_api_key)
     try:
         import anthropic
+        import httpx
     except ImportError as exc:
         raise RuntimeError(
             "The 'anthropic' package is not installed. Run pip install -r requirements.txt and try again."
@@ -2196,10 +2287,15 @@ def request_anthropic_plan_with_metadata(
             *image_blocks,
         ]
 
-    client = anthropic.Anthropic(
-        api_key=settings.llm_api_key,
+    http_client = httpx.Client(follow_redirects=False)
+    client_kwargs: dict[str, Any] = {
+        "api_key": settings.llm_api_key,
+        "http_client": http_client,
         **_llm_sdk_retry_kwargs(settings),
-    )
+    }
+    if normalize_provider_name(settings.llm_provider) == "custom":
+        client_kwargs["base_url"] = endpoint_for_protocol(settings.llm_base_url, "messages")
+    client = anthropic.Anthropic(**client_kwargs)
     try:
         request_payload = build_anthropic_request_payload(settings, user_content)
         if stream_callback is not None and not image_paths:
@@ -2230,6 +2326,9 @@ def request_anthropic_plan_with_metadata(
         if image_paths:
             raise RuntimeError(format_multimodal_error(exc, settings, True, "Anthropic")) from exc
         raise RuntimeError(format_anthropic_error(exc, settings.llm_model or DEFAULT_ANTHROPIC_MODEL)) from exc
+    finally:
+        _close_provider_client(client)
+        http_client.close()
 
 
 def normalize_reference_image_paths(
@@ -2253,6 +2352,12 @@ def normalize_reference_image_paths(
         seen.add(key)
         image_paths.append(path)
     return image_paths
+
+
+def _close_provider_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if callable(close):
+        close()
 
 
 def resolve_existing_image_path(image_path: str | Path) -> Path:

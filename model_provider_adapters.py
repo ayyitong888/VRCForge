@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+from provider_protocol_negotiation import (
+    DEEPSEEK_AUTO_MODEL,
+    DEEPSEEK_FLASH_MODEL,
+    DEEPSEEK_PRO_MODEL,
+    provider_protocol_candidates,
+    supported_provider_api_types,
+)
+
 
 class ProviderCredentialError(ValueError):
     """A provider credential cannot safely be placed in an HTTP header."""
@@ -64,16 +72,13 @@ def normalize_provider_api_type(provider: str, model: str, api_type: object) -> 
         return requested, fixed
 
     if requested == "auto":
-        if provider_id == "deepseek" and model_id == "deepseek-v4-flash":
-            return requested, "responses"
-        return requested, "chat_completions"
-    if requested == "responses":
-        if provider_id != "deepseek" or model_id != "deepseek-v4-flash":
+        candidates = provider_protocol_candidates(provider_id, model_id, requested)
+        if not candidates:
             raise ProviderApiTypeError(_API_TYPE_ERROR)
-        return requested, "responses"
-    if requested != "chat_completions":
+        return requested, candidates[0].api_type
+    if requested not in supported_provider_api_types(provider_id, model_id):
         raise ProviderApiTypeError(_API_TYPE_ERROR)
-    return requested, "chat_completions"
+    return requested, requested
 
 
 def provider_model_descriptor(provider: str, model: str, api_type: object) -> dict[str, object]:
@@ -82,22 +87,30 @@ def provider_model_descriptor(provider: str, model: str, api_type: object) -> di
     requested, resolved = normalize_provider_api_type(provider, model, api_type)
     provider_id = str(provider).strip().lower()
     model_id = str(model).strip()
+    supported = list(supported_provider_api_types(provider_id, model_id))
     descriptor: dict[str, object] = {
         "api_type": requested,
         "apiType": requested,
         "resolvedApiType": resolved,
-        "supportedApiTypes": [resolved],
+        "supportedApiTypes": supported or [resolved],
         "capabilities": [],
         "capabilitySource": "unknown",
         "modelRegistrySchema": "vrcforge.provider-model-registry.v1",
     }
-    if provider_id == "deepseek" and model_id == "deepseek-v4-flash":
+    if provider_id == "deepseek" and model_id == DEEPSEEK_AUTO_MODEL:
+        descriptor.update(
+            supportedApiTypes=["responses", "chat_completions"],
+            capabilities=["text", "structured_json", "reasoning", "tools"],
+            capabilitySource="vrcforge_handshake_policy",
+            recommendedModel=DEEPSEEK_FLASH_MODEL,
+        )
+    elif provider_id == "deepseek" and model_id == DEEPSEEK_FLASH_MODEL:
         descriptor.update(
             supportedApiTypes=["responses", "chat_completions"],
             capabilities=["text", "structured_json", "reasoning", "tools"],
             capabilitySource="official_registry",
         )
-    elif provider_id == "deepseek" and model_id == "deepseek-v4-pro":
+    elif provider_id == "deepseek" and model_id == DEEPSEEK_PRO_MODEL:
         descriptor.update(
             supportedApiTypes=["chat_completions"],
             capabilities=["text", "structured_json", "reasoning", "tools"],

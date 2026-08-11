@@ -109,13 +109,10 @@ def test_dedicated_openai_transport_disables_nested_sdk_retries(
     response = request_openai_compatible_plan_with_metadata(dedicated, "{}")
 
     assert response.text == '{"candidates": []}'
-    assert client_kwargs == [
-        {
-            "api_key": "test-only",
-            "base_url": "https://api.example.invalid/v1",
-            "max_retries": 0,
-        }
-    ]
+    assert len(client_kwargs) == 1
+    http_client = client_kwargs[0].pop("http_client")
+    assert http_client.follow_redirects is False
+    assert client_kwargs == [{"api_key": "test-only", "base_url": "https://api.example.invalid/v1", "max_retries": 0}]
 
 
 def test_dedicated_anthropic_transport_disables_nested_sdk_retries(
@@ -146,6 +143,9 @@ def test_dedicated_anthropic_transport_disables_nested_sdk_retries(
     response = request_anthropic_plan_with_metadata(dedicated, "{}")
 
     assert response.text == '{"candidates": []}'
+    assert len(client_kwargs) == 1
+    http_client = client_kwargs[0].pop("http_client")
+    assert http_client.follow_redirects is False
     assert client_kwargs == [{"api_key": "test-only", "max_retries": 0}]
 
 

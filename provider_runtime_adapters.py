@@ -49,7 +49,6 @@ class ProviderRuntimeResponse:
 
 
 _TOOL_NAME = "vrcforge_plan_action"
-_EMPTY_COMPLETION_ERROR = "DeepSeek Responses returned no message or planner action."
 _TOOL_SCHEMA = {
     "type": "function",
     "name": _TOOL_NAME,
@@ -88,8 +87,10 @@ _TOOL_SCHEMA = {
 }
 
 
-class DeepSeekResponsesAdapter:
-    """Responses adapter for the exact public ``deepseek-v4-flash`` model."""
+class _ResponsesRequestBase:
+    """Provider-neutral OpenAI Responses transport for one configured origin."""
+
+    _provider_label = "OpenAI-compatible Responses"
 
     def __init__(
         self, *, api_key: str, base_url: str, client_factory: Callable[..., Any] | None = None,
@@ -98,17 +99,14 @@ class DeepSeekResponsesAdapter:
         self._api_key = validate_provider_api_key(api_key)
         self._base_url = str(base_url or "").rstrip("/")
         if not self._base_url:
-            raise RuntimeError("DeepSeek Responses requires a Base URL.")
+            raise RuntimeError(f"{self._provider_label} requires a Base URL.")
         if max_retries is not None and (isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0):
             raise ValueError("LLM SDK max retries must be a non-negative integer.")
         self._client_factory = client_factory
         self._max_retries = max_retries
 
     def get_models(self) -> list[dict[str, Any]]:
-        return [
-            {"id": "deepseek-v4-flash", "supportedApiTypes": ["responses", "chat_completions"]},
-            {"id": "deepseek-v4-pro", "supportedApiTypes": ["chat_completions"]},
-        ]
+        return []
 
     def _client(self) -> Any:
         kwargs: dict[str, Any] = {"api_key": self._api_key, "base_url": self._base_url}
@@ -118,17 +116,25 @@ class DeepSeekResponsesAdapter:
             return self._client_factory(**kwargs)
         try:
             from openai import OpenAI
+            import httpx
         except ImportError as exc:
             raise RuntimeError("The 'openai' package is not installed. Run pip install -r requirements.txt and try again.") from exc
+        kwargs["http_client"] = httpx.Client(follow_redirects=False)
         return OpenAI(**kwargs)
 
+    def _empty_completion_error(self) -> str:
+        return f"{self._provider_label} returned no message or planner action."
+
+    def _validate_model(self, model: str) -> None:
+        if not str(model).strip():
+            raise RuntimeError(f"{self._provider_label} requires a model.")
+
     def send_request(self, request: ProviderRuntimeRequest) -> ProviderRuntimeResponse:
-        if request.model != "deepseek-v4-flash":
-            raise RuntimeError("DeepSeek Responses is only available for deepseek-v4-flash.")
+        self._validate_model(request.model)
         if request.reference_image_paths:
-            raise RuntimeError("DeepSeek Responses does not support reference images or files.")
+            raise RuntimeError(f"{self._provider_label} does not support reference images or files in this planner lane.")
         if request.mode not in {"planner", "probe"}:
-            raise ValueError("DeepSeek Responses request mode is invalid.")
+            raise ValueError("Responses request mode is invalid.")
         if request.structured_output and request.mode != "probe":
             raise ValueError("Structured output is only supported for a provider probe.")
         payload: dict[str, Any] = {
@@ -146,27 +152,45 @@ class DeepSeekResponsesAdapter:
         if request.max_output_tokens is not None:
             payload["max_output_tokens"] = request.max_output_tokens
         client = self._client()
-        if request.stream_callback is not None:
-            return self._consume_stream(
-                client.responses.create(**payload, stream=True), request.stream_callback, planner_mode=request.mode == "planner"
-            )
-        for attempt in range(2):
-            try:
-                return self.parse_response(
-                    client.responses.create(**payload),
-                    planner_mode=request.mode == "planner",
+        try:
+            if request.stream_callback is not None:
+                return self._consume_stream(
+                    client.responses.create(**payload, stream=True), request.stream_callback, planner_mode=request.mode == "planner"
                 )
-            except RuntimeError as exc:
-                if attempt != 0 or str(exc) != _EMPTY_COMPLETION_ERROR:
-                    raise
-        raise AssertionError("bounded DeepSeek Responses retry loop exhausted unexpectedly")
+            for attempt in range(2):
+                try:
+                    return self.parse_response(
+                        client.responses.create(**payload),
+                        planner_mode=request.mode == "planner",
+                    )
+                except RuntimeError as exc:
+                    if attempt != 0 or str(exc) != self._empty_completion_error():
+                        raise
+            raise AssertionError("bounded Responses retry loop exhausted unexpectedly")
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+
+
+class _ResponsesProtocolAdapter(_ResponsesRequestBase):
+    """Shared Responses parsing and streaming implementation."""
+
+    _provider_label = "OpenAI-compatible Responses"
+
+    def get_models(self) -> list[dict[str, Any]]:
+        return []
+
+    def _validate_model(self, model: str) -> None:
+        if not str(model).strip():
+            raise RuntimeError(f"{self._provider_label} requires a model.")
 
     def parse_response(self, response: Any, *, planner_mode: bool = True) -> ProviderRuntimeResponse:
         output = _as_list(_value(response, "output"))
         tool_calls = [item for item in output if str(_value(item, "type") or "") == "function_call"]
         if tool_calls:
             if not planner_mode:
-                raise RuntimeError("DeepSeek Responses probe returned an unexpected tool call.")
+                raise RuntimeError(f"{self._provider_label} probe returned an unexpected tool call.")
             unexpected = [
                 item
                 for item in output
@@ -177,27 +201,27 @@ class DeepSeekResponsesAdapter:
             # planner function call.  Ignore that text, but still fail closed on
             # multiple calls or any unknown output item.
             if len(tool_calls) != 1 or unexpected:
-                raise RuntimeError("DeepSeek Responses returned an invalid planner tool call.")
+                raise RuntimeError(f"{self._provider_label} returned an invalid planner tool call.")
             return ProviderRuntimeResponse(text=self.parse_tool_call(tool_calls[0]), usage=_usage(response), reasoning_summary=_summaries(output))
         text = str(_value(response, "output_text") or "")
         if not text:
             text = "".join(_message_text(item) for item in output if str(_value(item, "type") or "") == "message")
         if not text:
-            raise RuntimeError(_EMPTY_COMPLETION_ERROR)
+            raise RuntimeError(self._empty_completion_error())
         return ProviderRuntimeResponse(text=text, usage=_usage(response), reasoning_summary=_summaries(output))
 
     def parse_tool_call(self, item: Any) -> str:
         if str(_value(item, "name") or "") != _TOOL_NAME:
-            raise RuntimeError("DeepSeek Responses returned an unknown planner tool.")
+            raise RuntimeError(f"{self._provider_label} returned an unknown planner tool.")
         raw = _value(item, "arguments")
         if not isinstance(raw, str):
-            raise RuntimeError("DeepSeek Responses planner arguments are invalid.")
+            raise RuntimeError(f"{self._provider_label} planner arguments are invalid.")
         try:
             arguments = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise RuntimeError("DeepSeek Responses planner arguments are invalid.") from exc
+            raise RuntimeError(f"{self._provider_label} planner arguments are invalid.") from exc
         if not isinstance(arguments, dict):
-            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         allowed = {
             "action",
             "summary",
@@ -212,7 +236,7 @@ class DeepSeekResponsesAdapter:
             "completion_claim",
         }
         if set(arguments) - allowed:
-            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         action = arguments.get("action")
         if not isinstance(action, str) or action not in {
             "reply",
@@ -221,7 +245,7 @@ class DeepSeekResponsesAdapter:
             "enter_execution",
             "write",
         }:
-            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         for text_key in (
             "summary",
             "reply",
@@ -231,30 +255,30 @@ class DeepSeekResponsesAdapter:
             "correction_for_action_id",
         ):
             if text_key in arguments and not isinstance(arguments[text_key], str):
-                raise RuntimeError("DeepSeek Responses planner action is invalid.")
+                raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         for params_key in ("skill_params", "shell_params", "write_params"):
             if params_key in arguments and not isinstance(arguments[params_key], dict):
-                raise RuntimeError("DeepSeek Responses planner action is invalid.")
+                raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         if "completion_claim" in arguments:
             claim = arguments["completion_claim"]
             if not isinstance(claim, dict) or set(claim) - {"satisfied", "evidence_action_ids"}:
-                raise RuntimeError("DeepSeek Responses planner action is invalid.")
+                raise RuntimeError(f"{self._provider_label} planner action is invalid.")
             if "satisfied" in claim and not isinstance(claim["satisfied"], bool):
-                raise RuntimeError("DeepSeek Responses planner action is invalid.")
+                raise RuntimeError(f"{self._provider_label} planner action is invalid.")
             evidence_ids = claim.get("evidence_action_ids")
             if evidence_ids is not None and (
                 not isinstance(evidence_ids, list)
                 or not all(isinstance(item, str) for item in evidence_ids)
             ):
-                raise RuntimeError("DeepSeek Responses planner action is invalid.")
+                raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         if action == "reply" and not (str(arguments.get("reply") or "").strip() or str(arguments.get("summary") or "").strip()):
-            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         if action == "skill" and not str(arguments.get("skill_tool") or "").strip():
-            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         if action == "shell" and not str(arguments.get("shell_command") or "").strip():
-            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         if action == "write" and not str(arguments.get("write_tool") or "").strip():
-            raise RuntimeError("DeepSeek Responses planner action is invalid.")
+            raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         return json.dumps(arguments, ensure_ascii=False)
 
     def _consume_stream(self, stream: Any, callback: Callable[[str], None], *, planner_mode: bool) -> ProviderRuntimeResponse:
@@ -266,7 +290,7 @@ class DeepSeekResponsesAdapter:
         for event in stream:
             event_type = str(_value(event, "type") or "")
             if event_type in {"response.failed", "response.incomplete"}:
-                raise RuntimeError("DeepSeek Responses stream did not complete.")
+                raise RuntimeError(f"{self._provider_label} stream did not complete.")
             if event_type == "response.output_text.delta":
                 delta = str(_value(event, "delta") or "")
                 if delta:
@@ -293,17 +317,39 @@ class DeepSeekResponsesAdapter:
                     )
                 if tool_item is not None:
                     if not planner_mode:
-                        raise RuntimeError("DeepSeek Responses probe returned an unexpected tool call.")
+                        raise RuntimeError(f"{self._provider_label} probe returned an unexpected tool call.")
                     assembled = {"type": "function_call", "name": _value(tool_item, "name"), "arguments": "".join(tool_args) or _value(tool_item, "arguments")}
                     return ProviderRuntimeResponse(text=self.parse_tool_call(assembled), usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))))
                 final_text = str(_value(final_response, "output_text") or "")
                 completed_text = final_text or "".join(text_parts)
                 if not completed_text:
-                    raise RuntimeError("DeepSeek Responses stream completed without a message or planner action.")
+                    raise RuntimeError(f"{self._provider_label} stream completed without a message or planner action.")
                 return ProviderRuntimeResponse(text=completed_text, usage=usage, reasoning_summary=_summaries(_as_list(_value(final_response, "output"))))
         if not final_seen:
-            raise RuntimeError("DeepSeek Responses stream ended before response.completed.")
-        raise RuntimeError("DeepSeek Responses stream returned no response.")
+            raise RuntimeError(f"{self._provider_label} stream ended before response.completed.")
+        raise RuntimeError(f"{self._provider_label} stream returned no response.")
+
+
+class OpenAIResponsesAdapter(_ResponsesProtocolAdapter):
+    """Generic Responses adapter for OpenAI and explicitly configured sites."""
+
+    _provider_label = "OpenAI-compatible Responses"
+
+
+class DeepSeekResponsesAdapter(_ResponsesProtocolAdapter):
+    """Responses adapter for the exact public ``deepseek-v4-flash`` model."""
+
+    _provider_label = "DeepSeek Responses"
+
+    def get_models(self) -> list[dict[str, Any]]:
+        return [
+            {"id": "deepseek-v4-flash", "supportedApiTypes": ["responses", "chat_completions"]},
+            {"id": "deepseek-v4-pro", "supportedApiTypes": ["chat_completions"]},
+        ]
+
+    def _validate_model(self, model: str) -> None:
+        if model != "deepseek-v4-flash":
+            raise RuntimeError("DeepSeek Responses is only available for deepseek-v4-flash.")
 
 
 def _value(item: Any, key: str) -> Any:

@@ -526,7 +526,7 @@ def test_provider_test_service_flash_responses_probe_without_chat(
             responses_adapter=lambda _key, _url: FakeResponsesAdapter(),
             google_client=lambda _config, _location: pytest.fail("unexpected Google SDK"),
             google_types=lambda: pytest.fail("unexpected Google types"),
-            anthropic_client=lambda _key: pytest.fail("unexpected Anthropic SDK"),
+            anthropic_client=lambda _key, _url: pytest.fail("unexpected Anthropic SDK"),
             openai_client=lambda _key, _url, _timeout: pytest.fail("unexpected OpenAI SDK"),
         ),
     )

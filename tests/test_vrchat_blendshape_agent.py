@@ -220,7 +220,9 @@ class ProviderStreamingTests(unittest.TestCase):
 
         self.assertEqual(response.text, '{"reply":"hello"}')
         self.assertEqual(chunks, ['{"reply":"hel', 'lo"}'])
-        self.assertEqual(FakeAnthropic.instances[0].kwargs, {"api_key": "test-key"})
+        anthropic_kwargs = dict(FakeAnthropic.instances[0].kwargs)
+        self.assertFalse(anthropic_kwargs.pop("http_client").follow_redirects)
+        self.assertEqual(anthropic_kwargs, {"api_key": "test-key"})
         self.assertEqual(FakeAnthropic.instances[0].messages.create_calls, [])
         self.assertEqual(FakeAnthropic.instances[0].messages.stream_calls[0]["model"], "claude-test")
 
@@ -301,7 +303,9 @@ class ProviderStreamingTests(unittest.TestCase):
 
         self.assertEqual(response.text, '{"reply":"hello"}')
         self.assertEqual(chunks, ['{"reply":"hel', 'lo"}'])
-        self.assertEqual(FakeOpenAI.instances[0].kwargs, {"api_key": "test-key", "base_url": "https://api.deepseek.example/v1"})
+        openai_kwargs = dict(FakeOpenAI.instances[0].kwargs)
+        self.assertFalse(openai_kwargs.pop("http_client").follow_redirects)
+        self.assertEqual(openai_kwargs, {"api_key": "test-key", "base_url": "https://api.deepseek.example/v1"})
         self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True])
         self.assertEqual(FakeOpenAI.instances[0].chat.completions.calls[0]["stream_options"], {"include_usage": True})
         self.assertEqual(response.usage["inputTokens"], 321)

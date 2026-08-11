@@ -513,6 +513,78 @@ def test_runtime_missing_api_type_migrates_flash_to_responses_without_chat(monke
     assert response.text == '{"reply":"ok"}'
 
 
+def test_runtime_deepseek_auto_model_falls_back_once_on_explicit_preoutput_protocol_error(monkeypatch) -> None:
+    configured = settings(api_type="auto")
+    configured.llm_model = "deepseek-auto"
+    calls: list[tuple[str, str]] = []
+
+    def responses(candidate, *_args, **_kwargs):
+        calls.append((candidate.llm_model, candidate.llm_api_type))
+        error = RuntimeError("not found")
+        error.status_code = 404  # type: ignore[attr-defined]
+        raise error
+
+    def chat(candidate, *_args, **_kwargs):
+        calls.append((candidate.llm_model, candidate.llm_api_type))
+        return SimpleNamespace(text='{"reply":"pro"}', reasoning={}, usage={})
+
+    monkeypatch.setattr("vrchat_blendshape_agent.request_responses_plan_with_metadata", responses)
+    monkeypatch.setattr("vrchat_blendshape_agent.request_openai_compatible_plan_with_metadata", chat)
+
+    response = request_llm_plan_with_metadata(configured, "p")
+
+    assert response.text == '{"reply":"pro"}'
+    assert calls == [
+        ("deepseek-v4-flash", "responses"),
+        ("deepseek-v4-pro", "chat_completions"),
+    ]
+
+
+@pytest.mark.parametrize("status", [401, 429, 500])
+def test_runtime_auto_model_does_not_replay_on_auth_rate_limit_or_server_error(monkeypatch, status: int) -> None:
+    configured = settings(api_type="auto")
+    configured.llm_model = "deepseek-auto"
+    chat_calls: list[str] = []
+
+    def responses(*_args, **_kwargs):
+        error = RuntimeError("request failed")
+        error.status_code = status  # type: ignore[attr-defined]
+        raise error
+
+    monkeypatch.setattr("vrchat_blendshape_agent.request_responses_plan_with_metadata", responses)
+    monkeypatch.setattr(
+        "vrchat_blendshape_agent.request_openai_compatible_plan_with_metadata",
+        lambda *_args, **_kwargs: chat_calls.append("chat"),
+    )
+
+    with pytest.raises(RuntimeError, match="request failed"):
+        request_llm_plan_with_metadata(configured, "p")
+    assert chat_calls == []
+
+
+def test_runtime_auto_model_does_not_fallback_after_stream_output(monkeypatch) -> None:
+    configured = settings(api_type="auto")
+    configured.llm_model = "deepseek-auto"
+    chat_calls: list[str] = []
+
+    def responses(_settings, _prompt, *, stream_callback=None, **_kwargs):
+        assert stream_callback is not None
+        stream_callback("partial")
+        error = RuntimeError("not found after output")
+        error.status_code = 404  # type: ignore[attr-defined]
+        raise error
+
+    monkeypatch.setattr("vrchat_blendshape_agent.request_responses_plan_with_metadata", responses)
+    monkeypatch.setattr(
+        "vrchat_blendshape_agent.request_openai_compatible_plan_with_metadata",
+        lambda *_args, **_kwargs: chat_calls.append("chat"),
+    )
+
+    with pytest.raises(RuntimeError, match="after output"):
+        request_llm_plan_with_metadata(configured, "p", stream_callback=lambda _text: None)
+    assert chat_calls == []
+
+
 def test_direct_wrapper_does_not_echo_key_on_error() -> None:
     with pytest.raises(RuntimeError) as error:
         request_deepseek_responses_plan_with_metadata(settings(), "p", reference_image_paths=["x.png"])

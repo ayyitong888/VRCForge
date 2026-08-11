@@ -336,6 +336,14 @@ export type ProviderTestResult = {
   message: string;
   responsePreview?: string;
   skipped?: boolean;
+  recommendedModel?: string;
+  recommendedApiType?: ProviderApiType | string;
+  attempts?: Array<{
+    model: string;
+    apiType: ProviderApiType | string;
+    status: "verified" | "failed" | "unsupported" | string;
+    message?: string;
+  }>;
 };
 
 export type ProviderReasoningVariants = {

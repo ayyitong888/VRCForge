@@ -194,9 +194,6 @@ export function useProviderSettings({
 
   function handleApiModelChange(model: string) {
     setApiModel(model);
-    if (apiType === "responses" && !(apiProvider === "deepseek" && model.trim() === "deepseek-v4-flash")) {
-      setApiType("auto");
-    }
   }
 
   function handleVisionProviderChange(provider: string) {
@@ -279,7 +276,7 @@ export function useProviderSettings({
       setModelOptionsScope({ provider: payload.provider || apiProvider, baseUrl: payload.baseUrl || apiBaseUrl.trim() });
       if (models.length === 0) {
         setModelsError(t("provider.noModelsReturned"));
-      } else if (!models.some((item) => item.id === apiModel)) {
+      } else if (!(apiProvider === "deepseek" && apiModel === "deepseek-auto") && !models.some((item) => item.id === apiModel)) {
         handleApiModelChange(payload.selectedModel && models.some((item) => item.id === payload.selectedModel) ? payload.selectedModel : models[0].id);
       }
     } catch (cause) {
@@ -313,7 +310,8 @@ export function useProviderSettings({
         thinking_level: apiThinkingLevel === "default" ? "" : apiThinkingLevel,
         capability,
       });
-      setProviderTestMessage(`${payload.capability}: ${payload.status} - ${payload.message}`);
+      const attempts = payload.attempts?.map((item) => `${item.model} / ${item.apiType}: ${item.status}`).join("; ");
+      setProviderTestMessage(`${payload.capability}: ${payload.status} - ${payload.message}${attempts ? ` (${attempts})` : ""}`);
       if (!payload.ok && payload.status !== "skipped") {
         setModelsError(payload.message);
       }
