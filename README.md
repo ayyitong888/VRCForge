@@ -1,6 +1,6 @@
 <div align="center">
 
-![VRCForge — Local AI Workbench for VRChat Avatar Editing](docs/assets/social-preview.svg)
+![VRCForge — 还差多久？还差 4 小时](docs/assets/vrcforge-four-hours-meme.jpg)
 
 [![Target](https://img.shields.io/badge/target-v1.5.1-4f46e5?style=flat-square)](docs/RELEASE_NOTES_1.5.1.md)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-22c55e?style=flat-square)](LICENSE)
