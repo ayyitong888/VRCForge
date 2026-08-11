@@ -340,7 +340,12 @@ namespace VRCForge.Editor
                     return false;
                 }
                 var manifest = JObject.Parse(File.ReadAllText(manifestPath));
-                if (manifest.Count != 3
+                var propertyCount = 0;
+                foreach (var property in manifest.Properties())
+                {
+                    propertyCount++;
+                }
+                if (propertyCount != 3
                     || !string.Equals((string)manifest["schema"], "vrcforge.trusted-release.v1", StringComparison.Ordinal))
                 {
                     return false;

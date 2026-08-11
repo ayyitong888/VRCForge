@@ -24,7 +24,9 @@ def test_peer_verifier_is_windows_owner_pid_fail_closed_contract() -> None:
     assert "VRCForgeMcpTrustedRelease.AssetPath" in source
     assert 'manifest["desktopSha256"]' in source
     assert 'manifest["backendSha256"]' in source
-    assert "manifest.Count != 3" in source
+    assert "manifest.Count" not in source
+    assert "foreach (var property in manifest.Properties())" in source
+    assert "propertyCount != 3" in source
     assert "Properties().Count()" not in source
     assert 'VerifyIntegrityEntry(files, "desktop", "VRCForge.exe", expectedParent, expectedDesktopDigest)' in source
     assert 'VerifyIntegrityEntry(files, "backend", "backend/vrcforge_backend.exe", expectedBackend, expectedBackendDigest)' in source
