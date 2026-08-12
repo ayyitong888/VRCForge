@@ -200,6 +200,7 @@ redaction rules, but review them before sharing.
 - [Dependencies](DEPENDENCIES.md)
 - [Notices](NOTICE)
 - [Compatibility matrix](docs/COMPATIBILITY_MATRIX.md)
+- [Product regression contract](docs/PRODUCT_REGRESSION_CONTRACT.md)
 - [Optimization strategy](docs/OPTIMIZATION_STRATEGY.md)
 - [Packaging guide](packaging/README.md)
 
