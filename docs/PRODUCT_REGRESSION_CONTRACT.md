@@ -143,12 +143,25 @@ Each item ends with its version history in this exact form:
 ### UX-002 — Agent-owned TODO presentation
 
 - Contract: Agent skills own list/replace/create/update/delete. The rail is a
-  status list, not user checkboxes. Active items keep a colored marker and
-  reduced-motion-aware breathing effect; completed items keep the colored
-  marker while text becomes muted and struck through.
+  compact ordered status list, not user checkboxes. Pending items use a
+  theme-colored hollow circle with their display-order number. Active items use
+  a filled theme-colored numbered circle and a reduced-motion-aware breathing
+  title. Completed items replace the number with a check inside the same filled
+  theme circle while the title becomes muted and struck through.
 - Forbidden regression: do not replace TODO with execution history, editable
-  checkboxes or a duplicate center card.
+  checkboxes, visible status words, status-color traffic lights, second-line
+  error/summary text, status grouping or a duplicate center card. Preserve the
+  received order and derive the visible number only from that display order.
 - Acceptance: TODO skill/API and layout/style contract tests.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
+### UX-002A — Environment rows disclose truncated text on hover
+
+- Contract: the project Environment section remains compact, but each row,
+  title and truncated detail exposes its complete label/value through hover.
+- Forbidden regression: no permanently clipped status with no disclosure, and
+  no eager tooltip framework or startup request for static text.
+- Acceptance: RuntimeInfoRow source contract and packaged visual review.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ### UX-003 — Sub-agent summary and detail workspace

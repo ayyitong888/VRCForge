@@ -58,11 +58,14 @@ export function RuntimeInfoRow({
   muted?: boolean;
 }) {
   return (
-    <div className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 py-1 text-sm">
+    <div
+      className="grid min-w-0 grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 py-1 text-sm"
+      title={value ? `${label}: ${value}` : label}
+    >
       <div className={cn("flex items-center justify-center", muted ? "text-muted-foreground/60" : "text-muted-foreground")}>{icon}</div>
       <div className="min-w-0">
-        <div className="truncate font-medium">{label}</div>
-        {value ? <div className={cn("truncate text-xs", muted ? "text-muted-foreground/60" : "text-muted-foreground")}>{value}</div> : null}
+        <div className="truncate font-medium" title={label}>{label}</div>
+        {value ? <div className={cn("truncate text-xs", muted ? "text-muted-foreground/60" : "text-muted-foreground")} title={value}>{value}</div> : null}
       </div>
       {suffix ? <div className="shrink-0 text-xs">{suffix}</div> : null}
     </div>

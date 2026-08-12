@@ -3,11 +3,12 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const [app, sidebar, sections, todo, activity, dashboard, zhCN, enUS] = await Promise.all([
+const [app, sidebar, sections, todo, runtimeUi, activity, dashboard, zhCN, enUS] = await Promise.all([
   readFile(resolve(root, "src", "App.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "runtime-sidebar.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "project-workbench-sections.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "agent-todo-panel.tsx"), "utf8"),
+  readFile(resolve(root, "src", "components", "runtime", "runtime-sidebar-ui.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "runtime-activity-panel.tsx"), "utf8"),
   readFile(resolve(root, "dashboard_server.py"), "utf8"),
   readFile(resolve(root, "src", "locales", "zh-CN.json"), "utf8"),
@@ -17,6 +18,26 @@ const [app, sidebar, sections, todo, activity, dashboard, zhCN, enUS] = await Pr
 assert.match(todo, /data-vrcforge-agent-todo/);
 assert.match(todo, /workspace\.todo/);
 assert.match(todo, /progress\.map/);
+assert.match(todo, /progress\.map\(\(item, index\)/);
+assert.match(todo, /: index \+ 1\}/);
+assert.match(todo, /<ol className="m-0 list-none space-y-0\.5 p-0">/);
+assert.match(todo, /<li/);
+assert.match(todo, /<Check className=/);
+assert.match(todo, /border-primary/);
+assert.match(todo, /bg-transparent text-primary/);
+assert.match(todo, /bg-primary text-background/);
+assert.match(todo, /animate-pulse motion-reduce:animate-none/);
+assert.match(todo, /text-muted-foreground line-through/);
+assert.doesNotMatch(todo, /todoStatusLabel/);
+assert.doesNotMatch(todo, /workspace\.progress(?:Completed|Blocked|Cancelled|InProgress|Pending)/);
+assert.doesNotMatch(todo, /grid-cols-\[16px_minmax\(0,1fr\)_auto\]/);
+assert.doesNotMatch(todo, /item\.summary/);
+assert.doesNotMatch(todo, /emerald|amber|destructive/);
+assert.match(todo, /aria-current=\{isActiveTodo\(item\.status\) \? "step" : undefined\}/);
+assert.match(todo, /aria-hidden="true"/);
+assert.match(runtimeUi, /title=\{label\}/);
+assert.match(runtimeUi, /title=\{value\}/);
+assert.match(runtimeUi, /title=\{value \? `\$\{label\}: \$\{value\}` : label\}/);
 assert.match(sidebar, /<AgentTodoPanel progress=\{agentProgress\}/);
 assert.match(sidebar, /data-vrcforge-project-workbench/);
 assert.match(sidebar, /data-vrcforge-environment-status=\{projectWorkspace \? undefined : true\}/);
