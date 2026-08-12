@@ -50,7 +50,7 @@ def same_endpoint_origin(left: object, right: object) -> bool:
     return endpoint_origin(left) == endpoint_origin(right)
 
 
-def endpoint_for_protocol(value: object, api_type: str) -> str:
+def endpoint_for_protocol(value: object, api_type: str, *, provider: str = "") -> str:
     """Adapt one configured API base path without changing its origin.
 
     OpenAI-compatible clients treat a configured ``/v1`` as their API base,
@@ -63,6 +63,12 @@ def endpoint_for_protocol(value: object, api_type: str) -> str:
         return normalized
     parsed = urlsplit(normalized)
     path = parsed.path.rstrip("/")
+    if str(provider).strip().lower() == "deepseek":
+        if path.split("/")[-1:] == ["v1"]:
+            path = path[:-3]
+        if path.split("/")[-1:] != ["anthropic"]:
+            path = f"{path}/anthropic" if path else "/anthropic"
+        return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
     if path.split("/")[-1:] == ["v1"]:
         path = path[:-3]
     return urlunsplit((parsed.scheme, parsed.netloc, path.rstrip("/"), "", ""))

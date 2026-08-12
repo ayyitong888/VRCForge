@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, RLock, Thread
 from typing import Any, Mapping
@@ -283,6 +283,38 @@ def test_configuration_persists_and_projects_user_context_window_cap(
 
     with pytest.raises(ValueError, match="at least 4000"):
         owner.resolve_api_request(ApiRequest(context_window=1024))
+
+
+def test_model_limit_and_user_context_cap_remain_distinct_in_projections(tmp_path: Path) -> None:
+    policy = replace(
+        _policy(),
+        provider_config_descriptor=lambda config: {
+            **_descriptor(config),
+            "modelContextWindow": 1_000_000,
+            "maxOutputTokens": 384_000,
+        },
+    )
+    owner = _owner(tmp_path / "config.json", policy=policy)
+    owner.save_api_config(
+        ProviderApiConfig(
+            "deepseek",
+            "saved-key",
+            "https://api.deepseek.com",
+            "deepseek-v4-pro",
+            "auto",
+            context_window=128_000,
+        )
+    )
+
+    projected = owner.serialize_app_api_config()
+    effective = owner.build_effective_model_summary()
+
+    assert projected["contextWindow"] == 128_000
+    assert projected["modelContextWindow"] == 1_000_000
+    assert effective["configuredContextWindow"] == 128_000
+    assert effective["modelContextWindow"] == 1_000_000
+    assert effective["effectiveContextWindow"] == 128_000
+    assert effective["contextWindow"] == 128_000
 
 
 def test_configuration_revalidates_invalid_saved_key_and_never_returns_it(

@@ -131,6 +131,21 @@ test("a user context cap can shrink but never expand the provider window", () =>
     policy.resolveContextLimit("deepseek", "deepseek-v4-pro", undefined, 96_000),
     { limit: 96_000, known: true, source: "user" },
   );
+  for (const model of ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-auto"]) {
+    assert.deepEqual(
+      policy.resolveContextLimit("deepseek", model),
+      { limit: 1_000_000, known: true, source: "known" },
+      model,
+    );
+  }
+  assert.deepEqual(
+    policy.resolveContextLimit(
+      "deepseek",
+      "deepseek-v4-flash",
+      { contextWindow: 128_000, modelContextWindow: 1_000_000 },
+    ),
+    { limit: 1_000_000, known: true, source: "provider" },
+  );
   assert.deepEqual(
     policy.resolveContextLimit("unlisted", "unknown-model", undefined, 64_000),
     { limit: 64_000, known: true, source: "user" },

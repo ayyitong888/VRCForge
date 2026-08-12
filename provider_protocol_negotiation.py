@@ -49,13 +49,17 @@ def provider_protocol_candidates(
     if provider_id == "deepseek":
         if model_id == DEEPSEEK_AUTO_MODEL:
             return (
-                ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "responses"),
+                ProviderProtocolCandidate(provider_id, DEEPSEEK_PRO_MODEL, "responses"),
+                ProviderProtocolCandidate(provider_id, DEEPSEEK_PRO_MODEL, "messages"),
                 ProviderProtocolCandidate(provider_id, DEEPSEEK_PRO_MODEL, "chat_completions"),
+                ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "responses"),
+                ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "messages"),
                 ProviderProtocolCandidate(provider_id, DEEPSEEK_FLASH_MODEL, "chat_completions"),
             )
-        if model_id == DEEPSEEK_FLASH_MODEL:
+        if model_id in {DEEPSEEK_FLASH_MODEL, DEEPSEEK_PRO_MODEL}:
             return (
                 ProviderProtocolCandidate(provider_id, model_id, "responses"),
+                ProviderProtocolCandidate(provider_id, model_id, "messages"),
                 ProviderProtocolCandidate(provider_id, model_id, "chat_completions"),
             )
         return (ProviderProtocolCandidate(provider_id, model_id, "chat_completions"),)
@@ -88,8 +92,8 @@ def supported_provider_api_types(provider: str, model: str) -> tuple[str, ...]:
     if provider_id == "deepseek":
         if model_id == DEEPSEEK_AUTO_MODEL:
             return ()
-        if model_id == DEEPSEEK_FLASH_MODEL:
-            return ("responses", "chat_completions")
+        if model_id in {DEEPSEEK_FLASH_MODEL, DEEPSEEK_PRO_MODEL}:
+            return ("responses", "messages", "chat_completions")
         return ("chat_completions",)
     if provider_id in {"gemini", "vertexai"}:
         return ("generate_content",)

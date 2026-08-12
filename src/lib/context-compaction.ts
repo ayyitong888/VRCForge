@@ -26,6 +26,7 @@ export type ContextLimitResolution = {
 };
 
 export type ContextModelInfo = {
+  modelContextWindow?: number;
   inputTokenLimit?: number;
   contextWindow?: number;
   maxInputTokens?: number;
@@ -304,6 +305,8 @@ export function projectRuntimeCompactionItems(
 
 const KNOWN_MODEL_CONTEXT_LIMITS: Readonly<Record<string, number>> = Object.freeze({
   "deepseek:deepseek-v4-pro": 1_000_000,
+  "deepseek:deepseek-v4-flash": 1_000_000,
+  "deepseek:deepseek-auto": 1_000_000,
   "gemini:gemini-2.5-flash": 1_048_576,
   "gemini:gemini-2.5-pro": 1_048_576,
   "gemini:gemini-2.5-flash-lite": 1_048_576,
@@ -335,6 +338,7 @@ export function resolveContextLimit(
 ): ContextLimitResolution {
   const userLimit = positiveNumber(userContextWindow);
   const providerLimit = firstPositiveNumber(
+    modelInfo?.modelContextWindow,
     modelInfo?.inputTokenLimit,
     modelInfo?.contextWindow,
     modelInfo?.maxInputTokens,

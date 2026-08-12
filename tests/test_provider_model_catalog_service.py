@@ -154,6 +154,33 @@ def test_catalog_enriches_with_frozen_registry_descriptor() -> None:
     }
 
 
+def test_catalog_projects_registry_model_limits_without_overwriting_provider_fields() -> None:
+    service = ProviderModelCatalogService(
+        ProviderModelCatalogPolicyPorts(
+            validate_provider_api_key=lambda _key: None,
+            provider_requires_api_key=lambda _provider: True,
+            provider_display_name=lambda provider: provider.title(),
+            provider_model_descriptor=lambda provider, model, api_type: {
+                **_descriptor(provider, model, api_type),
+                "modelContextWindow": 1_000_000,
+                "maxOutputTokens": 384_000,
+                "modelVersion": "DeepSeek-V4-Flash-0731",
+            },
+            resolve_vertex_project_location=lambda _value: ("project", "location"),
+        )
+    )
+
+    enriched = service.enrich_provider_model_item(
+        _config("deepseek"),
+        {"id": "deepseek-v4-flash", "label": "Flash", "contextWindow": 128_000},
+    )
+
+    assert enriched["contextWindow"] == 128_000
+    assert enriched["modelContextWindow"] == 1_000_000
+    assert enriched["maxOutputTokens"] == 384_000
+    assert enriched["modelVersion"] == "DeepSeek-V4-Flash-0731"
+
+
 def test_catalog_wraps_sdk_failure_without_fallback() -> None:
     class FailingModels:
         @staticmethod

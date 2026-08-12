@@ -58,7 +58,7 @@ def normalize_provider_api_type(provider: str, model: str, api_type: object) -> 
     # DeepSeek model identifiers are protocol values, not display labels.  Do
     # not silently canonicalize a near-match onto a different transport.
     model_id = str(model).strip()
-    if api_type is None and provider_id == "deepseek" and model_id == "deepseek-v4-flash":
+    if api_type is None and provider_id == "deepseek" and model_id in {DEEPSEEK_FLASH_MODEL, DEEPSEEK_PRO_MODEL}:
         requested = "auto"
     else:
         requested = legacy_provider_api_type(provider_id) if api_type is None else str(api_type).strip().lower()
@@ -99,22 +99,30 @@ def provider_model_descriptor(provider: str, model: str, api_type: object) -> di
     }
     if provider_id == "deepseek" and model_id == DEEPSEEK_AUTO_MODEL:
         descriptor.update(
-            supportedApiTypes=["responses", "chat_completions"],
+            supportedApiTypes=["responses", "messages", "chat_completions"],
             capabilities=["text", "structured_json", "reasoning", "tools"],
             capabilitySource="vrcforge_handshake_policy",
-            recommendedModel=DEEPSEEK_FLASH_MODEL,
+            recommendedModel=DEEPSEEK_PRO_MODEL,
+            modelContextWindow=1_000_000,
+            maxOutputTokens=384_000,
         )
     elif provider_id == "deepseek" and model_id == DEEPSEEK_FLASH_MODEL:
         descriptor.update(
-            supportedApiTypes=["responses", "chat_completions"],
+            supportedApiTypes=["responses", "messages", "chat_completions"],
             capabilities=["text", "structured_json", "reasoning", "tools"],
             capabilitySource="official_registry",
+            modelContextWindow=1_000_000,
+            maxOutputTokens=384_000,
+            modelVersion="DeepSeek-V4-Flash-0731",
         )
     elif provider_id == "deepseek" and model_id == DEEPSEEK_PRO_MODEL:
         descriptor.update(
-            supportedApiTypes=["chat_completions"],
+            supportedApiTypes=["responses", "messages", "chat_completions"],
             capabilities=["text", "structured_json", "reasoning", "tools"],
             capabilitySource="official_registry",
+            modelContextWindow=1_000_000,
+            maxOutputTokens=384_000,
+            modelVersion="DeepSeek-V4-Pro-0813",
         )
     return descriptor
 

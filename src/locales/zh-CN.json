@@ -783,7 +783,7 @@
     "apiType_messages": "消息",
     "deepseekAutoNegotiation": "自动协商模型与协议",
     "deepseekAutoNegotiationHint": "允许 VRCForge 在同一 DeepSeek 端点测试真实模型与协议；关闭后将严格使用下方指定的模型和 API 类型。",
-    "deepseekAutoRoute": "协商顺序：Flash Responses → Pro Chat → Flash Chat",
+    "deepseekAutoRoute": "协商顺序：Pro Responses → Pro Anthropic → Pro Chat → Flash Responses → Flash Anthropic → Flash Chat",
     "customEndpoint": "自定义兼容接口",
     "noKeyNeeded": "无需密钥",
     "selectModel": "请选择模型",

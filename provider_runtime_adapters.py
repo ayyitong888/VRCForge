@@ -337,19 +337,19 @@ class OpenAIResponsesAdapter(_ResponsesProtocolAdapter):
 
 
 class DeepSeekResponsesAdapter(_ResponsesProtocolAdapter):
-    """Responses adapter for the exact public ``deepseek-v4-flash`` model."""
+    """Responses adapter for the exact public DeepSeek V4 GA models."""
 
     _provider_label = "DeepSeek Responses"
 
     def get_models(self) -> list[dict[str, Any]]:
         return [
-            {"id": "deepseek-v4-flash", "supportedApiTypes": ["responses", "chat_completions"]},
-            {"id": "deepseek-v4-pro", "supportedApiTypes": ["chat_completions"]},
+            {"id": "deepseek-v4-flash", "supportedApiTypes": ["responses", "messages", "chat_completions"]},
+            {"id": "deepseek-v4-pro", "supportedApiTypes": ["responses", "messages", "chat_completions"]},
         ]
 
     def _validate_model(self, model: str) -> None:
-        if model != "deepseek-v4-flash":
-            raise RuntimeError("DeepSeek Responses is only available for deepseek-v4-flash.")
+        if model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+            raise RuntimeError("DeepSeek Responses requires an exact DeepSeek V4 GA model ID.")
 
 
 def _value(item: Any, key: str) -> Any:

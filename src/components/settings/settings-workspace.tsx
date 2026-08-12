@@ -96,6 +96,7 @@ type SettingsWorkspaceProps = {
   onApiKeyChange: (value: string) => void;
   onApiBaseUrlChange: (value: string) => void;
   onApiModelChange: (value: string) => void;
+  onDeepSeekAutoNegotiationChange: (enabled: boolean) => void;
   onApiTypeChange: (value: ProviderApiType) => void;
   onApiContextWindowChange: (value: string) => void;
   onApiThinkingLevelChange: (value: string) => void;
@@ -191,6 +192,7 @@ export function SettingsWorkspace({
   onApiKeyChange,
   onApiBaseUrlChange,
   onApiModelChange,
+  onDeepSeekAutoNegotiationChange,
   onApiTypeChange,
   onApiContextWindowChange,
   onApiThinkingLevelChange,
@@ -390,6 +392,7 @@ export function SettingsWorkspace({
               onApiKeyChange={onApiKeyChange}
               onBaseUrlChange={onApiBaseUrlChange}
               onModelChange={onApiModelChange}
+              onDeepSeekAutoNegotiationChange={onDeepSeekAutoNegotiationChange}
               onApiTypeChange={onApiTypeChange}
               onContextWindowChange={onApiContextWindowChange}
               onThinkingLevelChange={onApiThinkingLevelChange}

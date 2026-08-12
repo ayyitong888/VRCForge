@@ -5721,21 +5721,15 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual(len(probe_calls), 2)
+        self.assertEqual(len(probe_calls), 1)
         self.assertEqual(
             {(call[0].provider, call[0].model, call[0].api_type) for call in probe_calls},
-            {
-                ("openai", "gpt-4.1-mini", "responses"),
-                ("openai", "gpt-4.1-mini", "chat_completions"),
-            },
+            {("openai", "gpt-4.1-mini", "responses")},
         )
         self.assertTrue(all(call[2] for call in probe_calls))
         self.assertEqual(
             {(attempt["model"], attempt["apiType"], attempt["status"]) for attempt in payload["attempts"]},
-            {
-                ("gpt-4.1-mini", "responses", "verified"),
-                ("gpt-4.1-mini", "chat_completions", "verified"),
-            },
+            {("gpt-4.1-mini", "responses", "verified")},
         )
         self.assertNotIn("provider-secret", json.dumps(payload))
 

@@ -783,7 +783,7 @@
     "apiType_messages": "メッセージ",
     "deepseekAutoNegotiation": "モデルとプロトコルを自動ネゴシエーション",
     "deepseekAutoNegotiationHint": "同じ DeepSeek エンドポイントで実在するモデルとプロトコルを VRCForge が検証します。オフにすると、下で指定したモデルと API タイプに固定します。",
-    "deepseekAutoRoute": "ネゴシエーション順：Flash Responses → Pro Chat → Flash Chat",
+    "deepseekAutoRoute": "ネゴシエーション順：Pro Responses → Pro Anthropic → Pro Chat → Flash Responses → Flash Anthropic → Flash Chat",
     "customEndpoint": "カスタム互換エンドポイント",
     "noKeyNeeded": "キー不要",
     "selectModel": "モデルを選択",

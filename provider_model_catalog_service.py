@@ -65,6 +65,10 @@ class ProviderModelCatalogService:
             capabilities=descriptor["capabilities"],
             capabilitySource=descriptor["capabilitySource"],
         )
+        for key in ("modelContextWindow", "maxOutputTokens", "modelVersion"):
+            value = descriptor.get(key)
+            if value is not None:
+                enriched[key] = value
         return enriched
 
     def fetch_provider_models(self, config: ProviderApiConfig) -> list[dict[str, Any]]:

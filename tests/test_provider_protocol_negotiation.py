@@ -20,8 +20,11 @@ def _pairs(provider: str, model: str, api_type: str) -> list[tuple[str, str]]:
 
 def test_deepseek_automatic_model_negotiates_both_models_in_bounded_order() -> None:
     assert _pairs("deepseek", DEEPSEEK_AUTO_MODEL, "auto") == [
-        ("deepseek-v4-flash", "responses"),
+        ("deepseek-v4-pro", "responses"),
+        ("deepseek-v4-pro", "messages"),
         ("deepseek-v4-pro", "chat_completions"),
+        ("deepseek-v4-flash", "responses"),
+        ("deepseek-v4-flash", "messages"),
         ("deepseek-v4-flash", "chat_completions"),
     ]
 
@@ -29,9 +32,12 @@ def test_deepseek_automatic_model_negotiates_both_models_in_bounded_order() -> N
 def test_exact_deepseek_models_never_silently_change_model() -> None:
     assert _pairs("deepseek", "deepseek-v4-flash", "auto") == [
         ("deepseek-v4-flash", "responses"),
+        ("deepseek-v4-flash", "messages"),
         ("deepseek-v4-flash", "chat_completions"),
     ]
     assert _pairs("deepseek", "deepseek-v4-pro", "auto") == [
+        ("deepseek-v4-pro", "responses"),
+        ("deepseek-v4-pro", "messages"),
         ("deepseek-v4-pro", "chat_completions"),
     ]
 

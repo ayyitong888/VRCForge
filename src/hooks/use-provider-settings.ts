@@ -196,6 +196,11 @@ export function useProviderSettings({
     setApiModel(model);
   }
 
+  function handleDeepSeekAutoNegotiationChange(enabled: boolean) {
+    setApiModel(enabled ? "deepseek-auto" : "deepseek-v4-flash");
+    setApiType("auto");
+  }
+
   function handleVisionProviderChange(provider: string) {
     setVisionProvider(provider);
     setVisionModel(provider ? defaultModelForProvider(provider) : "");
@@ -365,6 +370,7 @@ export function useProviderSettings({
     providerSnapshot,
     saveApiProvider,
     handleProviderChange,
+    handleDeepSeekAutoNegotiationChange,
     handleVisionProviderChange,
     saveVisionProfile,
     clearVisionProfile,

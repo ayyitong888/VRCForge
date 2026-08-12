@@ -36,3 +36,15 @@ def test_endpoint_canonicalizes_origin_port_path_and_allows_loopback_http() -> N
     assert endpoint_for_protocol("https://provider.example/v1", "messages") == "https://provider.example"
     assert endpoint_for_protocol("https://provider.example/gateway/v1", "messages") == "https://provider.example/gateway"
     assert endpoint_for_protocol("https://provider.example/v1", "responses") == "https://provider.example/v1"
+
+
+def test_deepseek_messages_uses_official_same_origin_anthropic_base() -> None:
+    assert endpoint_for_protocol(
+        "https://api.deepseek.com", "messages", provider="deepseek"
+    ) == "https://api.deepseek.com/anthropic"
+    assert endpoint_for_protocol(
+        "https://api.deepseek.com/anthropic", "messages", provider="deepseek"
+    ) == "https://api.deepseek.com/anthropic"
+    assert endpoint_for_protocol(
+        "https://api.deepseek.com/v1", "messages", provider="deepseek"
+    ) == "https://api.deepseek.com/anthropic"

@@ -561,13 +561,29 @@ class ProviderConfigurationService:
 
     def build_effective_model_summary(self) -> dict[str, Any]:
         config = self.current_api_config()
+        descriptor = self._policy.provider_config_descriptor(config)
+        raw_model_limit = descriptor.get("modelContextWindow")
+        model_limit = (
+            int(raw_model_limit)
+            if isinstance(raw_model_limit, int) and not isinstance(raw_model_limit, bool) and raw_model_limit > 0
+            else 0
+        )
+        configured_limit = config.context_window if config.context_window > 0 else 0
+        effective_limit = (
+            min(configured_limit, model_limit)
+            if configured_limit and model_limit
+            else configured_limit or model_limit
+        )
         return {
             "provider": config.provider,
             "providerLabel": self._policy.provider_display_name(config.provider),
             "model": config.model,
             "baseUrl": config.base_url,
-            "contextWindow": config.context_window,
-            **self._policy.provider_config_descriptor(config),
+            **descriptor,
+            "configuredContextWindow": configured_limit,
+            "effectiveContextWindow": effective_limit,
+            # Legacy projection retained as the correctly bounded effective value.
+            "contextWindow": effective_limit,
             "authHeader": self._policy.provider_auth_label(config.provider),
             "apiKeyRequired": self._policy.provider_requires_api_key(config.provider),
         }

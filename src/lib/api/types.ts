@@ -157,6 +157,10 @@ export type ApiConfig = {
   thinking_level?: string;
   /** User-selected effective context cap in tokens; 0/absent keeps auto detection. */
   contextWindow?: number;
+  /** Registry/provider model maximum, kept distinct from the user's working cap. */
+  modelContextWindow?: number;
+  maxOutputTokens?: number;
+  modelVersion?: string;
   usesBaseUrl?: boolean;
   authHeader?: string;
   apiKeyRequired: boolean;
@@ -178,11 +182,13 @@ export type VisionConfig = {
 export type ProviderModelInfo = {
   id: string;
   label: string;
+  modelContextWindow?: number;
   contextWindow?: number;
   inputTokenLimit?: number;
   maxInputTokens?: number;
   outputTokenLimit?: number;
   maxOutputTokens?: number;
+  modelVersion?: string;
   provider?: string;
   api_type?: ProviderApiType;
   apiType?: ProviderApiType;

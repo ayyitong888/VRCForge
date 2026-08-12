@@ -329,8 +329,9 @@ def test_internal_legacy_config_uses_provider_transport_instead_of_chat_default(
     ("provider", "model", "api_type", "expected"),
     [
         ("deepseek", "deepseek-v4-flash", None, ("auto", "responses")),
+        ("deepseek", "deepseek-v4-pro", None, ("auto", "responses")),
         ("deepseek", "deepseek-v4-flash", "auto", ("auto", "responses")),
-        ("deepseek", "deepseek-v4-pro", "auto", ("auto", "chat_completions")),
+        ("deepseek", "deepseek-v4-pro", "auto", ("auto", "responses")),
         ("deepseek", "deepseek-auto", "auto", ("auto", "responses")),
         ("deepseek", "DeepSeek-V4-Flash", "auto", ("auto", "chat_completions")),
         ("deepseek", "future-model", "auto", ("auto", "chat_completions")),
@@ -352,7 +353,6 @@ def test_provider_api_type_preserves_legacy_and_resolves_auto(
 @pytest.mark.parametrize(
     ("provider", "model", "api_type"),
     [
-        ("deepseek", "deepseek-v4-pro", "responses"),
         ("deepseek", "future-model", "responses"),
         ("deepseek", "DeepSeek-V4-Flash", "responses"),
         ("deepseek", "deepseek-auto", "chat_completions"),
@@ -370,21 +370,29 @@ def test_provider_api_type_rejects_incompatible_transport(provider: str, model: 
 
 def test_deepseek_registry_descriptor_is_known_only_for_exact_models() -> None:
     flash = provider_model_descriptor("deepseek", "deepseek-v4-flash", "auto")
-    pro = provider_model_descriptor("deepseek", "deepseek-v4-pro", "chat_completions")
+    pro = provider_model_descriptor("deepseek", "deepseek-v4-pro", "auto")
     unknown = provider_model_descriptor("deepseek", "deepseek-v4-pro-preview", "auto")
     mixed_case = provider_model_descriptor("deepseek", "DeepSeek-V4-Flash", "auto")
 
     assert flash["resolvedApiType"] == "responses"
-    assert flash["supportedApiTypes"] == ["responses", "chat_completions"]
+    assert flash["supportedApiTypes"] == ["responses", "messages", "chat_completions"]
     assert flash["capabilities"] == ["text", "structured_json", "reasoning", "tools"]
     assert flash["capabilitySource"] == "official_registry"
-    assert pro["supportedApiTypes"] == ["chat_completions"]
+    assert pro["resolvedApiType"] == "responses"
+    assert pro["supportedApiTypes"] == ["responses", "messages", "chat_completions"]
+    assert pro["modelContextWindow"] == 1_000_000
+    assert pro["maxOutputTokens"] == 384_000
+    assert pro["modelVersion"] == "DeepSeek-V4-Pro-0813"
     assert pro["capabilitySource"] == "official_registry"
     assert unknown["capabilities"] == []
     assert unknown["capabilitySource"] == "unknown"
     assert mixed_case["resolvedApiType"] == "chat_completions"
     assert mixed_case["capabilitySource"] == "unknown"
-    assert "tokenLimit" not in flash
+    assert flash["modelContextWindow"] == 1_000_000
+    assert flash["maxOutputTokens"] == 384_000
+    auto = provider_model_descriptor("deepseek", "deepseek-auto", "auto")
+    assert auto["modelContextWindow"] == 1_000_000
+    assert auto["maxOutputTokens"] == 384_000
 
 
 def test_api_models_enriches_registry_without_network() -> None:
@@ -413,6 +421,9 @@ def test_api_models_enriches_registry_without_network() -> None:
     assert payload["resolvedApiType"] == "responses"
     assert payload["models"][0]["provider"] == "deepseek"
     assert payload["models"][0]["contextWindow"] == 123
+    assert payload["models"][0]["modelContextWindow"] == 1_000_000
+    assert payload["models"][0]["maxOutputTokens"] == 384_000
+    assert payload["models"][0]["modelVersion"] == "DeepSeek-V4-Flash-0731"
     assert payload["models"][0]["capabilitySource"] == "official_registry"
     assert payload["models"][1]["capabilities"] == []
     assert payload["models"][1]["capabilitySource"] == "unknown"

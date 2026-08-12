@@ -14,6 +14,7 @@ type CapturedOperationStep = {
 };
 
 const CAPTURABLE_RUN_STATUSES = new Set(["completed", "applied"]);
+const COMPLETION_UNVERIFIED = "completion_unverified";
 const STRUCTURED_TOOL_NAME = /^vrcforge_[a-z0-9_]+$/;
 const STRUCTURED_STEP_STATUSES = new Set([
   "applied",
@@ -94,12 +95,14 @@ export function buildPathToSkillOperationSummary(
 ): PathToSkillOperationSummary | null {
   const runStatus = normalizeToken(run.status || run.lastEvent);
   const nextStep = normalizeToken(run.nextStep);
+  const capturesOnlyVerifiedActions = runStatus === "blocked" && nextStep === COMPLETION_UNVERIFIED;
   if (
-    !CAPTURABLE_RUN_STATUSES.has(runStatus)
+    !isCapturableRunOutcome(runStatus, nextStep)
     || Boolean(run.error)
     || ["blocked", "cancelled", "paused"].includes(nextStep)
     || hasUncapturableRunStep(run)
     || hasIncompleteStructuredStep(run)
+    || (capturesOnlyVerifiedActions && !hasDetailedStructuredStep(run))
   ) {
     return null;
   }
@@ -133,7 +136,9 @@ export function buildPathToSkillOperationSummary(
     schema: "vrcforge.operation_summary.v1",
     source: { kind: "runtime_run" },
     workflow: recipeType || "captured_runtime_operation",
-    status: "completed",
+    // The special token keeps the surrounding blocked user task distinct from
+    // the successful structured actions that are safe to reuse.
+    status: capturesOnlyVerifiedActions ? "structured_actions_completed" : "completed",
     steps,
     evidence: {
       approvalRecorded: hasApprovalEvidence,
@@ -200,6 +205,9 @@ function collectStructuredSteps(run: AgentRuntimeRun): CapturedOperationStep[] {
 function hasUncapturableRunStep(run: AgentRuntimeRun): boolean {
   const seenStructuredTools = new Set<string>();
   return (run.steps || []).some((step) => {
+    if (isRuntimeExposureControlStep(step)) {
+      return false;
+    }
     const tool = normalizeToken(step.tool);
     const kind = normalizeToken(step.kind);
     if (!tool) {
@@ -220,6 +228,17 @@ function hasUncapturableRunStep(run: AgentRuntimeRun): boolean {
   });
 }
 
+function isCapturableRunOutcome(runStatus: string, nextStep: string): boolean {
+  return CAPTURABLE_RUN_STATUSES.has(runStatus)
+    || (runStatus === "blocked" && nextStep === COMPLETION_UNVERIFIED);
+}
+
+function isRuntimeExposureControlStep(step: NonNullable<AgentRuntimeRun["steps"]>[number]): boolean {
+  return normalizeToken(step.kind) === "phase"
+    && normalizeToken(step.tool) === "exposure_layer"
+    && normalizeToken(step.status) === "entered_execution";
+}
+
 function hasIncompleteStructuredStep(run: AgentRuntimeRun): boolean {
   const candidates: Array<[unknown, unknown]> = (run.steps || []).map((step) => [step.tool, step.status]);
   candidates.push(
@@ -231,6 +250,13 @@ function hasIncompleteStructuredStep(run: AgentRuntimeRun): boolean {
     const tool = normalizeToken(toolValue);
     return STRUCTURED_TOOL_NAME.test(tool) && normalizeStepStatus(statusValue) === null;
   });
+}
+
+function hasDetailedStructuredStep(run: AgentRuntimeRun): boolean {
+  return (run.steps || []).some((step) => (
+    STRUCTURED_TOOL_NAME.test(normalizeToken(step.tool))
+    && normalizeStepStatus(step.status) !== null
+  ));
 }
 
 function normalizeStepKind(value: unknown, tool: string): CapturedOperationStep["kind"] {

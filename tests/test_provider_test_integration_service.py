@@ -117,8 +117,8 @@ def test_provider_test_invalid_structured_response_is_warning() -> None:
     assert "did not validate" in result["message"]
 
 
-def test_provider_test_deepseek_auto_probes_flash_and_pro_and_reports_recommendation() -> None:
-    probe = FakeProbe(['{"ok": true}', '{"ok": true}', RuntimeError("safe-key must not leak")])
+def test_provider_test_deepseek_auto_stops_after_first_success() -> None:
+    probe = FakeProbe(['{"ok": true}', RuntimeError("must not run")])
     result = _service(probe).run(
         Request(
             provider="deepseek",
@@ -129,15 +129,86 @@ def test_provider_test_deepseek_auto_probes_flash_and_pro_and_reports_recommenda
     )
 
     assert result["ok"] is True
-    assert result["recommendedModel"] == "deepseek-v4-flash"
+    assert result["recommendedModel"] == "deepseek-v4-pro"
     assert result["recommendedApiType"] == "responses"
     assert [(call[0].model, call[0].api_type) for call in probe.calls] == [
-        ("deepseek-v4-flash", "responses"),
-        ("deepseek-v4-pro", "chat_completions"),
-        ("deepseek-v4-flash", "chat_completions"),
+        ("deepseek-v4-pro", "responses"),
     ]
-    assert result["attempts"][0]["status"] == "verified"
+    assert result["attempts"] == [
+        {"model": "deepseek-v4-pro", "apiType": "responses", "status": "verified"}
+    ]
     assert "safe-key" not in str(result["attempts"])
+
+
+def test_provider_test_continues_only_after_explicit_protocol_compatibility_error() -> None:
+    unsupported = RuntimeError("endpoint not found")
+    unsupported.status_code = 404  # type: ignore[attr-defined]
+    probe = FakeProbe([unsupported, "VRCForge provider test OK", RuntimeError("must not run")])
+
+    result = _service(probe).run(
+        Request(provider="deepseek", model="deepseek-v4-pro", api_type="auto")
+    )
+
+    assert result["ok"] is True
+    assert [(call[0].model, call[0].api_type) for call in probe.calls] == [
+        ("deepseek-v4-pro", "responses"),
+        ("deepseek-v4-pro", "messages"),
+    ]
+    assert [attempt["status"] for attempt in result["attempts"]] == [
+        "unsupported",
+        "verified",
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(RuntimeError("ordinary provider failure"), id="ordinary"),
+        pytest.param(TimeoutError("provider timed out"), id="timeout"),
+    ],
+)
+def test_provider_test_stops_after_non_compatibility_exception(failure: BaseException) -> None:
+    probe = FakeProbe([failure, "VRCForge provider test OK"] * 3)
+
+    result = _service(probe).run(
+        Request(provider="deepseek", model="deepseek-v4-pro", api_type="auto")
+    )
+
+    assert result["ok"] is False
+    assert len(probe.calls) == 1
+    assert result["attempts"][0]["status"] == "failed"
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 503])
+def test_provider_test_stops_after_auth_rate_limit_or_server_error(status: int) -> None:
+    failure = RuntimeError(f"HTTP {status}")
+    failure.status_code = status  # type: ignore[attr-defined]
+    probe = FakeProbe([failure, "VRCForge provider test OK"] * 3)
+
+    result = _service(probe).run(
+        Request(provider="deepseek", model="deepseek-v4-pro", api_type="auto")
+    )
+
+    assert result["ok"] is False
+    assert len(probe.calls) == 1
+    assert result["attempts"][0]["status"] == "failed"
+
+
+def test_provider_test_stops_after_invalid_structured_response() -> None:
+    probe = FakeProbe(["not-json", '{"ok": true}'] * 3)
+
+    result = _service(probe).run(
+        Request(
+            provider="deepseek",
+            model="deepseek-v4-pro",
+            api_type="auto",
+            capability="structured",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "warning"
+    assert len(probe.calls) == 1
 
 
 def test_provider_test_vision_is_honestly_skipped_without_sdk_call() -> None:
@@ -148,6 +219,36 @@ def test_provider_test_vision_is_honestly_skipped_without_sdk_call() -> None:
     assert result["status"] == "skipped"
     assert result["skipped"] is True
     assert probe.calls == []
+
+
+def test_deepseek_messages_probe_uses_official_anthropic_base() -> None:
+    observed: dict[str, Any] = {}
+    sdk = ProviderProbeSdkPorts(
+        responses_adapter=lambda *_args: pytest.fail("unexpected Responses SDK"),
+        google_client=lambda *_args: pytest.fail("unexpected Google SDK"),
+        google_types=lambda: pytest.fail("unexpected Google types"),
+        anthropic_client=lambda key, url: (
+            observed.update(client=(key, url))
+            or SimpleNamespace(
+                messages=SimpleNamespace(
+                    create=lambda **kwargs: (
+                        observed.update(request=kwargs)
+                        or SimpleNamespace(content=[SimpleNamespace(text="ok")])
+                    )
+                )
+            )
+        ),
+        openai_client=lambda *_args: pytest.fail("unexpected Chat SDK"),
+    )
+    runner = ProviderTextProbeRunner(_probe_policy(observed), sdk)
+    config = ProviderApiConfig(
+        "deepseek", "safe-key", "https://api.deepseek.com",
+        "deepseek-v4-pro", "messages", "high",
+    )
+
+    assert runner.probe(config, "probe") == "ok"
+    assert observed["client"] == ("safe-key", "https://api.deepseek.com/anthropic")
+    assert observed["request"]["model"] == "deepseek-v4-pro"
 
 
 def test_provider_test_normalization_and_probe_failures_are_bounded_results() -> None:
@@ -364,6 +465,6 @@ def test_probe_runner_custom_site_routes_each_explicit_protocol_without_silent_c
     assert observed == [
         ("responses", "https://custom.example/v1"),
         ("chat_completions", "https://custom.example/v1"),
-        ("messages", "https://custom.example/v1"),
+        ("messages", "https://custom.example"),
         ("generate_content", "https://custom.example/v1"),
     ]

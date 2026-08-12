@@ -448,6 +448,7 @@ export default function App() {
     providerSnapshot,
     saveApiProvider,
     handleProviderChange,
+    handleDeepSeekAutoNegotiationChange,
     handleVisionProviderChange,
     saveVisionProfile,
     clearVisionProfile,
@@ -3643,6 +3644,7 @@ export default function App() {
               onApiKeyChange={setApiKey}
               onApiBaseUrlChange={setApiBaseUrl}
               onApiModelChange={setApiModel}
+              onDeepSeekAutoNegotiationChange={handleDeepSeekAutoNegotiationChange}
               onApiTypeChange={setApiType}
               onApiContextWindowChange={setApiContextWindow}
               onApiThinkingLevelChange={setApiThinkingLevel}

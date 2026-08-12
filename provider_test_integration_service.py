@@ -207,19 +207,23 @@ class ProviderTestIntegrationService:
                 )
                 if structured_ok:
                     successful.append((candidate, text, structured_ok))
+                break
             except Exception as exc:  # noqa: BLE001
+                compatibility_error = is_explicit_protocol_compatibility_error(exc)
                 attempts.append(
                     {
                         "model": candidate.model,
                         "apiType": candidate.api_type,
                         "status": (
                             "unsupported"
-                            if is_explicit_protocol_compatibility_error(exc)
+                            if compatibility_error
                             else "failed"
                         ),
                         "message": self._bounded_probe_error(exc, config.api_key),
                     }
                 )
+                if not compatibility_error:
+                    break
         if not successful:
             first_message = next(
                 (str(item.get("message") or "") for item in attempts if item.get("message")),
@@ -348,7 +352,12 @@ class ProviderTextProbeRunner:
             finally:
                 _close_sdk_client(client)
         if resolved_api_type == "messages":
-            client = self._sdk.anthropic_client(config.api_key, config.base_url)
+            base_url = (
+                endpoint_for_protocol(config.base_url, "messages", provider=config.provider)
+                if config.base_url
+                else ""
+            )
+            client = self._sdk.anthropic_client(config.api_key, base_url)
             try:
                 request_payload = self._policy.build_anthropic_request_payload(
                     self.probe_settings(config),
@@ -478,7 +487,7 @@ def _default_anthropic_client(api_key: str, base_url: str) -> Any:
         "http_client": httpx.Client(follow_redirects=False),
     }
     if base_url:
-        kwargs["base_url"] = endpoint_for_protocol(base_url, "messages")
+        kwargs["base_url"] = base_url
     return anthropic.Anthropic(**kwargs)
 
 

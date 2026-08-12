@@ -1474,7 +1474,13 @@ def request_deepseek_responses_plan_with_metadata(
 def _responses_reasoning_effort(settings: Settings) -> str:
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
     supported = reasoning_effort_variants("deepseek", settings.llm_model, settings.llm_api_type)
-    return level if level in supported else ""
+    if level not in supported:
+        return ""
+    return _deepseek_documented_effort(level)
+
+
+def _deepseek_documented_effort(level: str) -> str:
+    return "high" if level in {"medium", "xhigh"} else level
 
 
 def llm_system_instruction(settings: Settings) -> str:
@@ -1846,8 +1852,8 @@ def _deepseek_reasoning_variants(model_id: str, resolved_api_type: str = "chat_c
     # enum. `high` is VRCForge's semantic label for enabled thinking.
     if re.match(r"^deepseek-(?:chat|reasoner)(?:[-.]|$)", model_id):
         return ["none", "high"]
-    if model_id == "deepseek-v4-flash" and resolved_api_type == "responses":
-        return ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    if model_id in {"deepseek-v4-flash", "deepseek-v4-pro"} and resolved_api_type in {"responses", "messages"}:
+        return ["none", "low", "medium", "high", "xhigh", "max"]
     # Chat Completion V4 models use the safe common semantic subset.
     if model_id in {"deepseek-v4-flash", "deepseek-v4-pro"}:
         return ["none", "low", "high", "max"]
@@ -1926,6 +1932,8 @@ def reasoning_variants_descriptor(provider: str, model: str, api_type: object = 
     }.get(provider_id, "unknown")
     if provider_id == "deepseek" and resolved_api_type == "responses":
         transport = "deepseek_responses"
+    elif provider_id == "deepseek" and resolved_api_type == "messages":
+        transport = "deepseek_messages"
     request_mode = {
         "openai": "reasoning_effort",
         "deepseek": "thinking_toggle",
@@ -1935,6 +1943,8 @@ def reasoning_variants_descriptor(provider: str, model: str, api_type: object = 
     }.get(provider_id, "")
     if provider_id == "deepseek" and resolved_api_type == "responses":
         request_mode = "reasoning.effort"
+    elif provider_id == "deepseek" and resolved_api_type == "messages":
+        request_mode = "output_config.effort"
     if provider_id == "anthropic":
         if anthropic_model_supports_adaptive_thinking(model_id):
             request_mode = "adaptive_thinking_effort"
@@ -2045,6 +2055,13 @@ def build_anthropic_request_payload(settings: Settings, user_content: Any) -> di
         "system": llm_system_instruction(settings),
         "messages": [{"role": "user", "content": user_content}],
     }
+    if normalize_provider_name(settings.llm_provider) == "deepseek":
+        level = normalize_reasoning_effort(settings.gemini_thinking_level)
+        supported = reasoning_effort_variants("deepseek", payload["model"], "messages")
+        if level in supported and level != "none":
+            payload["thinking"] = {"type": "enabled"}
+            payload["output_config"] = {"effort": _deepseek_documented_effort(level)}
+        return payload
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
     if level not in reasoning_effort_variants("anthropic", payload["model"]):
         level = ""
@@ -2293,9 +2310,13 @@ def request_anthropic_plan_with_metadata(
         "http_client": http_client,
         **_llm_sdk_retry_kwargs(settings),
     }
-    if normalize_provider_name(settings.llm_provider) == "custom":
-        client_kwargs["base_url"] = endpoint_for_protocol(settings.llm_base_url, "messages")
+    provider_id = normalize_provider_name(settings.llm_provider)
+    if provider_id in {"custom", "deepseek"}:
+        client_kwargs["base_url"] = endpoint_for_protocol(
+            settings.llm_base_url, "messages", provider=provider_id
+        )
     client = anthropic.Anthropic(**client_kwargs)
+    response_source = "deepseek-messages" if provider_id == "deepseek" else "anthropic"
     try:
         request_payload = build_anthropic_request_payload(settings, user_content)
         if stream_callback is not None and not image_paths:
@@ -2311,20 +2332,28 @@ def request_anthropic_plan_with_metadata(
                 final_message = stream.get_final_message()
             return LlmPlanResponse(
                 text="".join(chunks) or extract_anthropic_message_text(final_message),
-                reasoning=extract_llm_reasoning_trace(final_message, settings, source="anthropic"),
-                usage=extract_llm_token_usage(final_message, settings, source="anthropic"),
+                reasoning=extract_llm_reasoning_trace(final_message, settings, source=response_source),
+                usage=extract_llm_token_usage(final_message, settings, source=response_source),
             )
         response = client.messages.create(
             **request_payload,
         )
         return LlmPlanResponse(
             text=extract_anthropic_message_text(response),
-            reasoning=extract_llm_reasoning_trace(response, settings, source="anthropic"),
-            usage=extract_llm_token_usage(response, settings, source="anthropic"),
+            reasoning=extract_llm_reasoning_trace(response, settings, source=response_source),
+            usage=extract_llm_token_usage(response, settings, source=response_source),
         )
     except Exception as exc:  # noqa: BLE001
         if image_paths:
-            raise RuntimeError(format_multimodal_error(exc, settings, True, "Anthropic")) from exc
+            raise RuntimeError(format_multimodal_error(exc, settings, True, provider_display_name(settings.llm_provider))) from exc
+        if provider_id == "deepseek":
+            raise RuntimeError(
+                format_deepseek_messages_error(
+                    exc,
+                    settings,
+                    str(client_kwargs.get("base_url") or settings.llm_base_url),
+                )
+            ) from exc
         raise RuntimeError(format_anthropic_error(exc, settings.llm_model or DEFAULT_ANTHROPIC_MODEL)) from exc
     finally:
         _close_provider_client(client)
@@ -2690,6 +2719,41 @@ def format_openai_compatible_error(exc: Exception, settings: Settings) -> str:
     return (
         f"{provider_name} request failed for model '{settings.llm_model}' via OpenAI-compatible endpoint "
         f"'{settings.llm_base_url}' with HTTP {status_code}.\nOriginal error: {message}"
+    )
+
+
+def format_deepseek_messages_error(
+    exc: Exception,
+    settings: Settings,
+    endpoint: str,
+) -> str:
+    status_code = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None) or "unknown"
+    message = str(exc).strip()
+    model = settings.llm_model
+    endpoint_line = f"DeepSeek Messages endpoint: '{endpoint}'.\n"
+
+    if status_code == 429:
+        return (
+            f"DeepSeek quota was exhausted for model '{model}'.\n"
+            "Check DeepSeek billing/quota or retry after the quota window resets.\n"
+            f"{endpoint_line}Original error: {message}"
+        )
+
+    if status_code in {401, 403}:
+        key_origin = str(settings.llm_api_key_env or "").strip()
+        key_guidance = (
+            f"Check {key_origin} or the saved dashboard API config."
+            if key_origin
+            else "Check the saved dashboard API config."
+        )
+        return (
+            f"DeepSeek rejected the API key while calling model '{model}'.\n"
+            f"{key_guidance}\n{endpoint_line}Original error: {message}"
+        )
+
+    return (
+        f"DeepSeek Messages request failed for model '{model}' via endpoint "
+        f"'{endpoint}' with HTTP {status_code}.\nOriginal error: {message}"
     )
 
 

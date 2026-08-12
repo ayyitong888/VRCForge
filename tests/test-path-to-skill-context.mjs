@@ -191,6 +191,79 @@ test("an applied approval event uses its structured target tool without evidence
   assert.equal(serialized.includes("display text"), false);
 });
 
+test("completion-unverified run captures only its completed structured action", () => {
+  const summary = buildPathToSkillOperationSummary({
+    status: "blocked",
+    nextStep: "completion_unverified",
+    skillTool: "vrcforge_build_test_readiness",
+    skillStatus: "executed",
+    steps: [
+      {
+        kind: "phase",
+        tool: "exposure_layer",
+        status: "entered_execution",
+      },
+      {
+        kind: "skill",
+        tool: "vrcforge_build_test_readiness",
+        status: "executed",
+      },
+    ],
+  });
+
+  assert.deepEqual(summary, {
+    schema: "vrcforge.operation_summary.v1",
+    source: { kind: "runtime_run" },
+    workflow: "captured_runtime_operation",
+    status: "structured_actions_completed",
+    steps: [
+      { kind: "skill", tool: "vrcforge_build_test_readiness", status: "executed" },
+    ],
+    evidence: { approvalRecorded: false, checkpointRecorded: false },
+    validation: { requiresApproval: false, requiresCheckpoint: false, requiresRollback: false },
+  });
+});
+
+test("completion-unverified exception stays closed for contaminated or incomplete runs", () => {
+  const baseRun = {
+    status: "blocked",
+    nextStep: "completion_unverified",
+    steps: [
+      { kind: "phase", tool: "exposure_layer", status: "entered_execution" },
+      { kind: "skill", tool: "vrcforge_build_test_readiness", status: "executed" },
+    ],
+  };
+  const contaminatedSteps = [
+    { kind: "shell", tool: "powershell", status: "completed" },
+    { kind: "skill", tool: "vrcforge_ask_user", status: "executed" },
+    { kind: "skill", tool: "vrcforge_progress_update", status: "executed" },
+    { kind: "write", tool: "vrcforge_apply_shader_tuning", status: "failed" },
+    { kind: "phase", tool: "exposure_layer", status: "failed" },
+  ];
+
+  for (const extraStep of contaminatedSteps) {
+    assert.equal(
+      buildPathToSkillOperationSummary({
+        ...baseRun,
+        steps: [...baseRun.steps, extraStep],
+      }),
+      null,
+      JSON.stringify(extraStep),
+    );
+  }
+  assert.equal(buildPathToSkillOperationSummary({ ...baseRun, nextStep: "needs_user_action" }), null);
+  assert.equal(buildPathToSkillOperationSummary({ ...baseRun, error: "provider failed" }), null);
+  assert.equal(
+    buildPathToSkillOperationSummary({
+      status: "blocked",
+      nextStep: "completion_unverified",
+      skillTool: "vrcforge_build_test_readiness",
+      skillStatus: "executed",
+    }),
+    null,
+  );
+});
+
 test("nonterminal runs and runs without structured VRCForge tools are not offered", () => {
   assert.equal(
     buildPathToSkillOperationSummary({

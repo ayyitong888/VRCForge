@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -25,6 +26,7 @@ from vrchat_blendshape_agent import (
     build_openai_compatible_request_payload,
     provider_display_name,
     provider_requires_api_key,
+    request_anthropic_plan_with_metadata,
     request_deepseek_responses_plan_with_metadata,
     request_llm_plan_with_metadata,
 )
@@ -524,20 +526,157 @@ def test_runtime_deepseek_auto_model_falls_back_once_on_explicit_preoutput_proto
         error.status_code = 404  # type: ignore[attr-defined]
         raise error
 
-    def chat(candidate, *_args, **_kwargs):
+    def messages(candidate, *_args, **_kwargs):
         calls.append((candidate.llm_model, candidate.llm_api_type))
         return SimpleNamespace(text='{"reply":"pro"}', reasoning={}, usage={})
 
     monkeypatch.setattr("vrchat_blendshape_agent.request_responses_plan_with_metadata", responses)
-    monkeypatch.setattr("vrchat_blendshape_agent.request_openai_compatible_plan_with_metadata", chat)
+    monkeypatch.setattr("vrchat_blendshape_agent.request_anthropic_plan_with_metadata", messages)
 
     response = request_llm_plan_with_metadata(configured, "p")
 
     assert response.text == '{"reply":"pro"}'
     assert calls == [
-        ("deepseek-v4-flash", "responses"),
-        ("deepseek-v4-pro", "chat_completions"),
+        ("deepseek-v4-pro", "responses"),
+        ("deepseek-v4-pro", "messages"),
     ]
+
+
+def test_deepseek_responses_adapter_accepts_both_ga_v4_models() -> None:
+    adapter, holder = adapter_for({"output_text": "ok", "output": []})
+
+    response = adapter.send_request(
+        ProviderRuntimeRequest(model="deepseek-v4-pro", prompt="p", instructions="s")
+    )
+
+    assert response.text == "ok"
+    assert holder["client"].responses.calls[0]["model"] == "deepseek-v4-pro"
+    assert adapter.get_models() == [
+        {
+            "id": "deepseek-v4-flash",
+            "supportedApiTypes": ["responses", "messages", "chat_completions"],
+        },
+        {
+            "id": "deepseek-v4-pro",
+            "supportedApiTypes": ["responses", "messages", "chat_completions"],
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    ("requested", "sent"),
+    [
+        ("none", "none"),
+        ("minimal", ""),
+        ("low", "low"),
+        ("medium", "high"),
+        ("high", "high"),
+        ("xhigh", "high"),
+        ("max", "max"),
+    ],
+)
+def test_deepseek_responses_production_maps_only_documented_effort_values(
+    requested: str, sent: str
+) -> None:
+    observed: dict[str, FakeClient] = {}
+
+    def factory(**_kwargs):
+        observed["client"] = FakeClient(
+            SimpleNamespace(output_text="ok", output=[], usage={})
+        )
+        return observed["client"]
+
+    configured = settings(api_type="responses")
+    configured.llm_model = "deepseek-v4-pro"
+    configured.gemini_thinking_level = requested
+
+    request_deepseek_responses_plan_with_metadata(
+        configured,
+        "p",
+        client_factory=factory,
+    )
+
+    payload = observed["client"].responses.calls[0]
+    if sent:
+        assert payload["reasoning"] == {"effort": sent}
+    else:
+        assert "reasoning" not in payload
+
+
+def test_deepseek_messages_production_request_preserves_provider_usage_and_endpoint(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeMessages:
+        def create(self, **kwargs):
+            observed["request"] = kwargs
+            return SimpleNamespace(
+                content=[SimpleNamespace(text='{"reply":"ok"}')],
+                usage=SimpleNamespace(input_tokens=7, output_tokens=3),
+            )
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            observed["client"] = kwargs
+            self.messages = FakeMessages()
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=FakeAnthropic))
+    configured = settings(api_type="messages")
+    configured.llm_model = "deepseek-v4-pro"
+    configured.llm_base_url = "https://api.deepseek.example/v1"
+    configured.llm_api_key_env = "DEEPSEEK_API_KEY"
+
+    response = request_anthropic_plan_with_metadata(configured, "p")
+
+    assert response.text == '{"reply":"ok"}'
+    client = observed["client"]
+    assert isinstance(client, dict)
+    assert client["api_key"] == "safe-key"
+    assert client["base_url"] == "https://api.deepseek.example/anthropic"
+    request = observed["request"]
+    assert isinstance(request, dict)
+    assert request["model"] == "deepseek-v4-pro"
+    assert response.usage == {
+        "schema": "vrcforge.provider_usage.v1",
+        "provider": "deepseek",
+        "providerLabel": "DeepSeek",
+        "model": "deepseek-v4-pro",
+        "source": "deepseek-messages",
+        "exact": True,
+        "inputTokens": 7,
+        "outputTokens": 3,
+        "totalTokens": 10,
+    }
+
+
+def test_deepseek_messages_production_error_preserves_provider_model_key_origin_and_endpoint(monkeypatch) -> None:
+    failure = RuntimeError("invalid credential")
+    failure.status_code = 401  # type: ignore[attr-defined]
+
+    class FakeMessages:
+        def create(self, **_kwargs):
+            raise failure
+
+    class FakeAnthropic:
+        def __init__(self, **_kwargs):
+            self.messages = FakeMessages()
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=FakeAnthropic))
+    configured = settings(api_type="messages")
+    configured.llm_model = "deepseek-v4-pro"
+    configured.llm_base_url = "https://api.deepseek.example/v1"
+    configured.llm_api_key_env = "DEEPSEEK_API_KEY"
+
+    with pytest.raises(RuntimeError) as captured:
+        request_anthropic_plan_with_metadata(configured, "p")
+
+    message = str(captured.value)
+    assert "DeepSeek" in message
+    assert "deepseek-v4-pro" in message
+    assert "DEEPSEEK_API_KEY" in message
+    assert "https://api.deepseek.example/anthropic" in message
+    assert "Anthropic" not in message
+    assert "x-api-key" not in message
+    assert "ANTHROPIC_API_KEY" not in message
 
 
 @pytest.mark.parametrize("status", [401, 429, 500])

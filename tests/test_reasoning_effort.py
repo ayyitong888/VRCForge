@@ -199,7 +199,10 @@ def test_reasoning_variants_are_provider_and_model_aware():
     assert reasoning_effort_variants("openai", "gpt-5.2-chat-latest") == []
     assert reasoning_effort_variants("deepseek", "deepseek-reasoner") == ["none", "high"]
     assert reasoning_effort_variants("deepseek", "deepseek-v4-flash", "responses") == [
-        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+        "none", "low", "medium", "high", "xhigh", "max"
+    ]
+    assert reasoning_effort_variants("deepseek", "deepseek-v4-pro", "messages") == [
+        "none", "low", "medium", "high", "xhigh", "max"
     ]
     assert reasoning_effort_variants("deepseek", "deepseek-v4-flash", "chat_completions") == ["none", "low", "high", "max"]
     assert reasoning_effort_variants("deepseek", "deepseek-v4-pro", "chat_completions") == ["none", "low", "high", "max"]
@@ -231,7 +234,7 @@ def test_flash_responses_reasoning_descriptor_is_transport_specific():
     assert descriptor["transport"] == "deepseek_responses"
     assert descriptor["resolvedApiType"] == "responses"
     assert [variant["key"] for variant in descriptor["variants"]] == [
-        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+        "none", "low", "medium", "high", "xhigh", "max"
     ]
 
 
@@ -325,6 +328,52 @@ def test_anthropic_payload_off_sends_no_thinking():
     payload = build_anthropic_request_payload(make_settings("anthropic", model="claude-opus-4-6"), "hello")
     assert payload["max_tokens"] == ANTHROPIC_RESPONSE_BASE_MAX_TOKENS
     assert "thinking" not in payload
+
+
+def test_deepseek_anthropic_payload_uses_official_thinking_effort_shape():
+    configured = make_settings(
+        "deepseek", model="deepseek-v4-pro", thinking_level="high"
+    )
+    configured.llm_api_type = "messages"
+    payload = build_anthropic_request_payload(configured, "hello")
+    assert payload["model"] == "deepseek-v4-pro"
+    assert payload["thinking"] == {"type": "enabled"}
+    assert payload["output_config"] == {"effort": "high"}
+
+
+@pytest.mark.parametrize(
+    ("requested", "sent"),
+    [
+        ("low", "low"),
+        ("medium", "high"),
+        ("high", "high"),
+        ("xhigh", "high"),
+        ("max", "max"),
+    ],
+)
+def test_deepseek_anthropic_payload_maps_product_effort_to_documented_values(
+    requested: str, sent: str
+):
+    configured = make_settings(
+        "deepseek", model="deepseek-v4-pro", thinking_level=requested
+    )
+    configured.llm_api_type = "messages"
+
+    payload = build_anthropic_request_payload(configured, "hello")
+
+    assert payload["output_config"] == {"effort": sent}
+
+
+def test_deepseek_anthropic_payload_never_sends_undocumented_minimal():
+    configured = make_settings(
+        "deepseek", model="deepseek-v4-pro", thinking_level="minimal"
+    )
+    configured.llm_api_type = "messages"
+
+    payload = build_anthropic_request_payload(configured, "hello")
+
+    assert "thinking" not in payload
+    assert "output_config" not in payload
 
 
 def test_anthropic_adaptive_payload_raises_response_budget_per_level():

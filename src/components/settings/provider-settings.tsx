@@ -2,6 +2,7 @@ import { Check, Eye, Loader2, MessageSquare, RefreshCw } from "lucide-react";
 import type { FormEvent, ReactNode } from "react";
 import i18n from "../../i18n";
 import type { ProviderApiType, ProviderModelInfo, ProviderReasoningVariants } from "../../lib/api";
+import { resolveContextLimit } from "../../lib/context-compaction";
 import { providerCapabilities, providerNeedsApiKey } from "../../lib/provider-ui";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -32,6 +33,7 @@ type ProviderSetupProps = {
   onApiKeyChange: (value: string) => void;
   onBaseUrlChange: (value: string) => void;
   onModelChange: (value: string) => void;
+  onDeepSeekAutoNegotiationChange: (enabled: boolean) => void;
   onApiTypeChange: (value: ProviderApiType) => void;
   onContextWindowChange: (value: string) => void;
   onThinkingLevelChange: (value: string) => void;
@@ -83,6 +85,7 @@ export function ProviderSetup({
   onApiKeyChange,
   onBaseUrlChange,
   onModelChange,
+  onDeepSeekAutoNegotiationChange,
   onApiTypeChange,
   onContextWindowChange,
   onThinkingLevelChange,
@@ -98,7 +101,9 @@ export function ProviderSetup({
   const capabilities = providerCapabilities(modelCapabilities, capabilitySource);
   const apiTypeOptions = supportedApiTypeOptions(provider, model);
   const selectedModelInfo = models.find((item) => item.id === model);
-  const detectedContextWindow = firstPositiveContextWindow(selectedModelInfo);
+  const knownContextWindow = resolveContextLimit(provider, model, selectedModelInfo);
+  const detectedContextWindow = firstPositiveContextWindow(selectedModelInfo)
+    ?? (knownContextWindow.known ? knownContextWindow.limit : undefined);
   const contextWindowK = contextWindow.trim() ? Number(contextWindow) : 0;
   const contextWindowValid = !contextWindow.trim()
     || (Number.isInteger(contextWindowK) && contextWindowK >= 4 && contextWindowK <= 10_000);
@@ -166,7 +171,7 @@ export function ProviderSetup({
               <input
                 type="checkbox"
                 checked={deepseekAutoNegotiation}
-                onChange={(event) => onModelChange(event.target.checked ? "deepseek-auto" : "deepseek-v4-flash")}
+                onChange={(event) => onDeepSeekAutoNegotiationChange(event.target.checked)}
                 aria-label={i18n.t("provider.deepseekAutoNegotiation")}
                 className="mt-0.5 h-4 w-4 shrink-0 accent-primary"
               />
@@ -327,7 +332,7 @@ export function ProviderSetup({
 }
 
 function firstPositiveContextWindow(model: ProviderModelInfo | undefined): number | undefined {
-  for (const value of [model?.inputTokenLimit, model?.contextWindow, model?.maxInputTokens]) {
+  for (const value of [model?.modelContextWindow, model?.inputTokenLimit, model?.contextWindow, model?.maxInputTokens]) {
     if (typeof value === "number" && Number.isFinite(value) && value > 0) {
       return value;
     }
@@ -340,8 +345,8 @@ function supportedApiTypeOptions(provider: string, model: string): ProviderApiTy
     if (model.trim() === "deepseek-auto") {
       return ["auto"];
     }
-    return model.trim() === "deepseek-v4-flash"
-      ? ["auto", "responses", "chat_completions"]
+    return model.trim() === "deepseek-v4-flash" || model.trim() === "deepseek-v4-pro"
+      ? ["auto", "responses", "messages", "chat_completions"]
       : ["auto", "chat_completions"];
   }
   if (provider === "custom") {

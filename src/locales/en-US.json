@@ -783,7 +783,7 @@
     "apiType_messages": "Messages",
     "deepseekAutoNegotiation": "Negotiate model and protocol automatically",
     "deepseekAutoNegotiationHint": "Allow VRCForge to probe real models and protocols on the same DeepSeek endpoint. Turn this off to pin the model and API type below.",
-    "deepseekAutoRoute": "Negotiation order: Flash Responses → Pro Chat → Flash Chat",
+    "deepseekAutoRoute": "Negotiation order: Pro Responses → Pro Anthropic → Pro Chat → Flash Responses → Flash Anthropic → Flash Chat",
     "customEndpoint": "Custom Compatible Endpoint",
     "noKeyNeeded": "No key needed",
     "selectModel": "Select a model",
