@@ -88,3 +88,20 @@ def test_packaged_skill_probe_seeds_current_mcp2_fixture_and_waits_for_audit_row
     assert "auditRowsReady" in source
     assert "rowElements().length === 10" in source
     assert "eventValues().length === expectedGovernanceRows.length" in source
+
+
+def test_packaged_skill_probe_uses_authenticated_loopback_provider_after_local_planner_removal() -> None:
+    source = (
+        ROOT / "scripts" / "diagnose_packaged_skill_ecosystem.mjs"
+    ).read_text(encoding="utf-8")
+
+    assert 'from "node:http"' in source
+    assert "createAuthenticatedLoopbackPlannerProvider" in source
+    assert 'server.listen(0, "127.0.0.1"' in source
+    assert 'authorization !== `Bearer ${plannerProviderApiKey}`' in source
+    assert "beginToolSelection(skillName, effectiveParams)" in source
+    assert 'action: "skill"' in source
+    assert 'action: "reply"' in source
+    assert 'provider: "custom"' in source
+    assert 'api_type: "chat_completions"' in source
+    assert "await plannerProvider.close()" in source

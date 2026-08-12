@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
+import { createServer } from "node:http";
 import {
   mkdir,
   readFile,
@@ -40,6 +41,7 @@ const appOrigin = "http://127.0.0.1:8757";
 const appRequestOrigin = "http://tauri.localhost";
 const agentGatewayToken = randomBytes(32).toString("base64url");
 const agentApprovalToken = randomBytes(32).toString("base64url");
+const plannerProviderApiKey = randomBytes(32).toString("base64url");
 const paidPayloadSentinel = `PAID_PAYLOAD_SENTINEL_${randomBytes(12).toString("hex")}`;
 const negativeTestSecret = "test-only-secret-value-123456789";
 const privateUrlSentinel = `https://private-assets.invalid/${randomBytes(12).toString("hex")}/SecretOutfit.zip`;
@@ -243,6 +245,7 @@ let processStartWatcherMode = "";
 let processStartWatcherSettleVerified = false;
 let processStartWatcherSettleMs = 0;
 let packageFilesystemBaseline;
+let plannerProvider;
 const trackedProcessIdentities = new Map();
 const trackedProcessNamesEver = new Set();
 const observedProcessStartEvents = new Map();
@@ -280,6 +283,135 @@ Optional environment:
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+function createAuthenticatedLoopbackPlannerProvider() {
+  const requests = [];
+  let activeSelection = null;
+  const server = createServer(async (request, response) => {
+    const authorization = String(request.headers.authorization || "");
+    if (authorization !== `Bearer ${plannerProviderApiKey}`) {
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "invalid probe credential" } }));
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/models") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        object: "list",
+        data: [{ id: "vrcforge-skill-probe", object: "model" }],
+      }));
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "not found" } }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    let body = {};
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    } catch {
+      body = {};
+    }
+    if (!activeSelection) {
+      response.writeHead(409, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "no active probe selection" } }));
+      return;
+    }
+    activeSelection.sampleCount += 1;
+    const firstSample = activeSelection.sampleCount === 1;
+    const plan = firstSample
+      ? {
+        action: "skill",
+        skill_tool: activeSelection.skillName,
+        skill_params: activeSelection.params,
+        summary: `Run ${activeSelection.skillName}.`,
+        reply: "",
+      }
+      : {
+        action: "reply",
+        summary: `Finished ${activeSelection.skillName}.`,
+        reply: `Finished ${activeSelection.skillName}.`,
+      };
+    const content = JSON.stringify(plan);
+    requests.push({
+      method: request.method,
+      url: request.url,
+      model: String(body.model || ""),
+      stream: body.stream === true,
+      skillName: activeSelection.skillName,
+      sample: activeSelection.sampleCount,
+      action: plan.action,
+    });
+    if (body.stream === true) {
+      const model = String(body.model || "vrcforge-skill-probe");
+      response.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+      });
+      response.write(`data: ${JSON.stringify({
+        id: "chatcmpl-skill-probe",
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [{ index: 0, delta: { role: "assistant", content }, finish_reason: null }],
+      })}\n\n`);
+      response.write(`data: ${JSON.stringify({
+        id: "chatcmpl-skill-probe",
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+        usage: { prompt_tokens: 8, completion_tokens: 8, total_tokens: 16 },
+      })}\n\n`);
+      response.end("data: [DONE]\n\n");
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      id: "chatcmpl-skill-probe",
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model: String(body.model || "vrcforge-skill-probe"),
+      choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+      usage: { prompt_tokens: 8, completion_tokens: 8, total_tokens: 16 },
+    }));
+  });
+  return {
+    requests,
+    beginToolSelection(skillName, effectiveParams) {
+      if (activeSelection) throw new Error("overlapping packaged skill probe selection");
+      const selection = {
+        skillName: String(skillName || ""),
+        params: effectiveParams && typeof effectiveParams === "object" ? effectiveParams : {},
+        sampleCount: 0,
+      };
+      activeSelection = selection;
+      return selection;
+    },
+    finishToolSelection(selection) {
+      if (activeSelection === selection) activeSelection = null;
+    },
+    async listen() {
+      await new Promise((resolveListen, rejectListen) => {
+        server.once("error", rejectListen);
+        server.listen(0, "127.0.0.1", resolveListen);
+      });
+      const address = server.address();
+      return Number(address?.port || 0);
+    },
+    async close() {
+      if (!server.listening) return;
+      await new Promise((resolveClose, rejectClose) => {
+        server.close((error) => error ? rejectClose(error) : resolveClose());
+        server.closeAllConnections?.();
+      });
+    },
+  };
 }
 
 function addAssertion(report, message) {
@@ -2984,24 +3116,31 @@ function packageSkillName(preview) {
 }
 
 async function invokeRuntimeSkill(skillName, params = {}) {
-  const payload = await agentApi("/api/agent/runtime/message", {
-    method: "POST",
-    body: {
-      agent_name: "packaged-skill-ecosystem-probe",
-      message: `Run the installed ${skillName} package fixture once.`,
-      skill_tool: skillName,
-      skill_params: {
-        projectPath: projectRoot,
-        projectRoot,
-        avatarPath: "AvatarRoot",
-        includeReadiness: false,
-        includeQuest: false,
-        ...params,
+  const effectiveParams = {
+    projectPath: projectRoot,
+    projectRoot,
+    avatarPath: "AvatarRoot",
+    includeReadiness: false,
+    includeQuest: false,
+    ...params,
+  };
+  if (!plannerProvider) throw new Error("packaged skill probe Provider is not running");
+  const selection = plannerProvider.beginToolSelection(skillName, effectiveParams);
+  try {
+    const payload = await agentApi("/api/agent/runtime/message", {
+      method: "POST",
+      body: {
+        agent_name: "packaged-skill-ecosystem-probe",
+        message: `Run the installed ${skillName} package fixture once.`,
+        skill_tool: skillName,
+        skill_params: effectiveParams,
       },
-    },
-    timeoutMs: 180000,
-  });
-  return payload?.skill || {};
+      timeoutMs: 180000,
+    });
+    return payload?.skill || {};
+  } finally {
+    plannerProvider.finishToolSelection(selection);
+  }
 }
 
 function packageAuditEventMatches(event, record, signerFingerprint) {
@@ -5473,6 +5612,7 @@ print(json.dumps(result, separators=(",", ":")))
         appSessionToken,
         agentGatewayToken,
         agentApprovalToken,
+        plannerProviderApiKey,
         negativeTestSecret,
         privateUrlSentinel,
         ephemeralSigningKeyPath,
@@ -5678,6 +5818,7 @@ print(json.dumps({
           appSessionToken,
           agentGatewayToken,
           agentApprovalToken,
+          plannerProviderApiKey,
           negativeTestSecret,
           privateUrlSentinel,
           ephemeralSigningKeyPath,
@@ -6090,6 +6231,7 @@ function sanitizeReportText(value) {
     [appSessionToken, "<redacted-app-token>"],
     [agentGatewayToken, "<redacted-agent-token>"],
     [agentApprovalToken, "<redacted-approval-token>"],
+    [plannerProviderApiKey, "<redacted-planner-provider-key>"],
     [paidPayloadSentinel, "<redacted-paid-payload-sentinel>"],
     [negativeTestSecret, "<redacted-negative-test-secret>"],
     [privateUrlSentinel, "<redacted-private-url-sentinel>"],
@@ -6113,6 +6255,14 @@ function safeError(error) {
 }
 
 function validateFinalContract(report) {
+  if (
+    report.plannerProvider?.configured !== true
+    || report.plannerProvider?.authenticated !== true
+    || report.plannerProvider?.loopbackOnly !== true
+    || Number(report.plannerProvider?.requestCount || 0) < 1
+  ) {
+    addAssertion(report, "authenticated loopback planner Provider evidence was incomplete");
+  }
   if (
     report.payloadMatchesManifest !== true
     || report.launchSource !== "manifest-directory-portable-zip-extracted-to-isolated-evidence-root"
@@ -7199,6 +7349,13 @@ async function main() {
     assertions: [],
     phases: {},
     closure: {},
+    plannerProvider: {
+      configured: false,
+      authenticated: true,
+      loopbackOnly: true,
+      requestCount: 0,
+      port: 0,
+    },
   };
   let app;
   let records = [];
@@ -7268,6 +7425,9 @@ async function main() {
       throw new Error("Preflight found an existing packaged instance or occupied probe port; nothing was terminated.");
     }
 
+    plannerProvider = createAuthenticatedLoopbackPlannerProvider();
+    const plannerProviderPort = await plannerProvider.listen();
+    report.plannerProvider.port = plannerProviderPort;
     app = await launchPackagedApp(releaseBinding);
     report.releaseBinding.executableLaunchLockVerified = app.executableLock?.verified === true
       && app.executableLock?.sha256 === releaseBinding.innerExeSha256;
@@ -7282,6 +7442,22 @@ async function main() {
         .filter((value) => typeof value === "boolean")
         .every(Boolean),
     };
+    const configuredProvider = await appApi("/api/config", {
+      method: "POST",
+      body: {
+        provider: "custom",
+        api_key: plannerProviderApiKey,
+        base_url: `http://127.0.0.1:${plannerProviderPort}/v1`,
+        model: "vrcforge-skill-probe",
+        api_type: "chat_completions",
+      },
+    });
+    report.plannerProvider.configured = configuredProvider?.apiConfig?.provider === "custom"
+      && configuredProvider?.apiConfig?.model === "vrcforge-skill-probe"
+      && configuredProvider?.apiConfig?.apiKeyPresent === true;
+    if (!report.plannerProvider.configured) {
+      addAssertion(report, "authenticated loopback planner Provider was not applied");
+    }
     await exerciseFirstRunLanguageGate(report, app.cdp);
     packagedExport = await createPackagedExportBase(app.cdp, signed);
     report.apkSemanticMatrix = { packagedExport };
@@ -7355,6 +7531,7 @@ async function main() {
     )) {
       addAssertion(report, "strict packaged probe Git/version binding changed before evidence completion");
     }
+    report.plannerProvider.requestCount = plannerProvider?.requests?.length || 0;
     validateFinalContract(report);
     if (report.assertions.length > 0) failureDetected = true;
   } catch (error) {
@@ -7412,6 +7589,13 @@ async function main() {
         .catch(() => false);
     }
     report.cleanup.builderStoreClear = !(await pathExists(resolve(packageFixtureRoot, ".builder-store")).catch(() => true));
+    report.plannerProvider.requestCount = plannerProvider?.requests?.length || 0;
+    if (plannerProvider) {
+      await plannerProvider.close().catch((providerCloseError) => {
+        addAssertion(report, `loopback planner Provider cleanup failed: ${sanitizeReportText(String(providerCloseError?.message || providerCloseError))}`);
+      });
+      plannerProvider = undefined;
+    }
     if (report.assertions.length > 0) failureDetected = true;
     if (failureDetected) {
       await finalizeFailureCleanup(report, finalSnapshot).catch((failureCleanupError) => {
