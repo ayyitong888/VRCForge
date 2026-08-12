@@ -13263,6 +13263,60 @@ def _audit_verified_avatar_images(
     *,
     include_paths: bool,
 ) -> dict[str, Any]:
+    digest_angles: dict[str, list[str]] = {}
+    for angle, image in zip(angles, verified_images, strict=True):
+        digest = hashlib.sha256(bytes(image["imageBytes"])).hexdigest()
+        digest_angles.setdefault(digest, []).append(angle)
+    duplicate_angle_groups = [
+        group for group in digest_angles.values() if len(group) > 1
+    ]
+    if duplicate_angle_groups:
+        duplicate_angles = sorted(
+            {angle for group in duplicate_angle_groups for angle in group}
+        )
+        error = (
+            "Multi-angle capture contains byte-identical frames for angles "
+            f"{', '.join(duplicate_angles)}; distinct viewpoints were not proven."
+        )
+        results: list[dict[str, Any]] = []
+        for angle, image in zip(angles, verified_images, strict=True):
+            result = {"angle": angle, "status": "failed", "error": error}
+            if include_paths:
+                image_path = str(image.get("imagePath") or "")
+                result.update(
+                    {
+                        "imagePath": image_path,
+                        "imageUrl": to_artifact_url(image_path),
+                    }
+                )
+            results.append(result)
+        emit_log(
+            "error",
+            "vision",
+            "Multi-image analysis rejected byte-identical angle captures.",
+            {
+                "imageCount": len(verified_images),
+                "angleCount": len(angles),
+                "duplicateAngleCount": len(duplicate_angles),
+            },
+        )
+        return {
+            "ok": False,
+            "overallStatus": "failed",
+            "angles": list(angles),
+            "coverageComplete": False,
+            "visualVerified": False,
+            "visualVerification": {
+                "profile": "multi_angle_visual",
+                "status": "failed",
+                "summary": (
+                    "Distinct multi-angle coverage was not proven because two or more "
+                    "frozen captures were byte-identical."
+                ),
+            },
+            "results": results,
+        }
+
     results: list[dict[str, Any]] = []
     for angle, image in zip(angles, verified_images, strict=True):
         image_path = str(image.get("imagePath") or "")

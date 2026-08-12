@@ -111,7 +111,7 @@ assertSourceContract(
   "The non-chat approval surface must match the scoped user-facing approval contract.",
 );
 assertSourceContract(
-  path.join(root, "src", "components", "chat", "conversation-card.tsx"),
+  path.join(root, "src", "components", "chat", "conversation-timeline.tsx"),
   ["presentApproval", "approvalAction !== \"approve\"", "approvalAction !== \"reject\"", "<InlineApprovalCard approval={approval}"],
   "Conversation history must show only a read-only approval hint and hide it once a decision starts.",
 );
@@ -205,9 +205,10 @@ try {
     cwd: smokeRoot,
   });
   assert(lowRiskTurn.status === 200, "Agent runtime message should accept natural language input.");
-  assert(lowRiskTurn.json.plan.planner === "deterministic-local", "Agent runtime should produce a plan.");
-  assert(lowRiskTurn.json.shell.status === "executed", "Low-risk shell commands should execute directly.");
-  assert(lowRiskTurn.json.shell.classification.risk === "low", "Directory listing should be low-risk.");
+  assert(lowRiskTurn.json.plan.planner === "llm", "Agent runtime should stay on the Provider planner lane.");
+  assert(lowRiskTurn.json.plan.plannerFailure?.code === "provider_not_configured", "Missing Provider must be explicit.");
+  assert(lowRiskTurn.json.plan.nextStep === "planner_failed", "Missing Provider must terminate without local planning.");
+  assert(!lowRiskTurn.json.shell && !lowRiskTurn.json.skill && !lowRiskTurn.json.write, "Missing Provider must execute zero tools.");
 
   const attachmentTurn = await postJson(`${endpoint}/api/app/agent/message`, {
     message: "read the attached smoke note",
@@ -225,6 +226,7 @@ try {
   assert(attachmentTurn.status === 200, "Agent runtime should accept bounded file/image attachment payloads.");
   assert(attachmentTurn.json.attachments?.[0]?.payloadKind === "text", "Attachment payload kind should be preserved.");
   assert(attachmentTurn.json.attachments?.[0]?.text === "hello smoke", "Text attachment payload should be preserved.");
+  assert(attachmentTurn.json.plan.plannerFailure?.code === "provider_not_configured", "Attachments must not reactivate local planning.");
 
   const workspaceDiff = await requestJson(`${endpoint}/api/app/workspace/diff?root=${encodeURIComponent(root)}&includePatch=true`, "GET");
   assert(workspaceDiff.status === 200, "Workspace diff endpoint should be available.");
@@ -234,17 +236,15 @@ try {
     message: "检查 Unity MCP 状态",
   });
   assert(unityStatusTurn.status === 200, "Unity status skill turn should return normally.");
-  assert(unityStatusTurn.json.plan.skillTool === "vrcforge_unity_status", "Unity status intent should route to the Unity status skill.");
-  assert(unityStatusTurn.json.skill.tool === "vrcforge_unity_status", "Runtime should execute the routed Unity status skill.");
-  assert(["executed", "failed", "blocked"].includes(unityStatusTurn.json.skill.status), "Unity status skill should produce a bounded status.");
+  assert(unityStatusTurn.json.plan.plannerFailure?.code === "provider_not_configured", "Tool keywords must not bypass the Provider planner.");
+  assert(!unityStatusTurn.json.skill, "Tool keywords must execute zero skills without a Provider.");
 
   const skillManifestTurn = await postJson(`${endpoint}/api/app/agent/message`, {
     message: "列一下 skills",
   });
   assert(skillManifestTurn.status === 200, "Skill manifest turn should return normally.");
-  assert(skillManifestTurn.json.plan.skillTool === "vrcforge_skill_manifest", "Skill list intent should route to the manifest skill.");
-  assert(skillManifestTurn.json.skill.result.toolCount >= 10, "Skill manifest should include the registered tools.");
-  assert(!("token" in skillManifestTurn.json.skill.result), "Skill manifest must not leak the local gateway token.");
+  assert(skillManifestTurn.json.plan.plannerFailure?.code === "provider_not_configured", "Skill-list text must not bypass the Provider planner.");
+  assert(!skillManifestTurn.json.skill, "Skill-list text must execute zero skills without a Provider.");
 
   const createdSkill = await requestJson(`${endpoint}/api/app/skills`, "POST", {
     name: "smoke-review",
@@ -266,10 +266,8 @@ try {
     message: "/smoke-review target-avatar",
   });
   assert(userSkillTurn.status === 200, "User skill runtime turn should return normally.");
-  assert(userSkillTurn.json.skill.status === "executed", "User skill entrypoint should execute through an allowed read-only tool.");
-  assert(userSkillTurn.json.skill.result.name === "smoke-review", "Loaded user skill should match the request.");
-  assert(userSkillTurn.json.skill.result.arguments === "target-avatar", "Direct skill invocation should pass arguments.");
-  assert(userSkillTurn.json.skill.entrypointTool === "vrcforge_health", "User skill should expose its read-only entrypoint.");
+  assert(userSkillTurn.json.plan.plannerFailure?.code === "provider_not_configured", "Direct skill text must still require the Provider planner.");
+  assert(!userSkillTurn.json.skill, "Direct skill text must execute zero skills without a Provider.");
 
   const skillCheck = await requestJson(`${endpoint}/api/app/skills/check`, "GET");
   assert(skillCheck.status === 200, "Skill check should be available.");
@@ -290,18 +288,9 @@ try {
     cwd: shellProjectRoot,
   });
   assert(highRiskTurn.status === 200, "High-risk shell turn should return normally.");
-  assert(highRiskTurn.json.shell.status === "pending_approval", "High-risk shell command should require approval.");
-  assert(!fs.existsSync(highRiskTarget), "High-risk shell command must not execute before approval.");
-  const shellApproval = await postJson(
-    `${endpoint}/api/app/agent/approvals/${highRiskTurn.json.shell.approval_id}/approve`,
-    {},
-  );
-  assert(shellApproval.status === 200, "Desktop approval endpoint should approve shell execution.");
-  assert(
-    shellApproval.json.execution.status === "applied",
-    `Approved shell payload should execute: ${JSON.stringify(shellApproval.json.execution)}`,
-  );
-  assert(fs.existsSync(highRiskTarget), "Approved high-risk shell command should create the target file.");
+  assert(highRiskTurn.json.plan.plannerFailure?.code === "provider_not_configured", "Explicit shell parameters must not bypass Provider planning.");
+  assert(!highRiskTurn.json.shell, "Missing Provider must create no shell approval.");
+  assert(!fs.existsSync(highRiskTarget), "Missing Provider must leave the project untouched.");
 
   console.log("agentic app smoke passed");
 } finally {

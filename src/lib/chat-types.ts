@@ -154,4 +154,3 @@ export type ChatThread = {
 };
 
 export type ApprovalActionState = "approve" | "reject" | "modify";
-export type MessageFeedback = "up" | "down";

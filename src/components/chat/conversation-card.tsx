@@ -1,32 +1,21 @@
 import {
-  AlertTriangle,
   Bot,
   Check,
-  ChevronDown,
-  ChevronRight,
   Copy,
-  Eye,
-  ListChecks,
   Loader2,
   MessageSquare,
   Pencil,
+  Save,
   RotateCcw,
   Settings,
-  Shield,
-  Sparkles,
-  TerminalSquare,
-  ThumbsDown,
-  ThumbsUp,
   Wrench,
   X,
 } from "lucide-react";
-import { ReactNode, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
-import { presentApproval } from "../../lib/approval-presentation";
-import type { AgentApproval, AgentReasoningTrace, AgentRuntimeResponse, AgentSkillResult } from "../../lib/api";
-import type { ApprovalActionState, ChatAttachment, ConversationItem, MessageFeedback } from "../../lib/chat-types";
-import { thinkingTraceLabel } from "../../lib/provider-ui";
+import type { AgentApproval } from "../../lib/api";
+import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -35,18 +24,24 @@ import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown } from "./chat-markdown";
 import { AttachmentStrip } from "./composer";
+import { RunRow, buildAgentTimelineRows, displayPlanner, formatPayload } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
   approval,
   approvalAction,
-  feedback,
   canRetry,
   canEdit,
+  editing,
+  editingText,
+  editingAttachments,
+  onEditTextChange,
+  onEditAttachmentRemove,
+  onEditItemSave,
+  onEditItemCancel,
   onCopyItem,
   onRetryItem,
   onEditItem,
-  onFeedbackItem,
   onModifyApproval,
   onImportAttachment,
   onOpenSettings,
@@ -55,13 +50,18 @@ export function ConversationCard({
   item: ConversationItem;
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
-  feedback?: MessageFeedback;
+  editing?: boolean;
+  editingText?: string;
+  editingAttachments?: ChatAttachment[];
+  onEditTextChange?: (value: string) => void;
+  onEditAttachmentRemove?: (attachmentId: string) => void;
+  onEditItemSave?: () => void;
+  onEditItemCancel?: () => void;
   canRetry?: boolean;
   canEdit?: boolean;
   onCopyItem?: (item: ConversationItem) => void;
   onRetryItem?: (itemId: string) => void;
   onEditItem?: (itemId: string) => void;
-  onFeedbackItem?: (itemId: string, value: MessageFeedback) => void;
   onApprove?: (approvalId: string) => void;
   onReject?: (approvalId: string) => void;
   onModifyApproval?: (approval: AgentApproval) => void;
@@ -72,8 +72,84 @@ export function ConversationCard({
   const { t } = useTranslation();
   if (item.type === "user") {
     const attachments = item.attachments || [];
-    const imageAttachments = attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
-    const otherAttachments = attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
+    const displayedText = editing ? editingText : item.text;
+    const draftAttachments = editingAttachments || attachments;
+    const imageAttachments = draftAttachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
+    const otherAttachments = draftAttachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
+    const hasEditingState = Boolean(editing);
+
+    if (hasEditingState) {
+      return (
+        <div className="group flex justify-end">
+          <div className="relative flex max-w-[78%] flex-col items-end gap-2">
+            {item.queuedFrom ? (
+              <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[11px] text-muted-foreground">
+                <MessageSquare className="h-3 w-3" />
+                {t("chat.queuedSent")}
+              </div>
+            ) : null}
+            <textarea
+              value={displayedText}
+              onChange={(event) => onEditTextChange?.(event.target.value)}
+              className="min-h-[90px] w-full resize-none rounded-2xl border border-muted bg-muted px-3 py-2 text-sm outline-none"
+            />
+            {imageAttachments.length ? (
+              <div className="flex max-w-full flex-wrap justify-end gap-2">
+                {imageAttachments.map((attachment) => (
+                  <div key={attachment.id} className="relative">
+                    <button
+                      type="button"
+                      className="block overflow-hidden rounded-lg border border-border bg-muted/70"
+                      title={attachment.name}
+                    >
+                      <img src={attachment.dataUrl} alt={attachment.name} className="h-20 w-28 object-cover" />
+                    </button>
+                    <button
+                      type="button"
+                      className="absolute right-1 top-1 rounded-md border border-border bg-background/90 p-1 text-xs text-foreground"
+                      onClick={() => onEditAttachmentRemove?.(attachment.id)}
+                      title={t("chat.removeAttachment")}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {otherAttachments.length ? (
+              <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2 text-sm">
+                <AttachmentStrip
+                  attachments={otherAttachments}
+                  compact
+                  onRemove={onEditAttachmentRemove}
+                />
+              </div>
+            ) : null}
+            <div className="flex items-center gap-1 pt-1">
+              <button
+                type="button"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={onEditItemSave}
+                title={t("chat.saveEdit")}
+                aria-label={t("chat.saveEdit")}
+              >
+                <Save className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                onClick={onEditItemCancel}
+                title={t("chat.cancelEdit")}
+                aria-label={t("chat.cancelEdit")}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="group flex justify-end">
         <div className="relative flex max-w-[78%] flex-col items-end gap-2">
@@ -240,7 +316,10 @@ export function ConversationCard({
   const shell = response.shell;
   const skill = response.skill;
   const vision = response.vision;
-  const timelineOrder = buildAgentTimelineOrder(response);
+  const write = response.write;
+  const planReply = response.plan.reply || response.plan.summary;
+  const providerLine = item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner);
+  const replySource = item.model ? `${providerLine} · ${item.model}` : providerLine;
   const awaitingApproval = shell?.status === "pending_approval";
   const localIdle =
     response.plan.planner === "deterministic-local" &&
@@ -249,6 +328,23 @@ export function ConversationCard({
     !response.plan.shellCommand;
   const nextStep = response.plan.nextStep || "";
   const showIntent = Boolean(nextStep) && nextStep !== "await_user_instruction" && nextStep !== "done";
+  const timelineRows = buildAgentTimelineRows({
+    response,
+    shell,
+    vision,
+    skill,
+    write,
+    approval,
+    approvalAction,
+    onModifyApproval,
+    showIntent,
+    nextStep,
+    planLabel: replySource,
+    providerLine,
+    awaitingApproval,
+    elapsedSeconds: item.elapsedSeconds,
+    t,
+  });
 
   if (localIdle) {
     return (
@@ -276,155 +372,12 @@ export function ConversationCard({
   return (
     <div className="group flex justify-start">
       <div className="relative flex w-full max-w-[85%] flex-col gap-1.5">
-        <div className="order-last px-1 text-sm">
-          <ChatMarkdown text={response.plan.reply || response.plan.summary} />
-          {false && showIntent ? (
-            <p className="hidden">
-              <Sparkles className="h-3.5 w-3.5 shrink-0" />
-              <span>
-                {t("agent.willDoNext", { step: displayStep(nextStep) })}
-                {response.plan.skillTool ? `：${response.plan.skillTool}` : ""}
-              </span>
-            </p>
-          ) : null}
-          <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-            <span>{item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner)}{item.model ? ` · ${item.model}` : ""}</span>
-            {item.elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(item.elapsedSeconds) })}</span> : null}
-          </div>
-        </div>
-
-        {showIntent ? (
-          <RunRow
-            icon="plan"
-            title={displayStep(nextStep)}
-            statusTone="muted"
-            statusLabel={response.plan.skillTool ? "tool planned" : response.plan.shellCommand ? "command planned" : "planned"}
-            timelineOrder={timelineOrder.plan}
-          >
-            <DataLine label="Planner" value={response.plan.plannerLabel || displayPlanner(response.plan.planner)} />
-            {response.plan.skillTool ? <DataLine label="Tool" value={response.plan.skillTool} mono /> : null}
-            {response.plan.skillCategory ? <DataLine label="Category" value={response.plan.skillCategory} /> : null}
-            {response.plan.shellCommand ? <OutputBlock label="Command" value={response.plan.shellCommand} /> : null}
-            {response.plan.expectedResult ? <DataLine label="Expected" value={response.plan.expectedResult} /> : null}
-          </RunRow>
-        ) : null}
-
-        <ReasoningTracePanel
-          trace={response.reasoning}
-          fallbackLabel={item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner)}
-          elapsedSeconds={item.elapsedSeconds}
-          timelineOrder={timelineOrder.reasoning}
-        />
-
-        {vision ? (
-          <RunRow
-            icon="vision"
-            title={
-              vision.status === "analyzed"
-                ? t("vision.stepTitle", {
-                    model: [vision.providerLabel || vision.provider, vision.model].filter(Boolean).join(" · ") || "vision",
-                  })
-                : t("vision.stepTitleSkipped")
-            }
-            statusTone={vision.status === "analyzed" ? "ok" : vision.status === "error" ? "danger" : "warn"}
-            statusLabel={
-              vision.status === "analyzed"
-                ? t("vision.stepAnalyzed", { count: vision.imageCount ?? 0 })
-                : vision.status === "error"
-                  ? t("skillStatus.failed")
-                  : t("vision.stepUnconfigured")
-            }
-            timelineOrder={timelineOrder.vision}
-          >
-            {vision.imageNames && vision.imageNames.length > 0 ? (
-              <DataLine label={t("vision.images")} value={vision.imageNames.join(", ")} />
-            ) : null}
-            {vision.source ? (
-              <DataLine label={t("vision.source")} value={vision.source === "main" ? t("vision.sourceMain") : t("vision.sourceProfile")} />
-            ) : null}
-            {vision.status === "analyzed" && vision.usage?.totalTokens ? (
-              <DataLine label={t("vision.tokens")} value={String(vision.usage.totalTokens)} />
-            ) : null}
-            {vision.text ? <OutputBlock label={t("vision.analysis")} value={vision.text} /> : null}
-            {vision.error ? <DataLine label={t("skills.error")} value={vision.error} /> : null}
-            {vision.reason && vision.status !== "analyzed" ? <DataLine label={t("vision.reason")} value={vision.reason} /> : null}
-          </RunRow>
-        ) : null}
-
-        {shell?.classification ? (
-          <RunRow
-            icon="shell"
-            title={shell.classification.command}
-            statusTone={shell.result ? (shell.result.ok ? "ok" : "danger") : awaitingApproval ? "warn" : riskTone(shell.classification.risk)}
-            statusLabel={
-              shell.result
-                ? t("shell.exitCodeDuration", { code: shell.result.exitCode, time: formatDuration(shell.result.durationSeconds) })
-                : awaitingApproval
-                  ? t("shell.awaitConfirmation")
-                  : t("shell.riskLevel", { level: shell.classification.risk })
-            }
-            timelineOrder={timelineOrder.shell}
-          >
-            <DataLine label={t("approval.directory")} value={shell.classification.cwd} />
-            <div className="overflow-hidden rounded-md border border-border bg-muted/50 p-3 font-mono text-xs">
-              <pre className="whitespace-pre-wrap break-words">{shell.classification.command}</pre>
-            </div>
-            {shell.classification.reasons.length ? (
-              <div className="flex flex-wrap gap-2">
-                {shell.classification.reasons.map((reason) => (
-                  <Badge key={reason} tone="muted" className="max-w-full">
-                    <span className="truncate">{reason}</span>
-                  </Badge>
-                ))}
-              </div>
-            ) : null}
-            {shell.result ? (
-              <>
-                <DataLine label={t("shell.elapsed")} value={formatDuration(shell.result.durationSeconds)} />
-                <OutputBlock label={t("shell.output")} value={shell.result.stdout} />
-                {shell.result.stderr ? <OutputBlock label={t("shell.errorOutput")} value={shell.result.stderr} danger /> : null}
-              </>
-            ) : null}
-          </RunRow>
-        ) : null}
-
-        {skill ? (
-          <RunRow
-            icon="skill"
-            title={skill.tool || t("skills.skillCall")}
-            statusTone={skillTone(skill)}
-            statusLabel={displaySkillStatus(skill.status)}
-            timelineOrder={timelineOrder.skill}
-          >
-            <DataLine label={t("skills.tool")} value={skill.tool || "-"} mono />
-            {skill.category ? <DataLine label={t("skills.category")} value={skill.category} /> : null}
-            {skill.error ? <DataLine label={t("skills.error")} value={skill.error} /> : null}
-            {skill.result !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(skill.result)} /> : null}
-          </RunRow>
-        ) : null}
-
-        {approval && approvalAction !== "approve" && approvalAction !== "reject" ? (
-          <div style={{ order: timelineOrder.approval }}>
-            <InlineApprovalCard approval={approval} action={approvalAction} onModify={onModifyApproval} />
-          </div>
-        ) : awaitingApproval ? (
-          <div className="flex items-center gap-2 px-1 py-1 text-xs text-amber-700" style={{ order: timelineOrder.approval }}>
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            <span>{t("approval.awaitingInline")}</span>
-          </div>
-        ) : null}
-        {shell?.error ? (
-          <RunRow icon="shell" title={t("shell.executionError")} statusTone="danger" statusLabel={t("skillStatus.failed")} timelineOrder={timelineOrder.shellError}>
-            <DataLine label={t("skills.error")} value={shell.error} />
-          </RunRow>
-        ) : null}
+        {timelineRows}
         <MessageActions
           createdAt={item.createdAt || item.id}
           onCopy={() => onCopyItem?.(item)}
           onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
-          onFeedbackUp={() => onFeedbackItem?.(item.id, "up")}
-          onFeedbackDown={() => onFeedbackItem?.(item.id, "down")}
-          feedback={feedback}
+          onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
         />
       </div>
     </div>
@@ -519,24 +472,18 @@ export function UserImageAttachments({
 function MessageActions({
   align = "left",
   createdAt,
-  feedback,
   onCopy,
   onRetry,
   onEdit,
-  onFeedbackUp,
-  onFeedbackDown,
 }: {
   align?: "left" | "right";
   createdAt?: string;
-  feedback?: MessageFeedback;
   onCopy?: () => void;
   onRetry?: () => void;
   onEdit?: () => void;
-  onFeedbackUp?: () => void;
-  onFeedbackDown?: () => void;
 }) {
   const { t } = useTranslation();
-  const hasActions = onCopy || onRetry || onEdit || onFeedbackUp || onFeedbackDown;
+  const hasActions = onCopy || onRetry || onEdit;
   const timeLabel = formatMessageTime(createdAt, i18n.language);
   if (!hasActions) {
     return null;
@@ -580,34 +527,6 @@ function MessageActions({
           aria-label={t("chat.editMessage")}
         >
           <Pencil className="h-3.5 w-3.5" />
-        </button>
-      ) : null}
-      {onFeedbackUp ? (
-        <button
-          type="button"
-          className={cn(
-            "flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground",
-            feedback === "up" && "bg-muted text-foreground",
-          )}
-          onClick={onFeedbackUp}
-          title={t("messageActions.goodResponse")}
-          aria-label={t("messageActions.goodResponse")}
-        >
-          <ThumbsUp className="h-3.5 w-3.5" />
-        </button>
-      ) : null}
-      {onFeedbackDown ? (
-        <button
-          type="button"
-          className={cn(
-            "flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground",
-            feedback === "down" && "bg-muted text-foreground",
-          )}
-          onClick={onFeedbackDown}
-          title={t("messageActions.badResponse")}
-          aria-label={t("messageActions.badResponse")}
-        >
-          <ThumbsDown className="h-3.5 w-3.5" />
         </button>
       ) : null}
     </div>
@@ -654,250 +573,4 @@ function parseMessageTime(value: string | undefined): number {
   }
   const timestamp = Number(match[1]);
   return Number.isFinite(timestamp) ? timestamp : 0;
-}
-
-type AgentTimelineKey = "plan" | "reasoning" | "vision" | "shell" | "skill" | "approval" | "shellError";
-
-type AgentTimelineOrder = Record<AgentTimelineKey, number>;
-
-const DEFAULT_AGENT_TIMELINE_ORDER: AgentTimelineOrder = {
-  plan: 10,
-  reasoning: 20,
-  vision: 30,
-  shell: 40,
-  skill: 50,
-  approval: 60,
-  shellError: 70,
-};
-
-function buildAgentTimelineOrder(response: AgentRuntimeResponse): AgentTimelineOrder {
-  const order: AgentTimelineOrder = { ...DEFAULT_AGENT_TIMELINE_ORDER };
-  const assigned = new Set<AgentTimelineKey>();
-  const steps = [...(response.steps || [])].sort((left, right) => {
-    const leftIndex = typeof left.index === "number" ? left.index : Number.MAX_SAFE_INTEGER;
-    const rightIndex = typeof right.index === "number" ? right.index : Number.MAX_SAFE_INTEGER;
-    if (leftIndex !== rightIndex) {
-      return leftIndex - rightIndex;
-    }
-    return 0;
-  });
-  let nextOrder = 10;
-  for (const step of steps) {
-    const key = agentTimelineKeyForStep(step.kind, step.tool);
-    if (!key || assigned.has(key)) {
-      continue;
-    }
-    order[key] = nextOrder;
-    assigned.add(key);
-    nextOrder += 10;
-  }
-  return order;
-}
-
-function agentTimelineKeyForStep(kind?: string, tool?: string): AgentTimelineKey | undefined {
-  const normalizedKind = (kind || "").toLowerCase();
-  const normalizedTool = (tool || "").toLowerCase();
-  if (normalizedKind.includes("vision")) {
-    return "vision";
-  }
-  if (normalizedKind.includes("approval")) {
-    return "approval";
-  }
-  if (normalizedKind.includes("shell") || normalizedTool.includes("shell")) {
-    return "shell";
-  }
-  if (normalizedKind.includes("skill") || normalizedKind.includes("tool")) {
-    return "skill";
-  }
-  if (normalizedKind.includes("plan")) {
-    return "plan";
-  }
-  return undefined;
-}
-
-function ReasoningTracePanel({
-  trace,
-  fallbackLabel,
-  elapsedSeconds,
-  timelineOrder,
-}: {
-  trace?: AgentReasoningTrace;
-  fallbackLabel: string;
-  elapsedSeconds?: number;
-  timelineOrder?: number;
-}) {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const items = (trace?.items || []).filter((item) => (item.text || "").trim() || item.opaque);
-  if (!items.length) {
-    return null;
-  }
-  const status = thinkingTraceLabel(trace?.provider || trace?.providerLabel || fallbackLabel, trace?.model || "");
-  const provider = trace?.providerLabel || trace?.provider || fallbackLabel || "model";
-  const model = trace?.model || "";
-  const title = model ? `${status} · ${provider} · ${model}` : `${status} · ${provider}`;
-  return (
-    <div className="text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
-      >
-        {open ? (
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        )}
-        <Sparkles className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 truncate text-xs">{title}</span>
-        {elapsedSeconds ? <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{formatDuration(elapsedSeconds)}</span> : null}
-        <span className={cn("shrink-0 text-xs", trace?.redacted ? "text-amber-600" : "text-muted-foreground")}>
-          {items.length}
-        </span>
-      </button>
-      {open ? (
-        <div className="ml-6 mt-1 space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">
-          <DataLine label={t("thinking.provider")} value={provider} />
-          {model ? <DataLine label={t("thinking.model")} value={model} mono /> : null}
-          {trace?.source ? <DataLine label={t("thinking.source")} value={trace.source} mono /> : null}
-          {items.map((item, index) => (
-            <OutputBlock
-              key={`${item.title || item.kind || "reasoning"}-${index}`}
-              label={item.title || item.kind || t("thinking.reasoning")}
-              value={item.opaque ? t("thinking.opaqueRetained") : t("thinking.hiddenSummary")}
-            />
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function RunRow({
-  icon,
-  title,
-  statusTone,
-  statusLabel,
-  children,
-  timelineOrder,
-}: {
-  icon: "shell" | "skill" | "plan" | "vision";
-  title: string;
-  statusTone: "ok" | "warn" | "danger" | "muted";
-  statusLabel: string;
-  children: ReactNode;
-  timelineOrder?: number;
-}) {
-  const [open, setOpen] = useState(false);
-  const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : ListChecks;
-  return (
-    <div className="group/run text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
-      >
-        {open ? (
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        )}
-        <Icon className="h-3.5 w-3.5 shrink-0" />
-        <span className={cn("min-w-0 truncate text-xs", icon === "shell" ? "font-mono" : "")}>{title}</span>
-        <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : statusTone === "warn" ? "text-amber-600" : statusTone === "ok" ? "text-emerald-600" : "text-muted-foreground")}>
-          {statusLabel}
-        </span>
-      </button>
-      {open ? <div className="ml-6 mt-1 space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">{children}</div> : null}
-    </div>
-  );
-}
-
-function InlineApprovalCard({
-  approval,
-  action,
-  onModify,
-}: {
-  approval: AgentApproval;
-  action?: ApprovalActionState;
-  onModify?: (approval: AgentApproval) => void;
-}) {
-  const { t } = useTranslation();
-  const presentation = presentApproval(approval, t);
-  return (
-    <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
-      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
-      <div className="min-w-0 flex-1 text-muted-foreground">
-        <span className="font-medium text-foreground">{presentation.title}</span>
-        {` — ${t("approval.awaitingInline")}`}
-      </div>
-      {!approval.goalDeliveryId?.trim() ? (
-        <Button type="button" variant="outline" className="h-7 shrink-0 px-2 text-xs" disabled={Boolean(action)} onClick={() => onModify?.(approval)}>
-          <Pencil className="h-3.5 w-3.5" />
-          {action === "modify" ? t("approval.modifying") : t("approval.modify")}
-        </Button>
-      ) : null}
-    </div>
-  );
-}
-
-function displayPlanner(planner: string): string {
-  if (planner === "deterministic-local") return i18n.t("planner.local");
-  if (planner === "llm") return i18n.t("planner.ai");
-  return planner || i18n.t("planner.fallback");
-}
-
-function displayStep(step: string): string {
-  const labels: Record<string, string> = {
-    classify_shell: i18n.t("step.classifyShell"),
-    execute_shell: i18n.t("step.executeShell"),
-    call_skill: i18n.t("step.callSkill"),
-    request_approval: i18n.t("shell.awaitConfirmation"),
-    await_user_instruction: i18n.t("step.awaitUserInstruction"),
-    done: i18n.t("step.done"),
-  };
-  return labels[step] || step;
-}
-
-function riskTone(risk: string): "ok" | "warn" | "danger" | "muted" {
-  if (risk === "low") return "ok";
-  if (risk === "high") return "warn";
-  if (risk === "reject") return "danger";
-  return "muted";
-}
-
-function skillTone(skill: AgentSkillResult): "ok" | "warn" | "danger" | "muted" {
-  if (skill.status === "executed" && skill.ok) return "ok";
-  if (skill.status === "loaded" && skill.ok) return "ok";
-  if (skill.status === "blocked") return "warn";
-  if (skill.status === "failed" || !skill.ok) return "danger";
-  return "muted";
-}
-
-function displaySkillStatus(status: string): string {
-  const labels: Record<string, string> = {
-    executed: i18n.t("agent.executed"),
-    loaded: i18n.t("skillStatus.loaded"),
-    failed: i18n.t("skillStatus.failed"),
-    blocked: i18n.t("skillStatus.blocked"),
-  };
-  return labels[status] || status || "-";
-}
-
-function formatPayload(value: unknown): string {
-  if (value === null || value === undefined) return "-";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function formatDuration(totalSeconds: number): string {
-  const seconds = Math.max(0, Math.round(totalSeconds));
-  if (seconds < 60) return String(seconds) + "s";
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return String(minutes) + "m " + String(rest) + "s";
 }

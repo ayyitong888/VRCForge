@@ -10,7 +10,6 @@ import type {
   ContextUsage,
   ChatCompactionState,
   ConversationItem,
-  MessageFeedback,
 } from "../../lib/chat-types";
 import { AttachmentStrip, Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
@@ -46,8 +45,6 @@ export function ChatWorkspace({
   onCancelCompaction,
   providerLabel,
   model,
-  editing,
-  onCancelEdit,
   projects,
   onBindProject,
   conversation,
@@ -65,13 +62,18 @@ export function ChatWorkspace({
   pendingApprovalForResponse,
   scopedPendingApprovals,
   approvalActions,
-  messageFeedback,
   latestRetryableItemId,
   latestEditableUserItemId,
+  editingItemId,
+  editingText,
+  editingAttachments,
+  onEditItemChangeText,
+  onEditItemRemoveAttachment,
   onCopyItem,
   onRetryItem,
   onEditItem,
-  onFeedbackItem,
+  onEditItemSave,
+  onEditItemCancel,
   onApprove,
   onReject,
   onModifyApproval,
@@ -101,8 +103,6 @@ export function ChatWorkspace({
   onCancelCompaction?: () => void;
   providerLabel: string;
   model: string;
-  editing: boolean;
-  onCancelEdit: () => void;
   projects: Array<{ key: string; name: string }>;
   onBindProject: (path: string) => void;
   conversation: ConversationItem[];
@@ -116,16 +116,21 @@ export function ChatWorkspace({
   onAnswerQuestion: (questionId: string, optionId: string, value: string) => void | Promise<void>;
   conversationEndRef: Ref<HTMLDivElement>;
   onConversationMouseUp: () => void;
-  onConversationScroll: () => void;
+  onConversationScroll: (scrollElement: HTMLDivElement) => void;
   pendingApprovalForResponse: (response: AgentRuntimeResponse) => AgentApproval | null;
   approvalActions: Record<string, ApprovalActionState>;
-  messageFeedback: Record<string, MessageFeedback>;
   latestRetryableItemId: string;
   latestEditableUserItemId: string;
+  editingItemId: string;
+  editingText: string;
+  editingAttachments: ChatAttachment[];
+  onEditItemChangeText: (value: string) => void;
+  onEditItemRemoveAttachment: (attachmentId: string) => void;
   onCopyItem: (item: ConversationItem) => void;
   onRetryItem: (itemId: string) => void;
   onEditItem: (itemId: string) => void;
-  onFeedbackItem: (itemId: string, value: MessageFeedback) => void;
+  onEditItemSave: () => void;
+  onEditItemCancel: () => void;
   scopedPendingApprovals: AgentApproval[];
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
@@ -164,8 +169,6 @@ export function ChatWorkspace({
       contextUsage={contextUsage}
       providerLabel={providerLabel}
       model={model}
-      editing={editing}
-      onCancelEdit={onCancelEdit}
       projects={projects}
       onBindProject={onBindProject}
     />
@@ -222,7 +225,7 @@ export function ChatWorkspace({
         className="min-h-0 flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8"
         data-chat-history-scroll
         onMouseUp={onConversationMouseUp}
-        onScroll={onConversationScroll}
+        onScroll={(event) => onConversationScroll(event.currentTarget)}
       >
         <div className="mx-auto max-w-3xl space-y-7">
           <BackgroundGoalCatchUpCard
@@ -240,13 +243,18 @@ export function ChatWorkspace({
                 item={item}
                 approval={approval}
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
-                feedback={messageFeedback[item.id]}
                 canRetry={!sending && item.id === latestRetryableItemId}
                 canEdit={!sending && queued.length === 0 && item.id === latestEditableUserItemId}
+                editing={editingItemId === item.id}
+                editingText={editingText}
+                editingAttachments={editingAttachments}
+                onEditTextChange={onEditItemChangeText}
+                onEditAttachmentRemove={onEditItemRemoveAttachment}
                 onCopyItem={onCopyItem}
                 onRetryItem={onRetryItem}
                 onEditItem={onEditItem}
-                onFeedbackItem={onFeedbackItem}
+                onEditItemSave={onEditItemSave}
+                onEditItemCancel={onEditItemCancel}
                 onApprove={onApprove}
                 onReject={onReject}
                 onModifyApproval={onModifyApproval}

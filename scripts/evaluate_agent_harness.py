@@ -20,7 +20,11 @@ if str(SCRIPT_DIR) not in sys.path:
 
 from agent_harness import evaluate_agent_harness, load_agent_harness_matrix
 from agent_task_loop import canonical_task_id
-from runtime_planner_service import PlannerCatalogSnapshot, PlannerTool, RuntimePlannerService
+from runtime_planner_service import (
+    PlannerCatalogSnapshot,
+    PlannerTool,
+    RuntimePlannerService,
+)
 from smoke_mcp_tool_trigger_matrix import app_backend_provider
 
 
@@ -43,26 +47,28 @@ class _HarnessDesktop:
 
 
 def _planner_for_matrix(matrix: dict[str, object]) -> RuntimePlannerService:
-    action_kinds: dict[str, str] = {}
     names: set[str] = set()
     for case in matrix["selectionCases"]:
         name = str(case["expectedTool"]).strip()
-        action_kind = str(case["expectedActionKind"])
         if name:
             names.add(name)
-            previous = action_kinds.setdefault(name, action_kind)
-            if previous != action_kind:
-                raise ValueError(f"Harness tool {name} has conflicting action kinds")
+            if str(case["kind"]) == "positive":
+                # We no longer use prompt-level expected actions as a local truth source.
+                pass
         for item in case.get("forbiddenTools", []):
             names.add(str(item))
-    for name in names:
-        action_kinds.setdefault(name, "skill")
+    action_kinds = {
+        name: "skill" if str(case.get("expectedActionKind") or "skill").strip() != "write" else "write"
+        for name in sorted(names)
+        for case in matrix["selectionCases"]
+        if str(case.get("expectedTool") or "").strip() == name
+    }
     tools = tuple(
         PlannerTool(
             name=name,
-            description=f"Harness selection contract for {name}.",
-            category="supervised-write" if action_kind == "write" else "read/debug",
-            write=action_kind == "write",
+            description="Harness selection contract for known matrix tool.",
+            category="supervised-write" if action_kinds.get(name) == "write" else "read/debug",
+            write=action_kinds.get(name) == "write",
         )
         for name, action_kind in sorted(action_kinds.items())
     )
@@ -76,6 +82,7 @@ def _planner_for_matrix(matrix: dict[str, object]) -> RuntimePlannerService:
             execution=PlannerCatalogSnapshot(visible_tools=tools, routable_tools=tools),
         ),
         desktop=_HarnessDesktop(),
+        model=None,
     )
 
 
@@ -296,7 +303,13 @@ def main() -> int:
                 }
             return {"toolCalls": [], "actionKind": "none"}
 
-        report = evaluate_agent_harness(matrix, select_tool=select_tool)
+        report = evaluate_agent_harness(
+            matrix,
+            select_tool=select_tool,
+            selection_source="offline-runtime-no-provider",
+            trusted_selection_receipts=False,
+            trusted_runtime_journey_receipts=False,
+        )
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if arguments.output is not None:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,8 @@ path.
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -32,6 +34,22 @@ from agent_task_loop import (
 )
 from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import PlannerModelResult, detect_avatar_write_intent
+
+
+def provider_fixture_from_legacy_router(test):
+    """Keep approval-loop tests focused while production stays Provider-only.
+
+    The adapter is test-only: it turns the former deterministic fixture output
+    into a Provider-labelled plan. RuntimePlannerService production entrypoints
+    never call this router.
+    """
+
+    @wraps(test)
+    def wrapped(self, *args, **kwargs):
+        with self._provider_fixture_from_legacy_router():
+            return test(self, *args, **kwargs)
+
+    return wrapped
 
 
 class AgentLoopP0Tests(unittest.TestCase):
@@ -106,6 +124,28 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         return project
 
+    @contextmanager
+    def _provider_fixture_from_legacy_router(self):
+        planner = self.gateway.runtime_planner
+
+        def provider_plan(message, params, observe, *args, **kwargs):
+            plan = planner._local_plan_agent_turn(
+                message,
+                params,
+                observe,
+                kwargs.get("loop_state"),
+                exposure_layer=kwargs.get("exposure_layer", "planning"),
+            )
+            return {
+                **plan,
+                "planner": "llm",
+                "plannerLabel": "Fixture Provider",
+            }
+
+        with patch.object(planner, "plan_agent_turn", side_effect=provider_plan):
+            yield
+
+    @provider_fixture_from_legacy_router
     def test_single_model_autoresolve_creates_real_approval_and_dispatches_static_write(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -197,6 +237,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(arguments["parentPath"], "Milltina")
         self.assertFalse(arguments["preview"])
 
+    @provider_fixture_from_legacy_router
     def test_explicit_scene_root_create_bypasses_avatar_scan_and_uses_supervised_write(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -270,6 +311,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(arguments["parentPath"], "")
         self.assertFalse(arguments["preview"])
 
+    @provider_fixture_from_legacy_router
     def test_approved_write_resumes_the_same_task_without_replaying_the_write(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -356,6 +398,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertTrue(continuation["steps"][0]["historical"])
         mock_invoke.assert_called_once()
 
+    @provider_fixture_from_legacy_router
     def test_approved_unity_shell_resumes_the_same_task_without_replaying_the_command(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -404,8 +447,10 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(continuation["task"]["taskId"], initial["task"]["taskId"])
         self.assertEqual(continuation["task"]["actions"][0]["kind"], "shell")
         self.assertEqual(continuation["plan"]["nextStep"], "done", continuation)
+        self.assertEqual(continuation["task"]["status"], "completed")
         execute_payload.assert_called_once()
 
+    @provider_fixture_from_legacy_router
     def test_rejected_write_returns_to_the_original_task_as_needs_user_action(self) -> None:
         project = self._unity_project()
         with TestClient(dashboard_server.app) as client:
@@ -434,6 +479,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertEqual(self.gateway._approvals[approval_id]["status"], "rejected")
 
+    @provider_fixture_from_legacy_router
     def test_failed_approved_handler_returns_to_the_original_task_without_replay(self) -> None:
         project = self._unity_project()
         with TestClient(dashboard_server.app) as client:
@@ -812,6 +858,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
         self.assertIsNone(continuation)
 
+    @provider_fixture_from_legacy_router
     def test_blocked_approved_write_can_retry_and_resume_the_same_task_once(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -882,6 +929,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(continuation["plan"]["nextStep"], "done")
         invoke.assert_called_once()
 
+    @provider_fixture_from_legacy_router
     def test_blocked_approved_write_can_be_rejected_before_retry(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -933,6 +981,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(project_root["targetMode"], "")
         self.assertIsNone(detect_avatar_write_intent("inspect the scene root"))
 
+    @provider_fixture_from_legacy_router
     def test_scene_root_and_avatar_target_conflict_fails_closed(self) -> None:
         plan = self.gateway.runtime_planner.plan_agent_turn(
             "create an object at the scene root",
@@ -947,6 +996,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertFalse(plan["writeNeeded"])
         self.assertFalse(plan["skillNeeded"])
 
+    @provider_fixture_from_legacy_router
     def test_multiple_models_asks_user_to_choose_without_writing(self) -> None:
         gateway = self.gateway
 
@@ -1017,6 +1067,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertNotIn("skill", payload)
         self.assertEqual(payload.get("steps", []), [])
 
+    @provider_fixture_from_legacy_router
     def test_projectless_runtime_shell_auto_yields_to_a_controllable_session(self) -> None:
         gateway = self.gateway
         calls: list[dict] = []
@@ -1269,6 +1320,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(captured[0]["parent_session_id"], "")
         self.assertNotIn("_taskSeed", captured[0]["params"])
 
+    @provider_fixture_from_legacy_router
     def test_projectless_fast_terminal_shell_uses_one_inline_action_identity(self) -> None:
         gateway = self.gateway
 
@@ -1294,7 +1346,8 @@ class AgentLoopP0Tests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(original["plan"]["nextStep"], "done")
+        self.assertEqual(original["plan"]["nextStep"], "completion_unverified")
+        self.assertEqual(original["task"]["status"], "completion_unverified")
         requirement = original["task"]["requirements"][0]
         completed = original["task"]["actions"][-1]
         self.assertEqual(requirement["actionId"], completed["actionId"])
@@ -1822,6 +1875,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         ]
         self.assertEqual(completed[-1]["status"], "failed")
 
+    @provider_fixture_from_legacy_router
     def test_provider_model_followup_replies_without_tooling(self) -> None:
         gateway = self.gateway
         with patch.object(type(gateway.runtime_skills), "execute", autospec=True) as execute_skill:
@@ -2097,6 +2151,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertEqual(result["steps"][1]["status"], "failed")
 
+    @provider_fixture_from_legacy_router
     def test_deterministic_multi_angle_capture_enters_execution_and_requests_write_approval(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -2161,12 +2216,17 @@ class AgentLoopP0Tests(unittest.TestCase):
             planner_prompts.append(str(prompt))
             if len(planner_prompts) == 1:
                 payload = {
+                    "action": "enter_execution",
+                    "summary": "Enter execution to request the supervised capture.",
+                }
+            elif len(planner_prompts) == 2:
+                payload = {
                     "action": "write",
                     "write_tool": "vrcforge_capture_multi_screenshot",
                     "write_params": capture_arguments,
                     "summary": "Capture the approved fixed-angle views.",
                 }
-            elif len(planner_prompts) == 2:
+            elif len(planner_prompts) == 3:
                 payload = {
                     "action": "skill",
                     "skill_tool": "vrcforge_vision_audit_multi",
@@ -2328,9 +2388,9 @@ class AgentLoopP0Tests(unittest.TestCase):
                     execution,
                 )
 
-        self.assertEqual(request_model.call_count, 3)
-        self.assertIn("captureReceipt=managed-visual-receipt", planner_prompts[1])
-        self.assertIn("vrcforge_vision_audit_multi", planner_prompts[2])
+        self.assertEqual(request_model.call_count, 4)
+        self.assertIn("captureReceipt=managed-visual-receipt", planner_prompts[2])
+        self.assertIn("vrcforge_vision_audit_multi", planner_prompts[3])
         execute_skill.assert_called_once()
         self.assertIsNotNone(continuation)
         self.assertEqual(
@@ -2376,7 +2436,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         receipt = authority.issue(continuation)
         journey = authority.verify(receipt)
         self.assertEqual(journey["taskId"], initial["task"]["taskId"])
-        self.assertEqual(journey["providerRequestCount"], 3)
+        self.assertEqual(journey["providerRequestCount"], 4)
         self.assertEqual(journey["resultRefeedCount"], 2)
 
     def test_permanent_visual_provider_rejection_refeeds_route_and_discards_images(self) -> None:
@@ -2388,6 +2448,11 @@ class AgentLoopP0Tests(unittest.TestCase):
         def plan_visual_failure(prompt):
             planner_prompts.append(str(prompt))
             if len(planner_prompts) == 1:
+                payload = {
+                    "action": "enter_execution",
+                    "summary": "Enter execution to request the supervised capture.",
+                }
+            elif len(planner_prompts) == 2:
                 payload = {
                     "action": "write",
                     "write_tool": "vrcforge_capture_multi_screenshot",
@@ -2530,8 +2595,8 @@ class AgentLoopP0Tests(unittest.TestCase):
                     execution,
                 )
 
-        self.assertEqual(request_model.call_count, 2)
-        self.assertIn("captureReceipt=managed-rejected-visual-receipt", planner_prompts[1])
+        self.assertEqual(request_model.call_count, 3)
+        self.assertIn("captureReceipt=managed-rejected-visual-receipt", planner_prompts[2])
         execute_skill.assert_called_once()
         self.assertIsNotNone(continuation)
         self.assertEqual(continuation["plan"]["nextStep"], "needs_user_action", continuation)
@@ -2596,14 +2661,51 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertNotIn("write", result)
         self.assertEqual(result.get("steps", []), [])
-        self.assertEqual(result["plan"]["nextStep"], "needs_user_action")
+        self.assertEqual(result["plan"]["nextStep"], "planner_failed")
         self.assertEqual(
-            result["plan"]["completionGate"],
+            result["plan"]["plannerFailure"],
             {
-                "status": "needs_user_action",
-                "reason": "visual_audit_unavailable",
+                "code": "provider_not_configured",
+                "phase": "initial",
+                "retryable": False,
             },
         )
+        self.assertFalse(result["plan"]["providerConnected"])
+
+    def test_missing_provider_ignores_caller_shell_argument_and_creates_no_approval(self) -> None:
+        gateway = self.gateway
+        project = self._unity_project()
+        approval_count = len(gateway.approval_transactions.list_approvals())
+
+        with patch.object(
+            dashboard_server.PROVIDER_CONFIGURATION,
+            "current_api_config",
+            return_value=SimpleNamespace(
+                provider="",
+                api_key="",
+                base_url="",
+                model="",
+            ),
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "write the supplied command",
+                    "shell_command": "Set-Content Assets/must-not-run.txt blocked",
+                    "projectRoot": str(project),
+                    "cwd": str(project),
+                    "workspaceRoot": str(project),
+                    "session_id": "missing-provider-shell-session",
+                }
+            )
+
+        self.assertEqual(result["plan"]["plannerFailure"]["code"], "provider_not_configured")
+        self.assertNotIn("shell", result)
+        self.assertNotIn("approvalId", result)
+        self.assertEqual(
+            len(gateway.approval_transactions.list_approvals()),
+            approval_count,
+        )
+        self.assertFalse((project / "Assets" / "must-not-run.txt").exists())
 
     def test_execution_preflight_revalidates_schema_and_calls_no_handler(self) -> None:
         gateway = self.gateway

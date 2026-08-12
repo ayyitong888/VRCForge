@@ -208,13 +208,7 @@ export function conversationItemText(item: ConversationItem, t: TFunction): stri
     return appendAttachmentSummary(item.text, item.attachments || [], t);
   }
   if (item.type === "agent") {
-    const parts = [
-      item.response.plan?.reply || item.response.plan?.summary || "",
-      item.response.write ? `Write:\n${formatPayload(item.response.write)}` : "",
-      item.response.skill ? `Tool:\n${formatPayload(item.response.skill)}` : "",
-      item.response.shell ? `Command:\n${formatPayload(item.response.shell)}` : "",
-    ];
-    return parts.filter((part) => part.trim()).join("\n\n");
+    return item.response.plan?.reply || item.response.plan?.summary || "";
   }
   if (item.type === "result") {
     return [item.result ? formatPayload(item.result) : "", item.error || ""].filter(Boolean).join("\n\n");

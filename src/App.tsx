@@ -14,8 +14,6 @@ import {
   Search,
   Send,
   Square,
-  ThumbsDown,
-  ThumbsUp,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import i18n, { setLocale, type LocaleCode } from "./i18n";
@@ -57,6 +55,8 @@ import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
+import { SubAgentWorkspaceSurface } from "./components/subagents/sub-agent-workspace-surface";
+import { type UserAttachmentSource } from "./components/runtime/project-workbench-sections";
 import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
@@ -116,7 +116,7 @@ import {
 import { ingestChatAttachment } from "./lib/attachment-ingest";
 import { resolveContextLimit } from "./lib/context-compaction";
 import { thinkingTraceLabel } from "./lib/provider-ui";
-import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem, MessageFeedback } from "./lib/chat-types";
+import type { ChatAttachment, ComposerAction, ComposerActionId, ContextUsage, ConversationItem } from "./lib/chat-types";
 import { executionModeLabel, permissionVisualState } from "./lib/permission-ui";
 import { resolveComputerUseAccentHex } from "./lib/computer-use-visuals";
 import { normalizeProjectPathKey, projectKey, shortPath } from "./lib/project-path";
@@ -124,7 +124,13 @@ import { sortSidebarProjects } from "./lib/sidebar-project-order";
 import { asRecord, getHealthDetailNumber } from "./lib/runtime-parsing";
 import { buildEmptyProjectState } from "./lib/sidebar-view";
 import { localizeRuntimeHealthMessage } from "./lib/runtime-workspace-view";
-import { parseApprovalNotificationAction, showApprovalNotification } from "./lib/approval-notifications";
+import {
+  parseApprovalNotificationAction,
+  parseSubAgentReviewNotificationAction,
+  showApprovalNotification,
+  showSubAgentReviewNotification,
+  SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT,
+} from "./lib/approval-notifications";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "./lib/subagent-ui";
 import {
   createMarkdownSmokeChatState,
@@ -132,7 +138,7 @@ import {
   isMarkdownSmokeMode,
 } from "./lib/markdown-smoke";
 import { parseDelegateCommand } from "./lib/subagent-delegate";
-import { subAgentProposedNextAction } from "./lib/subagent-merge";
+import { isAwaitingMergeReview, subAgentProposedNextAction } from "./lib/subagent-merge";
 import { pickSubAgentName, reconcileSelectedSubAgent, updateSubAgentList } from "./lib/subagent-state";
 import {
   AgentApproval,
@@ -204,6 +210,8 @@ type EditingMessageDraft = {
   itemId: string;
   priorInput: string;
   priorAttachments: ChatAttachment[];
+  draftText: string;
+  draftAttachments: ChatAttachment[];
 };
 
 const MAX_ATTACHMENTS_PER_TURN = 8;
@@ -251,6 +259,7 @@ export default function App() {
   const [error, setError] = useState("");
   const {
     notice: transientFailure,
+    showTransientNotice,
     showTransientFailure,
     dismissTransientFailure,
   } = useTransientFailureNotice();
@@ -285,7 +294,6 @@ export default function App() {
   const [sidebarsVisible, setSidebarsVisible] = useState(false);
   const [leftSidebarMounted, setLeftSidebarMounted] = useState(false);
   const [rightSidebarMounted, setRightSidebarMounted] = useState(false);
-  const [messageFeedback, setMessageFeedback] = useState<Record<string, MessageFeedback>>({});
   const [showOnboarding, setShowOnboarding] = useState(initialOnboardingState.showOnboarding);
   const [showOnboardingLanguageGate, setShowOnboardingLanguageGate] = useState(
     initialOnboardingState.showLanguageGate,
@@ -327,6 +335,7 @@ export default function App() {
   const [startupIssue, setStartupIssue] = useState("");
   const [dismissedDoctorPromptSignature, setDismissedDoctorPromptSignature] = useState("");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
+  const [pinnedToConversationBottom, setPinnedToConversationBottom] = useState(true);
   const projectInitRef = useRef(false);
   const refreshRuntimeRunsRef = useRef<(includeEvents?: boolean, target?: string) => Promise<void>>(async () => undefined);
   const pendingApprovalsRef = useRef<AgentApproval[]>([]);
@@ -336,6 +345,13 @@ export default function App() {
   } | null>(null);
   const knownApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
   const exhaustedApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
+  const knownSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
+  const handledSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
+  const exhaustedSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
+  const toReviewNotificationId = useCallback((task: SubAgentTask): string => {
+    const revision = typeof task.revision === "number" ? String(task.revision) : "0";
+    return `${task.id}:${revision}:${task.parentChatId || ""}`;
+  }, []);
   const runtimeStartingRef = useRef(false);
   const startupLaunchStartedAtRef = useRef<number | null>(null);
   const backendReadyStatusRef = useRef<"idle" | "starting" | "ready" | "error">("idle");
@@ -985,9 +1001,9 @@ export default function App() {
     if (!editingMessage || editingMessage.chatId === activeChatId) {
       return;
     }
+    setInput(editingMessage.priorInput);
+    setAttachments(cloneChatAttachments(editingMessage.priorAttachments));
     setEditingMessage(null);
-    setInput("");
-    setAttachments([]);
     setRuntimeNotice("");
   }, [activeChatId, editingMessage, setRuntimeNotice]);
   const {
@@ -1104,9 +1120,150 @@ export default function App() {
             exhaustedApprovalNotificationIdsRef.current.add(approval.id);
             setError(cause instanceof Error ? cause.message : String(cause));
           }),
-      );
+        );
     }
   }, [agentApprovals, pendingApprovalItems, t]);
+
+  useEffect(() => {
+    if (!isTauriRuntime() || !runtimeConnected) {
+      return;
+    }
+    const reviewTasks = (subAgentList?.tasks || []).filter((task) => {
+      return (
+        isAwaitingMergeReview(task)
+        && typeof task.revision === "number"
+        && Number.isInteger(task.revision)
+        && task.revision > 0
+        && Boolean(task.parentChatId)
+        && getChatById(task.parentChatId || "")
+      );
+    });
+    const pendingReviewNotificationIds = new Set(reviewTasks.map((task) => toReviewNotificationId(task)));
+    for (const notificationId of knownSubAgentReviewNotificationIdsRef.current) {
+      if (!pendingReviewNotificationIds.has(notificationId)) {
+        knownSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+      }
+    }
+    for (const notificationId of handledSubAgentReviewNotificationIdsRef.current) {
+      if (!pendingReviewNotificationIds.has(notificationId)) {
+        handledSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+      }
+    }
+    for (const notificationId of exhaustedSubAgentReviewNotificationIdsRef.current) {
+      if (!pendingReviewNotificationIds.has(notificationId)) {
+        exhaustedSubAgentReviewNotificationIdsRef.current.delete(notificationId);
+      }
+    }
+
+    for (const task of reviewTasks) {
+      const reviewNotificationId = toReviewNotificationId(task);
+      if (
+        knownSubAgentReviewNotificationIdsRef.current.has(reviewNotificationId)
+        || exhaustedSubAgentReviewNotificationIdsRef.current.has(reviewNotificationId)
+      ) {
+        continue;
+      }
+      knownSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+      const notify = () =>
+        showSubAgentReviewNotification({
+          taskId: task.id,
+          revision: Number(task.revision),
+          parentChatId: task.parentChatId || "",
+          title: `${t("subagent.review")} · ${subAgentRoleLabel(task.role)}`,
+          body: `${task.displayName || t("subagent.taskLabel")} · ${t("subagent.awaitingReview")} (${task.revision})`,
+          openLabel: t("subagent.inspect"),
+        });
+      void notify().catch(() =>
+        new Promise<void>((resolve) => window.setTimeout(resolve, 1_500))
+          .then(() => {
+            if (!isAwaitingMergeReview(task)) {
+              knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+              return;
+            }
+            return notify();
+          })
+          .catch((cause) => {
+            knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+            exhaustedSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+            setError(cause instanceof Error ? cause.message : String(cause));
+          }),
+      );
+    }
+  }, [getChatById, runtimeConnected, subAgentList?.tasks, t, toReviewNotificationId]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    if (!runtimeConnected) {
+      knownSubAgentReviewNotificationIdsRef.current.clear();
+      handledSubAgentReviewNotificationIdsRef.current.clear();
+      exhaustedSubAgentReviewNotificationIdsRef.current.clear();
+      return;
+    }
+    let active = true;
+    let unlistenSubAgentAction: (() => void) | null = null;
+    void listen<unknown>(SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT, (event) => {
+      const action = parseSubAgentReviewNotificationAction(event.payload);
+      if (!action || !active) {
+        return;
+      }
+      const reviewNotificationId = `${action.taskId}:${action.revision}:${action.parentChatId}`;
+      if (
+        handledSubAgentReviewNotificationIdsRef.current.has(reviewNotificationId)
+        || exhaustedSubAgentReviewNotificationIdsRef.current.has(reviewNotificationId)
+      ) {
+        return;
+      }
+      handledSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+      void (async () => {
+        try {
+          const payload = await fetchSubAgent(endpoint, action.taskId);
+          const task = payload.task;
+          if (
+            task.id !== action.taskId
+            || task.parentChatId !== action.parentChatId
+            || task.revision !== action.revision
+            || !isAwaitingMergeReview(task)
+            || !getChatById(task.parentChatId)
+          ) {
+            handledSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+            exhaustedSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+            setError(t("approval.notificationExpired"));
+            return;
+          }
+          const chat = getChatById(task.parentChatId);
+          if (!chat) {
+            handledSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+            exhaustedSubAgentReviewNotificationIdsRef.current.add(reviewNotificationId);
+            setError(t("approval.notificationExpired"));
+            return;
+          }
+          openChat(chat);
+          setActiveView("chat");
+          setSelectedSubAgent(task);
+          setSubAgentList((current) => updateSubAgentList(current, task));
+          setSelectedSubAgentPanelOpen(true);
+        } catch (cause) {
+          handledSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      })();
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenSubAgentAction = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch((cause) => active && setError(cause instanceof Error ? cause.message : String(cause)));
+
+    return () => {
+      active = false;
+      unlistenSubAgentAction?.();
+    };
+  }, [endpoint, getChatById, openChat, runtimeConnected, t]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -1199,6 +1356,44 @@ export default function App() {
         })),
     [activeChat?.items],
   );
+  const userAttachmentSources = useMemo<UserAttachmentSource[]>(() => {
+    const seen = new Set<string>();
+    const sources: UserAttachmentSource[] = [];
+    const register = (source: UserAttachmentSource | undefined | null) => {
+      if (!source || !source.id || !source.name) {
+        return;
+      }
+      const normalizedSize = Number.isSafeInteger(source.size) && source.size >= 0 ? source.size : 0;
+      const dedupeKey = `${source.id}\u0000${source.name}\u0000${source.type}\u0000${normalizedSize}`;
+      if (seen.has(dedupeKey)) {
+        return;
+      }
+      seen.add(dedupeKey);
+      sources.push({ ...source, size: normalizedSize, type: source.type || "file" });
+    };
+    for (const item of activeChat?.items || []) {
+      if (item.type !== "user" || !item.attachments?.length) {
+        continue;
+      }
+      for (const attachment of item.attachments) {
+        register({
+          id: attachment.id,
+          name: attachment.name,
+          type: attachment.type || "file",
+          size: attachment.size,
+        });
+      }
+    }
+    for (const attachment of activeChat?.compactedAttachmentRefs || []) {
+      register({
+        id: attachment.id,
+        name: attachment.name,
+        type: attachment.type || "file",
+        size: attachment.size,
+      });
+    }
+    return sources;
+  }, [activeChat?.id, activeChat?.items, activeChat?.compactedAttachmentRefs]);
   const subAgentTasks = subAgentList?.tasks ?? [];
   const activeSubAgentTasks = useMemo(() => {
     const parentChatId = activeChat?.id || "";
@@ -1518,8 +1713,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!pinnedToConversationBottom) {
+      return;
+    }
     conversationEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [conversation.length]);
+  }, [pinnedToConversationBottom, conversation.length]);
+
+  useEffect(() => {
+    setPinnedToConversationBottom(true);
+  }, [activeChatId]);
 
   useEffect(() => {
     if (projectInitRef.current || activeProjectPath || !authoritativeSelectedProjectPath) {
@@ -2076,23 +2278,24 @@ export default function App() {
 
   function copyConversationItem(item: ConversationItem) {
     const text = conversationItemText(item, t);
-    if (!text.trim()) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      showTransientNotice("error", "copy", t("chat.copyFailed", { reason: t("chat.copyNoText") }));
       return;
     }
-    void navigator.clipboard?.writeText(text).catch(() => undefined);
-    setRuntimeNotice(t("chat.copiedMessage"));
-  }
-
-  function setConversationFeedback(itemId: string, value: MessageFeedback) {
-    setMessageFeedback((current) => {
-      const next = { ...current };
-      if (next[itemId] === value) {
-        delete next[itemId];
-      } else {
-        next[itemId] = value;
-      }
-      return next;
-    });
+    if (!navigator.clipboard?.writeText) {
+      showTransientNotice("error", "copy", t("chat.copyFailed", { reason: t("chat.copyClipboardUnavailable") }));
+      return;
+    }
+    void navigator.clipboard.writeText(trimmed).then(
+      () => {
+        showTransientNotice("success", "copy", t("chat.copiedMessage"));
+      },
+      (cause) => {
+        const reason = cause instanceof Error ? cause.message : String(cause || "");
+        showTransientNotice("error", "copy", t("chat.copyFailed", { reason: (reason || t("chat.copyUnknownReason")).slice(0, 500) }));
+      },
+    );
   }
 
   function editConversationMessage(itemId: string) {
@@ -2118,9 +2321,9 @@ export default function App() {
       itemId,
       priorInput: input,
       priorAttachments: cloneChatAttachments(attachments),
+      draftText: item.text,
+      draftAttachments: cloneChatAttachments(item.attachments || []),
     });
-    setInput(item.text);
-    setAttachments(cloneChatAttachments(item.attachments || []));
     setRuntimeNotice(t("chat.editingMessage"));
   }
 
@@ -2135,11 +2338,37 @@ export default function App() {
   }
 
   function discardMessageEdit() {
+    if (!editingMessage) {
+      return;
+    }
+    setInput(editingMessage.priorInput);
+    setAttachments(cloneChatAttachments(editingMessage.priorAttachments));
     setEditingMessage(null);
     setRuntimeNotice("");
   }
 
-  async function saveMessageEdit(message: string) {
+  function updateEditingMessageText(nextText: string) {
+    setEditingMessage((current) => {
+      if (!current) {
+        return current;
+      }
+      return { ...current, draftText: nextText };
+    });
+  }
+
+  function removeEditingMessageAttachment(attachmentId: string) {
+    setEditingMessage((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        draftAttachments: current.draftAttachments.filter((attachment) => attachment.id !== attachmentId),
+      };
+    });
+  }
+
+  async function saveMessageEdit() {
     if (!editingMessage) {
       return false;
     }
@@ -2162,19 +2391,25 @@ export default function App() {
       setError(t("chat.latestMessageActionOnly", { defaultValue: "Only the latest message can be changed." }));
       return true;
     }
+    const nextText = editingMessage.draftText.trim();
+    const nextAttachments = cloneChatAttachments(editingMessage.draftAttachments);
+    if (!nextText && nextAttachments.length === 0) {
+      discardMessageEdit();
+      return true;
+    }
     const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     const turn: QueuedTurn = {
       id: `edit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      text: message,
-      attachments: cloneChatAttachments(attachments),
+      text: nextText,
+      attachments: nextAttachments,
       providerLabel: providerSnapshot.providerLabel,
       provider: providerSnapshot.provider,
       model: providerSnapshot.model,
       contextLimit: turnContextLimit.known ? turnContextLimit.limit : undefined,
     };
     setEditingMessage(null);
-    setInput("");
-    setAttachments([]);
+    setInput(editingMessage.priorInput);
+    setAttachments(cloneChatAttachments(editingMessage.priorAttachments));
     await runTurnNow(chat.id, turn, {
       baseItems: chat.items.slice(0, index),
       sessionId: "",
@@ -2401,10 +2636,6 @@ export default function App() {
       const message = chatDisabledReason || t("chat.connectProviderBeforeSend");
       setError(message);
       showTransientFailure("send", message);
-      return;
-    }
-    if (editingMessage) {
-      await saveMessageEdit(message);
       return;
     }
     if (message === "/compact" || message.startsWith("/compact ")) {
@@ -2953,21 +3184,27 @@ export default function App() {
       tasks={activeSubAgentTasks}
       loading={loadingSubAgents}
       error={subAgentError}
-      selected={
-        selectedSubAgentPanelOpen
-        && selectedSubAgent
-        && activeSubAgentTasks.some((task) => task.id === selectedSubAgent.id)
-          ? selectedSubAgent
-          : null
-      }
-      onInspect={(taskId) => void inspectSubAgentTask(taskId)}
-      onCancel={(taskId) => void cancelSubAgentTask(taskId)}
-      onRetry={(taskId) => void retrySubAgentTask(taskId)}
-      onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
-      onAdoptNextAction={adoptSubAgentNextAction}
-      onCloseInspect={() => setSelectedSubAgentPanelOpen(false)}
+      onOpen={() => setSelectedSubAgentPanelOpen(true)}
     />
   );
+  const subAgentWorkspaceSurface = selectedSubAgentPanelOpen ? (
+    <div className="min-h-0 flex-1 overflow-hidden px-3 pb-3">
+      <SubAgentWorkspaceSurface
+        tasks={activeSubAgentTasks}
+        selected={activeSubAgentTasks.some((task) => task.id === selectedSubAgent?.id) ? selectedSubAgent : null}
+        onSelect={(taskId) => {
+          const next = activeSubAgentTasks.find((task) => task.id === taskId) ?? null;
+          setSelectedSubAgent(next);
+          setSelectedSubAgentPanelOpen(true);
+        }}
+        onCancel={(taskId) => void cancelSubAgentTask(taskId)}
+        onRetry={(taskId) => void retrySubAgentTask(taskId)}
+        onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
+        onAdoptNextAction={adoptSubAgentNextAction}
+        onClose={() => setSelectedSubAgentPanelOpen(false)}
+      />
+    </div>
+  ) : null;
 
   return (
     <main className="h-screen overflow-hidden bg-background text-foreground">
@@ -3074,7 +3311,7 @@ export default function App() {
             onStartRuntime={() => void startRuntime()}
           />
 
-          {activeView === "doctor" ? (
+          {selectedSubAgentPanelOpen ? subAgentWorkspaceSurface : activeView === "doctor" ? (
             <DoctorWorkspace
               report={doctorReport}
               loading={loadingDoctor}
@@ -3350,8 +3587,6 @@ export default function App() {
               onCancelCompaction={activeChatId ? () => cancelCompaction(activeChatId) : undefined}
               providerLabel={providerSnapshot.providerLabel}
               model={providerSnapshot.model}
-              editing={Boolean(editingMessage && editingMessage.chatId === activeChatId)}
-              onCancelEdit={cancelMessageEdit}
               projects={projectItems.map((project) => ({
                 key: projectKey(project),
                 name: project.name || shortPath(project.path || ""),
@@ -3372,17 +3607,28 @@ export default function App() {
               onAnswerQuestion={answerRuntimeQuestion}
               conversationEndRef={conversationEndRef}
               onConversationMouseUp={handleConversationMouseUp}
-              onConversationScroll={() => (selectionMenu ? setSelectionMenu(null) : undefined)}
+              onConversationScroll={(scrollElement) => {
+                const nearBottom = scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 24;
+                setPinnedToConversationBottom(nearBottom);
+                if (selectionMenu) {
+                  setSelectionMenu(null);
+                }
+              }}
               pendingApprovalForResponse={pendingApprovalForResponse}
               scopedPendingApprovals={pendingApprovalItems}
               approvalActions={approvalActions}
-              messageFeedback={messageFeedback}
+              editingItemId={editingMessage?.chatId === activeChatId ? editingMessage.itemId : ""}
+              editingText={editingMessage?.draftText || ""}
+              editingAttachments={editingMessage?.draftAttachments || []}
+              onEditItemChangeText={updateEditingMessageText}
+              onEditItemRemoveAttachment={removeEditingMessageAttachment}
               latestRetryableItemId={latestRetryableItemId}
               latestEditableUserItemId={latestEditableUserItemId}
               onCopyItem={copyConversationItem}
               onRetryItem={retryConversationItem}
               onEditItem={editConversationMessage}
-              onFeedbackItem={setConversationFeedback}
+              onEditItemSave={saveMessageEdit}
+              onEditItemCancel={cancelMessageEdit}
               onApprove={approveShell}
               onReject={rejectShell}
               onModifyApproval={modifyApprovalInComposer}
@@ -3420,7 +3666,6 @@ export default function App() {
               hasEnvironmentAttention={hasEnvironmentAttention}
               hasStartupIssue={hasStartupIssue}
               workspaceProjectLabel={workspaceProjectLabel}
-              projectWorkspaceLabel={activeProjectName || shortPath(activeChat?.projectPath || "") || workspaceProjectLabel}
               selectedProjectComponent={selectedProjectComponent}
               backendComponent={backendComponent}
               mcpPackageComponent={mcpPackageComponent}
@@ -3429,14 +3674,9 @@ export default function App() {
               unityToolsComponent={unityToolsComponent}
               agentProgress={agentProgress}
               projectWorkspace={projectChatWorkspace}
-              activityPanel={projectChatWorkspace ? runtimeActivityPanel : undefined}
               subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}
-              runtimeActivityCount={runtimeRuns.length + (runtimeRunsError ? 1 : 0)}
-              subAgentCount={activeSubAgentTasks.length}
-              workspaceDiff={workspaceDiff}
-              agentGoals={agentGoals}
-              agentMemory={agentMemory}
-              skills={skills}
+              subAgentTaskCount={activeSubAgentTasks.length}
+              userAttachmentSources={userAttachmentSources}
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
               refreshUnityStatus={refreshUnityStatus}
@@ -3547,7 +3787,12 @@ export default function App() {
 
       {transientFailure ? (
         <TransientFailureToast
-          title={t(`notifications.${transientFailure.kind}Failed`)}
+          title={
+            transientFailure.tone === "success" && transientFailure.kind === "copy"
+              ? t("notifications.copySuccess")
+              : t(`notifications.${transientFailure.kind}Failed`)
+          }
+          tone={transientFailure.tone}
           message={transientFailure.message}
           dismissLabel={t("notifications.dismiss")}
           onDismiss={dismissTransientFailure}

@@ -252,6 +252,22 @@ def bind_test_runtime_planner(
     return planner
 
 
+@contextmanager
+def use_test_runtime_planner(
+    gateway: AgentGateway,
+    respond: Callable[[str], object],
+):
+    """Temporarily replace only the Provider port of an already-bound App gateway."""
+    planner = RuntimePlannerService(
+        catalog=_TestRuntimePlannerCatalog(gateway),
+        desktop=_TestRuntimePlannerDesktop(gateway),
+        model=_TestRuntimePlannerModel(respond),
+        turn=_TestRuntimePlannerTurn(),
+    )
+    with patch.object(gateway, "_runtime_planner", planner):
+        yield planner
+
+
 def _test_runtime_provider_config(*, model: str = "test-model") -> ProviderApiConfig:
     return ProviderApiConfig(
         provider="ollama",
@@ -3352,7 +3368,16 @@ class DashboardServerTests(unittest.TestCase):
                 (workspace_path / directory).mkdir()
             target = workspace_path / "Assets" / "background-goal.txt"
             past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
-            with TestClient(dashboard_server.app) as client:
+            shell_command = "Set-Content -Path Assets/background-goal.txt -Value guarded -Encoding utf8"
+            with (
+                use_test_runtime_planner(
+                    dashboard_server.AGENT_GATEWAY,
+                    lambda _prompt: PlannerModelResult(
+                        text=json.dumps({"action": "shell", "shell_command": shell_command})
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 created = client.post(
                     "/api/app/agent/goals",
                     json={"title": "Guarded write", "chatId": "chat-background-denied", "wakeAt": past},
@@ -3369,7 +3394,7 @@ class DashboardServerTests(unittest.TestCase):
                         "message": delivery["resumePrompt"],
                         "clientTurnId": delivery["clientTurnId"],
                         "goalDeliveryId": delivery["deliveryId"],
-                        "shell_command": "Set-Content -Path Assets/background-goal.txt -Value guarded -Encoding utf8",
+                        "shell_command": shell_command,
                         "workspace_root": workspace,
                         "cwd": workspace,
                         "projectPath": workspace,
@@ -6156,14 +6181,30 @@ class DashboardServerTests(unittest.TestCase):
             )
 
     def test_agent_runtime_message_observes_and_plans_without_unity(self) -> None:
-        with TestClient(dashboard_server.app) as client:
+        unconfigured = ProviderApiConfig(
+            provider="deepseek",
+            api_key="",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-flash",
+        )
+        with (
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=unconfigured,
+            ),
+            TestClient(dashboard_server.app) as client,
+        ):
             response = client.post("/api/app/agent/message", json={"message": "检查仓库状态"})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["observe"]["ok"])
-        self.assertEqual(payload["plan"]["planner"], "deterministic-local")
+        self.assertEqual(payload["plan"]["planner"], "llm")
+        self.assertTrue(payload["plan"]["plannerFailed"])
+        self.assertEqual(payload["plan"]["plannerFailure"]["code"], "provider_not_configured")
+        self.assertEqual(payload["plan"]["plannerFailure"]["phase"], "initial")
         self.assertIn("session_id", payload)
         self.assertIn("turn_id", payload)
 
@@ -7383,15 +7424,39 @@ class DashboardServerTests(unittest.TestCase):
         self.assertLessEqual(len(observation), RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
 
     def test_agent_runtime_routes_read_skill_without_shell(self) -> None:
-        with TestClient(dashboard_server.app) as client:
+        tool = "vrcforge_unity_status"
+        arguments: dict[str, object] = {}
+        responses = iter(
+            [
+                PlannerModelResult(
+                    text=json.dumps({"action": "skill", "skill_tool": tool, "skill_params": arguments})
+                ),
+                PlannerModelResult(
+                    text=json.dumps(
+                        {
+                            "action": "reply",
+                            "reply": "Unity MCP status inspected.",
+                            "completion_claim": {
+                                "satisfied": True,
+                                "evidence_action_ids": [canonical_action_id("skill", tool, arguments)],
+                            },
+                        }
+                    )
+                ),
+            ]
+        )
+        with (
+            use_test_runtime_planner(dashboard_server.AGENT_GATEWAY, lambda _prompt: next(responses)),
+            TestClient(dashboard_server.app) as client,
+        ):
             response = client.post("/api/app/agent/message", json={"message": "检查 Unity MCP 状态"})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["plan"]["shellNeeded"])
-        self.assertTrue(payload["plan"]["skillNeeded"])
-        self.assertEqual(payload["plan"]["skillTool"], "vrcforge_unity_status")
+        self.assertFalse(payload["plan"]["skillNeeded"])
+        self.assertEqual(payload["steps"][0]["tool"], "vrcforge_unity_status")
         self.assertEqual(payload["plan"]["nextStep"], "done")
         self.assertEqual(payload["plan"]["taskCompletion"]["status"], "completed")
         self.assertEqual(
@@ -7403,19 +7468,73 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("result", payload["skill"])
 
     def test_agent_runtime_routes_skill_manifest_request(self) -> None:
-        with TestClient(dashboard_server.app) as client:
+        tool = "vrcforge_skill_manifest"
+        responses = iter(
+            [
+                PlannerModelResult(text=json.dumps({"action": "skill", "skill_tool": tool, "skill_params": {}})),
+                PlannerModelResult(
+                    text=json.dumps(
+                        {
+                            "action": "reply",
+                            "reply": "Skill manifest inspected.",
+                            "completion_claim": {
+                                "satisfied": True,
+                                "evidence_action_ids": [canonical_action_id("skill", tool, {})],
+                            },
+                        }
+                    )
+                ),
+            ]
+        )
+        with (
+            use_test_runtime_planner(dashboard_server.AGENT_GATEWAY, lambda _prompt: next(responses)),
+            TestClient(dashboard_server.app) as client,
+        ):
             response = client.post("/api/app/agent/message", json={"message": "列一下 skills"})
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(payload["plan"]["skillTool"], "vrcforge_skill_manifest")
+        self.assertEqual(payload["plan"]["nextStep"], "done")
+        self.assertEqual(payload["steps"][0]["tool"], "vrcforge_skill_manifest")
         self.assertEqual(payload["skill"]["status"], "executed")
         self.assertGreater(payload["skill"]["result"]["toolCount"], 10)
         self.assertNotIn("token", payload["skill"]["result"])
 
     def test_app_skill_registry_crud_uses_local_skill_markdown(self) -> None:
-        with TestClient(dashboard_server.app) as client:
+        invocation_params = {"arguments": "Scene/Hero"}
+        responses = iter(
+            [
+                PlannerModelResult(text=json.dumps({"action": "enter_execution"})),
+                PlannerModelResult(
+                    text=json.dumps(
+                        {
+                            "action": "skill",
+                            "skill_tool": "avatar-review",
+                            "skill_params": invocation_params,
+                        }
+                    )
+                ),
+                PlannerModelResult(
+                    text=json.dumps(
+                        {
+                            "action": "reply",
+                            "reply": "Avatar review skill loaded.",
+                            "completion_claim": {
+                                "satisfied": True,
+                                "evidence_action_ids": [
+                                    canonical_action_id("skill", "avatar-review", invocation_params)
+                                ],
+                            },
+                        }
+                    )
+                ),
+            ]
+        )
+        with (
+            use_test_runtime_planner(dashboard_server.AGENT_GATEWAY, lambda _prompt: next(responses)),
+            TestClient(dashboard_server.app) as client,
+        ):
             initial = client.get("/api/app/skills")
             self.assertEqual(initial.status_code, 200)
             initial_payload = initial.json()
@@ -7674,7 +7793,36 @@ class DashboardServerTests(unittest.TestCase):
             for directory in ("Assets", "Packages", "ProjectSettings"):
                 (Path(workspace) / directory).mkdir()
             target = Path(workspace) / "Assets" / "agent-loop.txt"
-            with TestClient(dashboard_server.app) as client:
+            low_command = "Get-ChildItem"
+            high_command = "Set-Content -Path Assets/agent-loop.txt -Value hi -Encoding utf8"
+            responses = iter(
+                [
+                    PlannerModelResult(
+                        text=json.dumps({"action": "shell", "shell_command": low_command})
+                    ),
+                    PlannerModelResult(
+                        text=json.dumps(
+                            {
+                                "action": "reply",
+                                "reply": "Directory inspected.",
+                                "completion_claim": {
+                                    "satisfied": True,
+                                    "evidence_action_ids": [
+                                        canonical_action_id("shell", "shell", {"command": low_command})
+                                    ],
+                                },
+                            }
+                        )
+                    ),
+                    PlannerModelResult(
+                        text=json.dumps({"action": "shell", "shell_command": high_command})
+                    ),
+                ]
+            )
+            with (
+                use_test_runtime_planner(dashboard_server.AGENT_GATEWAY, lambda _prompt: next(responses)),
+                TestClient(dashboard_server.app) as client,
+            ):
                 low = client.post(
                     "/api/app/agent/message",
                     json={
@@ -7693,7 +7841,7 @@ class DashboardServerTests(unittest.TestCase):
                     "/api/app/agent/message",
                     json={
                         "message": "写入测试文件",
-                        "shell_command": "Set-Content -Path Assets/agent-loop.txt -Value hi -Encoding utf8",
+                        "shell_command": high_command,
                         "workspace_root": workspace,
                         "cwd": workspace,
                     },
@@ -16104,6 +16252,38 @@ namespace VRCForge.Editor
         self.assertEqual(mismatch.status_code, 400)
         self.assertEqual(duplicate.status_code, 400)
 
+    def test_audit_multi_rejects_byte_identical_captures_before_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "latest"
+            root.mkdir()
+            front = root / "vision_front.png"
+            back = root / "vision_back.png"
+            authority = dashboard_server.ManagedVisualCaptureAuthority(root)
+            frame = b"same-frozen-frame"
+            front.write_bytes(frame)
+            back.write_bytes(frame)
+            with patch.object(
+                dashboard_server,
+                "MANAGED_VISUAL_CAPTURE_AUTHORITY",
+                authority,
+            ), patch("dashboard_server.run_provider_vision_audit_bytes") as mock_audit:
+                payload = dashboard_server.audit_avatar_multi_screenshot_sync(
+                    dashboard_server.VisionAuditMultiRequest(
+                        imagePaths=[str(front), str(back)],
+                        angles=["front", "back"],
+                    )
+                )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["coverageComplete"])
+        self.assertFalse(payload["visualVerified"])
+        self.assertEqual(payload["overallStatus"], "failed")
+        self.assertEqual(payload["visualVerification"]["status"], "failed")
+        self.assertIn("byte-identical", payload["visualVerification"]["summary"])
+        self.assertTrue(all(item["status"] == "failed" for item in payload["results"]))
+        self.assertTrue(all("byte-identical" in item["error"] for item in payload["results"]))
+        mock_audit.assert_not_called()
+
     def test_multi_vision_audit_agent_tool_is_internal_to_the_runtime_loop(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
@@ -16175,6 +16355,60 @@ namespace VRCForge.Editor
         self.assertEqual(payload["evidence"], issued["evidence"])
         self.assertEqual(mock_audit.call_count, 2)
         self.assertNotIn("imagePath", json.dumps(payload))
+
+    def test_managed_multi_vision_rejects_byte_identical_angles_before_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            managed = Path(temp_dir) / "latest"
+            managed.mkdir()
+            front = managed / "vision_front.png"
+            back = managed / "vision_back.png"
+            front.write_bytes(b"same-frozen-frame")
+            back.write_bytes(b"same-frozen-frame")
+            authority = dashboard_server.ManagedVisualCaptureAuthority(managed)
+            binding = {
+                "taskId": "task-duplicate-frames",
+                "sessionId": "session-duplicate-frames",
+                "approvalId": "approval-duplicate-frames",
+                "requestedActionId": "action-capture-duplicate-frames",
+            }
+            issued = authority.issue(
+                [
+                    {"imagePath": str(front), "angle": "front"},
+                    {"imagePath": str(back), "angle": "back"},
+                ],
+                binding=binding,
+            )
+            with patch.object(
+                dashboard_server,
+                "MANAGED_VISUAL_CAPTURE_AUTHORITY",
+                authority,
+            ), patch(
+                "dashboard_server.run_provider_vision_audit_bytes",
+            ) as mock_audit:
+                payload = dashboard_server.audit_managed_avatar_multi_screenshot_sync(
+                    dashboard_server.ManagedVisionAuditMultiRequest(
+                        captureReceipt=issued["captureReceipt"]
+                    ),
+                    task_binding=binding,
+                )
+
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["coverageComplete"])
+        self.assertFalse(payload["visualVerified"])
+        self.assertEqual(payload["overallStatus"], "failed")
+        self.assertEqual(payload["visualVerification"]["status"], "failed")
+        self.assertIn("byte-identical", payload["visualVerification"]["summary"])
+        self.assertTrue(payload["captureEvidenceVerified"])
+        self.assertFalse(payload["retryable"])
+        self.assertFalse(payload["retainImages"])
+        self.assertNotIn("captureReceipt", payload)
+        self.assertTrue(
+            all(item["status"] == "failed" for item in payload["results"])
+        )
+        self.assertTrue(
+            all("byte-identical" in item["error"] for item in payload["results"])
+        )
+        mock_audit.assert_not_called()
 
     def test_external_agent_cannot_call_the_task_internal_multi_vision_tool(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()

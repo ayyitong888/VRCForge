@@ -2767,9 +2767,9 @@ class AgentGateway:
                 "shellRole": "fallback",
                 "timeoutSeconds": 120,
             },
-            "deterministicPlanner": {
-                "status": "ok",
-                "available": True,
+            "planner": {
+                "mode": "provider_only",
+                "providerRequired": True,
             },
             "skills": {
                 "schema": skills["schema"],
@@ -3850,10 +3850,13 @@ class AgentGateway:
                 enter_runtime_execution()
                 continue
 
-            # 仅首步采用调用方直接给的 shell 命令，避免后续步骤反复重放同一条命令。
-            command = param_command if step_index == 0 else ""
-            if not command:
-                command = str(plan.get("shellCommand") or "").strip()
+            # Caller-supplied shell text is only an argument source after the
+            # Provider has independently selected the Shell action.  It must
+            # never bypass a failed/missing Provider plan and create an
+            # approval on its own.
+            command = str(plan.get("shellCommand") or "").strip()
+            if not command and step_index == 0 and plan.get("shellNeeded") is True:
+                command = param_command
             shell_step_params = ensure_dict(plan.get("shellParams"))
             shell_protection_scope = ""
             if command and not project_root:
@@ -4737,7 +4740,7 @@ class AgentGateway:
         plan["stepCount"] = len(steps)
         plan["steps"] = steps
         if not plan.get("planner"):
-            plan["planner"] = first_plan.get("planner") or "deterministic-local"
+            plan["planner"] = first_plan.get("planner") or "llm"
         if not plan.get("reply"):
             plan["reply"] = last_plan.get("reply") or last_plan.get("summary") or ""
         return plan
@@ -4786,8 +4789,9 @@ class AgentGateway:
                 "shellRole": "fallback",
                 "timeoutSeconds": 120,
             },
-            "deterministicPlanner": {
-                "available": True,
+            "planner": {
+                "mode": "provider_only",
+                "providerRequired": True,
             },
             "tools": {
                 "count": len(self.build_manifest().get("tools", [])),

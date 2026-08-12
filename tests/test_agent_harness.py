@@ -32,18 +32,24 @@ def test_offline_agent_harness_runs_the_real_runtime_selection_and_completion_ga
         check=False,
     )
 
-    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.returncode == 1, completed.stdout + completed.stderr
     report = json.loads(completed.stdout)
     assert report["schema"] == "vrcforge.agent_harness_report.v6"
-    assert report["accepted"] is True
+    assert report["accepted"] is False
     assert report["releaseAccepted"] is False
+    assert report["selectionOnly"] is False
+    assert report["selectionSource"] == "offline-runtime-no-provider"
+    assert report["trustedSelectionReceipts"] is False
+    assert report["selectionReceiptAccepted"] is False
     assert report["toolsExecuted"] is False
-    assert report["selection"]["passed"] == report["selection"]["total"] == 40
+    assert report["selection"]["passed"] == 20
+    assert report["selection"]["total"] == 40
     assert report["selection"]["positive"] == {
-        "passed": 20,
+        "passed": 0,
         "total": 20,
-        "correctRate": 1.0,
+        "correctRate": 0.0,
     }
+    assert report["selection"]["accepted"] is False
     assert report["selection"]["negative"] == {
         "zeroToolCalls": 20,
         "total": 20,

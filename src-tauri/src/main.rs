@@ -159,6 +159,7 @@ fn main() {
             answer_agent_question,
             approve_agent_approval,
             show_approval_notification,
+            show_sub_agent_review_notification,
             begin_developer_options_challenge,
             begin_chat_attachment_upload,
             bind_agent_goal_owner,

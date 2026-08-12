@@ -27,10 +27,13 @@ const APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR: &str = "0";
 const APPROVAL_NOTIFICATION_ICON_FILE_NAME: &str = "VRCForge.png";
 const APPROVAL_NOTIFICATION_ICON_ALT_TEXT: &str = "VRCForge";
 const APPROVAL_NOTIFICATION_ACTION_EVENT: &str = "vrcforge-approval-notification-action";
-const MAX_APPROVAL_ID_LENGTH: usize = 128;
+const MAX_NOTIFICATION_ID_LENGTH: usize = 128;
 const MAX_TITLE_LENGTH: usize = 120;
 const MAX_BODY_LENGTH: usize = 512;
 const MAX_ACTION_LABEL_LENGTH: usize = 32;
+const SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT: &str =
+    "vrcforge-sub-agent-review-notification-action";
+const SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION: &str = "open";
 
 #[cfg(windows)]
 pub(crate) fn bind_approval_notification_identity() -> bool {
@@ -51,10 +54,30 @@ pub(crate) struct DesktopApprovalNotificationRequest {
     reject_label: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopSubAgentReviewNotificationRequest {
+    task_id: String,
+    revision: u64,
+    parent_chat_id: String,
+    title: String,
+    body: String,
+    open_label: String,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApprovalNotificationActionEvent {
     approval_id: String,
+    action: &'static str,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubAgentReviewNotificationActionEvent {
+    task_id: String,
+    revision: u64,
+    parent_chat_id: String,
     action: &'static str,
 }
 
@@ -123,6 +146,72 @@ pub(crate) fn show_approval_notification(
         let _ = app;
         let _ = request;
         Err("Approval notifications are only supported on Windows.".to_string())
+    }
+}
+
+/// Displays a bounded, display-only sub-agent review toast.
+///
+/// This command never updates any sub-agent state directly. A toast action only
+/// emits an event for the existing frontend path to refetch the latest task and
+/// re-check parent chat/revision/merge decision before opening the detail view.
+#[tauri::command]
+pub(crate) fn show_sub_agent_review_notification(
+    app: AppHandle,
+    request: DesktopSubAgentReviewNotificationRequest,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        validate_sub_agent_review_request(&request)?;
+        if !bind_approval_notification_identity() {
+            return Err("Unable to bind the VRCForge notification identity.".to_string());
+        }
+        let executable = std::env::current_exe()
+            .map_err(|_| "Unable to resolve the VRCForge notification icon.".to_string())?;
+        let icon_path = approval_notification_icon_path(&executable)
+            .filter(|path| path.is_file())
+            .ok_or_else(|| "Unable to resolve the VRCForge notification icon.".to_string())?;
+        let event = SubAgentReviewNotificationActionEvent {
+            task_id: request.task_id.clone(),
+            revision: request.revision,
+            parent_chat_id: request.parent_chat_id.clone(),
+            action: SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION,
+        };
+        let callback_app = app.clone();
+        tauri_winrt_notification::Toast::new(APPROVAL_NOTIFICATION_APP_ID)
+            .title(&request.title)
+            .text1(&request.body)
+            .icon(
+                &icon_path,
+                tauri_winrt_notification::IconCrop::Square,
+                APPROVAL_NOTIFICATION_ICON_ALT_TEXT,
+            )
+            .add_button(
+                &request.open_label,
+                SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION,
+            )
+            .on_activated(move |activation| {
+                let open_action = match activation.as_deref() {
+                    None => true,
+                    Some(value) if value.trim().is_empty() => true,
+                    Some(value) => parse_sub_agent_review_notification_action(value).is_some(),
+                };
+                if !open_action {
+                    return Ok(());
+                }
+                let _ =
+                    callback_app.emit(SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT, event.clone());
+                focus_main_window(&callback_app);
+                Ok(())
+            })
+            .show()
+            .map_err(|_| "Unable to show the sub-agent review notification.".to_string())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = app;
+        let _ = request;
+        Err("Sub-agent review notifications are only supported on Windows.".to_string())
     }
 }
 
@@ -220,16 +309,28 @@ fn approval_notification_action(action: &str, approval_id: &str) -> String {
     format!("{action}:{approval_id}")
 }
 
+fn sub_agent_review_notification_action() -> &'static str {
+    SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION
+}
+
 fn parse_approval_notification_action(value: &str, approval_id: &str) -> Option<&'static str> {
     ["approve", "reject"]
         .into_iter()
         .find(|action| value == approval_notification_action(action, approval_id))
 }
 
+fn parse_sub_agent_review_notification_action(value: &str) -> Option<&'static str> {
+    if value == sub_agent_review_notification_action() {
+        Some(SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION)
+    } else {
+        None
+    }
+}
+
 fn validate_notification_request(
     request: &DesktopApprovalNotificationRequest,
 ) -> Result<(), String> {
-    validate_approval_id(&request.approval_id)?;
+    validate_notification_id(&request.approval_id)?;
     validate_display_text(&request.title, MAX_TITLE_LENGTH, "title")?;
     validate_display_text(&request.body, MAX_BODY_LENGTH, "body")?;
     validate_display_text(
@@ -245,15 +346,29 @@ fn validate_notification_request(
     Ok(())
 }
 
-fn validate_approval_id(value: &str) -> Result<(), String> {
+fn validate_notification_id(value: &str) -> Result<(), String> {
     if value.is_empty()
-        || value.len() > MAX_APPROVAL_ID_LENGTH
+        || value.len() > MAX_NOTIFICATION_ID_LENGTH
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     {
         return Err("Invalid approval notification identifier.".to_string());
     }
+    Ok(())
+}
+
+fn validate_sub_agent_review_request(
+    request: &DesktopSubAgentReviewNotificationRequest,
+) -> Result<(), String> {
+    validate_notification_id(&request.task_id)?;
+    validate_notification_id(&request.parent_chat_id)?;
+    if request.revision == 0 {
+        return Err("Invalid sub-agent review notification revision.".to_string());
+    }
+    validate_display_text(&request.title, MAX_TITLE_LENGTH, "title")?;
+    validate_display_text(&request.body, MAX_BODY_LENGTH, "body")?;
+    validate_display_text(&request.open_label, MAX_ACTION_LABEL_LENGTH, "open label")?;
     Ok(())
 }
 
@@ -281,10 +396,11 @@ mod tests {
     use super::approval_notification_icon_path;
     use super::{
         approval_notification_action, parse_approval_notification_action,
-        validate_notification_request, DesktopApprovalNotificationRequest,
-        APPROVAL_NOTIFICATION_APP_ID, APPROVAL_NOTIFICATION_DISPLAY_NAME,
-        APPROVAL_NOTIFICATION_ICON_ALT_TEXT, APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR,
-        APPROVAL_NOTIFICATION_ICON_FILE_NAME, MAX_ACTION_LABEL_LENGTH,
+        parse_sub_agent_review_notification_action, validate_notification_request,
+        DesktopApprovalNotificationRequest, APPROVAL_NOTIFICATION_APP_ID,
+        APPROVAL_NOTIFICATION_DISPLAY_NAME, APPROVAL_NOTIFICATION_ICON_ALT_TEXT,
+        APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR, APPROVAL_NOTIFICATION_ICON_FILE_NAME,
+        MAX_ACTION_LABEL_LENGTH,
     };
     #[cfg(windows)]
     use std::path::Path;
@@ -326,6 +442,16 @@ mod tests {
             parse_approval_notification_action("open:approval_123-abc", id),
             None
         );
+    }
+
+    #[test]
+    fn sub_agent_review_parse_accepts_activation_click_and_open() {
+        assert_eq!(
+            parse_sub_agent_review_notification_action("open"),
+            Some("open")
+        );
+        assert_eq!(parse_sub_agent_review_notification_action(""), None);
+        assert_eq!(parse_sub_agent_review_notification_action("unknown"), None);
     }
 
     #[test]

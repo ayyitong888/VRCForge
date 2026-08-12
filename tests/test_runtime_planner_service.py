@@ -153,20 +153,41 @@ def service(
     )
 
 
-def test_local_shell_meta_and_disconnected_paths_preserve_runtime_contract() -> None:
+def test_plan_agent_turn_without_provider_fails_without_local_fallback() -> None:
     planner = service()
 
-    shell = planner.plan_agent_turn("git status", {}, {})
+    for message, params in (
+        ("git status", {}),
+        ("Capture front and back views, then run a visual audit.", {}),
+        (
+            "Run with explicitly selected supervision.",
+            {"skill_tool": "vrcforge_health", "skill_params": {}},
+        ),
+    ):
+        plan = planner.plan_agent_turn(message, params, {})
+        assert plan["planner"] == "llm"
+        assert plan["plannerFailed"] is True
+        assert plan["plannerFailure"] == {
+            "code": "provider_not_configured",
+            "phase": "initial",
+            "retryable": False,
+        }
+        assert plan["nextStep"] == "planner_failed"
+        assert plan["deterministicTerminal"] is True
+
+
+def test_local_router_meta_and_disconnected_paths_preserve_runtime_contract() -> None:
+    planner = service()
+
+    shell = planner._local_plan_agent_turn("git status", {}, {})
     assert shell["planner"] == "deterministic-local"
     assert shell["shellCommand"] == "git --no-pager status --short"
     assert shell["nextStep"] == "classify_shell"
 
-    disconnected = planner.plan_agent_turn("ordinary conversation", {}, {})
-    assert disconnected["deterministicTerminal"] is True
-    assert disconnected["providerConnected"] is False
-    assert disconnected["nextStep"] == "done"
+    disconnected = planner._local_plan_agent_turn("ordinary conversation", {}, {})
+    assert disconnected["nextStep"] == "await_user_instruction"
 
-    metadata = planner.plan_agent_turn(
+    metadata = planner._local_plan_agent_turn(
         "which model did you use for the previous response?",
         {"providerLabel": "Fixture Provider", "model": "fixture-model"},
         {},
@@ -183,7 +204,7 @@ def test_local_shell_meta_and_disconnected_paths_preserve_runtime_contract() -> 
                 routable_tools=(tool("vrcforge_health", category="read/debug"),),
             )
         )
-    ).plan_agent_turn("check health", {}, {})
+    )._local_plan_agent_turn("check health", {}, {})
     assert hidden_health["skillTool"] == "vrcforge_health"
     assert hidden_health["skillCategory"] == "read/debug"
 
@@ -220,7 +241,7 @@ def test_runtime_routes_specific_unity_reads_before_broad_status_and_avatar_rule
     expected_tool: str,
     forbidden_tools: set[str],
 ) -> None:
-    plan = service().plan_agent_turn(message, {}, {})
+    plan = service()._local_plan_agent_turn(message, {}, {})
 
     assert plan["skillTool"] == expected_tool
     assert plan["skillTool"] not in forbidden_tools
@@ -236,7 +257,7 @@ def test_runtime_routes_specific_unity_reads_before_broad_status_and_avatar_rule
     ],
 )
 def test_runtime_keeps_intent_bound_broad_routes(message: str, expected_tool: str) -> None:
-    plan = service().plan_agent_turn(message, {}, {})
+    plan = service()._local_plan_agent_turn(message, {}, {})
 
     assert plan["skillTool"] == expected_tool
     assert plan["nextStep"] == "call_skill"
@@ -360,11 +381,15 @@ def test_failed_deterministic_tool_feedback_without_model_does_not_replay() -> N
         ],
     )
 
+    assert plan["planner"] == "llm"
+    assert plan["plannerFailed"] is True
+    assert plan["plannerFailure"] == {
+        "code": "provider_not_configured",
+        "phase": "initial",
+        "retryable": False,
+    }
+    assert plan["nextStep"] == "planner_failed"
     assert plan["deterministicTerminal"] is True
-    assert plan["skillNeeded"] is False
-    assert plan["writeNeeded"] is False
-    assert plan["shellNeeded"] is False
-    assert plan["nextStep"] == "done"
 
 
 def test_verified_loaded_skill_context_is_explicit_and_bounded_for_the_next_plan() -> None:
@@ -569,7 +594,7 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
     )
     planner = service(catalog=catalog)
 
-    scan = planner.plan_agent_turn("create an object named Probe", {}, {})
+    scan = planner._local_plan_agent_turn("create an object named Probe", {}, {})
     assert scan["skillTool"] == "vrcforge_list_avatars"
     assert scan["continueLoop"] is True
     assert scan["writeNeeded"] is False
@@ -579,7 +604,7 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
         "verificationProfile": "persisted_scene_write_console",
     }
 
-    resolved = planner.plan_agent_turn(
+    resolved = planner._local_plan_agent_turn(
         "create an object named Probe",
         {"projectPath": "fixture-project"},
         {},
@@ -603,7 +628,7 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
     assert resolved["nextStep"] == "request_write"
     assert resolved["completionRequirement"]["tool"] == "vrcforge_create_gameobject"
 
-    ambiguous = planner.plan_agent_turn(
+    ambiguous = planner._local_plan_agent_turn(
         "create an object",
         {},
         {},
@@ -618,7 +643,7 @@ def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() 
     assert ambiguous["writeNeeded"] is False
     assert ambiguous["nextStep"] == "needs_user_action"
 
-    conflicting = planner.plan_agent_turn(
+    conflicting = planner._local_plan_agent_turn(
         "create an object at the active scene root",
         {"avatarPath": "AvatarRoot"},
         {},
@@ -741,13 +766,13 @@ def test_deterministic_supervised_write_route_preserves_action_kind_across_expos
         "skill_params": {"name": "Probe"},
     }
 
-    planning = planner.plan_agent_turn(
+    planning = planner._local_plan_agent_turn(
         "Run the explicitly selected supervised operation.",
         request,
         {},
         exposure_layer=EXPOSURE_LAYER_PLANNING,
     )
-    execution = planner.plan_agent_turn(
+    execution = planner._local_plan_agent_turn(
         "Run the explicitly selected supervised operation.",
         request,
         {},
@@ -828,7 +853,7 @@ def test_direction_words_without_view_context_do_not_expand_one_screenshot_to_mu
         routable_tools=(single, multi),
     )
 
-    plan = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot)).plan_agent_turn(
+    plan = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))._local_plan_agent_turn(
         "Capture one screenshot of the left and right buttons.",
         {},
         {},
@@ -1030,12 +1055,11 @@ def test_visual_provider_loss_after_capture_stops_before_model_resample() -> Non
         exposure_layer=EXPOSURE_LAYER_EXECUTION,
     )
 
-    assert model.prompts == []
-    assert plan["nextStep"] == "needs_user_action"
-    assert plan["completionGate"] == {
-        "status": "needs_user_action",
-        "reason": "visual_audit_unavailable",
-    }
+    assert len(model.prompts) == 1
+    assert "managed-receipt" in model.prompts[0]
+    assert plan["planner"] == "llm"
+    assert plan["nextStep"] == "done"
+    assert plan["reply"] == "skip audit"
     assert plan["writeNeeded"] is False
     assert plan["skillNeeded"] is False
 
@@ -1310,7 +1334,7 @@ def test_visual_audit_request_stops_before_capture_when_the_audit_capability_is_
         ),
     )
 
-    plan = service(catalog=catalog).plan_agent_turn(
+    plan = service(catalog=catalog)._local_plan_agent_turn(
         "Capture front and back views, then run a visual audit.",
         {},
         {},
@@ -1343,13 +1367,13 @@ def test_single_capture_and_capture_status_keep_distinct_action_kinds() -> None:
     )
     planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
 
-    single_plan = planner.plan_agent_turn(
+    single_plan = planner._local_plan_agent_turn(
         "Capture one current screenshot.",
         {},
         {},
         exposure_layer=EXPOSURE_LAYER_EXECUTION,
     )
-    status_plan = planner.plan_agent_turn(
+    status_plan = planner._local_plan_agent_turn(
         "Read the current capture status for play mode.",
         {},
         {},
@@ -1396,7 +1420,7 @@ def test_deterministic_keyword_router_keeps_non_actionable_context_text_only(
 
     plan = service(
         catalog=FakeCatalog(planning=planning, execution=execution)
-    ).plan_agent_turn(
+    )._local_plan_agent_turn(
         message,
         {},
         {},

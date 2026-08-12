@@ -14,6 +14,7 @@ const history = read("src/lib/conversation-utils.ts");
 const scopedCard = read("src/components/approvals/scoped-pending-approval-card.tsx");
 const pendingStrip = read("src/components/approvals/pending-approvals-strip.tsx");
 const inlineCard = read("src/components/chat/conversation-card.tsx");
+const inlineTimeline = read("src/components/chat/conversation-timeline.tsx");
 const app = read("src/App.tsx");
 
 assert.match(hook, /if \(approval\.goalDeliveryId\?\.trim\(\)\) \{\s*return;/);
@@ -55,7 +56,7 @@ assert.match(types, /type: "approval_revision"/);
 assert.match(types, /approvalId: string;\s*targetTool: string;\s*requestedAt: string;\s*reason: string;\s*note: string;\s*status: "awaiting_user_input";/s);
 assert.doesNotMatch(history.slice(history.indexOf("export function buildChatHistory"), history.indexOf("export function visibleAgentDialogueText")), /approval_revision/);
 assert.match(scopedCard, /!approval\.goalDeliveryId\?\.trim\(\)/);
-assert.match(inlineCard, /!approval\.goalDeliveryId\?\.trim\(\)/);
+assert.match(inlineTimeline, /!approval\.goalDeliveryId\?\.trim\(\)/);
 assert.match(inlineCard, /data-approval-revision=/);
 
 console.log("approval revision UI contract passed");

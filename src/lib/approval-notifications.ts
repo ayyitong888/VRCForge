@@ -2,10 +2,23 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AgentApproval } from "./api";
 
 export type ApprovalNotificationAction = "approve" | "reject";
+export type SubAgentReviewNotificationAction = "open";
 
 export type ApprovalNotificationActionPayload = {
   approvalId: string;
   action: ApprovalNotificationAction;
+};
+
+export const SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT = "vrcforge-sub-agent-review-notification-action";
+
+export type SubAgentReviewNotificationPayload = {
+  taskId: string;
+  revision: number;
+  parentChatId: string;
+};
+
+export type SubAgentReviewNotificationActionPayload = SubAgentReviewNotificationPayload & {
+  action: SubAgentReviewNotificationAction;
 };
 
 export async function showApprovalNotification(
@@ -24,6 +37,46 @@ export async function showApprovalNotification(
       rejectLabel,
     },
   });
+}
+
+export async function showSubAgentReviewNotification(
+  request: SubAgentReviewNotificationPayload & {
+    title: string;
+    body: string;
+    openLabel: string;
+  },
+): Promise<void> {
+  await invoke("show_sub_agent_review_notification", {
+    request: {
+      taskId: request.taskId,
+      revision: request.revision,
+      parentChatId: request.parentChatId,
+      title: request.title,
+      body: request.body,
+      openLabel: request.openLabel,
+    },
+  });
+}
+
+export function parseSubAgentReviewNotificationAction(value: unknown): SubAgentReviewNotificationActionPayload | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const payload = value as Record<string, unknown>;
+  const taskId = typeof payload.taskId === "string" ? payload.taskId : "";
+  const parentChatId = typeof payload.parentChatId === "string" ? payload.parentChatId : "";
+  const revisionValue = typeof payload.revision === "number" ? payload.revision : Number(payload.revision);
+  const action = payload.action;
+  if (
+    !taskId
+    || !parentChatId
+    || !Number.isInteger(revisionValue)
+    || revisionValue <= 0
+    || action !== "open"
+  ) {
+    return null;
+  }
+  return { taskId, parentChatId, revision: revisionValue, action: "open" };
 }
 
 export function parseApprovalNotificationAction(value: unknown): ApprovalNotificationActionPayload | null {

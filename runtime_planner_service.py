@@ -1427,41 +1427,13 @@ class RuntimePlannerService:
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
         ) -> dict[str, object]:
             loop_state = loop_state or []
-            local_plan = self._local_plan_agent_turn(
-                message,
-                params,
-                observe,
-                loop_state,
-                exposure_layer=exposure_layer,
-            )
-            correction_needed = latest_loop_step_needs_model_correction(loop_state)
-            visual_journey_requires_provider = (
-                multi_angle_visual_journey_requires_provider(
-                    message,
-                    loop_state,
-                    local_plan,
-                    exposure_layer,
+            planner_label = str(params.get("_plannerAttemptLabel") or "").strip()
+            if self._model is None:
+                return self._planner_failure_plan(
+                    cause_code="provider_not_configured",
+                    phase="initial",
+                    planner_label=planner_label,
                 )
-            )
-            # 关键词命中（明确的技能/命令/写入意图）直接走确定性路径：快、稳定、可测试。
-            # A failed/needs-user-action tool observation must be shown to the
-            # model before deterministic routing can replay the same action.
-            if not correction_needed and not visual_journey_requires_provider and (
-                local_plan.get("shellNeeded")
-                or local_plan.get("skillNeeded")
-                or local_plan.get("writeNeeded")
-                or local_plan.get("enterExecution")
-            ):
-                return local_plan
-            # 确定性兜底已经给出明确的终止答复（例如「多个模型让用户选」「没找到模型」），
-            # 这是确定结论，不交给 LLM 再编一遍。
-            if (
-                not correction_needed
-                and not visual_journey_requires_provider
-                and local_plan.get("deterministicTerminal")
-            ):
-                return local_plan
-            # 本地规划没认出意图时，尝试 LLM 规划。
             llm_plan = self._llm_plan_agent_turn(
                 message,
                 observe,
@@ -1471,47 +1443,15 @@ class RuntimePlannerService:
                 reasoning_trace=reasoning_trace,
                 propagate_provider_errors=bool(params.get("_backgroundGoalRun")),
                 exposure_layer=exposure_layer,
-                planner_label=str(params.get("_plannerAttemptLabel") or "").strip(),
+                planner_label=planner_label,
             )
             if llm_plan is not None:
                 return llm_plan
-            # 走到这里：确定性兜底没认出意图，LLM 也没产出可执行规划。
-            # 注意——生产里 llm_plan_fn 始终挂着 wrapper：没连 Provider / API Key 缺失 /
-            # provider 报错时，wrapper 会 raise，被 _llm_plan_agent_turn 吞掉返回 None。
-            # 所以这里不能只在 `llm_plan_fn is None` 时才诚实，否则会退回那个看似
-            # 「已规划」却什么都没干的空兜底（正是 A5 要砍的「做了做了」假象）。
-            # 统一走诚实终止：明确告知「这条没法自动规划」。
-            return self._disconnected_local_plan(local_plan)
-
-    def _disconnected_local_plan(self, local_plan: dict[str, object]) -> dict[str, object]:
-            plan = dict(local_plan)
-            plan.update(
-                {
-                    "summary": "No actionable plan: deterministic fallback missed and the model planner produced nothing.",
-                    "reply": (
-                        "这条我没法自动规划——通常是还没接上可用的模型 Provider"
-                        "（或 API Key 没配 / provider 暂时不可用）。"
-                        "你可以在设置里连一个供应商；或者给我更明确的指令——"
-                        "比如「检查 Unity 状态」「列出模型」「往模型里加个对象」，我就能直接动手。"
-                    ),
-                    "planner": "deterministic-local",
-                    "plannerLabel": "",
-                    "deterministicTerminal": True,
-                    "providerConnected": False,
-                    "shellNeeded": False,
-                    "shellCommand": "",
-                    "shellParams": {},
-                    "skillNeeded": False,
-                    "skillTool": "",
-                    "skillParams": {},
-                    "writeNeeded": False,
-                    "writeTool": "",
-                    "writeParams": {},
-                    "continueLoop": False,
-                    "nextStep": "done",
-                }
+            return self._planner_failure_plan(
+                cause_code="planner_invalid_response",
+                phase="initial",
+                planner_label=planner_label,
             )
-            return plan
 
     def _planner_failure_plan(
             self,
