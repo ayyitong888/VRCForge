@@ -344,7 +344,7 @@ async function listenerOwnedByLaunch(identity) {
   return value.trim().toLowerCase() === "true";
 }
 
-async function waitForOwnedCdpListener(identity, timeoutMs = 5000) {
+async function waitForOwnedCdpListener(identity, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   do {
     try {
