@@ -32,6 +32,11 @@
         });
       })();
     </script>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module">
+      void (async function loadAppAfterStartupShell() {
+        await window.__vrcforgeStartupShellPaintedPromise;
+        await import("/src/main.tsx");
+      })();
+    </script>
   </body>
 </html>

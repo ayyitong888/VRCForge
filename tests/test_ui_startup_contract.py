@@ -221,6 +221,9 @@ def test_startup_paints_static_shell_before_loading_app_and_records_visible_shel
     assert "startupShellPaintedMs" in index_source
     assert index_source.count("window.requestAnimationFrame") == 1
     assert "window.setTimeout" in index_source
+    assert "await window.__vrcforgeStartupShellPaintedPromise" in index_source
+    assert 'await import("/src/main.tsx")' in index_source
+    assert '<script type="module" src="/src/main.tsx"></script>' not in index_source
     assert "flushSync" not in main_source
     assert main_source.index("startupShellPainted.then") < main_source.index("await Promise.all")
     assert main_source.index("await Promise.all") < main_source.index("ReactDOM.createRoot")
