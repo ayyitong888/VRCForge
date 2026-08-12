@@ -55,7 +55,6 @@ import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
-import { SubAgentWorkspaceSurface } from "./components/subagents/sub-agent-workspace-surface";
 import { type UserAttachmentSource } from "./components/runtime/project-workbench-sections";
 import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
@@ -221,6 +220,11 @@ const AsyncAppSidebar = lazy(() =>
 );
 const AsyncRightRuntimeSidebar = lazy(() =>
   import("./components/runtime/runtime-sidebar").then((module) => ({ default: module.RightRuntimeSidebar })),
+);
+const AsyncSubAgentWorkspaceSurface = lazy(() =>
+  import("./components/subagents/sub-agent-workspace-surface").then((module) => ({
+    default: module.SubAgentWorkspaceSurface,
+  })),
 );
 
 function SidebarPlaceholder({ side }: { side: "left" | "right" }) {
@@ -3189,20 +3193,22 @@ export default function App() {
   );
   const subAgentWorkspaceSurface = selectedSubAgentPanelOpen ? (
     <div className="min-h-0 flex-1 overflow-hidden px-3 pb-3">
-      <SubAgentWorkspaceSurface
-        tasks={activeSubAgentTasks}
-        selected={activeSubAgentTasks.some((task) => task.id === selectedSubAgent?.id) ? selectedSubAgent : null}
-        onSelect={(taskId) => {
-          const next = activeSubAgentTasks.find((task) => task.id === taskId) ?? null;
-          setSelectedSubAgent(next);
-          setSelectedSubAgentPanelOpen(true);
-        }}
-        onCancel={(taskId) => void cancelSubAgentTask(taskId)}
-        onRetry={(taskId) => void retrySubAgentTask(taskId)}
-        onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
-        onAdoptNextAction={adoptSubAgentNextAction}
-        onClose={() => setSelectedSubAgentPanelOpen(false)}
-      />
+      <Suspense fallback={null}>
+        <AsyncSubAgentWorkspaceSurface
+          tasks={activeSubAgentTasks}
+          selected={activeSubAgentTasks.some((task) => task.id === selectedSubAgent?.id) ? selectedSubAgent : null}
+          onSelect={(taskId) => {
+            const next = activeSubAgentTasks.find((task) => task.id === taskId) ?? null;
+            setSelectedSubAgent(next);
+            setSelectedSubAgentPanelOpen(true);
+          }}
+          onCancel={(taskId) => void cancelSubAgentTask(taskId)}
+          onRetry={(taskId) => void retrySubAgentTask(taskId)}
+          onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
+          onAdoptNextAction={adoptSubAgentNextAction}
+          onClose={() => setSelectedSubAgentPanelOpen(false)}
+        />
+      </Suspense>
     </div>
   ) : null;
 

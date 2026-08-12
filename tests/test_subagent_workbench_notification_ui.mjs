@@ -16,7 +16,8 @@ test("sub-agent panel props and surface wiring use open action flow", async () =
   assert.equal(panel.includes("onOpen"), true);
   assert.equal(/<SubAgentPanel[\s\S]*onOpen=/.test(app), true);
   assert.equal(/selectedSubAgentPanelOpen\s*\?\s*subAgentWorkspaceSurface/.test(app), true);
-  assert.equal(/<SubAgentWorkspaceSurface/.test(app), true);
+  assert.equal(/<AsyncSubAgentWorkspaceSurface/.test(app), true);
+  assert.equal(/const AsyncSubAgentWorkspaceSurface = lazy/.test(app), true);
   assert.equal(surface.includes("sticky bottom-0"), true);
 });
 

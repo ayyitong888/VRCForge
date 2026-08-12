@@ -227,8 +227,10 @@ def test_startup_loads_app_and_locale_in_parallel_and_records_visible_shell() ->
     assert "__vrcforgeStartupShellPaintedPromise" in main_source
     assert "const AsyncAppSidebar = lazy" in app_source
     assert "const AsyncRightRuntimeSidebar = lazy" in app_source
+    assert "const AsyncSubAgentWorkspaceSurface = lazy" in app_source
     assert 'import { AppSidebar }' not in app_source
     assert 'import { RightRuntimeSidebar }' not in app_source
+    assert 'import { SubAgentWorkspaceSurface }' not in app_source
     assert "sidebarsRequestedMs" in app_source
     assert "leftSidebarMountedMs" in app_source
     assert "rightSidebarMountedMs" in app_source
