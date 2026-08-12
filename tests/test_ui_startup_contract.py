@@ -206,15 +206,15 @@ def test_main_window_close_hides_to_tray_while_explicit_quit_stops_backend() -> 
     assert "thread::sleep" not in quit_commands
 
 
-def test_startup_loads_app_and_locale_in_parallel_and_records_visible_shell() -> None:
+def test_startup_paints_static_shell_before_loading_app_and_records_visible_shell() -> None:
     index_source = _read("index.html")
     startup_shell_source = _read("public/vrcforge-startup-shell.js")
     main_source = _read("src/main.tsx")
     app_source = _read("src/App.tsx")
     probe_source = _read("scripts/diagnose_packaged_latency.mjs")
 
-    assert 'const appModule = import("./App")' in main_source
-    assert "Promise.all([initializeI18n(), appModule, startupShellPainted])" in main_source
+    assert 'const appModule = startupShellPainted.then(() => import("./App"))' in main_source
+    assert "Promise.all([initializeI18n(), appModule])" in main_source
     assert "data-vrcforge-startup-shell" in index_source
     assert "Local AI Workbench for VRChat Avatar Editing" in index_source
     assert index_source.index("/vrcforge-startup-shell.js") < index_source.index("/src/main.tsx")
@@ -223,6 +223,7 @@ def test_startup_loads_app_and_locale_in_parallel_and_records_visible_shell() ->
     assert startup_shell_source.count("window.requestAnimationFrame") == 1
     assert "window.setTimeout" in startup_shell_source
     assert "flushSync" not in main_source
+    assert main_source.index("startupShellPainted.then") < main_source.index("await Promise.all")
     assert main_source.index("await Promise.all") < main_source.index("ReactDOM.createRoot")
     assert "__vrcforgeStartupShellPaintedPromise" in main_source
     assert "const AsyncAppSidebar = lazy" in app_source

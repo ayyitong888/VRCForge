@@ -17,8 +17,8 @@ async function main() {
     });
   }));
 
-  const appModule = import("./App");
-  const [, { default: App }] = await Promise.all([initializeI18n(), appModule, startupShellPainted]);
+  const appModule = startupShellPainted.then(() => import("./App"));
+  const [, { default: App }] = await Promise.all([initializeI18n(), appModule]);
   metrics.appDependenciesReadyMs ??= Math.round(performance.now());
 
   const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
