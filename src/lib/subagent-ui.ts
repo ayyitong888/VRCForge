@@ -46,6 +46,10 @@ export function displaySubAgentStatus(status: string): string {
       return i18n.t("subagent.statusCompleted");
     case "failed":
       return i18n.t("subagent.statusFailed");
+    case "cancelled":
+      return i18n.t("subagent.statusCancelled");
+    case "interrupted":
+      return i18n.t("subagent.statusInterrupted");
     default:
       return status || i18n.t("subagent.statusReady");
   }

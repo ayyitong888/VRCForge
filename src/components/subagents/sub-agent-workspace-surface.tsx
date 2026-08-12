@@ -3,6 +3,10 @@ import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { SubAgentTask } from "../../lib/api";
 import {
+  canAdoptSubAgentResult,
+  canCancelSubAgentTask,
+  canDismissSubAgentResult,
+  canRetrySubAgentTask,
   isAwaitingMergeReview,
   isMergedAdopted,
   isMergedDismissed,
@@ -53,6 +57,7 @@ export function SubAgentWorkspaceSurface({
   onRetry,
   onMerge,
   onAdoptNextAction,
+  busyTaskIds,
   onClose,
 }: {
   tasks: SubAgentTask[];
@@ -62,6 +67,7 @@ export function SubAgentWorkspaceSurface({
   onRetry: (taskId: string) => void;
   onMerge: (task: SubAgentTask, decision: "adopted" | "dismissed") => void;
   onAdoptNextAction: (task: SubAgentTask) => void;
+  busyTaskIds: ReadonlySet<string>;
   onClose: () => void;
 }) {
   const { t } = useTranslation();
@@ -72,9 +78,11 @@ export function SubAgentWorkspaceSurface({
   );
   const activeTask = selected && tasks.some((task) => task.id === selected.id) ? selected : tasks[0] || null;
   const activeTaskNextAction = activeTask ? subAgentProposedNextAction(activeTask) : "";
-  const canCancel = activeTask ? ["queued", "running", "cancelling"].includes(activeTask.status) : false;
-  const canRetry = activeTask ? ["failed", "cancelled", "interrupted"].includes(activeTask.status) : false;
-  const needsReview = activeTask ? isAwaitingMergeReview(activeTask) : false;
+  const canCancel = activeTask ? canCancelSubAgentTask(activeTask) : false;
+  const canRetry = activeTask ? canRetrySubAgentTask(activeTask) : false;
+  const canAdopt = activeTask ? canAdoptSubAgentResult(activeTask) : false;
+  const canDismiss = activeTask ? canDismissSubAgentResult(activeTask) : false;
+  const actionBusy = activeTask ? busyTaskIds.has(activeTask.id) : false;
   const hasTasks = tasks.length > 0;
   const selectedTaskStatus = activeTask ? displaySubAgentStatus(activeTask.status) : "";
 
@@ -182,6 +190,9 @@ export function SubAgentWorkspaceSurface({
           </div>
           <div className="app-scrollbar min-h-0 flex-1 space-y-2 overflow-y-auto p-2 text-xs">
             {activeTask?.summary ? <DataLine label={t("subagent.review")} value={activeTask.summary} /> : null}
+            {activeTask?.resultUnavailable ? (
+              <OutputBlock label={t("subagent.result")} value={t("subagent.resultUnavailable")} danger />
+            ) : null}
             {activeTask?.error ? <OutputBlock label={t("doctor.error")} value={activeTask.error} danger /> : null}
             {activeTask?.result ? <OutputBlock label={t("subagent.result")} value={formatPayload(activeTask.result)} /> : null}
             {activeTask?.events?.length ? (
@@ -217,6 +228,9 @@ export function SubAgentWorkspaceSurface({
                   <DataLine label={t("subagent.dismissedBadge")} value={activeTask.mergedAt || "-"} />
                 ) : null}
                 <DataLine label={t("subagent.revision")} value={formatRevision(activeTask.revision)} />
+                {activeTask.parentContinuationStatus ? (
+                  <DataLine label={t("subagent.parentContinuation")} value={activeTask.parentContinuationStatus} />
+                ) : null}
                 <DataLine label={t("subagent.lastUpdated")} value={activeTask.updatedAt || activeTask.createdAt || "-"} />
               </div>
             ) : null}
@@ -224,38 +238,40 @@ export function SubAgentWorkspaceSurface({
           <div className="sticky bottom-0 border-t border-border/80 bg-card p-2">
             <div className="flex flex-wrap justify-end gap-2">
               {canCancel && activeTask ? (
-                <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onCancel(activeTask.id)}>
+                <Button type="button" variant="ghost" className="h-7 px-2 text-xs" disabled={actionBusy} onClick={() => onCancel(activeTask.id)}>
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                   {t("subagent.cancel")}
                 </Button>
               ) : null}
               {canRetry && activeTask ? (
-                <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onRetry(activeTask.id)}>
+                <Button type="button" variant="ghost" className="h-7 px-2 text-xs" disabled={actionBusy} onClick={() => onRetry(activeTask.id)}>
                   <RefreshCw className="h-3.5 w-3.5" />
                   {t("doctor.retry")}
                 </Button>
               ) : null}
-              {needsReview && activeTask ? (
-                <>
+              {canAdopt && activeTask ? (
                   <Button
                     type="button"
                     variant="ghost"
                     className="h-7 px-2 text-xs"
+                    disabled={actionBusy}
                     onClick={() => onMerge(activeTask, "adopted")}
                   >
                     <Check className="h-3.5 w-3.5" />
                     {t("subagent.mergeAdopt")}
                   </Button>
+              ) : null}
+              {canDismiss && activeTask ? (
                   <Button
                     type="button"
                     variant="ghost"
                     className="h-7 px-2 text-xs"
+                    disabled={actionBusy}
                     onClick={() => onMerge(activeTask, "dismissed")}
                   >
                     <Ban className="h-3.5 w-3.5" />
                     {t("subagent.mergeDismiss")}
                   </Button>
-                </>
               ) : null}
               {activeTaskNextAction && activeTask ? (
                 <Button

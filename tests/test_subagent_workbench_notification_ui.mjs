@@ -18,7 +18,21 @@ test("sub-agent panel props and surface wiring use open action flow", async () =
   assert.equal(/selectedSubAgentPanelOpen\s*\?\s*subAgentWorkspaceSurface/.test(app), true);
   assert.equal(/<AsyncSubAgentWorkspaceSurface/.test(app), true);
   assert.equal(/const AsyncSubAgentWorkspaceSurface = lazy/.test(app), true);
+  assert.equal(/onSelect=\{\(taskId\) => void inspectSubAgentTask\(taskId\)\}/.test(app), true);
+  assert.equal(/onOpen=\{\(\) => void openSubAgentWorkspace\(\)\}/.test(app), true);
   assert.equal(surface.includes("sticky bottom-0"), true);
+});
+
+test("sub-agent mutations refresh the selected detail snapshot and event history", async () => {
+  const app = await readFile(path.join(root, "src/App.tsx"), "utf8");
+
+  assert.equal(/async function refreshSelectedSubAgentTask\(taskId: string, mode:/.test(app), true);
+  assert.equal(/mode === "select" \? \+\+subAgentInspectRequestRef\.current/.test(app), true);
+  assert.equal(/requestId !== subAgentInspectRequestRef\.current/.test(app), true);
+  assert.equal(/function beginSubAgentAction\(taskId: string\)/.test(app), true);
+  assert.equal(/async function cancelSubAgentTask[\s\S]*await refreshSelectedSubAgentTask\(taskId, "if-current"\)/.test(app), true);
+  assert.equal(/async function retrySubAgentTask[\s\S]*await refreshSelectedSubAgentTask\(payload\.task\.id\)/.test(app), true);
+  assert.equal(/async function mergeSubAgentTask[\s\S]*await refreshSelectedSubAgentTask\(payload\.task\.id, "if-current"\)/.test(app), true);
 });
 
 test("review notification click path uses taskId+revision+parentChatId key and re-opens by chat object", async () => {
@@ -35,6 +49,8 @@ test("review toast surface only emits open action and dedupe keys include parent
   const rust = await readFile(path.join(root, "src-tauri/src/approval_notification_windows.rs"), "utf8");
 
   assert.equal(/action: \"open\"/.test(notifications), true);
+  assert.equal(/typeof revisionValue/.test(notifications), true);
+  assert.equal(/Number\(payload\.revision\)/.test(notifications), false);
   assert.equal(/const SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION/.test(rust), true);
   assert.equal(/approval-action/.test(rust), false);
 });

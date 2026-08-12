@@ -34,6 +34,7 @@ export type SubAgentTask = {
   mergedAt?: string;
   mergedChatId?: string;
   mergeDecision?: "adopted" | "dismissed" | string;
+  parentContinuationStatus?: "pending" | "dispatching" | "delivered" | "interrupted" | string;
   resultAvailable?: boolean;
   resultUnavailable?: boolean;
   result?: Record<string, unknown> | null;

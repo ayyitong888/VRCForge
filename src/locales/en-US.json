@@ -887,6 +887,8 @@
     "statusCancelling": "Cancelling",
     "statusCompleted": "Completed",
     "statusFailed": "Failed",
+    "statusCancelled": "Cancelled",
+    "statusInterrupted": "Interrupted",
     "awaitingReview": "Awaiting review",
     "review": "Merge review",
     "mergeAdopt": "Merge into chat",
@@ -898,6 +900,8 @@
     "openTasks": "Active / open",
     "completedTasks": "{{count}} completed",
     "eventHistory": "Task history",
+    "resultUnavailable": "The durable task result is unavailable. Review the task history before continuing.",
+    "parentContinuation": "Parent task delivery",
     "revision": "Revision",
     "lastUpdated": "Last updated"
   },

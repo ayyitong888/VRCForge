@@ -10,6 +10,7 @@ const [app, panel, surface, notifications, rustNotifications] = await Promise.al
   readFile(resolve(root, "src", "lib", "approval-notifications.ts"), "utf8"),
   readFile(resolve(root, "src-tauri", "src", "approval_notification_windows.rs"), "utf8"),
 ]);
+const mergePolicy = await readFile(resolve(root, "src", "lib", "subagent-merge.ts"), "utf8");
 
 assert.match(panel, /data-vrcforge-open-subagent-surface/);
 assert.match(panel, /statusRunning/);
@@ -24,6 +25,15 @@ assert.match(surface, /onRetry\(activeTask\.id\)/);
 assert.match(surface, /onMerge\(activeTask, "adopted"\)/);
 assert.match(surface, /onMerge\(activeTask, "dismissed"\)/);
 assert.match(surface, /onAdoptNextAction\(activeTask\)/);
+assert.match(surface, /canAdoptSubAgentResult\(activeTask\)/);
+assert.match(surface, /canDismissSubAgentResult\(activeTask\)/);
+assert.match(surface, /busyTaskIds\.has\(activeTask\.id\)/);
+assert.match(surface, /resultUnavailable/);
+assert.match(surface, /parentContinuationStatus/);
+assert.match(mergePolicy, /task\.status === "completed"/);
+assert.match(mergePolicy, /task\.status === "failed"/);
+assert.match(mergePolicy, /!task\.mergeDecision/);
+assert.doesNotMatch(mergePolicy, /task\.status === "cancelling"/);
 
 assert.match(app, /selectedSubAgentPanelOpen \? subAgentWorkspaceSurface : activeView === "doctor"/);
 assert.match(app, /showSubAgentReviewNotification/);
@@ -34,6 +44,8 @@ assert.match(app, /task\.parentChatId !== action\.parentChatId/);
 assert.match(app, /!isAwaitingMergeReview\(task\)/);
 assert.match(app, /openChat\(chat\)/);
 assert.match(app, /setSelectedSubAgentPanelOpen\(true\)/);
+assert.match(app, /subAgentInspectRequestRef/);
+assert.match(app, /subAgentActionBusyRef/);
 
 assert.match(notifications, /action !== "open"/);
 assert.match(notifications, /taskId/);

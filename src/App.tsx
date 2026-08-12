@@ -329,6 +329,7 @@ export default function App() {
   const [subAgentError, setSubAgentError] = useState("");
   const [selectedSubAgent, setSelectedSubAgent] = useState<SubAgentTask | null>(() => initialSubAgentTask);
   const [selectedSubAgentPanelOpen, setSelectedSubAgentPanelOpen] = useState(() => Boolean(initialSubAgentTask));
+  const [subAgentActionBusyTaskIds, setSubAgentActionBusyTaskIds] = useState<Set<string>>(() => new Set());
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [editingMessage, setEditingMessage] = useState<EditingMessageDraft | null>(null);
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number; text: string } | null>(null);
@@ -374,6 +375,9 @@ export default function App() {
   const desktopEventRuntimeTimerRef = useRef<number | null>(null);
   const desktopEventSubAgentTimerRef = useRef<number | null>(null);
   const subAgentHandoffBusyRef = useRef(new Set<string>());
+  const subAgentActionBusyRef = useRef(new Set<string>());
+  const subAgentInspectRequestRef = useRef(0);
+  const subAgentSelectionIntentRef = useRef(initialSubAgentTask?.id || "");
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
   const chatSessionActionsRef = useRef<{
     selectProject: (projectPath: string) => void;
@@ -1403,6 +1407,9 @@ export default function App() {
     const parentChatId = activeChat?.id || "";
     return parentChatId ? subAgentTasks.filter((task) => task.parentChatId === parentChatId) : [];
   }, [activeChat?.id, subAgentTasks]);
+  useEffect(() => {
+    subAgentSelectionIntentRef.current = selectedSubAgent?.id || "";
+  }, [selectedSubAgent?.id]);
   const hasRunningSubAgents = subAgentTasks.some((task) => ["queued", "running", "cancelling"].includes(task.status));
   const activeProjectName =
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
@@ -2907,36 +2914,90 @@ export default function App() {
     }
   }
 
+  function beginSubAgentAction(taskId: string): boolean {
+    if (subAgentActionBusyRef.current.has(taskId)) {
+      return false;
+    }
+    subAgentActionBusyRef.current.add(taskId);
+    setSubAgentActionBusyTaskIds(new Set(subAgentActionBusyRef.current));
+    return true;
+  }
+
+  function endSubAgentAction(taskId: string) {
+    subAgentActionBusyRef.current.delete(taskId);
+    setSubAgentActionBusyTaskIds(new Set(subAgentActionBusyRef.current));
+  }
+
   async function cancelSubAgentTask(taskId: string) {
+    if (!beginSubAgentAction(taskId)) {
+      return;
+    }
     try {
       const payload = await cancelSubAgent(endpoint, taskId);
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
+      setSelectedSubAgent((current) => (current?.id === payload.task.id ? payload.task : current));
+      await refreshSelectedSubAgentTask(taskId, "if-current");
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      endSubAgentAction(taskId);
     }
   }
 
   async function retrySubAgentTask(taskId: string) {
+    if (!beginSubAgentAction(taskId)) {
+      return;
+    }
     try {
       const payload = await retrySubAgent(endpoint, taskId);
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
+      setSelectedSubAgent(payload.task);
+      subAgentSelectionIntentRef.current = payload.task.id;
+      await refreshSelectedSubAgentTask(payload.task.id);
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      endSubAgentAction(taskId);
     }
+  }
+
+  async function refreshSelectedSubAgentTask(taskId: string, mode: "select" | "if-current" = "select") {
+    const requestId = mode === "select" ? ++subAgentInspectRequestRef.current : subAgentInspectRequestRef.current;
+    if (mode === "select") {
+      subAgentSelectionIntentRef.current = taskId;
+    }
+    const payload = await fetchSubAgent(endpoint, taskId);
+    setSubAgentList((current) => updateSubAgentList(current, payload.task));
+    const selectionIsCurrent = subAgentSelectionIntentRef.current === taskId;
+    if ((mode === "select" && requestId !== subAgentInspectRequestRef.current) || !selectionIsCurrent) {
+      return payload.task;
+    }
+    setSelectedSubAgent(payload.task);
+    return payload.task;
   }
 
   async function inspectSubAgentTask(taskId: string) {
+    setSelectedSubAgentPanelOpen(true);
     try {
-      const payload = await fetchSubAgent(endpoint, taskId);
-      setSelectedSubAgentPanelOpen(true);
-      setSelectedSubAgent(payload.task);
-      setSubAgentList((current) => updateSubAgentList(current, payload.task));
+      await refreshSelectedSubAgentTask(taskId);
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
     }
   }
 
+  async function openSubAgentWorkspace() {
+    const task = activeSubAgentTasks.find((item) => item.id === selectedSubAgent?.id) || activeSubAgentTasks[0];
+    if (!task) {
+      setSelectedSubAgentPanelOpen(true);
+      return;
+    }
+    await inspectSubAgentTask(task.id);
+  }
+
   async function mergeSubAgentTask(task: SubAgentTask, decision: "adopted" | "dismissed") {
+    if (!beginSubAgentAction(task.id)) {
+      return;
+    }
     try {
       if (!task.parentChatId || !getChatById(task.parentChatId)) {
         throw new Error("Sub-agent parent chat is unavailable.");
@@ -2964,10 +3025,13 @@ export default function App() {
         return touchChat({ ...chat, items });
       });
       await persistChatsNow();
+      await refreshSelectedSubAgentTask(payload.task.id, "if-current");
       setActiveView("chat");
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
       void loadSubAgents(false);
+    } finally {
+      endSubAgentAction(task.id);
     }
   }
 
@@ -3188,7 +3252,7 @@ export default function App() {
       tasks={activeSubAgentTasks}
       loading={loadingSubAgents}
       error={subAgentError}
-      onOpen={() => setSelectedSubAgentPanelOpen(true)}
+      onOpen={() => void openSubAgentWorkspace()}
     />
   );
   const subAgentWorkspaceSurface = selectedSubAgentPanelOpen ? (
@@ -3197,15 +3261,12 @@ export default function App() {
         <AsyncSubAgentWorkspaceSurface
           tasks={activeSubAgentTasks}
           selected={activeSubAgentTasks.some((task) => task.id === selectedSubAgent?.id) ? selectedSubAgent : null}
-          onSelect={(taskId) => {
-            const next = activeSubAgentTasks.find((task) => task.id === taskId) ?? null;
-            setSelectedSubAgent(next);
-            setSelectedSubAgentPanelOpen(true);
-          }}
+          onSelect={(taskId) => void inspectSubAgentTask(taskId)}
           onCancel={(taskId) => void cancelSubAgentTask(taskId)}
           onRetry={(taskId) => void retrySubAgentTask(taskId)}
           onMerge={(task, decision) => void mergeSubAgentTask(task, decision)}
           onAdoptNextAction={adoptSubAgentNextAction}
+          busyTaskIds={subAgentActionBusyTaskIds}
           onClose={() => setSelectedSubAgentPanelOpen(false)}
         />
       </Suspense>

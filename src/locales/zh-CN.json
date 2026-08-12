@@ -887,6 +887,8 @@
     "statusCancelling": "取消中",
     "statusCompleted": "已完成",
     "statusFailed": "失败",
+    "statusCancelled": "已取消",
+    "statusInterrupted": "已中断",
     "awaitingReview": "待审查",
     "review": "合并审查",
     "mergeAdopt": "合并进对话",
@@ -898,6 +900,8 @@
     "openTasks": "进行中 / 待处理",
     "completedTasks": "已完成 {{count}} 个",
     "eventHistory": "任务历史",
+    "resultUnavailable": "持久化任务结果不可用，请先查看任务历史再继续。",
+    "parentContinuation": "父任务回灌",
     "revision": "修订版本",
     "lastUpdated": "最近更新"
   },

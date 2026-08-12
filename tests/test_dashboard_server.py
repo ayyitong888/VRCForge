@@ -7882,12 +7882,20 @@ class DashboardServerTests(unittest.TestCase):
             for directory in ("Assets", "Packages", "ProjectSettings"):
                 (Path(workspace) / directory).mkdir()
             target = Path(workspace) / "Assets" / "revision.txt"
-            with TestClient(dashboard_server.app) as client:
+            command = "Set-Content -Path Assets/revision.txt -Value hi -Encoding utf8"
+            with (
+                use_test_runtime_planner(
+                    dashboard_server.AGENT_GATEWAY,
+                    lambda _prompt: PlannerModelResult(
+                        text=json.dumps({"action": "shell", "shell_command": command})
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 high = client.post(
                     "/api/app/agent/message",
                     json={
                         "message": "write test file",
-                        "shell_command": "Set-Content -Path Assets/revision.txt -Value hi -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
                         "projectPath": workspace,
@@ -7929,12 +7937,20 @@ class DashboardServerTests(unittest.TestCase):
             for directory in ("Assets", "Packages", "ProjectSettings"):
                 (Path(workspace) / directory).mkdir()
             target = Path(workspace) / "Assets" / "terminal.txt"
-            with TestClient(dashboard_server.app) as client:
+            command = "Set-Content -Path Assets/terminal.txt -Value hi -Encoding utf8"
+            with (
+                use_test_runtime_planner(
+                    dashboard_server.AGENT_GATEWAY,
+                    lambda _prompt: PlannerModelResult(
+                        text=json.dumps({"action": "shell", "shell_command": command})
+                    ),
+                ),
+                TestClient(dashboard_server.app) as client,
+            ):
                 high = client.post(
                     "/api/app/agent/message",
                     json={
                         "message": "write test file",
-                        "shell_command": "Set-Content -Path Assets/terminal.txt -Value hi -Encoding utf8",
                         "workspace_root": workspace,
                         "cwd": workspace,
                         "projectPath": workspace,

@@ -65,11 +65,12 @@ export function parseSubAgentReviewNotificationAction(value: unknown): SubAgentR
   const payload = value as Record<string, unknown>;
   const taskId = typeof payload.taskId === "string" ? payload.taskId : "";
   const parentChatId = typeof payload.parentChatId === "string" ? payload.parentChatId : "";
-  const revisionValue = typeof payload.revision === "number" ? payload.revision : Number(payload.revision);
+  const revisionValue = payload.revision;
   const action = payload.action;
   if (
     !taskId
     || !parentChatId
+    || typeof revisionValue !== "number"
     || !Number.isInteger(revisionValue)
     || revisionValue <= 0
     || action !== "open"

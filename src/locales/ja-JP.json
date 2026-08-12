@@ -887,6 +887,8 @@
     "statusCancelling": "キャンセル中",
     "statusCompleted": "完了",
     "statusFailed": "失敗",
+    "statusCancelled": "キャンセル済み",
+    "statusInterrupted": "中断済み",
     "awaitingReview": "レビュー待ち",
     "review": "マージレビュー",
     "mergeAdopt": "チャットに取り込む",
@@ -898,6 +900,8 @@
     "openTasks": "進行中 / 対応待ち",
     "completedTasks": "完了 {{count}} 件",
     "eventHistory": "タスク履歴",
+    "resultUnavailable": "永続化されたタスク結果を利用できません。続行する前にタスク履歴を確認してください。",
+    "parentContinuation": "親タスクへの返却",
     "revision": "リビジョン",
     "lastUpdated": "最終更新"
   },
