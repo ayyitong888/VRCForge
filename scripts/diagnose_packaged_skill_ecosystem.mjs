@@ -5050,21 +5050,28 @@ async function exerciseFirstRunLanguageGate(report, cdp) {
 }
 
 async function invokeContextualReadinessRuntime(sessionId) {
-  const payload = await appApi("/api/app/agent/message", {
-    method: "POST",
-    body: {
-      agent_name: "packaged-skill-context-probe",
-      session_id: sessionId,
-      clientTurnId: `contextual-skill-${Date.now()}`,
-      message: "Contextual Path-to-Skill readiness capture.",
-      skill_tool: "vrcforge_build_test_readiness",
-      skill_params: { projectPath: projectRoot, projectRoot },
-      projectPath: projectRoot,
-      projectRoot,
-    },
-    timeoutMs: 180000,
-  });
-  return payload?.skill || {};
+  if (!plannerProvider) throw new Error("packaged skill probe Provider is not running");
+  const params = { projectPath: projectRoot, projectRoot };
+  const selection = plannerProvider.beginToolSelection("vrcforge_build_test_readiness", params);
+  try {
+    const payload = await appApi("/api/app/agent/message", {
+      method: "POST",
+      body: {
+        agent_name: "packaged-skill-context-probe",
+        session_id: sessionId,
+        clientTurnId: `contextual-skill-${Date.now()}`,
+        message: "Contextual Path-to-Skill readiness capture.",
+        skill_tool: "vrcforge_build_test_readiness",
+        skill_params: params,
+        projectPath: projectRoot,
+        projectRoot,
+      },
+      timeoutMs: 180000,
+    });
+    return payload?.skill || {};
+  } finally {
+    plannerProvider.finishToolSelection(selection);
+  }
 }
 
 async function exerciseContextualPathToSkillUi(report, cdp) {

@@ -106,3 +106,22 @@ def test_packaged_skill_probe_uses_authenticated_loopback_provider_after_local_p
     assert 'provider: "custom"' in source
     assert 'api_type: "chat_completions"' in source
     assert "await plannerProvider.close()" in source
+
+
+def test_contextual_path_to_skill_runtime_owns_a_provider_selection() -> None:
+    source = (
+        ROOT / "scripts" / "diagnose_packaged_skill_ecosystem.mjs"
+    ).read_text(encoding="utf-8")
+
+    start = source.index("async function invokeContextualReadinessRuntime")
+    end = source.index("async function exerciseContextualPathToSkillUi", start)
+    contextual_runtime = source[start:end]
+
+    assert 'plannerProvider.beginToolSelection("vrcforge_build_test_readiness"' in contextual_runtime
+    assert "plannerProvider.finishToolSelection(selection)" in contextual_runtime
+    assert contextual_runtime.index("beginToolSelection") < contextual_runtime.index(
+        'appApi("/api/app/agent/message"'
+    )
+    assert contextual_runtime.index('appApi("/api/app/agent/message"') < contextual_runtime.index(
+        "finishToolSelection"
+    )
