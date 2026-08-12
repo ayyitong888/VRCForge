@@ -29,6 +29,14 @@ RunCommandFunc = Callable[..., subprocess.CompletedProcess[str]]
 ListenerQueryFunc = Callable[[int], list[dict[str, Any]]]
 
 
+def gateway_optimizer_tool_name(value: str) -> str:
+    """Translate the public optimization name to its fixed MCP gateway name."""
+    normalized = str(value or "").strip()
+    if normalized.startswith("optimization."):
+        return "vrcforge_" + normalized.replace(".", "_").replace("-", "_")
+    return normalized
+
+
 def main() -> int:
     args = parse_args()
     smoke = GoldenPathMatrixSmoke(args)
@@ -613,7 +621,13 @@ class GoldenPathMatrixSmoke:
         if self.avatar_path:
             command += ["--avatar-path", self.avatar_path]
         if self.args.optimizer_tool:
-            command += ["--optimizer-write-request", "--optimizer-tool", self.args.optimizer_tool, "--target-profile", self.args.target_profile]
+            command += [
+                "--optimizer-write-request",
+                "--optimizer-tool",
+                gateway_optimizer_tool_name(self.args.optimizer_tool),
+                "--target-profile",
+                self.args.target_profile,
+            ]
         if self.args.include_live_writes:
             command += ["--live-write-rollback", "--parent-path", self.args.parent_path]
         self.add_subprocess_path(
@@ -622,7 +636,6 @@ class GoldenPathMatrixSmoke:
             command,
             mode="gateway",
         )
-
     def vsk_import_dry_run_cleanup(self) -> None:
         package_path = self.vsk_package
         title = ".vsk import -> dry-run -> disable/uninstall"

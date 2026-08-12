@@ -109,7 +109,7 @@ def main() -> int:
     report = build_stable_readiness_gate(args)
     output = write_report(report, args.artifacts_dir)
     print(json.dumps({"ok": report["ok"], "status": report["summary"]["status"], "reportPath": str(output)}, indent=2))
-    return 0 if report["ok"] or args.allow_blocked else 1
+    return 0 if report["ok"] else 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -138,7 +138,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--proof-matrix", default="docs/PROOF_MATRIX.md")
     parser.add_argument("--artifacts-dir", default="artifacts/stable-readiness-gate")
     parser.add_argument("--stale-version", action="append", default=["0.9.0-beta"], help="Stale version string that must not appear in current public docs.")
-    parser.add_argument("--allow-blocked", action="store_true", help="Exit 0 even when required readiness gates are blocked.")
+    parser.add_argument(
+        "--allow-blocked",
+        action="store_true",
+        help=(
+            "Deprecated; retained for CLI compatibility but has no effect. "
+            "Blocked readiness reports always exit nonzero."
+        ),
+    )
     parser.add_argument(
         "--max-artifact-age-hours",
         type=float,
@@ -347,7 +354,7 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
             "releaseArtifactsAndPackagedSmokesRequired": True,
             "compatibilityMatrixRequiredBeforeStable": True,
             "privacyBoundaryRequiredBeforeStable": True,
-            "installerAdminBlockedKeepsGateBlockedUnlessAllowBlocked": True,
+            "installerAdminBlockedAlwaysKeepsGateBlocked": True,
             "localEvidenceDocsAreAdvisoryForFreshClones": True,
             "maxArtifactAgeHours": max_age_hours if max_age_hours > 0 else None,
             "requireLiveWrites": require_live_writes,

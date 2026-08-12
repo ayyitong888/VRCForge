@@ -14,6 +14,7 @@ def _state(*, after: float = 0.8, locked: list[str] | None = None) -> dict:
     return {
         "settings": SimpleNamespace(),
         "avatarPath": "Scene/A",
+        "scanArguments": {"avatarPath": "Scene/A", "outputPath": "", "refreshAssets": False},
         "coreArguments": core_arguments,
         "validatedChanges": changes,
         "skippedChanges": [],
@@ -50,7 +51,10 @@ def test_apply_preparer_seals_real_validated_core_call(monkeypatch: pytest.Monke
     monkeypatch.setattr(dashboard_server, "_prepare_shader_tuning_apply_state", lambda _request: _state())
     prepared, preview = dashboard_server.prepare_shader_material_apply_request(_arguments(), None)
 
-    assert build_prepared_execution_plan(prepared) == [("vrc_apply_material_tuning", _state()["coreArguments"])]
+    assert build_prepared_execution_plan(prepared) == [
+        ("vrc_scan_avatar_materials", _state()["scanArguments"]),
+        ("vrc_apply_material_tuning", _state()["coreArguments"]),
+    ]
     assert preview["changeCount"] == 1
 
 

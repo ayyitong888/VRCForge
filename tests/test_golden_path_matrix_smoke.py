@@ -447,6 +447,7 @@ def test_external_agent_live_write_forwards_the_exact_parent_path(tmp_path: Path
             include_external_agent=True,
             include_live_writes=True,
             parent_path="Scene/Hero",
+            optimizer_tool="optimization.aao.trace-apply-request",
             gateway_config=str(tmp_path / "isolated-agent-gateway.json"),
         ),
         run_command_func=fake_run,
@@ -455,6 +456,7 @@ def test_external_agent_live_write_forwards_the_exact_parent_path(tmp_path: Path
 
     assert len(run_calls) == 1
     assert run_calls[0][run_calls[0].index("--gateway-config") + 1] == str(tmp_path / "isolated-agent-gateway.json")
+    assert run_calls[0][run_calls[0].index("--optimizer-tool") + 1] == "vrcforge_optimization_aao_trace_apply_request"
     assert run_calls[0][-3:] == ["--live-write-rollback", "--parent-path", "Scene/Hero"]
 
 

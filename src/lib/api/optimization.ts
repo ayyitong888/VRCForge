@@ -152,6 +152,8 @@ export type PackageInstallRequestResult = {
   status?: string;
   approval?: AgentApproval;
   error?: string;
+  message?: string;
+  approvalCreated?: boolean;
   installPlan?: Record<string, unknown>;
 };
 

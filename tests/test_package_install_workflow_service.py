@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any
 
 from package_install_workflow_service import (
@@ -45,6 +47,9 @@ def _service(
 
     def detect_package(_project_path: Any, package_ids: list[str]) -> dict[str, Any]:
         calls.append(("detect", package_ids))
+        package_state = plan.get("packageState")
+        if isinstance(package_state, dict):
+            return {**package_state, "packageIds": package_ids}
         return {"installed": False, "packageIds": package_ids}
 
     def read_compile_errors(params: dict[str, Any]) -> dict[str, Any]:
@@ -66,7 +71,7 @@ def _service(
             detect_package=detect_package,
             addon_frameworks={},
             optimizer_dependencies=optimizer_dependencies,
-            summarize_debug=lambda value: value,
+            summarize_debug=plan.get("summarizeDebug", lambda value: value),
             read_compile_errors=read_compile_errors,
             redact_support=lambda value: value,
             create_apply_request=create_apply_request,
@@ -158,6 +163,115 @@ def test_optimizer_and_doctor_requests_keep_existing_explicit_approval_policy() 
     assert approval["requires_explicit_approval"] is True
     assert approval["never_auto_approve"] is True
     assert approval["explicit_approval_reason"].startswith("Doctor package repair")
+
+
+def test_installed_package_defaults_to_use_first_and_never_creates_approval(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    project = tmp_path / "avatar"
+    project.mkdir()
+    service = _service(
+        calls,
+        {
+            "canExecuteCommandInstall": True,
+            "projectPath": str(project),
+            "packageId": "com.anatawa12.avatar-optimizer",
+            "package": {"dependencyId": "aao"},
+            "packageState": {
+                "installed": True,
+                "packageId": "com.anatawa12.avatar-optimizer",
+                "version": "1.2.3",
+                "source": "vpm",
+            },
+        },
+    )
+
+    result = service.request_install(
+        {
+            "packageId": "com.anatawa12.avatar-optimizer",
+            "packageVersion": "9.9.9",
+        }
+    )
+
+    assert result["ok"] is True
+    assert result["status"] == "use_installed"
+    assert result["approvalCreated"] is False
+    assert result["packageState"]["version"] == "1.2.3"
+    assert not any(call[0] == "approval" for call in calls)
+
+
+def test_installed_package_rejects_caller_supplied_upgrade_evidence(
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[Any, ...]] = []
+    project = tmp_path / "avatar"
+    project.mkdir()
+    service = _service(
+        calls,
+        {
+            "canExecuteCommandInstall": True,
+            "projectPath": str(project),
+            "packageId": "com.example.optimizer",
+            "package": {"dependencyId": "fixture"},
+            "packageState": {
+                "installed": True,
+                "packageId": "com.example.optimizer",
+                "version": "1.2.3",
+                "source": "vpm",
+            },
+            "summarizeDebug": lambda value: str(value).replace(
+                "secret-token", "[redacted]"
+            ),
+        },
+    )
+
+    failure_text = "secret-token missing optimizer type"
+    result = service.request_install(
+        {
+            "packageId": "com.example.optimizer",
+            "runtimeCompatibilityFailure": {
+                "kind": "runtime_incompatibility",
+                "operation": "configure_optimizer",
+                "packageId": "com.example.optimizer",
+                "originalError": failure_text,
+            },
+        }
+    )
+    assert result["ok"] is True
+    assert result["status"] == "use_installed"
+    assert result["approvalCreated"] is False
+    assert "caller-supplied evidence" in result["message"]
+    assert not any(call[0] == "approval" for call in calls)
+
+
+def test_diagnostics_preserve_only_bounded_redacted_original_error_and_digest() -> None:
+    calls: list[tuple[Any, ...]] = []
+    service = _service(
+        calls,
+        {
+            "projectPath": "E:/avatar",
+            "summarizeDebug": lambda value: str(value).replace(
+                "secret-token", "[redacted]"
+            ),
+        },
+    )
+    raw_error = "secret-token " + ("incompatible package runtime " * 300)
+
+    result = service.diagnose_install(
+        {
+            "projectPath": "E:/avatar",
+            "packageId": "com.example.optimizer",
+            "stderrSummary": raw_error,
+        }
+    )
+
+    assert result["originalError"].startswith("[redacted] incompatible")
+    assert "secret-token" not in result["originalError"]
+    assert len(result["originalError"]) <= 2000
+    assert result["originalErrorSha256"] == hashlib.sha256(
+        result["originalError"].encode("utf-8")
+    ).hexdigest()
 
 
 def test_status_diagnostics_and_prepared_execution_are_separate_ports() -> None:

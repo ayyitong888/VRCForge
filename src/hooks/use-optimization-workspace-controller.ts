@@ -290,7 +290,11 @@ export function useOptimizationWorkspaceController({
         repository: dependency.installMethod?.repository || undefined,
         allowAgentManagedDownload: true,
       });
-      setOptimizationMessage(payload.approval ? `Install approval queued: ${payload.approval.id}` : payload.error || "Install request queued.");
+      setOptimizationMessage(
+        payload.approval
+          ? `Install approval queued: ${payload.approval.id}`
+          : payload.message || payload.error || "Install request was not queued.",
+      );
       await refreshSilently(targetEndpoint);
       await loadOptimizationPlan(targetEndpoint);
     } catch (cause) {

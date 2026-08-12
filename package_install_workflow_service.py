@@ -35,6 +35,7 @@ _SEMVER_RE = re.compile(
 _VPM_PROCESS_MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 _VPM_INSTALL_TIMEOUT_SECONDS = 300
 _VPM_JSON_READBACK_MAX_BYTES = 4 * 1024 * 1024
+_RUNTIME_COMPATIBILITY_ERROR_MAX_CHARS = 2000
 
 
 class RunBoundedProcessPort(Protocol):
@@ -567,6 +568,9 @@ class PackageInstallWorkflowService:
         package_state = None
         if project_value and Path(project_value).is_dir():
             package_state = self._ports.detect_package(Path(project_value), [package_id])
+        installed = bool(
+            isinstance(package_state, dict) and package_state.get("installed")
+        )
         return {
             "ok": True,
             **strategy,
@@ -574,9 +578,11 @@ class PackageInstallWorkflowService:
             "planOnly": True,
             "projectPath": project_value,
             "packageState": package_state,
+            "compatibilityAction": "use_installed" if installed else "install_missing",
             "canExecuteCommandInstall": bool(strategy.get("commandInstaller"))
             and bool(project_value),
-            "canCreateInstallRequest": bool(project_value),
+            "canCreateInstallRequest": bool(project_value) and not installed,
+            "canPrepareUpgradeRequest": False,
         }
 
     def diagnose_install(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -602,6 +608,12 @@ class PackageInstallWorkflowService:
             )
         )
         safe_text = str(self._ports.summarize_debug(raw_text))[:5000]
+        original_error = safe_text.strip()[:_RUNTIME_COMPATIBILITY_ERROR_MAX_CHARS]
+        original_error_sha256 = (
+            hashlib.sha256(original_error.encode("utf-8")).hexdigest()
+            if original_error
+            else ""
+        )
         warnings: list[str] = []
         try:
             package_status = self.package_manager_status({"projectPath": project_value})
@@ -623,6 +635,8 @@ class PackageInstallWorkflowService:
             "readOnly": True,
             "projectPath": project_value,
             "packageId": package_id,
+            "originalError": original_error,
+            "originalErrorSha256": original_error_sha256,
             "packageManager": self._ports.redact_support(package_status),
             "compileErrors": self._ports.redact_support(compile_errors),
             "symptoms": symptoms,
@@ -727,8 +741,28 @@ class PackageInstallWorkflowService:
         plan = self.plan_install(normalized)
         if not plan.get("ok"):
             return plan
-        if not plan.get("canExecuteCommandInstall"):
+        package_state = (
+            plan.get("packageState")
+            if isinstance(plan.get("packageState"), dict)
+            else {}
+        )
+        installed = bool(package_state.get("installed"))
+        if installed:
             return {
+                "ok": True,
+                "status": "use_installed",
+                "approvalCreated": False,
+                "packageState": package_state,
+                "message": (
+                    "The installed package version must be tried first. An upgrade "
+                    "is not created from caller-supplied evidence. If the installed "
+                    "version fails, preserve that runtime error and check newer "
+                    "versions through the supervised package manager flow."
+                ),
+                "installPlan": plan,
+            }
+        if not plan.get("canExecuteCommandInstall"):
+            blocked: dict[str, Any] = {
                 "ok": False,
                 "status": "blocked",
                 "error": (
@@ -737,6 +771,7 @@ class PackageInstallWorkflowService:
                 ),
                 "installPlan": plan,
             }
+            return blocked
 
         package = plan.get("package") if isinstance(plan.get("package"), dict) else {}
         optimizer_package = bool(package.get("dependencyId"))
@@ -762,29 +797,30 @@ class PackageInstallWorkflowService:
                 ),
             }
 
+        approval_arguments = {
+            "projectPath": plan.get("projectPath"),
+            "packageId": plan.get("packageId"),
+            "repository": plan.get("repository") or "",
+            "preferredManager": str(
+                normalized.get("preferredManager")
+                or normalized.get("preferred_manager")
+                or ""
+            ),
+            "includePrerelease": bool(
+                normalized.get("includePrerelease")
+                or normalized.get("include_prerelease")
+                or normalized.get("prerelease")
+            ),
+            "packageVersion": str(
+                normalized.get("packageVersion")
+                or normalized.get("package_version")
+                or ""
+            ).strip(),
+        }
         return self._ports.create_apply_request(
             {
                 "target_tool": "vrcforge_install_vpm_package",
-                "arguments": {
-                    "projectPath": plan.get("projectPath"),
-                    "packageId": plan.get("packageId"),
-                    "repository": plan.get("repository") or "",
-                    "preferredManager": str(
-                        normalized.get("preferredManager")
-                        or normalized.get("preferred_manager")
-                        or ""
-                    ),
-                    "includePrerelease": bool(
-                        normalized.get("includePrerelease")
-                        or normalized.get("include_prerelease")
-                        or normalized.get("prerelease")
-                    ),
-                    "packageVersion": str(
-                        normalized.get("packageVersion")
-                        or normalized.get("package_version")
-                        or ""
-                    ).strip(),
-                },
+                "arguments": approval_arguments,
                 "reason": (
                     f"Install VPM package {plan.get('packageId')} through VRCForge "
                     "supervised package manager flow."
@@ -1171,6 +1207,19 @@ class VpmPackageInstallPreparer:
                 "lane; configure existing repositories separately.",
                 status_code=403,
             )
+        state = _sealed_vpm_project_state(
+            project_path,
+            package_id,
+            self._ports.detect_package,
+        )
+        package_state = _ensure_dict(state.get("packageState"))
+        installed = bool(package_state.get("installed"))
+        if installed:
+            raise AgentGatewayError(
+                "The installed package version must be tried first; this install "
+                "lane does not accept caller-supplied upgrade evidence.",
+                status_code=409,
+            )
         managers = self._ports.locate_managers()
         strategy = self._ports.select_strategy(arguments, managers)
         cli = (
@@ -1193,20 +1242,18 @@ class VpmPackageInstallPreparer:
             or arguments.get("include_prerelease")
             or arguments.get("prerelease")
         )
-        selected_version = select_sealed_vpm_version(
-            package_info,
-            str(
-                arguments.get("packageVersion")
-                or arguments.get("package_version")
-                or ""
-            ).strip(),
-            prerelease,
-        )
-        state = _sealed_vpm_project_state(
-            project_path,
-            package_id,
-            self._ports.detect_package,
-        )
+        try:
+            selected_version = select_sealed_vpm_version(
+                package_info,
+                str(
+                    arguments.get("packageVersion")
+                    or arguments.get("package_version")
+                    or ""
+                ).strip(),
+                prerelease,
+            )
+        except RuntimeError:
+            raise
         argv = _vpm_install_argv(
             cli_name=str(cli["name"]),
             cli_path=str(binary["identity"]["path"]),
@@ -1217,6 +1264,16 @@ class VpmPackageInstallPreparer:
         )
         approval_arguments = dict(arguments)
         approval_arguments["packageVersion"] = selected_version
+        prepared_evidence_payload: dict[str, Any] = {
+            "binary": binary,
+            "cliName": cli["name"],
+            "cliVersion": cli_version,
+            "project": state,
+            "packageId": package_id,
+            "packageVersion": selected_version,
+            "includePrerelease": prerelease,
+            "repository": "",
+        }
         prepared = install_prepared_calls(
             approval_arguments,
             [
@@ -1229,23 +1286,15 @@ class VpmPackageInstallPreparer:
                     },
                 )
             ],
-            {
-                "binary": binary,
-                "cliName": cli["name"],
-                "cliVersion": cli_version,
-                "project": state,
-                "packageId": package_id,
-                "packageVersion": selected_version,
-                "includePrerelease": prerelease,
-                "repository": "",
-            },
+            prepared_evidence_payload,
         )
-        return prepared, {
+        prepared_preview: dict[str, Any] = {
             "ok": True,
             "targetTool": "vrcforge_install_vpm_package",
             "projectPath": str(state["project"]["path"]),
             "packageId": package_id,
             "packageVersion": selected_version,
+            "compatibilityAction": "install_missing",
             "command": argv,
             "processPolicy": {
                 "scope": "one synchronous child owned by this approved request",
@@ -1256,6 +1305,7 @@ class VpmPackageInstallPreparer:
                 "authentication": "CLI existing local user configuration only",
             },
         }
+        return prepared, prepared_preview
 
 
 class VpmPackageInstallExecutor:

@@ -12073,10 +12073,16 @@ def _prepare_shader_tuning_apply_state(request: ShaderMaterialApplyRequest) -> d
     changes = validation["validatedChanges"]
     if not changes:
         raise RuntimeError("No valid shader material changes remained after validation.")
+    scan_arguments = {
+        "avatarPath": avatar_path,
+        "outputPath": "",
+        "refreshAssets": False,
+    }
     core_arguments = {"avatarPath": avatar_path, "changes": changes, "saveAssets": True}
     return {
         "settings": settings,
         "avatarPath": avatar_path,
+        "scanArguments": scan_arguments,
         "coreArguments": core_arguments,
         "validatedChanges": changes,
         "skippedChanges": validation["skippedChanges"],
@@ -12103,7 +12109,10 @@ def prepare_shader_material_apply_request(
     }
     prepared = install_prepared_calls(
         arguments,
-        [("vrc_apply_material_tuning", state["coreArguments"])],
+        [
+            ("vrc_scan_avatar_materials", state["scanArguments"]),
+            ("vrc_apply_material_tuning", state["coreArguments"]),
+        ],
         evidence,
     )
     return prepared, {
@@ -12131,7 +12140,7 @@ def apply_shader_material_plan_approved_sync(arguments: dict[str, Any]) -> dict[
             raise RuntimeError("Prepared shader validated Core arguments drifted after approval.")
         if evidence.get("historyId") != (request.history_id or ""):
             raise RuntimeError("Prepared shader history target drifted after approval.")
-        tool_name, tool_arguments = prepared_call(arguments)
+        tool_name, tool_arguments = prepared_call(arguments, 1)
         if tool_name != "vrc_apply_material_tuning":
             raise RuntimeError("Prepared shader Core call is invalid.")
         require_exact_shader_evidence(tool_arguments, state["coreArguments"], "Core arguments")

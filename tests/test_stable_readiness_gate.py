@@ -20,6 +20,31 @@ def load_gate():
     return module
 
 
+def test_blocked_report_exits_nonzero_with_or_without_legacy_allow_flag(tmp_path, monkeypatch):
+    gate = load_gate()
+    blocked_report = {"ok": False, "summary": {"status": "blocked"}}
+    monkeypatch.setattr(gate, "build_stable_readiness_gate", lambda _args: blocked_report)
+    monkeypatch.setattr(
+        gate,
+        "write_report",
+        lambda _report, _artifacts_dir: tmp_path / "blocked-report.json",
+    )
+
+    for allow_blocked in (False, True):
+        args = make_args(tmp_path, allow_blocked=allow_blocked)
+        monkeypatch.setattr(gate, "parse_args", lambda: args)
+        assert gate.main() == 1
+
+
+def test_report_policy_has_no_allow_blocked_exception(tmp_path):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    report = gate.build_stable_readiness_gate(make_args(tmp_path))
+    policy = report["policy"]
+    assert policy["installerAdminBlockedAlwaysKeepsGateBlocked"] is True
+    assert "installerAdminBlockedKeepsGateBlockedUnlessAllowBlocked" not in policy
+
+
 def make_args(tmp_path: Path, **overrides: object) -> Namespace:
     values = {
         "version": "1.0.1",

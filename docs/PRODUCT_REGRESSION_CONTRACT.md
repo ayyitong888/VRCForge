@@ -362,8 +362,11 @@ Each item ends with its version history in this exact form:
   forced upgrade.
 - Forbidden regression: no global version pin, import-time install, silent
   downgrade or speculative upgrade. If the installed package proves
-  incompatible at runtime, preserve the original error, then check available
-  newer versions and offer a separate approved upgrade path.
+  incompatible at runtime, preserve the original error and direct the user to
+  check available newer versions. Until Runtime owns a short-lived,
+  single-use incompatibility receipt, caller-supplied failure claims may not
+  create an upgrade approval; any future upgrade remains a separate approved
+  transaction.
 - Acceptance: dependency-doctor, optimizer skill, package-plan, version
   selection, diagnostic and prepared-install tests.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]

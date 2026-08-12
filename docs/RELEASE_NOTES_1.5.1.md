@@ -117,9 +117,10 @@ Core with its fixed 64-tool contract.
   the component inventory returned by the live VRCForge Core while retaining
   approval, checkpoint, readback, and rollback ownership.
 - Made optional optimizer-package handling compatibility-first: missing packages
-  are reported, existing versions are tried before any upgrade, and install or
-  upgrade remains a separate approval-bound action. A runtime incompatibility
-  keeps its original error before VRCForge checks a newer available version;
+  are reported, existing versions are tried before any upgrade, and install
+  remains a separate approval-bound action. A runtime incompatibility keeps its
+  original error and directs the user to check newer available versions; a
+  caller cannot self-report incompatibility to create an upgrade approval.
   VRCForge does not pin third-party package versions during import.
 
 ## Safety and scope

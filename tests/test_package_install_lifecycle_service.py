@@ -60,6 +60,13 @@ def _project(tmp_path: Path) -> Path:
     return project
 
 
+def _set_installed_package(project: Path, package_id: str, version: str) -> None:
+    (project / "Packages" / "manifest.json").write_text(
+        json.dumps({"dependencies": {package_id: version}}),
+        encoding="utf-8",
+    )
+
+
 def _detection() -> PackageDetectionService:
     return PackageDetectionService(
         PackageDetectionPorts(
@@ -301,6 +308,68 @@ def test_preparer_rejects_reserved_repository_and_unavailable_prerelease(
             {"projectPath": str(project), "packageId": "com.example.package"},
             None,
         )
+
+
+def test_installed_package_preparer_requires_runtime_incompatibility_evidence(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    package_id = "com.example.package"
+    _set_installed_package(project, package_id, "1.2.3")
+    cli = tmp_path / "vrc-get.exe"
+    cli.write_bytes(b"fixed-cli")
+    preparer = _preparer(
+        project,
+        cli,
+        _detection(),
+        [],
+        versions=[{"version": "1.3.0"}],
+    )
+
+    with pytest.raises(AgentGatewayError, match="installed package version must be tried first"):
+        preparer.prepare(
+            {"projectPath": str(project), "packageId": package_id},
+            None,
+        )
+
+
+def test_installed_package_rejects_caller_supplied_upgrade_evidence(
+    tmp_path: Path,
+) -> None:
+    project = _project(tmp_path)
+    package_id = "com.example.package"
+    installed_version = "1.2.3"
+    _set_installed_package(project, package_id, installed_version)
+    cli = tmp_path / "vrc-get.exe"
+    cli.write_bytes(b"fixed-cli")
+    preparer = _preparer(
+        project,
+        cli,
+        _detection(),
+        [],
+        versions=[{"version": "1.2.3"}, {"version": "1.3.0"}],
+    )
+
+    with pytest.raises(AgentGatewayError) as captured:
+        preparer.prepare(
+            {
+                "projectPath": str(project),
+                "packageId": package_id,
+                "runtimeCompatibilityFailure": {
+                    "schema": "vrcforge.package_runtime_compatibility_failure.v1",
+                    "kind": "runtime_incompatibility",
+                    "operation": "configure_optimizer",
+                    "packageId": package_id,
+                    "installedVersion": installed_version,
+                    "originalError": "caller supplied",
+                    "originalErrorSha256": "0" * 64,
+                },
+            },
+            None,
+        )
+
+    assert captured.value.status_code == 409
+    assert "caller-supplied upgrade evidence" in str(captured.value)
 
 
 def test_approved_executor_owns_one_child_and_requires_exact_readback(
