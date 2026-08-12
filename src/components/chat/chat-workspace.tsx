@@ -78,7 +78,6 @@ export function ChatWorkspace({
   onReject,
   onModifyApproval,
   onImportAttachment,
-  onOpenSettings,
   onOpenDoctor,
   activityPanel,
   subAgentPanel,
@@ -136,7 +135,6 @@ export function ChatWorkspace({
   onReject: (approvalId: string) => void;
   onModifyApproval: (approval: AgentApproval) => void;
   onImportAttachment?: (attachment: ChatAttachment) => void;
-  onOpenSettings: () => void;
   onOpenDoctor: () => void;
   activityPanel?: ReactNode;
   subAgentPanel?: ReactNode;
@@ -259,7 +257,6 @@ export function ChatWorkspace({
                 onReject={onReject}
                 onModifyApproval={onModifyApproval}
                 onImportAttachment={onImportAttachment}
-                onOpenSettings={onOpenSettings}
                 onOpenDoctor={onOpenDoctor}
               />
             );

@@ -566,15 +566,11 @@
     "rejected": "已駁回",
     "executionResult": "執行結果",
     "compactedHistory": "已壓縮的歷史",
-    "localIdleMessage": "這句話我還沒辦法直接理解——目前在用本地關鍵詞規劃……",
-    "openSettings": "開啟設定",
     "willDoNext": "我接下來會{{step}}",
     "executed": "已執行",
     "noSummaryReturned": "沒有返回摘要。",
     "subagentTask": "背景任務",
     "coreDisconnectedSend": "核心未連線，訊息未發送。",
-    "keywordPlannerHint1": "這句話我還沒辦法直接理解——目前在用本地關鍵詞規劃，只認識「日誌、截圖、表情、材質、健康檢查」這類固定指令。",
-    "keywordPlannerHint2": "在設定裡綁定模型供應商後，就能用自然語言交流並自動規劃工具呼叫；如果已綁定密鑰，說明 AI 規劃還沒啟用，重啟核心或檢查供應商配置即可。",
     "elapsed": "· 已運行 {{time}}"
   },
   "approval": {
@@ -697,10 +693,8 @@
     "blocked": "已阻止"
   },
   "planner": {
-    "deterministicLocal": "本地規劃",
     "llm": "AI 規劃",
     "fallback": "規劃",
-    "local": "本地規劃",
     "ai": "AI 規劃"
   },
   "step": {

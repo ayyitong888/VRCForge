@@ -173,94 +173,50 @@ def test_plan_agent_turn_without_provider_fails_without_local_fallback() -> None
             "retryable": False,
         }
         assert plan["nextStep"] == "planner_failed"
-        assert plan["deterministicTerminal"] is True
+        assert "deterministicTerminal" not in plan
 
 
-def test_local_router_meta_and_disconnected_paths_preserve_runtime_contract() -> None:
-    planner = service()
-
-    shell = planner._local_plan_agent_turn("git status", {}, {})
-    assert shell["planner"] == "deterministic-local"
-    assert shell["shellCommand"] == "git --no-pager status --short"
-    assert shell["nextStep"] == "classify_shell"
-
-    disconnected = planner._local_plan_agent_turn("ordinary conversation", {}, {})
-    assert disconnected["nextStep"] == "await_user_instruction"
-
-    metadata = planner._local_plan_agent_turn(
-        "which model did you use for the previous response?",
-        {"providerLabel": "Fixture Provider", "model": "fixture-model"},
-        {},
+def test_runtime_planner_has_no_private_local_router_or_deterministic_contract() -> None:
+    source = (ROOT / "runtime_planner_service.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    owner = next(
+        item
+        for item in tree.body
+        if isinstance(item, ast.ClassDef) and item.name == "RuntimePlannerService"
     )
-    assert metadata["plannerLabel"] == "Fixture Provider · fixture-model"
-    assert metadata["deterministicTerminal"] is True
-    assert metadata["shellNeeded"] is False
-    assert metadata["writeNeeded"] is False
+    method_names = {
+        item.name for item in owner.body if isinstance(item, ast.FunctionDef)
+    }
+    module_function_names = {
+        item.name for item in tree.body if isinstance(item, ast.FunctionDef)
+    }
 
-    hidden_health = service(
-        catalog=FakeCatalog(
-            planning=PlannerCatalogSnapshot(
-                visible_tools=(),
-                routable_tools=(tool("vrcforge_health", category="read/debug"),),
-            )
-        )
-    )._local_plan_agent_turn("check health", {}, {})
-    assert hidden_health["skillTool"] == "vrcforge_health"
-    assert hidden_health["skillCategory"] == "read/debug"
-
-
-@pytest.mark.parametrize(
-    ("message", "expected_tool", "forbidden_tools"),
-    [
-        ("检查 Unity 当前的 C# 编译错误。", "vrcforge_get_compile_errors", {"vrcforge_unity_status"}),
-        ("扫描这个 avatar 的材质，并列出 shader。", "vrcforge_scan_materials", {"vrcforge_list_avatars"}),
-        ("扫描 avatar 的 blendshape 名称。", "vrcforge_scan_blendshapes", {"vrcforge_list_avatars"}),
-        ("检查这个 avatar 的 Expression Parameters 使用情况。", "vrcforge_scan_parameters", {"vrcforge_list_avatars"}),
-        ("读取 FX Animator 的层、状态和参数。", "vrcforge_scan_fx_animator", {"vrcforge_health"}),
-        ("扫描这个 avatar 的 expression menu controls 及关联参数。", "vrcforge_scan_avatar_controls", {"vrcforge_list_avatars"}),
-        (
-            "计算这个 VRChat avatar 的 SDK performance rating。",
-            "vrcforge_scan_avatar_performance",
-            {"vrcforge_list_avatars", "vrcforge_scan_thry_avatar_performance"},
-        ),
-        (
-            "计算这个 avatar 的 Thry VRAM 和 mesh memory。",
-            "vrcforge_scan_thry_avatar_performance",
-            {"vrcforge_list_avatars", "vrcforge_scan_avatar_performance"},
-        ),
-        ("读取这个 avatar 的 VRCAvatarDescriptor 视点和 playable layers。", "vrcforge_read_avatar_descriptor", {"vrcforge_list_avatars"}),
-        (
-            "列出 avatar hierarchy 里的对象和组件类型。",
-            "vrcforge_scan_avatar_items",
-            {"vrcforge_list_avatars", "vrcforge_get_gameobject"},
-        ),
-    ],
-)
-def test_runtime_routes_specific_unity_reads_before_broad_status_and_avatar_rules(
-    message: str,
-    expected_tool: str,
-    forbidden_tools: set[str],
-) -> None:
-    plan = service()._local_plan_agent_turn(message, {}, {})
-
-    assert plan["skillTool"] == expected_tool
-    assert plan["skillTool"] not in forbidden_tools
-    assert plan["nextStep"] == "call_skill"
+    assert not {
+        "_local_plan_agent_turn",
+        "_match_runtime_skill",
+        "_runtime_skill_route",
+        "_plan_runtime_meta_question",
+        "_plan_write_intent",
+        "_avatars_from_loop_state",
+        "_build_avatar_write_params",
+        "_match_package_skill_route",
+    }.intersection(method_names)
+    assert not {
+        "extract_skill_invocation",
+        "extract_shell_command_candidate",
+        "detect_avatar_write_intent",
+        "extract_avatar_paths",
+        "runtime_tool_intent_text",
+        "has_multi_angle_capture_intent",
+        "has_multi_angle_visual_audit_intent",
+        "multi_angle_visual_journey_requires_provider",
+    }.intersection(module_function_names)
+    assert "deterministic-local" not in source
+    assert "deterministicTerminal" not in source
 
 
-@pytest.mark.parametrize(
-    ("message", "expected_tool"),
-    [
-        ("检查 Unity MCP 是否已连接。", "vrcforge_unity_status"),
-        ("列出当前 Unity 项目里的所有 avatar。", "vrcforge_list_avatars"),
-        ("检查 VRCForge 后端健康状态。", "vrcforge_health"),
-    ],
-)
-def test_runtime_keeps_intent_bound_broad_routes(message: str, expected_tool: str) -> None:
-    plan = service()._local_plan_agent_turn(message, {}, {})
 
-    assert plan["skillTool"] == expected_tool
-    assert plan["nextStep"] == "call_skill"
+
 
 
 def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
@@ -318,7 +274,7 @@ def test_capture_approval_observation_exposes_only_opaque_visual_capability() ->
     assert "D:/private" not in observation
 
 
-def test_failed_deterministic_tool_feedback_invokes_model_correction_once() -> None:
+def test_failed_tool_feedback_invokes_model_correction_once() -> None:
     catalog = FakeCatalog(
         planning=PlannerCatalogSnapshot(
             visible_tools=(
@@ -367,7 +323,7 @@ def test_failed_deterministic_tool_feedback_invokes_model_correction_once() -> N
     assert plan["correctionForActionId"] == "scan-materials-failed"
 
 
-def test_failed_deterministic_tool_feedback_without_model_does_not_replay() -> None:
+def test_failed_tool_feedback_without_model_does_not_replay() -> None:
     plan = service().plan_agent_turn(
         "扫描这个 avatar 的材质，并列出 shader。",
         {},
@@ -389,7 +345,6 @@ def test_failed_deterministic_tool_feedback_without_model_does_not_replay() -> N
         "retryable": False,
     }
     assert plan["nextStep"] == "planner_failed"
-    assert plan["deterministicTerminal"] is True
 
 
 def test_verified_loaded_skill_context_is_explicit_and_bounded_for_the_next_plan() -> None:
@@ -579,78 +534,6 @@ def test_llm_tool_schema_failure_returns_a_correctable_non_execution_plan() -> N
     assert "additionalProperties=false" in model.prompts[0]
 
 
-def test_write_intent_scans_resolves_one_avatar_and_rejects_ambiguous_targets() -> None:
-    catalog = FakeCatalog(
-        planning=PlannerCatalogSnapshot(
-            visible_tools=(
-                tool("vrcforge_list_avatars"),
-                tool("vrcforge_create_gameobject", category="write", write=True),
-            ),
-            routable_tools=(
-                tool("vrcforge_list_avatars"),
-                tool("vrcforge_create_gameobject", category="write", write=True),
-            ),
-        )
-    )
-    planner = service(catalog=catalog)
-
-    scan = planner._local_plan_agent_turn("create an object named Probe", {}, {})
-    assert scan["skillTool"] == "vrcforge_list_avatars"
-    assert scan["continueLoop"] is True
-    assert scan["writeNeeded"] is False
-    assert scan["completionRequirement"] == {
-        "kind": "write",
-        "tool": "vrcforge_create_gameobject",
-        "verificationProfile": "persisted_scene_write_console",
-    }
-
-    resolved = planner._local_plan_agent_turn(
-        "create an object named Probe",
-        {"projectPath": "fixture-project"},
-        {},
-        loop_state=[
-            {
-                "tool": "vrcforge_list_avatars",
-                "status": "executed",
-                "result": {"avatars": [{"avatarPath": "AvatarRoot"}]},
-            }
-        ],
-    )
-    assert resolved["writeTool"] == "vrcforge_create_gameobject"
-    assert resolved["writeParams"] == {
-        "name": "Probe",
-        "parentPath": "AvatarRoot",
-        "preview": False,
-        "writeIntent": "add_object",
-        "targetAvatar": "AvatarRoot",
-        "projectPath": "fixture-project",
-    }
-    assert resolved["nextStep"] == "request_write"
-    assert resolved["completionRequirement"]["tool"] == "vrcforge_create_gameobject"
-
-    ambiguous = planner._local_plan_agent_turn(
-        "create an object",
-        {},
-        {},
-        loop_state=[
-            {
-                "tool": "vrcforge_list_avatars",
-                "result": {"avatarPaths": ["AvatarA", "AvatarB"]},
-            }
-        ],
-    )
-    assert ambiguous["deterministicTerminal"] is True
-    assert ambiguous["writeNeeded"] is False
-    assert ambiguous["nextStep"] == "needs_user_action"
-
-    conflicting = planner._local_plan_agent_turn(
-        "create an object at the active scene root",
-        {"avatarPath": "AvatarRoot"},
-        {},
-    )
-    assert conflicting["deterministicTerminal"] is True
-    assert conflicting["writeNeeded"] is False
-    assert conflicting["nextStep"] == "needs_user_action"
 
 
 def test_llm_execution_layer_has_a_first_class_supervised_write_action() -> None:
@@ -748,171 +631,12 @@ def test_llm_skill_action_returns_correctable_kind_mismatch_for_any_supervised_w
     assert plan["nextStep"] == "planner_invalid_response"
 
 
-def test_deterministic_supervised_write_route_preserves_action_kind_across_exposure_layers() -> None:
-    write_tool = tool("fixture-supervised-write", category="supervised-write", write=True)
-    catalog = FakeCatalog(
-        planning=PlannerCatalogSnapshot(
-            visible_tools=(),
-            routable_tools=(write_tool,),
-        ),
-        execution=PlannerCatalogSnapshot(
-            visible_tools=(write_tool,),
-            routable_tools=(write_tool,),
-        ),
-    )
-    planner = service(catalog=catalog)
-    request = {
-        "skill_tool": "fixture-supervised-write",
-        "skill_params": {"name": "Probe"},
-    }
-
-    planning = planner._local_plan_agent_turn(
-        "Run the explicitly selected supervised operation.",
-        request,
-        {},
-        exposure_layer=EXPOSURE_LAYER_PLANNING,
-    )
-    execution = planner._local_plan_agent_turn(
-        "Run the explicitly selected supervised operation.",
-        request,
-        {},
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-
-    assert planning["enterExecution"] is True
-    assert planning["skillNeeded"] is False
-    assert planning["writeNeeded"] is False
-    assert planning["nextStep"] == "enter_execution"
-    assert execution["skillNeeded"] is False
-    assert execution["writeNeeded"] is True
-    assert execution["writeTool"] == "fixture-supervised-write"
-    assert execution["writeParams"] == {"name": "Probe"}
-    assert execution["nextStep"] == "request_write"
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Capture front and back views for coverage.",
-        "Capture front, left, right, and back fixed-angle views, then audit all views for complete visual coverage.",
-        "Take screenshots from several angles for a visual audit.",
-        "请做多角度截图，对比正面、侧面和背面。",
-        "把正面和背面分别拍下来。",
-    ],
-)
-def test_multi_angle_capture_intent_selects_the_supervised_multi_capture(message: str) -> None:
-    single = tool(
-        "vrcforge_capture_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    multi = tool(
-        "vrcforge_capture_multi_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    audit = tool("vrcforge_vision_audit_multi")
-    catalog = FakeCatalog(
-        planning=PlannerCatalogSnapshot(
-            visible_tools=(audit,),
-            routable_tools=(single, multi, audit),
-        ),
-        execution=PlannerCatalogSnapshot(
-            visible_tools=(single, multi, audit),
-            routable_tools=(single, multi, audit),
-        ),
-    )
-
-    plan = service(catalog=catalog)._local_plan_agent_turn(
-        message,
-        {},
-        {},
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-
-    assert plan["skillNeeded"] is False
-    assert plan["writeNeeded"] is True
-    assert plan["writeTool"] == "vrcforge_capture_multi_screenshot"
-    assert plan["writeTool"] != "vrcforge_capture_screenshot"
-    assert plan["nextStep"] == "request_write"
 
 
-def test_direction_words_without_view_context_do_not_expand_one_screenshot_to_multi_capture() -> None:
-    single = tool(
-        "vrcforge_capture_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    multi = tool(
-        "vrcforge_capture_multi_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    snapshot = PlannerCatalogSnapshot(
-        visible_tools=(single, multi),
-        routable_tools=(single, multi),
-    )
-
-    plan = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))._local_plan_agent_turn(
-        "Capture one screenshot of the left and right buttons.",
-        {},
-        {},
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-
-    assert plan["writeNeeded"] is True
-    assert plan["writeTool"] == "vrcforge_capture_screenshot"
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        "Capture front and back views, then run a visual audit.",
-        "Capture front, left, right, and back fixed-angle views, then audit all views for complete visual coverage.",
-        "把正面和背面分别拍下来，然后做视觉审计。",
-    ],
-)
-def test_managed_multi_capture_receipt_routes_the_explicit_visual_audit_as_the_final_step(
-    message: str,
-) -> None:
-    capture = tool(
-        "vrcforge_capture_multi_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    audit = tool("vrcforge_vision_audit_multi")
-    snapshot = PlannerCatalogSnapshot(
-        visible_tools=(capture, audit),
-        routable_tools=(capture, audit),
-    )
-    planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
-
-    plan = planner._local_plan_agent_turn(
-        message,
-        {},
-        {},
-        loop_state=[
-            {
-                "tool": "vrcforge_capture_multi_screenshot",
-                "kind": "write",
-                "status": "applied",
-                "result": {
-                    "captureReceipt": "managed-receipt",
-                    "captureEvidenceId": "visual-fixture",
-                    "angles": ["front", "back"],
-                },
-                "outcome": {"status": "ok"},
-            }
-        ],
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-
-    assert plan["writeNeeded"] is False
-    assert plan["skillNeeded"] is True
-    assert plan["skillTool"] == "vrcforge_vision_audit_multi"
-    assert plan["skillParams"] == {"captureReceipt": "managed-receipt"}
-    assert plan["continueLoop"] is False
-    assert plan["nextStep"] == "call_skill"
 
 
 def test_explicit_multi_angle_audit_execution_selection_is_provider_owned() -> None:
@@ -1064,74 +788,6 @@ def test_visual_provider_loss_after_capture_stops_before_model_resample() -> Non
     assert plan["skillNeeded"] is False
 
 
-def test_transient_visual_audit_reuses_only_the_reissued_exact_receipt() -> None:
-    capture = tool(
-        "vrcforge_capture_multi_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    audit = tool("vrcforge_vision_audit_multi")
-    snapshot = PlannerCatalogSnapshot(
-        visible_tools=(capture, audit),
-        routable_tools=(capture, audit),
-    )
-    planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
-    base_state = [
-        {
-            "tool": "vrcforge_capture_multi_screenshot",
-            "kind": "write",
-            "status": "applied",
-            "result": {"captureReceipt": "consumed-original"},
-            "outcome": {"status": "ok"},
-        }
-    ]
-
-    transient = planner._local_plan_agent_turn(
-        "Capture front and back views, then run a visual audit.",
-        {},
-        {},
-        loop_state=[
-            *base_state,
-            {
-                "tool": "vrcforge_vision_audit_multi",
-                "kind": "skill",
-                "status": "failed",
-                "result": {
-                    "captureReceipt": "reissued-exact-retry",
-                    "retryable": True,
-                    "retainImages": True,
-                },
-                "outcome": {"status": "failed"},
-            },
-        ],
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-    permanent = planner._local_plan_agent_turn(
-        "Capture front and back views, then run a visual audit.",
-        {},
-        {},
-        loop_state=[
-            *base_state,
-            {
-                "tool": "vrcforge_vision_audit_multi",
-                "kind": "skill",
-                "status": "failed",
-                "result": {
-                    "retryable": False,
-                    "retainImages": False,
-                },
-                "outcome": {"status": "failed"},
-            },
-        ],
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-
-    assert transient["skillTool"] == "vrcforge_vision_audit_multi"
-    assert transient["skillParams"] == {"captureReceipt": "reissued-exact-retry"}
-    assert permanent["skillNeeded"] is False
-    assert permanent["writeNeeded"] is False
-    assert permanent["nextStep"] == "needs_user_action"
-    assert permanent["completionGate"]["reason"] == "visual_audit_image_discarded"
 
 
 def test_transient_visual_audit_observation_exposes_only_opaque_retry_capability() -> None:
@@ -1284,157 +940,12 @@ def test_provider_stale_visual_receipt_gets_typed_correction_for_exact_reissue()
     assert plan["nextStep"] == "planner_invalid_response"
 
 
-def test_multi_capture_only_finishes_after_approval_but_explicit_visual_audit_continues() -> None:
-    capture = tool(
-        "vrcforge_capture_multi_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    audit = tool("vrcforge_vision_audit_multi")
-    snapshot = PlannerCatalogSnapshot(
-        visible_tools=(capture, audit),
-        routable_tools=(capture, audit),
-    )
-    planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
-
-    capture_only = planner._local_plan_agent_turn(
-        "Capture front and back views for comparison.",
-        {},
-        {},
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-    capture_and_audit = planner._local_plan_agent_turn(
-        "Capture front, left, right, and back fixed-angle views, then audit all views for complete visual coverage.",
-        {},
-        {},
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-
-    assert capture_only["writeTool"] == "vrcforge_capture_multi_screenshot"
-    assert capture_only["continueLoop"] is False
-    assert capture_and_audit["writeTool"] == "vrcforge_capture_multi_screenshot"
-    assert capture_and_audit["continueLoop"] is True
 
 
-def test_visual_audit_request_stops_before_capture_when_the_audit_capability_is_hidden() -> None:
-    capture = tool(
-        "vrcforge_capture_multi_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    audit = tool("vrcforge_vision_audit_multi")
-    catalog = FakeCatalog(
-        planning=PlannerCatalogSnapshot(
-            visible_tools=(),
-            routable_tools=(capture, audit),
-        ),
-        execution=PlannerCatalogSnapshot(
-            visible_tools=(capture,),
-            routable_tools=(capture, audit),
-        ),
-    )
-
-    plan = service(catalog=catalog)._local_plan_agent_turn(
-        "Capture front and back views, then run a visual audit.",
-        {},
-        {},
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-
-    assert plan["deterministicTerminal"] is True
-    assert plan["writeNeeded"] is False
-    assert plan["skillNeeded"] is False
-    assert plan["nextStep"] == "needs_user_action"
-    assert plan["completionGate"] == {
-        "status": "needs_user_action",
-        "reason": "visual_audit_unavailable",
-    }
-    assert "Gemini" not in plan["reply"]
-    assert "Google" not in plan["reply"]
-    assert "vision-capable main model or Vision Profile" in plan["reply"]
 
 
-def test_single_capture_and_capture_status_keep_distinct_action_kinds() -> None:
-    single = tool(
-        "vrcforge_capture_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    status_tool = tool("vrcforge_capture_status")
-    snapshot = PlannerCatalogSnapshot(
-        visible_tools=(single, status_tool),
-        routable_tools=(single, status_tool),
-    )
-    planner = service(catalog=FakeCatalog(planning=snapshot, execution=snapshot))
-
-    single_plan = planner._local_plan_agent_turn(
-        "Capture one current screenshot.",
-        {},
-        {},
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-    status_plan = planner._local_plan_agent_turn(
-        "Read the current capture status for play mode.",
-        {},
-        {},
-        exposure_layer=EXPOSURE_LAYER_EXECUTION,
-    )
-
-    assert single_plan["writeNeeded"] is True
-    assert single_plan["writeTool"] == "vrcforge_capture_screenshot"
-    assert single_plan["skillNeeded"] is False
-    assert status_plan["skillNeeded"] is True
-    assert status_plan["skillTool"] == "vrcforge_capture_status"
-    assert status_plan["writeNeeded"] is False
 
 
-@pytest.mark.parametrize(
-    ("message", "exposure_layer"),
-    [
-        ("Translate 'scan avatar materials'; do not inspect the project.", EXPOSURE_LAYER_PLANNING),
-        ("Rewrite this more politely: take one current screenshot.", EXPOSURE_LAYER_EXECUTION),
-        ("I scanned the avatar materials yesterday; no action is requested now.", EXPOSURE_LAYER_PLANNING),
-        ("Give me a manual FX Animator plan without reading the project.", EXPOSURE_LAYER_PLANNING),
-        ("screenshot", EXPOSURE_LAYER_EXECUTION),
-    ],
-)
-def test_deterministic_keyword_router_keeps_non_actionable_context_text_only(
-    message: str,
-    exposure_layer: str,
-) -> None:
-    materials = tool("vrcforge_scan_materials")
-    fx = tool("vrcforge_scan_fx_animator")
-    capture = tool(
-        "vrcforge_capture_screenshot",
-        category="supervised-write",
-        write=True,
-    )
-    planning = PlannerCatalogSnapshot(
-        visible_tools=(materials, fx),
-        routable_tools=(materials, fx, capture),
-    )
-    execution = PlannerCatalogSnapshot(
-        visible_tools=(materials, fx, capture),
-        routable_tools=(materials, fx, capture),
-    )
-
-    plan = service(
-        catalog=FakeCatalog(planning=planning, execution=execution)
-    )._local_plan_agent_turn(
-        message,
-        {},
-        {},
-        exposure_layer=exposure_layer,
-    )
-
-    assert plan["skillNeeded"] is False
-    assert plan["writeNeeded"] is False
-    assert plan["nextStep"] not in {
-        "call_skill",
-        "request_write",
-        "enter_execution",
-        "classify_shell",
-    }
 
 
 @pytest.mark.parametrize(

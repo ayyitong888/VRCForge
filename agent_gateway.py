@@ -3481,6 +3481,30 @@ class AgentGateway:
             ensure_dict(ensure_dict(task_continuation).get("execution")) or None
         )
         approval_id = str(ensure_dict(task_continuation).get("approvalId") or "").strip()
+        if continuation_context and write_payload is not None:
+            completed_action_id = str(
+                continuation_context.get("requestedActionId") or ""
+            ).strip()
+            completed_step = next(
+                (
+                    step
+                    for step in reversed(steps)
+                    if not completed_action_id
+                    or str(step.get("actionId") or "").strip()
+                    == completed_action_id
+                ),
+                None,
+            )
+            if completed_step is not None:
+                if write_payload.get("result") is not None:
+                    completed_step["result"] = write_payload.get("result")
+                completion_outcome = ensure_dict(
+                    continuation_completion.get("outcome")
+                )
+                if completion_outcome:
+                    completed_step["outcome"] = completion_outcome
+                if write_payload.get("error"):
+                    completed_step["error"] = str(write_payload.get("error"))
         first_plan: dict[str, Any] | None = None
         last_plan: dict[str, Any] = {}
         iterations = 0
@@ -3706,6 +3730,10 @@ class AgentGateway:
                     "preProvider": True,
                 }
             )
+            if bootstrap_payload.get("result") is not None:
+                steps[-1]["result"] = bootstrap_payload.get("result")
+            if bootstrap_outcome:
+                steps[-1]["outcome"] = bootstrap_outcome
 
         for step_index in range(RUNTIME_AGENT_MAX_STEPS):
             if continuation_shutdown_guard:
@@ -4337,6 +4365,13 @@ class AgentGateway:
                     "actionId": task_action["actionId"],
                 }
             )
+            if step_payload.get("result") is not None:
+                steps[-1]["result"] = step_payload.get("result")
+            step_timeline_outcome = ensure_dict(step_payload.get("outcome"))
+            if step_timeline_outcome:
+                steps[-1]["outcome"] = step_timeline_outcome
+            if step_payload.get("error"):
+                steps[-1]["error"] = str(step_payload.get("error"))
 
             if (
                 str(plan.get("planner") or "").strip().casefold() != "llm"

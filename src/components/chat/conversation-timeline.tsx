@@ -13,8 +13,16 @@ import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown } from "./chat-markdown";
 
+type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
+  actionId?: string;
+  result?: unknown;
+  outcome?: Record<string, unknown>;
+  error?: string;
+  historical?: boolean;
+};
+
 export type OrderedAgentStep = {
-  step: NonNullable<AgentRuntimeResponse["steps"]>[number];
+  step: AgentTimelineStep;
   sourceIndex: number;
 };
 
@@ -232,14 +240,16 @@ function buildAgentTimelineRowsFromSteps({
     if (normalizedKind === "shell") {
       const detailedShell = shellStepCount === 1 ? shell : undefined;
       const stepShellStatus = step.status || detailedShell?.status || "shell";
+      const stepResult = step.result !== undefined ? step.result : detailedShell?.result;
+      const stepShellResult = asAgentShellResult(stepResult);
       rows.push(
         <RunRow
           key={rowKey}
           icon="shell"
           title={step.tool || detailedShell?.classification?.command || "shell"}
-          statusTone={detailedShell?.result ? (detailedShell.result.ok ? "ok" : "danger") : stepStatusTone(stepShellStatus)}
-          statusLabel={detailedShell?.result
-              ? t("shell.exitCodeDuration", { code: detailedShell.result.exitCode, time: formatDuration(detailedShell.result.durationSeconds) })
+          statusTone={stepShellResult ? (stepShellResult.ok ? "ok" : "danger") : stepStatusTone(stepShellStatus)}
+          statusLabel={stepShellResult
+              ? t("shell.exitCodeDuration", { code: stepShellResult.exitCode, time: formatDuration(stepShellResult.durationSeconds) })
               : awaitingApproval
                 ? t("shell.awaitConfirmation")
                 : stepShellStatus}
@@ -257,13 +267,14 @@ function buildAgentTimelineRowsFromSteps({
               ))}
             </div>
           ) : null}
-          {detailedShell?.result ? (
+          {stepShellResult ? (
             <>
-              <DataLine label={t("shell.elapsed")} value={formatDuration(detailedShell.result.durationSeconds)} />
-              <OutputBlock label={t("shell.output")} value={detailedShell.result.stdout} />
-              {detailedShell.result.stderr ? <OutputBlock label={t("shell.errorOutput")} value={detailedShell.result.stderr} danger /> : null}
+              <DataLine label={t("shell.elapsed")} value={formatDuration(stepShellResult.durationSeconds)} />
+              <OutputBlock label={t("shell.output")} value={stepShellResult.stdout} />
+              {stepShellResult.stderr ? <OutputBlock label={t("shell.errorOutput")} value={stepShellResult.stderr} danger /> : null}
             </>
-          ) : null}
+          ) : stepResult !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(stepResult)} /> : null}
+          {step.error || detailedShell?.error ? <DataLine label={t("skills.error")} value={step.error || detailedShell?.error || ""} /> : null}
           {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
       );
@@ -273,12 +284,13 @@ function buildAgentTimelineRowsFromSteps({
       const detailedSkill = skillStepCount === 1 ? skill : undefined;
       const stepSkillTool = step.tool || skill?.tool || t("skills.skillCall");
       const stepSkillStatus = step.status || skill?.status || "skill";
+      const stepResult = step.result !== undefined ? step.result : detailedSkill?.result;
       rows.push(
         <RunRow key={rowKey} icon="skill" title={stepSkillTool} statusTone={detailedSkill ? skillTone(detailedSkill) : stepStatusTone(stepSkillStatus)} statusLabel={displaySkillStatus(stepSkillStatus)}>
           <DataLine label={t("skills.tool")} value={stepSkillTool} mono />
           {detailedSkill?.category ? <DataLine label={t("skills.category")} value={detailedSkill.category} /> : null}
-          {detailedSkill?.error ? <DataLine label={t("skills.error")} value={detailedSkill.error} /> : null}
-          {detailedSkill?.result !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(detailedSkill.result)} /> : null}
+          {step.error || detailedSkill?.error ? <DataLine label={t("skills.error")} value={step.error || detailedSkill?.error || ""} /> : null}
+          {stepResult !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(stepResult)} /> : null}
           {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
       );
@@ -288,13 +300,14 @@ function buildAgentTimelineRowsFromSteps({
       const detailedWrite = writeStepCount === 1 ? write : undefined;
       const stepWriteTool = step.tool || write?.tool || t("skills.skillCall");
       const status = step.status || write?.status || (write?.ok ? "executed" : "pending");
+      const stepResult = step.result !== undefined ? step.result : detailedWrite?.result;
       rows.push(
         <RunRow key={rowKey} icon="plan" title={stepWriteTool} statusTone={detailedWrite?.ok ? "ok" : stepStatusTone(status)} statusLabel={status}>
           <DataLine label="Tool" value={stepWriteTool} mono />
           {detailedWrite?.approvalId ? <DataLine label="Approval" value={detailedWrite.approvalId} mono /> : null}
           {detailedWrite?.paramsSummary ? <DataLine label={t("skills.data")} value={formatPayload(detailedWrite.paramsSummary)} /> : null}
-          {detailedWrite?.result ? <OutputBlock label={t("skills.data")} value={formatPayload(detailedWrite.result)} /> : null}
-          {detailedWrite?.error ? <DataLine label={t("skills.error")} value={detailedWrite.error} /> : null}
+          {stepResult !== undefined ? <OutputBlock label={t("skills.data")} value={formatPayload(stepResult)} /> : null}
+          {step.error || detailedWrite?.error ? <DataLine label={t("skills.error")} value={step.error || detailedWrite?.error || ""} /> : null}
           {step.summary ? <DataLine label={t("agent.stepSummary")} value={step.summary} /> : null}
         </RunRow>,
       );
@@ -317,8 +330,8 @@ function buildAgentTimelineRowsFromSteps({
       }
       continue;
     }
-    if (normalizedKind === "result" && response.result) {
-      const result = response.result as { ok?: boolean; status?: string; message?: string } | AgentShellResult;
+    if (normalizedKind === "result" && (step.result !== undefined || response.result !== undefined)) {
+      const result = (step.result !== undefined ? step.result : response.result) as { ok?: boolean; status?: string; message?: string } | AgentShellResult;
       rows.push(
         <RunRow
           key={rowKey}
@@ -764,9 +777,8 @@ export function InlineApprovalCard({
 }
 
 export function displayPlanner(planner: string): string {
-  if (planner === "deterministic-local") return i18n.t("planner.local");
   if (planner === "llm") return i18n.t("planner.ai");
-  return planner || i18n.t("planner.fallback");
+  return i18n.t("planner.fallback");
 }
 
 function displayStep(step: string): string {
@@ -812,6 +824,21 @@ function displaySkillStatus(status: string): string {
     blocked: i18n.t("skillStatus.blocked"),
   };
   return labels[status] || status || "-";
+}
+
+function asAgentShellResult(value: unknown): AgentShellResult | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const candidate = value as Partial<AgentShellResult>;
+  return typeof candidate.ok === "boolean"
+    && typeof candidate.command === "string"
+    && typeof candidate.exitCode === "number"
+    && typeof candidate.durationSeconds === "number"
+    && typeof candidate.stdout === "string"
+    && typeof candidate.stderr === "string"
+    ? candidate as AgentShellResult
+    : undefined;
 }
 
 export function formatPayload(value: unknown): string {

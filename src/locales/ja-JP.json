@@ -566,15 +566,11 @@
     "rejected": "却下済み",
     "executionResult": "実行結果",
     "compactedHistory": "圧縮済み履歴",
-    "localIdleMessage": "この入力はまだ直接処理できません——現在ローカルキーワードプランニングを使用中……",
-    "openSettings": "設定を開く",
     "willDoNext": "次に{{step}}します",
     "executed": "実行済み",
     "noSummaryReturned": "要約は返されませんでした。",
     "subagentTask": "バックグラウンドタスク",
     "coreDisconnectedSend": "コア未接続、メッセージは送信されませんでした。",
-    "keywordPlannerHint1": "この文は直接理解できません。現在のローカルキーワードプランナーは「ログ、スクリーンショット、表情、マテリアル、ヘルスチェック」などの固定コマンドのみ認識します。",
-    "keywordPlannerHint2": "設定でモデルプロバイダーを設定すると、自然言語でのやり取りとツール呼び出しの自動計画が可能になります。キーが設定済みの場合、AIプランニングがまだ有効でない可能性があります。コアを再起動するかプロバイダー設定を確認してください。",
     "elapsed": "· 実行済み {{time}}"
   },
   "approval": {
@@ -697,10 +693,8 @@
     "blocked": "ブロック済み"
   },
   "planner": {
-    "deterministicLocal": "ローカルプランニング",
     "llm": "AI プランニング",
     "fallback": "プランニング",
-    "local": "ローカルプランナー",
     "ai": "AIプランナー"
   },
   "step": {

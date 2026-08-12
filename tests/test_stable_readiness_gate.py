@@ -31,6 +31,9 @@ def make_args(tmp_path: Path, **overrides: object) -> Namespace:
         "payload_zip_smoke": "",
         "golden_path_matrix": "",
         "skill_ecosystem_smoke": "",
+        "packaged_latency_cold": "",
+        "packaged_latency_warm": "",
+        "visual_completion_receipt": "",
         "optimizer_request_guard_smoke": "",
         "external_agent_smoke": "",
         "installer_smoke": "",
@@ -40,6 +43,7 @@ def make_args(tmp_path: Path, **overrides: object) -> Namespace:
         "artifacts_dir": str(tmp_path / "reports"),
         "stale_version": ["0.9.0-beta"],
         "allow_blocked": False,
+        "max_release_evidence_age_hours": 24.0,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -307,6 +311,148 @@ def test_stable_readiness_gate_blocks_missing_avatar_encryption_boundary(tmp_pat
 
     assert report["ok"] is False
     assert "public_docs.avatar_encryption_preview_boundary" in report["summary"]["blockingSteps"]
+
+
+def test_packaged_startup_pair_requires_exact_release_and_warm_hard_budgets(tmp_path):
+    gate = load_gate()
+    cold = tmp_path / "cold.json"
+    warm = tmp_path / "warm.json"
+    commit = "a" * 40
+    payload_sha = "b" * 64
+
+    def startup_payload(sample: str) -> dict:
+        return {
+            "schema": "vrcforge.packaged_startup_probe.v1",
+            "ok": True,
+            "sample": sample,
+            "profileRoot": str(tmp_path / "profile"),
+            "profileExistedBefore": sample == "warm",
+            "startupPairMarker": {
+                "schema": "vrcforge.packaged_startup_pair.v1",
+                "manifestCommit": commit,
+                "portableSha256": payload_sha,
+                "profileRoot": str(tmp_path / "profile"),
+                "coldCompleted": True,
+                "profilePreparedForWarm": True,
+            },
+            "releaseBinding": {
+                "version": "1.5.1",
+                "manifestCommit": commit,
+                "headCommit": commit,
+                "originMainCommit": commit,
+                "strictReleaseBinding": True,
+                "portableName": "VRCForge_Windows_x64_1.5.1.zip",
+                "portableSha256": payload_sha,
+                "buildPolicy": {
+                    "mode": "strict",
+                    "releaseEligible": True,
+                    "allowDirty": False,
+                    "allowUnpushed": False,
+                    "allowVersionMismatch": False,
+                },
+            },
+            "startupMetrics": {
+                "vrcforge": {
+                    "startupShellPaintedMs": 100,
+                    "startBackendInvokeMs": 100,
+                    "bootstrapRefreshMs": 100,
+                    "centerUsableMs": 120,
+                    "sidebarsRequestedMs": 121,
+                }
+            },
+            "startupBudget": {"ok": True},
+            "providerRequests": [],
+            "providerRequestCount": 0,
+            "lifecycle": {
+                "mode": "explicit-quit",
+                "forcedCleanupUsed": False,
+                "ok": True,
+                "afterQuit": {"processes": [], "ports": []},
+            },
+        }
+
+    write_json(cold, startup_payload("cold"))
+    write_json(warm, startup_payload("warm"))
+    step = gate.check_packaged_startup_pair(cold, warm, "1.5.1", payload_sha, commit)
+    assert step["ok"] is True
+
+    over_budget = startup_payload("warm")
+    over_budget["startupMetrics"]["vrcforge"]["startupShellPaintedMs"] = 101
+    write_json(warm, over_budget)
+    rejected = gate.check_packaged_startup_pair(cold, warm, "1.5.1", payload_sha, commit)
+    assert rejected["ok"] is False
+    assert rejected["details"]["warmHardBudgetsOk"] is False
+
+
+def test_visual_completion_receipt_requires_authenticated_release_acceptance_and_visual_pass(tmp_path):
+    gate = load_gate()
+    path = tmp_path / "visual.json"
+    payload = {
+        "schema": "vrcforge.agent_harness_report.v6",
+        "accepted": True,
+        "releaseAccepted": True,
+        "runtimeJourneyAccepted": True,
+        "externalVerificationAccepted": True,
+        "toolsExecuted": True,
+        "trustedRuntimeJourneyReceipts": True,
+        "runtimeJourneys": {
+            "passed": 1,
+            "total": 1,
+            "cases": [
+                {
+                    "accepted": True,
+                    "receiptValid": True,
+                    "nextStep": "done",
+                    "taskStatus": "completed",
+                    "verificationProfiles": ["multi_angle_visual"],
+                    "verificationStates": ["passed"],
+                    "completedActions": [
+                        {
+                            "kind": "skill",
+                            "tool": "vrcforge_vision_audit_multi",
+                            "verificationProfiles": ["multi_angle_visual"],
+                            "verificationStates": ["passed"],
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    write_json(path, payload)
+    assert gate.check_visual_completion_receipt(path)["ok"] is True
+
+    payload["releaseAccepted"] = False
+    write_json(path, payload)
+    rejected = gate.check_visual_completion_receipt(path)
+    assert rejected["ok"] is False
+    assert rejected["details"]["releaseAccepted"] is False
+
+
+def test_1_5_1_stable_gate_blocks_without_runtime_release_evidence(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path, version="1.5.1"))
+
+    assert report["ok"] is False
+    assert "startup.exact_package_pair" in report["summary"]["blockingSteps"]
+    assert "visual.runtime_completion_receipt" in report["summary"]["blockingSteps"]
+    assert report["policy"]["requireReleaseRuntimeEvidence"] is True
+
+
+def test_1_5_1_stable_gate_does_not_auto_reuse_an_old_visual_success(tmp_path, monkeypatch):
+    gate = load_gate()
+    write_minimum_tree(tmp_path)
+    old_success = tmp_path / "artifacts" / "test-results" / "old-success.json"
+    write_json(old_success, {"schema": "vrcforge.agent_harness_report.v6", "releaseAccepted": True})
+    monkeypatch.chdir(tmp_path)
+
+    report = gate.build_stable_readiness_gate(make_args(tmp_path, version="1.5.1"))
+
+    visual = _step(report, "visual.runtime_completion_receipt")
+    assert visual["ok"] is False
+    assert visual["path"].endswith("<visual-completion-receipt-required>")
 
 
 def test_stable_readiness_gate_writes_report(tmp_path):

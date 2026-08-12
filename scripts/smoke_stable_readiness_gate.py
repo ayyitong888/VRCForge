@@ -123,6 +123,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--payload-zip-smoke", default="")
     parser.add_argument("--golden-path-matrix", default="")
     parser.add_argument("--skill-ecosystem-smoke", default="")
+    parser.add_argument("--packaged-latency-cold", default="")
+    parser.add_argument("--packaged-latency-warm", default="")
+    parser.add_argument("--visual-completion-receipt", default="")
     parser.add_argument("--optimizer-request-guard-smoke", default="")
     parser.add_argument("--external-agent-smoke", default="")
     parser.add_argument("--installer-smoke", default="")
@@ -141,6 +144,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="If > 0, each smoke/proof artifact must have been written within this many hours, else the gate blocks. Default 0 disables the freshness guard.",
+    )
+    parser.add_argument(
+        "--max-release-evidence-age-hours",
+        type=float,
+        default=24.0,
+        help="Maximum age of exact-package startup and Runtime visual completion evidence required for 1.5.1+ stable release.",
     )
     parser.add_argument(
         "--require-live-writes",
@@ -196,6 +205,7 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     max_age_hours = float(getattr(args, "max_artifact_age_hours", 0.0) or 0.0)
     require_live_writes = bool(getattr(args, "require_live_writes", False))
     require_skill_ecosystem = version_at_least(version, "1.3.0")
+    require_release_runtime_evidence = version_at_least(version, "1.5.1")
     packaged_backend_path = resolve_evidence_path(args.packaged_backend_smoke, "artifacts/packaged-backend-smoke-*/packaged-bootstrap-summary.json")
     payload_zip_path = resolve_evidence_path(args.payload_zip_smoke, "artifacts/payload-smoke/*/summary.json")
     golden_path_matrix_path = resolve_evidence_path(args.golden_path_matrix, "artifacts/golden-path-matrix/*.json")
@@ -206,6 +216,25 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
     optimizer_guard_path = resolve_evidence_path(args.optimizer_request_guard_smoke, "artifacts/optimizer-request-guard-smoke/*.json")
     external_agent_path = resolve_evidence_path(args.external_agent_smoke, "artifacts/external-agent-smoke/*.json")
     installer_path = resolve_evidence_path(args.installer_smoke, "artifacts/installer-smoke/installer-install-uninstall-*.json")
+    packaged_latency_cold_path = resolve_json_evidence_path(
+        getattr(args, "packaged_latency_cold", ""),
+        "artifacts/latency/packaged-latency-*.json",
+        lambda payload: payload.get("schema") == "vrcforge.packaged_startup_probe.v1"
+        and payload.get("sample") == "cold",
+    )
+    packaged_latency_warm_path = resolve_json_evidence_path(
+        getattr(args, "packaged_latency_warm", ""),
+        "artifacts/latency/packaged-latency-*.json",
+        lambda payload: payload.get("schema") == "vrcforge.packaged_startup_probe.v1"
+        and payload.get("sample") == "warm",
+    )
+    # Stable publication must name the exact Runtime visual receipt. Automatic
+    # "latest passing" discovery could skip a newer failed attempt and silently
+    # reuse an older success, so an omitted path is deliberately blocking.
+    visual_completion_receipt_path = Path(
+        str(getattr(args, "visual_completion_receipt", "") or "").strip()
+        or "<visual-completion-receipt-required>"
+    )
 
     payload_name = f"VRCForge_Windows_x64_{version}.zip"
     steps.append(check_packaged_backend(packaged_backend_path, version, manifest_hashes.get(payload_name, "")))
@@ -239,6 +268,41 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
             str(getattr(args, "upgrade_from_installer_sha256", "") or "").strip().lower(),
         )
     )
+    if require_release_runtime_evidence:
+        steps.append(
+            check_packaged_startup_pair(
+                packaged_latency_cold_path,
+                packaged_latency_warm_path,
+                version,
+                manifest_hashes.get(payload_name, ""),
+                manifest_commit,
+            )
+        )
+        steps.append(check_visual_completion_receipt(visual_completion_receipt_path))
+        release_evidence_max_age = float(
+            getattr(args, "max_release_evidence_age_hours", 24.0) or 0.0
+        )
+        if release_evidence_max_age <= 0:
+            steps.append(
+                {
+                    "name": "freshness.release_runtime_evidence_policy",
+                    "category": "freshness",
+                    "required": True,
+                    "ok": False,
+                    "error": "1.5.1+ stable release requires a positive Runtime evidence freshness window",
+                }
+            )
+        else:
+            for fresh_name, fresh_path in (
+                ("packaged_latency_cold", packaged_latency_cold_path),
+                ("packaged_latency_warm", packaged_latency_warm_path),
+                ("visual_completion_receipt", visual_completion_receipt_path),
+            ):
+                steps.append(
+                    check_artifact_freshness(
+                        f"freshness.{fresh_name}", fresh_path, release_evidence_max_age
+                    )
+                )
 
     # Freshness guard (opt-in). Default 0 disables it so existing callers keep their
     # exact behavior; CI/release can pass a window so a stale-but-passing artifact
@@ -288,6 +352,12 @@ def build_stable_readiness_gate(args: argparse.Namespace) -> dict[str, Any]:
             "maxArtifactAgeHours": max_age_hours if max_age_hours > 0 else None,
             "requireLiveWrites": require_live_writes,
             "requireSkillEcosystem": require_skill_ecosystem,
+            "requireReleaseRuntimeEvidence": require_release_runtime_evidence,
+            "maxReleaseEvidenceAgeHours": (
+                float(getattr(args, "max_release_evidence_age_hours", 24.0) or 0.0)
+                if require_release_runtime_evidence
+                else None
+            ),
             "latestPublishedStable": latest_stable,
             "stableRefresh": stable_refresh,
         },
@@ -1191,6 +1261,220 @@ def check_skill_ecosystem_smoke(
     )
 
 
+def check_packaged_startup_pair(
+    cold_path: Path,
+    warm_path: Path,
+    version: str,
+    expected_payload_sha256: str,
+    expected_manifest_commit: str,
+) -> dict[str, Any]:
+    cold, cold_error = read_json_document(cold_path)
+    warm, warm_error = read_json_document(warm_path)
+    if cold_error or warm_error:
+        reason = "; ".join(item for item in (cold_error, warm_error) if item)
+        return evidence_step(
+            "startup.exact_package_pair",
+            False,
+            True,
+            warm_path,
+            reason=reason,
+            category="latency",
+            details={"coldPath": str(cold_path), "warmPath": str(warm_path)},
+        )
+
+    expected_policy = {
+        "mode": "strict",
+        "releaseEligible": True,
+        "allowDirty": False,
+        "allowUnpushed": False,
+        "allowVersionMismatch": False,
+    }
+
+    def release_bound(payload: dict[str, Any], sample: str) -> bool:
+        binding = payload.get("releaseBinding") if isinstance(payload.get("releaseBinding"), dict) else {}
+        pair = payload.get("startupPairMarker") if isinstance(payload.get("startupPairMarker"), dict) else {}
+        return bool(
+            payload.get("schema") == "vrcforge.packaged_startup_probe.v1"
+            and payload.get("ok") is True
+            and payload.get("sample") == sample
+            and binding.get("version") == version
+            and binding.get("manifestCommit") == expected_manifest_commit
+            and binding.get("headCommit") == expected_manifest_commit
+            and binding.get("originMainCommit") == expected_manifest_commit
+            and binding.get("strictReleaseBinding") is True
+            and binding.get("portableName") == f"VRCForge_Windows_x64_{version}.zip"
+            and binding.get("portableSha256") == expected_payload_sha256
+            and binding.get("buildPolicy") == expected_policy
+            and pair.get("schema") == "vrcforge.packaged_startup_pair.v1"
+            and pair.get("manifestCommit") == expected_manifest_commit
+            and pair.get("portableSha256") == expected_payload_sha256
+            and pair.get("profileRoot") == payload.get("profileRoot")
+            and pair.get("coldCompleted") is True
+            and pair.get("profilePreparedForWarm") is True
+        )
+
+    pair_identity_ok = bool(
+        cold.get("profileRoot")
+        and cold.get("profileRoot") == warm.get("profileRoot")
+        and cold.get("profileExistedBefore") is False
+        and warm.get("profileExistedBefore") is True
+    )
+    warm_metrics = (
+        warm.get("startupMetrics", {}).get("vrcforge", {})
+        if isinstance(warm.get("startupMetrics"), dict)
+        and isinstance(warm.get("startupMetrics", {}).get("vrcforge"), dict)
+        else {}
+    )
+
+    def exact_budget(field: str) -> bool:
+        value = warm_metrics.get(field)
+        return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100
+
+    warm_hard_budgets_ok = all(
+        exact_budget(field)
+        for field in ("startupShellPaintedMs", "startBackendInvokeMs", "bootstrapRefreshMs")
+    )
+    center_before_sidebars = bool(
+        isinstance(warm_metrics.get("centerUsableMs"), (int, float))
+        and not isinstance(warm_metrics.get("centerUsableMs"), bool)
+        and isinstance(warm_metrics.get("sidebarsRequestedMs"), (int, float))
+        and not isinstance(warm_metrics.get("sidebarsRequestedMs"), bool)
+        and warm_metrics["centerUsableMs"] <= warm_metrics["sidebarsRequestedMs"]
+    )
+
+    def clean_lifecycle(payload: dict[str, Any]) -> bool:
+        lifecycle = payload.get("lifecycle") if isinstance(payload.get("lifecycle"), dict) else {}
+        after_quit = lifecycle.get("afterQuit") if isinstance(lifecycle.get("afterQuit"), dict) else {}
+        return bool(
+            payload.get("providerRequestCount") == 0
+            and payload.get("providerRequests") == []
+            and lifecycle.get("mode") == "explicit-quit"
+            and lifecycle.get("forcedCleanupUsed") is False
+            and lifecycle.get("ok") is True
+            and after_quit.get("processes") == []
+            and after_quit.get("ports") == []
+        )
+
+    cold_release_bound = release_bound(cold, "cold")
+    warm_release_bound = release_bound(warm, "warm")
+    cold_lifecycle_ok = clean_lifecycle(cold)
+    warm_lifecycle_ok = clean_lifecycle(warm)
+    ok = bool(
+        cold_release_bound
+        and warm_release_bound
+        and pair_identity_ok
+        and warm.get("startupBudget", {}).get("ok") is True
+        and warm_hard_budgets_ok
+        and center_before_sidebars
+        and cold_lifecycle_ok
+        and warm_lifecycle_ok
+    )
+    return evidence_step(
+        "startup.exact_package_pair",
+        ok,
+        True,
+        warm_path,
+        category="latency",
+        schema=str(warm.get("schema") or ""),
+        fields_checked=[
+            "releaseBinding",
+            "startupPairMarker",
+            "profileRoot",
+            "startupMetrics.vrcforge",
+            "providerRequestCount",
+            "lifecycle",
+        ],
+        reason="" if ok else "exact-package cold/warm startup evidence did not pass the stable latency and lifecycle contract",
+        details={
+            "coldPath": str(cold_path),
+            "warmPath": str(warm_path),
+            "coldReleaseBound": cold_release_bound,
+            "warmReleaseBound": warm_release_bound,
+            "pairIdentityOk": pair_identity_ok,
+            "warmHardBudgetsOk": warm_hard_budgets_ok,
+            "centerBeforeSidebars": center_before_sidebars,
+            "coldLifecycleOk": cold_lifecycle_ok,
+            "warmLifecycleOk": warm_lifecycle_ok,
+        },
+    )
+
+
+def check_visual_completion_receipt(path: Path) -> dict[str, Any]:
+    payload, parse_error = read_json_document(path)
+    if parse_error:
+        return evidence_step(
+            "visual.runtime_completion_receipt",
+            False,
+            True,
+            path,
+            reason=parse_error,
+            category="visual",
+        )
+    runtime = payload.get("runtimeJourneys") if isinstance(payload.get("runtimeJourneys"), dict) else {}
+    cases = runtime.get("cases") if isinstance(runtime.get("cases"), list) else []
+
+    def visual_action_passed(action: Any) -> bool:
+        if not isinstance(action, dict):
+            return False
+        profiles = action.get("verificationProfiles") if isinstance(action.get("verificationProfiles"), list) else []
+        states = action.get("verificationStates") if isinstance(action.get("verificationStates"), list) else []
+        return bool(
+            action.get("kind") == "skill"
+            and action.get("tool") == "vrcforge_vision_audit_multi"
+            and len(profiles) == len(states)
+            and any(profile == "multi_angle_visual" and states[index] == "passed" for index, profile in enumerate(profiles))
+        )
+
+    def runtime_visual_passed(case: Any) -> bool:
+        if not isinstance(case, dict):
+            return False
+        actions = case.get("completedActions") if isinstance(case.get("completedActions"), list) else []
+        return bool(
+            case.get("accepted") is True
+            and case.get("receiptValid") is True
+            and case.get("nextStep") == "done"
+            and case.get("taskStatus") == "completed"
+            and any(visual_action_passed(action) for action in actions)
+        )
+
+    passing_visual_cases = sum(1 for case in cases if runtime_visual_passed(case))
+    release_accepted = payload.get("releaseAccepted") is True
+    ok = bool(
+        payload.get("schema") == "vrcforge.agent_harness_report.v6"
+        and release_accepted
+        and payload.get("runtimeJourneyAccepted") is True
+        and payload.get("externalVerificationAccepted") is True
+        and payload.get("toolsExecuted") is True
+        and payload.get("trustedRuntimeJourneyReceipts") is True
+        and isinstance(runtime.get("passed"), int)
+        and runtime.get("passed") == runtime.get("total")
+        and runtime.get("total") == len(cases)
+        and passing_visual_cases >= 1
+    )
+    return evidence_step(
+        "visual.runtime_completion_receipt",
+        ok,
+        True,
+        path,
+        category="visual",
+        schema=str(payload.get("schema") or ""),
+        fields_checked=[
+            "releaseAccepted",
+            "runtimeJourneyAccepted",
+            "externalVerificationAccepted",
+            "trustedRuntimeJourneyReceipts",
+            "runtimeJourneys.cases.completedActions",
+        ],
+        reason="" if ok else "authenticated Runtime-owned visual completion receipt was missing or not release-accepted",
+        details={
+            "releaseAccepted": release_accepted,
+            "runtimeJourneyAccepted": payload.get("runtimeJourneyAccepted"),
+            "passingVisualCases": passing_visual_cases,
+            "releaseArtifactBindingAvailable": False,
+        },
+    )
+
+
 def check_optimizer_request_guard(path: Path) -> dict[str, Any]:
     payload, parse_error = read_json_document(path)
     if parse_error:
@@ -1392,6 +1676,21 @@ def resolve_evidence_path(explicit: str, pattern: str) -> Path:
     if explicit:
         return Path(explicit)
     candidates = [path for path in Path().glob(pattern) if path.is_file()]
+    if not candidates:
+        return Path(pattern)
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def resolve_json_evidence_path(explicit: str, pattern: str, predicate: Any) -> Path:
+    if explicit:
+        return Path(explicit)
+    candidates: list[Path] = []
+    for path in Path().glob(pattern):
+        if not path.is_file():
+            continue
+        payload, parse_error = read_json_document(path)
+        if not parse_error and predicate(payload):
+            candidates.append(path)
     if not candidates:
         return Path(pattern)
     return max(candidates, key=lambda path: path.stat().st_mtime)

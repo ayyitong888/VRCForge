@@ -203,29 +203,23 @@ export function cloneChatAttachments(attachments: ChatAttachment[]): ChatAttachm
   }));
 }
 
-export function conversationItemText(item: ConversationItem, t: TFunction): string {
-  if (item.type === "user") {
-    return appendAttachmentSummary(item.text, item.attachments || [], t);
+export function copyableAgentDialogueText(response: AgentRuntimeResponse): string {
+  const explicitReply = String(response.plan?.reply || "").trim();
+  if (explicitReply) {
+    return explicitReply;
   }
-  if (item.type === "agent") {
-    return item.response.plan?.reply || item.response.plan?.summary || "";
+  return (response.steps || [])
+    .filter((step) => /assistant|final|reply/i.test(step.kind || ""))
+    .map((step) => String(step.summary || "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+export function conversationItemText(item: ConversationItem, _t: TFunction): string {
+  if (item.type !== "agent") {
+    return "";
   }
-  if (item.type === "result") {
-    return [item.result ? formatPayload(item.result) : "", item.error || ""].filter(Boolean).join("\n\n");
-  }
-  if (item.type === "approval_revision") {
-    return [item.approvalId, item.targetTool, item.reason, item.note].filter(Boolean).join("\n");
-  }
-  if (item.type === "error") {
-    return item.text;
-  }
-  if (item.type === "compact") {
-    return item.text;
-  }
-  if (item.type === "subagent") {
-    return formatPayload(item.task);
-  }
-  return "";
+  return copyableAgentDialogueText(item.response);
 }
 
 export function latestConversationItemId(

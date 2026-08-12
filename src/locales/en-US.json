@@ -566,15 +566,11 @@
     "rejected": "Rejected",
     "executionResult": "Execution Result",
     "compactedHistory": "Compacted History",
-    "localIdleMessage": "I can't process this directly yet — currently using local keyword planning...",
-    "openSettings": "Open Settings",
     "willDoNext": "Next I'll {{step}}",
     "executed": "Executed",
     "noSummaryReturned": "No summary was returned.",
     "subagentTask": "Background Task",
     "coreDisconnectedSend": "Core disconnected, message not sent.",
-    "keywordPlannerHint1": "I can't understand that directly — the current local keyword planner only recognizes fixed commands like logs, screenshots, expressions, materials, and health checks.",
-    "keywordPlannerHint2": "After binding a model provider in Settings, you can use natural language and auto-plan tool calls. If a key is already set, AI planning may not be enabled yet — restart the core or check provider config.",
     "elapsed": "· Ran {{time}}"
   },
   "approval": {
@@ -697,10 +693,8 @@
     "blocked": "Blocked"
   },
   "planner": {
-    "deterministicLocal": "Local Planning",
     "llm": "AI Planning",
     "fallback": "Planning",
-    "local": "Local planner",
     "ai": "AI planner"
   },
   "step": {

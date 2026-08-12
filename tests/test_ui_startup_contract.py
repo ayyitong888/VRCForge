@@ -76,7 +76,7 @@ def test_project_chat_uses_a_lazy_workbench_while_quick_chat_keeps_the_status_su
     assert "workspaceProjectLabel = authoritativeSelectedProjectPath" in app
     assert 'const AsyncRightRuntimeSidebar = lazy' in app
     assert 'const projectChatWorkspace = activeView === "chat" && Boolean(activeChat?.projectPath)' in app
-    assert "activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}" in app
+    assert "activityPanel={runtimeActivityPanel}" in app
     assert "projectWorkspace={projectChatWorkspace}" in app
     assert "subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}" in app
     assert "subAgentTaskCount={activeSubAgentTasks.length}" in app
@@ -150,7 +150,7 @@ def test_active_desktop_safety_state_survives_scope_changes_without_loading_hist
     assert "setActiveDesktopActions([])" not in no_session_body
 
 
-def test_runtime_and_subagent_details_move_to_the_project_workbench_without_duplication() -> None:
+def test_runtime_ledger_stays_in_chat_while_subagent_details_move_to_the_project_workbench() -> None:
     app = _read("src/App.tsx")
     chat = _read("src/components/chat/chat-workspace.tsx")
     activity = _read("src/components/runtime/runtime-activity-panel.tsx")
@@ -163,7 +163,8 @@ def test_runtime_and_subagent_details_move_to_the_project_workbench_without_dupl
     assert "{activityPanel}" in chat
     assert "{subAgentPanel}" in chat
     assert "{activityPanel}" not in sidebar
-    assert "activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}" in app
+    assert "activityPanel={runtimeActivityPanel}" in app
+    assert "activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}" not in app
     assert "subAgentPanel={projectChatWorkspace ? undefined : subAgentActivityPanel}" in app
     assert "subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}" in app
     assert "data-vrcforge-runtime-activity-panel" in activity

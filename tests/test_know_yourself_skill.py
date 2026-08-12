@@ -901,18 +901,6 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
     )
 
     report = dashboard_server.KNOW_YOURSELF_READINESS.know_yourself_sync({"editorFocusConfirmed": "true"})
-    route = dashboard_server.AGENT_GATEWAY.runtime_planner._match_runtime_skill(
-        "API 已经接好了，准备打开 Unity 工程",
-        {},
-    )
-    direct_work_start_route = dashboard_server.AGENT_GATEWAY.runtime_planner._match_runtime_skill(
-        "打开这个 Unity 工程开始做头像",
-        {},
-    )
-    short_work_start_route = dashboard_server.AGENT_GATEWAY.runtime_planner._match_runtime_skill(
-        "开工程",
-        {},
-    )
     executed = dashboard_server.AGENT_GATEWAY.runtime_skills.execute(
         "know-yourself",
         {"editorFocusConfirmed": True},
@@ -926,13 +914,6 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
     )
 
     assert report["readyForUnityWork"] is True
-    assert route is not None
-    assert route["tool"] == "know-yourself"
-    assert route["reason"] == "work-start self check"
-    assert direct_work_start_route is not None
-    assert direct_work_start_route["tool"] == "know-yourself"
-    assert short_work_start_route is not None
-    assert short_work_start_route["tool"] == "know-yourself"
     assert executed["status"] == "executed"
     assert executed["entrypointTool"] == "vrcforge_know_yourself"
     assert executed["entrypoint"]["result"]["readyForUnityWork"] is True

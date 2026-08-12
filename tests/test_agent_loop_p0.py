@@ -1,7 +1,7 @@
 """Focused P0 regression tests for the VRCForge agent runtime loop.
 
 These cover the post-1.1.0 P0 path: the runtime turn is a bounded agentic loop
-(observe -> plan -> act -> feed result back), with deterministic single-model
+(observe -> plan -> act -> feed result back), with Provider-planned
 auto-resolution for "add an object to the model" write intents, real approval
 creation, approved dispatch to the static GameObject primitive, and an honest
 "not connected / cannot plan" terminal instead of a fake success reply.
@@ -33,20 +33,15 @@ from agent_task_loop import (
     canonical_action_id,
 )
 from provider_configuration_service import ProviderApiConfig
-from runtime_planner_service import PlannerModelResult, detect_avatar_write_intent
+from runtime_planner_service import PlannerModelResult
 
 
-def provider_fixture_from_legacy_router(test):
-    """Keep approval-loop tests focused while production stays Provider-only.
-
-    The adapter is test-only: it turns the former deterministic fixture output
-    into a Provider-labelled plan. RuntimePlannerService production entrypoints
-    never call this router.
-    """
+def provider_plan_fixture(test):
+    """Drive focused approval-loop journeys with explicit Provider plans."""
 
     @wraps(test)
     def wrapped(self, *args, **kwargs):
-        with self._provider_fixture_from_legacy_router():
+        with self._provider_plan_fixture():
             return test(self, *args, **kwargs)
 
     return wrapped
@@ -125,27 +120,127 @@ class AgentLoopP0Tests(unittest.TestCase):
         return project
 
     @contextmanager
-    def _provider_fixture_from_legacy_router(self):
+    def _provider_plan_fixture(self):
         planner = self.gateway.runtime_planner
 
-        def provider_plan(message, params, observe, *args, **kwargs):
-            plan = planner._local_plan_agent_turn(
-                message,
-                params,
-                observe,
-                kwargs.get("loop_state"),
-                exposure_layer=kwargs.get("exposure_layer", "planning"),
-            )
-            return {
-                **plan,
-                "planner": "llm",
-                "plannerLabel": "Fixture Provider",
-            }
+        def provider_plan(message, params, _observe, *args, **kwargs):
+            lowered = str(message or "").casefold()
+            loop_state = list(kwargs.get("loop_state") or [])
+            base = {"planner": "llm", "plannerLabel": "Fixture Provider"}
+            if "上一条用了哪个供应商和模型" in str(message or ""):
+                provider = params.get("providerLabel") or params.get("provider") or "Provider"
+                model = params.get("model") or "model"
+                return {
+                    **base,
+                    "summary": f"{provider} / {model}",
+                    "reply": f"The previous response used {provider} / {model}.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                }
+            if "capture front and back views" in lowered:
+                return {
+                    **base,
+                    "summary": "Capture the requested front and back coverage views.",
+                    "writeNeeded": True,
+                    "writeTool": "vrcforge_capture_multi_screenshot",
+                    "writeParams": {"angles": ["front", "back"]},
+                    "continueLoop": False,
+                    "nextStep": "call_tool",
+                }
+            if params.get("shell_command") or params.get("shellCommand"):
+                command = params.get("shell_command") or params.get("shellCommand")
+                return {
+                    **base,
+                    "summary": "Run the requested Shell command.",
+                    "shellNeeded": True,
+                    "shellCommand": command,
+                    "shellParams": {},
+                    "continueLoop": False,
+                    "nextStep": "call_shell",
+                }
+            if "scene root" in lowered and params.get("avatarPath"):
+                return {
+                    **base,
+                    "summary": "The scene-root and avatar targets conflict.",
+                    "reply": "Choose either the scene root or the named avatar target before writing.",
+                    "writeNeeded": False,
+                    "skillNeeded": False,
+                    "continueLoop": False,
+                    "nextStep": "needs_user_action",
+                }
+            if "scene root" in lowered:
+                known_names = (
+                    "VRCForgeMCP2AppAcceptance",
+                    "ApprovalLoopProbe",
+                    "RejectedProbe",
+                    "FailedApprovalProbe",
+                    "RetryApprovalProbe",
+                    "CancelledRetryProbe",
+                )
+                name = next((item for item in known_names if item.casefold() in lowered), "GameObject")
+                return {
+                    **base,
+                    "summary": f"Create {name} at the scene root.",
+                    "writeNeeded": True,
+                    "writeTool": "vrcforge_create_gameobject",
+                    "writeParams": {
+                        "name": name,
+                        "parentPath": "",
+                        "projectPath": params.get("projectRoot") or params.get("projectPath") or "",
+                    },
+                    "resolvedTarget": "scene_root",
+                    "continueLoop": False,
+                    "nextStep": "call_tool",
+                }
+            if "add a new object to the model" in lowered:
+                avatar_result = next(
+                    (
+                        item.get("result")
+                        for item in reversed(loop_state)
+                        if item.get("tool") == "vrcforge_list_avatars"
+                        and isinstance(item.get("result"), dict)
+                    ),
+                    None,
+                )
+                avatars = list((avatar_result or {}).get("avatars") or [])
+                if not avatars:
+                    return {
+                        **base,
+                        "summary": "Inspect the available avatars before choosing a parent.",
+                        "skillNeeded": True,
+                        "skillTool": "vrcforge_list_avatars",
+                        "skillParams": {},
+                        "continueLoop": True,
+                        "nextStep": "call_skill",
+                    }
+                if len(avatars) > 1:
+                    return {
+                        **base,
+                        "summary": "Multiple avatars require an explicit target choice.",
+                        "reply": "Multiple avatars are available. Choose the target avatar before writing.",
+                        "continueLoop": False,
+                        "nextStep": "needs_user_action",
+                    }
+                parent_path = str(avatars[0].get("avatarPath") or "")
+                return {
+                    **base,
+                    "summary": "Create the requested object under the only available avatar.",
+                    "writeNeeded": True,
+                    "writeTool": "vrcforge_create_gameobject",
+                    "writeParams": {
+                        "name": "GameObject",
+                        "parentPath": parent_path,
+                        "projectPath": params.get("projectRoot") or params.get("projectPath") or "",
+                    },
+                    "continueLoop": False,
+                    "nextStep": "call_tool",
+                }
+            raise AssertionError(f"missing explicit Provider fixture for: {message}")
 
         with patch.object(planner, "plan_agent_turn", side_effect=provider_plan):
             yield
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_single_model_autoresolve_creates_real_approval_and_dispatches_static_write(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -237,7 +332,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(arguments["parentPath"], "Milltina")
         self.assertFalse(arguments["preview"])
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_explicit_scene_root_create_bypasses_avatar_scan_and_uses_supervised_write(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -311,7 +406,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(arguments["parentPath"], "")
         self.assertFalse(arguments["preview"])
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_approved_write_resumes_the_same_task_without_replaying_the_write(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -396,9 +491,13 @@ class AgentLoopP0Tests(unittest.TestCase):
             [action["actionId"] for action in continuation["task"]["actions"]],
         )
         self.assertTrue(continuation["steps"][0]["historical"])
+        self.assertEqual(
+            continuation["steps"][0].get("result"),
+            payload["execution"].get("result"),
+        )
         mock_invoke.assert_called_once()
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_approved_unity_shell_resumes_the_same_task_without_replaying_the_command(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -450,7 +549,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(continuation["task"]["status"], "completed")
         execute_payload.assert_called_once()
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_rejected_write_returns_to_the_original_task_as_needs_user_action(self) -> None:
         project = self._unity_project()
         with TestClient(dashboard_server.app) as client:
@@ -479,7 +578,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertEqual(self.gateway._approvals[approval_id]["status"], "rejected")
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_failed_approved_handler_returns_to_the_original_task_without_replay(self) -> None:
         project = self._unity_project()
         with TestClient(dashboard_server.app) as client:
@@ -679,7 +778,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 return {
                     "summary": "Load the installed workflow instructions.",
                     "reply": "",
-                    "planner": "deterministic-local",
+                    "planner": "llm",
                     "skillNeeded": True,
                     "skillTool": "fixture-guidance",
                     "skillParams": {},
@@ -742,7 +841,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             [
                 {
                     "summary": "Load the installed workflow instructions.",
-                    "planner": "deterministic-local",
+                    "planner": "llm",
                     "skillNeeded": True,
                     "skillTool": "fixture-guidance",
                     "skillParams": {},
@@ -858,7 +957,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
         self.assertIsNone(continuation)
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_blocked_approved_write_can_retry_and_resume_the_same_task_once(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -929,7 +1028,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(continuation["plan"]["nextStep"], "done")
         invoke.assert_called_once()
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_blocked_approved_write_can_be_rejected_before_retry(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
@@ -971,17 +1070,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertFalse(cannot_apply["ok"])
         self.assertEqual(cannot_apply["status"], "rejected")
 
-    def test_scene_root_write_intent_requires_an_unambiguous_scene_root_phrase(self) -> None:
-        english = detect_avatar_write_intent("create an object named RootProbe at the scene root")
-        chinese = detect_avatar_write_intent("在活动场景根节点创建一个名为根节点探针的对象")
-        project_root = detect_avatar_write_intent("create an object in the project root")
-
-        self.assertEqual(english["targetMode"], "scene_root")
-        self.assertEqual(chinese["targetMode"], "scene_root")
-        self.assertEqual(project_root["targetMode"], "")
-        self.assertIsNone(detect_avatar_write_intent("inspect the scene root"))
-
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_scene_root_and_avatar_target_conflict_fails_closed(self) -> None:
         plan = self.gateway.runtime_planner.plan_agent_turn(
             "create an object at the scene root",
@@ -991,12 +1080,11 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
 
         self.assertIsNotNone(plan)
-        self.assertTrue(plan["deterministicTerminal"])
         self.assertEqual(plan["nextStep"], "needs_user_action")
         self.assertFalse(plan["writeNeeded"])
         self.assertFalse(plan["skillNeeded"])
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_multiple_models_asks_user_to_choose_without_writing(self) -> None:
         gateway = self.gateway
 
@@ -1035,8 +1123,8 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(payload["plan"].get("nextStep"), "needs_user_action")
         self.assertNotIn("taskCompletion", payload["plan"])
         self.assertEqual(
-            payload["plan"]["task"]["requirements"][0]["tool"],
-            "vrcforge_create_gameobject",
+            payload["task"]["actions"][0]["tool"],
+            "vrcforge_list_avatars",
         )
         self.assertIn("Multiple avatars", payload["plan"].get("summary", ""))
 
@@ -1060,14 +1148,13 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertTrue(plan.get("plannerFailed"))
         self.assertEqual(plan.get("plannerFailure", {}).get("phase"), "initial")
         self.assertEqual(plan.get("plannerFailure", {}).get("code"), "provider_request_failed")
-        self.assertTrue(plan.get("deterministicTerminal"))
         self.assertEqual(plan.get("nextStep"), "planner_failed")
         self.assertNotIn("还没接上可用的模型 Provider", plan.get("reply", ""))
         self.assertNotIn("write", payload)
         self.assertNotIn("skill", payload)
         self.assertEqual(payload.get("steps", []), [])
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_projectless_runtime_shell_auto_yields_to_a_controllable_session(self) -> None:
         gateway = self.gateway
         calls: list[dict] = []
@@ -1150,23 +1237,24 @@ class AgentLoopP0Tests(unittest.TestCase):
                 "session": {"sessionId": "shell-llm-running", "status": "running"},
             }
 
-        with patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_llm):
-            with patch.object(gateway.runtime_planner, "_local_plan_agent_turn", return_value={}):
-                with patch.object(gateway.shell, "execute", side_effect=execute_shell):
-                    with patch.object(
-                        type(gateway.runtime_skills),
-                        "execute",
-                        autospec=True,
-                        side_effect=lambda _owner, tool, *_args, **_kwargs: skill_calls.append(tool),
-                    ):
-                        payload = gateway.runtime_message(
-                            {
-                                "message": "run the worker and then inspect health",
-                                "provider": "fixture",
-                                "model": "fixture",
-                                "session_id": "shell-llm-session",
-                            }
-                        )
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata", side_effect=fake_llm
+        ), patch.object(
+            gateway.shell, "execute", side_effect=execute_shell
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            side_effect=lambda _owner, tool, *_args, **_kwargs: skill_calls.append(tool),
+        ):
+            payload = gateway.runtime_message(
+                {
+                    "message": "run the worker and then inspect health",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "session_id": "shell-llm-session",
+                }
+            )
 
         self.assertEqual(planner_calls, 1)
         self.assertEqual(skill_calls, [])
@@ -1233,42 +1321,42 @@ class AgentLoopP0Tests(unittest.TestCase):
                 },
             }
 
-        with patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_llm):
-            with patch.object(gateway.runtime_planner, "_local_plan_agent_turn", return_value={}):
-                with patch.object(
-                    type(dashboard_server.SUB_AGENT_COLLABORATION),
-                    "create_task",
-                    autospec=True,
-                    side_effect=create_task,
-                ):
-                    initial = gateway.runtime_message(
-                        {
-                            "message": "delegate a specialist to find the relevant prefabs",
-                            "provider": "fixture",
-                            "model": "fixture",
-                            "session_id": "sub-agent-owner-session",
-                            "client_turn_id": "sub-agent-owner-turn",
-                        }
-                    )
-                    self.assertEqual(initial["plan"]["nextStep"], "waiting_for_tool")
-                    seed = created_params[0]["params"]["_taskSeed"]
-                    continuation = gateway.resume_runtime_task_after_sub_agent(
-                        {
-                            "subAgentTaskId": "sub-task-fixture",
-                            "status": "completed",
-                            "taskSeed": seed,
-                            "summary": "found three relevant prefabs",
-                            "result": {
-                                "ok": True,
-                                "summaryText": "found three relevant prefabs",
-                                "plannerEvidence": {
-                                    "role": "project_index_review",
-                                    "prefabCandidateCount": 3,
-                                    "summary": "candidate-marker-73",
-                                },
-                            },
-                        }
-                    )
+        with patch(
+            "dashboard_server.request_llm_plan_with_metadata", side_effect=fake_llm
+        ), patch.object(
+            type(dashboard_server.SUB_AGENT_COLLABORATION),
+            "create_task",
+            autospec=True,
+            side_effect=create_task,
+        ):
+            initial = gateway.runtime_message(
+                {
+                    "message": "delegate a specialist to find the relevant prefabs",
+                    "provider": "fixture",
+                    "model": "fixture",
+                    "session_id": "sub-agent-owner-session",
+                    "client_turn_id": "sub-agent-owner-turn",
+                }
+            )
+            self.assertEqual(initial["plan"]["nextStep"], "waiting_for_tool")
+            seed = created_params[0]["params"]["_taskSeed"]
+            continuation = gateway.resume_runtime_task_after_sub_agent(
+                {
+                    "subAgentTaskId": "sub-task-fixture",
+                    "status": "completed",
+                    "taskSeed": seed,
+                    "summary": "found three relevant prefabs",
+                    "result": {
+                        "ok": True,
+                        "summaryText": "found three relevant prefabs",
+                        "plannerEvidence": {
+                            "role": "project_index_review",
+                            "prefabCandidateCount": 3,
+                            "summary": "candidate-marker-73",
+                        },
+                    },
+                }
+            )
 
         self.assertIsNotNone(continuation)
         self.assertEqual(planner_calls, 2)
@@ -1320,7 +1408,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(captured[0]["parent_session_id"], "")
         self.assertNotIn("_taskSeed", captured[0]["params"])
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_projectless_fast_terminal_shell_uses_one_inline_action_identity(self) -> None:
         gateway = self.gateway
 
@@ -1875,7 +1963,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         ]
         self.assertEqual(completed[-1]["status"], "failed")
 
-    @provider_fixture_from_legacy_router
+    @provider_plan_fixture
     def test_provider_model_followup_replies_without_tooling(self) -> None:
         gateway = self.gateway
         with patch.object(type(gateway.runtime_skills), "execute", autospec=True) as execute_skill:
@@ -1897,7 +1985,6 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         plan = payload["plan"]
-        self.assertTrue(plan.get("deterministicTerminal"))
         self.assertEqual(plan.get("nextStep"), "done")
         self.assertIn("DeepSeek", plan.get("reply", ""))
         self.assertIn("deepseek-v4-pro", plan.get("reply", ""))
@@ -2030,10 +2117,6 @@ class AgentLoopP0Tests(unittest.TestCase):
             "dashboard_server.request_llm_plan_with_metadata",
             side_effect=fake_llm,
         ), patch.object(
-            gateway.runtime_planner,
-            "_local_plan_agent_turn",
-            return_value={},
-        ), patch.object(
             type(gateway.runtime_skills),
             "execute",
             autospec=True,
@@ -2111,10 +2194,6 @@ class AgentLoopP0Tests(unittest.TestCase):
             "dashboard_server.request_llm_plan_with_metadata",
             side_effect=fake_llm,
         ), patch.object(
-            gateway.runtime_planner,
-            "_local_plan_agent_turn",
-            return_value={},
-        ), patch.object(
             type(gateway.runtime_skills),
             "execute",
             autospec=True,
@@ -2151,15 +2230,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         self.assertEqual(result["steps"][1]["status"], "failed")
 
-    @provider_fixture_from_legacy_router
-    def test_deterministic_multi_angle_capture_enters_execution_and_requests_write_approval(self) -> None:
+    @provider_plan_fixture
+    def test_provider_multi_angle_capture_enters_execution_and_requests_write_approval(self) -> None:
         gateway = self.gateway
         project = self._unity_project()
 
-        with patch(
-            "dashboard_server.request_llm_plan_with_metadata",
-            side_effect=AssertionError("deterministic capture intent must not sample the Provider"),
-        ) as request_model, patch.object(
+        with patch.object(
             type(gateway.runtime_skills),
             "execute",
             autospec=True,
@@ -2171,13 +2247,13 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "model": "fixture",
                     "projectPath": str(project),
                     "projectRoot": str(project),
-                    "session_id": "deterministic-multi-capture-session",
-                    "client_turn_id": "deterministic-multi-capture-turn",
+                    "session_id": "provider-multi-capture-session",
+                    "client_turn_id": "provider-multi-capture-turn",
                 }
             )
 
-        request_model.assert_not_called()
         execute_skill.assert_not_called()
+        self.assertEqual(result["plan"]["planner"], "llm")
         self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
         self.assertEqual(result["write"]["status"], "approval_pending")
         approval_id = result["write"]["approvalId"]
@@ -2889,10 +2965,6 @@ class AgentLoopP0Tests(unittest.TestCase):
             "dashboard_server.request_llm_plan_with_metadata",
             side_effect=fake_llm,
         ), patch.object(
-            gateway.runtime_planner,
-            "_local_plan_agent_turn",
-            return_value={},
-        ), patch.object(
             type(gateway.runtime_skills),
             "execute",
             autospec=True,
@@ -2940,10 +3012,6 @@ class AgentLoopP0Tests(unittest.TestCase):
         with patch(
             "dashboard_server.request_llm_plan_with_metadata",
             side_effect=invalid_llm,
-        ), patch.object(
-            gateway.runtime_planner,
-            "_local_plan_agent_turn",
-            return_value={},
         ), patch.object(
             type(gateway.runtime_skills),
             "execute",
@@ -3110,67 +3178,33 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["plan"]["loopSuppression"]["consecutive"], 3)
         self.assertNotIn("toolCallLimitReached", result["plan"])
 
-    def test_deterministic_needs_user_action_can_be_corrected_by_the_model(self) -> None:
+    def test_provider_needs_user_action_stops_without_implicit_retry(self) -> None:
         gateway = self.gateway
         bad_arguments = {"avatarPath": "MissingAvatar"}
-        good_arguments = {"avatarPath": "AvatarRoot"}
-        failed_action_id = canonical_action_id(
-            "skill", "vrcforge_scan_materials", bad_arguments
-        )
-        corrected_action_id = canonical_action_id(
-            "skill", "vrcforge_scan_materials", good_arguments
-        )
-        plans = iter(
-            [
-                {
-                    "planner": "deterministic-local",
-                    "summary": "Scan the requested avatar.",
-                    "skillNeeded": True,
-                    "skillTool": "vrcforge_scan_materials",
-                    "skillParams": bad_arguments,
-                    "continueLoop": False,
-                    "nextStep": "call_skill",
-                },
-                {
-                    "planner": "llm",
-                    "summary": "Use the resolved avatar path.",
-                    "skillNeeded": True,
-                    "skillTool": "vrcforge_scan_materials",
-                    "skillParams": good_arguments,
-                    "correctionForActionId": failed_action_id,
-                    "continueLoop": True,
-                    "nextStep": "call_skill",
-                },
-                {
-                    "planner": "llm",
-                    "summary": "The corrected scan completed.",
-                    "reply": "The corrected scan completed.",
-                    "continueLoop": False,
-                    "nextStep": "done",
-                    "completionClaim": {
-                        "satisfied": True,
-                        "evidenceActionIds": [corrected_action_id],
-                    },
-                },
-            ]
-        )
         planner_calls = 0
 
         def plan(*_args, **_kwargs):
             nonlocal planner_calls
             planner_calls += 1
-            return next(plans)
+            return {
+                "planner": "llm",
+                "summary": "Scan the requested avatar.",
+                "skillNeeded": True,
+                "skillTool": "vrcforge_scan_materials",
+                "skillParams": bad_arguments,
+                "continueLoop": True,
+                "nextStep": "call_skill",
+            }
 
         def execute_skill(_owner, tool, params, agent_name=None, owner_id=""):
-            resolved = params.get("avatarPath") == "AvatarRoot"
             return {
                 "ok": True,
                 "tool": tool,
-                "status": "executed" if resolved else "needs_user_action",
-                "result": {"ok": True, "materials": []} if resolved else {"status": "needs_user_action"},
+                "status": "needs_user_action",
+                "result": {"status": "needs_user_action"},
                 "outcome": {
-                    "status": "ok" if resolved else "needs_user_action",
-                    "summary": "materials scanned" if resolved else "avatar path is ambiguous",
+                    "status": "needs_user_action",
+                    "summary": "avatar path is ambiguous",
                     "verification": {"state": "not_required", "checks": []},
                 },
             }
@@ -3188,30 +3222,42 @@ class AgentLoopP0Tests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(planner_calls, 3)
-        self.assertEqual(result["plan"]["nextStep"], "done", result)
-        self.assertEqual(result["task"]["actions"][0]["status"], "superseded")
-        self.assertEqual(
-            result["plan"]["taskCompletion"]["evidenceActionIds"],
-            [corrected_action_id],
-        )
+        self.assertEqual(planner_calls, 1)
+        self.assertEqual(result["plan"]["nextStep"], "needs_user_action", result)
+        self.assertEqual(result["task"]["actions"][0]["status"], "needs_user_action")
 
     def test_runtime_injected_skill_context_does_not_change_action_identity(self) -> None:
         gateway = self.gateway
         expected_action_id = canonical_action_id("skill", "vrcforge_progress_list", {})
+        plans = iter(
+            [
+                {
+                    "planner": "llm",
+                    "summary": "List progress.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_progress_list",
+                    "skillParams": {},
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                },
+                {
+                    "planner": "llm",
+                    "summary": "Progress listed.",
+                    "reply": "Progress listed.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                    "completionClaim": {
+                        "satisfied": True,
+                        "evidenceActionIds": [expected_action_id],
+                    },
+                },
+            ]
+        )
 
         with patch.object(
             gateway.runtime_planner,
             "plan_agent_turn",
-            return_value={
-                "planner": "deterministic-local",
-                "summary": "List progress.",
-                "skillNeeded": True,
-                "skillTool": "vrcforge_progress_list",
-                "skillParams": {},
-                "continueLoop": False,
-                "nextStep": "call_skill",
-            },
+            side_effect=lambda *_args, **_kwargs: next(plans),
         ), patch.object(
             type(gateway.runtime_skills),
             "execute",
@@ -3241,6 +3287,88 @@ class AgentLoopP0Tests(unittest.TestCase):
             result["plan"]["taskCompletion"]["evidenceActionIds"],
             [expected_action_id],
         )
+
+    def test_repeated_tool_steps_keep_their_own_results_in_execution_order(self) -> None:
+        gateway = self.gateway
+        first_arguments = {"avatarPath": "AvatarA"}
+        second_arguments = {"avatarPath": "AvatarB"}
+        second_action_id = canonical_action_id(
+            "skill", "vrcforge_scan_materials", second_arguments
+        )
+        plans = iter(
+            [
+                {
+                    "planner": "llm",
+                    "summary": "Scan the first avatar.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_scan_materials",
+                    "skillParams": first_arguments,
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                },
+                {
+                    "planner": "llm",
+                    "summary": "Scan the second avatar.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_scan_materials",
+                    "skillParams": second_arguments,
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                },
+                {
+                    "planner": "llm",
+                    "summary": "Both scans completed.",
+                    "reply": "Both scans completed.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                    "completionClaim": {
+                        "satisfied": True,
+                        "evidenceActionIds": [second_action_id],
+                    },
+                },
+            ]
+        )
+
+        def execute_skill(_owner, tool, params, agent_name=None, owner_id=""):
+            avatar_path = params["avatarPath"]
+            return {
+                "ok": True,
+                "tool": tool,
+                "status": "executed",
+                "result": {"avatarPath": avatar_path, "materials": []},
+                "outcome": {
+                    "status": "ok",
+                    "summary": f"scanned {avatar_path}",
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        with patch.object(
+            gateway.runtime_planner, "plan_agent_turn", side_effect=lambda *_args, **_kwargs: next(plans)
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            side_effect=execute_skill,
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "scan both avatars",
+                    "session_id": "timeline-result-order-session",
+                }
+            )
+
+        tool_steps = [
+            step
+            for step in result["steps"]
+            if step.get("kind") == "skill"
+            and step.get("tool") == "vrcforge_scan_materials"
+        ]
+        self.assertEqual(
+            [step.get("result", {}).get("avatarPath") for step in tool_steps],
+            ["AvatarA", "AvatarB"],
+        )
+        self.assertLess(tool_steps[0]["index"], tool_steps[1]["index"])
 
 
 if __name__ == "__main__":

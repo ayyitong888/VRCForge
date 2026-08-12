@@ -23,14 +23,35 @@ assert.match(timeline, /for \(const \{ step, sourceIndex \} of steps\)/);
 assert.match(timeline, /return left\.sourceIndex - right\.sourceIndex/);
 assert.match(timeline, /step\.tool \|\| skill\?\.tool/);
 assert.match(timeline, /step\.status \|\| skill\?\.status/);
+assert.match(timeline, /step\.result !== undefined/);
+assert.match(timeline, /stepResult/);
 assert.doesNotMatch(timeline, /assigned\.has\(/);
 
 assert.doesNotMatch(app, /ThumbsUp|ThumbsDown|messageFeedback|onFeedbackItem/);
 assert.doesNotMatch(card, /ThumbsUp|ThumbsDown|onFeedback/);
+assert.doesNotMatch(card, /localIdle|keywordPlannerHint|deterministic-local/);
+assert.doesNotMatch(timeline, /deterministic-local/);
+assert.doesNotMatch(timeline, /planner\.local/);
 
-assert.match(projection, /item\.response\.plan\?\.reply \|\| item\.response\.plan\?\.summary \|\| ""/);
+const copyBindings = card.match(/onCopy=\{copyableReply \? \(\) => onCopyItem\?\.\(item\) : undefined\}/g) || [];
+assert.equal(copyBindings.length, 1, "only the natural-language agent card may bind copy");
+assert.match(card, /copyableAgentDialogueText\(response\)/);
+assert.match(card, /onCopy=\{copyableReply \? \(\) => onCopyItem\?\.\(item\) : undefined\}/);
+assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "user"\)'), card.indexOf('if \(item.type === "error"\)')), /onCopy=/);
+assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "result"\)'), card.indexOf('if \(item.type === "approval_revision"\)')), /onCopy=/);
+assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "approval_revision"\)'), card.indexOf('if \(item.type === "compact"\)')), /onCopy=/);
+assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "subagent"\)'), card.indexOf("const response = item.response")), /onCopy=/);
+
+assert.match(projection, /return String\(response\.plan\?\.reply \|\| response\.plan\?\.summary \|\| ""\)/);
 assert.doesNotMatch(projection, /`Tool:|`Command:|`Write:/);
+assert.match(projection, /export function copyableAgentDialogueText/);
+assert.match(projection, /if \(item\.type !== "agent"\)/);
+assert.doesNotMatch(
+  projection.slice(projection.indexOf("export function conversationItemText"), projection.indexOf("export function latestConversationItemId")),
+  /item\.type === "result"|item\.type === "approval_revision"|item\.type === "subagent"/,
+);
 assert.match(noticeHook, /"copy"/);
+assert.match(noticeHook, /TRANSIENT_FAILURE_NOTICE_MS = 3_000/);
 assert.match(app, /showTransientNotice\("success", "copy"/);
 assert.match(app, /showTransientNotice\("error", "copy"/);
 

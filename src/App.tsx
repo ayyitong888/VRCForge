@@ -353,6 +353,9 @@ export default function App() {
   const knownSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
   const handledSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
   const exhaustedSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
+  const subAgentReviewNotificationActionHandlerRef = useRef<(payload: unknown) => void>(() => undefined);
+  const subAgentReviewRuntimeConnectedRef = useRef(false);
+  const subAgentTasksRef = useRef<SubAgentTask[]>(initialSubAgentTask ? [initialSubAgentTask] : []);
   const toReviewNotificationId = useCallback((task: SubAgentTask): string => {
     const revision = typeof task.revision === "number" ? String(task.revision) : "0";
     return `${task.id}:${revision}:${task.parentChatId || ""}`;
@@ -1184,7 +1187,15 @@ export default function App() {
       void notify().catch(() =>
         new Promise<void>((resolve) => window.setTimeout(resolve, 1_500))
           .then(() => {
-            if (!isAwaitingMergeReview(task)) {
+            const currentTask = subAgentTasksRef.current.find((current) => current.id === task.id);
+            if (
+              !subAgentReviewRuntimeConnectedRef.current
+              || !currentTask
+              || currentTask.revision !== task.revision
+              || currentTask.parentChatId !== task.parentChatId
+              || !isAwaitingMergeReview(currentTask)
+              || !getChatById(currentTask.parentChatId || "")
+            ) {
               knownSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
               return;
             }
@@ -1199,21 +1210,14 @@ export default function App() {
     }
   }, [getChatById, runtimeConnected, subAgentList?.tasks, t, toReviewNotificationId]);
 
-  useEffect(() => {
-    if (!isTauriRuntime()) {
-      return;
-    }
-    if (!runtimeConnected) {
-      knownSubAgentReviewNotificationIdsRef.current.clear();
-      handledSubAgentReviewNotificationIdsRef.current.clear();
-      exhaustedSubAgentReviewNotificationIdsRef.current.clear();
-      return;
-    }
-    let active = true;
-    let unlistenSubAgentAction: (() => void) | null = null;
-    void listen<unknown>(SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT, (event) => {
-      const action = parseSubAgentReviewNotificationAction(event.payload);
-      if (!action || !active) {
+  useLayoutEffect(() => {
+    subAgentReviewRuntimeConnectedRef.current = runtimeConnected;
+    subAgentReviewNotificationActionHandlerRef.current = (value: unknown) => {
+      if (!runtimeConnected || !subAgentReviewRuntimeConnectedRef.current) {
+        return;
+      }
+      const action = parseSubAgentReviewNotificationAction(value);
+      if (!action) {
         return;
       }
       const reviewNotificationId = `${action.taskId}:${action.revision}:${action.parentChatId}`;
@@ -1228,6 +1232,10 @@ export default function App() {
         try {
           const payload = await fetchSubAgent(endpoint, action.taskId);
           const task = payload.task;
+          if (!subAgentReviewRuntimeConnectedRef.current) {
+            handledSubAgentReviewNotificationIdsRef.current.delete(reviewNotificationId);
+            return;
+          }
           if (
             task.id !== action.taskId
             || task.parentChatId !== action.parentChatId
@@ -1249,6 +1257,7 @@ export default function App() {
           }
           openChat(chat);
           setActiveView("chat");
+          subAgentSelectionIntentRef.current = task.id;
           setSelectedSubAgent(task);
           setSubAgentList((current) => updateSubAgentList(current, task));
           setSelectedSubAgentPanelOpen(true);
@@ -1257,7 +1266,27 @@ export default function App() {
           setError(cause instanceof Error ? cause.message : String(cause));
         }
       })();
-    })
+    };
+  }, [endpoint, getChatById, openChat, runtimeConnected, t]);
+
+  useEffect(() => {
+    if (runtimeConnected) {
+      return;
+    }
+    knownSubAgentReviewNotificationIdsRef.current.clear();
+    handledSubAgentReviewNotificationIdsRef.current.clear();
+    exhaustedSubAgentReviewNotificationIdsRef.current.clear();
+  }, [runtimeConnected]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+    let active = true;
+    let unlistenSubAgentAction: (() => void) | null = null;
+    void listen<unknown>(SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT, (event) =>
+      subAgentReviewNotificationActionHandlerRef.current(event.payload)
+    )
       .then((unlisten) => {
         if (active) {
           unlistenSubAgentAction = unlisten;
@@ -1269,9 +1298,10 @@ export default function App() {
 
     return () => {
       active = false;
+      subAgentReviewRuntimeConnectedRef.current = false;
       unlistenSubAgentAction?.();
     };
-  }, [endpoint, getChatById, openChat, runtimeConnected, t]);
+  }, []);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -1403,6 +1433,7 @@ export default function App() {
     return sources;
   }, [activeChat?.id, activeChat?.items, activeChat?.compactedAttachmentRefs]);
   const subAgentTasks = subAgentList?.tasks ?? [];
+  subAgentTasksRef.current = subAgentTasks;
   const activeSubAgentTasks = useMemo(() => {
     const parentChatId = activeChat?.id || "";
     return parentChatId ? subAgentTasks.filter((task) => task.parentChatId === parentChatId) : [];
@@ -2948,12 +2979,19 @@ export default function App() {
     if (!beginSubAgentAction(taskId)) {
       return;
     }
+    const selectionIntentAtStart = subAgentSelectionIntentRef.current;
     try {
       const payload = await retrySubAgent(endpoint, taskId);
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
+      if (
+        selectionIntentAtStart !== taskId
+        || subAgentSelectionIntentRef.current !== selectionIntentAtStart
+      ) {
+        return;
+      }
       setSelectedSubAgent(payload.task);
       subAgentSelectionIntentRef.current = payload.task.id;
-      await refreshSelectedSubAgentTask(payload.task.id);
+      await refreshSelectedSubAgentTask(payload.task.id, "if-current");
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -3700,9 +3738,8 @@ export default function App() {
               onReject={rejectShell}
               onModifyApproval={modifyApprovalInComposer}
               onImportAttachment={(attachment) => void importVaultAttachment(attachment)}
-              onOpenSettings={() => openSettingsSection("models")}
               onOpenDoctor={() => void openDoctor()}
-              activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}
+              activityPanel={runtimeActivityPanel}
               subAgentPanel={projectChatWorkspace ? undefined : subAgentActivityPanel}
             />
           )}

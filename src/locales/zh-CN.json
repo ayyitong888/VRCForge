@@ -566,15 +566,11 @@
     "rejected": "已驳回",
     "executionResult": "执行结果",
     "compactedHistory": "已压缩的历史",
-    "localIdleMessage": "这句话我还没办法直接理解——当前在用本地关键词规划……",
-    "openSettings": "打开设置",
     "willDoNext": "我接下来会{{step}}",
     "executed": "已运行",
     "noSummaryReturned": "没有返回摘要。",
     "subagentTask": "后台任务",
     "coreDisconnectedSend": "核心未连接，消息未发送。",
-    "keywordPlannerHint1": "这句话我还没办法直接理解——当前在用本地关键词规划，只认识「日志、截图、表情、材质、健康检查」这类固定指令。",
-    "keywordPlannerHint2": "在设置里绑定模型供应商后，就能用自然语言交流并自动规划工具调用；如果已绑定密钥，说明 AI 规划还没启用，重启核心或检查供应商配置即可。",
     "elapsed": "· 已运行 {{time}}"
   },
   "approval": {
@@ -697,10 +693,8 @@
     "blocked": "已阻止"
   },
   "planner": {
-    "deterministicLocal": "本地规划",
     "llm": "AI 规划",
     "fallback": "规划",
-    "local": "本地规划",
     "ai": "AI 规划"
   },
   "step": {

@@ -33,6 +33,10 @@ const approveStart = hook.indexOf("async function approveShell");
 const approveEnd = hook.indexOf("async function rejectShell");
 const approve = hook.slice(approveStart, approveEnd);
 assert.doesNotMatch(approve, /appendToChat\(activeChatId/);
+assert.ok(
+  approve.indexOf("appendToChat(resultChatId") < approve.indexOf("appendContinuation(payload.continuation)"),
+  "approved execution result must be appended before its assistant continuation",
+);
 assert.match(app, /const pendingApprovalItems = \(agentApprovals \?\? \[\]\)\.filter\(\s*\(item\) => item\.status === "pending",?\s*\)/);
 assert.doesNotMatch(app, /item\.status === "pending" \|\| item\.status === "approved"/);
 assert.match(scopedCard, /approval\.status === "pending"/);

@@ -157,7 +157,6 @@ export function useApprovalExecution({
     const resultChatId = taskSessionId ? ownerChatId : activeChatId;
     try {
       const payload = await approveAgentApproval(endpoint, approvalId, approvalScope);
-      appendContinuation(payload.continuation);
       if (payload.continuationError) {
         setRuntimeNotice(payload.continuationError);
       }
@@ -178,6 +177,7 @@ export function useApprovalExecution({
           error: payload.execution?.error || completionNotice,
         });
       }
+      appendContinuation(payload.continuation);
       await refresh();
       await refreshRuntimeRuns(false);
       const executionApproval = asRecord(executionRecord?.approval);
@@ -215,7 +215,6 @@ export function useApprovalExecution({
       if (!payload.ok) {
         throw new Error(payload.message || `Approval ${approvalId} could not be rejected.`);
       }
-      const continued = appendContinuation(payload.continuation);
       if (payload.continuationError) {
         setRuntimeNotice(payload.continuationError);
       }
@@ -223,7 +222,7 @@ export function useApprovalExecution({
       const taskSessionId = approval?.taskContext?.sessionId || "";
       const ownerChatId = chatIdForSessionId(taskSessionId);
       const resultChatId = taskSessionId ? ownerChatId : activeChatId;
-      if (!continued && resultChatId) {
+      if (resultChatId) {
         appendToChat(resultChatId, {
           id: `result-${approvalId}-${Date.now()}`,
           type: "result",
@@ -231,6 +230,7 @@ export function useApprovalExecution({
           error: "rejected",
         });
       }
+      appendContinuation(payload.continuation);
       await refresh();
       await refreshRuntimeRuns(false);
     } catch (cause) {

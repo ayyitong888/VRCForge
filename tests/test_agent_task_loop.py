@@ -377,50 +377,6 @@ def test_shell_zero_exit_verifier_does_not_turn_a_running_process_terminal() -> 
     assert running["status"] == "running"
 
 
-def test_deterministic_single_read_completes_from_its_exact_result() -> None:
-    loop = AgentTaskLoop("list avatars")
-    loop.require_action(kind="skill", tool="vrcforge_list_avatars", arguments={})
-    action = loop.record_action(
-        kind="skill",
-        tool="vrcforge_list_avatars",
-        arguments={},
-        raw_result={"ok": True, "status": "executed", "result": {"avatars": []}},
-        outcome=ok_outcome("avatar list read"),
-    )
-
-    gated = loop.gate_terminal(
-        {
-            "planner": "deterministic-local",
-            "nextStep": "call_skill",
-            "reply": "listed",
-            "completionSatisfied": True,
-            "completionActionIds": [action["actionId"]],
-        }
-    )
-
-    assert gated["nextStep"] == "done"
-    assert gated["taskCompletion"]["evidenceActionIds"] == [action["actionId"]]
-
-
-def test_deterministic_action_without_runtime_completion_receipt_is_not_done() -> None:
-    loop = AgentTaskLoop("list avatars")
-    loop.require_action(kind="skill", tool="vrcforge_list_avatars", arguments={})
-    loop.record_action(
-        kind="skill",
-        tool="vrcforge_list_avatars",
-        arguments={},
-        raw_result={"ok": True, "status": "executed", "result": {"avatars": []}},
-        outcome=ok_outcome("avatar list read"),
-    )
-
-    gated = loop.gate_terminal(
-        {"planner": "deterministic-local", "nextStep": "call_skill", "reply": "listed"}
-    )
-
-    assert gated["nextStep"] == "completion_unverified"
-    assert gated["completionGate"]["reason"] == "runtime_completion_unbound"
-
-
 def test_corrected_action_supersedes_the_failed_branch_and_keeps_the_requirement() -> None:
     loop = AgentTaskLoop("inspect the selected avatar")
     bad_args = {"avatarPath": "Missing"}

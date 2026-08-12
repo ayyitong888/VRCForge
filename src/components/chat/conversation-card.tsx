@@ -7,7 +7,6 @@ import {
   Pencil,
   Save,
   RotateCcw,
-  Settings,
   Wrench,
   X,
 } from "lucide-react";
@@ -16,6 +15,7 @@ import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
+import { copyableAgentDialogueText } from "../../lib/conversation-utils";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -44,7 +44,6 @@ export function ConversationCard({
   onEditItem,
   onModifyApproval,
   onImportAttachment,
-  onOpenSettings,
   onOpenDoctor,
 }: {
   item: ConversationItem;
@@ -66,7 +65,6 @@ export function ConversationCard({
   onReject?: (approvalId: string) => void;
   onModifyApproval?: (approval: AgentApproval) => void;
   onImportAttachment?: (attachment: ChatAttachment) => void;
-  onOpenSettings?: () => void;
   onOpenDoctor?: () => void;
 }) {
   const { t } = useTranslation();
@@ -173,7 +171,6 @@ export function ConversationCard({
           <MessageActions
             align="right"
             createdAt={item.createdAt || item.id}
-            onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
           />
@@ -193,7 +190,6 @@ export function ConversationCard({
           </Button>
         </div>
         <MessageActions
-          onCopy={() => onCopyItem?.(item)}
           onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
         />
       </div>
@@ -241,7 +237,6 @@ export function ConversationCard({
           </RunRow>
           <MessageActions
             createdAt={item.createdAt || item.id}
-            onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           />
         </div>
@@ -256,7 +251,7 @@ export function ConversationCard({
           <div className="font-medium text-foreground">{t("approval.revisionRequestedTitle")}</div>
           <p className="mt-1">{t("approval.revisionRequestedDescription", { target: item.targetTool || t("approval.thisApproval") })}</p>
           <p className="mt-1">{t("approval.revisionAwaitingUserInput")}</p>
-          <MessageActions createdAt={item.createdAt || item.id} onCopy={() => onCopyItem?.(item)} />
+          <MessageActions createdAt={item.createdAt || item.id} />
         </div>
       </div>
     );
@@ -304,7 +299,6 @@ export function ConversationCard({
           ) : null}
           {task.result !== undefined ? <OutputBlock label={t("subagent.result")} value={formatPayload(task.result)} /> : null}
           <MessageActions
-            onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           />
         </div>
@@ -317,15 +311,10 @@ export function ConversationCard({
   const skill = response.skill;
   const vision = response.vision;
   const write = response.write;
-  const planReply = response.plan.reply || response.plan.summary;
+  const copyableReply = copyableAgentDialogueText(response);
   const providerLine = item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner);
   const replySource = item.model ? `${providerLine} · ${item.model}` : providerLine;
   const awaitingApproval = shell?.status === "pending_approval";
-  const localIdle =
-    response.plan.planner === "deterministic-local" &&
-    response.plan.nextStep === "await_user_instruction" &&
-    !response.plan.skillTool &&
-    !response.plan.shellCommand;
   const nextStep = response.plan.nextStep || "";
   const showIntent = Boolean(nextStep) && nextStep !== "await_user_instruction" && nextStep !== "done";
   const timelineRows = buildAgentTimelineRows({
@@ -346,36 +335,13 @@ export function ConversationCard({
     t,
   });
 
-  if (localIdle) {
-    return (
-      <div className="group flex justify-start">
-        <div className="relative max-w-[85%] space-y-2 px-1 text-sm">
-          <p className="text-muted-foreground">
-            {t("agent.keywordPlannerHint1")}
-          </p>
-          <p className="text-muted-foreground">
-            {t("agent.keywordPlannerHint2")}
-          </p>
-          <Button type="button" variant="outline" className="h-8 px-3 text-xs" onClick={() => onOpenSettings?.()}>
-            <Settings className="mr-1 h-3.5 w-3.5" />
-            {t("agent.openSettings")}
-          </Button>
-          <MessageActions
-            onCopy={() => onCopyItem?.(item)}
-            onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
-          />
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="group flex justify-start">
       <div className="relative flex w-full max-w-[85%] flex-col gap-1.5">
         {timelineRows}
         <MessageActions
           createdAt={item.createdAt || item.id}
-          onCopy={() => onCopyItem?.(item)}
+          onCopy={copyableReply ? () => onCopyItem?.(item) : undefined}
           onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
         />
@@ -483,8 +449,8 @@ function MessageActions({
   onEdit?: () => void;
 }) {
   const { t } = useTranslation();
-  const hasActions = onCopy || onRetry || onEdit;
   const timeLabel = formatMessageTime(createdAt, i18n.language);
+  const hasActions = Boolean(timeLabel || onCopy || onRetry || onEdit);
   if (!hasActions) {
     return null;
   }
