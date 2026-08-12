@@ -40,6 +40,19 @@ def _components() -> list[dict[str, object]]:
     ]
 
 
+def _aao_marker_params(project: Path) -> dict[str, object]:
+    return {
+        "projectPath": str(project),
+        "avatarPath": "Avatar",
+        "targetPath": "Avatar",
+        "optimizerId": "aao",
+        "mode": "aao_trace",
+        "componentType": "Anatawa12.AvatarOptimizer.TraceAndOptimize",
+        "profile": "pc_conservative",
+        "options": {},
+    }
+
+
 def test_optimizer_preparer_freezes_existing_nonzero_index(monkeypatch, tmp_path: Path) -> None:
     project = _project(tmp_path)
     components = _components()
@@ -55,6 +68,31 @@ def test_optimizer_preparer_freezes_existing_nonzero_index(monkeypatch, tmp_path
     assert calls
     assert all(call[0] == "vrc_set_property" for call in calls)
     assert {call[1]["componentIndex"] for call in calls} == {3}
+
+
+def test_optimizer_preparer_allows_one_bounded_marker_component_add(monkeypatch, tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    monkeypatch.setattr(
+        dashboard,
+        "get_gameobject_sync",
+        lambda _params: {"ok": True, "components": [{"type": "Transform"}]},
+    )
+
+    prepared, _preview = dashboard.prepare_configure_optimizer_component_request(
+        _aao_marker_params(project),
+        {},
+    )
+
+    assert build_prepared_execution_plan(prepared) == [
+        (
+            "vrc_add_component",
+            {
+                "gameObjectPath": "Avatar",
+                "componentType": "Anatawa12.AvatarOptimizer.TraceAndOptimize",
+                "preview": False,
+            },
+        )
+    ]
 
 
 def test_optimizer_execution_rejects_reordered_components_before_write(monkeypatch, tmp_path: Path) -> None:

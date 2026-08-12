@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
+from agent_gateway import AgentGatewayError
 from bounded_process import BoundedProcessResult
 from prepared_file_imports import (
     capture_directory,
@@ -1165,9 +1166,10 @@ class VpmPackageInstallPreparer:
             arguments.get("repository") or arguments.get("vpmRepository") or ""
         ).strip()
         if repository:
-            raise RuntimeError(
+            raise AgentGatewayError(
                 "Repository changes are not allowed in the sealed package-install "
-                "lane; configure existing repositories separately."
+                "lane; configure existing repositories separately.",
+                status_code=403,
             )
         managers = self._ports.locate_managers()
         strategy = self._ports.select_strategy(arguments, managers)

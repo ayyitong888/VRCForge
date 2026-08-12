@@ -70,6 +70,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shader-renderer-path", default="")
     parser.add_argument("--shader-slot-index", type=int, default=None)
     parser.add_argument("--shader-semantic-property", default="")
+    parser.add_argument("--shader-source-family", default="")
+    parser.add_argument("--shader-target-family", default="")
+    parser.add_argument("--shader-target-shader", default="")
+    parser.add_argument("--shader-skip-package-install", action="store_true")
     return parser.parse_args()
 
 
@@ -350,6 +354,14 @@ class GoldenPathMatrixSmoke:
             command += ["--slot-index", str(int(self.args.shader_slot_index))]
         if self.args.shader_semantic_property:
             command += ["--semantic-property", str(self.args.shader_semantic_property)]
+        if self.args.shader_source_family:
+            command += ["--source-family", str(self.args.shader_source_family)]
+        if self.args.shader_target_family:
+            command += ["--target-family", str(self.args.shader_target_family)]
+        if self.args.shader_target_shader:
+            command += ["--target-shader", str(self.args.shader_target_shader)]
+        if self.args.shader_skip_package_install:
+            command += ["--package-id", "", "--repository", ""]
         if self.args.capture_screenshots:
             command.append("--capture-screenshots")
         self.add_subprocess_path(

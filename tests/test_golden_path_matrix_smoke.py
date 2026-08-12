@@ -52,6 +52,10 @@ def make_args(tmp_path: Path, **overrides: Any) -> Namespace:
         "shader_renderer_path": "",
         "shader_slot_index": None,
         "shader_semantic_property": "",
+        "shader_source_family": "",
+        "shader_target_family": "",
+        "shader_target_shader": "",
+        "shader_skip_package_install": False,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -933,6 +937,10 @@ def test_live_write_flag_invokes_existing_shader_and_optimizer_smokes(tmp_path: 
             avatar_path="Scene/Hero",
             include_live_writes=True,
             optimizer_tool="optimization.lac.apply-request",
+            shader_source_family="lilToon",
+            shader_target_family="lilToon",
+            shader_target_shader="Hidden/lilToonCutout",
+            shader_skip_package_install=True,
         ),
         request_func=fake_read_only_request,
         run_command_func=fake_run,
@@ -942,6 +950,16 @@ def test_live_write_flag_invokes_existing_shader_and_optimizer_smokes(tmp_path: 
     assert report["ok"] is True
     assert "smoke_shader_adapter_apply_rollback.py" in called_scripts
     assert "smoke_optimizer_apply_rollback.py" in called_scripts
+    shader_command = next(
+        command
+        for command in run_calls
+        if any(str(part).endswith("smoke_shader_adapter_apply_rollback.py") for part in command)
+    )
+    assert shader_command[shader_command.index("--source-family") + 1] == "lilToon"
+    assert shader_command[shader_command.index("--target-family") + 1] == "lilToon"
+    assert shader_command[shader_command.index("--target-shader") + 1] == "Hidden/lilToonCutout"
+    assert shader_command[shader_command.index("--package-id") + 1] == ""
+    assert shader_command[shader_command.index("--repository") + 1] == ""
     optimizer_steps = [
         step
         for step in paths_by_id(report)["model_optimization_validation_rollback"]["steps"]

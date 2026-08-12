@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+from agent_gateway import AgentGatewayError
+
 from bounded_process import BoundedProcessResult
 from package_install_workflow_service import (
     PackageDetectionPorts,
@@ -284,7 +286,7 @@ def test_preparer_rejects_reserved_repository_and_unavailable_prerelease(
             },
             None,
         )
-    with pytest.raises(RuntimeError, match="Repository changes"):
+    with pytest.raises(AgentGatewayError, match="Repository changes") as repository_error:
         preparer.prepare(
             {
                 "projectPath": str(project),
@@ -293,6 +295,7 @@ def test_preparer_rejects_reserved_repository_and_unavailable_prerelease(
             },
             None,
         )
+    assert repository_error.value.status_code == 403
     with pytest.raises(RuntimeError, match="No non-yanked"):
         preparer.prepare(
             {"projectPath": str(project), "packageId": "com.example.package"},

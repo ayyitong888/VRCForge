@@ -19629,12 +19629,12 @@ def prepare_configure_optimizer_component_request(
         params.get("profile") or "pc_conservative"
     )
     options = ensure_dict(params.get("options") or {})
-    properties = _optimizer_component_properties(optimizer_id, profile, options)
-    if not properties:
-        raise RuntimeError("Optimizer configuration has no validated component properties.")
     present, component_index, component, components = _optimizer_component_snapshot(
         project_path, target_path, component_type,
     )
+    properties = _optimizer_component_properties(optimizer_id, profile, options)
+    if not properties and present:
+        raise RuntimeError("Optimizer configuration has no validated component properties.")
     prepared = {
         "optimizerId": optimizer_id,
         "mode": mode,
