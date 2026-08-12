@@ -1114,6 +1114,32 @@ function isDmtfCreationDate(value) {
   return /^\d{14}\.\d{6}[+-]\d{3}$/.test(String(value || ""));
 }
 
+function dmtfCreationInstantMicros(value) {
+  const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})\.(\d{6})([+-])(\d{3})$/.exec(
+    String(value || ""),
+  );
+  if (!match) return undefined;
+  const [, year, month, day, hour, minute, second, micros, offsetSign, offset] = match;
+  const localMicros = BigInt(Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  )) * 1000n + BigInt(micros);
+  const offsetMicros = BigInt(Number(offset)) * 60n * 1000000n;
+  return offsetSign === "+" ? localMicros - offsetMicros : localMicros + offsetMicros;
+}
+
+function creationDateStrictlyFollows(candidateCreationDate, parentCreationDate) {
+  const candidateInstant = dmtfCreationInstantMicros(candidateCreationDate);
+  const parentInstant = dmtfCreationInstantMicros(parentCreationDate);
+  return candidateInstant !== undefined
+    && parentInstant !== undefined
+    && candidateInstant > parentInstant;
+}
+
 function processIdentityMatches(candidate, recorded) {
   return isDmtfCreationDate(candidate.creationDate)
     && isDmtfCreationDate(recorded.creationDate)
@@ -1160,6 +1186,7 @@ function trackedIdentityForStartEvent(event) {
   if (!event) return undefined;
   return trackedIdentitiesForPid(event.pid).find((identity) =>
     identity.startEventSequence === event.sequence
+    && identity.parentPid === event.parentPid
     && identity.creationDate === event.creationDate
     && identity.name.toLowerCase() === event.name.toLowerCase());
 }
@@ -1205,14 +1232,36 @@ async function refreshObservedProcessStartEvents() {
   }
 }
 
-function observedStartEventBefore(pid, sequence) {
+function observedParentStartEvent(childEvent) {
+  if (!childEvent || childEvent.parentPid <= 0) return undefined;
   let found;
-  for (const event of observedProcessStartEventsBySequence.values()) {
-    if (event.pid === pid && event.sequence < sequence && (!found || event.sequence > found.sequence)) {
-      found = event;
+  let foundInstant;
+  for (const candidateParent of observedProcessStartEventsBySequence.values()) {
+    if (
+      candidateParent.pid === childEvent.parentPid
+      && creationDateStrictlyFollows(childEvent.creationDate, candidateParent.creationDate)
+    ) {
+      const instant = dmtfCreationInstantMicros(candidateParent.creationDate);
+      if (instant !== undefined && (foundInstant === undefined || instant > foundInstant)) {
+        found = candidateParent;
+        foundInstant = instant;
+      }
     }
   }
   return found;
+}
+
+function observedStartEventMatchesIdentity(event, identity) {
+  return Boolean(
+    event
+    && identity
+    && event.pid === identity.pid
+    && event.parentPid === identity.parentPid
+    && event.creationDate === identity.creationDate
+    && event.name.toLowerCase() === identity.name.toLowerCase()
+    && identity.startEventSequence > 0
+    && event.sequence === identity.startEventSequence,
+  );
 }
 
 function matchingObservedStartEvent(candidate) {
@@ -1241,13 +1290,11 @@ function observedStartChainReachesTracked(candidate, liveTrackedByPid) {
   const visited = new Set([candidate.pid]);
   while (event && event.parentPid > 0 && !visited.has(event.parentPid)) {
     const recordedLiveParent = liveTrackedByPid.get(event.parentPid);
-    const parentStart = observedStartEventBefore(event.parentPid, event.sequence);
+    const parentStart = observedParentStartEvent(event);
     if (
       recordedLiveParent
       && parentStart
-      && recordedLiveParent.startEventSequence > 0
-      && parentStart.sequence === recordedLiveParent.startEventSequence
-      && event.sequence > recordedLiveParent.startEventSequence
+      && observedStartEventMatchesIdentity(parentStart, recordedLiveParent)
     ) {
       return true;
     }
@@ -1255,7 +1302,7 @@ function observedStartChainReachesTracked(candidate, liveTrackedByPid) {
       return true;
     }
     visited.add(event.parentPid);
-    if (!parentStart || parentStart.sequence >= event.sequence) return false;
+    if (!parentStart) return false;
     event = parentStart;
   }
   return false;
@@ -1265,13 +1312,11 @@ function observedStartDirectlyFollowsTracked(candidate, liveTrackedByPid) {
   const recordedParent = liveTrackedByPid.get(candidate.parentPid);
   if (!recordedParent) return false;
   const event = matchingObservedStartEvent(candidate);
-  const parentStart = event ? observedStartEventBefore(candidate.parentPid, event.sequence) : undefined;
+  const parentStart = observedParentStartEvent(event);
   return Boolean(
     event
     && parentStart
-    && recordedParent.startEventSequence > 0
-    && parentStart.sequence === recordedParent.startEventSequence
-    && event.sequence > recordedParent.startEventSequence,
+    && observedStartEventMatchesIdentity(parentStart, recordedParent),
   );
 }
 
@@ -6256,7 +6301,13 @@ function sanitizeReportText(value) {
 }
 
 function safeError(error) {
-  return sanitizeReportText(String(error?.stack || error));
+  const details = [String(error?.stack || error)];
+  if (error instanceof AggregateError && Array.isArray(error.errors)) {
+    const summaries = error.errors.map((cause, index) =>
+      `[${index + 1}] ${String(cause?.message || cause)}`);
+    if (summaries.length > 0) details.push(`Aggregate causes: ${summaries.join("; ")}`);
+  }
+  return sanitizeReportText(details.join("\n"));
 }
 
 function validateFinalContract(report) {
@@ -6798,7 +6849,7 @@ async function runSelfTest() {
     observedProcessStartEvents.clear();
     observedProcessStartEventsBySequence.clear();
     const liveParent = { ...parent, pid: 200, creationDate: dmtf(7), startEventSequence: 20 };
-    const staleChild = { ...child, pid: 201, parentPid: 200, creationDate: dmtf(8) };
+    const staleChild = { ...child, pid: 201, parentPid: 200, creationDate: dmtf(6) };
     const liveParentStart = { pid: 200, parentPid: 1, name: liveParent.name, creationDate: liveParent.creationDate, sequence: 20 };
     const staleChildStart = { pid: 201, parentPid: 200, name: staleChild.name, creationDate: staleChild.creationDate, sequence: 19 };
     storeTrackedProcessIdentity(liveParent);
@@ -6809,6 +6860,35 @@ async function runSelfTest() {
     const liveParents = new Map([[liveParent.pid, liveParent]]);
     const reusedLiveParentDoesNotClaimOlderChild = !observedStartDirectlyFollowsTracked(staleChild, liveParents)
       && !observedStartChainReachesTracked(staleChild, liveParents);
+
+    trackedProcessIdentities.clear();
+    observedProcessStartEvents.clear();
+    observedProcessStartEventsBySequence.clear();
+    const delayedParentEvent = { ...parent, pid: 250, creationDate: dmtf(7), startEventSequence: 22 };
+    const earlyDeliveredChild = { ...child, pid: 251, parentPid: 250, creationDate: dmtf(8) };
+    const delayedParentStart = {
+      pid: delayedParentEvent.pid,
+      parentPid: delayedParentEvent.parentPid,
+      name: delayedParentEvent.name,
+      creationDate: delayedParentEvent.creationDate,
+      sequence: delayedParentEvent.startEventSequence,
+    };
+    const earlyDeliveredChildStart = {
+      pid: earlyDeliveredChild.pid,
+      parentPid: earlyDeliveredChild.parentPid,
+      name: earlyDeliveredChild.name,
+      creationDate: earlyDeliveredChild.creationDate,
+      sequence: 21,
+    };
+    storeTrackedProcessIdentity(delayedParentEvent);
+    for (const event of [earlyDeliveredChildStart, delayedParentStart]) {
+      observedProcessStartEvents.set(event.pid, event);
+      observedProcessStartEventsBySequence.set(event.sequence, event);
+    }
+    const delayedParentDeliveryStillClaimsNewerChild = observedStartDirectlyFollowsTracked(
+      earlyDeliveredChild,
+      new Map([[delayedParentEvent.pid, delayedParentEvent]]),
+    );
 
     trackedProcessIdentities.clear();
     observedProcessStartEvents.clear();
@@ -6925,6 +7005,7 @@ async function runSelfTest() {
       historicalParentGenerationPreserved,
       unrelatedReusedParentGenerationRejected,
       reusedLiveParentDoesNotClaimOlderChild,
+      delayedParentDeliveryStillClaimsNewerChild,
       reusedDescendantPidTracksNewGeneration,
       reusedDescendantPidBlocksClear,
       cleanupUsesReusedDescendantGeneration,
@@ -6972,7 +7053,19 @@ async function runSelfTest() {
       },
     ],
   });
+  const aggregateErrorSummary = safeError(new AggregateError(
+    [
+      new Error(`launch failed with ${negativeTestSecret}`),
+      new Error(`cleanup failed under ${repoRoot}`),
+    ],
+    "packaged launch and cleanup failed",
+  ));
   const checks = {
+    aggregateErrorPreservesSanitizedCauseSummaries:
+      aggregateErrorSummary.includes("launch failed with <redacted-negative-test-secret>")
+      && aggregateErrorSummary.includes("cleanup failed under <repo>")
+      && !aggregateErrorSummary.includes(negativeTestSecret)
+      && !aggregateErrorSummary.includes(repoRoot),
     cdpListenerOwnershipRejectsForeignRoot:
       cdpListenerOwnedByTrackedProcesses({
         ports: [{ localPort: cdpPort, owningProcess: 702 }],
@@ -7149,6 +7242,7 @@ async function runSelfTest() {
     historicalParentGenerationPreserved: processIdentityChecks.historicalParentGenerationPreserved,
     unrelatedReusedParentGenerationRejected: processIdentityChecks.unrelatedReusedParentGenerationRejected,
     reusedLiveParentDoesNotClaimOlderChild: processIdentityChecks.reusedLiveParentDoesNotClaimOlderChild,
+    delayedParentDeliveryStillClaimsNewerChild: processIdentityChecks.delayedParentDeliveryStillClaimsNewerChild,
     reusedDescendantPidTracksNewGeneration: processIdentityChecks.reusedDescendantPidTracksNewGeneration,
     reusedDescendantPidBlocksClear: processIdentityChecks.reusedDescendantPidBlocksClear,
     cleanupUsesReusedDescendantGeneration: processIdentityChecks.cleanupUsesReusedDescendantGeneration,
