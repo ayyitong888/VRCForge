@@ -95,6 +95,39 @@ def test_optimizer_preparer_allows_one_bounded_marker_component_add(monkeypatch,
     ]
 
 
+def test_optimizer_preparer_accepts_live_core_string_component_inventory(monkeypatch, tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    monkeypatch.setattr(
+        dashboard,
+        "get_gameobject_sync",
+        lambda _params: {
+            "ok": True,
+            "components": [
+                "UnityEngine.Transform",
+                "UnityEngine.Animator",
+                "VRC.Core.PipelineManager",
+                "VRC.SDK3.Avatars.Components.VRCAvatarDescriptor",
+            ],
+        },
+    )
+
+    prepared, _preview = dashboard.prepare_configure_optimizer_component_request(
+        _aao_marker_params(project),
+        {},
+    )
+
+    assert build_prepared_execution_plan(prepared) == [
+        (
+            "vrc_add_component",
+            {
+                "gameObjectPath": "Avatar",
+                "componentType": "Anatawa12.AvatarOptimizer.TraceAndOptimize",
+                "preview": False,
+            },
+        )
+    ]
+
+
 def test_optimizer_execution_rejects_reordered_components_before_write(monkeypatch, tmp_path: Path) -> None:
     project = _project(tmp_path)
     initial = _components()

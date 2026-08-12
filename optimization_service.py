@@ -688,6 +688,13 @@ def build_dependency_doctor(params: dict[str, Any]) -> dict[str, Any]:
             "preferredManagers": ["ALCOM/VCC UI handoff", "VCC vpm CLI", "vrc-get CLI", "agent-managed download plan"],
             "message": "Dependency installs are request-only: VRCForge plans package-manager use first, then any project write still requires approval and checkpoint.",
         },
+        "compatibilityPolicy": {
+            "forcePackageVersion": False,
+            "tryInstalledVersionFirst": True,
+            "missingDependency": "report_missing_or_request_supervised_install",
+            "runtimeCompatibilityFailure": "preserve_error_then_check_newer_available_version",
+            "upgradeRequiresApproval": True,
+        },
     }
 
 

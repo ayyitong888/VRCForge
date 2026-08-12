@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the VRCForge 0.9 golden path smoke matrix.")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--app-token-file", default="")
+    parser.add_argument("--gateway-config", default="", help="Exact Agent gateway config owned by the App instance under test.")
     parser.add_argument("--project-root", default="")
     parser.add_argument("--avatar-path", default="")
     parser.add_argument("--parent-path", default="", help="Exact existing GameObject parent for the external-agent live write smoke.")
@@ -348,6 +349,8 @@ class GoldenPathMatrixSmoke:
         ]
         if self.app_token_path:
             command += ["--app-token-file", str(self.app_token_path)]
+        if self.args.gateway_config:
+            command += ["--gateway-config", str(self.args.gateway_config)]
         if self.args.shader_renderer_path:
             command += ["--renderer-path", str(self.args.shader_renderer_path)]
         if self.args.shader_slot_index is not None:
@@ -603,6 +606,8 @@ class GoldenPathMatrixSmoke:
         ]
         if self.app_token_path:
             command += ["--app-token-file", str(self.app_token_path)]
+        if self.args.gateway_config:
+            command += ["--gateway-config", str(self.args.gateway_config)]
         if self.project_root:
             command += ["--project-root", self.project_root]
         if self.avatar_path:

@@ -83,6 +83,22 @@ Each item ends with its version history in this exact form:
   changes.
 - [首次实现: 1.5.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
+### AGT-006 — Honest Path-to-Skill recovery
+
+- Contract: only a Runtime run terminally blocked as `completion_unverified`
+  may expose its already successful, replayable structured actions for
+  Path-to-Skill capture. The resulting summary is
+  `structured_actions_completed`; it never claims that the blocked task
+  completed.
+- Forbidden regression: failed or pending actions, Shell, question, progress,
+  desktop, error-bearing or duplicate-pollution steps cannot enter the capture.
+  Only exact Runtime control steps `phase`, `exposure_layer` and
+  `entered_execution` are omitted.
+- Acceptance: `tests/test-path-to-skill-context.mjs` covers the positive special
+  case and fail-closed negatives; release evidence includes the exact packaged
+  Skill/Path-to-Skill report.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
 ## Approval, write and recovery contracts
 
 ### APR-001 — Durable non-expiring approval
@@ -257,10 +273,14 @@ Each item ends with its version history in this exact form:
 ### PRV-002 — Explicit protocol selection and bounded negotiation
 
 - Contract: protocol selection is observable. `Auto` negotiates an ordered
-  compatible protocol for the same Provider, exact model and canonical
-  endpoint; explicit protocol pinning never silently falls back.
-- Forbidden regression: no cross-Provider/model/origin fallback, retry after
-  output/ambiguous side effect, or capability claim from model list alone.
+  compatible protocol for the same Provider, explicitly selected concrete
+  model and canonical endpoint. The opt-in `deepseek-auto` virtual alias is the
+  sole exception: before any output, an explicit protocol-incompatibility
+  response may advance through its declared same-Provider Pro then Flash
+  candidates. Explicit protocol or concrete-model pinning never changes model.
+- Forbidden regression: no cross-Provider/origin fallback; no fallback on auth,
+  rate-limit, timeout, 5xx, ambiguous side effect or after output. DeepSeek
+  Messages stays on the same origin normalized to `/anthropic`.
 - Acceptance: protocol/cache/origin/error-class tests and Provider Test status.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
@@ -294,8 +314,8 @@ Each item ends with its version history in this exact form:
 - Forbidden regression: no eager sidebars, sub-agent detail or historical
   runtime data in the critical path; thresholds must not be weakened to pass.
 - Acceptance: manifest-bound isolated cold/warm pair, normal Quit and zero
-  residue. Verified 1.5.1 warm sample: shell 100 ms, backend invoke 30 ms,
-  cached bootstrap 9 ms and FCP 176 ms.
+  residue. Concrete release-candidate timings belong in `PROJECT_STATUS.md`,
+  not this durable threshold contract.
 - [首次实现: 1.5.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ### LAT-002 — Background and stop lifecycle
@@ -313,11 +333,14 @@ Each item ends with its version history in this exact form:
 
 - Contract: Import All needs no dependency fetch, environment variable or
   manual code edit; compile has zero errors and no unexpected warnings; menu
-  and connection guidance are immediately available.
+  and connection guidance are immediately available. Import never pins,
+  installs, upgrades or downgrades VRChat SDK, Gesture Manager, AAO or another
+  third-party VCC/VPM package.
 - Forbidden regression: no third-party MCP runtime/code/GUID residue, missing
   meta/assets, duplicate upgrade files or more than three guided actions to
   connect and list tools.
-- Acceptance: archive/provenance scan, clean import, compile and connection.
+- Acceptance: archive/provenance scan, zero packaged `Packages/` paths, clean
+  import with unchanged project package manifests, compile and connection.
 - [首次实现: 1.4.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ### PKG-002 — Safe upgrade and user-data preservation
@@ -330,6 +353,20 @@ Each item ends with its version history in this exact form:
 - Acceptance: disposable-Windows install/upgrade/uninstall and official Unity
   upgrade project; this remains a release-paired manual gate.
 - [首次实现: 1.4.0] [强化/修复: 1.5.0] [最近验证: 待考证]
+
+### PKG-003 — Compatibility-first third-party dependencies
+
+- Contract: an absent optional package is reported as missing. Installation is
+  opt-in and supervised; the exact available version is frozen only into that
+  approval transaction. An already installed version is tried first without a
+  forced upgrade.
+- Forbidden regression: no global version pin, import-time install, silent
+  downgrade or speculative upgrade. If the installed package proves
+  incompatible at runtime, preserve the original error, then check available
+  newer versions and offer a separate approved upgrade path.
+- Acceptance: dependency-doctor, optimizer skill, package-plan, version
+  selection, diagnostic and prepared-install tests.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ### CMP-001 — External Agent request boundary
 

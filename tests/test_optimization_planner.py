@@ -339,6 +339,13 @@ def test_dependency_doctor_missing_plugins_is_graceful(tmp_path: Path) -> None:
     assert payload["summary"]["missing"] >= 8
     assert all(item["status"] in {"installed", "missing", "unknown"} for item in payload["dependencies"])
     assert all(item["installMethod"]["automatic"] is False for item in payload["dependencies"])
+    assert payload["compatibilityPolicy"] == {
+        "forcePackageVersion": False,
+        "tryInstalledVersionFirst": True,
+        "missingDependency": "report_missing_or_request_supervised_install",
+        "runtimeCompatibilityFailure": "preserve_error_then_check_newer_available_version",
+        "upgradeRequiresApproval": True,
+    }
 
 
 def test_optimization_report_schema_is_stable_and_plan_only(tmp_path: Path) -> None:
@@ -635,6 +642,7 @@ def test_avatar_optimization_skill_group_contains_stable_request_tools_only() ->
     assert "vrcforge_scan_thry_avatar_performance" in allowed
     assert "vrcforge_package_install_plan" in allowed
     assert "vrcforge_package_install_request" in allowed
+    assert "vrcforge_diagnose_package_install_errors" in allowed
     assert "vrcforge_configure_optimizer_component" not in allowed
     assert "vrcforge_install_vpm_package" not in allowed
 

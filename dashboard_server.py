@@ -19559,10 +19559,16 @@ def _optimizer_component_snapshot(
     payload = get_gameobject_sync({"projectPath": project_path, "gameObjectPath": target_path})
     if not payload.get("ok"):
         raise RuntimeError(payload.get("error") or "Optimizer target inspection failed.")
-    components = payload.get("components")
-    if not isinstance(components, list) or not all(isinstance(item, dict) for item in components):
+    raw_components = payload.get("components")
+    if not isinstance(raw_components, list) or not all(
+        isinstance(item, dict) or (isinstance(item, str) and bool(item.strip()))
+        for item in raw_components
+    ):
         raise RuntimeError("Optimizer target component inventory is invalid.")
-    copied_components = [copy.deepcopy(item) for item in components]
+    copied_components = [
+        copy.deepcopy(item) if isinstance(item, dict) else {"type": item.strip()}
+        for item in raw_components
+    ]
     component_short = component_type.rsplit(".", 1)[-1]
     for index, component in enumerate(copied_components):
         values = {

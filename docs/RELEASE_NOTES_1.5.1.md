@@ -31,6 +31,12 @@ Core with its fixed 64-tool contract.
   Console diagnostic deltas, persisted scene writes, and complete multi-angle
   visual review. Console and visual evidence are required only by actions that
   explicitly declare those profiles.
+- Made Path-to-Skill recovery honest for a narrowly defined blocked Runtime
+  case. A `completion_unverified` run may contribute only its already
+  successful, replayable structured actions; the capture is labelled
+  `structured_actions_completed` and cannot imply that the whole task finished.
+  Failed, pending, Shell, question, progress, desktop, error-bearing, and
+  duplicate-pollution steps remain excluded.
 - Bound managed visual evidence to the exact Runtime task, approved capture
   action, immutable image bytes, and one-use receipt. Link, junction, reparse,
   hard-link, changed-byte, local-path, and cross-task inputs fail closed; the
@@ -70,6 +76,13 @@ Core with its fixed 64-tool contract.
   projecting key values back to the App. A dedicated Vision Profile remains
   optional, and the same saved Provider key can be reused across lanes when no
   lane-specific override exists.
+- Added GA metadata and Runtime support for DeepSeek V4 Pro and Flash across
+  Responses, Messages, and Chat Completions. A concrete model selection never
+  changes model. The opt-in `deepseek-auto` alias advances from Pro to Flash
+  only for an explicit pre-output protocol-incompatibility response; auth,
+  rate-limit, timeout, 5xx, and post-output failures never trigger fallback.
+  DeepSeek Messages remains on the configured origin normalized to
+  `/anthropic`.
 - Restored pending approvals as durable, non-expiring decisions. Restart keeps
   the exact bottom conversation card without carrying an execution capability;
   eligible fixed-angle capture approvals retain the explicit allow-similar
@@ -99,6 +112,15 @@ Core with its fixed 64-tool contract.
   projects action kind from host-owned tool metadata and binds it into the
   one-use selection receipt, so a correct tool name with the wrong execution
   lane no longer passes acceptance.
+- Corrected supervised Unity release paths so repository-forbidden package
+  requests return the policy denial, and marker-only optimizer setup accepts
+  the component inventory returned by the live VRCForge Core while retaining
+  approval, checkpoint, readback, and rollback ownership.
+- Made optional optimizer-package handling compatibility-first: missing packages
+  are reported, existing versions are tried before any upgrade, and install or
+  upgrade remains a separate approval-bound action. A runtime incompatibility
+  keeps its original error before VRCForge checks a newer available version;
+  VRCForge does not pin third-party package versions during import.
 
 ## Safety and scope
 

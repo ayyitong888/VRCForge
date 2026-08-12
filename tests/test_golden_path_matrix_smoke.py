@@ -56,6 +56,7 @@ def make_args(tmp_path: Path, **overrides: Any) -> Namespace:
         "shader_target_family": "",
         "shader_target_shader": "",
         "shader_skip_package_install": False,
+        "gateway_config": "",
     }
     values.update(overrides)
     return Namespace(**values)
@@ -446,12 +447,14 @@ def test_external_agent_live_write_forwards_the_exact_parent_path(tmp_path: Path
             include_external_agent=True,
             include_live_writes=True,
             parent_path="Scene/Hero",
+            gateway_config=str(tmp_path / "isolated-agent-gateway.json"),
         ),
         run_command_func=fake_run,
     )
     runner.external_agent_write_request_rollback()
 
     assert len(run_calls) == 1
+    assert run_calls[0][run_calls[0].index("--gateway-config") + 1] == str(tmp_path / "isolated-agent-gateway.json")
     assert run_calls[0][-3:] == ["--live-write-rollback", "--parent-path", "Scene/Hero"]
 
 
@@ -941,6 +944,7 @@ def test_live_write_flag_invokes_existing_shader_and_optimizer_smokes(tmp_path: 
             shader_target_family="lilToon",
             shader_target_shader="Hidden/lilToonCutout",
             shader_skip_package_install=True,
+            gateway_config=str(tmp_path / "isolated-agent-gateway.json"),
         ),
         request_func=fake_read_only_request,
         run_command_func=fake_run,
@@ -960,6 +964,7 @@ def test_live_write_flag_invokes_existing_shader_and_optimizer_smokes(tmp_path: 
     assert shader_command[shader_command.index("--target-shader") + 1] == "Hidden/lilToonCutout"
     assert shader_command[shader_command.index("--package-id") + 1] == ""
     assert shader_command[shader_command.index("--repository") + 1] == ""
+    assert shader_command[shader_command.index("--gateway-config") + 1] == str(tmp_path / "isolated-agent-gateway.json")
     optimizer_steps = [
         step
         for step in paths_by_id(report)["model_optimization_validation_rollback"]["steps"]
