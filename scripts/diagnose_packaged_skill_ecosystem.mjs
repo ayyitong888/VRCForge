@@ -322,20 +322,25 @@ function createAuthenticatedLoopbackPlannerProvider() {
       return;
     }
     activeSelection.sampleCount += 1;
-    const firstSample = activeSelection.sampleCount === 1;
-    const plan = firstSample
+    const plan = activeSelection.sampleCount === 1
       ? {
+        action: "enter_execution",
+        summary: `Enter execution mode for ${activeSelection.skillName}.`,
+        reply: "",
+      }
+      : activeSelection.sampleCount === 2
+        ? {
         action: "skill",
         skill_tool: activeSelection.skillName,
         skill_params: activeSelection.params,
         summary: `Run ${activeSelection.skillName}.`,
         reply: "",
       }
-      : {
-        action: "reply",
-        summary: `Finished ${activeSelection.skillName}.`,
-        reply: `Finished ${activeSelection.skillName}.`,
-      };
+        : {
+          action: "reply",
+          summary: `Finished ${activeSelection.skillName}.`,
+          reply: `Finished ${activeSelection.skillName}.`,
+        };
     const content = JSON.stringify(plan);
     requests.push({
       method: request.method,

@@ -100,6 +100,7 @@ def test_packaged_skill_probe_uses_authenticated_loopback_provider_after_local_p
     assert 'server.listen(0, "127.0.0.1"' in source
     assert 'authorization !== `Bearer ${plannerProviderApiKey}`' in source
     assert "beginToolSelection(skillName, effectiveParams)" in source
+    assert 'action: "enter_execution"' in source
     assert 'action: "skill"' in source
     assert 'action: "reply"' in source
     assert 'provider: "custom"' in source

@@ -17,7 +17,21 @@
         </div>
       </main>
     </div>
-    <script src="/vrcforge-startup-shell.js"></script>
+    <script>
+      (function scheduleStartupShellPaint() {
+        var metrics = (window.__vrcforgeStartupMetrics ||= {});
+        metrics.startupShellRequestedMs ??= Math.round(performance.now());
+        window.__vrcforgeStartupShellPaintedPromise ??= new Promise(function (resolve) {
+          window.requestAnimationFrame(function () {
+            window.setTimeout(function () {
+              metrics.startupShellPaintedMs ??= Math.round(performance.now());
+              document.documentElement.dataset.vrcforgeStartupShell = "ready";
+              resolve();
+            }, 0);
+          });
+        });
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
