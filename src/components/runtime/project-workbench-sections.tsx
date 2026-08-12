@@ -7,7 +7,7 @@ import { formatCount } from "../../lib/utils";
 import type { AgentProgress } from "../../lib/api";
 import { AgentTodoPanelEmbedded } from "./agent-todo-panel";
 import { RuntimeInfoRow, RuntimeSection, StatusDot } from "./runtime-sidebar-ui";
-import { Folder, ListChecks, Monitor, PlugZap, Server, Wrench, Box, Boxes } from "lucide-react";
+import { Folder, ListChecks, Monitor, PlugZap, Server, Wrench, Box } from "lucide-react";
 
 type ComponentStatus = { status: string; message?: string } | null | undefined;
 
@@ -46,9 +46,6 @@ export function ProjectWorkbenchSections({
   userAttachmentSources,
   approvalsLoaded,
   pendingApprovals,
-  hasEnvironmentAttention,
-  hasStartupIssue,
-  openDoctor,
 }: {
   workspaceProjectLabel: string;
   selectedProjectComponent: ComponentStatus;
@@ -65,9 +62,6 @@ export function ProjectWorkbenchSections({
   userAttachmentSources: UserAttachmentSource[];
   approvalsLoaded: boolean;
   pendingApprovals: number;
-  hasEnvironmentAttention: boolean;
-  hasStartupIssue: boolean;
-  openDoctor: () => void | Promise<void>;
 }) {
   const { t } = useTranslation();
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>(() => {
@@ -204,17 +198,6 @@ export function ProjectWorkbenchSections({
             </div>
           </div>
         </div>
-        {hasEnvironmentAttention || hasStartupIssue ? (
-          <button
-            type="button"
-            data-vrcforge-project-environment-doctor
-            className="mt-2 flex w-full items-center gap-2 rounded-lg border border-amber-300/70 bg-amber-50/70 px-3 py-2 text-left text-xs text-amber-800 transition-colors hover:bg-amber-100 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-300 dark:hover:bg-amber-950/35"
-            onClick={() => void openDoctor()}
-          >
-            <Boxes className="h-3.5 w-3.5" />
-            {t("sidebar.doctor")}
-          </button>
-        ) : null}
       </RuntimeSection>
 
       <RuntimeSection

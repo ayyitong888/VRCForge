@@ -3,13 +3,15 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
-const [app, sidebar, sections, todo, runtimeUi, activity, dashboard, zhCN, enUS] = await Promise.all([
+const [app, sidebar, sections, todo, runtimeUi, activity, appSidebar, workspaceHeader, dashboard, zhCN, enUS] = await Promise.all([
   readFile(resolve(root, "src", "App.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "runtime-sidebar.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "project-workbench-sections.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "agent-todo-panel.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "runtime-sidebar-ui.tsx"), "utf8"),
   readFile(resolve(root, "src", "components", "runtime", "runtime-activity-panel.tsx"), "utf8"),
+  readFile(resolve(root, "src", "components", "sidebar", "app-sidebar.tsx"), "utf8"),
+  readFile(resolve(root, "src", "components", "workspace", "workspace-header.tsx"), "utf8"),
   readFile(resolve(root, "dashboard_server.py"), "utf8"),
   readFile(resolve(root, "src", "locales", "zh-CN.json"), "utf8"),
   readFile(resolve(root, "src", "locales", "en-US.json"), "utf8"),
@@ -63,10 +65,15 @@ assert.ok(
 );
 assert.match(sections, /subAgentPanel/);
 assert.match(sections, /userAttachmentSources/);
-assert.match(sections, /hasEnvironmentAttention/);
-assert.match(sections, /hasStartupIssue/);
-assert.match(sections, /openDoctor/);
-assert.match(sections, /data-vrcforge-project-environment-doctor/);
+assert.doesNotMatch(sections, /hasEnvironmentAttention/);
+assert.doesNotMatch(sections, /hasStartupIssue/);
+assert.doesNotMatch(sections, /openDoctor/);
+assert.doesNotMatch(sections, /data-vrcforge-project-environment-doctor/);
+assert.match(appSidebar, /onOpenDoctor/);
+assert.match(appSidebar, /sidebar\.doctor/);
+assert.match(workspaceHeader, /onOpenDoctor/);
+assert.match(workspaceHeader, /showDoctorStartupPrompt/);
+assert.match(workspaceHeader, /onClick=\{onOpenDoctor\}/);
 assert.match(sidebar, /!projectWorkspace && \(hasEnvironmentAttention \|\| hasStartupIssue\)/);
 assert.doesNotMatch(sidebar, /\{hasEnvironmentAttention \|\| hasStartupIssue \? \(/);
 const todoTitleIndex = sections.indexOf('title={t("workspace.todo")}');

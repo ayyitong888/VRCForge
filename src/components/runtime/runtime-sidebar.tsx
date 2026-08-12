@@ -126,9 +126,6 @@ export function RightRuntimeSidebar({
             userAttachmentSources={userAttachmentSources}
             approvalsLoaded={approvalsLoaded}
             pendingApprovals={pendingApprovals}
-            hasEnvironmentAttention={hasEnvironmentAttention}
-            hasStartupIssue={hasStartupIssue}
-            openDoctor={openDoctor}
           />
         ) : (
           <>
