@@ -67,6 +67,18 @@ def test_stdio_bridge_start_runtime_is_explicit_opt_in() -> None:
     assert parsed.no_start is True
 
 
+def test_stdio_bridge_protocol_profile_and_exposure_are_explicit() -> None:
+    module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
+
+    defaults = module.parse_args([])
+    assert defaults.protocol_profile == "auto"
+    assert defaults.exposure_layer == "planning"
+
+    standard = module.parse_args(["--protocol-profile", "mcp-1x", "--exposure-layer", "planning"])
+    assert standard.protocol_profile == "mcp-1x"
+    assert standard.exposure_layer == "planning"
+
+
 def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> None:
     module = importlib.import_module("tools.vrcforge_agent_mcp_stdio")
 
@@ -99,7 +111,7 @@ def test_stdio_bridge_exposes_writes_only_in_execution_layer(monkeypatch) -> Non
 
     captured = {}
     monkeypatch.setattr(module, "run_stdio_loop", lambda router: captured.setdefault("router", router))
-    module.run_stdio_server(Bridge())
+    module.run_stdio_server(Bridge(), protocol_profile="vrcforge-2026")
     router = captured["router"]
     meta = {
         "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,

@@ -5,6 +5,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 from external_agent_connectors import (
     DEFAULT_MCP_URL,
@@ -19,6 +20,7 @@ from external_agent_connectors import (
     build_claude_code_style_config,
     build_codex_stdio_config,
     build_connector_bundle,
+    build_deepseek_harness_patch,
     build_generic_http_config,
     build_generic_stdio_config,
     build_skills_projection,
@@ -27,9 +29,28 @@ from external_agent_connectors import (
     render_codex_stdio_toml,
     render_codex_toml,
     render_connector_bundle_json,
+    render_deepseek_harness_patch,
     render_generic_http_json,
     render_generic_stdio_json,
 )
+
+
+def test_deepseek_harness_patch_uses_official_insert_row_shape_and_standard_profile() -> None:
+    patch = build_deepseek_harness_patch()
+    rendered = yaml.safe_load(render_deepseek_harness_patch())
+
+    assert rendered == patch
+    assert isinstance(patch, list)
+    assert len(patch) == 1
+    rows = patch[0]["insert"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["id"] == "mcp-vrcforge"
+    assert row["name"] == "@deepseek-ai/dsh-mcp-client"
+    assert row["config"]["serverName"] == DEFAULT_SERVER_NAME
+    assert row["config"]["transport"] == "stdio"
+    assert row["config"]["args"][-4:] == ["--protocol-profile", "auto", "--exposure-layer", "planning"]
+    assert "token" not in json.dumps(patch, ensure_ascii=False).casefold()
 
 
 def test_connector_bundle_uses_loopback_endpoint_and_env_placeholder(monkeypatch: pytest.MonkeyPatch) -> None:

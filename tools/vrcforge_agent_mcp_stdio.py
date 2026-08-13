@@ -17,6 +17,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from agent_mcp_2026 import Mcp2026Router, run_stdio_loop
+from agent_mcp_standard import McpStandardRouter, run_negotiated_stdio_loop, run_standard_stdio_loop
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8757"
@@ -36,7 +37,7 @@ def main() -> int:
         print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
         return 0
 
-    run_stdio_server(bridge)
+    run_stdio_server(bridge, protocol_profile=args.protocol_profile, exposure_layer=args.exposure_layer)
     return 0
 
 
@@ -49,6 +50,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-start", action="store_true", help="Compatibility flag; runtime auto-launch is disabled by default.")
     parser.add_argument("--preflight", action="store_true", help="Print a JSON preflight report and exit.")
     parser.add_argument("--json", action="store_true", help="Compatibility flag; preflight already prints JSON.")
+    parser.add_argument(
+        "--protocol-profile",
+        choices=("auto", "vrcforge-2026", "mcp-1x"),
+        default=os.environ.get("VRCFORGE_MCP_PROTOCOL_PROFILE", "auto"),
+        help="Prefer VRCForge 2026 and negotiate MCP 1.x only when the client initializes with it.",
+    )
+    parser.add_argument(
+        "--exposure-layer",
+        choices=("planning", "execution"),
+        default=os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER", "planning"),
+        help="Pin the tool catalogue exposed to this stdio client.",
+    )
     return parser.parse_args(argv)
 
 
@@ -230,10 +243,20 @@ class VRCForgeBridge:
         return json.loads(text or "{}")
 
 
-def run_stdio_server(bridge: VRCForgeBridge) -> None:
+def run_stdio_server(
+    bridge: VRCForgeBridge,
+    *,
+    protocol_profile: str = "vrcforge-2026",
+    exposure_layer: str = "planning",
+) -> None:
+    if protocol_profile not in {"auto", "vrcforge-2026", "mcp-1x"}:
+        raise ValueError("protocol_profile must be auto, vrcforge-2026 or mcp-1x")
+    if exposure_layer not in {"planning", "execution"}:
+        raise ValueError("exposure_layer must be planning or execution")
+
     def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
-        exposure_layer = str(params.get("exposureLayer") or "planning")
-        if exposure_layer not in {"planning", "execution"}:
+        requested_exposure = str(params.get("exposureLayer") or exposure_layer)
+        if requested_exposure not in {"planning", "execution"}:
             raise ValueError("exposureLayer must be planning or execution")
         tools: list[dict[str, Any]] = [
             {
@@ -245,7 +268,7 @@ def run_stdio_server(bridge: VRCForgeBridge) -> None:
         if not bridge.preflight().get("runtimeOnline"):
             return tools
         try:
-            manifest = bridge.manifest(exposure_layer)
+            manifest = bridge.manifest(requested_exposure)
         except Exception:
             return tools
         manifest_tools = manifest.get("tools") if isinstance(manifest, dict) else []
@@ -272,13 +295,26 @@ def run_stdio_server(bridge: VRCForgeBridge) -> None:
             return bridge.preflight()
         return bridge.call_tool(tool_name, arguments, agent_name="external-stdio-agent")
 
-    router = Mcp2026Router(
+    router_standard = McpStandardRouter(
+        lambda: list_tools({"exposureLayer": exposure_layer}),
+        call_tool,
+        server_name=DEFAULT_SERVER_NAME,
+        server_version="1.5.1",
+    )
+    if protocol_profile == "mcp-1x":
+        run_standard_stdio_loop(router_standard)
+        return
+
+    router_2026 = Mcp2026Router(
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
         server_version="1.5.1",
     )
-    run_stdio_loop(router)
+    if protocol_profile == "vrcforge-2026":
+        run_stdio_loop(router_2026)
+        return
+    run_negotiated_stdio_loop(router_2026, router_standard)
 
 
 def read_json_file(path: Path | None) -> dict[str, Any]:

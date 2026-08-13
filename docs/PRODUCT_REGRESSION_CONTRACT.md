@@ -475,6 +475,32 @@ Each item ends with its version history in this exact form:
 - Acceptance: connector negatives, interop matrix and package boundary scan.
 - [首次实现: 1.3.0] [强化/修复: 1.5.0] [最近验证: 1.5.1]
 
+### CMP-002 — DeepSeek Harness and host-side multi-MCP compatibility
+
+- Contract: the App-side external-Agent edge prefers VRCForge MCP 2026
+  (`2026-07-28`). A client that begins the published standard MCP initialize
+  lifecycle may select a pinned supported MCP 1.x revision from the first valid
+  frame. The selected profile is recorded and frozen for that connection; no
+  mid-connection switch or silent catalogue downgrade is allowed. The Unity
+  package/Core stays VRCForge MCP 2026-only.
+- Contract: the DeepSeek Harness connector is generated in its official Cordis
+  patch-list shape as one stable, uniquely namespaced stdio MCP row. It contains
+  no credential, exposes planning tools by default, preserves unrelated MCP
+  rows, and fails closed on duplicate ids, namespace conflicts or modified
+  managed entries. The developer-preview Harness source used for compatibility
+  verification is commit-pinned in evidence.
+- Forbidden regression: no DSH-only protocol fork, token in generated YAML,
+  direct external Unity write, replacement of another MCP row, guessed
+  fallback after discovery, or claim that host-side multi-MCP coexistence is
+  VRCForge outbound MCP federation.
+- Acceptance: failure-first router/installer/connector tests; build the pinned
+  official DSH repository; load VRCForge plus an independent MCP server in the
+  same official DSH client; prove both namespaces can be called; then run an
+  official DSH Agent turn that selects a VRCForge read tool and reaches a live
+  Unity Editor. Preserve the separate built-in Provider Agent prompt replay as
+  an honest comparison, including a rejected or failed final status.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
 ## Release contracts
 
 ### REL-001 — Strict artifact identity

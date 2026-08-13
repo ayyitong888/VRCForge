@@ -77,6 +77,7 @@ export function ExternalAgentConnectorsPanel({
   const smokeCommand = [status?.launcher?.smoke?.command, ...smokeArgs, ...smokeLiveArgs].filter(Boolean).join(" ");
   const genericStdioText = status?.clientConfigs?.generic?.text || claudeStdioText;
   const genericHttpText = status?.clientConfigs?.genericHttp?.text || claudeText;
+  const deepseekHarnessText = status?.clientConfigs?.deepseekHarness?.text || "";
   const clients = status?.clients;
   const lastAction = status?.lastConnectorAction;
   const connectorRows: Array<{
@@ -116,6 +117,13 @@ export function ExternalAgentConnectorsPanel({
       mode: t("connector.desktopConfig"),
       copyText: claudeStdioText,
       copyLabel: "Claude Cowork config",
+    },
+    {
+      client: "deepseekHarness",
+      title: "DeepSeek Harness",
+      mode: t("connector.userConfig"),
+      copyText: deepseekHarnessText,
+      copyLabel: "DeepSeek Harness config",
     },
   ];
   return (

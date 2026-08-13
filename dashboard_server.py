@@ -1677,7 +1677,7 @@ class ExternalAgentGatewayUpdateRequest(BaseModel):
 
 
 class ExternalAgentConnectorActionRequest(BaseModel):
-    client: Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"]
+    client: Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic", "deepseekHarness"]
     project_path: str | None = Field(default=None, alias="projectPath")
     config_path: str | None = Field(default=None, alias="configPath")
 
@@ -22393,6 +22393,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             cleanup_user_data=False,
             cleanup_user_data_root="",
             shell_pty_worker=False,
+            protocol_profile="auto",
+            exposure_layer="planning",
             cli_args=raw_args[cli_index + 1 :],
         )
     parser = argparse.ArgumentParser(description="Launch the VRChat Blendshape control dashboard.")
@@ -22403,6 +22405,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-start", action="store_true", help="Compatibility flag; stdio runtime auto-launch is disabled by default.")
     parser.add_argument("--preflight", action="store_true", help="With --agent-mcp-stdio, print a bridge preflight report and exit.")
     parser.add_argument("--json", action="store_true", help="Compatibility flag for preflight JSON output.")
+    parser.add_argument(
+        "--protocol-profile",
+        choices=("auto", "vrcforge-2026", "mcp-1x"),
+        default=os.environ.get("VRCFORGE_MCP_PROTOCOL_PROFILE", "auto"),
+        help="Negotiated MCP profile for --agent-mcp-stdio; VRCForge 2026 is preferred.",
+    )
+    parser.add_argument(
+        "--exposure-layer",
+        choices=("planning", "execution"),
+        default=os.environ.get("VRCFORGE_MCP_EXPOSURE_LAYER", "planning"),
+        help="Tool exposure layer pinned for --agent-mcp-stdio.",
+    )
     parser.add_argument("--cli", action="store_true", help="Run the VRCForge CLI against the local desktop runtime.")
     parser.add_argument("--cleanup-user-data", action="store_true", help="Installer helper: remove VRCForge user data and known project chat transcripts.")
     parser.add_argument("--cleanup-user-data-root", default="", help="Installer helper override for the VRCForge user data root.")
@@ -22541,7 +22555,7 @@ def main() -> int:
         if args.preflight:
             print(json.dumps(bridge.preflight(), ensure_ascii=False, indent=2, sort_keys=True))
             return 0
-        run_stdio_server(bridge)
+        run_stdio_server(bridge, protocol_profile=args.protocol_profile, exposure_layer=args.exposure_layer)
         return 0
     adoption_requested = backend_listener_adoption_requested()
     if not adoption_requested and backend_bind_target_occupied(args.host, args.port):

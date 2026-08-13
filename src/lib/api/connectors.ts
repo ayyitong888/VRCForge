@@ -87,7 +87,7 @@ export type ExternalAgentConnectorStatus = {
     };
   };
   clients?: Record<
-    "codexApp" | "codexCli" | "claudeCode" | "claudeCowork" | "generic",
+    "codexApp" | "codexCli" | "claudeCode" | "claudeCowork" | "generic" | "deepseekHarness",
     {
       label?: string;
       scope?: "user" | "project" | string;
@@ -118,6 +118,7 @@ export type ExternalAgentConnectorStatus = {
     claudeCowork?: { format: string; text: string; config?: unknown; transport?: string };
     generic?: { format: string; text: string; config?: unknown; transport?: string };
     genericHttp?: { format: string; text: string; config?: unknown; transport?: string };
+    deepseekHarness?: { format: string; text: string; config?: unknown; transport?: string };
   };
   launcher?: {
     stdioBridge?: {
@@ -152,7 +153,7 @@ export type ExternalAgentConnectorStatus = {
   lastConnectorAction?: ExternalAgentConnectorActionResult;
 };
 
-export type ExternalAgentConnectorClient = "codexApp" | "codexCli" | "claudeCode" | "claudeCowork" | "generic";
+export type ExternalAgentConnectorClient = "codexApp" | "codexCli" | "claudeCode" | "claudeCowork" | "generic" | "deepseekHarness";
 
 export type ExternalAgentConnectorActionResult = {
   ok: boolean;

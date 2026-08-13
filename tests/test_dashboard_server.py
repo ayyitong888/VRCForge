@@ -15018,6 +15018,24 @@ namespace VRCForge.Editor
         self.assertFalse(default_args.start_runtime)
         self.assertTrue(start_args.start_runtime)
 
+    def test_agent_mcp_stdio_protocol_profile_is_explicit(self) -> None:
+        defaults = dashboard_server.parse_args(["--agent-mcp-stdio"])
+        standard = dashboard_server.parse_args(
+            ["--agent-mcp-stdio", "--protocol-profile", "mcp-1x", "--exposure-layer", "planning"]
+        )
+
+        self.assertEqual(defaults.protocol_profile, "auto")
+        self.assertEqual(defaults.exposure_layer, "planning")
+        self.assertEqual(standard.protocol_profile, "mcp-1x")
+        self.assertEqual(standard.exposure_layer, "planning")
+
+    def test_deepseek_harness_connector_action_is_accepted_by_api_model(self) -> None:
+        request = dashboard_server.ExternalAgentConnectorActionRequest.model_validate(
+            {"client": "deepseekHarness"}
+        )
+
+        self.assertEqual(request.client, "deepseekHarness")
+
     def test_agent_mcp_stdio_main_does_not_reconcile_sub_agent_tasks(self) -> None:
         args = dashboard_server.parse_args(["--agent-mcp-stdio", "--preflight", "--no-start"])
         reconcile_sub_agents = Mock(side_effect=AssertionError("stdio mode must not reconcile backend-owned tasks"))

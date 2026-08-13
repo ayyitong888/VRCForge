@@ -9,6 +9,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 import external_agent_connector_installer as connector_installer
 
@@ -29,6 +30,65 @@ def make_source_root(tmp_path: Path) -> Path:
     tools.mkdir(parents=True)
     (tools / "vrcforge_agent_mcp_stdio.py").write_text("# test bridge placeholder\n", encoding="utf-8")
     return root
+
+
+def test_deepseek_harness_install_preserves_other_mcp_rows_and_uninstalls_exact_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = make_source_root(tmp_path)
+    dsh_home = tmp_path / "dsh-home"
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    patch_path = dsh_home / "cordis.patch.yml"
+    patch_path.parent.mkdir(parents=True)
+    existing = [
+        {
+            "insert": [
+                {
+                    "id": "mcp-existing",
+                    "name": "@deepseek-ai/dsh-mcp-client",
+                    "config": {"serverName": "existing", "transport": "stdio", "command": "node"},
+                }
+            ]
+        }
+    ]
+    patch_path.write_text(yaml.safe_dump(existing, sort_keys=False), encoding="utf-8")
+
+    installed = install_connector("deepseekHarness", root_dir=root, run_self_test=False)
+    assert installed["restartRequired"] is False
+    assert "hot-reload" in installed["restartInstruction"]
+    payload = yaml.safe_load(patch_path.read_text(encoding="utf-8"))
+    rows = [row for operation in payload for row in operation.get("insert", [])]
+    assert installed["ok"] is True
+    assert [row["id"] for row in rows] == ["mcp-existing", "mcp-vrcforge"]
+
+    removed = uninstall_connector("deepseekHarness", root_dir=root)
+    payload_after = yaml.safe_load(patch_path.read_text(encoding="utf-8"))
+    rows_after = [row for operation in payload_after for row in operation.get("insert", [])]
+    assert removed["ok"] is True
+    assert [row["id"] for row in rows_after] == ["mcp-existing"]
+
+
+def test_deepseek_harness_rejects_non_insert_operation_targeting_managed_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_source_root(tmp_path)
+    dsh_home = tmp_path / "dsh-home"
+    monkeypatch.setenv("DSH_HOME", str(dsh_home))
+    patch_path = dsh_home / "cordis.patch.yml"
+    patch_path.parent.mkdir(parents=True, exist_ok=True)
+    patch_path.write_text(
+        yaml.safe_dump([{"id": "mcp-vrcforge", "config": {"toolCallTimeoutMs": 1}}], sort_keys=False),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConnectorInstallError) as install_error:
+        install_connector("deepseekHarness", root_dir=root, run_self_test=False)
+
+    assert install_error.value.stage == "conflict"
+    assert patch_path.read_text(encoding="utf-8") == yaml.safe_dump(
+        [{"id": "mcp-vrcforge", "config": {"toolCallTimeoutMs": 1}}], sort_keys=False
+    )
 
 
 def test_claude_code_install_preserves_existing_server_and_is_idempotent(tmp_path: Path) -> None:
@@ -454,7 +514,7 @@ def test_connector_statuses_are_split_by_app_and_cli(monkeypatch: pytest.MonkeyP
 
     statuses = connector_client_statuses(root_dir=root, project_path=str(project))
 
-    assert set(statuses) == {"codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"}
+    assert set(statuses) == {"codexApp", "codexCli", "claudeCode", "claudeCowork", "generic", "deepseekHarness"}
     assert statuses["codexApp"]["label"] == "Codex App"
     assert statuses["codexCli"]["label"] == "Codex CLI"
     assert statuses["claudeCode"]["scope"] == "project"

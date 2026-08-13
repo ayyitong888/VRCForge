@@ -16,6 +16,9 @@ DEFAULT_STDIO_SCRIPT = "tools\\vrcforge_agent_mcp_stdio.py"
 DEFAULT_STDIO_EXTRA_ARGS = ("--no-start",)
 DEFAULT_SMOKE_COMMAND = "python"
 DEFAULT_SMOKE_SCRIPT = "scripts\\smoke_external_agent_bridge.py"
+DSH_PINNED_COMMIT = "47f943859bef60e4160492346772ded9b24f765a"
+DSH_PACKAGE = "@deepseek-ai/dsh-mcp-client"
+DSH_PATCH_ID = "mcp-vrcforge"
 
 _ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SERVER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -110,8 +113,50 @@ def build_connector_bundle(options: ExternalAgentConnectorOptions | None = None)
                 "config": build_generic_http_config(opts),
                 "text": render_generic_http_json(opts),
             },
+            "deepseekHarness": {
+                "format": "yaml",
+                "transport": "stdio",
+                "config": build_deepseek_harness_patch(options),
+                "text": render_deepseek_harness_patch(options),
+            },
         },
     }
+
+
+def build_deepseek_harness_patch(options: ExternalAgentConnectorOptions | None = None) -> list[dict[str, Any]]:
+    """Pinned DSH Cordis patch entry; contains no credentials and uses standard MCP."""
+    opts = options or ExternalAgentConnectorOptions()
+    return [
+        {
+            "insert": [
+                {
+                    "id": DSH_PATCH_ID,
+                    "name": DSH_PACKAGE,
+                    "config": {
+                        "serverName": opts.server_name,
+                        "transport": "stdio",
+                        "command": opts.stdio_command,
+                        "args": [
+                            opts.stdio_script,
+                            *opts.stdio_extra_args,
+                            "--protocol-profile",
+                            "auto",
+                            "--exposure-layer",
+                            "planning",
+                        ],
+                        "cwd": opts.stdio_cwd,
+                        "env": {},
+                        "toolCallTimeoutMs": 60000,
+                    },
+                }
+            ]
+        }
+    ]
+
+
+def render_deepseek_harness_patch(options: ExternalAgentConnectorOptions | None = None) -> str:
+    import yaml
+    return yaml.safe_dump(build_deepseek_harness_patch(options), sort_keys=False, allow_unicode=True)
 
 
 def build_skills_projection(
@@ -366,12 +411,16 @@ __all__ = [
     "DEFAULT_STDIO_EXTRA_ARGS",
     "DEFAULT_STDIO_SCRIPT",
     "DEFAULT_TOKEN_ENV_VAR",
+    "DSH_PINNED_COMMIT",
+    "DSH_PACKAGE",
+    "DSH_PATCH_ID",
     "ExternalAgentConnectorOptions",
     "build_claude_code_stdio_config",
     "build_claude_code_style_config",
     "build_codex_stdio_config",
     "build_codex_style_config",
     "build_connector_bundle",
+    "build_deepseek_harness_patch",
     "build_generic_http_config",
     "build_generic_stdio_config",
     "build_launcher_metadata",
@@ -381,6 +430,7 @@ __all__ = [
     "render_codex_stdio_toml",
     "render_codex_toml",
     "render_connector_bundle_json",
+    "render_deepseek_harness_patch",
     "render_generic_http_json",
     "render_generic_stdio_json",
 ]

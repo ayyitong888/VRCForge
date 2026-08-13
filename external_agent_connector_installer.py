@@ -27,9 +27,13 @@ from external_agent_connectors import (
     build_claude_code_stdio_config,
     build_connector_bundle,
     render_codex_stdio_toml,
+    build_deepseek_harness_patch,
+    DSH_PATCH_ID,
+    DSH_PACKAGE,
 )
+import yaml
 
-ConnectorClient = Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic"]
+ConnectorClient = Literal["codex", "codexApp", "codexCli", "claudeCode", "claudeCowork", "generic", "deepseekHarness"]
 
 
 _CONFIG_PATH_LOCKS_GUARD = threading.Lock()
@@ -144,6 +148,8 @@ def install_connector(
         result = _install_claude_cowork(options=options)
     elif client == "generic":
         result = _install_generic(config_path=config_path, options=options)
+    elif client == "deepseekHarness":
+        result = _install_deepseek_harness(bridge=bridge, options=options)
     elif client in {"codex", "codexApp", "codexCli"}:
         result = _install_codex(options=options)
     else:  # pragma: no cover - Literal request validation should stop this.
@@ -193,6 +199,15 @@ def uninstall_connector(
             )
         expected = build_claude_code_stdio_config(resolve_stdio_bridge(root_dir).to_options())["mcpServers"][DEFAULT_SERVER_NAME]
         result = _update_generic_json_mcp_server(path, expected, install=False)
+    elif client == "deepseekHarness":
+        if root_dir is None:
+            raise ConnectorInstallError(
+                "DeepSeek Harness connector removal needs the VRCForge installation root to verify ownership.",
+                stage="verify_ownership",
+            )
+        path = deepseek_harness_config_path()
+        expected = build_deepseek_harness_patch(resolve_stdio_bridge(root_dir).to_options())
+        result = _update_deepseek_harness_patch(expected, install=False)
     elif client in {"codex", "codexApp", "codexCli"}:
         path = codex_config_path()
         result = _update_codex_toml_server(path, DEFAULT_SERVER_NAME, None)
@@ -224,6 +239,7 @@ def connector_client_statuses(
         "claudeCode": _claude_code_status(project_path, bridge),
         "claudeCowork": _claude_cowork_status(bridge),
         "generic": _generic_status(bridge, generic_config_path_value),
+        "deepseekHarness": _deepseek_harness_status(bridge),
     }
 
 
@@ -245,6 +261,8 @@ def restart_instruction(client: str) -> str:
         return "Start a new Codex CLI session so it reloads ~/.codex/config.toml."
     if client == "generic":
         return "Restart or reconnect the MCP client so it reloads the edited mcpServers config file."
+    if client == "deepseekHarness":
+        return "DeepSeek Harness hot-reloads cordis.patch.yml; start a session if no Harness instance is running."
     return "Start a new client session so it reloads MCP servers."
 
 
@@ -279,6 +297,124 @@ def _install_generic(*, config_path: str | None, options: ExternalAgentConnector
     path = generic_config_path(config_path)
     block = build_claude_code_stdio_config(options)["mcpServers"][DEFAULT_SERVER_NAME]
     return {"configPath": str(path), **_update_generic_json_mcp_server(path, block, install=True)}
+
+
+def deepseek_harness_config_path() -> Path:
+    value = os.environ.get("DSH_HOME", "").strip()
+    root = Path(value).expanduser() if value else Path.home() / ".dsh"
+    return root / "cordis.patch.yml"
+
+
+def _install_deepseek_harness(*, bridge: StdioBridgeSpec, options: ExternalAgentConnectorOptions) -> dict[str, Any]:
+    path = deepseek_harness_config_path()
+    patch = build_deepseek_harness_patch(options)
+    return {"configPath": str(path), **_update_deepseek_harness_patch(patch, install=True)}
+
+
+def _dsh_insert_rows(patches: list[Any]) -> list[tuple[dict[str, Any], list[Any]]]:
+    rows: list[tuple[dict[str, Any], list[Any]]] = []
+    for operation in patches:
+        if not isinstance(operation, dict):
+            continue
+        inserted = operation.get("insert")
+        if not isinstance(inserted, list):
+            continue
+        for row in inserted:
+            if isinstance(row, dict):
+                rows.append((row, inserted))
+    return rows
+
+
+def _dsh_direct_managed_operations(patches: list[Any]) -> list[dict[str, Any]]:
+    """Return non-insert patch operations that target VRCForge's managed row."""
+    return [
+        operation
+        for operation in patches
+        if isinstance(operation, dict)
+        and "insert" not in operation
+        and operation.get("id") == DSH_PATCH_ID
+    ]
+
+
+def _update_deepseek_harness_patch(patch: list[dict[str, Any]] | None, *, install: bool) -> dict[str, Any]:
+    path = deepseek_harness_config_path()
+    lock = _config_path_lock(path)
+    with lock:
+        existing: list[Any] = []
+        if path.exists():
+            try:
+                loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+            except Exception as exc:
+                raise ConnectorInstallError(f"DeepSeek Harness patch is invalid YAML: {exc}", stage="parse_config") from exc
+            if not isinstance(loaded, list):
+                raise ConnectorInstallError("DeepSeek Harness patch must be a YAML patch list.", stage="parse_config")
+            existing = loaded
+        inserted_rows = _dsh_insert_rows(existing)
+        matches = [(row, owner) for row, owner in inserted_rows if row.get("id") == DSH_PATCH_ID]
+        direct_managed_operations = _dsh_direct_managed_operations(existing)
+        managed_row = patch[0]["insert"][0] if patch else None
+        namespace_conflicts = [
+            row for row, _owner in inserted_rows
+            if row.get("id") != DSH_PATCH_ID
+            and row.get("name") == DSH_PACKAGE
+            and isinstance(row.get("config"), dict)
+            and managed_row is not None
+            and row["config"].get("serverName") == managed_row["config"].get("serverName")
+        ]
+        if install:
+            if managed_row is None:
+                raise ConnectorInstallError("DeepSeek Harness managed row is missing.", stage="validate_config")
+            if len(matches) > 1:
+                raise ConnectorInstallError("DeepSeek Harness patch contains duplicate vrcforge entries; refusing to modify.", stage="conflict")
+            if direct_managed_operations:
+                raise ConnectorInstallError("DeepSeek Harness patch already modifies the vrcforge row outside its managed insert; refusing to overwrite.", stage="conflict")
+            if namespace_conflicts:
+                raise ConnectorInstallError("DeepSeek Harness serverName is already used by another MCP row.", stage="conflict")
+            if matches and matches[0][0] != managed_row:
+                raise ConnectorInstallError("DeepSeek Harness vrcforge entry conflicts with the pinned connector; refusing to overwrite.", stage="conflict")
+            if not matches:
+                existing.extend(patch)
+        else:
+            if len(matches) > 1:
+                raise ConnectorInstallError("DeepSeek Harness patch contains duplicate vrcforge entries; refusing to modify.", stage="conflict")
+            if direct_managed_operations:
+                raise ConnectorInstallError("DeepSeek Harness patch modifies the vrcforge row outside its managed insert; refusing to remove.", stage="verify_ownership")
+            if matches:
+                if managed_row is not None and matches[0][0] != managed_row:
+                    raise ConnectorInstallError("DeepSeek Harness vrcforge entry was modified; refusing to remove it.", stage="verify_ownership")
+                row, owner = matches[0]
+                owner.remove(row)
+                existing = [operation for operation in existing if not (isinstance(operation, dict) and operation.get("insert") == [])]
+            else:
+                return {"changed": False, "removed": False, "installed": False, "configPath": str(path)}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(path, yaml.safe_dump(existing, sort_keys=False, allow_unicode=True))
+        return {"changed": True, "removed": not install, "installed": install, "entriesPreserved": len(_dsh_insert_rows(existing)), "configPath": str(path)}
+
+
+def _deepseek_harness_status(bridge: dict[str, Any]) -> dict[str, Any]:
+    path = deepseek_harness_config_path()
+    installed = False
+    conflict = False
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) if path.exists() else {}
+        patches = loaded if isinstance(loaded, list) else []
+        matches = [row for row, _owner in _dsh_insert_rows(patches) if row.get("id") == DSH_PATCH_ID]
+        installed = len(matches) == 1
+        conflict = len(matches) > 1 or bool(_dsh_direct_managed_operations(patches))
+    except Exception:
+        conflict = True
+    return {"label": "DeepSeek Harness", "scope": "user", "configPath": str(path), "installed": installed, "conflict": conflict, "installable": not conflict, "bridge": bridge}
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path = _canonical_config_path(path)
+    temp = path.with_name(f".{path.name}.vrcforge-{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(text, encoding="utf-8")
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def claude_code_config_path(project_path: str | None) -> Path:
@@ -930,6 +1066,7 @@ CLIENT_LABELS = {
     "claudeCode": "Claude Code CLI",
     "claudeCowork": "Claude Cowork App",
     "generic": "Generic MCP client",
+    "deepseekHarness": "DeepSeek Harness",
 }
 
 

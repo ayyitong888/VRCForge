@@ -7,13 +7,14 @@ export const CONNECTOR_CLIENT_LABELS: Record<ExternalAgentConnectorClient, strin
   claudeCode: "Claude Code CLI",
   claudeCowork: "Claude Cowork App",
   generic: "Generic MCP client",
+  deepseekHarness: "DeepSeek Harness",
 };
 
 export function normalizeConnectorClient(client?: string): ExternalAgentConnectorClient | "" {
   if (client === "codex") {
     return "codexApp";
   }
-  return client === "codexApp" || client === "codexCli" || client === "claudeCode" || client === "claudeCowork" || client === "generic"
+  return client === "codexApp" || client === "codexCli" || client === "claudeCode" || client === "claudeCowork" || client === "generic" || client === "deepseekHarness"
     ? client
     : "";
 }
