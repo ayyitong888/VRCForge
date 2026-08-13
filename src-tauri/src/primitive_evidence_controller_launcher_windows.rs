@@ -1774,8 +1774,7 @@ mod tests {
     use crate::primitive_evidence_authority_windows::{AUTHORITY_PIPE_NAME, AUTHORITY_PIPE_SDDL};
     use serde_json::json;
     use std::{
-        env,
-        fs,
+        env, fs,
         io::Write,
         os::windows::io::AsHandle,
         process::Command as TestCommand,

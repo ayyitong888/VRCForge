@@ -9,6 +9,7 @@ import {
   scanProjectIndex,
 } from "../lib/api";
 import type { AppBootstrap, OutfitImportPlanResult, ProjectIndexScanResult, ProjectPrefs } from "../lib/api";
+import type { ProjectType } from "../lib/chat-types";
 import { isAbsoluteLocalPath, isTauriRuntime } from "../lib/app-runtime";
 import {
   COLLAPSED_PROJECTS_KEY,
@@ -28,12 +29,13 @@ type UseProjectManagementParams = {
   endpoint: string;
   runtimeConnected: boolean;
   activeProjectPath: string;
+  activeProjectType: ProjectType;
   projects: ProjectEntry[];
   refresh: (target?: string) => Promise<void>;
   refreshSilently: (target?: string) => Promise<void>;
   startRuntime: () => Promise<string | null>;
   setError: (message: string) => void;
-  onProjectAdded: (projectPath: string) => void;
+  onProjectAdded: (projectPath: string, projectType?: ProjectType) => void;
   onActiveProjectHidden: () => void;
 };
 
@@ -41,6 +43,7 @@ export function useProjectManagement({
   endpoint,
   runtimeConnected,
   activeProjectPath,
+  activeProjectType,
   projects,
   refresh,
   refreshSilently,
@@ -52,9 +55,10 @@ export function useProjectManagement({
   const { t } = useTranslation();
   const [showProjectModal, setShowProjectModal] = useState(false);
   const [newProjectPath, setNewProjectPath] = useState("");
+  const [newProjectType, setNewProjectType] = useState<ProjectType>("general");
   const [savingProjectPrefs, setSavingProjectPrefs] = useState(false);
   const [projectModalError, setProjectModalError] = useState("");
-  const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], hiddenPaths: [] });
+  const [projectPrefs, setProjectPrefs] = useState<ProjectPrefs>({ customPaths: [], customProjects: [], hiddenPaths: [] });
   const [projectPrefsReady, setProjectPrefsReady] = useState(false);
   const [loadingProjects, setLoadingProjects] = useState(false);
   const [projectMenu, setProjectMenu] = useState<{ projectPath: string; x: number; y: number } | null>(null);
@@ -92,16 +96,34 @@ export function useProjectManagement({
     () => new Set(projectUiPrefs.pinnedPaths.map(normalizeProjectPathKey)),
     [projectUiPrefs.pinnedPaths],
   );
+  const allProjectItems = useMemo(() => {
+    const byPath = new Map(
+      projects.map((project) => [normalizeProjectPathKey(project.path || ""), project]),
+    );
+    for (const customProject of projectPrefs.customProjects) {
+      const key = normalizeProjectPathKey(customProject.path);
+      if (!key || byPath.has(key)) {
+        continue;
+      }
+      byPath.set(key, {
+        name: shortPath(customProject.path),
+        path: customProject.path,
+        projectType: customProject.projectType,
+        sources: ["custom"],
+      });
+    }
+    return [...byPath.values()];
+  }, [projectPrefs.customProjects, projects]);
   const projectItems = useMemo(
     () =>
-      projects
+      allProjectItems
         .filter((project) => !hiddenPathSet.has(normalizeProjectPathKey(project.path || "")))
         .sort((a, b) => Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(b)))) - Number(pinnedProjectSet.has(normalizeProjectPathKey(projectKey(a))))),
-    [projects, hiddenPathSet, pinnedProjectSet],
+    [allProjectItems, hiddenPathSet, pinnedProjectSet],
   );
   const hiddenProjects = useMemo(
-    () => projects.filter((project) => hiddenPathSet.has(normalizeProjectPathKey(project.path || ""))),
-    [projects, hiddenPathSet],
+    () => allProjectItems.filter((project) => hiddenPathSet.has(normalizeProjectPathKey(project.path || ""))),
+    [allProjectItems, hiddenPathSet],
   );
 
   useEffect(() => {
@@ -128,7 +150,7 @@ export function useProjectManagement({
   }, [runtimeConnected, endpoint, projectPrefsReady]);
 
   useEffect(() => {
-    if (!runtimeConnected || !activeProjectPath) {
+    if (!runtimeConnected || !activeProjectPath || activeProjectType !== "unity") {
       setProjectIndex(null);
       setProjectIndexProject("");
       setProjectIndexError("");
@@ -138,7 +160,7 @@ export function useProjectManagement({
       void scanActiveProjectIndex(activeProjectPath, true);
     }, PROJECT_INDEX_BACKGROUND_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [runtimeConnected, endpoint, activeProjectPath]);
+  }, [runtimeConnected, endpoint, activeProjectPath, activeProjectType]);
 
   async function fetchProjectPrefsOnce() {
     try {
@@ -173,13 +195,14 @@ export function useProjectManagement({
     const saved = await persistProjectPrefs({
       ...projectPrefs,
       customPaths: [...projectPrefs.customPaths, path],
+      customProjects: [...projectPrefs.customProjects.filter((item) => normalizeProjectPathKey(item.path) !== normalizeProjectPathKey(path)), { path, projectType: newProjectType }],
     });
     if (!saved) {
       return;
     }
     const accepted = saved.customPaths.some((item) => item.replace(/\//g, "\\").toLowerCase() === path.replace(/\//g, "\\").toLowerCase());
     if (!accepted) {
-      setProjectModalError(t("project.invalidProjectRoot"));
+      setProjectModalError(t(newProjectType === "general" ? "project.invalidGeneralProjectRoot" : "project.invalidProjectRoot"));
       return;
     }
     setNewProjectPath("");
@@ -189,13 +212,14 @@ export function useProjectManagement({
     } catch {
       // The project list will refresh on the next poll.
     }
-    onProjectAdded(path);
+    onProjectAdded(path, newProjectType);
   }
 
   function removeCustomProject(path: string) {
     void persistProjectPrefs({
       ...projectPrefs,
       customPaths: projectPrefs.customPaths.filter((item) => normalizeProjectPathKey(item) !== normalizeProjectPathKey(path)),
+      customProjects: projectPrefs.customProjects.filter((item) => normalizeProjectPathKey(item.path) !== normalizeProjectPathKey(path)),
     });
   }
 
@@ -420,6 +444,8 @@ export function useProjectManagement({
     setShowProjectModal,
     newProjectPath,
     setNewProjectPath,
+    newProjectType,
+    setNewProjectType,
     savingProjectPrefs,
     projectModalError,
     setProjectModalError,

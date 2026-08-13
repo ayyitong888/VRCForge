@@ -5,6 +5,7 @@ import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { onboardingChecklistItemState, onboardingChecklistVisualClasses } from "./onboarding-checklist-state";
+import type { ProjectType } from "../../lib/chat-types";
 
 export function OnboardingOverlay({
   open,
@@ -12,6 +13,7 @@ export function OnboardingOverlay({
   stepIndex,
   runtimeConnected,
   selectedProjectReady,
+  projectType,
   unityToolsReady,
   unityToolsCount,
   apiKeyPresent,
@@ -31,6 +33,7 @@ export function OnboardingOverlay({
   stepIndex: number;
   runtimeConnected: boolean;
   selectedProjectReady: boolean;
+  projectType: ProjectType;
   unityToolsReady: boolean;
   unityToolsCount: number;
   apiKeyPresent: boolean;
@@ -49,8 +52,7 @@ export function OnboardingOverlay({
   if (!open) {
     return null;
   }
-  const steps = [
-    {
+  const projectStep = {
       title: t("onboarding.step3Title"),
       done: selectedProjectReady,
       doneDesc: t("onboarding.step3DoneDesc"),
@@ -61,8 +63,8 @@ export function OnboardingOverlay({
           {t("onboarding.selectProject")}
         </Button>
       ),
-    },
-    {
+    };
+  const unityStep = {
       title: t("onboarding.step1Title"),
       done: unityToolsReady,
       doneDesc: t("onboarding.toolsConnected", { count: unityToolsCount, total: 64 }),
@@ -77,8 +79,8 @@ export function OnboardingOverlay({
           {loadingRuntime ? t("onboarding.connecting") : t("onboarding.retryConnection")}
         </Button>
       ),
-    },
-    {
+    };
+  const providerStep = {
       title: t("onboarding.step2Title"),
       done: apiKeyPresent,
       doneDesc: t("onboarding.step2DoneDesc"),
@@ -89,8 +91,10 @@ export function OnboardingOverlay({
           {t("onboarding.goToSettings")}
         </Button>
       ),
-    },
-  ];
+    };
+  const steps = projectType === "unity"
+    ? [projectStep, unityStep, providerStep]
+    : [projectStep, providerStep];
   if (minimized) {
     return (
       <button

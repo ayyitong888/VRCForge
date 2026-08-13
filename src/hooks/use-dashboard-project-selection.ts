@@ -7,6 +7,7 @@ type UseDashboardProjectSelectionParams = {
   endpoint: string;
   runtimeConnected: boolean;
   projectPath: string;
+  projectType: "general" | "unity";
   confirmedProjectPath: string;
   setBootstrap: Dispatch<SetStateAction<AppBootstrap | null>>;
   setError: Dispatch<SetStateAction<string>>;
@@ -16,6 +17,7 @@ export function useDashboardProjectSelection({
   endpoint,
   runtimeConnected,
   projectPath,
+  projectType,
   confirmedProjectPath,
   setBootstrap,
   setError,
@@ -26,6 +28,7 @@ export function useDashboardProjectSelection({
   useEffect(() => {
     if (
       !runtimeConnected
+      || projectType !== "unity"
       || !projectPath.trim()
       || normalizeProjectPathKey(confirmedProjectPath) === normalizeProjectPathKey(projectPath)
     ) {
@@ -67,5 +70,5 @@ export function useDashboardProjectSelection({
     return () => {
       active = false;
     };
-  }, [confirmedProjectPath, endpoint, projectPath, runtimeConnected, setBootstrap, setError]);
+  }, [confirmedProjectPath, endpoint, projectPath, projectType, runtimeConnected, setBootstrap, setError]);
 }

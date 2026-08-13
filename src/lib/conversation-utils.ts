@@ -204,6 +204,13 @@ export function cloneChatAttachments(attachments: ChatAttachment[]): ChatAttachm
 }
 
 export function copyableAgentDialogueText(response: AgentRuntimeResponse): string {
+  const visibleTimelineProse = (response.timeline || [])
+    .filter((event) => event.kind === "planner" || event.kind === "assistant")
+    .map((event) => String(event.payload?.summary || "").trim())
+    .filter((text, index, all) => Boolean(text) && all.indexOf(text) === index);
+  if (visibleTimelineProse.length) {
+    return visibleTimelineProse.join("\n\n");
+  }
   const explicitReply = String(response.plan?.reply || "").trim();
   if (explicitReply) {
     return explicitReply;

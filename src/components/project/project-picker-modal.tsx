@@ -1,6 +1,7 @@
 import { Eye, EyeOff, Folder, FolderPlus, Loader2, Trash2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProjectSnapshot } from "../../lib/api";
+import type { ProjectType } from "../../lib/chat-types";
 import { projectKey, shortPath } from "../../lib/project-path";
 import { Button } from "../ui/button";
 
@@ -21,6 +22,8 @@ export function ProjectPickerModal({
   onNewProjectPathChange,
   onClearError,
   onAddProjectPath,
+  projectType = "general",
+  onProjectTypeChange,
 }: {
   open: boolean;
   projects: ProjectEntry[];
@@ -36,6 +39,8 @@ export function ProjectPickerModal({
   onNewProjectPathChange: (value: string) => void;
   onClearError: () => void;
   onAddProjectPath: () => void;
+  projectType?: ProjectType;
+  onProjectTypeChange?: (value: ProjectType) => void;
 }) {
   const { t } = useTranslation();
   if (!open) {
@@ -46,7 +51,7 @@ export function ProjectPickerModal({
       <section className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-lg border border-border bg-card p-6 shadow-panel">
         <div className="flex min-w-0 items-center gap-2">
           <FolderPlus className="h-5 w-5 shrink-0 text-primary" />
-          <h2 className="truncate text-lg font-semibold">{t("onboarding.step3Title")}</h2>
+          <h2 className="truncate text-lg font-semibold">{t("project.selectProjectTitle")}</h2>
           <button
             type="button"
             className="ml-auto shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -112,6 +117,20 @@ export function ProjectPickerModal({
           ) : null}
           <div>
             <div className="mb-2 text-xs font-medium text-muted-foreground">{t("project.addProjectFolder")}</div>
+            <div className="mb-2 flex gap-3" role="radiogroup" aria-label={t("project.chooseProjectType")}>
+              {(["general", "unity"] as const).map((value) => (
+                <label key={value} className="flex items-center gap-1.5 text-xs">
+                  <input
+                    type="radio"
+                    name="project-type"
+                    value={value}
+                    checked={projectType === value}
+                    onChange={() => onProjectTypeChange?.(value)}
+                  />
+                  {t(value === "general" ? "project.generalProject" : "project.unityProject")}
+                </label>
+              ))}
+            </div>
             <div className="flex gap-2">
               <input
                 value={newProjectPath}
@@ -125,7 +144,7 @@ export function ProjectPickerModal({
                     onAddProjectPath();
                   }
                 }}
-                placeholder={t("project.pathPlaceholder")}
+                placeholder={t(projectType === "general" ? "project.generalPathPlaceholder" : "project.pathPlaceholder")}
                 className="h-9 min-w-0 flex-1 rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary"
               />
               <Button type="button" disabled={saving || !newProjectPath.trim()} onClick={onAddProjectPath}>
@@ -134,7 +153,7 @@ export function ProjectPickerModal({
               </Button>
             </div>
             {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
-            <p className="mt-2 text-xs text-muted-foreground">{t("project.pathHint")}</p>
+            <p className="mt-2 text-xs text-muted-foreground">{t(projectType === "general" ? "project.generalPathHint" : "project.pathHint")}</p>
           </div>
         </div>
       </section>

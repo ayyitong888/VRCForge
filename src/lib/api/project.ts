@@ -2,6 +2,7 @@ import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 
 export type ProjectPrefs = {
   customPaths: string[];
+  customProjects: Array<{ path: string; projectType: "general" | "unity" }>;
   hiddenPaths: string[];
 };
 
@@ -47,33 +48,33 @@ export type ProjectIndexScanResult = {
 
 export async function fetchProjectPrefs(endpoint: string): Promise<ProjectPrefs> {
   if (hasTauriInternals()) {
-    const payload = await invokeTauriWithAbort<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>("fetch_project_prefs", {
+    const payload = await invokeTauriWithAbort<{ ok: boolean; customPaths?: string[]; customProjects?: ProjectPrefs["customProjects"]; hiddenPaths?: string[] }>("fetch_project_prefs", {
       request: { timeoutMs: 30000 },
     });
-    return { customPaths: payload.customPaths || [], hiddenPaths: payload.hiddenPaths || [] };
+    return { customPaths: payload.customPaths || [], customProjects: payload.customProjects || [], hiddenPaths: payload.hiddenPaths || [] };
   }
-  const payload = await requestJson<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>(
+  const payload = await requestJson<{ ok: boolean; customPaths?: string[]; customProjects?: ProjectPrefs["customProjects"]; hiddenPaths?: string[] }>(
     `${endpoint}/api/app/projects/prefs`,
   );
-  return { customPaths: payload.customPaths || [], hiddenPaths: payload.hiddenPaths || [] };
+  return { customPaths: payload.customPaths || [], customProjects: payload.customProjects || [], hiddenPaths: payload.hiddenPaths || [] };
 }
 
 export async function saveProjectPrefs(endpoint: string, prefs: ProjectPrefs): Promise<ProjectPrefs> {
   if (hasTauriInternals()) {
-    const payload = await invokeTauriWithAbort<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>("save_project_prefs", {
-      request: { customPaths: prefs.customPaths, hiddenPaths: prefs.hiddenPaths, timeoutMs: 30000 },
+    const payload = await invokeTauriWithAbort<{ ok: boolean; customPaths?: string[]; customProjects?: ProjectPrefs["customProjects"]; hiddenPaths?: string[] }>("save_project_prefs", {
+      request: { customPaths: prefs.customPaths, customProjects: prefs.customProjects, hiddenPaths: prefs.hiddenPaths, timeoutMs: 30000 },
     });
-    return { customPaths: payload.customPaths || [], hiddenPaths: payload.hiddenPaths || [] };
+    return { customPaths: payload.customPaths || [], customProjects: payload.customProjects || [], hiddenPaths: payload.hiddenPaths || [] };
   }
-  const payload = await requestJson<{ ok: boolean; customPaths?: string[]; hiddenPaths?: string[] }>(
+  const payload = await requestJson<{ ok: boolean; customPaths?: string[]; customProjects?: ProjectPrefs["customProjects"]; hiddenPaths?: string[] }>(
     `${endpoint}/api/app/projects/prefs`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ customPaths: prefs.customPaths, hiddenPaths: prefs.hiddenPaths }),
+      body: JSON.stringify({ customPaths: prefs.customPaths, customProjects: prefs.customProjects, hiddenPaths: prefs.hiddenPaths }),
     },
   );
-  return { customPaths: payload.customPaths || [], hiddenPaths: payload.hiddenPaths || [] };
+  return { customPaths: payload.customPaths || [], customProjects: payload.customProjects || [], hiddenPaths: payload.hiddenPaths || [] };
 }
 
 export async function scanProjectIndex(

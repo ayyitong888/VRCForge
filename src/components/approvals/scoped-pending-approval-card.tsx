@@ -47,13 +47,13 @@ export function ScopedPendingApprovalCard({ approvals, actions, disabled, onAppr
           </Badge>
         ) : null}
       </div>
-      <div className="max-h-[45vh] space-y-3 overflow-auto border-t border-border px-4 py-3">
+      <div className="space-y-3 border-t border-border px-4 py-3">
         {visibleApprovals.map((approval) => {
           const action = actions[approval.id];
           const busy = disabled || Boolean(action);
           const presentation = presentApproval(approval, t);
           return (
-            <article key={approval.id} className="rounded-xl border border-border bg-background/70 p-3">
+            <article key={approval.id} data-approval-id={approval.id} className="rounded-xl border border-border bg-background/70 p-3">
               <div className="text-sm font-medium">{presentation.title}</div>
               <p className="mt-1 text-xs text-muted-foreground">{presentation.summary}</p>
               <dl className="mt-3 grid gap-2 text-xs">

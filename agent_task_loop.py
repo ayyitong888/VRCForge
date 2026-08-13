@@ -15,15 +15,12 @@ import json
 from typing import Any
 
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
+from agent_budget_policy import AgentBudgetPolicy, freeze_agent_budget_policy
 
 
 TASK_LOOP_SCHEMA = "vrcforge.agent_task_loop.v2"
 TASK_APPROVAL_CONTEXT_SCHEMA = "vrcforge.agent_task_approval.v1"
 WRITE_TRANSACTION_SCHEMA = "vrcforge.approved_write_transaction.v1"
-# This is the Runtime safety ceiling for one user turn, not an ordinary stop
-# condition. The loop should normally end through a terminal model reply,
-# cancellation, approval wait, completion verification, or no-progress guard.
-TASK_LOOP_MAX_TOOL_CALLS = 25
 _RUNNING_STATUSES = frozenset(
     {"accepted", "in_progress", "queued", "running", "started", "starting"}
 )
@@ -528,14 +525,16 @@ def approval_task_context(
             if isinstance(seed.get("contextLimit"), int)
             else None
         ),
-        "toolCallsUsed": max(
-            0,
-            min(int(seed.get("toolCallsUsed") or 0), TASK_LOOP_MAX_TOOL_CALLS),
-        ),
+        "toolCallsUsed": max(0, int(seed.get("toolCallsUsed") or 0)),
         "providerRequestCount": max(
             0,
             min(int(seed.get("providerRequestCount") or 0), 100),
         ),
+        "modelTurnsUsed": max(0, min(int(seed.get("modelTurnsUsed") or 0), 4096)),
+        "budgetPolicy": {
+            "maxModelTurns": freeze_agent_budget_policy(seed.get("budgetPolicy")).max_model_turns,
+            "normalToolCallLimit": None,
+        },
         "continueAfterApproval": seed.get("continueAfterApproval") is True,
         "exposureLayer": (
             "execution"
@@ -952,6 +951,8 @@ class AgentTaskLoop:
     context_limit: int | None = None
     tool_calls_used: int = 0
     provider_request_count: int = 0
+    model_turns_used: int = 0
+    budget_policy: AgentBudgetPolicy = field(default_factory=AgentBudgetPolicy)
     exposure_layer: str = "planning"
     history: list[dict[str, Any]] = field(default_factory=list)
     _actions: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -967,14 +968,12 @@ class AgentTaskLoop:
             self.client_turn_id,
             self.objective,
         )
-        self.tool_calls_used = max(
-            0,
-            min(int(self.tool_calls_used or 0), TASK_LOOP_MAX_TOOL_CALLS),
-        )
+        self.tool_calls_used = max(0, int(self.tool_calls_used or 0))
         self.provider_request_count = max(
             0,
             min(int(self.provider_request_count or 0), 100),
         )
+        self.model_turns_used = max(0, min(int(self.model_turns_used or 0), 4096))
         self.exposure_layer = (
             "execution" if _status(self.exposure_layer) == "execution" else "planning"
         )
@@ -1003,17 +1002,13 @@ class AgentTaskLoop:
                 if isinstance(context.get("contextLimit"), int)
                 else None
             ),
-            tool_calls_used=max(
-                0,
-                min(
-                    int(context.get("toolCallsUsed") or 0),
-                    TASK_LOOP_MAX_TOOL_CALLS,
-                ),
-            ),
+            tool_calls_used=max(0, int(context.get("toolCallsUsed") or 0)),
             provider_request_count=max(
                 0,
                 min(int(context.get("providerRequestCount") or 0), 100),
             ),
+            model_turns_used=max(0, min(int(context.get("modelTurnsUsed") or 0), 4096)),
+            budget_policy=freeze_agent_budget_policy(context.get("budgetPolicy")),
             exposure_layer=str(context.get("exposureLayer") or "execution"),
             history=_bounded_history(context.get("history")),
         )
@@ -1105,11 +1100,7 @@ class AgentTaskLoop:
             "model": _bounded_text(self.model, 160),
             "contextLimit": self.context_limit,
             "toolCallsUsed": max(
-                0,
-                min(
-                    int(self.tool_calls_used if tool_calls_used is None else tool_calls_used),
-                    TASK_LOOP_MAX_TOOL_CALLS,
-                ),
+                0, int(self.tool_calls_used if tool_calls_used is None else tool_calls_used)
             ),
             "providerRequestCount": max(
                 0,
@@ -1122,6 +1113,11 @@ class AgentTaskLoop:
                     100,
                 ),
             ),
+            "modelTurnsUsed": max(0, min(int(self.model_turns_used or 0), 4096)),
+            "budgetPolicy": {
+                "maxModelTurns": self.budget_policy.max_model_turns,
+                "normalToolCallLimit": None,
+            },
             "exposureLayer": exposure_layer or self.exposure_layer,
             "actions": [dict(item) for item in self._actions.values()][-3:],
             "requirements": [dict(item) for item in self._requirements.values()][-3:],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextvars
 import hashlib
+from itertools import count
 import hmac
 import json
 import math
@@ -63,12 +64,12 @@ from optimization_service import (
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
 )
 from agent_runtime_session_state import AgentRuntimeSessionState, AgentRuntimeSessionStatePorts
+from agent_runtime_followup_queue import AgentRuntimeFollowupQueue, FollowupQueuePorts
 from agent_runtime_run_ledger import AgentRuntimeRunLedger, AgentRuntimeRunLedgerPorts
 from agent_runtime_event_projection import project_runtime_turn_event
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
 from agent_task_loop import (
     AgentTaskLoop,
-    TASK_LOOP_MAX_TOOL_CALLS,
     approval_task_context,
     canonical_action_id,
     prepare_approval_task_continuation,
@@ -76,6 +77,9 @@ from agent_task_loop import (
     prepare_sub_agent_task_continuation,
 )
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
+from agent_budget_policy import freeze_agent_budget_policy
+from agent_general_no_progress import general_read_observation_key
+from general_agent_tools import extract_explicit_local_roots
 from runtime_planner_service import RuntimePlannerService
 from background_goal_runtime import (
     RepeatedFailureGuard,
@@ -259,6 +263,7 @@ class AgentGatewayConfig:
     checkpoint_archive_max_size_mb: int = CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB
     checkpoint_archive_dir: str = ""
     project_category_allow_rules: list[dict[str, str]] = field(default_factory=list)
+    agent_budget_policy: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -304,13 +309,9 @@ class UserConstraintsSnapshot:
 
 
 RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview"}
-# 有界 agentic 循环每轮的最大步数——这是「安全兜底」而非主要终止条件。
-# 真正的终止靠模型/规划自决：拿到终止答复、发起写入审批、命中重复动作即停。
-# 这个上限只在规划器停不下来时兜底。25 步为复杂的只读调查保留足够空间，
-# 同时限制无界 token 消耗、重复工具调用和审批噪声；常规任务应在此之前自然结束。
-# 命中上限时不静默收尾，而是诚实告知「到步数上限、先汇报、可继续」（见循环 else 分支）。
-RUNTIME_AGENT_MAX_STEPS = 25
-RUNTIME_AGENT_MAX_TOOL_CALLS = TASK_LOOP_MAX_TOOL_CALLS
+# Interactive work stops on the model's final assistant response. Automation
+# may explicitly set maxAgenticTurns; tool calls remain telemetry only and
+# completion remains Runtime-verified.
 RUNTIME_PLANNER_ARGUMENT_MAX_ATTEMPTS = 2
 EXPOSURE_LAYER_PLANNING = "planning"
 EXPOSURE_LAYER_EXECUTION = "execution"
@@ -1727,6 +1728,7 @@ class AgentGateway:
         background_activity_started: Callable[[str], Any] | None = None,
         runtime_turn_completed: Callable[[dict[str, Any]], None] | None = None,
         runtime_status_changed: Callable[[dict[str, Any]], None] | None = None,
+        runtime_timeline_changed: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.config_path = config_path
         self.audit_dir = audit_dir
@@ -1752,6 +1754,9 @@ class AgentGateway:
         )
         self._runtime_session_state = AgentRuntimeSessionState(
             AgentRuntimeSessionStatePorts(shared_state_lock=self._lock)
+        )
+        self._runtime_followup_queue = AgentRuntimeFollowupQueue(
+            FollowupQueuePorts(path=self.audit_dir / "runtime-followups.json", lock=self._lock)
         )
         self._runtime_run_ledger = AgentRuntimeRunLedger(
             AgentRuntimeRunLedgerPorts(
@@ -1834,6 +1839,12 @@ class AgentGateway:
         # authenticated dashboard event channel. It carries no prompt,
         # reasoning, arguments, credentials, or execution authority.
         self._runtime_status_changed = runtime_status_changed or (lambda _payload: None)
+        if runtime_timeline_changed is not None and not callable(runtime_timeline_changed):
+            raise TypeError("runtime_timeline_changed must be callable")
+        # Safe live timeline projection only. The callback receives the same
+        # bounded event that is persisted on the final turn; raw arguments,
+        # prompts, credentials, and model reasoning never cross this seam.
+        self._runtime_timeline_changed = runtime_timeline_changed or (lambda _payload: None)
         self._runtime_planner: RuntimePlannerService | None = None
         # Optional vision-analysis hook injected by the host server. Receives
         # (message, image_attachments) and returns a dict:
@@ -2575,6 +2586,7 @@ class AgentGateway:
                 "checkpoint_archive_max_size_mb": CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
                 "checkpoint_archive_dir": "",
                 "project_category_allow_rules": [],
+                "agent_budget_policy": {},
                 "token_created_at": "",
                 "token_rotated_at": "",
             }
@@ -2611,6 +2623,7 @@ class AgentGateway:
                 project_category_allow_rules=self._normalize_project_category_allow_rules(
                     raw.get("project_category_allow_rules")
                 ),
+                agent_budget_policy=dict(raw.get("agent_budget_policy") or {}) if isinstance(raw.get("agent_budget_policy"), dict) else {},
             )
             self._sync_checkpoint_store_override(config)
             if changed:
@@ -2655,6 +2668,7 @@ class AgentGateway:
                 "project_category_allow_rules": self._normalize_project_category_allow_rules(
                     config.project_category_allow_rules
                 ),
+                "agent_budget_policy": dict(config.agent_budget_policy or {}),
             }
             atomic_write_json(self.config_path, payload)
             self._sync_checkpoint_store_override(config)
@@ -3366,19 +3380,62 @@ class AgentGateway:
         continuation_shutdown_guard: bool = False,
     ) -> dict[str, Any]:
         owned_params = params if isinstance(params, dict) else {}
+        response_payload: dict[str, Any] | None = None
         try:
-            return self._runtime_message_impl_body(
+            response_payload = self._runtime_message_impl_body(
                 owned_params,
                 agent_name=agent_name,
                 task_continuation=task_continuation,
                 continuation_shutdown_guard=continuation_shutdown_guard,
             )
+            return response_payload
         finally:
-            self._runtime_session_state.finish_turn(
-                session_id=str(owned_params.get("_resolvedRuntimeSessionId") or ""),
+            resolved_session_id = str(owned_params.get("_resolvedRuntimeSessionId") or "")
+            resolved_client_turn_id = str(owned_params.get("_resolvedRuntimeClientTurnId") or "")
+            late_steers = self._runtime_session_state.finish_turn(
+                session_id=resolved_session_id,
                 turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
-                client_turn_id=str(owned_params.get("_resolvedRuntimeClientTurnId") or ""),
+                client_turn_id=resolved_client_turn_id,
             )
+            # A steer can win the exact-turn CAS after the final model boundary
+            # but before turn ownership is released. It must become a durable
+            # follow-up instead of disappearing with the hot mailbox.
+            deferred: list[dict[str, Any]] = []
+            followup_outcomes: list[dict[str, Any]] = []
+            for item in late_steers:
+                input_id = str(item.get("inputId") or "")[:180]
+                followup_lane_id = str(item.get("followupLaneId") or resolved_session_id)[:180]
+                try:
+                    queued = self._runtime_followup_queue.enqueue(
+                        session_id=followup_lane_id,
+                        client_turn_id=input_id,
+                        target_client_turn_id=resolved_client_turn_id,
+                        message=str(item.get("message") or ""),
+                    )
+                except Exception:  # noqa: BLE001 - persistence failure becomes an authoritative bounded outcome.
+                    queued = {
+                        "accepted": False,
+                        "status": "backpressure",
+                        "reason": "durable_store_unavailable",
+                    }
+                if queued.get("accepted") is True:
+                    deferred.append({
+                        "inputId": input_id,
+                        "queueId": queued.get("queueId"),
+                        "sequence": queued.get("sequence"),
+                        "status": queued.get("status") or "pending",
+                    })
+                followup_outcomes.append({
+                    "inputId": input_id,
+                    "targetClientTurnId": resolved_client_turn_id[:180],
+                    "followupLaneId": followup_lane_id,
+                    "status": str(queued.get("status") or ("queued" if queued.get("accepted") is True else "rejected"))[:40],
+                    "reason": str(queued.get("reason") or ("queued_followup" if queued.get("accepted") is True else "followup_rejected"))[:80],
+                })
+            if response_payload is not None and followup_outcomes:
+                response_payload["deferredSteerFollowupOutcomes"] = followup_outcomes
+                if deferred:
+                    response_payload["deferredSteerFollowups"] = deferred
 
     def _runtime_message_impl_body(
         self,
@@ -3404,11 +3461,15 @@ class AgentGateway:
         params["_resolvedRuntimeSessionId"] = session_id
         params["_resolvedRuntimeTurnId"] = turn_id
         params["_resolvedRuntimeClientTurnId"] = client_turn_id
-        self._runtime_session_state.begin_turn(
+        if not self._runtime_session_state.begin_turn(
             session_id=session_id,
             turn_id=turn_id,
             client_turn_id=client_turn_id,
-        )
+        ):
+            raise AgentGatewayError(
+                "A runtime turn with this sessionId and clientTurnId is already active.",
+                status_code=409,
+            )
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
         self._desktop.bind_runtime_identity(
             session_id=session_id,
@@ -3421,6 +3482,33 @@ class AgentGateway:
         if history:
             self._runtime_session_state.restore_session(session_id, history, now)
         project_root = str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or "").strip()
+        project_context_active = (
+            params.get("_projectContextActive") is not False
+            if "_projectContextActive" in params
+            else bool(project_root)
+        )
+        general_allowed_roots: list[str] = []
+        if not project_context_active:
+            root_candidates = [
+                project_root,
+                str(params.get("workspace_root") or params.get("workspaceRoot") or "").strip(),
+                str(params.get("cwd") or "").strip(),
+            ]
+            if not project_root:
+                root_candidates.extend(extract_explicit_local_roots(message))
+            seen_general_roots: set[str] = set()
+            for candidate in root_candidates:
+                if not candidate:
+                    continue
+                try:
+                    resolved = Path(candidate).expanduser().resolve(strict=True)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                normalized = os.path.normcase(str(resolved))
+                if normalized in seen_general_roots:
+                    continue
+                seen_general_roots.add(normalized)
+                general_allowed_roots.append(str(resolved))
         continuation_context = ensure_dict(ensure_dict(task_continuation).get("context"))
         continuation_completion = ensure_dict(ensure_dict(task_continuation).get("completion"))
         if continuation_context and continuation_completion:
@@ -3446,6 +3534,13 @@ class AgentGateway:
                     else None
                 ),
                 history=history,
+                budget_policy=freeze_agent_budget_policy(
+                    params.get("agentBudgetPolicy")
+                    or params.get("budgetPolicy")
+                    or ({"maxAgenticTurns": params.get("maxAgenticTurns")} if params.get("maxAgenticTurns") is not None else None)
+                    or getattr(self.ensure_config(), "agent_budget_policy", None)
+                    or getattr(self.ensure_config(), "advanced_settings", None)
+                ),
             )
         observe = self.runtime_observe(session_id=session_id, project_root=project_root)
         if attachments:
@@ -3525,6 +3620,55 @@ class AgentGateway:
         steps: list[dict[str, Any]] = (
             task_loop.historical_steps() if continuation_context else []
         )
+        timeline: list[dict[str, Any]] = []
+
+        def append_timeline_event(
+            kind: str,
+            *,
+            label: str = "",
+            summary: str = "",
+            status: str = "",
+            tool: str = "",
+            phase: str = "",
+            subagent_status: str = "",
+            action_id: str = "",
+        ) -> None:
+            """Persist the visible runtime order without prompts, CoT, or raw arguments."""
+
+            sequence = len(timeline)
+            payload: dict[str, Any] = {}
+            for key, value, limit in (
+                ("label", label, 160),
+                ("summary", summary, 1000),
+                ("status", status, 80),
+                ("tool", tool, 160),
+                ("phase", phase, 80),
+                ("subagentStatus", subagent_status, 40),
+                ("actionId", action_id, 96),
+            ):
+                bounded = summarize_text(str(value or ""), limit)
+                if bounded:
+                    payload[key] = bounded
+            event = {
+                "id": f"timeline-{turn_id}-{sequence}",
+                "sequence": sequence,
+                "timestamp": utc_now_iso(),
+                "kind": kind,
+                "payload": payload,
+            }
+            timeline.append(event)
+            try:
+                self._runtime_timeline_changed(
+                    {
+                        "sessionId": summarize_text(session_id, 160),
+                        "turnId": summarize_text(turn_id, 160),
+                        "clientTurnId": summarize_text(client_turn_id, 160),
+                        "timelineEvent": event,
+                    }
+                )
+            except Exception:
+                # Presentation must never fail or delay the Runtime.
+                pass
         if vision_payload is not None:
             # 带标签的视觉分析 run step：记录真实执行的 provider/model 与该次
             # 调用自己的 token 用量（不进聊天 contextUsage）。
@@ -3585,7 +3729,15 @@ class AgentGateway:
         last_plan: dict[str, Any] = {}
         iterations = 0
         cap_reached = False
-        tool_call_cap_reached = False
+        consumed_steer_input_ids: list[str] = []
+        consumed_steer_seen: set[str] = set()
+
+        def record_consumed_steers(items: list[dict[str, Any]]) -> None:
+            for item in items:
+                input_id = str(item.get("inputId") or "").strip()
+                if input_id and input_id not in consumed_steer_seen and len(consumed_steer_input_ids) < 256:
+                    consumed_steer_seen.add(input_id)
+                    consumed_steer_input_ids.append(input_id)
         tool_calls_used = task_loop.tool_calls_used if continuation_context else 0
         runtime_exposure_layer = (
             task_loop.exposure_layer if continuation_context else EXPOSURE_LAYER_PLANNING
@@ -3594,6 +3746,9 @@ class AgentGateway:
         runtime_compaction: dict[str, Any] | None = None
         runtime_compaction_attempted = False
         planner_argument_failures = 0
+        completion_claim_correction_attempted = False
+        general_no_progress_attempts = 0
+        observed_general_read_keys: set[str] = set()
         unresolved_planner_argument_failure: dict[str, Any] | None = None
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
         unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
@@ -3810,7 +3965,24 @@ class AgentGateway:
             if bootstrap_outcome:
                 steps[-1]["outcome"] = bootstrap_outcome
 
-        for step_index in range(RUNTIME_AGENT_MAX_STEPS):
+        # A final assistant response is the ordinary termination boundary.
+        # Optional model-turn limits support automation. Tool-call count is
+        # telemetry only; normal turns end at the model's final response.
+        for step_index in count():
+            budget_decision = task_loop.budget_policy.check(
+                model_turns_used=task_loop.model_turns_used,
+                tool_calls_used=tool_calls_used,
+                remaining_action=remaining_action,
+            )
+            if budget_decision.get("paused"):
+                cap_reached = True
+                last_plan = {
+                    "summary": "Runtime paused at a bounded budget.",
+                    "reply": "Runtime paused before the next action; the task is not complete.",
+                    "planner": "runtime",
+                    **budget_decision,
+                }
+                break
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
             continuation_terminal_plan = ensure_dict(
@@ -3890,6 +4062,7 @@ class AgentGateway:
                     client_turn_id=client_turn_id,
                 )
                 if steer_inputs:
+                    record_consumed_steers(steer_inputs)
                     history.extend(
                         {
                             "role": "user",
@@ -3922,6 +4095,7 @@ class AgentGateway:
                 reasoning_trace=reasoning_trace,
                 exposure_layer=runtime_exposure_layer,
             )
+            task_loop.model_turns_used += 1
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
             iterations += 1
@@ -3950,6 +4124,7 @@ class AgentGateway:
                 client_turn_id=client_turn_id,
             )
             if steer_inputs:
+                record_consumed_steers(steer_inputs)
                 history.extend(
                     {
                         "role": "user",
@@ -3999,6 +4174,20 @@ class AgentGateway:
                     }
                     break
                 continue
+
+            if any(
+                (
+                    str(plan.get("shellCommand") or params.get("shell_command") or params.get("shellCommand") or "").strip(),
+                    plan.get("writeNeeded") and plan.get("writeTool"),
+                    plan.get("skillNeeded") and plan.get("skillTool"),
+                )
+            ):
+                append_timeline_event(
+                    "planner",
+                    label="Agent update",
+                    summary=str(plan.get("reply") or plan.get("summary") or ""),
+                    status="planned",
+                )
 
             planned_tool_name = str(plan.get("writeTool") or plan.get("skillTool") or "").strip()
             planned_tool = self._tools.get(planned_tool_name)
@@ -4073,6 +4262,40 @@ class AgentGateway:
                     f"{plan.get('skillTool')}::"
                     + json.dumps(plan.get("skillParams"), ensure_ascii=False, sort_keys=True, default=str),
                 )
+            elif (
+                not project_context_active
+                and not completion_claim_correction_attempted
+                and str(plan.get("planner") or "").strip().casefold() == "llm"
+                and task_loop.completed_action_ids()
+                and ensure_dict(
+                    task_loop.gate_terminal(plan).get("completionGate")
+                ).get("reason") == "completion_claim_unbound"
+            ):
+                completed_action_ids = task_loop.completed_action_ids()
+                correction_summary = (
+                    "The terminal reply was not bound to the completed action evidence. "
+                    "Reassess whether more read-only inspection is needed. If the task is "
+                    "actually complete, return completion_claim with satisfied=true and "
+                    "evidence_action_ids exactly equal to: "
+                    + ", ".join(completed_action_ids)
+                )
+                loop_state.append(
+                    {
+                        "tool": "runtime_completion_gate",
+                        "kind": "verification",
+                        "status": "needs_correction",
+                        "outcome": {
+                            "status": "needs_correction",
+                            "summary": correction_summary,
+                            "verification": {
+                                "state": "not_required",
+                                "checks": [],
+                            },
+                        },
+                    }
+                )
+                completion_claim_correction_attempted = True
+                continue
             else:
                 # 没有工具动作（终止答复 / 未连接 / 让用户选模型）→ 结束本轮。
                 break
@@ -4121,18 +4344,6 @@ class AgentGateway:
                     }
                 )
                 continue
-
-            # The tool-call budget is only a safety ceiling. Ordinary agentic
-            # work continues through distinct actions until the planner gives
-            # a terminal reply or another explicit Runtime stop condition wins.
-            if tool_calls_used >= RUNTIME_AGENT_MAX_TOOL_CALLS:
-                tool_call_cap_reached = True
-                remaining_action = {
-                    "kind": action_kind,
-                    "tool": str(plan.get("writeTool") or plan.get("skillTool") or ("shell" if action_kind == "shell" else "")),
-                    "summary": str(plan.get("summary") or "").strip(),
-                }
-                break
 
             # Only a consecutive semantic replay is suppressed. A distinct
             # successful action moves the observation boundary and permits the
@@ -4191,8 +4402,87 @@ class AgentGateway:
                 planned_tool,
                 planned_arguments,
             )
+            general_read_key = (
+                general_read_observation_key(
+                    kind=action_kind,
+                    tool=planned_tool,
+                    arguments=planned_arguments,
+                )
+                if not project_context_active
+                else ""
+            )
+            semantic_general_replay = bool(
+                general_read_key and general_read_key in observed_general_read_keys
+            )
+            consecutive_general_replay = bool(
+                not project_context_active
+                and planned_action_id == last_successful_action_id
+            )
+            if semantic_general_replay or consecutive_general_replay:
+                general_no_progress_attempts += 1
+                correction_summary = (
+                    "The proposed action would repeat an already successful observation and was not executed. "
+                    "Use a materially different read/find/search/file-inspection step, run a command that can add new evidence, "
+                    "or finish only when the existing evidence really answers the user."
+                )
+                loop_state.append(
+                    {
+                        "tool": "runtime_no_progress",
+                        "kind": "verification",
+                        "status": "suppressed",
+                        "result": {
+                            "code": "duplicate_observation",
+                            "actionId": planned_action_id,
+                            "summary": correction_summary,
+                        },
+                        "outcome": {
+                            "status": "needs_correction",
+                            "summary": correction_summary,
+                            "verification": {"state": "not_required", "checks": []},
+                        },
+                    }
+                )
+                if general_no_progress_attempts >= 3:
+                    last_plan = {
+                        **plan,
+                        "summary": "The model repeated an observation without making progress.",
+                        "reply": (
+                            "VRCForge stopped this turn because repeated inspection proposals added no new evidence. "
+                            "The task failed to make progress and is not marked complete."
+                        ),
+                        "plannerFailed": True,
+                        "plannerFailure": {
+                            "code": "planner_no_progress",
+                            "phase": "post_tool",
+                            "retryable": True,
+                        },
+                        "continueLoop": False,
+                        "nextStep": "planner_failed",
+                    }
+                    break
+                continue
             if planned_action_id == last_successful_action_id:
                 break
+
+            # Delegation remains an ordinary Runtime tool call. Its separate
+            # created/started/completed/failed lifecycle is projected only by
+            # the durable Sub Agent registry, so no synthetic lifecycle event
+            # is emitted here.
+            timeline_kind = (
+                "command"
+                if action_kind == "shell"
+                else "file_edit"
+                if action_kind == "write"
+                else "tool_call"
+            )
+            append_timeline_event(
+                timeline_kind,
+                label=("Run command" if action_kind == "shell" else planned_tool or action_kind),
+                summary=str(plan.get("summary") or ""),
+                status="started",
+                tool=planned_tool,
+                action_id=planned_action_id,
+            )
 
             completion_requirement = ensure_dict(plan.get("completionRequirement"))
             if completion_requirement:
@@ -4233,10 +4523,16 @@ class AgentGateway:
             tool_calls_used += 1
             if action_kind == "shell":
                 step_tool = "shell"
+                general_shell_root = general_allowed_roots[0] if general_allowed_roots else ""
                 shell_workspace_root = (
                     params.get("workspace_root")
                     or params.get("workspaceRoot")
-                    or project_root
+                    or (project_root if project_context_active else general_shell_root)
+                )
+                shell_cwd = (
+                    shell_step_params.get("cwd")
+                    or params.get("cwd")
+                    or shell_workspace_root
                 )
                 explicit_shell_location = bool(
                     shell_step_params.get("cwd")
@@ -4246,7 +4542,7 @@ class AgentGateway:
                 )
                 action_arguments = {
                     "command": command,
-                    "cwd": shell_step_params.get("cwd") or params.get("cwd") or project_root,
+                    "cwd": shell_cwd,
                     "workspaceRoot": shell_workspace_root,
                     "options": shell_step_params,
                 }
@@ -4254,9 +4550,9 @@ class AgentGateway:
                     {
                         **shell_step_params,
                         "command": command,
-                        "cwd": shell_step_params.get("cwd") or params.get("cwd") or project_root,
+                        "cwd": shell_cwd,
                         "workspace_root": shell_workspace_root,
-                        "projectRoot": project_root,
+                        "projectRoot": project_root if project_context_active else "",
                         "session_id": session_id,
                         "turn_id": turn_id,
                         "client_turn_id": client_turn_id,
@@ -4346,6 +4642,13 @@ class AgentGateway:
                 step_tool = str(plan.get("skillTool") or "")
                 step_params = dict(planned_arguments)
                 action_arguments = dict(planned_arguments)
+                if step_tool in {
+                    "vrcforge_list_directory",
+                    "vrcforge_read_text_file",
+                    "vrcforge_find_files",
+                    "vrcforge_search_text",
+                }:
+                    step_params["_generalAllowedRoots"] = list(general_allowed_roots)
                 if step_tool == "vrcforge_delegate_subagent":
                     action_arguments = dict(step_params)
                     task_loop.require_action(
@@ -4513,6 +4816,28 @@ class AgentGateway:
             if step_payload.get("error"):
                 steps[-1]["error"] = str(step_payload.get("error"))
 
+            result_outcome = ensure_dict(step_payload.get("outcome"))
+            result_summary = str(
+                result_outcome.get("summary")
+                or step_payload.get("error")
+                or steps[-1].get("summary")
+                or ""
+            )
+            result_status = str(
+                result_outcome.get("status")
+                or step_payload.get("status")
+                or task_action.get("status")
+                or "completed"
+            )
+            append_timeline_event(
+                "tool_result",
+                label=step_tool or action_kind,
+                summary=result_summary,
+                status=result_status,
+                tool=step_tool,
+                action_id=planned_action_id,
+            )
+
             if (
                 str(plan.get("planner") or "").strip().casefold() != "llm"
                 and plan.get("continueLoop") is not True
@@ -4618,6 +4943,8 @@ class AgentGateway:
             else:
                 repeated_failure_guard.record_success()
                 last_successful_action_id = planned_action_id
+                if general_read_key:
+                    observed_general_read_keys.add(general_read_key)
                 if (
                     unresolved_planner_argument_failure is not None
                     and task_action.get("status") == "completed"
@@ -4653,11 +4980,6 @@ class AgentGateway:
                 break
             if str(plan.get("nextStep") or "") == "done":
                 break
-        else:
-            # 跑满 RUNTIME_AGENT_MAX_STEPS 都没自然终止 → 命中安全兜底上限。
-            # 不静默收尾：在 reply 里诚实告知「到步数上限、先汇报、可继续」。
-            cap_reached = True
-
         reasoning_trace = ensure_dict(reasoning_trace)
         context_usage = ensure_dict(context_usage)
         if prior_provider_request_count:
@@ -4681,26 +5003,13 @@ class AgentGateway:
         if cap_reached and isinstance(top_plan, dict):
             top_plan["stepLimitReached"] = True
             top_plan["nextStep"] = "paused"
+            top_plan["reason"] = "model_turn_budget_exhausted"
             base_reply = str(top_plan.get("reply") or "").rstrip()
             notice = (
-                f"（已到本轮 {RUNTIME_AGENT_MAX_STEPS} 步上限，先停下来汇报：上面是这一轮做到的部分。"
+                f"（已到本轮显式配置的 {task_loop.budget_policy.max_model_turns} 次模型轮次上限，先停下来汇报：上面是这一轮做到的部分。"
                 "需要的话再说一声，我接着往下做。）"
             )
             top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
-        if tool_call_cap_reached and isinstance(top_plan, dict):
-            top_plan["stepLimitReached"] = True
-            top_plan["toolCallLimitReached"] = True
-            top_plan["toolCallCount"] = tool_calls_used
-            top_plan["nextStep"] = "paused"
-            top_plan["remainingAction"] = remaining_action or {}
-            base_reply = str(top_plan.get("reply") or "").rstrip()
-            remaining_label = str((remaining_action or {}).get("tool") or (remaining_action or {}).get("kind") or "next action")
-            notice = (
-                f"（已到本轮 {RUNTIME_AGENT_MAX_TOOL_CALLS} 次工具调用上限，先停下来汇报。"
-                f"尚未执行：{remaining_label}。需要的话再说一声，我接着往下做。）"
-            )
-            top_plan["reply"] = f"{base_reply}\n\n{notice}".strip() if base_reply else notice
-
         terminal_status = str(top_plan.get("nextStep") or "").strip()
         if unresolved_planner_argument_failure is not None and terminal_status not in {
             "cancelled",
@@ -4758,6 +5067,15 @@ class AgentGateway:
             # "image not analyzed" messaging in the user-facing chat flow.
             top_plan["visionStatus"] = vision_payload.get("status")
 
+        final_reply = str(top_plan.get("reply") or top_plan.get("summary") or "").strip()
+        if final_reply:
+            append_timeline_event(
+                "assistant",
+                label="Assistant",
+                summary=final_reply,
+                status=str(top_plan.get("nextStep") or "done"),
+            )
+
         turn = {
             "id": turn_id,
             "createdAt": now,
@@ -4775,6 +5093,8 @@ class AgentGateway:
             turn["vision"] = vision_payload
         if steps:
             turn["steps"] = steps
+        if timeline:
+            turn["timeline"] = timeline
         if int(reasoning_trace.get("itemCount") or 0) > 0:
             turn["reasoning"] = reasoning_trace
         if context_usage:
@@ -4865,12 +5185,16 @@ class AgentGateway:
             "plan": top_plan,
             "task": ensure_dict(top_plan.get("task")) or task_loop.snapshot(),
         }
+        if timeline:
+            payload["timeline"] = timeline
         if continuation_source:
             payload["continuationSource"] = continuation_source
         if approval_id and continuation_context:
             payload["resumedApprovalId"] = approval_id
         if client_turn_id:
             payload["clientTurnId"] = client_turn_id
+        if consumed_steer_input_ids:
+            payload["consumedSteerInputIds"] = consumed_steer_input_ids
         if goal_delivery_id:
             payload["goalDeliveryId"] = goal_delivery_id
         if attachments:
@@ -4913,11 +5237,13 @@ class AgentGateway:
         ).strip()
         input_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
         message = str(params.get("message") or "").strip()
+        followup_lane_id = str(params.get("lane_id") or params.get("laneId") or params.get("followupLaneId") or "").strip()
         result = self._runtime_session_state.submit_steer(
             session_id=session_id,
             target_client_turn_id=target_client_turn_id,
             input_id=input_id,
             message=message,
+            followup_lane_id=followup_lane_id,
         )
         return {
             "ok": result.get("accepted") is True,
@@ -4926,6 +5252,28 @@ class AgentGateway:
             "targetClientTurnId": target_client_turn_id,
             "clientTurnId": input_id,
         }
+
+    def list_runtime_followups(self, *, session_id: str = "", include_terminal: bool = True) -> list[dict[str, Any]]:
+        return self._runtime_followup_queue.list(session_id=session_id, include_terminal=include_terminal)
+
+    def enqueue_runtime_followup(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._runtime_followup_queue.enqueue(
+            session_id=str(params.get("sessionId") or params.get("session_id") or ""),
+            client_turn_id=str(params.get("clientTurnId") or params.get("client_turn_id") or ""),
+            target_client_turn_id=str(params.get("targetClientTurnId") or params.get("target_client_turn_id") or ""),
+            message=str(params.get("message") or ""),
+            attachments=params.get("attachments") if isinstance(params.get("attachments"), list) else [],
+            envelope={"provider": params.get("provider"), "model": params.get("model"), "projectPath": params.get("projectPath"), "projectRoot": params.get("projectRoot"), "projectType": params.get("projectType"), "providerLabel": params.get("providerLabel")},
+        )
+
+    def claim_runtime_followups(self, *, session_id: str = "", owner_id: str = "", limit: int = 8, queue_id: str = "") -> list[dict[str, Any]]:
+        return self._runtime_followup_queue.claim(session_id=session_id, owner_id=owner_id, limit=limit, queue_id=queue_id)
+
+    def ack_runtime_followup(self, queue_id: str, session_id: str = "", claim_token: str = "") -> bool:
+        return self._runtime_followup_queue.ack(queue_id=queue_id, session_id=session_id, claim_token=claim_token)
+
+    def cancel_runtime_followup(self, queue_id: str, session_id: str = "", claim_token: str = "") -> bool:
+        return self._runtime_followup_queue.cancel(queue_id=queue_id, session_id=session_id, claim_token=claim_token)
 
     def _summarize_loop_plan(
         self,
@@ -5198,6 +5546,7 @@ class AgentGateway:
             "computerUseEverEnabled": bool(config.computer_use_ever_enabled),
             "backgroundGoalNotificationsEnabled": bool(config.background_goal_notifications_enabled),
             "roslynFullAutoEverEnabled": bool(config.roslyn_risk_acknowledged),
+            "maxAgenticTurns": freeze_agent_budget_policy(config.agent_budget_policy).max_model_turns,
         }
 
     def update_advanced_settings(
@@ -5206,6 +5555,7 @@ class AgentGateway:
         developer_options_enabled: bool,
         computer_use_enabled: bool,
         background_goal_notifications_enabled: bool | None = None,
+        max_agentic_turns: int | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             config = self.ensure_config()
@@ -5220,6 +5570,8 @@ class AgentGateway:
                 config.background_goal_notifications_enabled = bool(
                     background_goal_notifications_enabled
                 )
+            if max_agentic_turns is not None:
+                config.agent_budget_policy = {"maxAgenticTurns": max(1, min(int(max_agentic_turns), 4096))}
             self.save_config(config)
             updated = self.advanced_settings_state(config)
         self.append_audit(
@@ -6098,7 +6450,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.5.1",
+        server_version="1.6.0",
     )
     return create_agent_mcp_2026_asgi_app(
         router,

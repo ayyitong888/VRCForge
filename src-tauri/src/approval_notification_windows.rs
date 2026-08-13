@@ -50,8 +50,6 @@ pub(crate) struct DesktopApprovalNotificationRequest {
     approval_id: String,
     title: String,
     body: String,
-    approve_label: String,
-    reject_label: String,
 }
 
 #[derive(Deserialize)]
@@ -112,26 +110,18 @@ pub(crate) fn show_approval_notification(
                 tauri_winrt_notification::IconCrop::Square,
                 APPROVAL_NOTIFICATION_ICON_ALT_TEXT,
             )
-            .add_button(
-                &request.approve_label,
-                &approval_notification_action("approve", &approval_id),
-            )
-            .add_button(
-                &request.reject_label,
-                &approval_notification_action("reject", &approval_id),
-            )
             .on_activated(move |activation| {
-                let Some(action) = activation
-                    .as_deref()
-                    .and_then(|value| parse_approval_notification_action(value, &approval_id))
-                else {
+                // Detail-first contract: activation only wakes the app. The
+                // frontend re-reads approvalId and current revision/status;
+                // no notification action may approve or reject directly.
+                if !is_approval_notification_activation(activation.as_deref()) {
                     return Ok(());
-                };
+                }
                 let _ = callback_app.emit(
                     APPROVAL_NOTIFICATION_ACTION_EVENT,
                     ApprovalNotificationActionEvent {
                         approval_id: approval_id.clone(),
-                        action,
+                        action: "open",
                     },
                 );
                 focus_main_window(&callback_app);
@@ -305,18 +295,12 @@ fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn approval_notification_action(action: &str, approval_id: &str) -> String {
-    format!("{action}:{approval_id}")
-}
-
 fn sub_agent_review_notification_action() -> &'static str {
     SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION
 }
 
-fn parse_approval_notification_action(value: &str, approval_id: &str) -> Option<&'static str> {
-    ["approve", "reject"]
-        .into_iter()
-        .find(|action| value == approval_notification_action(action, approval_id))
+fn is_approval_notification_activation(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), None | Some("") | Some("open"))
 }
 
 fn parse_sub_agent_review_notification_action(value: &str) -> Option<&'static str> {
@@ -333,16 +317,6 @@ fn validate_notification_request(
     validate_notification_id(&request.approval_id)?;
     validate_display_text(&request.title, MAX_TITLE_LENGTH, "title")?;
     validate_display_text(&request.body, MAX_BODY_LENGTH, "body")?;
-    validate_display_text(
-        &request.approve_label,
-        MAX_ACTION_LABEL_LENGTH,
-        "approve label",
-    )?;
-    validate_display_text(
-        &request.reject_label,
-        MAX_ACTION_LABEL_LENGTH,
-        "reject label",
-    )?;
     Ok(())
 }
 
@@ -395,12 +369,11 @@ mod tests {
     #[cfg(windows)]
     use super::approval_notification_icon_path;
     use super::{
-        approval_notification_action, parse_approval_notification_action,
-        parse_sub_agent_review_notification_action, validate_notification_request,
-        DesktopApprovalNotificationRequest, APPROVAL_NOTIFICATION_APP_ID,
-        APPROVAL_NOTIFICATION_DISPLAY_NAME, APPROVAL_NOTIFICATION_ICON_ALT_TEXT,
-        APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR, APPROVAL_NOTIFICATION_ICON_FILE_NAME,
-        MAX_ACTION_LABEL_LENGTH,
+        is_approval_notification_activation, parse_sub_agent_review_notification_action,
+        validate_notification_request, DesktopApprovalNotificationRequest,
+        APPROVAL_NOTIFICATION_APP_ID, APPROVAL_NOTIFICATION_DISPLAY_NAME,
+        APPROVAL_NOTIFICATION_ICON_ALT_TEXT, APPROVAL_NOTIFICATION_ICON_BACKGROUND_COLOR,
+        APPROVAL_NOTIFICATION_ICON_FILE_NAME,
     };
     #[cfg(windows)]
     use std::path::Path;
@@ -410,38 +383,16 @@ mod tests {
             approval_id: "approval_123-abc".to_string(),
             title: "Approval required".to_string(),
             body: "Review this pending operation in VRCForge.".to_string(),
-            approve_label: "Allow once".to_string(),
-            reject_label: "Reject".to_string(),
         }
     }
 
     #[test]
-    fn toast_actions_are_exact_and_limited_to_approve_or_reject() {
-        let id = "approval_123-abc";
-        assert_eq!(
-            approval_notification_action("approve", id),
-            "approve:approval_123-abc"
-        );
-        assert_eq!(
-            approval_notification_action("reject", id),
-            "reject:approval_123-abc"
-        );
-        assert_eq!(
-            parse_approval_notification_action("approve:approval_123-abc", id),
-            Some("approve")
-        );
-        assert_eq!(
-            parse_approval_notification_action("reject:approval_123-abc", id),
-            Some("reject")
-        );
-        assert_eq!(
-            parse_approval_notification_action("approve:another-approval", id),
-            None
-        );
-        assert_eq!(
-            parse_approval_notification_action("open:approval_123-abc", id),
-            None
-        );
+    fn approval_toast_is_detail_first_and_rejects_direct_decisions() {
+        assert!(is_approval_notification_activation(None));
+        assert!(is_approval_notification_activation(Some("")));
+        assert!(is_approval_notification_activation(Some("open")));
+        assert!(!is_approval_notification_activation(Some("approve")));
+        assert!(!is_approval_notification_activation(Some("reject")));
     }
 
     #[test]
@@ -483,9 +434,5 @@ mod tests {
         let mut control = request();
         control.body = "line one\nline two".to_string();
         assert!(validate_notification_request(&control).is_err());
-
-        let mut too_long = request();
-        too_long.approve_label = "x".repeat(MAX_ACTION_LABEL_LENGTH + 1);
-        assert!(validate_notification_request(&too_long).is_err());
     }
 }

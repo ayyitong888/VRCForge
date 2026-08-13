@@ -1,6 +1,7 @@
 import {
   Bot,
   Check,
+  ChevronRight,
   Copy,
   FilePlus2,
   Loader2,
@@ -15,8 +16,9 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
+import { projectRuntimeResponseForDisplay } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
-import type { AgentRuntimePhase } from "../../lib/chat-streaming";
+import { providerReconnectAttempt, type AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
 import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
@@ -27,7 +29,7 @@ import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown } from "./chat-markdown";
 import { AttachmentStrip } from "./composer";
-import { RunRow, buildAgentTimelineRows, displayPlanner, formatPayload } from "./conversation-timeline";
+import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, displayPlanner, formatPayload } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
@@ -160,13 +162,13 @@ export function ConversationCard({
     return (
       <div className="group flex justify-end">
         <div className="relative flex max-w-[78%] flex-col items-end gap-2">
-          {item.queuedFrom ? (
+          {item.queuedFrom || item.queueStatus ? (
             <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[11px] text-muted-foreground">
               <MessageSquare className="h-3 w-3" />
-              {t("chat.queuedSent")}
+              {item.queueStatus === "steering" ? t("chat.steering") : item.queueStatus === "waiting_for_resources" ? t("chat.waitingForResources") : item.queueStatus === "delivery_unverified" ? t("chat.deliveryUnverified") : item.queueStatus === "paused" ? t("chat.paused") : item.queueStatus === "cancelled" ? t("chat.cancelled") : t("chat.queued")}
             </div>
           ) : null}
-          {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} onImport={onImportAttachment} /> : null}
+          {imageAttachments.length ? <UserImageAttachments messageId={item.id} attachments={imageAttachments} onImport={onImportAttachment} /> : null}
           {item.text ? (
             <div className="rounded-2xl bg-muted px-4 py-2.5 text-sm text-foreground">
               <ChatMarkdown text={item.text} />
@@ -210,10 +212,8 @@ export function ConversationCard({
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
-          <div className="flex items-center gap-2 text-muted-foreground" data-vrcforge-streaming-phase={item.phase || "unknown"}>
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>{streamingPhaseLabel(item.phase, t)}</span>
-          </div>
+          <StreamingPhaseStatus item={item} />
+          {item.timeline?.length ? <div data-vrcforge-live-runtime-timeline>{buildDurableTimelineRows(item.timeline)}</div> : null}
           {item.text ? <ChatMarkdown text={item.text} /> : null}
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
             <span>{item.providerLabel || displayPlanner("llm")}{item.model ? ` / ${item.model}` : ""}</span>
@@ -313,7 +313,17 @@ export function ConversationCard({
     );
   }
 
-  const response = item.response;
+  if (item.type === "timeline_event") {
+    return (
+      <div className="group flex justify-start" data-vrcforge-timeline-event={item.event.kind}>
+        <div className="relative w-full max-w-[85%] space-y-1.5">
+          {buildDurableTimelineRows([item.event])}
+        </div>
+      </div>
+    );
+  }
+
+  const response = projectRuntimeResponseForDisplay(item.response, (key) => t(key));
   const shell = response.shell;
   const skill = response.skill;
   const vision = response.vision;
@@ -347,8 +357,7 @@ export function ConversationCard({
       <div className="relative flex w-full max-w-[85%] flex-col gap-1.5">
         {timelineRows}
         <MessageActions
-          createdAt={item.createdAt || item.id}
-          onCopy={copyableReply ? () => onCopyItem?.(item) : undefined}
+          onCopy={copyableReply ? () => onCopyItem?.({ ...item, response }) : undefined}
           onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
           onSaveAsSkill={saveOperationSummary ? () => onSaveOperationAsSkill?.(saveOperationSummary) : undefined}
@@ -361,9 +370,11 @@ export function ConversationCard({
 }
 
 export function UserImageAttachments({
+  messageId,
   attachments,
   onImport,
 }: {
+  messageId?: string;
   attachments: ChatAttachment[];
   onImport?: (attachment: ChatAttachment) => void;
 }) {
@@ -388,6 +399,20 @@ export function UserImageAttachments({
       previousFocus?.focus();
     };
   }, [preview]);
+  useEffect(() => {
+    const openRequestedAttachment = (event: Event) => {
+      const detail = (event as CustomEvent<{ messageId?: string; attachmentId?: string }>).detail;
+      if (!detail || detail.messageId !== messageId) {
+        return;
+      }
+      const attachment = attachments.find((item) => item.id === detail.attachmentId && Boolean(item.dataUrl));
+      if (attachment) {
+        setPreview(attachment);
+      }
+    };
+    window.addEventListener("vrcforge-open-chat-attachment", openRequestedAttachment);
+    return () => window.removeEventListener("vrcforge-open-chat-attachment", openRequestedAttachment);
+  }, [attachments, messageId]);
   if (!attachments.length) {
     return null;
   }
@@ -442,6 +467,46 @@ export function UserImageAttachments({
         </div>
       ) : null}
     </>
+  );
+}
+
+function StreamingPhaseStatus({ item }: { item: Extract<ConversationItem, { type: "streaming" }> }) {
+  const { t } = useTranslation();
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (item.phase !== "waiting_for_model" || !item.providerLastActivityAt) return undefined;
+    setNowMs(Date.now());
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [item.phase, item.providerLastActivityAt]);
+  const reconnectAttempt = item.phase === "waiting_for_model"
+    ? providerReconnectAttempt(item.providerLastActivityAt, nowMs)
+    : undefined;
+  const label = reconnectAttempt
+    ? t("chat.runtimePhase.reconnecting", { attempt: reconnectAttempt, max: 5 })
+    : streamingPhaseLabel(item.phase, t);
+  const reconnecting = reconnectAttempt !== undefined;
+  const reconnectDetail = reconnectAttempt === 5
+    ? t("chat.runtimePhase.reconnectingRetry")
+    : t("chat.runtimePhase.reconnectingDetail");
+  return (
+    <div className="text-muted-foreground" data-vrcforge-streaming-phase={item.phase || "unknown"}>
+      {reconnecting ? (
+        <details className="group">
+          <summary className="group flex cursor-pointer list-none items-center gap-2 text-left [&::-webkit-details-marker]:hidden">
+            <ChevronRight className="h-3.5 w-3.5 transition-transform group-open:rotate-90" aria-hidden="true" />
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>{label}</span>
+          </summary>
+          <p className="mt-1 pl-5 text-xs text-muted-foreground/80">{reconnectDetail}</p>
+        </details>
+      ) : (
+        <div className="flex items-center gap-2">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>{label}</span>
+        </div>
+      )}
+    </div>
   );
 }
 

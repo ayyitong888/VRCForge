@@ -3,6 +3,8 @@ import type { AgentRuntimePhase } from "./chat-streaming";
 
 export const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
 
+export type ProjectType = "general" | "unity";
+
 export type ChatAttachment = {
   id: string;
   name: string;
@@ -116,11 +118,40 @@ export type ChatCompactionState = {
   message?: string;
 };
 
+/** Durable, non-CoT projection of one runtime occurrence in a turn. */
+export type ChatTimelineEventKind =
+  | "phase"
+  | "planner"
+  | "tool_call"
+  | "tool_result"
+  | "file_edit"
+  | "command"
+  | "subagent"
+  | "assistant";
+
+export type ChatTimelineEvent = {
+  id: string;
+  sequence: number;
+  timestamp: string;
+  kind: ChatTimelineEventKind;
+  /** Safe display projection only; never raw prompt/CoT/credentials/arguments. */
+  payload: {
+    label?: string;
+    summary?: string;
+    status?: string;
+    tool?: string;
+    phase?: string;
+    actionId?: string;
+    subagentStatus?: "created" | "started" | "completed" | "failed";
+  };
+};
+
 export type ConversationItem =
-  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean; createdAt?: string }
-  | { id: string; type: "streaming"; clientTurnId: string; text: string; phase?: AgentRuntimePhase; providerLabel?: string; model?: string; createdAt?: string }
-  | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
+  | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean; queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled"; clientTurnId?: string; queueEnvelope?: { provider?: string; providerLabel?: string; model?: string; contextLimit?: number; projectPath?: string; projectType?: ProjectType; sessionId?: string; laneId?: string; computerUseRequested?: boolean; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; queueId?: string; sequence?: number }; createdAt?: string }
+  | { id: string; type: "streaming"; clientTurnId: string; text: string; phase?: AgentRuntimePhase; timeline?: ChatTimelineEvent[]; providerLastActivityAt?: string; providerLabel?: string; model?: string; createdAt?: string }
+  | { id: string; type: "agent"; response: AgentRuntimeResponse; timeline?: ChatTimelineEvent[]; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
+  | { id: string; type: "timeline_event"; event: ChatTimelineEvent; createdAt?: string }
   | {
       id: string;
       type: "approval_revision";
@@ -141,6 +172,7 @@ export type ChatThread = {
   sessionId: string;
   title: string;
   projectPath: string;
+  projectType?: "general" | "unity";
   createdAt?: string;
   updatedAt?: string;
   agentName?: string;

@@ -118,7 +118,13 @@ class _TestRuntimePlannerCatalog:
             requires_user_activation=bool(value.requires_user_activation),
         )
 
-    def read(self, exposure_layer: str) -> PlannerCatalogSnapshot:
+    def read(
+        self,
+        exposure_layer: str,
+        *,
+        project_context_active: bool = True,
+    ) -> PlannerCatalogSnapshot:
+        _ = project_context_active
         config = self._gateway.ensure_config()
         visible_tools = tuple(
             self._tool(tool)
@@ -2031,6 +2037,7 @@ class DashboardServerTests(unittest.TestCase):
                     "computerUseEverEnabled": False,
                     "backgroundGoalNotificationsEnabled": True,
                     "roslynFullAutoEverEnabled": False,
+                    "maxAgenticTurns": None,
                 },
             )
             gateway.update_advanced_settings(
@@ -4459,6 +4466,23 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(forwarded["provider"], "ollama")
         self.assertEqual(forwarded["model"], "model-id")
 
+    def test_agent_runtime_payload_freezes_general_or_project_context_per_turn(self) -> None:
+        general = dashboard_server.agent_runtime_request_payload(
+            dashboard_server.AgentRuntimeMessageRequest(
+                message="inspect an ordinary folder",
+                cwd=r"E:\ordinary-folder",
+            )
+        )
+        project = dashboard_server.agent_runtime_request_payload(
+            dashboard_server.AgentRuntimeMessageRequest(
+                message="inspect the selected avatar",
+                projectPath=r"E:\Unity\AvatarProject",
+            )
+        )
+
+        self.assertIs(general["_projectContextActive"], False)
+        self.assertIs(project["_projectContextActive"], True)
+
     def test_agent_gateway_requires_token_and_is_disabled_by_default(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         with TestClient(dashboard_server.app) as client:
@@ -6378,6 +6402,119 @@ class DashboardServerTests(unittest.TestCase):
             baseline_owners,
         )
 
+    def test_provider_reasoning_activity_refreshes_idle_watchdog(self) -> None:
+        client_turn_id = "client-provider-idle-activity"
+        provider_calls = 0
+
+        def fake_request(
+            _settings,
+            _prompt,
+            *,
+            stream_activity_callback=None,
+            **_kwargs,
+        ) -> LlmPlanResponse:
+            nonlocal provider_calls
+            provider_calls += 1
+            activity_deadline = time.monotonic() + 0.12
+            while time.monotonic() < activity_deadline:
+                if stream_activity_callback is not None:
+                    stream_activity_callback({"type": "reasoning"})
+                time.sleep(0.005)
+            return LlmPlanResponse(
+                text=json.dumps({
+                    "action": "reply",
+                    "summary": "activity kept the Provider alive",
+                    "reply": "finished after active reasoning",
+                }),
+                usage={},
+                reasoning={},
+            )
+
+        with (
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=_test_runtime_provider_config(),
+            ),
+            patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "_FIRST_BYTE_TIMEOUT_SECONDS", None),
+            patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "_IDLE_TIMEOUT_SECONDS", 0.04),
+            patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "_OVERALL_TIMEOUT_SECONDS", None),
+            patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_request),
+        ):
+            payload = dashboard_server.AGENT_GATEWAY.runtime_message(
+                {
+                    "message": "keep working while activity remains live",
+                    "session_id": "sess-provider-idle-activity",
+                    "clientTurnId": client_turn_id,
+                }
+            )
+
+        self.assertEqual(provider_calls, 1)
+        self.assertEqual(payload["plan"]["nextStep"], "done")
+        self.assertEqual(payload["plan"]["reply"], "finished after active reasoning")
+        self.assertNotIn("plannerFailure", payload["plan"])
+
+    def test_provider_idle_five_of_five_closes_silent_transport_without_retry(self) -> None:
+        client_turn_id = "client-provider-idle-timeout"
+        baseline_owners = dashboard_server._RUNTIME_PLANNER_MODEL.active_call_count()
+        provider_calls = 0
+        transport_closed = threading.Event()
+
+        def fake_request(
+            _settings,
+            _prompt,
+            *,
+            stream_activity_callback=None,
+            cancel_event=None,
+            **_kwargs,
+        ) -> LlmPlanResponse:
+            nonlocal provider_calls
+            provider_calls += 1
+            if stream_activity_callback is not None:
+                stream_activity_callback({"type": "provider_event"})
+            while cancel_event is None or not cancel_event.is_set():
+                time.sleep(0.002)
+            transport_closed.set()
+            raise dashboard_server.RuntimePlannerProviderCancelledError("fixture observed cancellation")
+
+        started_at = time.monotonic()
+        with (
+            patch.object(
+                dashboard_server.PROVIDER_CONFIGURATION,
+                "current_api_config",
+                return_value=_test_runtime_provider_config(),
+            ),
+            patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "_FIRST_BYTE_TIMEOUT_SECONDS", None),
+            patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "_IDLE_TIMEOUT_SECONDS", 0.05),
+            patch.object(dashboard_server._RUNTIME_PLANNER_MODEL, "_OVERALL_TIMEOUT_SECONDS", None),
+            patch("dashboard_server.request_llm_plan_with_metadata", side_effect=fake_request),
+        ):
+            payload = dashboard_server.AGENT_GATEWAY.runtime_message(
+                {
+                    "message": "remain silent until the idle watchdog closes the transport",
+                    "session_id": "sess-provider-idle-timeout",
+                    "clientTurnId": client_turn_id,
+                }
+            )
+        elapsed = time.monotonic() - started_at
+
+        self.assertLess(
+            elapsed,
+            0.5,
+            "the bounded idle timeout and cancel join must terminate the silent Provider call",
+        )
+        self.assertEqual(payload["plan"]["plannerFailure"]["code"], "provider_timeout")
+        self.assertEqual(payload["plan"]["plannerFailure"]["transportPhase"], "idle")
+        self.assertEqual(payload["plan"]["nextStep"], "planner_failed")
+        self.assertIs(payload["plan"]["continueLoop"], False)
+        self.assertEqual(provider_calls, 1, "an idle timeout must never auto-retry or replay the Provider call")
+        self.assertTrue(transport_closed.is_set(), "the Provider transport must observe cancellation at 5/5")
+        self.assertEqual(
+            dashboard_server._RUNTIME_PLANNER_MODEL.active_call_count(),
+            baseline_owners,
+            "the timed-out Provider worker must leave the active registry",
+        )
+
     def test_runtime_stop_waits_for_write_transaction_then_blocks_next_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6635,7 +6772,17 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertEqual(calls, [tool])
         self.assertEqual(len(payload["steps"]), 1)
-        self.assertEqual(payload["plan"]["nextStep"], "completion_unverified")
+        # AGT-009: a successful observation replay with no new evidence is
+        # bounded no-progress, not an unverified completion claim.
+        self.assertEqual(payload["plan"]["nextStep"], "planner_failed")
+        self.assertEqual(
+            payload["plan"]["plannerFailure"]["code"], "planner_no_progress"
+        )
+        self.assertIn("not marked complete", payload["plan"]["reply"])
+        self.assertNotIn("No repeated command was executed", payload["plan"]["reply"])
+        terminal = [event for event in payload["timeline"] if event["kind"] == "assistant"][-1]
+        self.assertEqual(terminal["payload"]["status"], "planner_failed")
+        self.assertEqual(terminal["payload"]["summary"], payload["plan"]["reply"])
 
     def test_runtime_loop_distinguishes_two_write_tools_with_same_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6775,7 +6922,6 @@ class DashboardServerTests(unittest.TestCase):
                     "nextStep": "done",
                 }
             )
-
             plan_iterator = iter(plans)
             bind_test_runtime_planner(gateway, lambda _prompt: next(plan_iterator))
             payload = gateway.runtime_message({"message": "exercise distinct failures"})
@@ -6788,14 +6934,20 @@ class DashboardServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             runtime_statuses: list[dict] = []
+            runtime_timeline_events: list[dict] = []
             gateway = AgentGateway(
                 root / "config.json",
                 root / "audit",
                 runtime_status_changed=runtime_statuses.append,
+                runtime_timeline_changed=runtime_timeline_events.append,
             )
             calls: list[str] = []
             plans = []
-            for index in range(4):
+            # The former product limit stopped the 26th distinct action even
+            # though the planner still had useful work.  Exercise the real
+            # Gateway loop past that legacy boundary and require a natural
+            # model terminal response.
+            for index in range(26):
                 name = f"vrcforge_test_tool_budget_{index}"
                 gateway.register_tool(
                     name,
@@ -6824,6 +6976,10 @@ class DashboardServerTests(unittest.TestCase):
                     "nextStep": "done",
                 }
             )
+            # The Runtime requests one bounded correction when a Provider does
+            # not bind its final claim to evidence. Keep that correction
+            # available so this fixture tests the tool loop, not iterator EOF.
+            plans.append(dict(plans[-1]))
             plan_iterator = iter(plans)
             bind_test_runtime_planner(gateway, lambda _prompt: next(plan_iterator))
             payload = gateway.runtime_message(
@@ -6834,17 +6990,64 @@ class DashboardServerTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(calls, [f"vrcforge_test_tool_budget_{index}" for index in range(4)])
-        self.assertEqual(len([step for step in payload["steps"] if step["kind"] == "skill"]), 4)
+        self.assertEqual(calls, [f"vrcforge_test_tool_budget_{index}" for index in range(26)])
+        self.assertEqual(len([step for step in payload["steps"] if step["kind"] == "skill"]), 26)
         self.assertEqual(payload["plan"]["nextStep"], "completion_unverified")
         self.assertNotIn("stepLimitReached", payload["plan"])
         self.assertNotIn("toolCallLimitReached", payload["plan"])
         phases = [status["phase"] for status in runtime_statuses]
         self.assertEqual(phases[0], "preparing")
-        self.assertEqual(phases.count("running_tool"), 4)
-        self.assertGreaterEqual(phases.count("waiting_for_model"), 5)
+        self.assertEqual(phases.count("running_tool"), 26)
+        self.assertGreaterEqual(phases.count("waiting_for_model"), 27)
         self.assertEqual(phases[-1], "verifying")
         self.assertTrue(all("reasoning" not in status and "prompt" not in status and "label" not in status for status in runtime_statuses))
+        self.assertEqual(sum(event["timelineEvent"]["kind"] == "tool_call" for event in runtime_timeline_events), 26)
+        self.assertEqual(sum(event["timelineEvent"]["kind"] == "tool_result" for event in runtime_timeline_events), 26)
+        action_ids = [event["timelineEvent"]["payload"].get("actionId") for event in runtime_timeline_events]
+        self.assertEqual(len({action_id for action_id in action_ids if action_id}), 26)
+        self.assertTrue(all("reasoning" not in json.dumps(event) and "arguments" not in json.dumps(event) for event in runtime_timeline_events))
+
+    def test_explicit_agentic_turn_limit_pauses_without_claiming_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            calls: list[int] = []
+            gateway.register_tool(
+                "vrcforge_test_explicit_turn_budget",
+                "Explicit model-turn budget fixture.",
+                "read/debug",
+                lambda params: calls.append(int(params["index"])) or {"ok": True},
+            )
+            plan_index = 0
+
+            def planner(_prompt):
+                nonlocal plan_index
+                result = {
+                    "summary": "continue bounded work",
+                    "reply": "continuing",
+                    "planner": "test",
+                    "nextStep": "call_skill",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_test_explicit_turn_budget",
+                    "skillParams": {"index": plan_index},
+                    "continueLoop": True,
+                }
+                plan_index += 1
+                return result
+
+            bind_test_runtime_planner(gateway, planner)
+            payload = gateway.runtime_message({
+                "message": "exercise explicit agentic-turn budget",
+                "sessionId": "explicit-budget-session",
+                "clientTurnId": "explicit-budget-client-turn",
+                "maxAgenticTurns": 2,
+            })
+
+        self.assertEqual(calls, [0, 1])
+        self.assertEqual(payload["plan"]["nextStep"], "paused")
+        self.assertEqual(payload["plan"]["reason"], "model_turn_budget_exhausted")
+        self.assertTrue(payload["plan"]["stepLimitReached"])
+        self.assertIsNot(payload["plan"].get("completionSatisfied"), True)
 
     def test_runtime_steer_replans_before_executing_a_stale_model_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6932,6 +7135,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(calls, ["vrcforge_test_steered_action"])
         self.assertIn("inspect the package first", prompts[1])
         self.assertNotIn("vrcforge_test_stale_action", calls)
+        self.assertEqual(result["payload"]["consumedSteerInputIds"], ["steer-input"])
 
     def test_runtime_steer_during_tool_reaches_next_model_without_stale_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6966,6 +7170,82 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertFalse(worker.is_alive())
         self.assertIn("change direction", prompts[1])
+        self.assertEqual(result["payload"]["consumedSteerInputIds"], ["steer-tool-input"])
+
+    def test_steer_accepted_after_last_model_boundary_becomes_durable_followup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+
+            def body(params: dict, **_kwargs) -> dict:
+                params["_resolvedRuntimeSessionId"] = "runtime-session-late"
+                params["_resolvedRuntimeTurnId"] = "runtime-turn-late"
+                params["_resolvedRuntimeClientTurnId"] = "runtime-client-late"
+                gateway._runtime_session_state.begin_turn(
+                    session_id="runtime-session-late",
+                    turn_id="runtime-turn-late",
+                    client_turn_id="runtime-client-late",
+                )
+                accepted = gateway.submit_runtime_steer({
+                    "sessionId": "runtime-session-late",
+                    "targetClientTurnId": "runtime-client-late",
+                    "clientTurnId": "late-user-input",
+                    "message": "continue with this after the final boundary",
+                    "laneId": "chat-lane-late",
+                })
+                self.assertTrue(accepted["accepted"])
+                return {"ok": True, "plan": {"nextStep": "done"}}
+
+            with patch.object(gateway, "_runtime_message_impl_body", side_effect=body):
+                payload = gateway._runtime_message_impl({})
+
+        deferred = payload["deferredSteerFollowups"]
+        self.assertEqual([item["inputId"] for item in deferred], ["late-user-input"])
+        queued = gateway.list_runtime_followups(session_id="chat-lane-late", include_terminal=False)
+        self.assertEqual([item["clientTurnId"] for item in queued], ["late-user-input"])
+
+    def test_late_steer_persistence_backpressure_returns_bounded_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+
+            def body(params: dict, **_kwargs) -> dict:
+                params["_resolvedRuntimeSessionId"] = "runtime-session-backpressure"
+                params["_resolvedRuntimeTurnId"] = "runtime-turn-backpressure"
+                params["_resolvedRuntimeClientTurnId"] = "runtime-client-backpressure"
+                gateway._runtime_session_state.begin_turn(
+                    session_id="runtime-session-backpressure",
+                    turn_id="runtime-turn-backpressure",
+                    client_turn_id="runtime-client-backpressure",
+                )
+                accepted = gateway.submit_runtime_steer({
+                    "sessionId": "runtime-session-backpressure",
+                    "targetClientTurnId": "runtime-client-backpressure",
+                    "clientTurnId": "late-backpressure-input",
+                    "message": "private message must not be echoed in the outcome",
+                    "laneId": "chat-lane-backpressure",
+                })
+                self.assertTrue(accepted["accepted"])
+                return {"ok": True, "plan": {"nextStep": "done"}}
+
+            with patch.object(
+                gateway._runtime_followup_queue,
+                "enqueue",
+                return_value={"accepted": False, "status": "backpressure", "reason": "durable_store_capacity"},
+            ):
+                with patch.object(gateway, "_runtime_message_impl_body", side_effect=body):
+                    payload = gateway._runtime_message_impl({})
+
+        self.assertNotIn("deferredSteerFollowups", payload)
+        outcomes = payload["deferredSteerFollowupOutcomes"]
+        self.assertEqual(outcomes, [{
+            "inputId": "late-backpressure-input",
+            "targetClientTurnId": "runtime-client-backpressure",
+            "followupLaneId": "chat-lane-backpressure",
+            "status": "backpressure",
+            "reason": "durable_store_capacity",
+        }])
+        self.assertNotIn("private message", str(outcomes))
 
     def test_desktop_bootstrap_does_not_consume_the_turn_action_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7008,6 +7288,11 @@ class DashboardServerTests(unittest.TestCase):
                     "nextStep": "done",
                 }
             )
+            # Runtime performs one bounded completion-claim correction after a
+            # Provider terminal response that lacks exact action evidence.
+            # Keep that correction available so this fixture exercises the
+            # bootstrap/turn budget boundary rather than iterator EOF.
+            plans.append(dict(plans[-1]))
             plan_iterator = iter(plans)
             bind_test_runtime_planner(gateway, lambda _prompt: next(plan_iterator))
             with patch.object(gateway.desktop, "consume_computer_use_turn_grant"):
@@ -7078,32 +7363,146 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["question"]["goalDeliveryId"], "goal-delivery-question-api-link")
 
-    def test_agent_runtime_queue_records_request(self) -> None:
-        with TestClient(dashboard_server.app) as client:
-            response = client.post(
-                "/api/app/agent/runs/queue",
-                json={
-                    "sessionId": "sess-queue",
-                    "clientTurnId": "client-queue-1",
-                    "message": "queued follow-up",
-                    "providerLabel": "DeepSeek",
-                    "model": "deepseek-v4-pro",
-                },
-            )
-            self.assertEqual(response.status_code, 200)
-            self.assertEqual(response.json()["status"], "queued")
+    def test_agent_runtime_queue_is_durable_idempotent_and_claim_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = AgentGateway(Path(tmp) / "config.json", Path(tmp) / "audit")
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            dashboard_server.AGENT_GATEWAY = gateway
+            try:
+                with TestClient(dashboard_server.app) as client:
+                    body = {
+                        "sessionId": "runtime-session-queue",
+                        "laneId": "chat-lane-queue",
+                        "clientTurnId": "client-queue-1",
+                        "message": "queued follow-up",
+                        "providerLabel": "DeepSeek",
+                        "model": "deepseek-v4-pro",
+                    }
+                    response = client.post("/api/app/agent/runs/queue", json=body)
+                    self.assertEqual(response.status_code, 200)
+                    queued = response.json()
+                    self.assertTrue(queued["accepted"])
+                    self.assertEqual(queued["mode"], "followup")
+                    self.assertEqual(queued["status"], "pending")
 
-            ledger_response = client.get(
-                "/api/app/agent/runs",
-                params={"sessionId": "sess-queue", "clientTurnId": "client-queue-1"},
-            )
+                    duplicate = client.post("/api/app/agent/runs/queue", json=body).json()
+                    self.assertTrue(duplicate["deduped"])
+                    self.assertEqual(duplicate["queueId"], queued["queueId"])
 
-        self.assertEqual(ledger_response.status_code, 200)
-        runs = ledger_response.json()["runs"]
-        self.assertEqual(len(runs), 1)
-        self.assertEqual(runs[0]["status"], "queued")
-        self.assertEqual(runs[0]["messageSummary"], "queued follow-up")
-        self.assertEqual(runs[0]["providerLabel"], "DeepSeek")
+                    claimed = client.post(
+                        "/api/app/agent/runs/queue/claim",
+                        json={
+                            "sessionId": "chat-lane-queue",
+                            "ownerId": "desktop-test",
+                            "limit": 1,
+                            "queueId": queued["queueId"],
+                        },
+                    ).json()["items"][0]
+                    wrong = client.post(
+                        f"/api/app/agent/runs/queue/{queued['queueId']}/ack",
+                        json={"sessionId": "wrong-session", "claimToken": claimed["claimToken"]},
+                    )
+                    self.assertFalse(wrong.json()["ok"])
+                    acked = client.post(
+                        f"/api/app/agent/runs/queue/{queued['queueId']}/ack",
+                        json={"sessionId": "chat-lane-queue", "claimToken": claimed["claimToken"]},
+                    )
+                    self.assertTrue(acked.json()["ok"])
+
+                    remaining = client.get(
+                        "/api/app/agent/runs/queue",
+                        params={"sessionId": "chat-lane-queue", "includeTerminal": False},
+                    ).json()["items"]
+                    self.assertEqual(remaining, [])
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
+    def test_attachment_input_skips_hot_steer_and_keeps_durable_safe_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = AgentGateway(Path(tmp) / "config.json", Path(tmp) / "audit")
+            gateway._runtime_session_state.begin_turn(
+                session_id="runtime-session-attachment",
+                turn_id="runtime-turn-attachment",
+                client_turn_id="runtime-client-attachment",
+            )
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            dashboard_server.AGENT_GATEWAY = gateway
+            try:
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/agent/runs/queue",
+                        json={
+                            "sessionId": "runtime-session-attachment",
+                            "laneId": "chat-lane-attachment",
+                            "clientTurnId": "attachment-followup",
+                            "targetClientTurnId": "runtime-client-attachment",
+                            "message": "inspect this image next",
+                            "attachments": [{
+                                "id": "image-a",
+                                "name": "scene.png",
+                                "type": "image/png",
+                                "size": 12,
+                                "payloadHash": "sha256:abc",
+                                "dataUrl": "data:image/png;base64,secret",
+                            }],
+                        },
+                    )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["mode"], "followup")
+                self.assertEqual(
+                    gateway._runtime_session_state.drain_steer(
+                        session_id="runtime-session-attachment",
+                        client_turn_id="runtime-client-attachment",
+                    ),
+                    [],
+                )
+                queued = gateway.list_runtime_followups(
+                    session_id="chat-lane-attachment",
+                    include_terminal=False,
+                )
+                self.assertEqual(queued[0]["attachments"][0]["payloadHash"], "sha256:abc")
+                self.assertNotIn("dataUrl", queued[0]["attachments"][0])
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
+
+    def test_followup_claim_is_acked_by_the_runtime_request_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = AgentGateway(Path(tmp) / "config.json", Path(tmp) / "audit")
+            queued = gateway.enqueue_runtime_followup({
+                "sessionId": "chat-lane-runtime-ack",
+                "clientTurnId": "client-runtime-ack",
+                "message": "run me once",
+            })
+            gateway.runtime_message = Mock(return_value={
+                "ok": True,
+                "sessionId": "sess-runtime-ack",
+                "clientTurnId": "client-runtime-ack",
+                "turnId": "runtime-turn-ack",
+                "status": "completed",
+                "plan": {"nextStep": "done"},
+                "steps": [],
+            })
+            original_gateway = dashboard_server.AGENT_GATEWAY
+            dashboard_server.AGENT_GATEWAY = gateway
+            try:
+                with TestClient(dashboard_server.app) as client:
+                    response = client.post(
+                        "/api/app/agent/message",
+                        json={
+                            "session_id": "sess-runtime-ack",
+                            "clientTurnId": "client-runtime-ack",
+                            "message": "run me once",
+                            "followupQueueId": queued["queueId"],
+                            "followupLaneId": "chat-lane-runtime-ack",
+                        },
+                    )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    gateway.list_runtime_followups(session_id="chat-lane-runtime-ack", include_terminal=False),
+                    [],
+                )
+            finally:
+                dashboard_server.AGENT_GATEWAY = original_gateway
 
     @patch("dashboard_server.request_llm_plan_with_metadata")
     @patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config")

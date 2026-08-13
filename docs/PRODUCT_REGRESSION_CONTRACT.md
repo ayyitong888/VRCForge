@@ -37,24 +37,35 @@ Each item ends with its version history in this exact form:
   attachment, tool-name and caller-supplied Shell cases.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
-### AGT-002 — Bounded Agent tool loop
+### AGT-002 — Natural Agent loop with explicit safety budgets
 
 - Priority: P0.
-- Contract: an ordinary multi-step loop continues until the Runtime reaches a
-  terminal outcome; it has no hard stop after three calls. A per-turn budget of
-  25 remains a safety ceiling, not a normal completion rule. Desktop bootstrap
-  work has its own session budget/account and cannot consume or reset the
-  ordinary loop budget. Each step is `plan -> admit/approve -> execute ->
-  canonical result -> refeed -> verify -> next plan`; retries after repeated
-  failure, pending approval, and completion verification remain explicit,
-  identity-bound Runtime states.
-- Forbidden regression: no unlimited chain, arbitrary three-call cutoff,
-  missing result refeed, completed-action replay, hidden retry of an ambiguous
-  side effect, or budget sharing between desktop bootstrap and the ordinary
-  loop.
-- Acceptance: failure-first tests prove a safe four-step loop, the 25-call
-  ceiling, separate desktop accounting, repeated-failure/approval/completion
-  states, cancellation and full-tree identity preservation.
+- Contract: an ordinary interactive turn ends when the model returns a final
+  assistant response without another admitted action. Tool calls are telemetry
+  (`toolCallsUsed` is observational only), not conversation turns and not a
+  normal completion boundary. Interactive turns have no fixed tool-call or
+  model-turn count. Automation, unattended and background runs must explicitly
+  declare finite budgets such as `maxAgenticTurns`, wall-clock time and/or cost.
+  The foreground request must not inherit that background-only limit, and the
+  background request carries its finite budget across HTTP and Tauri transport.
+  Provider/context deadlines, repeated-semantic-failure guard, cancellation,
+  approval and Runtime-owned completion verification remain independent safety
+  boundaries. Hitting any declared budget pauses an incomplete task and
+  preserves the remaining action; it never reports completion. Desktop
+  bootstrap keeps its own per-session accounting and cannot consume or reset
+  the ordinary loop.
+  Each action remains `plan -> admit/approve -> execute -> canonical result ->
+  refeed -> verify -> next plan`.
+- Forbidden regression: no arbitrary three- or 25-call normal cutoff, tool-call
+  count mislabeled as a model/conversation turn, budget exhaustion reported as
+  completion, missing result refeed, completed-action replay, hidden retry of an
+  ambiguous side effect, or bootstrap sharing the ordinary turn's accounting.
+- Acceptance: failure-first tests execute 26 distinct real Gateway tools and
+  then stop on the model's natural terminal response; separate tests verify
+  `toolCallsUsed` remains telemetry, freeze explicit finite automation budgets
+  (model turns, time and/or cost), and retain repeated-failure, approval
+  continuation, cancellation, completion verification and full-tree identity
+  guarantees.
 - [首次实现: 1.2.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ### AGT-003 — Runtime-owned completion
@@ -122,20 +133,105 @@ Each item ends with its version history in this exact form:
   label/CoT redaction tests, including empty and mid-tool states.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
-### AGT-008 — Same-turn steer and bounded follow-up queue
+### AGT-008 — Exact-turn steer and durable follow-up lane
 
 - Priority: P0.
-- Contract: an accepted steer is captured by CAS identity and injected after
-  the current tool batch, before the next LLM request. Frozen write authority,
-  approval, checkpoint and verification semantics do not change. Follow-ups
-  preserve FIFO order, cap at eight, expose an explicit user button, and are
-  cancelled and cleaned up on terminal/cancelled runs.
+- Contract: text-only input targeting the exact active Runtime turn is captured
+  by CAS identity and injected at the next safe model boundary, never inside an
+  executing tool or frozen approval. Attachments, unavailable steer targets and
+  the bounded 20-item hot mailbox fall through to a durable per-chat follow-up
+  lane instead of rejecting input. The durable lane is FIFO and serialized per
+  chat while different chats may run independently; it has no arbitrary message
+  count cap. Backpressure is based on bounded message/attachment size and the
+  private queue-file byte budget, while the already-persisted chat input remains
+  visible and retryable. Queue envelopes are idempotent by chat lane plus client
+  turn, atomically persisted inside the private user-data boundary (requesting
+  user-only file mode where supported), claimed with a session-bound lease
+  token, acknowledged or cancelled explicitly, and restored
+  after restart/runner handoff. Stop cancels only active work and pauses pending
+  follow-ups until Resume or Cancel all. Ambiguous accepted delivery is shown as
+  unverified and is never replayed automatically; terminal tombstones retain
+  identity only and remove user content.
+- A steer accepted after the last model boundary is not durable until queue
+  persistence succeeds. Persistence failure/backpressure returns a bounded
+  identity-only outcome and leaves the input visibly retryable; it never
+  remains stuck as an apparently active steer.
 - Forbidden regression: no steer injection during a tool batch, write-scope
-  widening, reordered/uncapped follow-ups, hidden auto-send, duplicate replay,
-  or orphaned queue after cancellation.
-- Acceptance: CAS race tests cover batch-boundary injection, frozen write
-  identity, FIFO/8-cap, explicit-button gating and cancellation cleanup.
+  widening, eight-message rejection, count-based dropping, attachment loss,
+  reordered or concurrent execution within one chat lane, input existing only
+  in React memory, hidden auto-send, ambiguous duplicate replay, cross-session
+  claim/ack, or Stop/restart orphaning pending input.
+- Acceptance: CAS race tests cover safe-boundary injection and frozen write
+  identity; durable tests cover 32+ FIFO inputs, byte-based backpressure,
+  attachment-reference redaction, restart/idempotency, lease reclaim,
+  session/token binding, persistence-failure rollback, Stop/Resume/Cancel and
+  final-model-boundary fallback plus interrupted-delivery non-replay.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
+### AGT-009 — Projectless and General-project Agent parity
+
+- Priority: P0.
+- Contract: a temporary conversation without a project and a project explicitly
+  typed `general` run as an ordinary General Agent, not as a degraded Unity
+  workflow and not as a Shell-only mode. The model autonomously selects among
+  bounded directory listing, text read, file find and text search, ordinary
+  permission-gated Shell/process work, Ask/TODO/Sub Agent, attachments, vision
+  and connected MCP capabilities according to the request. General turns must
+  not expose or invoke Unity readiness, Unity MCP, avatar or project-write tools.
+  Tool results are re-fed to the model and the Runtime completion gate remains
+  authoritative.
+- General filesystem reads are bound to the explicitly selected General project
+  root or an existing absolute path written by the user in that turn. The tool
+  module enforces its own depth/count/byte/output ceilings, rejects symlink or
+  reparse traversal and known credential files, and redacts secret-like content
+  before it can enter Provider context. A model-proposed path cannot authorize
+  itself.
+- A successful top-level listing is an observation, not proof that an
+  investigation is complete. Repeating a semantically equivalent directory
+  observation through another tool spelling is suppressed before execution and
+  recorded as no progress. After the bounded repeated-no-progress threshold,
+  the Runtime returns `planner_no_progress`; it neither loops forever nor
+  fabricates completion.
+- Forbidden regression: no automatic Unity-tool detour, keyword-selected local
+  plan, fixed one-tool workflow, repeated `list`/`dir`/`Get-ChildItem` execution
+  for the same target, unscoped or link-escaped filesystem read, secret-bearing
+  result, or final answer that treats an uninspected directory listing as
+  completion evidence.
+- Acceptance: failure-first catalog/prompt/Gateway tests cover tool exposure,
+  bounded arbitrary-directory reads, binary/path/size limits, equivalent
+  observation suppression and an exact real Provider prompt replay with zero
+  Unity tool calls and no false completion.
+- [首次实现: 1.6.0] [强化/修复: 1.6.0] [最近验证: 1.6.0]
+
+### AGT-010 — Frozen-prompt comparative live acceptance
+
+- Priority: P0.
+- Contract: Agentic-loop acceptance uses one frozen Unicode prompt and one
+  explicitly authorized General root in fresh chats. Each configured comparison
+  model is run separately with the same project type, permission mode and input;
+  a refusal, failure or incomplete result remains valid evidence and is never
+  rewritten as success. The comparison records safe observable behavior:
+  Provider/model identity, first safe activity and first tool latency, ordered
+  tool/invocation sequence, duplicate/no-progress suppression, bounded failures,
+  final Runtime status/reason, total duration and Unity-tool count. It does not
+  compare or display chain-of-thought.
+- The same acceptance pass captures VRCForge and the current Codex reference UI
+  in equivalent active, collapsed-batch, expanded-batch and terminal states.
+  Review is behavioral rather than pixel-perfect: chronology, one invocation
+  per call/result pair, batch disclosure, one major duration, no per-event
+  timestamps, visible progress/error detail and right-rail placement must match
+  the approved product contract. Screenshots and the frozen prompt remain local
+  evidence and must be redacted before any public use.
+- Forbidden regression: no changed prompt between models, reused chat/context,
+  hidden model/permission/project difference, backend-direct substitute for the
+  WebView/Tauri path, Unity-tool detour from General, result-only comparison,
+  screenshot selected after the fact to hide a duplicate/error, secret/API key,
+  raw Provider body, prompt-path publication or CoT capture.
+- Acceptance: the local report binds prompt digest/code-point count, General
+  root digest, App/build identity and each fresh run/session; includes paired
+  screenshots plus a structured behavior table; and states every refusal,
+  failure, manual Stop and unverified completion honestly.
+- [首次实现: 1.6.0] [强化/修复: 1.6.0] [最近验证: 1.6.0]
 
 ## Approval, write and recovery contracts
 
@@ -171,14 +267,18 @@ Each item ends with its version history in this exact form:
 
 ### APR-004 — Approval notifications are bounded request surfaces
 
-- Contract: Windows notifications show a safe action gist. Main approvals may
-  expose bounded once/reject actions; sub-agent review notifications only open
-  the App and never decide.
+- Contract: Windows notifications show a safe action gist and are detail-first
+  for both main-thread approvals and sub-agent review. Clicking a notification
+  only wakes the App, re-fetches/revalidates the still-pending identity and
+  opens the owning chat/detail card; approve, reject, adopt and dismiss remain
+  explicit in-App actions.
 - Forbidden regression: never include raw prompts, keys, commands, paths,
   hierarchy, checkpoint IDs or complete arguments. A deep link re-fetches and
   revalidates exact task/chat/revision/pending state before opening actions.
-- Acceptance: Rust parser/validation, frontend deep-link and notification
-  payload tests.
+  A native-notification callback must never decide an approval or review.
+- Acceptance: Rust parser/validation and frontend deep-link/payload tests are
+  required automatically; manual Windows acceptance verifies wake, exact-card
+  focus and stale-notification refusal for both main and sub-agent paths.
 - [首次实现: 1.5.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ## Project workbench and conversation contracts
@@ -187,7 +287,12 @@ Each item ends with its version history in this exact form:
 
 - Contract: a project conversation right rail contains exactly, in order:
   Agent TODO, Sub Agents, VRCForge Environment Information, User Attachment
-  Sources. Quick Chat retains the generic environment surface.
+  Sources. Attachment sources come only from the current chat's user-provided
+  files/images, including compacted vault references. A source locates its
+  owning message only while that message remains in the transcript; an Open
+  action appears only when the original inline image preview is actually
+  available. Compacted metadata remains identifiable but exposes no inert
+  Locate/Open control. Quick Chat retains the generic environment surface.
 - Forbidden regression: do not put Runtime history/Run Ledger, Context, Memory,
   Skills, file-change history or approval decision buttons into this four-part
   project rail.
@@ -197,11 +302,12 @@ Each item ends with its version history in this exact form:
 ### UX-002 — Agent-owned TODO presentation
 
 - Contract: Agent skills own list/replace/create/update/delete. The rail is a
-  compact ordered status list, not user checkboxes. Pending items use a
-  theme-colored hollow circle with their display-order number. Active items use
-  a filled theme-colored numbered circle and a reduced-motion-aware breathing
-  title. Completed items replace the number with a check inside the same filled
-  theme circle while the title becomes muted and struck through.
+  compact ordered status list, not user checkboxes. Pending items use a muted
+  gray hollow numbered circle. Active items use a theme-colored numbered circle
+  and a reduced-motion-aware breathing title. Completed items keep the same
+  numbered marker in the completed color while only the title becomes muted
+  and struck through. Failed/blocked items remain visibly failed and never
+  impersonate completion.
 - Forbidden regression: do not replace TODO with execution history, editable
   checkboxes, visible status words, status-color traffic lights, second-line
   error/summary text, status grouping or a duplicate center card. Preserve the
@@ -223,22 +329,48 @@ Each item ends with its version history in this exact form:
 - Contract: the rail shows a compact active/completed summary. Opening it uses
   an independent large, scrollable surface with Active/Open and Completed
   groups, event/history detail and status-derived Cancel/Retry/Adopt/Dismiss/
-  Use-next-action controls.
+  Use-next-action controls. The detail surface has its own scroll owner and may
+  overlay the workspace, but the main chat remains mounted with its history,
+  scroll position and composer intact.
 - Forbidden regression: do not embed full detail in the narrow rail,
-  auto-adopt output, lock history during review or eagerly load detail during
-  startup.
-- Acceptance: workbench, notification deep-link, lazy-load and startup tests.
+  auto-adopt output, unmount/replace the main chat, lock history during review
+  or eagerly load detail during startup.
+- Acceptance: workbench, notification deep-link, main-chat persistence,
+  independent-scroll, lazy-load and startup tests plus manual scroll review.
 - [首次实现: 1.5.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ### UX-004 — Chronological conversation timeline
 
-- Contract: user messages, Agent natural-language replies and every tool call/
-  result render in source time order. Tool rows may appear between replies and
-  repeated calls remain separate facts.
+- Priority: P0.
+- Contract: user messages, safe Agent commentary/final replies, planner
+  boundaries, tool calls/results, file edits, commands and Sub Agent
+  created/started/completed/failed lifecycle events render as one durable source
+  timeline ordered by authoritative sequence and timestamp. Compact tool rows
+  may appear between prose; repeated calls and lifecycle transitions remain
+  separate facts. Reasoning/CoT, prompts, credentials and raw tool arguments
+  never enter the projection.
+- Sub Agent lifecycle is projected only from the durable task registry with its
+  stable task revision. The Runtime delegate call must not synthesize a second
+  created/started lifecycle stream. Delegation itself remains an ordinary
+  Runtime tool and therefore keeps its own chronological `tool_call` and
+  `tool_result`; registry lifecycle events supplement rather than replace
+  those execution facts.
+- Known terminal outcomes are projected from structured Runtime status/reason
+  codes, never opaque assistant prose. `planner_no_progress` renders as a
+  localized failed/not-complete Runtime card rather than an ordinary Agent
+  answer. Stop settles the live projection into a durable cancelled Agent card
+  while preserving accepted timeline evidence and one whole-turn duration;
+  restored history and copy use the same localized projection.
 - Forbidden regression: do not collect all calls above/below chat, collapse
-  repeated calls into the last result, or attach tool JSON to copied prose.
-- Acceptance: timeline extraction/order tests and conversation visual review.
-- [首次实现: 1.2.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+  repeated calls into the last result, replace the timeline with a Run Ledger,
+  append delayed Sub Agent terminal cards at discovery time, attach tool JSON
+  to copied prose, display a known Runtime failure as completed prose, expose
+  the raw terminal body, or erase the timeline on acknowledged cancellation.
+- Acceptance: backend sequence/timestamp/sanitization tests and frontend
+  materialization/fallback/copy/no-duplicate-lifecycle, Runtime-terminal and
+  durable-Stop tests are automatic gates; manual acceptance verifies live
+  prose/tool/Sub Agent interleaving, terminal presentation and scroll stability.
+- [首次实现: 1.2.0] [强化/修复: 1.5.1] [最近验证: 1.6.0]
 
 ### UX-005 — Edit and copy behavior
 
@@ -246,12 +378,17 @@ Each item ends with its version history in this exact form:
   Planner/tool/result JSON, hidden traces and attachments are excluded. Editing
   remains available on the latest sent user bubble through a usable full-width
   editing surface, then re-submits with the original turn identity rules.
-  Copy success/failure receives a dismissible transient notice.
+  Copy success/failure receives a dismissible transient notice. The
+  conversation text-selection action toolbar exists only while its owning chat
+  surface is active; changing view, chat, project or opening a project/sub-agent
+  detail surface clears both the toolbar state and the browser selection.
 - Forbidden regression: no Agent-only copy restriction, unusable narrow edit
-  field, Planner/tool/result JSON in copied text or response-rating thumbs UI.
+  field, Planner/tool/result JSON in copied text, response-rating thumbs UI, or
+  stale selection action toolbar over Settings or another conversation surface.
 - Acceptance: timeline tests cover user+Agent copy payloads, full-width edit
-  interaction, clipboard failure and exclusion of non-prose content.
-- [首次实现: 待考证] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+  interaction, clipboard failure and exclusion of non-prose content. A focused
+  navigation contract and live acceptance cover selection-toolbar retirement.
+- [首次实现: 待考证] [强化/修复: 1.5.1] [最近验证: 1.6.0]
 
 ### UX-006 — Transient failure notice
 
@@ -294,6 +431,65 @@ Each item ends with its version history in this exact form:
   association, action/command filtering, disabled reasons, max-height scroll,
   mouse/keyboard behavior, attach fallback and dismissal/reopen behavior.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
+### UX-009 — Explicit General and Unity project types
+
+- Priority: P0.
+- Contract: every newly added project is explicitly typed exactly `general` or
+  `unity`, and that type is carried through project preferences, catalogue,
+  chat identity, Runtime request, durable follow-up envelope, HTTP and Tauri.
+  A General project accepts an absolute existing directory and uses the General
+  Agent surface. A Unity project must contain `Assets`, `Packages` and
+  `ProjectSettings/ProjectVersion.txt`, binds the Unity-specific readiness and
+  tool surface, and may be selected from a discovered/running Editor instance.
+  Legacy entries are classified once from their validated shape.
+- Opening or discovering a Unity Editor must not implicitly convert a temporary
+  conversation or General project into Unity. Changing type is an explicit user
+  selection; General paths never pass through Unity selection, install, launch
+  or readiness APIs.
+- The left project rail presents General and Unity projects in two visibly
+  separate sections. Explicit General entries appear only under General;
+  explicit Unity entries and legacy entries without a persisted type remain
+  under Unity. Grouping preserves the incoming order within each type and does
+  not duplicate, drop or re-parent nested chats or their selection, unread,
+  pin, rename, menu and collapse state.
+- Forbidden regression: no path-only guess after explicit type exists, hidden
+  General-to-Unity promotion, arbitrary directory rejected solely for lacking
+  Unity metadata, Unity root accepted without its required structure, or
+  project type dropped by queue/restart/IPC transport. Do not mix General and
+  Unity project rows under one undifferentiated heading or infer the group from
+  a running/discovered Editor.
+- Acceptance: executable frontend/backend contracts cover the exact two-choice
+  UI, validation/migration, no-auto-conversion, chat/queue/runtime propagation
+  and Tauri parity. A focused sidebar contract covers the two sections,
+  order-preserving split and legacy-to-Unity behavior; packaged WebView review
+  covers project/chat actions in both sections. A live General prompt proves
+  zero Unity calls while a separately selected Unity project retains its
+  supervised tool chain.
+- [首次实现: 1.6.0] [强化/修复: 1.6.0] [最近验证: 1.6.0]
+
+### UX-010 — Provider idle reconnect disclosure
+
+- Priority: P1.
+- Contract: while a turn is waiting for the Provider, safe Provider activity
+  resets the idle clock and keeps the ordinary phase display. With no safe
+  activity, the chat shows a compact `Reconnecting N/5` status after each
+  consecutive 60-second interval. The status has a visible disclosure chevron;
+  expanding it shows fixed localized product text, not Provider output or
+  internal reasoning. Attempts 1-4 say that no Provider activity has arrived
+  yet and that any activity resets the timer. At 5/5 the turn terminates and
+  the detail directs the user to retry manually while stating that the request
+  was not automatically retried or replayed.
+- Forbidden regression: no absolute timeout while safe activity continues,
+  hidden/missing disclosure affordance, automatic retry/replay at 5/5, raw
+  error body, prompt, credential, CoT/reasoning text, or per-event timestamp in
+  the reconnect presentation.
+- Acceptance: failure-first streaming contracts cover the five 60-second
+  steps, activity reset, bounded 5/5 result, visible rotating chevron, four
+  locale keys and timer cleanup. A packaged WebView acceptance pass expands the
+  status, injects safe activity before 5/5, and observes a real silent 5/5
+  terminal result followed by a user-owned manual retry.
+- [首次实现: 1.6.0] [强化/修复: 1.6.0] [最近验证: 1.6.0]
 
 ## Vision contracts
 

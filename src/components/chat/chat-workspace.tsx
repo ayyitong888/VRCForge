@@ -1,5 +1,5 @@
-import { AlertTriangle, Loader2, MonitorUp, X } from "lucide-react";
-import { useMemo, type FormEvent, type ReactNode, type Ref } from "react";
+import { AlertTriangle, Loader2, Pause, Play, X } from "lucide-react";
+import { useMemo, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentApproval, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
 import type {
@@ -11,18 +11,20 @@ import type {
   ChatCompactionState,
   ConversationItem,
 } from "../../lib/chat-types";
-import { AttachmentStrip, Composer } from "./composer";
+import { Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
-import { ConversationCard, UserImageAttachments } from "./conversation-card";
+import { ConversationCard } from "./conversation-card";
 import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-card";
+import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
+import { mergeConversationTimelineItems } from "../../lib/chat-thread";
 
 export type QueuedChatTurn = {
   id: string;
   text: string;
   attachments: ChatAttachment[];
-  computerUseRequested?: boolean;
+  queueStatus?: "steering" | "queued" | "waiting_for_resources" | "delivery_unverified" | "paused" | "cancelled";
 };
 
 export function ChatWorkspace({
@@ -34,6 +36,8 @@ export function ChatWorkspace({
   permission,
   onSubmit,
   onStop,
+  onResumeQueue,
+  onCancelQueue,
   onSwitchMode,
   commands,
   actions,
@@ -83,7 +87,6 @@ export function ChatWorkspace({
   onOpenDoctor,
   runtimeRuns,
   onSaveOperationAsSkill,
-  subAgentPanel,
 }: {
   projectPromptTitle: string;
   input: string;
@@ -93,6 +96,8 @@ export function ChatWorkspace({
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
   onStop?: () => void;
+  onResumeQueue?: () => void;
+  onCancelQueue?: () => void;
   onSwitchMode: (mode: PermissionState["executionMode"]) => void;
   commands: Array<{ name: string; title: string }>;
   actions: ComposerAction[];
@@ -142,7 +147,6 @@ export function ChatWorkspace({
   onOpenDoctor: () => void;
   runtimeRuns: AgentRuntimeRun[];
   onSaveOperationAsSkill: (summary: PathToSkillOperationSummary) => void;
-  subAgentPanel?: ReactNode;
 }) {
   const { t } = useTranslation();
   const pendingAgentQuestions = useMemo(
@@ -152,6 +156,7 @@ export function ChatWorkspace({
       ),
     [agentQuestions],
   );
+  const conversationItems = mergeConversationTimelineItems(conversation);
   const composer = (compact = false) => (
     <Composer
       input={input}
@@ -187,6 +192,23 @@ export function ChatWorkspace({
       onModifyApproval={onModifyApproval}
     />
   ) : null;
+  const queueControls = queued.length && !sending ? (
+    <div className="mb-3 flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/40 px-3 py-2 text-xs" data-chat-followup-controls>
+      <div className="flex min-w-0 items-center gap-2 text-muted-foreground">
+        <Pause className="h-3.5 w-3.5 shrink-0" />
+        <span className="truncate">{t("chat.followupsPaused", { count: queued.length })}</span>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
+        <Button type="button" variant="outline" className="h-7 px-2 text-xs" onClick={onResumeQueue} data-chat-resume-followups>
+          <Play className="mr-1 h-3 w-3" />
+          {t("chat.resumeFollowups")}
+        </Button>
+        <Button type="button" variant="ghost" className="h-7 px-2 text-xs" onClick={onCancelQueue} data-chat-cancel-followups>
+          {t("chat.cancelFollowups")}
+        </Button>
+      </div>
+    </div>
+  ) : null;
 
   if (conversation.length === 0) {
     return (
@@ -208,8 +230,8 @@ export function ChatWorkspace({
                 onDismiss={onBackgroundGoalCatchUpDismiss}
               />
             </div>
+            {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
-            {subAgentPanel}
             {!approvalComposer ? composer(false) : null}
           </div>
         </div>
@@ -238,18 +260,18 @@ export function ChatWorkspace({
             onProviderWarningsRendered={onBackgroundGoalProviderWarningsRendered}
             onDismiss={onBackgroundGoalCatchUpDismiss}
           />
-          {conversation.map((item) => {
+          {conversationItems.map((item) => {
             const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
             const capturedOperation = item.type === "agent"
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
               : null;
             return (
-              <ConversationCard
-                key={item.id}
+              <div key={item.id} data-conversation-item-id={item.id}>
+                <ConversationCard
                 item={item}
                 approval={approval}
                 approvalAction={approval ? approvalActions[approval.id] : undefined}
-                canRetry={!sending && item.id === latestRetryableItemId}
+                canRetry={!sending && queued.length === 0 && item.id === latestRetryableItemId}
                 canEdit={!sending && queued.length === 0 && item.id === latestEditableUserItemId}
                 editing={editingItemId === item.id}
                 editingText={editingText}
@@ -269,37 +291,10 @@ export function ChatWorkspace({
                 saveOperationSummary={capturedOperation?.summary}
                 saveOperationTool={capturedOperation?.tool}
                 onSaveOperationAsSkill={onSaveOperationAsSkill}
-              />
-            );
-          })}
-          {queued.map((turn, index) => {
-            const imageAttachments = turn.attachments.filter((attachment) => attachment.dataUrl && attachment.type.startsWith("image/"));
-            const otherAttachments = turn.attachments.filter((attachment) => !attachment.dataUrl || !attachment.type.startsWith("image/"));
-            return (
-              <div key={turn.id} className="flex justify-end opacity-65">
-                <div className="flex max-w-[72%] flex-col items-end gap-2 text-sm text-foreground">
-                  <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[10px] text-muted-foreground">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    {t("chat.queued")} {index + 1}
-                  </div>
-                  {turn.computerUseRequested ? (
-                    <div className="flex items-center gap-1 text-[10px] font-medium text-primary">
-                      <MonitorUp className="h-3 w-3" />
-                      {t("composerAction.desktop")}
-                    </div>
-                  ) : null}
-                  {imageAttachments.length ? <UserImageAttachments attachments={imageAttachments} /> : null}
-                  <p className="rounded-2xl bg-muted px-4 py-2.5 whitespace-pre-wrap break-words">{turn.text || t("attachments.fallbackTitle")}</p>
-                  {otherAttachments.length ? (
-                    <div className="max-w-full rounded-xl bg-muted/70 px-3 py-2">
-                      <AttachmentStrip attachments={otherAttachments} compact />
-                    </div>
-                  ) : null}
-                </div>
+                />
               </div>
             );
           })}
-          {subAgentPanel}
           <div ref={conversationEndRef} />
         </div>
       </div>
@@ -310,6 +305,7 @@ export function ChatWorkspace({
               <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
             </div>
           ) : null}
+          {queueControls}
           <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
           {approvalComposer || composer(true)}
         </div>

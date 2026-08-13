@@ -9,7 +9,11 @@ import pytest
 
 import dashboard_server
 from provider_configuration_service import ProviderApiConfig
-from runtime_planner_service import EXPOSURE_LAYER_EXECUTION, EXPOSURE_LAYER_PLANNING
+from runtime_planner_service import (
+    EXPOSURE_LAYER_EXECUTION,
+    EXPOSURE_LAYER_PLANNING,
+    PlannerModelResult,
+)
 from vrchat_blendshape_agent import LlmPlanResponse
 
 
@@ -295,6 +299,93 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
     planning_routable = {item.name: item for item in planning.routable_tools}
     assert all(planning_routable[name].write for name in routable_writes)
     assert not routable_writes.intersection(item.name for item in planning.visible_tools)
+
+
+def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
+    catalog = dashboard_server._RuntimePlannerCatalog()
+
+    planning = catalog.read(
+        EXPOSURE_LAYER_PLANNING,
+        project_context_active=False,
+    )
+    execution = catalog.read(
+        EXPOSURE_LAYER_EXECUTION,
+        project_context_active=False,
+    )
+
+    planning_names = {item.name for item in planning.visible_tools}
+    execution_names = {item.name for item in execution.visible_tools}
+    routable_names = {item.name for item in execution.routable_tools}
+    assert planning_names <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+    assert execution_names <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+    assert routable_names <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+    assert "vrcforge_ask_user" in planning_names
+    assert "vrcforge_delegate_subagent" in planning_names
+    assert "vrcforge_execute_shell" in execution_names
+    assert "vrcforge_avatar_encryption_scan" not in routable_names
+    assert "vrcforge_scan_project_index" not in routable_names
+    assert "vrcforge_unity_status" not in routable_names
+    assert planning.skills == ()
+    assert execution.skills == ()
+
+
+def test_no_project_planner_prompt_is_general_and_omits_unity_tools() -> None:
+    planner = dashboard_server.RuntimePlannerService(
+        catalog=dashboard_server._RuntimePlannerCatalog(),
+        desktop=dashboard_server._RuntimePlannerDesktopObservation(),
+    )
+
+    prompt = planner._build_llm_plan_prompt(
+        r"看下Q:\虚构资料\星海アーカイブ\NebulaArchive是怎么加密的",
+        [],
+        project_context_active=False,
+    )
+
+    assert "general-purpose local Agent" in prompt
+    assert "Choose autonomously among the visible general Agent tools" in prompt
+    assert "bounded read-only list/read/find/search tools" in prompt
+    assert "use Shell for commands, scripts, or processes" in prompt
+    assert "questions, TODO/progress, subagents, attachments, vision, or MCP" in prompt
+    assert "Never repeat an already successful bounded directory listing through Shell" in prompt
+    assert "a top-level directory listing alone is not sufficient evidence" in prompt
+    assert "a reply is invalid after only a top-level directory listing" in prompt
+    assert '"completion_claim":{"satisfied":true,"evidence_action_ids"' in prompt
+    assert "vrcforge_avatar_encryption_scan" not in prompt
+    assert "vrcforge_scan_project_index" not in prompt
+    assert "vrcforge_unity_status" not in prompt
+
+
+def test_no_project_planner_rejects_unity_tool_while_project_turn_keeps_it() -> None:
+    class Model:
+        def plan(self, _prompt: str) -> PlannerModelResult:
+            return PlannerModelResult(
+                text=(
+                    '{"action":"skill","skill_tool":"vrcforge_avatar_encryption_scan",'
+                    '"skill_params":{},"summary":"scan"}'
+                )
+            )
+
+    planner = dashboard_server.RuntimePlannerService(
+        catalog=dashboard_server._RuntimePlannerCatalog(),
+        desktop=dashboard_server._RuntimePlannerDesktopObservation(),
+        model=Model(),
+    )
+
+    general = planner.plan_agent_turn(
+        "inspect an ordinary folder",
+        {"_projectContextActive": False},
+        {},
+    )
+    project = planner.plan_agent_turn(
+        "inspect the selected Unity avatar",
+        {"_projectContextActive": True},
+        {},
+    )
+
+    assert general["plannerFailed"] is True
+    assert general["skillNeeded"] is False
+    assert project["skillNeeded"] is True
+    assert project["skillTool"] == "vrcforge_avatar_encryption_scan"
 
 
 @pytest.mark.parametrize(

@@ -509,6 +509,20 @@ export type AgentRuntimeResponse = {
   turn_id: string;
   turnId: string;
   clientTurnId?: string;
+  consumedSteerInputIds?: string[];
+  deferredSteerFollowups?: Array<{
+    inputId: string;
+    queueId?: string;
+    sequence?: number;
+    status?: string;
+  }>;
+  deferredSteerFollowupOutcomes?: Array<{
+    inputId: string;
+    targetClientTurnId?: string;
+    followupLaneId?: string;
+    status?: string;
+    reason?: string;
+  }>;
   continuationSource?: string;
   goalDeliveryId?: string;
   backgroundGoalSkipped?: boolean;
@@ -532,6 +546,12 @@ export type AgentRuntimeResponse = {
     skillReason?: string;
     expectedResult?: string;
     nextStep?: string;
+    plannerFailure?: {
+      code?: string;
+      phase?: string;
+      retryable?: boolean;
+      transportPhase?: "first_byte" | "idle" | "overall" | string;
+    };
     taskCompletion?: Record<string, unknown>;
     choices?: Array<{
       id?: string;
@@ -605,6 +625,22 @@ export type AgentRuntimeResponse = {
   skill?: AgentSkillResult;
   result?: AgentShellResult | Record<string, unknown>;
   vision?: AgentVisionAnalysis;
+  /** Ordered, safe runtime projection; excludes prompts, CoT, credentials and raw tool args. */
+  timeline?: Array<{
+    id?: string;
+    sequence?: number;
+    timestamp?: string;
+    kind?: string;
+    payload?: {
+      label?: string;
+      summary?: string;
+      status?: string;
+      tool?: string;
+      phase?: string;
+      actionId?: string;
+      subagentStatus?: "created" | "started" | "completed" | "failed";
+    };
+  }>;
   steps?: Array<{
     index?: number;
     kind?: string;
@@ -1037,6 +1073,7 @@ export type ProjectSnapshot = {
     unityVersion?: string;
     sources?: string[];
     activeMcp?: boolean;
+    projectType?: "general" | "unity";
   }>;
   scan?: {
     status?: string;

@@ -43,6 +43,12 @@ from pydantic import BaseModel, Field
 
 from bounded_process import BoundedProcessResult, run_bounded_process
 from agent_command_safety import normalize_filesystem_path
+from general_agent_tools import (
+    find_files as general_find_files,
+    list_directory as general_list_directory,
+    read_text_file as general_read_text_file,
+    search_text as general_search_text,
+)
 from agent_completion_verifier import UnityConsoleCompletionVerifier
 from agent_harness_journey import JourneyReceiptError, RuntimeJourneyReceiptAuthority
 from agent_visual_capture_evidence import (
@@ -1318,15 +1324,19 @@ class AgentRuntimeMessageRequest(BaseModel):
     workspace_root: str | None = None
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
+    project_type: Literal["general", "unity"] | None = Field(default=None, alias="projectType")
     provider: str | None = None
     provider_label: str | None = Field(default=None, alias="providerLabel")
     model: str | None = None
     context_limit: int | None = Field(default=None, alias="contextLimit", gt=0, le=10_000_000)
+    max_agentic_turns: int | None = Field(default=None, alias="maxAgenticTurns", ge=1, le=4096)
     history: list[dict[str, Any]] = Field(default_factory=list)
     computer_use_requested: bool = Field(default=False, alias="computerUseRequested")
     computer_use_grant_id: str | None = Field(default=None, alias="computerUseGrantId")
     computer_use_visual_theme: str | None = Field(default=None, alias="computerUseVisualTheme")
     computer_use_visual_accent: str | None = Field(default=None, alias="computerUseVisualAccent")
+    followup_queue_id: str | None = Field(default=None, alias="followupQueueId", max_length=180)
+    followup_lane_id: str | None = Field(default=None, alias="followupLaneId", max_length=180)
 
     model_config = {"populate_by_name": True}
 
@@ -1353,16 +1363,35 @@ class ComputerUseTurnGrantRequest(BaseModel):
 
 
 class AgentRuntimeQueueRequest(BaseModel):
-    session_id: str | None = Field(default=None, alias="sessionId")
-    client_turn_id: str = Field(alias="clientTurnId")
-    target_client_turn_id: str | None = Field(default=None, alias="targetClientTurnId")
-    message: str = ""
-    attachments: list[dict[str, Any]] = Field(default_factory=list)
+    session_id: str | None = Field(default=None, alias="sessionId", min_length=1, max_length=180)
+    lane_id: str | None = Field(default=None, alias="laneId", min_length=1, max_length=180)
+    client_turn_id: str = Field(alias="clientTurnId", min_length=1, max_length=180)
+    target_client_turn_id: str | None = Field(default=None, alias="targetClientTurnId", min_length=1, max_length=180)
+    message: str = Field(default="", max_length=4000)
+    attachments: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     provider: str | None = None
     provider_label: str | None = Field(default=None, alias="providerLabel")
     model: str | None = None
     project_path: str | None = Field(default=None, alias="projectPath")
     project_root: str | None = Field(default=None, alias="projectRoot")
+    project_type: Literal["general", "unity"] | None = Field(default=None, alias="projectType")
+
+
+class AgentRuntimeQueueClaimRequest(BaseModel):
+    session_id: str = Field(alias="sessionId", min_length=1, max_length=180)
+    owner_id: str = Field(alias="ownerId", min_length=1, max_length=180)
+    limit: int = Field(default=8, ge=1, le=64)
+    queue_id: str | None = Field(default=None, alias="queueId", max_length=180)
+
+
+class AgentRuntimeQueueAckRequest(BaseModel):
+    session_id: str = Field(alias="sessionId", min_length=1, max_length=180)
+    claim_token: str = Field(alias="claimToken", min_length=1, max_length=256)
+
+
+class AgentRuntimeQueueCancelRequest(BaseModel):
+    session_id: str = Field(alias="sessionId", min_length=1, max_length=180)
+    claim_token: str | None = Field(default=None, alias="claimToken", max_length=256)
 
     model_config = {"populate_by_name": True}
 
@@ -1607,6 +1636,7 @@ class AdvancedSettingsRequest(BaseModel):
         alias="backgroundGoalNotificationsEnabled",
     )
     developer_challenge_id: str | None = Field(default=None, alias="developerChallengeId", max_length=128)
+    max_agentic_turns: int | None = Field(default=None, alias="maxAgenticTurns", ge=1, le=4096)
 
     model_config = {"populate_by_name": True}
 
@@ -1651,6 +1681,7 @@ class ChatAttachmentUploadFinishRequest(BaseModel):
 
 class ProjectPrefsRequest(BaseModel):
     custom_paths: list[str] = Field(default_factory=list, alias="customPaths")
+    custom_projects: list[dict[str, Any]] = Field(default_factory=list, alias="customProjects")
     hidden_paths: list[str] = Field(default_factory=list, alias="hiddenPaths")
 
     model_config = {"populate_by_name": True}
@@ -2364,6 +2395,7 @@ AGENT_GATEWAY = AgentGateway(
     background_activity_started=memory_review_idle_gate.signal_activity,
     runtime_turn_completed=broadcast_runtime_turn_completed,
     runtime_status_changed=broadcast_runtime_status,
+    runtime_timeline_changed=broadcast_runtime_status,
 )
 RUNTIME_LANE_BUDGET = RuntimeLaneBudget()
 BACKGROUND_GOAL_PREFLIGHT = ProviderPreflightCache(
@@ -3374,6 +3406,8 @@ def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsReques
                 update_fields["background_goal_notifications_enabled"] = (
                     request.background_goal_notifications_enabled
                 )
+            if request.max_agentic_turns is not None:
+                update_fields["max_agentic_turns"] = request.max_agentic_turns
             payload = AGENT_GATEWAY.update_advanced_settings(**update_fields)
         except Exception:
             if trace_downgraded:
@@ -3406,6 +3440,20 @@ def update_agentic_app_advanced_settings_guarded(request: AdvancedSettingsReques
 @app.post("/api/app/agent/message")
 async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest) -> dict[str, Any]:
     runtime_params = agent_runtime_request_payload(runtime_request)
+    followup_claim_token = ""
+    if runtime_request.followup_queue_id:
+        followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
+        if not followup_lane_id or not runtime_request.client_turn_id:
+            raise HTTPException(status_code=409, detail={"code": "followup_queue_not_ready"})
+        claimed = AGENT_GATEWAY.claim_runtime_followups(
+            session_id=followup_lane_id,
+            owner_id=f"app:{runtime_request.client_turn_id}",
+            queue_id=runtime_request.followup_queue_id,
+            limit=1,
+        )
+        if not claimed or claimed[0].get("clientTurnId") != runtime_request.client_turn_id:
+            raise HTTPException(status_code=409, detail={"code": "followup_queue_not_ready"})
+        followup_claim_token = str(claimed[0].get("claimToken") or "")
     try:
         if runtime_request.computer_use_requested:
             AGENT_GATEWAY.desktop.require_computer_use_enabled()
@@ -3435,6 +3483,17 @@ async def app_agent_runtime_message(runtime_request: AgentRuntimeMessageRequest)
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    finally:
+        followup_lane_id = runtime_request.followup_lane_id or runtime_request.session_id
+        if runtime_request.followup_queue_id and followup_lane_id and followup_claim_token:
+            try:
+                AGENT_GATEWAY.ack_runtime_followup(
+                    runtime_request.followup_queue_id,
+                    followup_lane_id,
+                    followup_claim_token,
+                )
+            except OSError:
+                pass
     await EVENT_BUS.broadcast("agentRuntimeTurn", payload)
     await EVENT_BUS.broadcast(
         "agentRuntimeRuns",
@@ -3487,6 +3546,8 @@ def verify_agent_harness_journey(
 def agent_runtime_request_payload(
     runtime_request: AgentRuntimeMessageRequest,
 ) -> dict[str, Any]:
+    bound_project = str(runtime_request.project_path or runtime_request.project_root or "").strip()
+    project_type = runtime_request.project_type or ("unity" if bound_project else "general")
     return {
         "session_id": runtime_request.session_id,
         "clientTurnId": runtime_request.client_turn_id,
@@ -3500,10 +3561,14 @@ def agent_runtime_request_payload(
         "workspace_root": runtime_request.workspace_root,
         "projectPath": runtime_request.project_path,
         "projectRoot": runtime_request.project_root,
+        "projectType": project_type,
+        "_projectType": project_type,
+        "_projectContextActive": project_type == "unity" and bool(bound_project),
         "provider": runtime_request.provider,
         "providerLabel": runtime_request.provider_label,
         "model": runtime_request.model,
         "_requestedContextLimit": runtime_request.context_limit,
+        "maxAgenticTurns": runtime_request.max_agentic_turns,
         "history": runtime_request.history,
         "_computerUseRequested": runtime_request.computer_use_requested,
         "_computerUseGrantId": runtime_request.computer_use_grant_id,
@@ -3618,7 +3683,12 @@ async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) ->
 
 @app.post("/api/app/agent/runs/queue")
 async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> dict[str, Any]:
+    if not (queue_request.lane_id or queue_request.session_id):
+        raise HTTPException(status_code=422, detail={"code": "queue_lane_required"})
     steer_result: dict[str, Any] | None = None
+    # Attachments require their own full turn so vision/payload resolution is
+    # deterministic. Same-turn steer is text-only and never drops attachments;
+    # the request falls through to the durable follow-up lane instead.
     if queue_request.target_client_turn_id and not queue_request.attachments:
         steer_result = AGENT_GATEWAY.submit_runtime_steer(
             {
@@ -3626,41 +3696,52 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
                 "targetClientTurnId": queue_request.target_client_turn_id,
                 "clientTurnId": queue_request.client_turn_id,
                 "message": queue_request.message,
+                "attachments": queue_request.attachments,
+                "laneId": queue_request.lane_id,
+                "projectType": queue_request.project_type
+                or ("unity" if (queue_request.project_path or queue_request.project_root) else "general"),
             }
         )
         if steer_result.get("accepted") is True:
             await EVENT_BUS.broadcast("agentRuntimeQueue", steer_result)
             return steer_result
-    try:
-        payload = AGENT_GATEWAY.runtime_runs.record_queue_event(
-            {
-                "session_id": queue_request.session_id,
-                "clientTurnId": queue_request.client_turn_id,
-                "message": queue_request.message,
-                "attachments": queue_request.attachments,
-                "provider": queue_request.provider,
-                "providerLabel": queue_request.provider_label,
-                "model": queue_request.model,
-                "projectPath": queue_request.project_path,
-                "projectRoot": queue_request.project_root,
-            }
-        )
-    except AgentGatewayError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    await EVENT_BUS.broadcast("agentRuntimeQueue", payload)
-    await EVENT_BUS.broadcast(
-        "agentRuntimeRuns",
-        AGENT_GATEWAY.runtime_runs.list_runs(limit=30, session_id=queue_request.session_id or ""),
-    )
-    if steer_result is not None:
-        return {
-            **payload,
-            "accepted": False,
-            "mode": "followup",
-            "reason": steer_result.get("reason") or "turn_not_active",
+    followup_lane_id = queue_request.lane_id or queue_request.session_id
+    if steer_result is None or steer_result.get("accepted") is not True:
+        payload = AGENT_GATEWAY.enqueue_runtime_followup({
+            "sessionId": followup_lane_id, "clientTurnId": queue_request.client_turn_id,
             "targetClientTurnId": queue_request.target_client_turn_id,
-        }
-    return payload
+            "message": queue_request.message, "attachments": queue_request.attachments,
+            "provider": queue_request.provider, "providerLabel": queue_request.provider_label,
+            "model": queue_request.model, "projectPath": queue_request.project_path, "projectRoot": queue_request.project_root,
+            "projectType": queue_request.project_type or ("unity" if (queue_request.project_path or queue_request.project_root) else "general"),
+        })
+        await EVENT_BUS.broadcast("agentRuntimeQueue", payload)
+        return payload
+    raise HTTPException(status_code=409, detail={"code": "queue_submission_failed"})
+
+
+@app.get("/api/app/agent/runs/queue")
+def app_agent_runtime_queue_list(sessionId: str = "", includeTerminal: bool = True) -> dict[str, Any]:
+    if not sessionId.strip():
+        raise HTTPException(status_code=400, detail={"code": "queue_session_required"})
+    return {"ok": True, "items": AGENT_GATEWAY.list_runtime_followups(session_id=sessionId, include_terminal=includeTerminal)}
+
+
+@app.post("/api/app/agent/runs/queue/claim")
+def app_agent_runtime_queue_claim(request: AgentRuntimeQueueClaimRequest) -> dict[str, Any]:
+    return {"ok": True, "items": AGENT_GATEWAY.claim_runtime_followups(session_id=request.session_id, owner_id=request.owner_id, limit=request.limit, queue_id=request.queue_id or "")}
+
+
+@app.post("/api/app/agent/runs/queue/{queue_id}/ack")
+def app_agent_runtime_queue_ack(queue_id: str, request: AgentRuntimeQueueAckRequest) -> dict[str, Any]:
+    ok = AGENT_GATEWAY.ack_runtime_followup(queue_id, request.session_id, request.claim_token)
+    return {"ok": ok, "queueId": queue_id, "status": "acked" if ok else "unchanged"}
+
+
+@app.post("/api/app/agent/runs/queue/{queue_id}/cancel")
+def app_agent_runtime_queue_cancel(queue_id: str, request: AgentRuntimeQueueCancelRequest) -> dict[str, Any]:
+    ok = AGENT_GATEWAY.cancel_runtime_followup(queue_id, request.session_id, request.claim_token or "")
+    return {"ok": ok, "queueId": queue_id, "status": "cancelled" if ok else "unchanged"}
 
 
 @app.get("/api/app/agent/desktop-actions")
@@ -6229,20 +6310,38 @@ def project_prefs_path() -> Path:
     return AGENT_GATEWAY.user_constraints_path.parent / "custom-projects.json"
 
 
-def load_project_prefs() -> dict[str, list[str]]:
+def load_project_prefs() -> dict[str, Any]:
     path = project_prefs_path()
     custom_paths: list[str] = []
     hidden_paths: list[str] = []
+    custom_projects: list[dict[str, str]] = []
     if path.exists():
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
                 custom_paths = [item for item in payload.get("customPaths") or [] if isinstance(item, str) and item.strip()]
+                for item in payload.get("customProjects") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    project_path = normalize_path_string(str(item.get("path") or ""))
+                    project_type = str(item.get("projectType") or "").strip().casefold()
+                    if project_path and project_type in {"general", "unity"}:
+                        custom_projects.append({"path": project_path, "projectType": project_type})
                 hidden_paths = [item for item in payload.get("hiddenPaths") or [] if isinstance(item, str) and item.strip()]
         except (OSError, ValueError):
             # 配置损坏时退回空配置，不阻断主流程；下次保存会覆盖修复。
             pass
-    return {"customPaths": custom_paths, "hiddenPaths": hidden_paths}
+    seen = {item["path"].casefold() for item in custom_projects}
+    for legacy_path in custom_paths:
+        normalized = normalize_path_string(legacy_path)
+        if normalized and normalized.casefold() not in seen:
+            custom_projects.append({"path": normalized, "projectType": "unity"})
+            seen.add(normalized.casefold())
+    return {
+        "customPaths": [item["path"] for item in custom_projects],
+        "customProjects": custom_projects,
+        "hiddenPaths": hidden_paths,
+    }
 
 
 @app.get("/api/app/projects/prefs")
@@ -6253,17 +6352,22 @@ def read_project_prefs() -> dict[str, Any]:
 
 @app.post("/api/app/projects/prefs")
 async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
-    custom_paths: list[str] = []
+    custom_projects: list[dict[str, str]] = []
     seen: set[str] = set()
-    for raw in request.custom_paths[:PROJECT_PREFS_MAX_PATHS]:
-        normalized = normalize_path_string(raw)
+    requested_projects = list(request.custom_projects)
+    requested_projects.extend({"path": raw, "projectType": "unity"} for raw in request.custom_paths)
+    for raw in requested_projects[:PROJECT_PREFS_MAX_PATHS]:
+        normalized = normalize_path_string(str(raw.get("path") or "")) if isinstance(raw, dict) else ""
+        project_type = str(raw.get("projectType") or "").strip().casefold() if isinstance(raw, dict) else ""
         if not normalized or normalized.casefold() in seen:
             continue
         candidate = Path(normalized)
-        if not candidate.is_dir() or not is_unity_project_path(candidate):
+        if not candidate.is_absolute() or not candidate.is_dir() or project_type not in {"general", "unity"}:
+            continue
+        if project_type == "unity" and not is_unity_project_path(candidate):
             continue
         seen.add(normalized.casefold())
-        custom_paths.append(normalized)
+        custom_projects.append({"path": normalized, "projectType": project_type})
     hidden_paths: list[str] = []
     hidden_seen: set[str] = set()
     for raw in request.hidden_paths[:PROJECT_PREFS_MAX_PATHS]:
@@ -6274,11 +6378,17 @@ async def write_project_prefs(request: ProjectPrefsRequest) -> dict[str, Any]:
         hidden_paths.append(normalized)
     path = project_prefs_path()
     try:
-        atomic_write_json(path, {"version": 1, "customPaths": custom_paths, "hiddenPaths": hidden_paths})
+        atomic_write_json(path, {"version": 2, "customProjects": custom_projects, "hiddenPaths": hidden_paths})
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"无法写入项目配置: {exc}") from exc
     await EVENT_BUS.broadcast("projects", PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(use_cache=True, refresh_async=False))
-    return {"ok": True, "path": str(path), "customPaths": custom_paths, "hiddenPaths": hidden_paths}
+    return {
+        "ok": True,
+        "path": str(path),
+        "customPaths": [item["path"] for item in custom_projects],
+        "customProjects": custom_projects,
+        "hiddenPaths": hidden_paths,
+    }
 
 
 @app.get("/api/app/skills")
@@ -9372,20 +9482,7 @@ def agent_runtime_message(request: Request, runtime_request: AgentRuntimeMessage
     authenticate_agent_request(request, allow_disabled=False)
     try:
         return AGENT_GATEWAY.runtime_message(
-            {
-                "session_id": runtime_request.session_id,
-                "message": runtime_request.message,
-                "shell_command": runtime_request.shell_command,
-                "skill_tool": runtime_request.skill_tool,
-                "skill_params": runtime_request.skill_params,
-                "cwd": runtime_request.cwd,
-                "workspace_root": runtime_request.workspace_root,
-                "projectPath": runtime_request.project_path,
-                "projectRoot": runtime_request.project_root,
-                "provider": runtime_request.provider,
-                "providerLabel": runtime_request.provider_label,
-                "model": runtime_request.model,
-            },
+            agent_runtime_request_payload(runtime_request),
             agent_name=runtime_request.agent_name,
         )
     except AgentGatewayError as exc:
@@ -14159,9 +14256,12 @@ class _RuntimePlannerModel:
     _MAX_ACTIVE_CALLS = 4
     _POLL_SECONDS = 0.01
     _CANCEL_JOIN_SECONDS = 0.25
-    _FIRST_BYTE_TIMEOUT_SECONDS = 30.0
-    _IDLE_TIMEOUT_SECONDS = 120.0
-    _OVERALL_TIMEOUT_SECONDS = 300.0
+    # The default interactive watchdog is activity-based: every bounded
+    # Provider text/reasoning event refreshes it. Deployments may opt into
+    # stricter first-byte/overall ceilings without changing that idle contract.
+    _FIRST_BYTE_TIMEOUT_SECONDS: float | None = None
+    _IDLE_TIMEOUT_SECONDS = 300.0
+    _OVERALL_TIMEOUT_SECONDS: float | None = None
 
     def __init__(self, turn: _RuntimePlannerProviderTurnBinding) -> None:
         self._turn = turn
@@ -14321,18 +14421,25 @@ class _RuntimePlannerModel:
         started_at = time.monotonic()
         while not owner.done.wait(self._POLL_SECONDS):
             elapsed = time.monotonic() - started_at
-            if stream_state["firstByteAt"] is None and elapsed >= self._FIRST_BYTE_TIMEOUT_SECONDS:
+            first_byte_timeout = self._FIRST_BYTE_TIMEOUT_SECONDS
+            if (
+                first_byte_timeout is not None
+                and first_byte_timeout > 0
+                and stream_state["firstByteAt"] is None
+                and elapsed >= first_byte_timeout
+            ):
                 owner.cancellation.set()
                 owner.done.wait(self._CANCEL_JOIN_SECONDS)
-                raise RuntimePlannerProviderTimeoutError("first_byte", self._FIRST_BYTE_TIMEOUT_SECONDS)
-            if stream_state["firstByteAt"] is not None and time.monotonic() - stream_state["lastActivityAt"] >= self._IDLE_TIMEOUT_SECONDS:
+                raise RuntimePlannerProviderTimeoutError("first_byte", first_byte_timeout)
+            if time.monotonic() - stream_state["lastActivityAt"] >= self._IDLE_TIMEOUT_SECONDS:
                 owner.cancellation.set()
                 owner.done.wait(self._CANCEL_JOIN_SECONDS)
                 raise RuntimePlannerProviderTimeoutError("idle", self._IDLE_TIMEOUT_SECONDS)
-            if elapsed >= self._OVERALL_TIMEOUT_SECONDS:
+            overall_timeout = self._OVERALL_TIMEOUT_SECONDS
+            if overall_timeout is not None and overall_timeout > 0 and elapsed >= overall_timeout:
                 owner.cancellation.set()
                 owner.done.wait(self._CANCEL_JOIN_SECONDS)
-                raise RuntimePlannerProviderTimeoutError("overall", self._OVERALL_TIMEOUT_SECONDS)
+                raise RuntimePlannerProviderTimeoutError("overall", overall_timeout)
             if self._runtime_cancel_requested(context):
                 owner.cancellation.set()
                 owner.done.wait(self._CANCEL_JOIN_SECONDS)
@@ -14495,6 +14602,29 @@ _RUNTIME_PLANNER_VISUAL_AUDIT_TOOLS = frozenset(
     {"vrcforge_vision_audit", "vrcforge_vision_audit_multi"}
 )
 
+RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
+    {
+        "vrcforge_list_directory",
+        "vrcforge_read_text_file",
+        "vrcforge_find_files",
+        "vrcforge_search_text",
+        "vrcforge_agent_desktop_action",
+        "vrcforge_progress_list",
+        "vrcforge_progress_replace",
+        "vrcforge_progress_create",
+        "vrcforge_progress_update",
+        "vrcforge_progress_delete",
+        "vrcforge_ask_user",
+        "vrcforge_delegate_subagent",
+        "vrcforge_classify_shell",
+        "vrcforge_execute_shell",
+        "vrcforge_shell_process",
+        "vrcforge_inspect_chat_attachment",
+        "vrcforge_vision_audit",
+        "vrcforge_vision_audit_multi",
+    }
+)
+
 
 def _runtime_planner_provider_capability_visible(tool: Any) -> bool:
     """Hide visual audit tools unless one configured visual provider can run."""
@@ -14510,7 +14640,12 @@ def _runtime_planner_provider_capability_visible(tool: Any) -> bool:
 
 
 class _RuntimePlannerCatalog:
-    def read(self, exposure_layer: str) -> PlannerCatalogSnapshot:
+    def read(
+        self,
+        exposure_layer: str,
+        *,
+        project_context_active: bool = True,
+    ) -> PlannerCatalogSnapshot:
         layer = normalize_exposure_layer(exposure_layer)
         gateway_config = AGENT_GATEWAY.ensure_config()
         visible_direct_tools = tuple(
@@ -14518,12 +14653,20 @@ class _RuntimePlannerCatalog:
             for tool in AGENT_GATEWAY._tools.values()
             if AGENT_GATEWAY._tool_runtime_visible(tool, gateway_config, layer)
             and _runtime_planner_provider_capability_visible(tool)
+            and (
+                project_context_active
+                or tool.name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+            )
         )
         visible_write_tools = tuple(
             _runtime_planner_write_tool(handler)
             for handler in AGENT_GATEWAY._write_handlers.values()
             if handler.name not in AGENT_GATEWAY._tools
             and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
+            and (
+                project_context_active
+                or handler.name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+            )
             and gateway_config.allow_write_requests
             and AGENT_GATEWAY._write_handler_visible(handler, gateway_config, layer)
         )
@@ -14532,11 +14675,17 @@ class _RuntimePlannerCatalog:
             for handler in AGENT_GATEWAY._write_handlers.values()
             if handler.name not in AGENT_GATEWAY._tools
             and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
+            and (
+                project_context_active
+                or handler.name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+            )
         )
         visible_tools = (*visible_direct_tools, *visible_write_tools)
         routable_tools = tuple(
             _runtime_planner_tool(tool)
             for tool in AGENT_GATEWAY._tools.values()
+            if project_context_active
+            or tool.name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
         ) + routable_write_tools
         skill_payloads = AGENT_GATEWAY.skills.build_skill_registry(
             gateway_config,
@@ -14556,7 +14705,7 @@ class _RuntimePlannerCatalog:
             )
             for skill in skill_payloads
             if isinstance(skill, dict) and str(skill.get("name") or "").strip()
-        )
+        ) if project_context_active else ()
         return PlannerCatalogSnapshot(
             visible_tools=visible_tools,
             routable_tools=routable_tools,
@@ -16926,6 +17075,7 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         editor_version: str = "Unknown",
         source: str,
         active_instance: dict[str, Any] | None = None,
+        project_type: Literal["general", "unity"] = "unity",
     ) -> None:
         normalized_path = normalize_path_string(path)
         display_name = name or (Path(normalized_path).name if normalized_path else "Active Unity Instance")
@@ -16953,6 +17103,7 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
                 "cliInstanceId": "",
                 "unityVersion": "",
                 "selectable": bool(normalized_path),
+                "projectType": project_type,
             }
             projects_by_key[key] = project
             name_index[display_name.casefold()] = key
@@ -16960,6 +17111,8 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         if source not in project["sources"]:
             project["sources"].append(source)
         project["source"] = project["sources"][0]
+        if project_type == "general":
+            project["projectType"] = "general"
         if editor_version and project.get("editorVersion") in {"", "Unknown"}:
             project["editorVersion"] = editor_version
         if active_instance:
@@ -17010,10 +17163,17 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
             selected = Path(DASHBOARD_STATE.selected_project_path)
             upsert_project(name=selected.name, path=str(selected), source="manual")
 
-        for custom_path in load_project_prefs()["customPaths"]:
+        for custom_project in load_project_prefs().get("customProjects", []):
+            custom_path = str(custom_project.get("path") or "")
+            custom_type = str(custom_project.get("projectType") or "unity")
             candidate = Path(custom_path)
             if candidate.is_dir():
-                upsert_project(name=candidate.name, path=str(candidate), source="custom")
+                upsert_project(
+                    name=candidate.name,
+                    path=str(candidate),
+                    source="custom",
+                    project_type="general" if custom_type == "general" else "unity",
+                )
 
         status = CURRENT_UNITY_STATUS
         if status is None:
@@ -20535,6 +20695,126 @@ def register_agent_gateway_tools() -> None:
             handler,
             **metadata,
         )
+
+    def general_params(params: object) -> dict[str, Any]:
+        raw = ensure_dict(params or {})
+        return {
+            str(key): value
+            for key, value in raw.items()
+            if str(key) not in {"token", "apiKey", "secret"}
+        }
+
+    def bounded_int(value: object, default: int, ceiling: int) -> int:
+        try:
+            return max(0, min(int(value), ceiling))
+        except (TypeError, ValueError):
+            return default
+
+    def general_list_directory_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        allowed_roots = raw.pop("_generalAllowedRoots", [])
+        result = general_list_directory(
+            raw.get("path", ""),
+            allowed_roots=allowed_roots if isinstance(allowed_roots, list) else [],
+            max_depth=bounded_int(raw.get("maxDepth", raw.get("max_depth", 1)), 1, 8),
+            max_count=bounded_int(raw.get("maxCount", raw.get("max_count", 200)), 200, 200),
+        )
+        result["summary"] = json.dumps(
+            [{key: entry[key] for key in ("name", "type", "size") if key in entry} for entry in result.get("entries", [])],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        result["notice"] = "Directory listing is complete. Do not repeat it through Shell dir/ls/Get-ChildItem; continue with vrcforge_find_files, vrcforge_search_text, or vrcforge_read_text_file when more evidence is needed."
+        return result
+
+    def general_read_text_file_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        allowed_roots = raw.pop("_generalAllowedRoots", [])
+        result = general_read_text_file(
+            raw.get("path", ""),
+            allowed_roots=allowed_roots if isinstance(allowed_roots, list) else [],
+            max_bytes=bounded_int(raw.get("maxBytes", raw.get("max_bytes", 1_048_576)), 1_048_576, 131_072),
+            max_output_chars=(
+                bounded_int(raw["maxOutputChars"], 32_000, 32_000)
+                if raw.get("maxOutputChars") is not None
+                else None
+            ),
+        )
+        result["summary"] = str(result.get("text") or "")
+        return result
+
+    def general_find_files_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        allowed_roots = raw.pop("_generalAllowedRoots", [])
+        result = general_find_files(
+            raw.get("path", ""),
+            allowed_roots=allowed_roots if isinstance(allowed_roots, list) else [],
+            pattern=str(raw.get("pattern", "*")),
+            max_depth=bounded_int(raw.get("maxDepth", raw.get("max_depth", 8)), 8, 8),
+            max_count=bounded_int(raw.get("maxCount", raw.get("max_count", 200)), 200, 200),
+        )
+        root = Path(str(result.get("path") or "."))
+        result["summary"] = json.dumps(
+            [
+                str(candidate.relative_to(root)) if candidate.is_relative_to(root) else str(item.get("name") or "")
+                for item in result.get("files", [])
+                for candidate in [Path(str(item.get("path") or ""))]
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return result
+
+    def general_search_text_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        allowed_roots = raw.pop("_generalAllowedRoots", [])
+        case_sensitive = raw.get("caseSensitive", raw.get("case_sensitive", True))
+        if isinstance(case_sensitive, str):
+            case_sensitive = case_sensitive.strip().lower() not in {"", "0", "false", "no", "off"}
+        result = general_search_text(
+            raw.get("path", ""),
+            str(raw.get("query", "")),
+            allowed_roots=allowed_roots if isinstance(allowed_roots, list) else [],
+            pattern=str(raw.get("pattern", "*")),
+            max_depth=bounded_int(raw.get("maxDepth", raw.get("max_depth", 8)), 8, 8),
+            max_count=bounded_int(raw.get("maxCount", raw.get("max_count", 200)), 200, 200),
+            max_file_bytes=bounded_int(raw.get("maxFileBytes", raw.get("max_file_bytes", 1_048_576)), 1_048_576, 131_072),
+            case_sensitive=bool(case_sensitive),
+        )
+        result["summary"] = json.dumps(
+            [
+                {"file": Path(str(item.get("path") or "")).name, "line": item.get("line"), "text": item.get("text")}
+                for item in result.get("matches", [])
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return result
+
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_list_directory",
+        "when-to-use: inspect a bounded local directory tree during read-only planning. when-NOT-to-use: do not use for writes, deletion, process control, or Unity project changes. Negative example: do not call it merely to explain what directory listing means.",
+        "read/debug",
+        general_list_directory_tool,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_read_text_file",
+        "when-to-use: read a bounded UTF-8 text file as local evidence during read-only planning. when-NOT-to-use: do not use for binary files, writes, secrets, or Unity project changes. Negative example: do not call it to describe a file without inspecting it.",
+        "read/debug",
+        general_read_text_file_tool,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_find_files",
+        "when-to-use: find bounded regular files by pattern in a local directory during read-only planning. when-NOT-to-use: do not use for writes, deletion, process control, or Unity project changes. Negative example: do not call it for a hypothetical path that was not requested.",
+        "read/debug",
+        general_find_files_tool,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_search_text",
+        "when-to-use: search bounded UTF-8 text files for a requested string during read-only planning. when-NOT-to-use: do not use for binary files, writes, secrets, or Unity project changes. Negative example: do not call it for general questions unrelated to local evidence.",
+        "read/debug",
+        general_search_text_tool,
+    )
 
     AGENT_GATEWAY.register_tool(
         "vrcforge_agent_observe",

@@ -107,6 +107,39 @@ class AgentLoopP0Tests(unittest.TestCase):
             self.gateway.shutdown_runtime_continuations(0)
         self.temp_dir.cleanup()
 
+    def test_duplicate_active_client_turn_is_rejected_before_provider_or_tools(self) -> None:
+        session_id = "duplicate-session"
+        client_turn_id = "duplicate-client-turn"
+        assert self.gateway._runtime_session_state.begin_turn(
+            session_id=session_id,
+            turn_id="original-runtime-turn",
+            client_turn_id=client_turn_id,
+        )
+
+        with self.assertRaises(dashboard_server.AgentGatewayError) as duplicate:
+            self.gateway.runtime_message(
+                {
+                    "message": "must not reach the Provider",
+                    "sessionId": session_id,
+                    "clientTurnId": client_turn_id,
+                }
+            )
+
+        self.assertEqual(duplicate.exception.status_code, 409)
+        self.assertTrue(
+            self.gateway._runtime_session_state.submit_steer(
+                session_id=session_id,
+                target_client_turn_id=client_turn_id,
+                input_id="original-owner-still-active",
+                message="original owner still active",
+            )["accepted"]
+        )
+        self.gateway._runtime_session_state.finish_turn(
+            session_id=session_id,
+            turn_id="original-runtime-turn",
+            client_turn_id=client_turn_id,
+        )
+
     def _unity_project(self) -> Path:
         project = Path(self.temp_dir.name) / "UnityProject"
         (project / "Assets").mkdir(parents=True, exist_ok=True)
@@ -1446,6 +1479,281 @@ class AgentLoopP0Tests(unittest.TestCase):
             "Shell command completed successfully.",
         )
 
+    def test_projectless_general_agent_corrects_one_unbound_completion_claim(self) -> None:
+        gateway = self.gateway
+        planner_states: list[list[dict]] = []
+
+        def plan_next(
+            _message,
+            _params,
+            _observe,
+            _history=None,
+            *,
+            loop_state=None,
+            **_kwargs,
+        ):
+            state = [dict(item) for item in (loop_state or [])]
+            planner_states.append(state)
+            if len(planner_states) == 1:
+                return {
+                    "planner": "llm",
+                    "summary": "Inspect the requested directory.",
+                    "shellNeeded": True,
+                    "shellCommand": "Get-ChildItem -LiteralPath .",
+                    "shellParams": {},
+                    "continueLoop": True,
+                    "nextStep": "call_shell",
+                }
+            if len(planner_states) == 2:
+                return {
+                    "planner": "llm",
+                    "summary": "The directory was inspected.",
+                    "reply": "I inspected the directory.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                }
+            completed_action_ids = [
+                str(item.get("actionId") or "")
+                for item in state
+                if str(item.get("actionId") or "")
+            ]
+            return {
+                "planner": "llm",
+                "summary": "The directory inspection is complete.",
+                "reply": "I inspected the directory and verified the result.",
+                "continueLoop": False,
+                "nextStep": "done",
+                "completionClaim": {
+                    "satisfied": True,
+                    "evidenceActionIds": completed_action_ids,
+                },
+            }
+
+        def execute_shell(_params, agent_name="desktop-agent", *, task_context=None):
+            self.assertIsNotNone(task_context)
+            return {
+                "ok": True,
+                "status": "executed",
+                "sessionId": "general-agent-shell",
+                "session": {"sessionId": "general-agent-shell", "status": "finished"},
+                "classification": {"risk": "low", "protectionScope": "host"},
+                "result": {"ok": True, "exitCode": 0, "stdout": "fixture.txt"},
+            }
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=plan_next,
+        ), patch.object(gateway.shell, "execute", side_effect=execute_shell):
+            result = gateway.runtime_message(
+                {
+                    "message": "Inspect this ordinary local directory.",
+                    "cwd": str(Path.cwd()),
+                    "session_id": "general-agent-completion-session",
+                    "client_turn_id": "general-agent-completion-turn",
+                    "_projectContextActive": False,
+                }
+            )
+
+        self.assertEqual(len(planner_states), 3, result)
+        correction = planner_states[2][-1]
+        self.assertEqual(correction["tool"], "runtime_completion_gate")
+        self.assertEqual(correction["status"], "needs_correction")
+        self.assertIn(
+            result["task"]["actions"][0]["actionId"],
+            correction["outcome"]["summary"],
+        )
+        self.assertEqual(result["plan"]["nextStep"], "done", result)
+        self.assertEqual(result["plan"]["taskCompletion"]["status"], "completed")
+
+    def test_projectless_completion_claim_correction_is_bounded_and_fails_closed(self) -> None:
+        gateway = self.gateway
+        planner_calls = 0
+
+        def plan_next(
+            _message,
+            _params,
+            _observe,
+            _history=None,
+            *,
+            loop_state=None,
+            **_kwargs,
+        ):
+            nonlocal planner_calls
+            planner_calls += 1
+            if planner_calls == 1:
+                return {
+                    "planner": "llm",
+                    "summary": "Inspect the requested directory.",
+                    "shellNeeded": True,
+                    "shellCommand": "Get-ChildItem -LiteralPath .",
+                    "shellParams": {},
+                    "continueLoop": True,
+                    "nextStep": "call_shell",
+                }
+            return {
+                "planner": "llm",
+                "summary": "The directory was inspected.",
+                "reply": "I inspected the directory.",
+                "continueLoop": False,
+                "nextStep": "done",
+            }
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=plan_next,
+        ), patch.object(
+            gateway.shell,
+            "execute",
+            return_value={
+                "ok": True,
+                "status": "executed",
+                "sessionId": "bounded-general-agent-shell",
+                "session": {
+                    "sessionId": "bounded-general-agent-shell",
+                    "status": "finished",
+                },
+                "classification": {"risk": "low", "protectionScope": "host"},
+                "result": {"ok": True, "exitCode": 0, "stdout": "fixture.txt"},
+            },
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "Inspect this ordinary local directory.",
+                    "cwd": str(Path.cwd()),
+                    "session_id": "bounded-general-agent-completion-session",
+                    "client_turn_id": "bounded-general-agent-completion-turn",
+                    "_projectContextActive": False,
+                }
+            )
+
+        self.assertEqual(planner_calls, 3, result)
+        self.assertEqual(result["plan"]["nextStep"], "completion_unverified")
+        self.assertEqual(
+            result["plan"]["completionGate"]["reason"],
+            "completion_claim_unbound",
+        )
+
+    def test_projectless_general_agent_suppresses_equivalent_directory_replays_and_pivots(self) -> None:
+        gateway = self.gateway
+        planner_calls = 0
+        planner_states: list[list[dict]] = []
+
+        def plan_next(
+            _message,
+            _params,
+            _observe,
+            _history=None,
+            *,
+            loop_state=None,
+            **_kwargs,
+        ):
+            nonlocal planner_calls
+            planner_calls += 1
+            state = [dict(item) for item in (loop_state or [])]
+            planner_states.append(state)
+            if planner_calls == 1:
+                return {
+                    "planner": "llm",
+                    "summary": "List the target once.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_list_directory",
+                    "skillParams": {"path": r"E:\fixture\app"},
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                }
+            if planner_calls == 2:
+                return {
+                    "planner": "llm",
+                    "summary": "Repeat the same listing through Shell.",
+                    "shellNeeded": True,
+                    "shellCommand": 'dir /a "E:\\fixture\\app"',
+                    "shellParams": {"cwd": r"E:\fixture"},
+                    "continueLoop": True,
+                    "nextStep": "call_shell",
+                }
+            if planner_calls == 3:
+                return {
+                    "planner": "llm",
+                    "summary": "Read the relevant file instead.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_read_text_file",
+                    "skillParams": {"path": r"E:\fixture\app\Readme.txt"},
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                }
+            completed_action_ids = [
+                str(item.get("actionId") or "")
+                for item in state
+                if str(item.get("actionId") or "")
+                and str(item.get("status") or "") == "executed"
+            ]
+            return {
+                "planner": "llm",
+                "summary": "The bounded evidence is sufficient.",
+                "reply": "The application uses the mechanism described in Readme.txt.",
+                "continueLoop": False,
+                "nextStep": "done",
+                "completionClaim": {
+                    "satisfied": True,
+                    "evidenceActionIds": completed_action_ids,
+                },
+            }
+
+        def execute_skill(_owner, tool_name, params, _agent_name=None, **_kwargs):
+            if tool_name == "vrcforge_list_directory":
+                result = {
+                    "ok": True,
+                    "summary": "Readme.txt",
+                    "notice": "Do not repeat the directory listing.",
+                }
+            else:
+                self.assertEqual(tool_name, "vrcforge_read_text_file")
+                result = {"ok": True, "summary": "Encryption is initialized by startup.exe."}
+            return {
+                "ok": True,
+                "tool": tool_name,
+                "status": "executed",
+                "result": result,
+                "outcome": {
+                    "status": "ok",
+                    "summary": result["summary"],
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=plan_next,
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            side_effect=execute_skill,
+        ) as execute, patch.object(
+            gateway.shell,
+            "execute",
+            side_effect=AssertionError("equivalent Shell directory replay must be suppressed"),
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": r"Inspect E:\fixture\app and explain its mechanism.",
+                    "session_id": "general-no-progress-session",
+                    "client_turn_id": "general-no-progress-turn",
+                    "projectType": "general",
+                    "_projectContextActive": False,
+                }
+            )
+
+        self.assertEqual(execute.call_count, 2, result)
+        self.assertEqual(planner_calls, 4, result)
+        self.assertEqual(planner_states[2][-1]["tool"], "runtime_no_progress")
+        self.assertEqual(planner_states[2][-1]["status"], "suppressed")
+        self.assertEqual(result["plan"]["nextStep"], "done", result)
+        self.assertEqual(result["task"]["status"], "completed", result)
+
     def test_nonzero_shell_exit_without_error_text_never_gets_success_summary(self) -> None:
         gateway = self.gateway
         plans = iter(
@@ -1649,6 +1957,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "model": "fixture-model",
                             "sessionId": "planner-failure-session",
                             "clientTurnId": "planner-failure-turn",
+                            "projectPath": r"C:\Unity\FixtureProject",
                         },
                     )
 
@@ -1725,6 +2034,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "model": "fixture-model",
                             "sessionId": "failed-completion-session",
                             "clientTurnId": "failed-completion-turn",
+                            "projectPath": r"C:\Unity\FixtureProject",
                         },
                     )
 
@@ -1862,6 +2172,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "model": "fixture-model",
                             "sessionId": "unrelated-success-session",
                             "clientTurnId": "unrelated-success-turn",
+                            "projectPath": r"C:\Unity\FixtureProject",
                         },
                     )
 
@@ -1949,6 +2260,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                             "model": "fixture-model",
                             "sessionId": "multiple-failure-session",
                             "clientTurnId": "multiple-failure-turn",
+                            "projectPath": r"C:\Unity\FixtureProject",
                         },
                     )
 
@@ -3177,6 +3489,22 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.assertEqual(result["plan"]["nextStep"], "loop_suppressed", result)
         self.assertEqual(result["plan"]["loopSuppression"]["consecutive"], 3)
         self.assertNotIn("toolCallLimitReached", result["plan"])
+        self.assertNotIn(
+            "subagent",
+            [str(event.get("kind") or "") for event in result.get("timeline") or []],
+            "Sub Agent lifecycle must come only from the durable task registry",
+        )
+        delegate_events = [
+            event
+            for event in result.get("timeline") or []
+            if str((event.get("payload") or {}).get("tool") or "")
+            == "vrcforge_delegate_subagent"
+        ]
+        self.assertEqual(
+            [str(event.get("kind") or "") for event in delegate_events],
+            ["tool_call", "tool_result", "tool_call", "tool_result", "tool_call", "tool_result"],
+            "Delegation remains an ordinary tool call/result even though lifecycle events are registry-owned.",
+        )
 
     def test_provider_needs_user_action_stops_without_implicit_retry(self) -> None:
         gateway = self.gateway
@@ -3292,6 +3620,9 @@ class AgentLoopP0Tests(unittest.TestCase):
         gateway = self.gateway
         first_arguments = {"avatarPath": "AvatarA"}
         second_arguments = {"avatarPath": "AvatarB"}
+        first_action_id = canonical_action_id(
+            "skill", "vrcforge_scan_materials", first_arguments
+        )
         second_action_id = canonical_action_id(
             "skill", "vrcforge_scan_materials", second_arguments
         )
@@ -3323,7 +3654,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "nextStep": "done",
                     "completionClaim": {
                         "satisfied": True,
-                        "evidenceActionIds": [second_action_id],
+                        "evidenceActionIds": [first_action_id, second_action_id],
                     },
                 },
             ]
@@ -3369,6 +3700,26 @@ class AgentLoopP0Tests(unittest.TestCase):
             ["AvatarA", "AvatarB"],
         )
         self.assertLess(tool_steps[0]["index"], tool_steps[1]["index"])
+        timeline = result.get("timeline") or []
+        self.assertEqual(
+            [event.get("kind") for event in timeline],
+            [
+                "planner",
+                "tool_call",
+                "tool_result",
+                "planner",
+                "tool_call",
+                "tool_result",
+                "assistant",
+            ],
+        )
+        self.assertEqual(
+            [event.get("sequence") for event in timeline],
+            list(range(len(timeline))),
+        )
+        self.assertTrue(all(event.get("timestamp") for event in timeline))
+        self.assertNotIn("arguments", json.dumps(timeline))
+        self.assertEqual(timeline[-1]["payload"]["summary"], result["plan"]["reply"])
 
 
 if __name__ == "__main__":

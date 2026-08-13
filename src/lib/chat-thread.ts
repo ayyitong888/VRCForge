@@ -1,5 +1,11 @@
 import type { AgentContextUsage } from "./api";
 import type { ChatThread, ConversationItem } from "./chat-types";
+export {
+  materializeRuntimeTimeline,
+  mergeConversationTimelineItems,
+  mergeRuntimeTimelines,
+  projectRuntimeResponseForDisplay,
+} from "./chat-timeline-presentation";
 import {
   normalizeCompactedAttachmentReferences,
   persistAttachmentReference,

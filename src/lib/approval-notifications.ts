@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AgentApproval } from "./api";
 
-export type ApprovalNotificationAction = "approve" | "reject";
+/** Native notifications are detail-first: clicking only wakes/deep-links the app. */
+export type ApprovalNotificationAction = "open";
 export type SubAgentReviewNotificationAction = "open";
 
 export type ApprovalNotificationActionPayload = {
@@ -25,16 +26,12 @@ export async function showApprovalNotification(
   approval: AgentApproval,
   title: string,
   body: string,
-  approveLabel: string,
-  rejectLabel: string,
 ): Promise<void> {
   await invoke("show_approval_notification", {
     request: {
       approvalId: approval.id,
       title,
       body,
-      approveLabel,
-      rejectLabel,
     },
   });
 }
@@ -86,9 +83,8 @@ export function parseApprovalNotificationAction(value: unknown): ApprovalNotific
   }
   const payload = value as Record<string, unknown>;
   const approvalId = typeof payload.approvalId === "string" ? payload.approvalId : "";
-  const action = payload.action;
-  if (!approvalId || (action !== "approve" && action !== "reject")) {
+  if (!approvalId || payload.action !== "open") {
     return null;
   }
-  return { approvalId, action };
+  return { approvalId, action: "open" };
 }

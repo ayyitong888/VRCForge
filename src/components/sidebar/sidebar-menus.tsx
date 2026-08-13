@@ -11,7 +11,8 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
-import type { ReactNode, Ref } from "react";
+import { useEffect, useRef, type ReactNode, type Ref } from "react";
+import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 import type { ChatThread } from "../../lib/chat-types";
 import { normalizeProjectPathKey } from "../../lib/project-path";
@@ -85,7 +86,7 @@ export function SidebarMenus({
 
   return (
     <>
-      {projectMenu ? (
+      {projectMenu ? createPortal(
         <ProjectContextMenu
           menu={projectMenu}
           chats={chats}
@@ -101,7 +102,8 @@ export function SidebarMenus({
           onArchiveProjectChats={onArchiveProjectChats}
           onHideProject={onHideProject}
           onRemoveCustomProject={onRemoveCustomProject}
-        />
+        />,
+        document.body,
       ) : null}
 
       {selectionMenu ? (
@@ -185,6 +187,7 @@ function ProjectContextMenu({
   onRemoveCustomProject: (projectPath: string) => void;
 }) {
   const { t } = useTranslation();
+  const menuRef = useRef<HTMLDivElement>(null);
   const menuPath = menu.projectPath;
   const menuKey = normalizeProjectPathKey(menuPath);
   const isCustom = customPathSet.has(menuKey);
@@ -193,10 +196,23 @@ function ProjectContextMenu({
   const projectChatCount = chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === menuKey && !chat.archived).length;
   const archivedChatCount = chats.filter((chat) => normalizeProjectPathKey(chat.projectPath) === menuKey && chat.archived).length;
 
+  useEffect(() => {
+    menuRef.current?.querySelector<HTMLButtonElement>('button[role="menuitem"]')?.focus();
+  }, []);
+
   return (
     <>
       <MenuScrim onClose={onClose} />
       <div
+        ref={menuRef}
+        role="menu"
+        aria-label={t("project.menu")}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onClose();
+          }
+        }}
         className="fixed z-50 w-56 rounded-lg border border-border bg-card p-1.5 shadow-panel"
         style={{
           left: Math.min(menu.x, window.innerWidth - 240),
@@ -393,6 +409,7 @@ function MenuButton({
   return (
     <button
       type="button"
+      role="menuitem"
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors",
         destructive ? "text-destructive hover:bg-destructive/10" : "hover:bg-muted",

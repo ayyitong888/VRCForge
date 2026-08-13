@@ -1,4 +1,4 @@
-import { Check, ListTodo } from "lucide-react";
+import { ListTodo } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import type { AgentProgress } from "../../lib/api";
@@ -9,16 +9,26 @@ function todoTextClass(itemStatus?: string): string {
   if (normalized === "completed") {
     return "text-muted-foreground line-through";
   }
-  return "text-foreground";
-}
-
-function isCompletedTodo(itemStatus?: string): boolean {
-  return (itemStatus || "pending").toLowerCase() === "completed";
+  if (normalized === "failed" || normalized === "blocked") {
+    return "text-red-600 dark:text-red-400";
+  }
+  if (normalized === "in_progress" || normalized === "running") {
+    return "text-foreground";
+  }
+  return "text-muted-foreground";
 }
 
 function isActiveTodo(itemStatus?: string): boolean {
   const normalized = (itemStatus || "pending").toLowerCase();
   return normalized === "in_progress" || normalized === "running";
+}
+
+function todoMarkerClass(itemStatus?: string): string {
+  const normalized = (itemStatus || "pending").toLowerCase();
+  if (normalized === "completed") return "border-primary bg-primary text-background";
+  if (normalized === "in_progress" || normalized === "running") return "border-primary bg-primary/15 text-primary";
+  if (normalized === "failed" || normalized === "blocked") return "border-red-600 text-red-600 dark:border-red-400 dark:text-red-400";
+  return "border-border text-muted-foreground";
 }
 
 function TodoItems({
@@ -40,14 +50,12 @@ function TodoItems({
         >
           <span
             className={cn(
-              "flex h-6 w-6 items-center justify-center rounded-full border border-primary text-xs font-semibold tabular-nums",
-              isCompletedTodo(item.status) || isActiveTodo(item.status)
-                ? "bg-primary text-background"
-                : "bg-transparent text-primary",
+              "flex h-6 w-6 items-center justify-center rounded-full border text-xs font-semibold tabular-nums",
+              todoMarkerClass(item.status),
             )}
             aria-hidden="true"
           >
-            {isCompletedTodo(item.status) ? <Check className="h-3.5 w-3.5 stroke-[2.5]" /> : index + 1}
+            {index + 1}
           </span>
           <span
             className={cn(

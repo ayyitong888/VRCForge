@@ -131,10 +131,13 @@ pub(crate) struct DesktopAgentMessageRequest {
     agent_name: Option<String>,
     attachments: Option<Vec<serde_json::Value>>,
     project_path: Option<String>,
+    project_type: Option<String>,
     provider: Option<String>,
     provider_label: Option<String>,
     model: Option<String>,
     context_limit: Option<u64>,
+    #[serde(alias = "max_agentic_turns")]
+    max_agentic_turns: Option<u64>,
     client_turn_id: Option<String>,
     goal_delivery_id: Option<String>,
     #[serde(default)]
@@ -142,6 +145,8 @@ pub(crate) struct DesktopAgentMessageRequest {
     computer_use_grant_id: Option<String>,
     computer_use_visual_theme: Option<String>,
     computer_use_visual_accent: Option<String>,
+    followup_queue_id: Option<String>,
+    followup_lane_id: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -169,6 +174,7 @@ pub(crate) struct DesktopAgentRunCancelRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopAgentRunQueuedRequest {
     session_id: Option<String>,
+    lane_id: Option<String>,
     client_turn_id: String,
     target_client_turn_id: Option<String>,
     message: Option<String>,
@@ -178,6 +184,16 @@ pub(crate) struct DesktopAgentRunQueuedRequest {
     model: Option<String>,
     project_path: Option<String>,
     project_root: Option<String>,
+    project_type: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DesktopAgentRunQueueTransitionRequest {
+    queue_id: String,
+    session_id: String,
+    claim_token: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -337,6 +353,7 @@ pub(crate) struct DesktopSupportBundleRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopProjectPrefsRequest {
     custom_paths: Option<Vec<String>>,
+    custom_projects: Option<Vec<serde_json::Value>>,
     hidden_paths: Option<Vec<String>>,
     timeout_ms: Option<u64>,
 }
@@ -761,33 +778,73 @@ pub async fn send_agent_message(
     request: DesktopAgentMessageRequest,
 ) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
+        let mut payload = serde_json::json!({
+            "agent_name": request.agent_name.unwrap_or_else(|| "desktop-agent".to_string()),
+            "session_id": request.session_id,
+            "clientTurnId": request.client_turn_id,
+            "goalDeliveryId": request.goal_delivery_id,
+            "message": request.message,
+            "history": request.history.unwrap_or_default(),
+            "attachments": request.attachments.unwrap_or_default(),
+            "projectPath": request.project_path,
+            "projectType": request.project_type,
+            "provider": request.provider,
+            "providerLabel": request.provider_label,
+            "model": request.model,
+            "contextLimit": request.context_limit,
+            "maxAgenticTurns": request.max_agentic_turns,
+            "computerUseRequested": request.computer_use_requested,
+            "computerUseGrantId": request.computer_use_grant_id,
+            "computerUseVisualTheme": request.computer_use_visual_theme,
+            "computerUseVisualAccent": request.computer_use_visual_accent,
+            "followupQueueId": request.followup_queue_id,
+            "followupLaneId": request.followup_lane_id,
+        });
+        if request.max_agentic_turns.is_none() {
+            payload
+                .as_object_mut()
+                .expect("agent message payload is an object")
+                .remove("maxAgenticTurns");
+        }
         backend_json_request(
             "POST",
             "/api/app/agent/message".to_string(),
-            Some(serde_json::json!({
-                "agent_name": request.agent_name.unwrap_or_else(|| "desktop-agent".to_string()),
-                "session_id": request.session_id,
-                "clientTurnId": request.client_turn_id,
-                "goalDeliveryId": request.goal_delivery_id,
-                "message": request.message,
-                "history": request.history.unwrap_or_default(),
-                "attachments": request.attachments.unwrap_or_default(),
-                "projectPath": request.project_path,
-                "provider": request.provider,
-                "providerLabel": request.provider_label,
-                "model": request.model,
-                "contextLimit": request.context_limit,
-                "computerUseRequested": request.computer_use_requested,
-                "computerUseGrantId": request.computer_use_grant_id,
-                "computerUseVisualTheme": request.computer_use_visual_theme,
-                "computerUseVisualAccent": request.computer_use_visual_accent,
-            })),
+            Some(payload),
             request
                 .timeout_ms
                 .or(Some(DESKTOP_AGENT_MESSAGE_TIMEOUT_MS)),
         )
     })
     .await
+}
+
+#[cfg(test)]
+mod agent_message_transport_tests {
+    use super::DesktopAgentMessageRequest;
+
+    fn request_with(field: serde_json::Value) -> DesktopAgentMessageRequest {
+        serde_json::from_value(field).expect("desktop agent message should deserialize")
+    }
+
+    #[test]
+    fn background_budget_accepts_frontend_camel_case_and_snake_case_alias() {
+        let camel = request_with(serde_json::json!({
+            "message": "continue the background goal",
+            "maxAgenticTurns": 25
+        }));
+        let snake = request_with(serde_json::json!({
+            "message": "continue the background goal",
+            "max_agentic_turns": 31
+        }));
+        assert_eq!(camel.max_agentic_turns, Some(25));
+        assert_eq!(snake.max_agentic_turns, Some(31));
+    }
+
+    #[test]
+    fn foreground_request_keeps_background_budget_absent() {
+        let request = request_with(serde_json::json!({"message": "inspect the project"}));
+        assert_eq!(request.max_agentic_turns, None);
+    }
 }
 
 #[tauri::command]
@@ -835,6 +892,7 @@ pub fn record_agent_run_queued(
         "/api/app/agent/runs/queue".to_string(),
         Some(serde_json::json!({
             "sessionId": request.session_id,
+            "laneId": request.lane_id,
             "clientTurnId": request.client_turn_id,
             "targetClientTurnId": request.target_client_turn_id,
             "message": request.message,
@@ -844,6 +902,26 @@ pub fn record_agent_run_queued(
             "model": request.model,
             "projectPath": request.project_path,
             "projectRoot": request.project_root,
+            "projectType": request.project_type,
+        })),
+        request.timeout_ms.or(Some(30_000)),
+    )
+}
+
+#[tauri::command]
+pub fn cancel_agent_run_followup(
+    request: DesktopAgentRunQueueTransitionRequest,
+) -> Result<serde_json::Value, String> {
+    let queue_id = percent_encode_query_component(request.queue_id.trim());
+    if queue_id.is_empty() || request.queue_id.len() > 180 {
+        return Err("Invalid Agent follow-up queue ID.".to_string());
+    }
+    backend_json_request(
+        "POST",
+        format!("/api/app/agent/runs/queue/{queue_id}/cancel"),
+        Some(serde_json::json!({
+            "sessionId": request.session_id,
+            "claimToken": request.claim_token,
         })),
         request.timeout_ms.or(Some(30_000)),
     )
@@ -1383,6 +1461,7 @@ pub fn save_project_prefs(
         "/api/app/projects/prefs".to_string(),
         Some(serde_json::json!({
             "customPaths": request.custom_paths.unwrap_or_default(),
+            "customProjects": request.custom_projects.unwrap_or_default(),
             "hiddenPaths": request.hidden_paths.unwrap_or_default(),
         })),
         request.timeout_ms.or(Some(30_000)),

@@ -157,19 +157,32 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
         }
     }
     if event_type == "agentRuntimeDelta" {
-        if let Some(value) = payload.get("sessionId").and_then(|value| value.as_str()) {
+        // Backend websocket messages use build_event_message(), so Runtime
+        // deltas live inside the single `payload` envelope. Accept the flat
+        // form as well for compatibility with direct sanitizer callers.
+        let runtime_delta = payload.get("payload").unwrap_or(&payload);
+        if let Some(value) = runtime_delta
+            .get("sessionId")
+            .and_then(|value| value.as_str())
+        {
             event["sessionId"] = serde_json::Value::String(value.chars().take(160).collect());
         }
-        if let Some(value) = payload.get("turnId").and_then(|value| value.as_str()) {
+        if let Some(value) = runtime_delta.get("turnId").and_then(|value| value.as_str()) {
             event["turnId"] = serde_json::Value::String(value.chars().take(160).collect());
         }
-        if let Some(value) = payload.get("clientTurnId").and_then(|value| value.as_str()) {
+        if let Some(value) = runtime_delta
+            .get("clientTurnId")
+            .and_then(|value| value.as_str())
+        {
             event["clientTurnId"] = serde_json::Value::String(value.chars().take(160).collect());
         }
-        if let Some(value) = payload.get("textDelta").and_then(|value| value.as_str()) {
+        if let Some(value) = runtime_delta
+            .get("textDelta")
+            .and_then(|value| value.as_str())
+        {
             event["textDelta"] = serde_json::Value::String(value.chars().take(1000).collect());
         }
-        if let Some(value) = payload.get("phase").and_then(|value| value.as_str()) {
+        if let Some(value) = runtime_delta.get("phase").and_then(|value| value.as_str()) {
             if matches!(
                 value,
                 "preparing"
@@ -182,8 +195,20 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
                 event["phase"] = serde_json::Value::String(value.to_string());
             }
         }
-        if let Some(value) = payload.get("done").and_then(|value| value.as_bool()) {
+        if let Some(timeline_event) = runtime_delta
+            .get("timelineEvent")
+            .and_then(sanitize_runtime_timeline_event)
+        {
+            event["timelineEvent"] = timeline_event;
+        }
+        if let Some(value) = runtime_delta.get("done").and_then(|value| value.as_bool()) {
             event["done"] = serde_json::Value::Bool(value);
+        }
+        if let Some(value) = runtime_delta
+            .get("activity")
+            .and_then(|value| value.as_bool())
+        {
+            event["activity"] = serde_json::Value::Bool(value);
         }
     }
     if event_type == "agentRuntimeTurn" {
@@ -192,6 +217,62 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
         }
     }
     Some(event)
+}
+
+fn sanitize_runtime_timeline_event(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let kind = value.get("kind")?.as_str()?;
+    if !matches!(
+        kind,
+        "phase"
+            | "planner"
+            | "tool_call"
+            | "tool_result"
+            | "file_edit"
+            | "command"
+            | "subagent"
+            | "assistant"
+    ) {
+        return None;
+    }
+    let id = bounded_event_text(value.get("id"), 180);
+    let timestamp = bounded_event_text(value.get("timestamp"), 80);
+    let sequence = value.get("sequence")?.as_u64()?;
+    if id.is_empty() || timestamp.is_empty() {
+        return None;
+    }
+    let source = value.get("payload").and_then(|item| item.as_object());
+    let mut payload = serde_json::Map::new();
+    for (key, limit) in [
+        ("label", 160usize),
+        ("summary", 1000usize),
+        ("status", 80usize),
+        ("tool", 160usize),
+        ("phase", 80usize),
+        ("actionId", 96usize),
+    ] {
+        let bounded = bounded_event_text(source.and_then(|item| item.get(key)), limit);
+        if !bounded.is_empty() {
+            payload.insert(key.to_string(), serde_json::Value::String(bounded));
+        }
+    }
+    let subagent_status =
+        bounded_event_text(source.and_then(|item| item.get("subagentStatus")), 40);
+    if matches!(
+        subagent_status.as_str(),
+        "created" | "started" | "completed" | "failed"
+    ) {
+        payload.insert(
+            "subagentStatus".to_string(),
+            serde_json::Value::String(subagent_status),
+        );
+    }
+    Some(serde_json::json!({
+        "id": id,
+        "sequence": sequence,
+        "timestamp": timestamp,
+        "kind": kind,
+        "payload": payload,
+    }))
 }
 
 fn bounded_event_text(value: Option<&serde_json::Value>, limit: usize) -> String {
@@ -206,7 +287,10 @@ fn bounded_event_text(value: Option<&serde_json::Value>, limit: usize) -> String
 fn sanitize_runtime_turn_event(payload: &serde_json::Value) -> Option<serde_json::Value> {
     let continuation_source = payload.get("continuationSource")?.as_str()?;
     if payload.get("schema")?.as_str()? != "vrcforge.runtime_turn_event.v1"
-        || !matches!(continuation_source, "shell_process_finished" | "sub_agent_finished")
+        || !matches!(
+            continuation_source,
+            "shell_process_finished" | "sub_agent_finished"
+        )
     {
         return None;
     }
@@ -392,5 +476,45 @@ mod tests {
         );
         assert_eq!(sanitized["payload"]["sessionId"], "session-owner");
         assert!(sanitized["payload"].get("result").is_none());
+    }
+
+    #[test]
+    fn runtime_delta_reads_the_websocket_payload_envelope_once() {
+        let sanitized = sanitize_backend_event(serde_json::json!({
+            "type": "agentRuntimeDelta",
+            "timestamp": "2026-08-14T03:37:25Z",
+            "payload": {
+                "sessionId": "session-live",
+                "turnId": "turn-live",
+                "clientTurnId": "client-live",
+                "phase": "running_tool",
+                "activity": true,
+                "timelineEvent": {
+                    "id": "timeline-turn-live-4",
+                    "sequence": 4,
+                    "timestamp": "2026-08-14T03:37:25Z",
+                    "kind": "tool_call",
+                    "payload": {
+                        "actionId": "action-live",
+                        "tool": "vrcforge_list_directory",
+                        "status": "started",
+                        "arguments": "must-not-cross"
+                    }
+                }
+            }
+        }))
+        .expect("runtime delta should be forwarded");
+
+        assert_eq!(sanitized["clientTurnId"], "client-live");
+        assert_eq!(sanitized["phase"], "running_tool");
+        assert_eq!(sanitized["activity"], true);
+        assert_eq!(
+            sanitized["timelineEvent"]["payload"]["actionId"],
+            "action-live"
+        );
+        assert!(sanitized["timelineEvent"]["payload"]
+            .get("arguments")
+            .is_none());
+        assert!(sanitized.get("payload").is_none());
     }
 }

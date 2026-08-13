@@ -1,10 +1,27 @@
 import type { ChatThread } from "./chat-types";
+import type { ProjectType } from "./chat-types";
 import { normalizeProjectPathKey, projectKey } from "./project-path";
 
 type SidebarProjectItem = {
   name?: string;
   path?: string;
+  projectType?: ProjectType;
 };
+
+export type SidebarProjectGroups<TProject extends SidebarProjectItem> = {
+  general: TProject[];
+  unity: TProject[];
+};
+
+/** Splits the sidebar list without changing incoming order within either type. */
+export function groupSidebarProjects<TProject extends SidebarProjectItem>(projects: readonly TProject[]): SidebarProjectGroups<TProject> {
+  const groups: SidebarProjectGroups<TProject> = { general: [], unity: [] };
+  for (const project of projects) {
+    // Legacy catalogue entries have no type and retain the historical Unity binding.
+    (project.projectType === "general" ? groups.general : groups.unity).push(project);
+  }
+  return groups;
+}
 
 type IndexedProject<TProject extends SidebarProjectItem> = {
   project: TProject;

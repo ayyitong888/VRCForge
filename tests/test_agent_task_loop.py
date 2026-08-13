@@ -12,6 +12,12 @@ from agent_task_loop import (
 )
 
 
+def test_tool_call_telemetry_is_preserved_past_legacy_256_boundary() -> None:
+    loop = AgentTaskLoop("long read-only task", tool_calls_used=257)
+    assert loop.tool_calls_used == 257
+    assert loop.approval_seed()["toolCallsUsed"] == 257
+
+
 def ok_outcome(summary: str = "done") -> dict:
     return {
         "status": "ok",

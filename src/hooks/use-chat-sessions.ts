@@ -24,7 +24,7 @@ import {
   stripSupersededStreamingItems,
   stripTransientConversationItems,
 } from "../lib/chat-thread";
-import type { ChatThread, ConversationItem } from "../lib/chat-types";
+import type { ChatThread, ConversationItem, ProjectType } from "../lib/chat-types";
 import { normalizeProjectPathKey } from "../lib/project-path";
 import { buildChatSidebarView } from "../lib/sidebar-view";
 
@@ -50,6 +50,8 @@ type UseChatSessionsParams = {
   projectPaths: string[];
   customProjectPaths: string[];
   activeProjectPath: string;
+  activeProjectType?: ProjectType;
+  setActiveProjectType?: (value: ProjectType) => void;
   setActiveProjectPath: (value: string) => void;
   setActiveView: (value: ActiveView) => void;
   setError: (message: string) => void;
@@ -64,6 +66,8 @@ export function useChatSessions({
   projectPaths,
   customProjectPaths,
   activeProjectPath,
+  activeProjectType = "general",
+  setActiveProjectType,
   setActiveProjectPath,
   setActiveView,
   setError,
@@ -557,7 +561,7 @@ export function useChatSessions({
     const id = `chat-${Date.now()}`;
     const now = new Date().toISOString();
     markChatsDirty();
-    const created = { id, sessionId: "", title: "", projectPath: activeProjectPath, createdAt: now, updatedAt: now, revision: 0, items: [] };
+    const created: ChatThread = { id, sessionId: "", title: "", projectPath: activeProjectPath, projectType: activeProjectType || (activeProjectPath ? "unity" : "general"), createdAt: now, updatedAt: now, revision: 0, items: [] };
     chatsRef.current = [created, ...chatsRef.current];
     setChats(chatsRef.current);
     setActiveChatId(id);
@@ -568,11 +572,12 @@ export function useChatSessions({
     return chatsRef.current.find((chat) => chat.id === chatId);
   }
 
-  function newConversation(projectPath?: string) {
+  function newConversation(projectPath?: string, projectType: ProjectType = projectPath ? "unity" : activeProjectType) {
     setActiveView("chat");
     if (projectPath !== undefined) {
       setActiveProjectPath(projectPath);
     }
+    setActiveProjectType?.(projectType);
     setActiveChatId("");
     setError("");
   }
@@ -610,16 +615,18 @@ export function useChatSessions({
     setChatMenu(null);
   }
 
-  function bindProject(projectPath: string) {
+  function bindProject(projectPath: string, projectType: ProjectType = "unity") {
     setActiveProjectPath(projectPath);
+    setActiveProjectType?.(projectType);
     if (activeChatId) {
-      updateChat(activeChatId, (chat) => ({ ...chat, projectPath }));
+      updateChat(activeChatId, (chat) => ({ ...chat, projectPath, projectType }));
     }
   }
 
   function newTemporaryChat() {
     setActiveView("chat");
     setActiveProjectPath("");
+    setActiveProjectType?.("general");
     setError("");
     expandProjectGroup(TEMP_CHATS_COLLAPSE_KEY);
     setActiveChatId("");
@@ -645,12 +652,14 @@ export function useChatSessions({
     setActiveView("chat");
     setActiveChatId(chat.id);
     setActiveProjectPath(chat.projectPath);
+    setActiveProjectType?.(chat.projectType || (chat.projectPath ? "unity" : "general"));
     setChatMenu(null);
   }
 
-  function selectProject(projectPath: string) {
+  function selectProject(projectPath: string, projectType: ProjectType = "unity") {
     setActiveView("chat");
     setActiveProjectPath(projectPath);
+    setActiveProjectType?.(projectType);
     const latest = chats.find((chat) => normalizeProjectPathKey(chat.projectPath) === normalizeProjectPathKey(projectPath) && !chat.archived);
     setActiveChatId(latest ? latest.id : "");
   }
@@ -713,6 +722,9 @@ function normalizeStoredChatSnapshot(values: unknown[]): { chats: ChatThread[]; 
       sessionId: typeof chat.sessionId === "string" ? chat.sessionId : "",
       title: typeof chat.title === "string" ? chat.title : "",
       projectPath: typeof chat.projectPath === "string" ? chat.projectPath : "",
+      projectType: chat.projectType === "general" || chat.projectType === "unity"
+        ? chat.projectType
+        : (typeof chat.projectPath === "string" && chat.projectPath.trim() ? "unity" : "general"),
       createdAt: typeof chat.createdAt === "string" ? chat.createdAt : "",
       updatedAt: typeof chat.updatedAt === "string" ? chat.updatedAt : "",
       agentName: typeof chat.agentName === "string" ? chat.agentName : "",
@@ -729,6 +741,7 @@ function normalizeStoredChatSnapshot(values: unknown[]): { chats: ChatThread[]; 
     shouldPersist = shouldPersist
       || restoredCompactionWasInterrupted
       || cached.createdAt !== normalized.createdAt
+      || cached.projectType !== normalized.projectType
       || cached.updatedAt !== normalized.updatedAt
       || JSON.stringify(chat.attachmentPayloads) !== JSON.stringify(normalized.attachmentPayloads)
       || JSON.stringify(chat.compactedAttachmentRefs) !== JSON.stringify(normalized.compactedAttachmentRefs);

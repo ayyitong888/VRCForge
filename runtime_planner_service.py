@@ -20,7 +20,11 @@ EXPOSURE_LAYER_PLANNING = "planning"
 EXPOSURE_LAYER_EXECUTION = "execution"
 RUNTIME_ATTACHMENT_MAX_ITEMS = 8
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_FIELDS = 8
-RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS = 2_400
+# Planner observations are a compact semantic hand-off, not a raw tool dump.
+# Keep the complete model-visible observation under the contract's 600-char
+# ceiling; individual fields use the same ceiling so one oversized summary
+# cannot consume the entire prompt budget before the final join/truncation.
+RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS = 600
 RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS = 600
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH = 2
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS = 12
@@ -33,6 +37,10 @@ _PLANNER_TOOL_SCHEMA_TYPES = frozenset(
 )
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
+    "vrcforge_list_directory": ("path:string", "maxDepth?:integer", "maxCount?:integer"),
+    "vrcforge_read_text_file": ("path:string", "maxBytes?:integer", "maxOutputChars?:integer"),
+    "vrcforge_find_files": ("path:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer"),
+    "vrcforge_search_text": ("path:string", "query:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer", "maxFileBytes?:integer", "caseSensitive?:boolean"),
     "vrcforge_get_compile_errors": ("projectPath?:string", "maxErrors?:integer"),
     "vrcforge_list_avatars": ("projectPath?:string",),
     "vrcforge_scan_materials": ("projectPath?:string", "avatarPath?:string"),
@@ -314,7 +322,12 @@ class PlannerCatalogSnapshot:
 
 class PlannerCatalogPort(Protocol):
     """Read visible prompt tools plus the full deterministic routing inventory."""
-    def read(self, exposure_layer: str) -> PlannerCatalogSnapshot: ...
+    def read(
+        self,
+        exposure_layer: str,
+        *,
+        project_context_active: bool = True,
+    ) -> PlannerCatalogSnapshot: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,14 +390,14 @@ _PLANNER_TOOL_OBSERVATION_SCALAR_FIELDS = {
 }
 
 _PLANNER_TOOL_OBSERVATION_FIELD_ORDER = (
-    "summary",
-    "resultsummary",
-    "summarytext",
-    "stdoutsummary",
-    "stderrsummary",
-    "message",
     "notice",
     "warnings",
+    "stderrsummary",
+    "stdoutsummary",
+    "resultsummary",
+    "summary",
+    "summarytext",
+    "message",
     "success",
     "status",
     "code",
@@ -907,12 +920,12 @@ def planner_safe_tool_result_fields(result: dict[str, object]) -> dict[str, obje
             break
     return projected
 
-def format_planner_tool_observation(value: object) -> str:
+def format_planner_tool_observation(value: object, limit: int = 130) -> str:
     if isinstance(value, (dict, list)):
         text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     else:
         text = str(value)
-    return sanitize_planner_observation_text(text, RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
+    return sanitize_planner_observation_text(text, limit)
 
 def redact_sensitive(value: object) -> object:
     if isinstance(value, dict):
@@ -993,6 +1006,7 @@ class RuntimePlannerService:
                 propagate_provider_errors=bool(params.get("_backgroundGoalRun")),
                 exposure_layer=exposure_layer,
                 planner_label=planner_label,
+                project_context_active=params.get("_projectContextActive") is not False,
             )
             if llm_plan is not None:
                 return llm_plan
@@ -1171,6 +1185,7 @@ class RuntimePlannerService:
             propagate_provider_errors: bool = False,
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
             planner_label: str = "",
+            project_context_active: bool = True,
         ) -> dict[str, object] | None:
             model_port = self._model
             if model_port is None:
@@ -1190,6 +1205,7 @@ class RuntimePlannerService:
                     loop_state or [],
                     observe=observe,
                     exposure_layer=exposure_layer,
+                    project_context_active=project_context_active,
                 )
                 raw_response = model_port.plan(prompt)
                 provider_reasoning = dict(raw_response.reasoning)
@@ -1285,7 +1301,10 @@ class RuntimePlannerService:
                     "nextStep": "enter_execution",
                 }
             if action == "skill":
-                catalog = self._catalog.read(exposure_layer)
+                catalog = self._catalog.read(
+                    exposure_layer,
+                    project_context_active=project_context_active,
+                )
                 visible_tool = next(
                     (tool for tool in catalog.visible_tools if tool.name == skill_tool),
                     None,
@@ -1460,7 +1479,10 @@ class RuntimePlannerService:
                         "nextStep": "call_skill",
                     }
             elif action == "write" and exposure_layer == EXPOSURE_LAYER_EXECUTION:
-                catalog = self._catalog.read(exposure_layer)
+                catalog = self._catalog.read(
+                    exposure_layer,
+                    project_context_active=project_context_active,
+                )
                 known_write_tool = next(
                     (
                         tool
@@ -1652,6 +1674,7 @@ class RuntimePlannerService:
                 loop_state,
                 observe=observe,
                 exposure_layer=runtime_exposure_layer,
+                project_context_active=params.get("_projectContextActive") is not False,
             )
             next_prompt_tokens = estimate_runtime_context_tokens(next_prompt)
             provider_overhead = max(0, last_input_tokens - previous_prompt_tokens)
@@ -1882,7 +1905,7 @@ class RuntimePlannerService:
                 if outcome.get("summary"):
                     fields.append(
                         "outcomeSummary="
-                        + sanitize_planner_observation_text(outcome.get("summary"), 300)
+                        + sanitize_planner_observation_text(outcome.get("summary"), 120)
                     )
                 verification = ensure_dict(outcome.get("verification"))
                 if verification.get("state"):
@@ -2036,7 +2059,7 @@ class RuntimePlannerService:
                     if value not in (None, ""):
                         fields.append(f"{key}={sanitize_planner_observation_text(value, 180)}")
                 for key, value in planner_safe_tool_result_fields(result).items():
-                    fields.append(f"{key}={format_planner_tool_observation(value)}")
+                    fields.append(f"{key}={format_planner_tool_observation(value, 130)}")
             elif result is not None:
                 fields.append("result=available")
             return summarize_text("; ".join(fields), RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
@@ -2048,11 +2071,15 @@ class RuntimePlannerService:
             loop_state: list[dict[str, object]] | None = None,
             observe: dict[str, object] | None = None,
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
+            project_context_active: bool = True,
         ) -> str:
             observe = observe or {}
             tool_lines: list[str] = []
             exposure_layer = normalize_exposure_layer(exposure_layer)
-            catalog = self._catalog.read(exposure_layer)
+            catalog = self._catalog.read(
+                exposure_layer,
+                project_context_active=project_context_active,
+            )
             for tool in catalog.visible_tools:
                 if tool.requires_user_activation and not catalog.computer_use_model_invocable:
                     continue
@@ -2094,14 +2121,29 @@ class RuntimePlannerService:
                     line += f" -> {observation_text}"
                 step_lines.append(line)
             steps_block = "\n".join(step_lines) if step_lines else "（本轮尚未执行任何工具）"
+            runtime_scope_instruction = (
+                "A Unity project is explicitly bound to this turn. Use the project tool catalog when it is relevant."
+                if project_context_active
+                else (
+                    "This is a general-purpose local Agent turn with no Unity project bound. "
+                    "Choose autonomously among the visible general Agent tools: prefer the bounded read-only list/read/find/search tools for direct filesystem evidence; use Shell for commands, scripts, or processes; and use questions, TODO/progress, subagents, attachments, vision, or MCP when the task calls for them. "
+                    "For questions about how a local artifact works, a top-level directory listing alone is not sufficient evidence; "
+                    "continue targeted read-only inspection until you can explain the relevant mechanism. "
+                    "For such mechanism investigations, a reply is invalid after only a top-level directory listing; choose find/search/read or another materially different evidence step first. "
+                    "Never repeat an already successful bounded directory listing through Shell dir/ls/Get-ChildItem; move to find/search/read or another materially different investigation step. "
+                    "Do not attempt Unity, avatar, VRCForge project-index, package, checkpoint, or project-write tools; "
+                    "the user must explicitly open a project conversation before those capabilities exist."
+                )
+            )
             prompt = (
+                f"{runtime_scope_instruction}\n"
                 "你是 VRCForge 桌面智能体的规划器，负责把用户的请求转换成下一步动作。\n"
                 "这是一个多步循环：你每次只产出一个动作；工具执行后结果会回灌给你，由你决定下一步，"
                 "直到信息足够后再用 reply 收尾。\n"
                 "可选动作：\n"
                 '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
                 '2. 执行 Shell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "shell_params": {"cwd": "<可选目录>"}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}。background/pty/yieldMs/timeout/env 只在确实需要主机后台或交互进程时按需添加；可能写 Unity 项目的命令必须省略这些高级选项，以进入审批和回滚事务。\n'
-                '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：{"action": "reply", "reply": "<回答>"}\n'
+                '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：未执行工具时用 {"action": "reply", "reply": "<回答>"}；执行过工具后必须用 {"action": "reply", "reply": "<回答>", "completion_claim":{"satisfied":true,"evidence_action_ids":["<每个已完成步骤的精确 actionId>"]}}\n'
                 '4. 进入执行模式（仅当用户明确要求项目写入或控制已启动的主机进程）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
                 "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
                 f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，执行类工具必须先进入 execution 层；Unity 项目写入按当前权限模式走审批或全权限自动执行；"

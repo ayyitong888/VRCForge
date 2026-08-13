@@ -171,7 +171,7 @@ def test_runtime_steer_mailbox_is_scoped_bounded_fifo_and_single_drain() -> None
         session_id="session-1", target_client_turn_id="client-1", input_id="input-1", message="replay"
     )["reason"] == "duplicate_input"
 
-    for index in range(8):
+    for index in range(20):
         assert state.submit_steer(
             session_id="session-1",
             target_client_turn_id="client-1",
@@ -234,17 +234,23 @@ def test_discard_session_clears_every_active_turn_and_mailbox() -> None:
     )["reason"] == "turn_not_active"
 
 
-def test_stale_finish_cannot_clear_a_reused_client_turn_owner() -> None:
+def test_concurrent_reuse_of_active_client_turn_is_rejected_without_replacing_owner() -> None:
     state, _lock = make_state()
-    state.begin_turn(session_id="shared", turn_id="old-turn", client_turn_id="reused-client")
-    state.begin_turn(session_id="shared", turn_id="new-turn", client_turn_id="reused-client")
+    assert state.begin_turn(session_id="shared", turn_id="old-turn", client_turn_id="reused-client") is True
+    assert state.begin_turn(session_id="shared", turn_id="new-turn", client_turn_id="reused-client") is False
+    assert state.submit_steer(
+        session_id="shared",
+        target_client_turn_id="reused-client",
+        input_id="old-owner-input",
+        message="belongs to original owner",
+    )["accepted"]
     state.finish_turn(session_id="shared", turn_id="old-turn", client_turn_id="reused-client")
     assert state.submit_steer(
         session_id="shared",
         target_client_turn_id="reused-client",
-        input_id="new-owner-input",
-        message="belongs to new owner",
-    )["accepted"]
+        input_id="late-input",
+        message="late",
+    )["reason"] == "turn_not_active"
     assert state.submit_steer(
         session_id="discarded",
         target_client_turn_id="client-b",

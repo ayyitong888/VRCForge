@@ -1,9 +1,16 @@
-export type QueueSettlement = { acceptedSteer: boolean; stopRequested: boolean };
-export type QueueDecision = "steered" | "enqueue" | "start" | "drop" | "queue_full";
+export type QueueSettlement = { acceptedSteer: boolean; stopRequested: boolean; cancelled?: boolean };
+export type QueueDecision = "steered" | "enqueue" | "start" | "drop";
 
 export type QueueReservation = {
   decision: Promise<QueueDecision>;
 };
+
+/** Dequeue only work that is explicitly runnable. */
+export function takeNextRunnableQueuedTurn<T extends { queueStatus?: string }>(queue: T[]): T | undefined {
+  const head = queue[0];
+  if (!head || (head.queueStatus !== undefined && head.queueStatus !== "queued")) return undefined;
+  return queue.shift();
+}
 
 type PendingReservation = {
   settlement?: QueueSettlement;
@@ -14,12 +21,11 @@ type PendingReservation = {
 export class RuntimeQueueArbitrator {
   private readonly pending = new Map<string, PendingReservation>();
   private readonly order: string[] = [];
-  private readonly max: number;
   private startReserved = false;
-  constructor(max = 8) { this.max = max; }
+  constructor(_max?: number) { /* legacy argument retained for callers; queue is unbounded */ }
 
-  reserve(id: string, queuedCount: number): QueueReservation | null {
-    if (this.pending.has(id) || this.pending.size + queuedCount >= this.max) return null;
+  reserve(id: string, _queuedCount: number): QueueReservation | null {
+    if (this.pending.has(id)) return null;
     let resolveDecision!: (decision: QueueDecision) => void;
     const decision = new Promise<QueueDecision>((resolve) => { resolveDecision = resolve; });
     this.pending.set(id, { resolve: resolveDecision });
@@ -30,11 +36,7 @@ export class RuntimeQueueArbitrator {
   settle(id: string, result: QueueSettlement, runActive: boolean): void {
     const reservation = this.pending.get(id);
     if (!reservation) return;
-    if (result.stopRequested) {
-      this.stop();
-      return;
-    }
-    reservation.settlement = result;
+    reservation.settlement = result.stopRequested ? { ...result, acceptedSteer: false } : result;
     if (runActive) this.startReserved = false;
     let active = runActive || this.startReserved;
     while (this.order.length > 0) {
@@ -43,7 +45,9 @@ export class RuntimeQueueArbitrator {
       if (!head?.settlement) break;
       this.order.shift();
       this.pending.delete(headId);
-      if (head.settlement.acceptedSteer) {
+      if (head.settlement.cancelled) {
+        head.resolve("drop");
+      } else if (head.settlement.acceptedSteer) {
         head.resolve("steered");
       } else if (!active) {
         active = true;

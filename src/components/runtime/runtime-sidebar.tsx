@@ -1,8 +1,9 @@
-import { Box, Boxes, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
+import { Box, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { AgentProgress } from "../../lib/api";
+import type { ProjectType } from "../../lib/chat-types";
 import { cn } from "../../lib/utils";
 import { AgentTodoPanel } from "./agent-todo-panel";
 import { RuntimeInfoRow, StatusDot } from "./runtime-sidebar-ui";
@@ -21,9 +22,8 @@ function componentValueFromMessage(component: ComponentStatus, localizeHealthMes
 export function RightRuntimeSidebar({
   runtimeConnected,
   loadingUnityStatus,
-  hasEnvironmentAttention,
-  hasStartupIssue,
   workspaceProjectLabel,
+  workspaceProjectType,
   selectedProjectComponent,
   backendComponent,
   mcpPackageComponent,
@@ -35,18 +35,18 @@ export function RightRuntimeSidebar({
   subAgentPanel,
   subAgentTaskCount,
   userAttachmentSources,
+  onLocateUserAttachmentSource,
+  onOpenUserAttachmentSource,
   approvalsLoaded,
   pendingApprovals,
   refreshUnityStatus,
   onHideSidebar,
-  openDoctor,
   localizeHealthMessage,
 }: {
   runtimeConnected: boolean;
   loadingUnityStatus: boolean;
-  hasEnvironmentAttention: boolean;
-  hasStartupIssue: boolean;
   workspaceProjectLabel: string;
+  workspaceProjectType: ProjectType;
   selectedProjectComponent: ComponentStatus;
   backendComponent: ComponentStatus;
   mcpPackageComponent: ComponentStatus;
@@ -58,11 +58,12 @@ export function RightRuntimeSidebar({
   subAgentPanel?: ReactNode;
   subAgentTaskCount: number;
   userAttachmentSources: UserAttachmentSource[];
+  onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
+  onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   approvalsLoaded: boolean;
   pendingApprovals: number;
   refreshUnityStatus: () => void | Promise<void>;
   onHideSidebar: () => void;
-  openDoctor: () => void | Promise<void>;
   localizeHealthMessage: (message?: string) => string;
 }) {
   const { t } = useTranslation();
@@ -112,6 +113,7 @@ export function RightRuntimeSidebar({
         {projectWorkspace ? (
           <ProjectWorkbenchSections
             workspaceProjectLabel={workspaceProjectLabel}
+            projectType={workspaceProjectType}
             selectedProjectComponent={selectedProjectComponent}
             backendComponent={backendComponent}
             mcpPackageComponent={mcpPackageComponent}
@@ -124,6 +126,8 @@ export function RightRuntimeSidebar({
             subAgentPanel={subAgentPanel}
             subAgentTaskCount={subAgentTaskCount}
             userAttachmentSources={userAttachmentSources}
+            onLocateUserAttachmentSource={onLocateUserAttachmentSource}
+            onOpenUserAttachmentSource={onOpenUserAttachmentSource}
             approvalsLoaded={approvalsLoaded}
             pendingApprovals={pendingApprovals}
           />
@@ -147,38 +151,42 @@ export function RightRuntimeSidebar({
                   suffix={<StatusDot status={backendStatus} />}
                 />
               </div>
-              <div data-vrcforge-status="mcp-core">
-                <RuntimeInfoRow
-                  icon={<Box className="h-4 w-4" />}
-                  label={t("workspace.mcpCore")}
-                  value={componentValueFromMessage(mcpPackageComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
-                  suffix={<StatusDot status={normalizedStatus(mcpPackageComponent)} />}
-                />
-              </div>
-              <div data-vrcforge-status="mcp-bridge">
-                <RuntimeInfoRow
-                  icon={<PlugZap className="h-4 w-4" />}
-                  label={t("workspace.mcpBridge")}
-                  value={componentValueFromMessage(unityBridgeComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
-                  suffix={<StatusDot status={normalizedStatus(unityBridgeComponent)} />}
-                />
-              </div>
-              <div data-vrcforge-status="unity">
-                <RuntimeInfoRow
-                  icon={<Monitor className="h-4 w-4" />}
-                  label={t("workspace.unityEditor")}
-                  value={componentValueFromMessage(unityInstanceComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
-                  suffix={<StatusDot status={normalizedStatus(unityInstanceComponent)} />}
-                />
-              </div>
-              <div data-vrcforge-status="tools">
-                <RuntimeInfoRow
-                  icon={<Wrench className="h-4 w-4" />}
-                  label={t("workspace.vrcForgeTools")}
-                  value={componentValueFromMessage(unityToolsComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
-                  suffix={<StatusDot status={normalizedStatus(unityToolsComponent)} />}
-                />
-              </div>
+              {workspaceProjectType === "unity" ? (
+                <>
+                  <div data-vrcforge-status="mcp-core">
+                    <RuntimeInfoRow
+                      icon={<Box className="h-4 w-4" />}
+                      label={t("workspace.mcpCore")}
+                      value={componentValueFromMessage(mcpPackageComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
+                      suffix={<StatusDot status={normalizedStatus(mcpPackageComponent)} />}
+                    />
+                  </div>
+                  <div data-vrcforge-status="mcp-bridge">
+                    <RuntimeInfoRow
+                      icon={<PlugZap className="h-4 w-4" />}
+                      label={t("workspace.mcpBridge")}
+                      value={componentValueFromMessage(unityBridgeComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
+                      suffix={<StatusDot status={normalizedStatus(unityBridgeComponent)} />}
+                    />
+                  </div>
+                  <div data-vrcforge-status="unity">
+                    <RuntimeInfoRow
+                      icon={<Monitor className="h-4 w-4" />}
+                      label={t("workspace.unityEditor")}
+                      value={componentValueFromMessage(unityInstanceComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
+                      suffix={<StatusDot status={normalizedStatus(unityInstanceComponent)} />}
+                    />
+                  </div>
+                  <div data-vrcforge-status="tools">
+                    <RuntimeInfoRow
+                      icon={<Wrench className="h-4 w-4" />}
+                      label={t("workspace.vrcForgeTools")}
+                      value={componentValueFromMessage(unityToolsComponent, localizeHealthMessage, t("workspace.runStatusUnknown"))}
+                      suffix={<StatusDot status={normalizedStatus(unityToolsComponent)} />}
+                    />
+                  </div>
+                </>
+              ) : null}
               <div data-vrcforge-status="approval">
                 <RuntimeInfoRow
                   icon={<ListChecks className="h-4 w-4" />}
@@ -190,17 +198,6 @@ export function RightRuntimeSidebar({
             </div>
           </>
         )}
-
-        {!projectWorkspace && (hasEnvironmentAttention || hasStartupIssue) ? (
-          <button
-            type="button"
-            className="mt-3 flex w-full items-center gap-2 rounded-lg border border-amber-300/70 bg-amber-50/70 px-3 py-2 text-left text-xs text-amber-800 transition-colors hover:bg-amber-100 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-300 dark:hover:bg-amber-950/35"
-            onClick={() => void openDoctor()}
-          >
-            <Boxes className="h-3.5 w-3.5" />
-            {t("sidebar.doctor")}
-          </button>
-        ) : null}
       </div>
     </aside>
   );

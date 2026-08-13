@@ -36,7 +36,13 @@ class _HarnessCatalog:
     planning: PlannerCatalogSnapshot
     execution: PlannerCatalogSnapshot
 
-    def read(self, exposure_layer: str) -> PlannerCatalogSnapshot:
+    def read(
+        self,
+        exposure_layer: str,
+        *,
+        project_context_active: bool = True,
+    ) -> PlannerCatalogSnapshot:
+        _ = project_context_active
         return self.execution if exposure_layer == "execution" else self.planning
 
 

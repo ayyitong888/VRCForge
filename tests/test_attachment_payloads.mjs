@@ -20,10 +20,18 @@ const transpiled = ts.transpileModule(source, {
 }).outputText;
 const payloadModuleUrl = `data:text/javascript;base64,${Buffer.from(transpiled).toString("base64")}`;
 const payloads = await import(payloadModuleUrl);
+const timelineSource = await readFile(path.join(root, "src/lib/chat-timeline-presentation.ts"), "utf8");
+const timelineTranspiled = ts.transpileModule(timelineSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
+  fileName: path.join(root, "src/lib/chat-timeline-presentation.ts"),
+}).outputText;
+const timelineModuleUrl = `data:text/javascript;base64,${Buffer.from(timelineTranspiled).toString("base64")}`;
 const chatThreadTranspiled = ts.transpileModule(chatThreadSource, {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2020 },
   fileName: path.join(root, "src/lib/chat-thread.ts"),
-}).outputText.replace('from "./attachment-payloads"', `from "${payloadModuleUrl}"`);
+}).outputText
+  .replace('from "./attachment-payloads"', `from "${payloadModuleUrl}"`)
+  .replace('from "./chat-timeline-presentation"', `from "${timelineModuleUrl}"`);
 const chatThreads = await import(`data:text/javascript;base64,${Buffer.from(chatThreadTranspiled).toString("base64")}`);
 
 test("desktop vault upload uses bounded chunks and aborts abandoned sessions", () => {

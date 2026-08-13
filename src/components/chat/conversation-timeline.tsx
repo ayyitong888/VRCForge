@@ -4,7 +4,13 @@ import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { presentApproval } from "../../lib/approval-presentation";
 import type { AgentApproval, AgentRuntimeResponse, AgentShellResult, AgentSkillResult } from "../../lib/api";
-import type { ApprovalActionState } from "../../lib/chat-types";
+import {
+  buildTimelinePresentation,
+  hasDurableExecutionEvents,
+  runtimeTerminalStatusKey,
+  type TimelineBatchKind,
+} from "../../lib/chat-timeline-presentation";
+import type { ApprovalActionState, ChatTimelineEvent } from "../../lib/chat-types";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -58,6 +64,43 @@ export function buildAgentTimelineRows({
   elapsedSeconds?: number;
   t: typeof i18n.t;
 }): ReactNode[] {
+  const durableTimeline = (response.timeline || []) as ChatTimelineEvent[];
+  const durableRows = buildDurableTimelineRows(
+    durableTimeline,
+    elapsedSeconds,
+    response.plan.plannerFailure?.code,
+  );
+  if (durableRows.length) {
+    const durableKinds = new Set(durableTimeline.map((event) => event.kind || ""));
+    const rows = [...durableRows];
+    const orderedSteps = normalizeAgentSteps(response.steps);
+    const hasDurableExecution = hasDurableExecutionEvents(durableTimeline);
+    if (!hasDurableExecution && orderedSteps.length) {
+      rows.push(...buildAgentTimelineRowsFromSteps({
+        steps: orderedSteps,
+        response,
+        shell,
+        vision,
+        skill,
+        write,
+        approval,
+        approvalAction,
+        onModifyApproval,
+        providerLine,
+        planLabel,
+        awaitingApproval,
+        elapsedSeconds,
+        t,
+      }));
+    }
+    if (!durableKinds.has("assistant")) {
+      const fallbackAnswer = response.plan.reply || response.plan.summary;
+      if (fallbackAnswer) {
+        rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+      }
+    }
+    return rows;
+  }
   const orderedSteps = normalizeAgentSteps(response.steps);
   const legacyFallback = orderedSteps.length === 0;
   if (legacyFallback) {
@@ -120,6 +163,88 @@ export function buildAgentTimelineRows({
     elapsedSeconds,
     t,
   });
+}
+
+/** Render the server-owned ordered projection without exposing hidden reasoning. */
+export function buildDurableTimelineRows(
+  events: ChatTimelineEvent[] = [],
+  elapsedSeconds?: number,
+  terminalFailureCode = "",
+): ReactNode[] {
+  const presentation = buildTimelinePresentation(events, elapsedSeconds);
+  if (!presentation.entries.length) return [];
+  const rows: ReactNode[] = [];
+  if (Number.isFinite(presentation.elapsedSeconds)) {
+    rows.push(
+      <div key="agent-turn-duration" data-agent-turn-duration className="px-1 text-xs text-muted-foreground">
+        {i18n.t("agent.workSegmentElapsed", { duration: formatDuration(presentation.elapsedSeconds || 0) })}
+      </div>,
+    );
+  }
+  for (const entry of presentation.entries) {
+    if (entry.type === "assistant") {
+      const terminalStatusKey = runtimeTerminalStatusKey(terminalFailureCode);
+      rows.push(terminalStatusKey ? (
+        <div
+          key={entry.id}
+          data-vrcforge-terminal-status={terminalFailureCode}
+          role="status"
+          className="space-y-1.5 rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2 text-sm leading-relaxed"
+        >
+          <div className="flex items-center gap-1.5 text-xs font-medium text-destructive">
+            <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>{i18n.t(terminalStatusKey)}</span>
+          </div>
+          <p className="text-muted-foreground">{entry.text}</p>
+        </div>
+      ) : (
+        <div key={entry.id} className="space-y-1 px-1 text-sm leading-relaxed">
+          <ChatMarkdown text={entry.text} />
+        </div>
+      ));
+      continue;
+    }
+    const failed = entry.invocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()));
+    rows.push(
+      <WorkSegmentRow
+        key={entry.id}
+        kind={entry.kind}
+        title={workBatchTitle(entry.kind, entry.invocations.length)}
+        statusLabel={i18n.t("agent.workSegmentItems", { count: entry.invocations.length })}
+        statusTone={failed ? "danger" : "muted"}
+      >
+        {entry.invocations.map((invocation) => {
+          const danger = ["failed", "error"].includes(invocation.status.toLowerCase());
+          return (
+            <RunRow
+              key={invocation.id}
+              icon={workBatchIcon(entry.kind)}
+              title={invocation.label}
+              statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
+              statusLabel={invocation.status}
+            >
+              {invocation.summary ? <div className="text-xs text-muted-foreground">{invocation.summary}</div> : null}
+            </RunRow>
+          );
+        })}
+      </WorkSegmentRow>,
+    );
+  }
+  return rows;
+}
+
+function workBatchTitle(kind: TimelineBatchKind, count: number): string {
+  if (kind === "command") return i18n.t("agent.commandBatch");
+  if (kind === "tool") return i18n.t("agent.toolBatch");
+  if (kind === "file_edit") return i18n.t("agent.workSegmentFiles", { count });
+  if (kind === "subagent") return i18n.t("agent.subagentBatch");
+  return i18n.t("agent.workSegment");
+}
+
+function workBatchIcon(kind: TimelineBatchKind): "shell" | "skill" | "plan" {
+  if (kind === "command") return "shell";
+  if (kind === "tool" || kind === "file_edit" || kind === "subagent") return "skill";
+  return "plan";
 }
 
 function buildAgentTimelineRowsFromSteps({
@@ -674,6 +799,38 @@ export function RunRow({
         </span>
       </button>
       {open ? <div className="ml-6 mt-1 space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">{children}</div> : null}
+    </div>
+  );
+}
+
+function WorkSegmentRow({
+  kind,
+  title,
+  statusLabel,
+  statusTone,
+  children,
+}: {
+  kind: TimelineBatchKind;
+  title: string;
+  statusLabel: string;
+  statusTone: "danger" | "muted";
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="group/work-segment text-muted-foreground">
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
+      >
+        {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+        {kind === "command" ? <TerminalSquare className="h-3.5 w-3.5 shrink-0" /> : kind === "tool" || kind === "file_edit" ? <Wrench className="h-3.5 w-3.5 shrink-0" /> : <ListChecks className="h-3.5 w-3.5 shrink-0" />}
+        <span className="min-w-0 truncate text-xs">{title}</span>
+        <span className={cn("shrink-0 text-xs", statusTone === "danger" ? "text-destructive" : "text-muted-foreground")}>{statusLabel}</span>
+      </button>
+      {open ? <div className="ml-6 mt-1 space-y-1 rounded-lg bg-muted/20 px-2 py-1">{children}</div> : null}
     </div>
   );
 }

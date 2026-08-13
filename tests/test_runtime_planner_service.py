@@ -57,7 +57,13 @@ class FakeCatalog:
     execution: PlannerCatalogSnapshot | None = None
     reads: list[str] = field(default_factory=list)
 
-    def read(self, exposure_layer: str) -> PlannerCatalogSnapshot:
+    def read(
+        self,
+        exposure_layer: str,
+        *,
+        project_context_active: bool = True,
+    ) -> PlannerCatalogSnapshot:
+        _ = project_context_active
         self.reads.append(exposure_layer)
         if exposure_layer == EXPOSURE_LAYER_EXECUTION and self.execution is not None:
             return self.execution
@@ -249,6 +255,20 @@ def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
     assert "nextActions=Wait for compilation" in observation
     assert "retryable=True" in observation
     assert "privateDump" not in observation
+
+
+def test_model_observation_enforces_contract_600_char_ceiling() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_read_text_file",
+            "status": "executed",
+            "result": {"summary": "X" * 1799},
+            "outcome": {"status": "ok", "summary": "X" * 1799},
+        }
+    )
+
+    assert len(observation) <= 600
+    assert observation.count("X") < 600
 
 
 def test_capture_approval_observation_exposes_only_opaque_visual_capability() -> None:

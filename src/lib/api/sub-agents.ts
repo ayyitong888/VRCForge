@@ -39,7 +39,14 @@ export type SubAgentTask = {
   resultUnavailable?: boolean;
   result?: Record<string, unknown> | null;
   paramsSummary?: Record<string, unknown>;
-  events?: Array<{ timestamp?: string; event?: string; data?: Record<string, unknown> }>;
+  events?: Array<{
+    timestamp?: string;
+    taskId?: string;
+    event?: string;
+    revision?: number;
+    data?: Record<string, unknown>;
+    task?: Record<string, unknown>;
+  }>;
 };
 
 export type SubAgentTaskList = {

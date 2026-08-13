@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { formatAttachmentSize } from "../../lib/chat-format";
 import { formatCount } from "../../lib/utils";
 import type { AgentProgress } from "../../lib/api";
+import type { ChatAttachment, ProjectType } from "../../lib/chat-types";
 import { AgentTodoPanelEmbedded } from "./agent-todo-panel";
 import { RuntimeInfoRow, RuntimeSection, StatusDot } from "./runtime-sidebar-ui";
 import { Folder, ListChecks, Monitor, PlugZap, Server, Wrench, Box } from "lucide-react";
@@ -16,6 +17,8 @@ export type UserAttachmentSource = {
   name: string;
   type: string;
   size: number;
+  messageId?: string;
+  attachment?: ChatAttachment;
 };
 
 const PROJECT_WORKBENCH_SECTIONS_KEY = "vrcforge_project_workbench_sections_collapsed_v1";
@@ -32,6 +35,7 @@ function normalizedStatus(component: ComponentStatus): string {
 
 export function ProjectWorkbenchSections({
   workspaceProjectLabel,
+  projectType,
   selectedProjectComponent,
   backendComponent,
   mcpPackageComponent,
@@ -44,10 +48,13 @@ export function ProjectWorkbenchSections({
   subAgentPanel,
   subAgentTaskCount,
   userAttachmentSources,
+  onLocateUserAttachmentSource,
+  onOpenUserAttachmentSource,
   approvalsLoaded,
   pendingApprovals,
 }: {
   workspaceProjectLabel: string;
+  projectType: ProjectType;
   selectedProjectComponent: ComponentStatus;
   backendComponent: ComponentStatus;
   mcpPackageComponent: ComponentStatus;
@@ -60,6 +67,8 @@ export function ProjectWorkbenchSections({
   subAgentPanel?: ReactNode;
   subAgentTaskCount: number;
   userAttachmentSources: UserAttachmentSource[];
+  onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
+  onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   approvalsLoaded: boolean;
   pendingApprovals: number;
 }) {
@@ -94,6 +103,7 @@ export function ProjectWorkbenchSections({
     : pendingApprovals > 0
       ? t("workspace.pendingApprovals", { count: pendingApprovals })
       : t("workspace.noPendingApprovals");
+  const isUnityProject = projectType === "unity";
 
   useEffect(() => {
     window.localStorage.setItem(PROJECT_WORKBENCH_SECTIONS_KEY, JSON.stringify(collapsedSections));
@@ -126,7 +136,6 @@ export function ProjectWorkbenchSections({
         title={t("workspace.subAgents")}
         collapsed={Boolean(collapsedSections.subAgents)}
         onToggle={() => toggleSection("subAgents")}
-        count={<span className="text-xs tabular-nums text-muted-foreground">{formatCount(subAgentTaskCount)}</span>}
       >
         <div className="px-1" data-vrcforge-project-sub-agents>
           {subAgentPanel}
@@ -156,38 +165,42 @@ export function ProjectWorkbenchSections({
                 suffix={<StatusDot status={backendStatus} />}
               />
             </div>
-            <div data-vrcforge-status="mcp-core">
-              <RuntimeInfoRow
-                icon={<Box className="h-4 w-4" />}
-                label={t("workspace.mcpCore")}
-                value={componentValue(mcpPackageComponent)}
-                suffix={<StatusDot status={normalizedStatus(mcpPackageComponent)} />}
-              />
-            </div>
-            <div data-vrcforge-status="mcp-bridge">
-              <RuntimeInfoRow
-                icon={<PlugZap className="h-4 w-4" />}
-                label={t("workspace.mcpBridge")}
-                value={componentValue(unityBridgeComponent)}
-                suffix={<StatusDot status={normalizedStatus(unityBridgeComponent)} />}
-              />
-            </div>
-            <div data-vrcforge-status="unity">
-              <RuntimeInfoRow
-                icon={<Monitor className="h-4 w-4" />}
-                label={t("workspace.unityEditor")}
-                value={componentValue(unityInstanceComponent)}
-                suffix={<StatusDot status={normalizedStatus(unityInstanceComponent)} />}
-              />
-            </div>
-            <div data-vrcforge-status="tools">
-              <RuntimeInfoRow
-                icon={<Wrench className="h-4 w-4" />}
-                label={t("workspace.vrcForgeTools")}
-                value={componentValue(unityToolsComponent)}
-                suffix={<StatusDot status={normalizedStatus(unityToolsComponent)} />}
-              />
-            </div>
+            {isUnityProject ? (
+              <>
+                <div data-vrcforge-status="mcp-core">
+                  <RuntimeInfoRow
+                    icon={<Box className="h-4 w-4" />}
+                    label={t("workspace.mcpCore")}
+                    value={componentValue(mcpPackageComponent)}
+                    suffix={<StatusDot status={normalizedStatus(mcpPackageComponent)} />}
+                  />
+                </div>
+                <div data-vrcforge-status="mcp-bridge">
+                  <RuntimeInfoRow
+                    icon={<PlugZap className="h-4 w-4" />}
+                    label={t("workspace.mcpBridge")}
+                    value={componentValue(unityBridgeComponent)}
+                    suffix={<StatusDot status={normalizedStatus(unityBridgeComponent)} />}
+                  />
+                </div>
+                <div data-vrcforge-status="unity">
+                  <RuntimeInfoRow
+                    icon={<Monitor className="h-4 w-4" />}
+                    label={t("workspace.unityEditor")}
+                    value={componentValue(unityInstanceComponent)}
+                    suffix={<StatusDot status={normalizedStatus(unityInstanceComponent)} />}
+                  />
+                </div>
+                <div data-vrcforge-status="tools">
+                  <RuntimeInfoRow
+                    icon={<Wrench className="h-4 w-4" />}
+                    label={t("workspace.vrcForgeTools")}
+                    value={componentValue(unityToolsComponent)}
+                    suffix={<StatusDot status={normalizedStatus(unityToolsComponent)} />}
+                  />
+                </div>
+              </>
+            ) : null}
             <div data-vrcforge-status="approval">
               <RuntimeInfoRow
                 icon={<ListChecks className="h-4 w-4" />}
@@ -210,13 +223,19 @@ export function ProjectWorkbenchSections({
           {userAttachmentSources.length ? (
             <>
               {visibleAttachmentSources.map((source) => (
-                <div key={source.id} className="rounded-md border border-border bg-background/65 px-2 py-1.5">
+                <div key={source.id} className="rounded-md border border-border bg-background/65 px-2 py-1.5" data-vrcforge-user-attachment-source={source.id}>
                   <div className="break-words" title={source.name || source.type || source.id}>
                     {source.name || source.type || source.id}
                   </div>
                   <div className="mt-0.5 text-muted-foreground">
                     {formatAttachmentSize(source.size)} · {source.type || "-"}
                   </div>
+                  {((onLocateUserAttachmentSource && source.messageId) || (onOpenUserAttachmentSource && source.attachment?.dataUrl && source.attachment.type.startsWith("image/"))) ? (
+                    <div className="mt-1 flex gap-1">
+                      {onLocateUserAttachmentSource && source.messageId ? <button type="button" className="rounded px-1.5 py-0.5 text-[11px] text-primary hover:bg-muted" onClick={() => onLocateUserAttachmentSource(source)}>{t("workspace.locateAttachment")}</button> : null}
+                      {onOpenUserAttachmentSource && source.attachment?.dataUrl && source.attachment.type.startsWith("image/") ? <button type="button" className="rounded px-1.5 py-0.5 text-[11px] text-primary hover:bg-muted" onClick={() => onOpenUserAttachmentSource(source)}>{t("workspace.openAttachment")}</button> : null}
+                    </div>
+                  ) : null}
                 </div>
               ))}
               {hasMoreAttachmentSources ? (

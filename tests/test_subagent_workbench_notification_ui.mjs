@@ -15,7 +15,8 @@ test("sub-agent panel props and surface wiring use open action flow", async () =
   assert.equal(panel.includes("onCloseInspect"), false);
   assert.equal(panel.includes("onOpen"), true);
   assert.equal(/<SubAgentPanel[\s\S]*onOpen=/.test(app), true);
-  assert.equal(/selectedSubAgentPanelOpen\s*\?\s*subAgentWorkspaceSurface/.test(app), true);
+  assert.equal(/selectedSubAgentPanelOpen\s*\?\s*subAgentWorkspaceSurface/.test(app), false);
+  assert.equal(/selectedSubAgentPanelOpen\s*\?\s*\([\s\S]*absolute inset-x-0 bottom-0 top-14/.test(app), true);
   assert.equal(/<AsyncSubAgentWorkspaceSurface/.test(app), true);
   assert.equal(/const AsyncSubAgentWorkspaceSurface = lazy/.test(app), true);
   assert.equal(/onSelect=\{\(taskId\) => void inspectSubAgentTask\(taskId\)\}/.test(app), true);

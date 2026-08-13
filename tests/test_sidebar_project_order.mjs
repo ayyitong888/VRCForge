@@ -65,3 +65,17 @@ test("invalid updatedAt falls back to createdAt while ties and missing times sta
 
   assert.deepEqual(ordered.map((item) => item.path), ["C:\\Second", "C:\\Third", "C:\\First", "C:\\Fourth"]);
 });
+
+test("projects are separated into General and Unity groups while legacy entries stay Unity", () => {
+  const projects = [
+    project("C:\\General"),
+    { ...project("C:\\Unity"), projectType: "unity" },
+    { ...project("C:\\GeneralTwo"), projectType: "general" },
+    { ...project("C:\\Legacy"), projectType: undefined },
+  ];
+
+  const groups = projectOrder.groupSidebarProjects(projects);
+
+  assert.deepEqual(groups.general.map((item) => item.path), ["C:\\GeneralTwo"]);
+  assert.deepEqual(groups.unity.map((item) => item.path), ["C:\\General", "C:\\Unity", "C:\\Legacy"]);
+});

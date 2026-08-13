@@ -1,18 +1,26 @@
 # VRCForge Compatibility Matrix
 
-This matrix is the public compatibility checklist for the 1.5.0 release line
-and future stable refreshes. It
+This matrix is the public compatibility checklist for the 1.6.0 target release
+and future stable refreshes. Version 1.5.1 remains the latest published stable
+release until 1.6.0 is formally published. It
 does not claim that every avatar, outfit, or shader stack is supported. It
 records the components VRCForge must detect, report, and gate before stable
 release work can be accepted or refreshed.
 
+For the 1.6.0 hot-fix-first publication, the release owner explicitly deferred
+fresh warm-start, Golden Path, visual-completion, packaged Skill, optimizer,
+external-Agent, and clean-Windows install/upgrade/uninstall evidence until
+after publication. Those exact-version probes remain unverified and must not be
+represented as passed release evidence.
+
 ## Stable Compatibility Targets
 
-| Area | Current target | Release evidence | 1.5 stable expectation |
+| Area | Current target | Release evidence | Stable expectation |
 | --- | --- | --- | --- |
-| Windows | Windows x64 installer and portable payload | Local candidate build, packaged smokes, and isolated elevated install/uninstall pass; strict final-hash rebuild and clean-environment installer rerun remain release gates | Use the release notes for the tested installation, migration, uninstall, and portable-launch boundaries |
-| Unity | Unity 2022.3 LTS VRChat avatar projects | Golden Path Matrix and Unity-package import smokes use Unity project roots | Doctor reports Unity version and project validity clearly |
-| VRCForge MCP 2.0 Core | Self-contained Unity package, MCP 2.0 (`2026-07-28`), fixed 64-tool contract | Clean import, direct App connection, `tools/list`, approval/checkpoint/write/readback/restore/reconnect evidence | No external MCP runtime is required; older clients fail with an update instruction |
+| Windows | Windows x64 installer and portable payload | Local candidate build and packaged smokes; the exact-version clean-environment install/upgrade/uninstall refresh is deferred and unverified for 1.6.0 | Use the release notes for the tested installation, migration, uninstall, and portable-launch boundaries |
+| Unity | Unity 2022.3 LTS VRChat avatar projects | Golden Path Matrix and Unity-package import smokes use Unity project roots; the exact 1.6.0 refresh is deferred and unverified | Doctor reports Unity version and project validity clearly |
+| VRCForge MCP 2.0 Core | Self-contained Unity package, MCP 2.0 (`2026-07-28`), fixed 64-tool contract | Clean import, direct App connection, `tools/list`, approval/checkpoint/write/readback/restore/reconnect evidence | No external Unity MCP runtime is required; the Unity Core remains `2026-07-28` only |
+| External-Agent MCP edge | App-side MCP 2026 preferred; pinned supported standard MCP 1.x selected only from the first valid initialize frame | Profile selection/freeze and client-compatibility tests; fresh external-Agent release smoke is deferred and unverified for 1.6.0 | No mid-connection switch, silent catalogue downgrade, or direct external Unity write |
 | VRChat SDK | VRChat SDK3 Avatar package | Validation report and Build/Test readiness detect SDK state | Missing SDK is a clear blocker, not a generic scan failure |
 | Modular Avatar | Optional package, read/write only through VRCForge approval paths | MA scan and rollback coverage audit metadata exist | MA-heavy writes require checkpoint, validation, and rollback proof |
 | NDMF | Optional dependency for optimizer/plugin ecosystems | Rollback coverage audit records NDMF package baseline metadata | NDMF generated residue is detected or explicitly marked not present |
@@ -51,7 +59,8 @@ malformed file is ignored.
 | Unity compile errors before apply | Block write-heavy workflows until compile status is understood |
 | Missing VRChat SDK performance type | Report a degraded validation source such as `missing_sdk_type` instead of hiding the reason |
 | External MCP client requests direct executor targets | Keep direct apply hidden; require named request tools and VRCForge approval |
-| Client sends a protocol older than MCP 2.0 (`2026-07-28`) | Reject it before tool dispatch with an update-client error; do not negotiate or fall back |
+| Client connects directly to the Unity Core with a protocol other than `2026-07-28` | Reject it before tool dispatch with an update-client error; do not negotiate or fall back |
+| Standard MCP client initializes through the App-side external-Agent edge | Select one pinned supported MCP 1.x profile from the first valid frame and freeze it for that connection; otherwise fail closed |
 | Known third-party Unity MCP package is present | Log a conflict warning at Unity startup; do not remove the package automatically |
 | Non-admin installer session | Record a blocked installer smoke artifact; rerun from Administrator shell or VM for full install/uninstall evidence |
 
@@ -84,7 +93,7 @@ operating-system compromise.
 | Booth package contents | Local only | No paid asset payloads | No | No | No |
 | Validation metadata | Yes | Yes, redacted | Redacted summary | Redacted summary | Schema and variables only |
 
-## 1.5 Evidence Rule
+## Stable Evidence Rule
 
 Before a future stable release or stable refresh is published, every stable row
 above needs either fresh evidence in the Golden Path Matrix / proof matrix or

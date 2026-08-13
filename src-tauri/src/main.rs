@@ -237,6 +237,7 @@ fn main() {
             preview_adjustment_checkpoint,
             preview_restore_checkpoint,
             record_agent_run_queued,
+            cancel_agent_run_followup,
             reject_agent_approval,
             run_agent_memory_review,
             refresh_projects,
@@ -720,6 +721,19 @@ mod tests {
             "clientTurnId": "client-1",
             "textDelta": "hello",
             "phase": "running_tool",
+            "timelineEvent": {
+                "id": "timeline-turn-1-2",
+                "sequence": 2,
+                "timestamp": "2026-08-14T00:00:00Z",
+                "kind": "tool_call",
+                "payload": {
+                    "tool": "vrcforge_list_directory",
+                    "status": "started",
+                    "actionId": "action-safe-1",
+                    "arguments": {"path": "secret"},
+                    "reasoning": "hidden"
+                }
+            },
             "label": "secret tool arguments",
             "done": false,
             "secret": "should-not-reach-webview",
@@ -734,6 +748,17 @@ mod tests {
                 "clientTurnId": "client-1",
                 "textDelta": "hello",
                 "phase": "running_tool",
+                "timelineEvent": {
+                    "id": "timeline-turn-1-2",
+                    "sequence": 2,
+                    "timestamp": "2026-08-14T00:00:00Z",
+                    "kind": "tool_call",
+                    "payload": {
+                        "tool": "vrcforge_list_directory",
+                        "status": "started",
+                        "actionId": "action-safe-1"
+                    }
+                },
                 "done": false
             }))
         );

@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { hasTauriInternals, invokeTauriWithAbort, requestJson } from "./http";
 import type { AgentApproval, AgentApprovalExecution, AgentDesktopAction, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalBackgroundState, AgentGoalDelivery, AgentMemory, AgentMessageAttachment, AgentProgress, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, AgentRuntimeRunLedger, DesktopBridgeStatus, DesktopRuntimeSnapshot } from "./types";
 
+/** Finite model-turn budget required for unattended/background delivery. */
+export const DEFAULT_BACKGROUND_MAX_AGENTIC_TURNS = 25;
+
 export type ChatHistoryEntry = {
   role: "user" | "agent";
   text: string;
@@ -74,7 +77,7 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; projectType?: "general" | "unity"; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; maxAgenticTurns?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; followupQueueId?: string; followupLaneId?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
@@ -85,14 +88,18 @@ export async function sendAgentMessage(
     history: history ?? [],
     attachments: options.attachments ?? [],
     projectPath: options.projectPath || undefined,
+    projectType: options.projectType || (options.projectPath ? "unity" : "general"),
     provider: options.provider || undefined,
     providerLabel: options.providerLabel || undefined,
     model: options.model || undefined,
     contextLimit: options.contextLimit && options.contextLimit > 0 ? Math.floor(options.contextLimit) : undefined,
+    maxAgenticTurns: options.maxAgenticTurns && options.maxAgenticTurns > 0 ? Math.floor(options.maxAgenticTurns) : undefined,
     computerUseRequested: Boolean(options.computerUseRequested),
     computerUseGrantId: options.computerUseGrantId,
     computerUseVisualTheme: options.computerUseVisualTheme,
     computerUseVisualAccent: options.computerUseVisualAccent,
+    followupQueueId: options.followupQueueId,
+    followupLaneId: options.followupLaneId,
   };
   if (hasTauriInternals()) {
     return invokeTauriWithAbort<AgentRuntimeResponse>("send_agent_message", { request }, options.signal);
@@ -110,14 +117,18 @@ export async function sendAgentMessage(
       history: request.history,
       attachments: request.attachments,
       projectPath: request.projectPath,
+      projectType: request.projectType,
       provider: request.provider,
       providerLabel: request.providerLabel,
       model: request.model,
       contextLimit: request.contextLimit,
+      maxAgenticTurns: request.maxAgenticTurns,
       computerUseRequested: request.computerUseRequested,
       computerUseGrantId: request.computerUseGrantId,
       computerUseVisualTheme: request.computerUseVisualTheme,
       computerUseVisualAccent: request.computerUseVisualAccent,
+      followupQueueId: request.followupQueueId,
+      followupLaneId: request.followupLaneId,
     }),
   });
 }
@@ -184,6 +195,7 @@ export async function recordAgentRunQueued(
   endpoint: string,
   payload: {
     sessionId?: string;
+    laneId?: string;
     clientTurnId: string;
     targetClientTurnId?: string;
     message?: string;
@@ -193,6 +205,7 @@ export async function recordAgentRunQueued(
     model?: string;
     projectPath?: string;
     projectRoot?: string;
+    projectType?: "general" | "unity";
   },
 ): Promise<{
   ok: boolean;
@@ -200,6 +213,9 @@ export async function recordAgentRunQueued(
   mode?: "steer" | "followup";
   reason?: string;
   status?: string;
+  queueId?: string;
+  sequence?: number;
+  deduped?: boolean;
   event?: AgentRuntimeRun;
 }> {
   if (hasTauriInternals()) {
@@ -212,6 +228,23 @@ export async function recordAgentRunQueued(
     timeoutMs: 30000,
   });
 }
+
+export async function cancelAgentRunFollowup(
+  endpoint: string,
+  queueId: string,
+  payload: { sessionId: string; claimToken?: string },
+): Promise<{ ok: boolean; queueId: string; status: string }> {
+  if (hasTauriInternals()) {
+    return invokeTauriWithAbort("cancel_agent_run_followup", { request: { queueId, ...payload, timeoutMs: 30000 } });
+  }
+  return requestJson(`${endpoint}/api/app/agent/runs/queue/${encodeURIComponent(queueId)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: 30000,
+  });
+}
+
 
 export async function fetchAgentDesktopActions(
   endpoint: string,

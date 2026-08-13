@@ -24,6 +24,7 @@ import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "
 import type { ChatThread } from "../../lib/chat-types";
 import type { ChatSidebarGroups } from "../../lib/chat-thread";
 import { normalizeProjectPathKey, projectKey } from "../../lib/project-path";
+import { groupSidebarProjects } from "../../lib/sidebar-project-order";
 import { cn } from "../../lib/utils";
 import { SidebarChat, SidebarProject, SidebarSection } from "./sidebar";
 
@@ -37,6 +38,7 @@ type SidebarProjectItem = {
   editorVersion?: string;
   unityVersion?: string;
   sources?: string[];
+  projectType?: "general" | "unity";
 };
 
 type AppSidebarProps = {
@@ -133,6 +135,7 @@ export function AppSidebar({
   onChatRenameCommit,
 }: AppSidebarProps) {
   const { t } = useTranslation();
+  const projectGroups = groupSidebarProjects(projectItems);
   const settingsNavItems = ([
     { section: "general", label: t("settings.navGeneral"), icon: <SlidersHorizontal className="h-4 w-4 shrink-0" /> },
     { section: "permissions", label: t("settings.navPermissions"), icon: <Shield className="h-4 w-4 shrink-0" /> },
@@ -230,7 +233,7 @@ export function AppSidebar({
 
       {collapsed ? null : (
         <SidebarSection
-          title={t("sidebar.projects")}
+          title={t("project.generalProject")}
           action={
             <button
               type="button"
@@ -244,8 +247,7 @@ export function AppSidebar({
             </button>
           }
         >
-          {projectItems.length > 0 ? (
-            projectItems.map((project, index) => {
+          {projectGroups.general.map((project, index) => {
               const key = projectKey(project) || `project-${index}`;
               const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
               const projectCollapsed = Boolean(collapsedProjects[key]);
@@ -297,10 +299,67 @@ export function AppSidebar({
                       ))}
                 </div>
               );
+            })}
+        </SidebarSection>
+      )}
+
+      {collapsed ? null : (
+        <SidebarSection title={t("project.unityProject")}>
+          {projectGroups.unity.length > 0 ? (
+            projectGroups.unity.map((project, index) => {
+              const key = projectKey(project) || `project-unity-${index}`;
+              const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
+              const projectCollapsed = Boolean(collapsedProjects[key]);
+              return (
+                <div key={key} className="min-w-0">
+                  <SidebarProject
+                    name={projectDisplayName(project)}
+                    meta={project.editorVersion || project.unityVersion || (project.sources ?? []).join("+")}
+                    active={activeView === "chat" && normalizeProjectPathKey(key) === normalizeProjectPathKey(activeProjectPath)}
+                    collapsed={projectCollapsed}
+                    hasChats={projectChats.length > 0}
+                    pinned={pinnedProjectSet.has(normalizeProjectPathKey(key))}
+                    renaming={renamingProjectPath === key}
+                    renameDraft={projectRenameDraft}
+                    onRenameChange={onProjectRenameChange}
+                    onRenameCommit={onProjectRenameCommit}
+                    onToggleCollapse={() => onToggleProjectCollapse(key)}
+                    onClick={() => onSelectProject(key)}
+                    onOpenMenu={(event) => onProjectMenu(key, event)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      onProjectMenu(key, event);
+                    }}
+                  />
+                  {projectCollapsed ? null : projectChats.map((chat) => (
+                    <SidebarChat
+                      key={chat.id}
+                      chatId={chat.id}
+                      title={chat.title || t("sidebar.newChat")}
+                      meta={chatSidebar.times.get(chat.id) || ""}
+                      active={activeView === "chat" && chat.id === activeChatId}
+                      unreadCount={backgroundGoalUnreadByChat[chat.id] || 0}
+                      indent
+                      pinned={chat.pinned}
+                      renaming={renamingChatId === chat.id}
+                      renameDraft={renameDraft}
+                      onRenameChange={onChatRenameChange}
+                      onRenameCommit={onChatRenameCommit}
+                      onClick={() => onOpenChat(chat)}
+                      onTogglePin={() => onTogglePinChat(chat.id)}
+                      onDelete={() => onDeleteChat(chat.id)}
+                      onContextMenu={(event) => {
+                        event.preventDefault();
+                        onChatMenu(chat.id, event);
+                      }}
+                    />
+                  ))}
+                </div>
+              );
             })
-          ) : (
+          ) : projectItems.length === 0 ? (
             <SidebarProject name={emptyProjectState?.name || t("agent.emptyProjectState.noUnityProject")} meta={emptyProjectState?.meta} active />
-          )}
+          ) : null}
         </SidebarSection>
       )}
 

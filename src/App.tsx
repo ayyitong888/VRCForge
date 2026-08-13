@@ -52,6 +52,7 @@ import {
 import { OutfitImportPanel } from "./components/project/outfit-import-panel";
 import { ProjectIndexPanel } from "./components/project/project-index-panel";
 import { ProjectPickerModal } from "./components/project/project-picker-modal";
+import type { ProjectType } from "./lib/chat-types";
 import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
 import { type UserAttachmentSource } from "./components/runtime/project-workbench-sections";
@@ -269,6 +270,7 @@ export default function App() {
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
   const [input, setInput] = useState("");
   const [activeProjectPath, setActiveProjectPath] = useState("");
+  const [activeProjectType, setActiveProjectType] = useState<ProjectType>("general");
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [developerOptionsEnabled, setDeveloperOptionsEnabled] = useState(() => loadDeveloperOptionsEnabled());
@@ -343,10 +345,6 @@ export default function App() {
   const projectInitRef = useRef(false);
   const refreshRuntimeRunsRef = useRef<(includeEvents?: boolean, target?: string) => Promise<void>>(async () => undefined);
   const pendingApprovalsRef = useRef<AgentApproval[]>([]);
-  const approvalActionHandlersRef = useRef<{
-    approve: (approvalId: string, allowFutureCategory?: boolean) => void;
-    reject: (approvalId: string) => void;
-  } | null>(null);
   const knownApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
   const exhaustedApprovalNotificationIdsRef = useRef<Set<string>>(new Set());
   const knownSubAgentReviewNotificationIdsRef = useRef<Set<string>>(new Set());
@@ -382,8 +380,8 @@ export default function App() {
   const subAgentSelectionIntentRef = useRef(initialSubAgentTask?.id || "");
   const selectionMenuRef = useRef<HTMLDivElement | null>(null);
   const chatSessionActionsRef = useRef<{
-    selectProject: (projectPath: string) => void;
-    newConversation: (projectPath?: string) => void;
+    selectProject: (projectPath: string, projectType?: ProjectType) => void;
+    newConversation: (projectPath?: string, projectType?: ProjectType) => void;
   } | null>(null);
 
   const permission = bootstrap?.permission;
@@ -403,6 +401,7 @@ export default function App() {
     endpoint,
     runtimeConnected,
     projectPath: activeProjectPath,
+    projectType: activeProjectType,
     confirmedProjectPath: authoritativeSelectedProjectPath,
     setBootstrap,
     setError,
@@ -691,6 +690,8 @@ export default function App() {
     setShowProjectModal,
     newProjectPath,
     setNewProjectPath,
+    newProjectType,
+    setNewProjectType,
     savingProjectPrefs,
     projectModalError,
     setProjectModalError,
@@ -736,13 +737,14 @@ export default function App() {
     endpoint,
     runtimeConnected,
     activeProjectPath,
+    activeProjectType,
     projects,
     refresh,
     refreshSilently,
     startRuntime,
     setError,
-    onProjectAdded: (projectPath) => {
-      chatSessionActionsRef.current?.selectProject(projectPath);
+    onProjectAdded: (projectPath, projectType) => {
+      chatSessionActionsRef.current?.selectProject(projectPath, projectType);
     },
     onActiveProjectHidden: () => {
       chatSessionActionsRef.current?.newConversation("");
@@ -791,6 +793,8 @@ export default function App() {
     projectPaths: chatSessionProjectPaths,
     customProjectPaths: projectPrefs.customPaths,
     activeProjectPath,
+    activeProjectType,
+    setActiveProjectType,
     setActiveProjectPath,
     setActiveView,
     setError,
@@ -802,6 +806,16 @@ export default function App() {
     [chats, pinnedProjectSet, projectItems],
   );
   chatSessionActionsRef.current = { selectProject, newConversation };
+  const projectTypeForPath = (projectPath: string): ProjectType => {
+    const normalized = normalizeProjectPathKey(projectPath);
+    const project = projectItems.find((candidate) => normalizeProjectPathKey(projectKey(candidate)) === normalized);
+    return project?.projectType === "general" ? "general" : "unity";
+  };
+  const selectProjectByPath = (projectPath: string) => selectProject(projectPath, projectTypeForPath(projectPath));
+  const newConversationForProject = (projectPath?: string) => newConversation(
+    projectPath,
+    projectPath ? projectTypeForPath(projectPath) : "general",
+  );
   const deliverRuntimeTurnContinuation = useRuntimeTurnContinuationDelivery({
     chats,
     appendToChat,
@@ -849,6 +863,8 @@ export default function App() {
     runTurnNow,
     runBackgroundTurn,
     stopCurrentRun,
+    resumeQueuedTurns,
+    cancelQueuedTurns,
     applyRuntimeDelta,
   } = useChatRunController({
     endpoint,
@@ -869,6 +885,7 @@ export default function App() {
     notifyFailure: showTransientFailure,
     prepareTurnContext,
     persistChatsNow,
+    chats,
   });
   const sending = chatRunSending || compacting;
   const visibleQueued = useMemo(
@@ -1082,7 +1099,6 @@ export default function App() {
     reloadChatStorageState,
   });
   pendingApprovalsRef.current = pendingApprovalItems;
-  approvalActionHandlersRef.current = { approve: approveShell, reject: rejectShell };
 
   useEffect(() => {
     if (agentApprovals === null) {
@@ -1114,8 +1130,6 @@ export default function App() {
           approval,
           t("approval.notificationTitle"),
           t("approval.notificationBody", { summary: presentation.notificationSummary }),
-          t("approval.approveOnce"),
-          t("approval.reject"),
         );
       void notify().catch(() =>
         new Promise<void>((resolve) => window.setTimeout(resolve, 1_500))
@@ -1314,21 +1328,63 @@ export default function App() {
       if (!action || !active) {
         return;
       }
-      const approval = pendingApprovalsRef.current.find((item) => item.id === action.approvalId);
-      if (!approval) {
-        setError(t("approval.notificationExpired"));
-        return;
-      }
-      const handlers = approvalActionHandlersRef.current;
-      if (!handlers) {
-        setError(t("approval.notificationFailed"));
-        return;
-      }
-      if (action.action === "approve") {
-        handlers.approve(approval.id);
-      } else {
-        handlers.reject(approval.id);
-      }
+      void (async () => {
+        // A native toast is only a wake/deep-link hint. Re-read the backend
+        // authority before exposing the card so a stale local event can never
+        // resurrect a decision that completed in another window/process.
+        const latest = await fetchAgentApprovals(endpoint);
+        if (!active) {
+          return;
+        }
+        setAgentApprovals(latest.approvals);
+        const approval = latest.approvals.find(
+          (item) => item.id === action.approvalId && String(item.status || "").trim().toLowerCase() === "pending",
+        );
+        if (!approval) {
+          setError(t("approval.notificationExpired"));
+          return;
+        }
+        const approvalSessionId = String(approval.taskContext?.sessionId || "").trim();
+        const approvalTurnId = String(approval.taskContext?.turnId || "").trim();
+        const approvalClientTurnId = String(approval.taskContext?.clientTurnId || "").trim();
+        const ownerChat = chats.find((chat) => {
+          if (approvalSessionId && chat.sessionId !== approvalSessionId) {
+            return false;
+          }
+          return chat.items.some((item) => {
+            if (item.type !== "agent") {
+              return false;
+            }
+            const response = item.response;
+            const responseApprovalId = String(
+              response.approvalId
+              || response.approval_id
+              || response.shell?.approvalId
+              || response.shell?.approval_id
+              || response.shell?.approval?.id
+              || response.write?.approvalId
+              || response.write?.approval_id
+              || "",
+            );
+            return responseApprovalId === approval.id
+              || (approvalTurnId && (response.turnId === approvalTurnId || response.turn_id === approvalTurnId))
+              || (approvalClientTurnId && response.clientTurnId === approvalClientTurnId);
+          });
+        });
+        if (ownerChat) {
+          openChat(ownerChat);
+        }
+        setActiveView("chat");
+        setSelectedSubAgentPanelOpen(false);
+        window.setTimeout(() => {
+          document.querySelector<HTMLElement>(`[data-approval-id="${approval.id.replace(/["\\]/g, "\\$&")}"]`)
+            ?.scrollIntoView({ block: "center", behavior: "smooth" });
+        }, 0);
+      })().catch((cause) => {
+        if (active) {
+          setError(cause instanceof Error ? cause.message : t("approval.notificationFailed"));
+        }
+      });
     })
       .then((unlisten) => {
         if (active) {
@@ -1342,7 +1398,7 @@ export default function App() {
       active = false;
       unlistenAction?.();
     };
-  }, [t]);
+  }, [chats, endpoint, openChat, t]);
   const currentModelInfo = useMemo(
     () => {
       const modelScopeMatches =
@@ -1419,6 +1475,8 @@ export default function App() {
           name: attachment.name,
           type: attachment.type || "file",
           size: attachment.size,
+          messageId: item.id,
+          attachment,
         });
       }
     }
@@ -1428,10 +1486,45 @@ export default function App() {
         name: attachment.name,
         type: attachment.type || "file",
         size: attachment.size,
+        attachment: {
+          id: attachment.id,
+          name: attachment.name,
+          type: attachment.type || "file",
+          size: attachment.size,
+          payloadKind: attachment.payloadKind,
+          payloadHash: attachment.payloadHash,
+          vaultPayloadHash: attachment.vaultPayloadHash,
+          vaultKind: attachment.vaultKind,
+          truncated: attachment.truncated,
+        },
       });
     }
     return sources;
   }, [activeChat?.id, activeChat?.items, activeChat?.compactedAttachmentRefs]);
+
+  function locateUserAttachmentSource(source: UserAttachmentSource) {
+    setActiveView("chat");
+    setSelectedSubAgentPanelOpen(false);
+    if (!source.messageId) {
+      return;
+    }
+    window.setTimeout(() => {
+      document.querySelector<HTMLElement>(`[data-conversation-item-id="${source.messageId?.replace(/["\\]/g, "\\$&")}"]`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 0);
+  }
+
+  function openUserAttachmentSource(source: UserAttachmentSource) {
+    locateUserAttachmentSource(source);
+    if (!source.messageId || !source.attachment?.dataUrl || !source.attachment.type.startsWith("image/")) {
+      return;
+    }
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("vrcforge-open-chat-attachment", {
+        detail: { messageId: source.messageId, attachmentId: source.attachment?.id },
+      }));
+    }, 0);
+  }
   const subAgentTasks = subAgentList?.tasks ?? [];
   subAgentTasksRef.current = subAgentTasks;
   const activeSubAgentTasks = useMemo(() => {
@@ -1509,7 +1602,11 @@ export default function App() {
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointercancel", onPointerUp);
   };
-  const selectedProjectComponent = healthComponents.selectedUnityProject;
+  const workspaceProjectPath = activeChat?.projectPath || activeProjectPath;
+  const workspaceProjectType: ProjectType = activeChat?.projectType || activeProjectType;
+  const selectedProjectComponent = workspaceProjectType === "general"
+    ? { status: workspaceProjectPath ? "ok" : "unknown" }
+    : healthComponents.selectedUnityProject;
   const backendComponent = healthComponents.backend;
   const mcpPackageComponent = healthComponents.mcpPackageConfigured;
   const unityBridgeComponent = healthComponents.unityMcpBridgeReachable;
@@ -1524,8 +1621,10 @@ export default function App() {
       (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(authoritativeSelectedProjectPath),
     ),
   );
-  const workspaceProjectLabel = authoritativeSelectedProjectPath
-    ? authoritativeProjectName || shortPath(authoritativeSelectedProjectPath)
+  const workspaceProjectLabel = workspaceProjectPath
+    ? projectDisplayName(projectItems.find(
+        (project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(workspaceProjectPath),
+      )) || shortPath(workspaceProjectPath)
     : t("workspace.noProjectSelected");
   const answerRuntimeQuestion = async (questionId: string, optionId: string, value: string) => {
     setActiveView("chat");
@@ -1617,6 +1716,11 @@ export default function App() {
       // Ignore blocked storage; the in-memory theme still works for this run.
     }
   }, [theme]);
+
+  useEffect(() => {
+    setSelectionMenu(null);
+    window.getSelection()?.removeAllRanges();
+  }, [activeView, activeChat?.id, activeProjectPath, selectedSubAgentPanelOpen, showProjectModal]);
 
   useLayoutEffect(() => {
     const menu = selectionMenuRef.current;
@@ -1718,11 +1822,13 @@ export default function App() {
     if (!showOnboarding || !onboardingMinimized) {
       return;
     }
-    const stepStates = [onboardingSelectedProjectReady, onboardingUnityToolsReady, Boolean(apiConfig?.apiKeyPresent)];
+    const stepStates = activeProjectType === "unity"
+      ? [onboardingSelectedProjectReady, onboardingUnityToolsReady, Boolean(apiConfig?.apiKeyPresent)]
+      : [onboardingSelectedProjectReady, Boolean(apiConfig?.apiKeyPresent)];
     if (stepStates[Math.min(onboardingStep, stepStates.length - 1)]) {
       setOnboardingMinimized(false);
     }
-  }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, apiConfig?.apiKeyPresent]);
+  }, [showOnboarding, onboardingMinimized, onboardingStep, onboardingSelectedProjectReady, onboardingUnityToolsReady, activeProjectType, apiConfig?.apiKeyPresent]);
 
   useEffect(() => {
     if (!isTauriRuntime()) {
@@ -1771,6 +1877,7 @@ export default function App() {
     }
     projectInitRef.current = true;
     setActiveProjectPath(authoritativeSelectedProjectPath);
+    setActiveProjectType("unity");
   }, [activeProjectPath, authoritativeSelectedProjectPath]);
 
   useEffect(() => {
@@ -2736,8 +2843,8 @@ export default function App() {
     setInput("");
     setAttachments([]);
     const result = await submitTurn(turn);
-    if (result === "queue_full") {
-      setInput(computerUseRequested ? `/desktop ${message}` : message);
+    if (result === "not_accepted") {
+      setInput(composerMessage);
       setAttachments(turn.attachments);
     }
   }
@@ -2821,37 +2928,92 @@ export default function App() {
 
   async function reconcileSubAgentHandoffs(tasks: SubAgentTask[]) {
     for (const task of tasks) {
-      if (!task.parentChatId || !["completed", "failed"].includes(task.status)) {
+      if (!task.parentChatId) {
         continue;
       }
       const parentChat = getChatById(task.parentChatId);
       if (!parentChat || subAgentHandoffBusyRef.current.has(task.id)) {
         continue;
       }
-      const cardId = `subagent-${task.id}`;
-      const existingCard = parentChat.items.find(
-        (item): item is Extract<ConversationItem, { type: "subagent" }> => item.id === cardId && item.type === "subagent",
-      );
-      const needsCardUpdate = !existingCard || existingCard.task.revision !== task.revision;
-      if (!needsCardUpdate && task.handoffStatus !== "handoff_pending") {
+      const publicEvents = (task.events || [])
+        .filter((event) => ["created", "started", "completed", "failed", "cancel_requested", "cancelled", "interrupted"].includes(String(event.event || "")))
+        .sort((left, right) => Number(left.revision || 0) - Number(right.revision || 0));
+      if (!publicEvents.length && Number(task.revision || 0) > 0) {
+        publicEvents.push({
+          timestamp: task.updatedAt || task.createdAt,
+          taskId: task.id,
+          event: task.status === "queued" ? "created" : task.status,
+          revision: task.revision,
+          data: {},
+        });
+      }
+      const eventItems: ConversationItem[] = publicEvents.map((event) => {
+        const eventName = String(event.event || task.status || "started");
+        const revision = Number(event.revision || task.revision || 0);
+        const timestamp = String(event.timestamp || task.updatedAt || task.createdAt || new Date().toISOString());
+        const eventData = event.data && typeof event.data === "object" ? event.data : {};
+        const summary = String(
+          eventData.summary
+          || eventData.error
+          || (eventName === "created" ? task.task : "")
+          || (eventName === "completed" ? task.summary : "")
+          || (["failed", "cancelled", "interrupted"].includes(eventName) ? task.error : "")
+          || "",
+        );
+        const subagentStatus = eventName === "created"
+          ? "created"
+          : eventName === "started" || eventName === "cancel_requested"
+            ? "started"
+            : eventName === "completed"
+              ? "completed"
+              : "failed";
+        return {
+          id: `subagent-event-${task.id}-${revision}`,
+          type: "timeline_event",
+          createdAt: timestamp,
+          event: {
+            id: `subagent-event-${task.id}-${revision}`,
+            sequence: revision,
+            timestamp,
+            kind: "subagent",
+            payload: {
+              label: task.displayName || t("agent.subagentTask"),
+              summary: summary.slice(0, 1000),
+              status: eventName,
+              tool: task.role,
+              subagentStatus,
+            },
+          },
+        };
+      });
+      const knownIds = new Set(parentChat.items.map((item) => item.id));
+      const newEventItems = eventItems.filter((item) => !knownIds.has(item.id));
+      const needsTimelineUpdate = newEventItems.length > 0
+        || parentChat.items.some((item) => item.id === `subagent-${task.id}`);
+      if (!needsTimelineUpdate && task.handoffStatus !== "handoff_pending") {
         continue;
       }
       subAgentHandoffBusyRef.current.add(task.id);
       try {
-        if (needsCardUpdate) {
+        if (needsTimelineUpdate) {
           updateChat(parentChat.id, (chat) => {
-            const nextItem: ConversationItem = { id: cardId, type: "subagent", task };
-            const index = chat.items.findIndex((item) => item.id === cardId);
-            const items = [...chat.items];
-            if (index >= 0) {
-              items[index] = nextItem;
-            } else {
-              items.push(nextItem);
-            }
+            const items = chat.items
+              .filter((item) => item.id !== `subagent-${task.id}`)
+              .concat(newEventItems)
+              .sort((left, right) => {
+                const leftCreatedAt = "createdAt" in left ? left.createdAt : left.type === "subagent" ? left.task.updatedAt : "";
+                const rightCreatedAt = "createdAt" in right ? right.createdAt : right.type === "subagent" ? right.task.updatedAt : "";
+                const leftTime = Date.parse(leftCreatedAt || "");
+                const rightTime = Date.parse(rightCreatedAt || "");
+                if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+                  return leftTime - rightTime;
+                }
+                return 0;
+              });
             return touchChat({ ...chat, items }, task.updatedAt || new Date().toISOString());
           });
         }
-        if (needsCardUpdate || task.handoffStatus === "handoff_pending") {
+        if (needsTimelineUpdate || task.handoffStatus === "handoff_pending") {
           await persistChatsNow();
         }
         if (task.handoffStatus === "handoff_pending") {
@@ -2874,7 +3036,7 @@ export default function App() {
     }
     setLoadingSubAgents(true);
     try {
-      const payload = await fetchSubAgents(endpoint, includeEvents);
+      const payload = await fetchSubAgents(endpoint, true);
       setSubAgentList(payload);
       setSelectedSubAgent((current) => reconcileSelectedSubAgent(current, payload.tasks));
       setSubAgentError("");
@@ -2939,6 +3101,7 @@ export default function App() {
       setSelectedSubAgent(payload.task);
       setSelectedSubAgentPanelOpen(true);
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
+      await reconcileSubAgentHandoffs([payload.task]);
       void loadSubAgents(false);
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
@@ -3048,21 +3211,7 @@ export default function App() {
       });
       setSubAgentList((current) => updateSubAgentList(current, payload.task));
       setSelectedSubAgent((current) => (current && current.id === payload.task.id ? payload.task : current));
-      // The stable card is updated in place. Replayed merge requests cannot
-      // append a second copy because the backend decision and card id are durable.
-      updateChat(task.parentChatId, (chat) => {
-        const cardId = `subagent-${payload.task.id}`;
-        const nextItem: ConversationItem = { id: cardId, type: "subagent", task: payload.task };
-        const index = chat.items.findIndex((item) => item.id === cardId);
-        const items = [...chat.items];
-        if (index >= 0) {
-          items[index] = nextItem;
-        } else {
-          items.push(nextItem);
-        }
-        return touchChat({ ...chat, items });
-      });
-      await persistChatsNow();
+      await loadSubAgents(true);
       await refreshSelectedSubAgentTask(payload.task.id, "if-current");
       setActiveView("chat");
     } catch (cause) {
@@ -3162,6 +3311,7 @@ export default function App() {
         maxConcurrent: current?.maxConcurrent,
         runningCount: (current?.runningCount || 0) + 1,
       }));
+      await reconcileSubAgentHandoffs([payload.task]);
       void loadSubAgents(false);
     } catch (cause) {
       setSubAgentError(cause instanceof Error ? cause.message : String(cause));
@@ -3347,7 +3497,7 @@ export default function App() {
           onOpenSettingsSection={openSettingsSection}
           onBackFromSettings={() => setActiveView("chat")}
           onRefreshProjects={() => void refreshProjectList()}
-          onSelectProject={selectProject}
+          onSelectProject={selectProjectByPath}
           onToggleProjectCollapse={toggleProjectCollapse}
           onProjectMenu={(projectPath, event) => {
             event.preventDefault();
@@ -3381,7 +3531,7 @@ export default function App() {
           onPointerDown={(event) => startLayoutResize("left", event)}
         />
 
-        <section className="flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
+        <section className="relative flex h-screen min-w-0 flex-col overflow-hidden bg-workspace">
           <WorkspaceHeader
             activeProjectLabel={activeProjectPath ? activeProjectName : t("sidebar.tempChat")}
             activeView={activeView}
@@ -3409,7 +3559,7 @@ export default function App() {
             onStartRuntime={() => void startRuntime()}
           />
 
-          {selectedSubAgentPanelOpen ? subAgentWorkspaceSurface : activeView === "doctor" ? (
+          {activeView === "doctor" ? (
             <DoctorWorkspace
               report={doctorReport}
               loading={loadingDoctor}
@@ -3674,6 +3824,8 @@ export default function App() {
               permission={permission}
               onSubmit={submitMessage}
               onStop={stopInteractiveActivity}
+              onResumeQueue={() => void resumeQueuedTurns()}
+              onCancelQueue={() => void cancelQueuedTurns()}
               onSwitchMode={switchMode}
               commands={slashCommands}
               actions={composerActions}
@@ -3736,7 +3888,6 @@ export default function App() {
               onOpenDoctor={() => void openDoctor()}
               runtimeRuns={runtimeRuns}
               onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
-              subAgentPanel={projectChatWorkspace ? undefined : subAgentActivityPanel}
             />
           )}
           {activeView !== "chat" ? (
@@ -3747,6 +3898,11 @@ export default function App() {
               onApprove={approveShell}
               onReject={rejectShell}
             />
+          ) : null}
+          {selectedSubAgentPanelOpen ? (
+            <div className="absolute inset-x-0 bottom-0 top-14 z-20 flex min-h-0 flex-col bg-workspace">
+              {subAgentWorkspaceSurface}
+            </div>
           ) : null}
         </section>
         <LayoutSplitter
@@ -3763,9 +3919,8 @@ export default function App() {
               <AsyncRightRuntimeSidebar
               runtimeConnected={runtimeConnected}
               loadingUnityStatus={loadingUnityStatus}
-              hasEnvironmentAttention={hasEnvironmentAttention}
-              hasStartupIssue={hasStartupIssue}
               workspaceProjectLabel={workspaceProjectLabel}
+              workspaceProjectType={workspaceProjectType}
               selectedProjectComponent={selectedProjectComponent}
               backendComponent={backendComponent}
               mcpPackageComponent={mcpPackageComponent}
@@ -3777,11 +3932,12 @@ export default function App() {
               subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}
               subAgentTaskCount={activeSubAgentTasks.length}
               userAttachmentSources={userAttachmentSources}
+              onLocateUserAttachmentSource={locateUserAttachmentSource}
+              onOpenUserAttachmentSource={openUserAttachmentSource}
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
               refreshUnityStatus={refreshUnityStatus}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
-              openDoctor={openDoctor}
               localizeHealthMessage={localizeHealthMessage}
               />
             </SidebarMountTracker>
@@ -3810,6 +3966,7 @@ export default function App() {
         stepIndex={onboardingStep}
         runtimeConnected={runtimeConnected}
         selectedProjectReady={onboardingSelectedProjectReady}
+        projectType={activeProjectType}
         unityToolsReady={onboardingUnityToolsReady}
         unityToolsCount={vrcForgeToolsCount}
         apiKeyPresent={Boolean(apiConfig?.apiKeyPresent)}
@@ -3839,19 +3996,21 @@ export default function App() {
         customPathSet={customPathSet}
         saving={savingProjectPrefs}
         newProjectPath={newProjectPath}
+        projectType={newProjectType}
         error={projectModalError}
         onClose={() => {
           setShowProjectModal(false);
           setProjectModalError("");
         }}
         onSelectProject={(key) => {
-          selectProject(key);
+          selectProjectByPath(key);
           setShowProjectModal(false);
           setProjectModalError("");
         }}
         onRemoveCustomProject={removeCustomProject}
         onRestoreProject={unhideProject}
         onNewProjectPathChange={setNewProjectPath}
+        onProjectTypeChange={setNewProjectType}
         onClearError={() => setProjectModalError("")}
         onAddProjectPath={() => void addProjectPath()}
       />
@@ -3859,7 +4018,7 @@ export default function App() {
       <SidebarMenus
         projectMenu={projectMenu}
         chatMenu={chatMenu}
-        selectionMenu={selectionMenu}
+        selectionMenu={activeView === "chat" && !selectedSubAgentPanelOpen && !showProjectModal ? selectionMenu : null}
         deleteTargetId={deleteTargetId}
         chats={chats}
         customPathSet={customPathSet}
@@ -3869,7 +4028,7 @@ export default function App() {
         onCloseProjectMenu={() => setProjectMenu(null)}
         onTogglePinProject={togglePinProject}
         onOpenProjectFolder={(projectPath) => void openProjectFolder(projectPath)}
-        onNewConversation={newConversation}
+        onNewConversation={newConversationForProject}
         onStartRenameProject={startRenameProject}
         onToggleProjectCollapse={toggleProjectCollapse}
         onArchiveProjectChats={archiveProjectChats}
