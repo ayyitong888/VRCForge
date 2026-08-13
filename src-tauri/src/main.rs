@@ -719,6 +719,8 @@ mod tests {
             "turnId": "turn-1",
             "clientTurnId": "client-1",
             "textDelta": "hello",
+            "phase": "running_tool",
+            "label": "secret tool arguments",
             "done": false,
             "secret": "should-not-reach-webview",
             "configPath": "C:\\Users\\Example\\AppData\\Local\\VRCForge\\settings.json"
@@ -731,6 +733,7 @@ mod tests {
                 "turnId": "turn-1",
                 "clientTurnId": "client-1",
                 "textDelta": "hello",
+                "phase": "running_tool",
                 "done": false
             }))
         );

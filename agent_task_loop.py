@@ -20,6 +20,10 @@ from agent_tool_result_contract import completion_gate_plan, normalize_agent_too
 TASK_LOOP_SCHEMA = "vrcforge.agent_task_loop.v2"
 TASK_APPROVAL_CONTEXT_SCHEMA = "vrcforge.agent_task_approval.v1"
 WRITE_TRANSACTION_SCHEMA = "vrcforge.approved_write_transaction.v1"
+# This is the Runtime safety ceiling for one user turn, not an ordinary stop
+# condition. The loop should normally end through a terminal model reply,
+# cancellation, approval wait, completion verification, or no-progress guard.
+TASK_LOOP_MAX_TOOL_CALLS = 25
 _RUNNING_STATUSES = frozenset(
     {"accepted", "in_progress", "queued", "running", "started", "starting"}
 )
@@ -524,7 +528,10 @@ def approval_task_context(
             if isinstance(seed.get("contextLimit"), int)
             else None
         ),
-        "toolCallsUsed": max(0, min(int(seed.get("toolCallsUsed") or 0), 3)),
+        "toolCallsUsed": max(
+            0,
+            min(int(seed.get("toolCallsUsed") or 0), TASK_LOOP_MAX_TOOL_CALLS),
+        ),
         "providerRequestCount": max(
             0,
             min(int(seed.get("providerRequestCount") or 0), 100),
@@ -960,7 +967,10 @@ class AgentTaskLoop:
             self.client_turn_id,
             self.objective,
         )
-        self.tool_calls_used = max(0, min(int(self.tool_calls_used or 0), 3))
+        self.tool_calls_used = max(
+            0,
+            min(int(self.tool_calls_used or 0), TASK_LOOP_MAX_TOOL_CALLS),
+        )
         self.provider_request_count = max(
             0,
             min(int(self.provider_request_count or 0), 100),
@@ -993,7 +1003,13 @@ class AgentTaskLoop:
                 if isinstance(context.get("contextLimit"), int)
                 else None
             ),
-            tool_calls_used=max(0, min(int(context.get("toolCallsUsed") or 0), 3)),
+            tool_calls_used=max(
+                0,
+                min(
+                    int(context.get("toolCallsUsed") or 0),
+                    TASK_LOOP_MAX_TOOL_CALLS,
+                ),
+            ),
             provider_request_count=max(
                 0,
                 min(int(context.get("providerRequestCount") or 0), 100),
@@ -1092,7 +1108,7 @@ class AgentTaskLoop:
                 0,
                 min(
                     int(self.tool_calls_used if tool_calls_used is None else tool_calls_used),
-                    3,
+                    TASK_LOOP_MAX_TOOL_CALLS,
                 ),
             ),
             "providerRequestCount": max(

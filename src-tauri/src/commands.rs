@@ -170,6 +170,7 @@ pub(crate) struct DesktopAgentRunCancelRequest {
 pub(crate) struct DesktopAgentRunQueuedRequest {
     session_id: Option<String>,
     client_turn_id: String,
+    target_client_turn_id: Option<String>,
     message: Option<String>,
     attachments: Option<Vec<serde_json::Value>>,
     provider: Option<String>,
@@ -835,6 +836,7 @@ pub fn record_agent_run_queued(
         Some(serde_json::json!({
             "sessionId": request.session_id,
             "clientTurnId": request.client_turn_id,
+            "targetClientTurnId": request.target_client_turn_id,
             "message": request.message,
             "attachments": request.attachments.unwrap_or_default(),
             "provider": request.provider,

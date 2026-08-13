@@ -76,7 +76,9 @@ def test_project_chat_uses_a_lazy_workbench_while_quick_chat_keeps_the_status_su
     assert "workspaceProjectLabel = authoritativeSelectedProjectPath" in app
     assert 'const AsyncRightRuntimeSidebar = lazy' in app
     assert 'const projectChatWorkspace = activeView === "chat" && Boolean(activeChat?.projectPath)' in app
-    assert "activityPanel={runtimeActivityPanel}" in app
+    assert "RuntimeActivityPanel" not in app
+    assert "activityPanel={" not in app
+    assert "runtimeRuns={runtimeRuns}" in app
     assert "projectWorkspace={projectChatWorkspace}" in app
     assert "subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}" in app
     assert "subAgentTaskCount={activeSubAgentTasks.length}" in app
@@ -150,21 +152,21 @@ def test_active_desktop_safety_state_survives_scope_changes_without_loading_hist
     assert "setActiveDesktopActions([])" not in no_session_body
 
 
-def test_runtime_ledger_stays_in_chat_while_subagent_details_move_to_the_project_workbench() -> None:
+def test_runtime_ledger_leaves_chat_while_capture_and_subagent_paths_remain() -> None:
     app = _read("src/App.tsx")
     chat = _read("src/components/chat/chat-workspace.tsx")
     activity = _read("src/components/runtime/runtime-activity-panel.tsx")
     sidebar = _read("src/components/runtime/runtime-sidebar.tsx")
 
-    assert "<RuntimeActivityPanel" in app
+    assert "<RuntimeActivityPanel" not in app
     assert "<SubAgentPanel" in app
-    assert "activityPanel={" in app
     assert "subAgentPanel={" in app
-    assert "{activityPanel}" in chat
+    assert "{activityPanel}" not in chat
     assert "{subAgentPanel}" in chat
     assert "{activityPanel}" not in sidebar
-    assert "activityPanel={runtimeActivityPanel}" in app
-    assert "activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}" not in app
+    assert "runtimeRuns={runtimeRuns}" in app
+    assert "matchPathToSkillRuntimeOperation(item.response, runtimeRuns)" in chat
+    assert "onSaveOperationAsSkill" in chat
     assert "subAgentPanel={projectChatWorkspace ? undefined : subAgentActivityPanel}" in app
     assert "subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}" in app
     assert "data-vrcforge-runtime-activity-panel" in activity

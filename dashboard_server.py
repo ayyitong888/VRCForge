@@ -1355,6 +1355,7 @@ class ComputerUseTurnGrantRequest(BaseModel):
 class AgentRuntimeQueueRequest(BaseModel):
     session_id: str | None = Field(default=None, alias="sessionId")
     client_turn_id: str = Field(alias="clientTurnId")
+    target_client_turn_id: str | None = Field(default=None, alias="targetClientTurnId")
     message: str = ""
     attachments: list[dict[str, Any]] = Field(default_factory=list)
     provider: str | None = None
@@ -2309,6 +2310,12 @@ def broadcast_runtime_turn_completed(payload: dict[str, Any]) -> None:
     )
 
 
+def broadcast_runtime_status(payload: dict[str, Any]) -> None:
+    """Publish one safe, non-CoT Runtime phase to authenticated App clients."""
+
+    EVENT_BUS.broadcast_from_sync("agentRuntimeDelta", payload)
+
+
 def _sub_agent_task_finished(event: dict[str, Any]) -> None:
     """Project one durable worker terminal event back to its owning task."""
 
@@ -2356,6 +2363,7 @@ AGENT_GATEWAY = AgentGateway(
     ),
     background_activity_started=memory_review_idle_gate.signal_activity,
     runtime_turn_completed=broadcast_runtime_turn_completed,
+    runtime_status_changed=broadcast_runtime_status,
 )
 RUNTIME_LANE_BUDGET = RuntimeLaneBudget()
 BACKGROUND_GOAL_PREFLIGHT = ProviderPreflightCache(
@@ -3610,6 +3618,19 @@ async def app_agent_runtime_cancel(cancel_request: AgentRuntimeCancelRequest) ->
 
 @app.post("/api/app/agent/runs/queue")
 async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> dict[str, Any]:
+    steer_result: dict[str, Any] | None = None
+    if queue_request.target_client_turn_id and not queue_request.attachments:
+        steer_result = AGENT_GATEWAY.submit_runtime_steer(
+            {
+                "sessionId": queue_request.session_id,
+                "targetClientTurnId": queue_request.target_client_turn_id,
+                "clientTurnId": queue_request.client_turn_id,
+                "message": queue_request.message,
+            }
+        )
+        if steer_result.get("accepted") is True:
+            await EVENT_BUS.broadcast("agentRuntimeQueue", steer_result)
+            return steer_result
     try:
         payload = AGENT_GATEWAY.runtime_runs.record_queue_event(
             {
@@ -3631,6 +3652,14 @@ async def app_agent_runtime_queue(queue_request: AgentRuntimeQueueRequest) -> di
         "agentRuntimeRuns",
         AGENT_GATEWAY.runtime_runs.list_runs(limit=30, session_id=queue_request.session_id or ""),
     )
+    if steer_result is not None:
+        return {
+            **payload,
+            "accepted": False,
+            "mode": "followup",
+            "reason": steer_result.get("reason") or "turn_not_active",
+            "targetClientTurnId": queue_request.target_client_turn_id,
+        }
     return payload
 
 
@@ -14097,6 +14126,16 @@ class RuntimePlannerProviderCancelledError(RuntimeError):
     """The owning runtime turn cancelled an in-flight Provider planning call."""
 
 
+class RuntimePlannerProviderTimeoutError(RuntimeError):
+    """A bounded Provider turn exceeded its first-byte/idle/overall deadline."""
+
+    def __init__(self, phase: str, timeout_seconds: float) -> None:
+        self.code = "provider_timeout"
+        self.phase = phase
+        self.timeout_seconds = timeout_seconds
+        super().__init__(f"Provider planning timed out ({phase}) after {timeout_seconds:.1f}s.")
+
+
 @dataclass
 class _RuntimePlannerProviderCall:
     owner_id: str
@@ -14120,6 +14159,9 @@ class _RuntimePlannerModel:
     _MAX_ACTIVE_CALLS = 4
     _POLL_SECONDS = 0.01
     _CANCEL_JOIN_SECONDS = 0.25
+    _FIRST_BYTE_TIMEOUT_SECONDS = 30.0
+    _IDLE_TIMEOUT_SECONDS = 120.0
+    _OVERALL_TIMEOUT_SECONDS = 300.0
 
     def __init__(self, turn: _RuntimePlannerProviderTurnBinding) -> None:
         self._turn = turn
@@ -14173,7 +14215,7 @@ class _RuntimePlannerModel:
             for part in (provider_display_name(config.provider), str(config.model or "").strip())
             if part
         )
-        stream_state = {"raw": "", "field": "", "text": ""}
+        stream_state = {"raw": "", "field": "", "text": "", "firstByteAt": None, "lastActivityAt": time.monotonic()}
         context = AGENT_GATEWAY.runtime_sessions.stream_context()
         owner_id = str(
             context.get("clientTurnId")
@@ -14184,6 +14226,10 @@ class _RuntimePlannerModel:
         owner = _RuntimePlannerProviderCall(owner_id=owner_id)
 
         def stream_callback(delta: str) -> None:
+            now = time.monotonic()
+            if stream_state["firstByteAt"] is None:
+                stream_state["firstByteAt"] = now
+            stream_state["lastActivityAt"] = now
             if owner.cancellation.is_set() or self._runtime_cancel_requested(context):
                 owner.cancellation.set()
                 raise RuntimePlannerProviderCancelledError("Provider planning was cancelled by the runtime turn owner.")
@@ -14210,7 +14256,28 @@ class _RuntimePlannerModel:
                     "sessionId": context.get("sessionId") or "",
                     "turnId": context.get("turnId") or "",
                     "clientTurnId": client_turn_id,
+                    "phase": "receiving_response",
                     "textDelta": text_delta[:1000],
+                },
+            )
+
+        def stream_activity_callback(_activity: dict[str, Any]) -> None:
+            """Emit only a fixed safe phase; never provider reasoning text."""
+            now = time.monotonic()
+            if stream_state["firstByteAt"] is None:
+                stream_state["firstByteAt"] = now
+            stream_state["lastActivityAt"] = now
+            client_turn_id = str(context.get("clientTurnId") or "").strip()
+            if not client_turn_id:
+                return
+            EVENT_BUS.broadcast_from_sync(
+                "agentRuntimeDelta",
+                {
+                    "sessionId": context.get("sessionId") or "",
+                    "turnId": context.get("turnId") or "",
+                    "clientTurnId": client_turn_id,
+                    "phase": "waiting_for_model",
+                    "activity": True,
                 },
             )
 
@@ -14222,6 +14289,8 @@ class _RuntimePlannerModel:
                     settings,
                     prompt,
                     stream_callback=stream_callback,
+                    cancel_event=owner.cancellation,
+                    stream_activity_callback=stream_activity_callback,
                 )
             except BaseException as exc:  # noqa: BLE001 - re-raised on the owning runtime thread.
                 owner.error = exc
@@ -14249,7 +14318,21 @@ class _RuntimePlannerModel:
                 self._active_calls.pop(owner.owner_id, None)
                 raise
 
+        started_at = time.monotonic()
         while not owner.done.wait(self._POLL_SECONDS):
+            elapsed = time.monotonic() - started_at
+            if stream_state["firstByteAt"] is None and elapsed >= self._FIRST_BYTE_TIMEOUT_SECONDS:
+                owner.cancellation.set()
+                owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                raise RuntimePlannerProviderTimeoutError("first_byte", self._FIRST_BYTE_TIMEOUT_SECONDS)
+            if stream_state["firstByteAt"] is not None and time.monotonic() - stream_state["lastActivityAt"] >= self._IDLE_TIMEOUT_SECONDS:
+                owner.cancellation.set()
+                owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                raise RuntimePlannerProviderTimeoutError("idle", self._IDLE_TIMEOUT_SECONDS)
+            if elapsed >= self._OVERALL_TIMEOUT_SECONDS:
+                owner.cancellation.set()
+                owner.done.wait(self._CANCEL_JOIN_SECONDS)
+                raise RuntimePlannerProviderTimeoutError("overall", self._OVERALL_TIMEOUT_SECONDS)
             if self._runtime_cancel_requested(context):
                 owner.cancellation.set()
                 owner.done.wait(self._CANCEL_JOIN_SECONDS)

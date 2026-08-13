@@ -1,10 +1,16 @@
-import type { AgentRuntimeRun } from "./api";
+import type { AgentRuntimeResponse, AgentRuntimeRun } from "./api";
 
 export type PathToSkillOperationSummary = Record<string, unknown>;
 
 export type PathToSkillDraftSeed = {
   revision: number;
   summary: PathToSkillOperationSummary;
+};
+
+export type MatchedPathToSkillRuntimeOperation = {
+  run: AgentRuntimeRun;
+  summary: PathToSkillOperationSummary;
+  tool: string;
 };
 
 type CapturedOperationStep = {
@@ -160,6 +166,41 @@ export function buildPathToSkillOperationSummary(
     summary.projectPath = "{{projectPath}}";
   }
   return summary;
+}
+
+export function matchPathToSkillRuntimeOperation(
+  response: AgentRuntimeResponse,
+  runs: AgentRuntimeRun[],
+): MatchedPathToSkillRuntimeOperation | null {
+  const clientTurnId = String(response.clientTurnId || "").trim();
+  if (!clientTurnId) {
+    return null;
+  }
+  const responseSessionId = String(response.sessionId || response.session_id || "").trim();
+  const matches = runs.filter((run) => {
+    if (String(run.clientTurnId || "").trim() !== clientTurnId) {
+      return false;
+    }
+    const runSessionId = String(run.sessionId || "").trim();
+    return !responseSessionId || runSessionId === responseSessionId;
+  });
+  if (matches.length !== 1) {
+    return null;
+  }
+  const run = matches[0];
+  const summary = buildPathToSkillOperationSummary(run);
+  if (!summary) {
+    return null;
+  }
+  const summarySteps = Array.isArray(summary.steps) ? summary.steps : [];
+  const summaryTool = summarySteps
+    .map((step) => (step && typeof step === "object" ? String((step as { tool?: unknown }).tool || "") : ""))
+    .find((tool) => STRUCTURED_TOOL_NAME.test(tool));
+  return {
+    run,
+    summary,
+    tool: run.skillTool || run.writeTool || run.targetTool || summaryTool || "",
+  };
 }
 
 function collectStructuredSteps(run: AgentRuntimeRun): CapturedOperationStep[] {

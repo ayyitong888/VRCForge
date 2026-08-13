@@ -1352,17 +1352,13 @@ async function runPackagedProgressQuestionUiGate(report, cdp) {
         const bodyText = document.body.innerText;
         const environmentPanel = document.querySelector("[data-vrcforge-environment-status]");
         const todoPanel = document.querySelector("[data-vrcforge-agent-todo]");
-        const activityPanel = document.querySelector("[data-vrcforge-runtime-activity-panel]");
         const environmentPanelFound = Boolean(environmentPanel);
         const todoPanelFound = Boolean(todoPanel);
-        const activityPanelFound = Boolean(activityPanel);
-        const activityInsideEnvironment = Boolean(environmentPanel && activityPanel && environmentPanel.contains(activityPanel));
+        const centralRuntimeLedgerAbsent = !document.querySelector("[data-vrcforge-runtime-activity-panel]");
         const todoInsideEnvironment = Boolean(environmentPanel && todoPanel && environmentPanel.contains(todoPanel));
         const rightRailText = environmentPanel?.innerText || "";
         const todoPanelText = todoPanel?.innerText || "";
-        const activityPanelText = activityPanel?.innerText || "";
         const questionInRightRail = rightRailText.includes(${JSON.stringify(questionText)});
-        const progressInActivityPanel = activityPanelText.includes(${JSON.stringify(progressTitle)});
         const progressInTodoPanel = todoPanelText.includes(${JSON.stringify(progressTitle)});
         const questionVisible = bodyText.includes(${JSON.stringify(questionText)}) && bodyText.includes(${JSON.stringify(optionLabel)});
         const secondOptionVisible = bodyText.includes(${JSON.stringify(secondOptionLabel)});
@@ -1380,9 +1376,9 @@ async function runPackagedProgressQuestionUiGate(report, cdp) {
         const hasSkip = /Skip|跳过|跳過|スキップ/.test(bodyText);
         const hasAwaitingRail = /待回答|Questions/.test(rightRailText);
         return {
-          ok: environmentPanelFound && todoPanelFound && todoInsideEnvironment && !activityInsideEnvironment &&
+          ok: environmentPanelFound && todoPanelFound && todoInsideEnvironment && centralRuntimeLedgerAbsent &&
             questionVisible && secondOptionVisible && eighthOptionVisible && recommendedVisible &&
-            explanationTitle && optionsAreScrollable && !questionInRightRail && progressInTodoPanel && !progressInActivityPanel &&
+            explanationTitle && optionsAreScrollable && !questionInRightRail && progressInTodoPanel &&
             hasSomethingElse && hasSkip && !hasAwaitingRail,
           questionVisible,
           secondOptionVisible,
@@ -1394,11 +1390,9 @@ async function runPackagedProgressQuestionUiGate(report, cdp) {
           optionScrollerScrollHeight: optionScroller?.scrollHeight || 0,
           environmentPanelFound,
           todoPanelFound,
-          activityPanelFound,
-          activityInsideEnvironment,
+          centralRuntimeLedgerAbsent,
           todoInsideEnvironment,
           questionInRightRail,
-          progressInActivityPanel,
           progressInTodoPanel,
           hasSomethingElse,
           hasSkip,

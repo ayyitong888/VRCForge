@@ -68,6 +68,7 @@ from agent_runtime_event_projection import project_runtime_turn_event
 from agent_runtime_skill_executor import AgentRuntimeSkillExecutor, AgentRuntimeSkillExecutorPorts
 from agent_task_loop import (
     AgentTaskLoop,
+    TASK_LOOP_MAX_TOOL_CALLS,
     approval_task_context,
     canonical_action_id,
     prepare_approval_task_continuation,
@@ -309,7 +310,7 @@ RUNTIME_DIRECT_SKILL_CATEGORIES = {"read/debug", "plan/preview"}
 # 同时限制无界 token 消耗、重复工具调用和审批噪声；常规任务应在此之前自然结束。
 # 命中上限时不静默收尾，而是诚实告知「到步数上限、先汇报、可继续」（见循环 else 分支）。
 RUNTIME_AGENT_MAX_STEPS = 25
-RUNTIME_AGENT_MAX_TOOL_CALLS = 3
+RUNTIME_AGENT_MAX_TOOL_CALLS = TASK_LOOP_MAX_TOOL_CALLS
 RUNTIME_PLANNER_ARGUMENT_MAX_ATTEMPTS = 2
 EXPOSURE_LAYER_PLANNING = "planning"
 EXPOSURE_LAYER_EXECUTION = "execution"
@@ -1725,6 +1726,7 @@ class AgentGateway:
         skill_package_write_lock: AbstractContextManager[object] | None = None,
         background_activity_started: Callable[[str], Any] | None = None,
         runtime_turn_completed: Callable[[dict[str, Any]], None] | None = None,
+        runtime_status_changed: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.config_path = config_path
         self.audit_dir = audit_dir
@@ -1825,6 +1827,13 @@ class AgentGateway:
         # App-lifetime, in-process notification only. It carries the already
         # redacted runtime turn projection and grants no execution authority.
         self._runtime_turn_completed = runtime_turn_completed or (lambda _payload: None)
+        if runtime_status_changed is not None and not callable(runtime_status_changed):
+            raise TypeError("runtime_status_changed must be callable")
+        # App-lifetime, in-process notification only. It emits an allowlisted
+        # phase plus bounded identifiers through the already
+        # authenticated dashboard event channel. It carries no prompt,
+        # reasoning, arguments, credentials, or execution authority.
+        self._runtime_status_changed = runtime_status_changed or (lambda _payload: None)
         self._runtime_planner: RuntimePlannerService | None = None
         # Optional vision-analysis hook injected by the host server. Receives
         # (message, image_attachments) and returns a dict:
@@ -2271,6 +2280,35 @@ class AgentGateway:
         scope_digest = hashlib.sha256(scope_bytes).hexdigest()
         origin_digest = hashlib.sha256(origin_bytes).hexdigest()
         return f"runtime-session:{scope_digest}|origin:{origin_digest}"
+
+    def _emit_runtime_status(
+        self,
+        phase: str,
+        *,
+        session_id: str,
+        turn_id: str,
+        client_turn_id: str,
+    ) -> None:
+        allowed_phases = {
+            "preparing",
+            "waiting_for_model",
+            "running_tool",
+            "waiting_for_approval",
+            "verifying",
+        }
+        if phase not in allowed_phases or not client_turn_id:
+            return
+        payload = {
+            "sessionId": summarize_text(session_id, 160),
+            "turnId": summarize_text(turn_id, 160),
+            "clientTurnId": summarize_text(client_turn_id, 160),
+            "phase": phase,
+        }
+        try:
+            self._runtime_status_changed(payload)
+        except Exception:
+            # A presentation-only event must never fail or delay the Runtime.
+            return
 
     def execute_shell_tool(self, params: dict[str, Any]) -> dict[str, Any]:
         agent_name = self._tool_agent_context.get() or "external-agent"
@@ -3327,6 +3365,29 @@ class AgentGateway:
         task_continuation: dict[str, Any] | None = None,
         continuation_shutdown_guard: bool = False,
     ) -> dict[str, Any]:
+        owned_params = params if isinstance(params, dict) else {}
+        try:
+            return self._runtime_message_impl_body(
+                owned_params,
+                agent_name=agent_name,
+                task_continuation=task_continuation,
+                continuation_shutdown_guard=continuation_shutdown_guard,
+            )
+        finally:
+            self._runtime_session_state.finish_turn(
+                session_id=str(owned_params.get("_resolvedRuntimeSessionId") or ""),
+                turn_id=str(owned_params.get("_resolvedRuntimeTurnId") or ""),
+                client_turn_id=str(owned_params.get("_resolvedRuntimeClientTurnId") or ""),
+            )
+
+    def _runtime_message_impl_body(
+        self,
+        params: dict[str, Any] | None = None,
+        agent_name: str = "desktop-agent",
+        *,
+        task_continuation: dict[str, Any] | None = None,
+        continuation_shutdown_guard: bool = False,
+    ) -> dict[str, Any]:
         params = params or {}
         if continuation_shutdown_guard:
             self._ensure_runtime_continuation_accepting()
@@ -3340,6 +3401,14 @@ class AgentGateway:
             session_id = f"sess_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         turn_id = f"turn_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}"
         client_turn_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
+        params["_resolvedRuntimeSessionId"] = session_id
+        params["_resolvedRuntimeTurnId"] = turn_id
+        params["_resolvedRuntimeClientTurnId"] = client_turn_id
+        self._runtime_session_state.begin_turn(
+            session_id=session_id,
+            turn_id=turn_id,
+            client_turn_id=client_turn_id,
+        )
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
         self._desktop.bind_runtime_identity(
             session_id=session_id,
@@ -3409,6 +3478,12 @@ class AgentGateway:
                 "turnId": turn_id,
                 "clientTurnId": client_turn_id,
             }
+        )
+        self._emit_runtime_status(
+            "preparing",
+            session_id=session_id,
+            turn_id=turn_id,
+            client_turn_id=client_turn_id,
         )
         self._runtime_run_ledger.append(
             {
@@ -3661,7 +3736,6 @@ class AgentGateway:
                 agent_name,
                 owner_id=self._runtime_shell_owner(turn_id, client_turn_id, session_id),
             )
-            tool_calls_used += 1
             skill_payload = bootstrap_payload
             bootstrap_action_id = canonical_action_id(
                 "skill",
@@ -3806,6 +3880,38 @@ class AgentGateway:
                     }
                     iterations += 1
                     break
+                # A steer arriving while the previous tool was running must
+                # be incorporated before this model request.  The post-plan
+                # drain below remains necessary for input that races with an
+                # in-flight provider call; this pre-boundary drain prevents a
+                # stale provider request after a completed tool batch.
+                steer_inputs = self._runtime_session_state.drain_steer(
+                    session_id=session_id,
+                    client_turn_id=client_turn_id,
+                )
+                if steer_inputs:
+                    history.extend(
+                        {
+                            "role": "user",
+                            "text": str(item.get("message") or ""),
+                            "createdAt": utc_now_iso(),
+                        }
+                        for item in steer_inputs
+                    )
+                    loop_state.append(
+                        {
+                            "tool": "user_steer",
+                            "kind": "user_interjection",
+                            "status": "received",
+                            "result": {"count": len(steer_inputs)},
+                        }
+                    )
+            self._emit_runtime_status(
+                "waiting_for_model",
+                session_id=session_id,
+                turn_id=turn_id,
+                client_turn_id=client_turn_id,
+            )
             plan = self.runtime_planner.plan_agent_turn(
                 message,
                 params,
@@ -3835,6 +3941,32 @@ class AgentGateway:
             last_plan = plan
             if first_plan is None:
                 first_plan = plan
+
+            # A user steer is accepted only for this exact active turn. Drain
+            # after the current model boundary and before any newly planned
+            # action executes, then re-plan from the synthetic user messages.
+            steer_inputs = self._runtime_session_state.drain_steer(
+                session_id=session_id,
+                client_turn_id=client_turn_id,
+            )
+            if steer_inputs:
+                history.extend(
+                    {
+                        "role": "user",
+                        "text": str(item.get("message") or ""),
+                        "createdAt": utc_now_iso(),
+                    }
+                    for item in steer_inputs
+                )
+                loop_state.append(
+                    {
+                        "tool": "user_steer",
+                        "kind": "user_interjection",
+                        "status": "received",
+                        "result": {"count": len(steer_inputs)},
+                    }
+                )
+                continue
 
             planner_argument_validation = ensure_dict(plan.get("argumentValidation"))
             if (
@@ -3990,8 +4122,9 @@ class AgentGateway:
                 )
                 continue
 
-            # A turn may still ask the planner for a terminal reply after the
-            # third tool result, but a fourth tool call is never executed.
+            # The tool-call budget is only a safety ceiling. Ordinary agentic
+            # work continues through distinct actions until the planner gives
+            # a terminal reply or another explicit Runtime stop condition wins.
             if tool_calls_used >= RUNTIME_AGENT_MAX_TOOL_CALLS:
                 tool_call_cap_reached = True
                 remaining_action = {
@@ -4091,6 +4224,12 @@ class AgentGateway:
             action_arguments: Any = {}
             if continuation_shutdown_guard:
                 self._ensure_runtime_continuation_accepting()
+            self._emit_runtime_status(
+                "running_tool",
+                session_id=session_id,
+                turn_id=turn_id,
+                client_turn_id=client_turn_id,
+            )
             tool_calls_used += 1
             if action_kind == "shell":
                 step_tool = "shell"
@@ -4490,6 +4629,12 @@ class AgentGateway:
                     unresolved_planner_argument_failure = None
 
             if step_waits_for_approval:
+                self._emit_runtime_status(
+                    "waiting_for_approval",
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    client_turn_id=client_turn_id,
+                )
                 break  # 进入审批等待 → 本轮收尾。
             if task_action.get("status") == "running":
                 # Background Shell and sub-agent tasks own the next decision
@@ -4593,6 +4738,12 @@ class AgentGateway:
             )
             if gated_plan is not None:
                 top_plan = gated_plan
+        self._emit_runtime_status(
+            "verifying",
+            session_id=session_id,
+            turn_id=turn_id,
+            client_turn_id=client_turn_id,
+        )
         if isinstance(top_plan, dict):
             top_plan = task_loop.gate_terminal(top_plan)
 
@@ -4751,6 +4902,30 @@ class AgentGateway:
             payload["result"] = shell_payload["result"]
         self._runtime_session_state.clear_stream_context()
         return payload
+
+    def submit_runtime_steer(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        params = dict(params or {})
+        session_id = str(params.get("session_id") or params.get("sessionId") or "").strip()
+        target_client_turn_id = str(
+            params.get("target_client_turn_id")
+            or params.get("targetClientTurnId")
+            or ""
+        ).strip()
+        input_id = str(params.get("client_turn_id") or params.get("clientTurnId") or "").strip()
+        message = str(params.get("message") or "").strip()
+        result = self._runtime_session_state.submit_steer(
+            session_id=session_id,
+            target_client_turn_id=target_client_turn_id,
+            input_id=input_id,
+            message=message,
+        )
+        return {
+            "ok": result.get("accepted") is True,
+            **result,
+            "sessionId": session_id,
+            "targetClientTurnId": target_client_turn_id,
+            "clientTurnId": input_id,
+        }
 
     def _summarize_loop_plan(
         self,

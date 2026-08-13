@@ -502,6 +502,14 @@
     "stop": "Stop",
     "send": "Send",
     "queue": "Queue",
+    "runtimePhase": {
+      "preparing": "Preparing request",
+      "waitingForModel": "Waiting for model",
+      "receivingResponse": "Receiving response",
+      "runningTool": "Running tool",
+      "waitingForApproval": "Waiting for approval",
+      "verifying": "Verifying result"
+    },
     "providerNotConfigured": "No model API key is configured. Open Settings or connect an external agent.",
     "connectProviderBeforeSend": "Connect a provider or external agent before sending.",
     "queueFull": "Queue is full ({{max}}). Wait for the running turn or press Stop.",
@@ -535,7 +543,7 @@
     "retryMessage": "Retry",
     "regenerateMessage": "Regenerate",
     "copiedMessage": "Message copied",
-    "copyNoText": "There is no agent reply text to copy.",
+    "copyNoText": "There is no message text to copy.",
     "copyClipboardUnavailable": "The system clipboard is unavailable.",
     "copyUnknownReason": "The clipboard rejected the copy request.",
     "saveEdit": "Save",

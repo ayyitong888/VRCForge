@@ -2055,7 +2055,7 @@ class DashboardServerTests(unittest.TestCase):
     def test_computer_use_tool_is_visible_only_for_explicit_app_turn(self) -> None:
         captured: list[str] = []
 
-        def plan_fn(_settings, prompt: str, *, stream_callback=None) -> LlmPlanResponse:
+        def plan_fn(_settings, prompt: str, *, stream_callback=None, **_kwargs) -> LlmPlanResponse:
             captured.append(prompt)
             return LlmPlanResponse(
                 text=json.dumps({"action": "reply", "reply": "done"}),
@@ -6290,7 +6290,7 @@ class DashboardServerTests(unittest.TestCase):
     def test_agent_runtime_cancel_after_planner_return_marks_turn_cancelled(self) -> None:
         client_turn_id = "client-cancel-after-plan"
 
-        def fake_request(_settings, _prompt, *, stream_callback=None) -> LlmPlanResponse:
+        def fake_request(_settings, _prompt, *, stream_callback=None, **_kwargs) -> LlmPlanResponse:
             dashboard_server.AGENT_GATEWAY.request_runtime_cancel(
                 {"clientTurnId": client_turn_id, "reason": "user_stop"}
             )
@@ -6332,7 +6332,7 @@ class DashboardServerTests(unittest.TestCase):
         errors: list[BaseException] = []
         baseline_owners = dashboard_server._RUNTIME_PLANNER_MODEL.active_call_count()
 
-        def fake_request(_settings, _prompt, *, stream_callback=None) -> LlmPlanResponse:
+        def fake_request(_settings, _prompt, *, stream_callback=None, **_kwargs) -> LlmPlanResponse:
             started.set()
             while True:
                 if stream_callback is not None:
@@ -6784,10 +6784,15 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["plan"]["nextStep"], "tool_failed")
         self.assertNotIn("loopSuppression", payload["plan"])
 
-    def test_runtime_loop_never_executes_a_fourth_tool_call(self) -> None:
+    def test_runtime_loop_executes_distinct_tools_until_the_planner_finishes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            gateway = AgentGateway(root / "config.json", root / "audit")
+            runtime_statuses: list[dict] = []
+            gateway = AgentGateway(
+                root / "config.json",
+                root / "audit",
+                runtime_status_changed=runtime_statuses.append,
+            )
             calls: list[str] = []
             plans = []
             for index in range(4):
@@ -6811,20 +6816,158 @@ class DashboardServerTests(unittest.TestCase):
                     }
                 )
 
+            plans.append(
+                {
+                    "summary": "all reads completed",
+                    "reply": "All requested reads completed.",
+                    "planner": "test",
+                    "nextStep": "done",
+                }
+            )
             plan_iterator = iter(plans)
             bind_test_runtime_planner(gateway, lambda _prompt: next(plan_iterator))
-            payload = gateway.runtime_message({"message": "exercise tool-call budget"})
+            payload = gateway.runtime_message(
+                {
+                    "message": "exercise tool-call budget",
+                    "sessionId": "tool-budget-session",
+                    "clientTurnId": "tool-budget-client-turn",
+                }
+            )
 
-        self.assertEqual(calls, [f"vrcforge_test_tool_budget_{index}" for index in range(3)])
-        self.assertEqual(len([step for step in payload["steps"] if step["kind"] == "skill"]), 3)
-        self.assertEqual(payload["plan"]["nextStep"], "paused")
-        self.assertTrue(payload["plan"]["stepLimitReached"])
-        self.assertTrue(payload["plan"]["toolCallLimitReached"])
-        self.assertEqual(payload["plan"]["toolCallCount"], 3)
-        self.assertEqual(payload["plan"]["remainingAction"]["tool"], "vrcforge_test_tool_budget_3")
-        self.assertIn("尚未执行：vrcforge_test_tool_budget_3", payload["plan"]["reply"])
+        self.assertEqual(calls, [f"vrcforge_test_tool_budget_{index}" for index in range(4)])
+        self.assertEqual(len([step for step in payload["steps"] if step["kind"] == "skill"]), 4)
+        self.assertEqual(payload["plan"]["nextStep"], "completion_unverified")
+        self.assertNotIn("stepLimitReached", payload["plan"])
+        self.assertNotIn("toolCallLimitReached", payload["plan"])
+        phases = [status["phase"] for status in runtime_statuses]
+        self.assertEqual(phases[0], "preparing")
+        self.assertEqual(phases.count("running_tool"), 4)
+        self.assertGreaterEqual(phases.count("waiting_for_model"), 5)
+        self.assertEqual(phases[-1], "verifying")
+        self.assertTrue(all("reasoning" not in status and "prompt" not in status and "label" not in status for status in runtime_statuses))
 
-    def test_desktop_bootstrap_counts_toward_three_tool_call_limit(self) -> None:
+    def test_runtime_steer_replans_before_executing_a_stale_model_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            calls: list[str] = []
+            first_plan_ready = threading.Event()
+            steer_submitted = threading.Event()
+            prompts: list[str] = []
+            for name in ("vrcforge_test_stale_action", "vrcforge_test_steered_action"):
+                gateway.register_tool(
+                    name,
+                    "Steer fixture.",
+                    "read/debug",
+                    lambda _params, current=name: calls.append(current) or {"ok": True},
+                )
+
+            plans = iter(
+                [
+                    {
+                        "summary": "stale action",
+                        "reply": "checking",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": "vrcforge_test_stale_action",
+                        "skillParams": {},
+                        "continueLoop": True,
+                    },
+                    {
+                        "summary": "steered action",
+                        "reply": "following the update",
+                        "planner": "test",
+                        "nextStep": "call_skill",
+                        "skillNeeded": True,
+                        "skillTool": "vrcforge_test_steered_action",
+                        "skillParams": {},
+                        "continueLoop": True,
+                    },
+                    {
+                        "summary": "done",
+                        "reply": "Updated request handled.",
+                        "planner": "test",
+                        "nextStep": "done",
+                    },
+                ]
+            )
+
+            def planner(prompt: str) -> dict:
+                prompts.append(prompt)
+                plan = next(plans)
+                if len(prompts) == 1:
+                    first_plan_ready.set()
+                    self.assertTrue(steer_submitted.wait(2))
+                return plan
+
+            bind_test_runtime_planner(gateway, planner)
+            result: dict[str, dict] = {}
+
+            def run_turn() -> None:
+                result["payload"] = gateway.runtime_message(
+                    {
+                        "session_id": "steer-session",
+                        "clientTurnId": "steer-owner",
+                        "message": "inspect the project",
+                    }
+                )
+
+            worker = threading.Thread(target=run_turn)
+            worker.start()
+            self.assertTrue(first_plan_ready.wait(2))
+            steer = gateway.submit_runtime_steer(
+                {
+                    "sessionId": "steer-session",
+                    "targetClientTurnId": "steer-owner",
+                    "clientTurnId": "steer-input",
+                    "message": "inspect the package first",
+                }
+            )
+            steer_submitted.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(steer["accepted"])
+        self.assertEqual(calls, ["vrcforge_test_steered_action"])
+        self.assertIn("inspect the package first", prompts[1])
+        self.assertNotIn("vrcforge_test_stale_action", calls)
+
+    def test_runtime_steer_during_tool_reaches_next_model_without_stale_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            tool_started = threading.Event()
+            release_tool = threading.Event()
+            prompts: list[str] = []
+
+            def running_tool(_params: dict) -> dict:
+                tool_started.set()
+                self.assertTrue(release_tool.wait(2))
+                return {"ok": True}
+
+            gateway.register_tool("vrcforge_test_running_tool", "Steer fixture.", "read/debug", running_tool)
+            gateway.register_tool("vrcforge_test_after_steer", "Steer fixture.", "read/debug", lambda _params: {"ok": True})
+            plans = iter([
+                {"summary": "run", "reply": "running", "planner": "test", "nextStep": "call_skill", "skillNeeded": True, "skillTool": "vrcforge_test_running_tool", "skillParams": {}, "continueLoop": True},
+                {"summary": "steered", "reply": "updated", "planner": "test", "nextStep": "call_skill", "skillNeeded": True, "skillTool": "vrcforge_test_after_steer", "skillParams": {}, "continueLoop": True},
+                {"summary": "done", "reply": "done", "planner": "test", "nextStep": "done"},
+            ])
+            bind_test_runtime_planner(gateway, lambda prompt: prompts.append(prompt) or next(plans))
+            result: dict[str, dict] = {}
+
+            worker = threading.Thread(target=lambda: result.setdefault("payload", gateway.runtime_message({"session_id": "steer-tool-session", "clientTurnId": "steer-tool-owner", "message": "inspect"})))
+            worker.start()
+            self.assertTrue(tool_started.wait(2))
+            steer = gateway.submit_runtime_steer({"sessionId": "steer-tool-session", "targetClientTurnId": "steer-tool-owner", "clientTurnId": "steer-tool-input", "message": "change direction"})
+            self.assertTrue(steer["accepted"])
+            release_tool.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertIn("change direction", prompts[1])
+
+    def test_desktop_bootstrap_does_not_consume_the_turn_action_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             gateway = AgentGateway(root / "config.json", root / "audit")
@@ -6857,6 +7000,14 @@ class DashboardServerTests(unittest.TestCase):
                     }
                 )
 
+            plans.append(
+                {
+                    "summary": "desktop reads completed",
+                    "reply": "Desktop reads completed.",
+                    "planner": "test",
+                    "nextStep": "done",
+                }
+            )
             plan_iterator = iter(plans)
             bind_test_runtime_planner(gateway, lambda _prompt: next(plan_iterator))
             with patch.object(gateway.desktop, "consume_computer_use_turn_grant"):
@@ -6864,10 +7015,9 @@ class DashboardServerTests(unittest.TestCase):
                     {"message": "exercise bootstrap tool-call budget", "_computerUseRequested": True}
                 )
 
-        self.assertEqual(calls, ["bootstrap", "vrcforge_test_after_bootstrap_0", "vrcforge_test_after_bootstrap_1"])
-        self.assertNotIn("vrcforge_test_after_bootstrap_2", calls)
-        self.assertTrue(payload["plan"]["toolCallLimitReached"])
-        self.assertEqual(payload["plan"]["toolCallCount"], 3)
+        self.assertEqual(calls, ["bootstrap", "vrcforge_test_after_bootstrap_0", "vrcforge_test_after_bootstrap_1", "vrcforge_test_after_bootstrap_2"])
+        self.assertEqual(payload["plan"]["nextStep"], "completion_unverified")
+        self.assertNotIn("toolCallLimitReached", payload["plan"])
 
     def test_desktop_bootstrap_runs_once_per_runtime_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7094,7 +7244,7 @@ class DashboardServerTests(unittest.TestCase):
     ) -> None:
         mock_current_api_config.return_value = _test_runtime_provider_config(model="qwen3")
 
-        def fake_request(_settings, _prompt, stream_callback=None):
+        def fake_request(_settings, _prompt, stream_callback=None, **_kwargs):
             self.assertIsNotNone(stream_callback)
             stream_callback('{"action":"reply","summary":"hel')
             stream_callback('lo"}')
@@ -7119,6 +7269,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["summary"], "hello")
         events = [call.args for call in mock_broadcast.call_args_list]
         self.assertEqual(events[0][0], "agentRuntimeDelta")
+        self.assertEqual(events[0][1]["phase"], "receiving_response")
         self.assertEqual(events[0][1]["textDelta"], "hel")
         self.assertEqual(events[0][1]["clientTurnId"], "client-stream")
         self.assertEqual(events[1][1]["textDelta"], "lo")
@@ -7140,7 +7291,7 @@ class DashboardServerTests(unittest.TestCase):
             model="deepseek-chat",
         )
 
-        def fake_request(_settings, _prompt, stream_callback=None):
+        def fake_request(_settings, _prompt, stream_callback=None, **_kwargs):
             self.assertIsNotNone(stream_callback)
             stream_callback('{"summary":"hel"')
             stream_callback(',"reply":"hello wor')
@@ -7170,7 +7321,7 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_agent_runtime_prompt_uses_full_visible_dialogue_only(self) -> None:
         captured: dict[str, str] = {}
-        def plan_fn(_settings, prompt: str, *, stream_callback=None) -> LlmPlanResponse:
+        def plan_fn(_settings, prompt: str, *, stream_callback=None, **_kwargs) -> LlmPlanResponse:
             captured["prompt"] = prompt
             return LlmPlanResponse(
                 text=json.dumps({"action": "reply", "reply": "done"}),
@@ -7230,7 +7381,7 @@ class DashboardServerTests(unittest.TestCase):
                 {"scope": "user", "kind": "preference", "text": "Global user memory"}
             )
 
-            def plan_fn(_settings, prompt: str, *, stream_callback=None) -> LlmPlanResponse:
+            def plan_fn(_settings, prompt: str, *, stream_callback=None, **_kwargs) -> LlmPlanResponse:
                 captured.append(prompt)
                 return LlmPlanResponse(
                     text=json.dumps({"action": "reply", "reply": "done"}),

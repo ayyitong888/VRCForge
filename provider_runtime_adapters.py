@@ -8,6 +8,7 @@ credential, and never executes a returned tool call.
 from __future__ import annotations
 
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
@@ -39,6 +40,8 @@ class ProviderRuntimeRequest:
     # tool-free so they cannot be mistaken for an Agent Gateway action request.
     mode: str = "planner"
     structured_output: bool = False
+    cancel_event: Any | None = None
+    stream_activity_callback: Callable[[dict[str, Any]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -119,7 +122,13 @@ class _ResponsesRequestBase:
             import httpx
         except ImportError as exc:
             raise RuntimeError("The 'openai' package is not installed. Run pip install -r requirements.txt and try again.") from exc
-        kwargs["http_client"] = httpx.Client(follow_redirects=False)
+        # Explicit bounded transport policy; OpenAI's defaults permit a
+        # 600-second read and implicit retries, which is unsafe for interactive
+        # planner turns and reasoning-only SSE streams.
+        kwargs["http_client"] = httpx.Client(
+            follow_redirects=False,
+            timeout=httpx.Timeout(connect=10.0, read=120.0, write=10.0, pool=10.0),
+        )
         return OpenAI(**kwargs)
 
     def _empty_completion_error(self) -> str:
@@ -152,10 +161,22 @@ class _ResponsesRequestBase:
         if request.max_output_tokens is not None:
             payload["max_output_tokens"] = request.max_output_tokens
         client = self._client()
+        watcher_stop = threading.Event()
+        cancel_watcher: threading.Thread | None = None
+        if request.cancel_event is not None:
+            def close_on_cancel() -> None:
+                while not watcher_stop.is_set():
+                    if request.cancel_event.wait(0.05):
+                        close = getattr(client, "close", None)
+                        if callable(close):
+                            close()
+                        return
+            cancel_watcher = threading.Thread(target=close_on_cancel, name="vrcforge-responses-cancel", daemon=True)
+            cancel_watcher.start()
         try:
             if request.stream_callback is not None:
-                return self._consume_stream(
-                    client.responses.create(**payload, stream=True), request.stream_callback, planner_mode=request.mode == "planner"
+                    return self._consume_stream(
+                    client.responses.create(**payload, stream=True), request.stream_callback, planner_mode=request.mode == "planner", activity_callback=request.stream_activity_callback
                 )
             for attempt in range(2):
                 try:
@@ -168,6 +189,9 @@ class _ResponsesRequestBase:
                         raise
             raise AssertionError("bounded Responses retry loop exhausted unexpectedly")
         finally:
+            watcher_stop.set()
+            if cancel_watcher is not None:
+                cancel_watcher.join(0.2)
             close = getattr(client, "close", None)
             if callable(close):
                 close()
@@ -281,7 +305,7 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
             raise RuntimeError(f"{self._provider_label} planner action is invalid.")
         return json.dumps(arguments, ensure_ascii=False)
 
-    def _consume_stream(self, stream: Any, callback: Callable[[str], None], *, planner_mode: bool) -> ProviderRuntimeResponse:
+    def _consume_stream(self, stream: Any, callback: Callable[[str], None], *, planner_mode: bool, activity_callback: Callable[[dict[str, Any]], None] | None = None) -> ProviderRuntimeResponse:
         text_parts: list[str] = []
         tool_args: list[str] = []
         tool_item: Any = None
@@ -289,6 +313,9 @@ class _ResponsesProtocolAdapter(_ResponsesRequestBase):
         final_seen = False
         for event in stream:
             event_type = str(_value(event, "type") or "")
+            if "reasoning" in event_type or "summary" in event_type:
+                if activity_callback is not None:
+                    activity_callback({"kind": "reasoning_activity"})
             if event_type in {"response.failed", "response.incomplete"}:
                 raise RuntimeError(f"{self._provider_label} stream did not complete.")
             if event_type == "response.output_text.delta":

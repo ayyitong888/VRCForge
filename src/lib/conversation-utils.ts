@@ -216,10 +216,10 @@ export function copyableAgentDialogueText(response: AgentRuntimeResponse): strin
 }
 
 export function conversationItemText(item: ConversationItem, _t: TFunction): string {
-  if (item.type !== "agent") {
-    return "";
+  if (item.type === "user") {
+    return item.text;
   }
-  return copyableAgentDialogueText(item.response);
+  return item.type === "agent" ? copyableAgentDialogueText(item.response) : "";
 }
 
 export function latestConversationItemId(

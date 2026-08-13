@@ -39,13 +39,22 @@ Each item ends with its version history in this exact form:
 
 ### AGT-002 — Bounded Agent tool loop
 
-- Contract: each step is `plan -> admit/approve -> execute -> canonical result
-  -> refeed -> verify -> next plan`. Action identity survives approval,
-  execution, restart, result delivery and verification.
-- Forbidden regression: no unlimited call chain, missing result refeed,
-  completed-action replay or hidden retry of an ambiguous side effect.
-- Acceptance: task-loop, continuation, cancellation, background and full-tree
-  tests; the per-turn tool budget remains enforced.
+- Priority: P0.
+- Contract: an ordinary multi-step loop continues until the Runtime reaches a
+  terminal outcome; it has no hard stop after three calls. A per-turn budget of
+  25 remains a safety ceiling, not a normal completion rule. Desktop bootstrap
+  work has its own session budget/account and cannot consume or reset the
+  ordinary loop budget. Each step is `plan -> admit/approve -> execute ->
+  canonical result -> refeed -> verify -> next plan`; retries after repeated
+  failure, pending approval, and completion verification remain explicit,
+  identity-bound Runtime states.
+- Forbidden regression: no unlimited chain, arbitrary three-call cutoff,
+  missing result refeed, completed-action replay, hidden retry of an ambiguous
+  side effect, or budget sharing between desktop bootstrap and the ordinary
+  loop.
+- Acceptance: failure-first tests prove a safe four-step loop, the 25-call
+  ceiling, separate desktop accounting, repeated-failure/approval/completion
+  states, cancellation and full-tree identity preservation.
 - [首次实现: 1.2.0] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ### AGT-003 — Runtime-owned completion
@@ -97,6 +106,35 @@ Each item ends with its version history in this exact form:
 - Acceptance: `tests/test-path-to-skill-context.mjs` covers the positive special
   case and fail-closed negatives; release evidence includes the exact packaged
   Skill/Path-to-Skill report.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
+### AGT-007 — Non-CoT runtime phase presentation
+
+- Priority: P0.
+- Contract: user-visible progress uses a fixed allowlisted phase set and a
+  spinner while work is active, with short safe commentary only. Runtime phase
+  labels are not model text and never expose reasoning, chain-of-thought,
+  hidden traces or arbitrary caller-supplied labels.
+- Forbidden regression: no `reasoning`, `chain_of_thought`, hidden trace,
+  arbitrary `label`, or raw model scratchpad may appear in timeline,
+  notification, sidebar or composer progress.
+- Acceptance: phase allowlist, spinner-in-every-active-state and adversarial
+  label/CoT redaction tests, including empty and mid-tool states.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
+### AGT-008 — Same-turn steer and bounded follow-up queue
+
+- Priority: P0.
+- Contract: an accepted steer is captured by CAS identity and injected after
+  the current tool batch, before the next LLM request. Frozen write authority,
+  approval, checkpoint and verification semantics do not change. Follow-ups
+  preserve FIFO order, cap at eight, expose an explicit user button, and are
+  cancelled and cleaned up on terminal/cancelled runs.
+- Forbidden regression: no steer injection during a tool batch, write-scope
+  widening, reordered/uncapped follow-ups, hidden auto-send, duplicate replay,
+  or orphaned queue after cancellation.
+- Acceptance: CAS race tests cover batch-boundary injection, frozen write
+  identity, FIFO/8-cap, explicit-button gating and cancellation cleanup.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ## Approval, write and recovery contracts
@@ -204,12 +242,15 @@ Each item ends with its version history in this exact form:
 
 ### UX-005 — Edit and copy behavior
 
-- Contract: editing occurs inline on the latest sent user bubble. Copy copies
-  only visible Agent natural-language reply text. Copy success/failure receives
-  a dismissible transient notice.
-- Forbidden regression: no editing in the new-message composer, no Planner/
-  tool/result JSON in copied text and no response-rating thumbs UI.
-- Acceptance: chat timeline and clipboard failure tests.
+- Contract: user and Agent prose each expose copy of their visible prose only;
+  Planner/tool/result JSON, hidden traces and attachments are excluded. Editing
+  remains available on the latest sent user bubble through a usable full-width
+  editing surface, then re-submits with the original turn identity rules.
+  Copy success/failure receives a dismissible transient notice.
+- Forbidden regression: no Agent-only copy restriction, unusable narrow edit
+  field, Planner/tool/result JSON in copied text or response-rating thumbs UI.
+- Acceptance: timeline tests cover user+Agent copy payloads, full-width edit
+  interaction, clipboard failure and exclusion of non-prose content.
 - [首次实现: 待考证] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ### UX-006 — Transient failure notice
@@ -220,6 +261,38 @@ Each item ends with its version history in this exact form:
 - Forbidden regression: no silent failure, raw error dump, upper-corner
   placement or modal interaction lock.
 - Acceptance: toast timing/style/i18n tests and packaged visual review.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
+### UX-007 — Timeline-owned execution evidence
+
+- Priority: P0.
+- Contract: execution evidence remains in the chronological timeline and its
+  bounded approval/checkpoint/rollback surfaces. Neither the chat center nor
+  the project right rail exposes a central Run Ledger. Save-as-Skill is allowed
+  only when `response.clientTurnId` has exactly one match in the current
+  `runtimeRuns` and the bounded summary extraction succeeds; missing,
+  duplicate, stale or cross-conversation mappings fail closed.
+- Forbidden regression: no central ledger, detached history that changes event
+  order, approval/checkpoint/rollback removal, or ambiguous skill capture.
+- Acceptance: static UI exclusion, timeline ordering, approval/checkpoint/
+  rollback and exact-identity Save-as-Skill negative tests.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
+### UX-008 — Unified command palette
+
+- Priority: P1.
+- Contract: `+` and `/` use the same compact command-palette container. Each
+  row has an icon, short title and one-line description; unavailable actions
+  retain their reason and permission boundary. The list has a fixed maximum
+  height with scrolling, mouse hover/click and ArrowUp/ArrowDown selection,
+  Enter execution and Escape dismissal. Only real VRCForge capabilities are
+  listed; absent plugins, targets or plans are never invented.
+- Forbidden regression: no separate large explanation cards or developer-only
+  command list, unbounded input/menu growth, hidden disabled reason, or
+  unsupported capability claim.
+- Acceptance: failure-first UI contract covers shared container and row
+  association, action/command filtering, disabled reasons, max-height scroll,
+  mouse/keyboard behavior, attach fallback and dismissal/reopen behavior.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ## Vision contracts
@@ -302,6 +375,27 @@ Each item ends with its version history in this exact form:
 - Forbidden regression: no 1M-only assumption, stale value after Provider
   switch, unsynchronized controls or compaction budget ignoring the cap.
 - Acceptance: UI, persistence, turn budgeting and compaction tests.
+- [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+
+### PRV-005 — Bounded Provider transport lifecycle
+
+- Priority: P0.
+- Contract: OpenRouter and every supported OpenAI-compatible endpoint use
+  request-scoped bounded connect, first-byte, idle and overall timeouts with
+  bounded retry policy. Retry never replays an ambiguous side effect or
+  crosses Provider/origin/model boundaries. Reasoning activity may be shown
+  only through the fixed safe phase contract; chain-of-thought and arbitrary
+  labels never enter user-visible output. HTTP 200 streams that emit a
+  midstream error are terminal errors, and a terminal EOF without a complete
+  result is not success. Stop actively closes that request, releases its
+  watcher and worker, and preserves capacity for later turns.
+- Forbidden regression: no unbounded connect/read/idle/overall wait, retry
+  storm, false success on midstream error or terminal EOF, leaked request after
+  Stop, orphan watcher/worker, or capacity starvation.
+- Acceptance: fake transports exercise short connect/first-byte/idle/overall
+  thresholds, retryable versus non-retryable failures, reasoning-activity
+  redaction, HTTP-200 midstream error, terminal EOF, request-scoped Stop
+  closure, watcher/worker cleanup and post-cancel capacity reuse.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
 ## Latency and lifecycle contracts

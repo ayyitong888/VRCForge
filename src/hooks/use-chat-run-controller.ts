@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
+import { normalizeAgentRuntimePhase, type AgentRuntimeDeltaEvent } from "../lib/chat-streaming";
 import type { ChatAttachment, ChatThread, ConversationItem } from "../lib/chat-types";
 import { stripTransientConversationItems } from "../lib/chat-thread";
+import { RuntimeQueueArbitrator } from "../lib/runtime-queue-arbitration";
 import {
   collectCompactedAttachmentReferences,
   mergeCompactedAttachmentReferences,
@@ -93,7 +94,7 @@ export type PreparedTurnContext = {
   compactionGeneration?: string;
 };
 
-export type SubmitTurnResult = "started" | "queued" | "queue_full" | "failed";
+export type SubmitTurnResult = "started" | "steered" | "queued" | "queue_full" | "failed";
 
 type UseChatRunControllerParams = {
   endpoint: string;
@@ -143,7 +144,10 @@ export function useChatRunController({
   const [stopRequested, setStopRequested] = useState(false);
   const queueRef = useRef<QueuedTurn[]>([]);
   const sendingRef = useRef(false);
+  const currentTurnRef = useRef<CurrentTurn | null>(null);
   const stopRequestedRef = useRef(false);
+  const queueArbitratorRef = useRef(new RuntimeQueueArbitrator(MAX_QUEUED_TURNS));
+  const queueDispatchTailRef = useRef<Promise<void>>(Promise.resolve());
   const streamingTurnChatRef = useRef(new Map<string, string>());
   const activeTurnAbortRef = useRef<AbortController | null>(null);
   const backgroundTurnAbortRefs = useRef(new Map<string, AbortController>());
@@ -154,7 +158,8 @@ export function useChatRunController({
 
   function applyRuntimeDelta(delta: AgentRuntimeDeltaEvent) {
     const clientTurnId = String(delta.clientTurnId || "").trim();
-    if (!clientTurnId || !delta.textDelta) {
+    const phase = normalizeAgentRuntimePhase(delta.phase);
+    if (!clientTurnId || (!delta.textDelta && !phase)) {
       return;
     }
     const chatId = streamingTurnChatRef.current.get(clientTurnId);
@@ -171,7 +176,11 @@ export function useChatRunController({
       if (!item || item.type !== "streaming") {
         return chat;
       }
-      items[index] = { ...item, text: `${item.text}${delta.textDelta}` };
+      items[index] = {
+        ...item,
+        text: `${item.text}${delta.textDelta || ""}`,
+        phase: phase || (delta.textDelta ? "receiving_response" : item.phase),
+      };
       return { ...chat, items };
     });
   }
@@ -196,7 +205,8 @@ export function useChatRunController({
 
   async function submitTurn(turn: QueuedTurn): Promise<SubmitTurnResult> {
     if (sendingRef.current) {
-      if (queueRef.current.length >= MAX_QUEUED_TURNS) {
+      const reservation = queueArbitratorRef.current.reserve(turn.id, queueRef.current.length);
+      if (!reservation) {
         const message = t("chat.queueFull", { max: MAX_QUEUED_TURNS });
         setError(message);
         notifyFailure?.("send", message);
@@ -211,21 +221,61 @@ export function useChatRunController({
         sessionId: turn.sessionId || ownerChat?.sessionId || sessionId || undefined,
         projectPath: turn.projectPath || ownerChat?.projectPath || activeRuntimeProjectPath || undefined,
       };
+      const targetClientTurnId = currentTurnRef.current?.clientTurnId;
+      const dispatch = queueDispatchTailRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          if (stopRequestedRef.current) return null;
+          return recordAgentRunQueued(endpoint, {
+            sessionId: queuedTurn.sessionId,
+            clientTurnId: turn.id,
+            targetClientTurnId,
+            message: turn.text,
+            attachments: serializeChatAttachments(turn.attachments),
+            provider: turn.provider,
+            providerLabel: turn.providerLabel,
+            model: turn.model,
+            projectPath: queuedTurn.projectPath,
+            projectRoot: queuedTurn.projectPath,
+          }).catch(() => null);
+        });
+      queueDispatchTailRef.current = dispatch.then(() => undefined, () => undefined);
+      const queueResult = await dispatch;
+      queueArbitratorRef.current.settle(turn.id, {
+        acceptedSteer: queueResult?.accepted === true && queueResult.mode === "steer",
+        stopRequested: stopRequestedRef.current,
+      }, sendingRef.current);
+      const arbitration = await reservation.decision;
+      if (arbitration === "steered") {
+        updateChat(ownerChatId, (current) => ({
+          ...touchChat(current),
+          items: [
+            ...current.items,
+            {
+              id: `user-${turn.id}`,
+              type: "user",
+              text: turn.text,
+              attachments: turn.attachments,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        }));
+        return "steered";
+      }
+      if (arbitration === "drop") return "failed";
       queueRef.current.push(queuedTurn);
       setQueued([...queueRef.current]);
-      void recordAgentRunQueued(endpoint, {
-        sessionId: queuedTurn.sessionId,
-        clientTurnId: turn.id,
-        message: turn.text,
-        attachments: serializeChatAttachments(turn.attachments),
-        provider: turn.provider,
-        providerLabel: turn.providerLabel,
-        model: turn.model,
-        projectPath: queuedTurn.projectPath,
-        projectRoot: queuedTurn.projectPath,
-      })
-        .then(() => refreshRuntimeRuns(false))
-        .catch(() => undefined);
+      void refreshRuntimeRuns(false).catch(() => undefined);
+      // The active run may have reached its finally block while the queue
+      // request was in flight. In that race, take ownership of this queued
+      // turn immediately; runTurnNow re-checks sendingRef to prevent a
+      // concurrent drain from starting a second runner.
+      if ((arbitration === "start" || !sendingRef.current) && queueRef.current[0]?.id === queuedTurn.id) {
+        queueRef.current.shift();
+        setQueued([...queueRef.current]);
+        queueArbitratorRef.current.runnerStarted();
+        void submitTurn(queuedTurn);
+      }
       return "queued";
     }
 
@@ -317,14 +367,16 @@ export function useChatRunController({
     let userItemId = "";
     if (!background) {
       activeTurnAbortRef.current = abortController;
-      setCurrentTurn({
+      const activeTurn = {
         clientTurnId: turn.id,
         text: turn.text,
         startedAt,
         providerLabel: turn.providerLabel,
         model: turn.model,
         computerUseRequested: turn.computerUseRequested,
-      });
+      };
+      currentTurnRef.current = activeTurn;
+      setCurrentTurn(activeTurn);
     }
     try {
       let targetEndpoint = endpoint;
@@ -384,6 +436,7 @@ export function useChatRunController({
         type: "streaming",
         clientTurnId: turn.id,
         text: "",
+        phase: "waiting_for_model",
         providerLabel: turn.providerLabel,
         model: turn.model,
         createdAt: new Date(startedAt).toISOString(),
@@ -695,6 +748,7 @@ export function useChatRunController({
         if (activeTurnAbortRef.current === abortController) {
           activeTurnAbortRef.current = null;
         }
+        currentTurnRef.current = null;
         setCurrentTurn(null);
       }
       streamingTurnChatRef.current.delete(turn.id);
@@ -705,8 +759,11 @@ export function useChatRunController({
     stopRequestedRef.current = true;
     setStopRequested(true);
     queueRef.current = [];
+    queueArbitratorRef.current.stop();
     setQueued([]);
-    const current = currentTurn;
+    // React state can lag while a send completes; the ref is the CAS owner
+    // for the currently active turn and avoids cancelling a stale turn.
+    const current = currentTurnRef.current;
     if (current?.clientTurnId) {
       void requestAgentRunCancel(endpoint, {
         clientTurnId: current?.clientTurnId,

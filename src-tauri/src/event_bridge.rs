@@ -169,6 +169,19 @@ pub(crate) fn sanitize_backend_event(payload: serde_json::Value) -> Option<serde
         if let Some(value) = payload.get("textDelta").and_then(|value| value.as_str()) {
             event["textDelta"] = serde_json::Value::String(value.chars().take(1000).collect());
         }
+        if let Some(value) = payload.get("phase").and_then(|value| value.as_str()) {
+            if matches!(
+                value,
+                "preparing"
+                    | "waiting_for_model"
+                    | "receiving_response"
+                    | "running_tool"
+                    | "waiting_for_approval"
+                    | "verifying"
+            ) {
+                event["phase"] = serde_json::Value::String(value.to_string());
+            }
+        }
         if let Some(value) = payload.get("done").and_then(|value| value.as_bool()) {
             event["done"] = serde_json::Value::Bool(value);
         }

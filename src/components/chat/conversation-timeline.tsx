@@ -1,11 +1,10 @@
-import { AlertTriangle, ChevronDown, ChevronRight, Eye, ListChecks, Pencil, Sparkles, TerminalSquare, Wrench } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
 import { ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { presentApproval } from "../../lib/approval-presentation";
-import type { AgentApproval, AgentReasoningTrace, AgentRuntimeResponse, AgentShellResult, AgentSkillResult } from "../../lib/api";
+import type { AgentApproval, AgentRuntimeResponse, AgentShellResult, AgentSkillResult } from "../../lib/api";
 import type { ApprovalActionState } from "../../lib/chat-types";
-import { thinkingTraceLabel } from "../../lib/provider-ui";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -192,12 +191,6 @@ function buildAgentTimelineRowsFromSteps({
     }
     if (normalizedKind === "reasoning") {
       rows.push(
-        <ReasoningTracePanel
-          key={rowKey}
-          trace={response.reasoning}
-          fallbackLabel={providerLine}
-          elapsedSeconds={elapsedSeconds}
-        />,
       );
       continue;
     }
@@ -435,11 +428,6 @@ function buildLegacyAgentTimelineRows({
       </RunRow>,
     );
   }
-  if (response.plan.nextStep || response.reasoning || response.write || response.skill || response.shell || response.vision || approval || shell?.error) {
-    rows.push(
-      <ReasoningTracePanel key="reasoning" trace={response.reasoning} fallbackLabel={providerLine} elapsedSeconds={elapsedSeconds} />,
-    );
-  }
   if (vision) {
     rows.push(
       <RunRow
@@ -650,64 +638,6 @@ function nextStepLabel(step: OrderedAgentStep["step"]): string {
   }
   return "";
 }
-export function ReasoningTracePanel({
-  trace,
-  fallbackLabel,
-  elapsedSeconds,
-  timelineOrder,
-}: {
-  trace?: AgentReasoningTrace;
-  fallbackLabel: string;
-  elapsedSeconds?: number;
-  timelineOrder?: number;
-}) {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const items = (trace?.items || []).filter((item) => (item.text || "").trim() || item.opaque);
-  if (!items.length) {
-    return null;
-  }
-  const status = thinkingTraceLabel(trace?.provider || trace?.providerLabel || fallbackLabel, trace?.model || "");
-  const provider = trace?.providerLabel || trace?.provider || fallbackLabel || "model";
-  const model = trace?.model || "";
-  const title = model ? `${status} · ${provider} · ${model}` : `${status} · ${provider}`;
-  return (
-    <div className="text-muted-foreground" style={timelineOrder !== undefined ? { order: timelineOrder } : undefined}>
-      <button
-        type="button"
-        onClick={() => setOpen((value) => !value)}
-        className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left transition-colors hover:bg-muted/50"
-      >
-        {open ? (
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-        )}
-        <Sparkles className="h-3.5 w-3.5 shrink-0" />
-        <span className="min-w-0 truncate text-xs">{title}</span>
-        {elapsedSeconds ? <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{formatDuration(elapsedSeconds)}</span> : null}
-        <span className={cn("shrink-0 text-xs", trace?.redacted ? "text-amber-600" : "text-muted-foreground")}>
-          {items.length}
-        </span>
-      </button>
-      {open ? (
-        <div className="ml-6 mt-1 space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">
-          <DataLine label={t("thinking.provider")} value={provider} />
-          {model ? <DataLine label={t("thinking.model")} value={model} mono /> : null}
-          {trace?.source ? <DataLine label={t("thinking.source")} value={trace.source} mono /> : null}
-          {items.map((item, index) => (
-            <OutputBlock
-              key={`${item.title || item.kind || "reasoning"}-${index}`}
-              label={item.title || item.kind || t("thinking.reasoning")}
-              value={item.opaque ? t("thinking.opaqueRetained") : t("thinking.hiddenSummary")}
-            />
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 export function RunRow({
   icon,
   title,

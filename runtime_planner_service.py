@@ -1008,6 +1008,7 @@ class RuntimePlannerService:
             cause_code: str,
             phase: str,
             planner_label: str,
+            transport_phase: str = "",
         ) -> dict[str, object]:
             post_tool = phase == "post_tool"
             invalid_response = cause_code == "planner_invalid_response"
@@ -1060,6 +1061,8 @@ class RuntimePlannerService:
                 "continueLoop": False,
                 "nextStep": "planner_failed",
             }
+            if transport_phase in {"first_byte", "idle", "overall"}:
+                plan["plannerFailure"]["transportPhase"] = transport_phase
             if not_configured:
                 plan["providerConnected"] = False
             elif post_tool:
@@ -1125,6 +1128,11 @@ class RuntimePlannerService:
             ):
                 return "provider_connection_failed"
             return "provider_request_failed"
+
+    @staticmethod
+    def _planner_transport_phase(exc: Exception) -> str:
+            phase = str(exc.__dict__.get("phase") or "").strip().lower()
+            return phase if phase in {"first_byte", "idle", "overall"} else ""
 
     def validate_tool_arguments(
             self,
@@ -1199,6 +1207,7 @@ class RuntimePlannerService:
                     cause_code=self._planner_failure_code(exc),
                     phase=phase,
                     planner_label=str(planner_label or "").strip(),
+                    transport_phase=self._planner_transport_phase(exc),
                 )
             if not isinstance(payload, dict):
                 return self._planner_failure_plan(

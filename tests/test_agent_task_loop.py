@@ -909,6 +909,32 @@ def test_provider_request_count_survives_an_async_task_boundary() -> None:
     assert resumed.approval_seed()["providerRequestCount"] == 2
 
 
+def test_tool_call_count_survives_an_async_task_boundary_beyond_three() -> None:
+    loop = AgentTaskLoop("continue after approval", session_id="session-1")
+    seed = loop.approval_seed(
+        requested_tool="vrcforge_apply_shader_tuning",
+        requested_arguments={"avatarPath": "Avatar"},
+        tool_calls_used=7,
+    )
+    context = approval_task_context(
+        seed,
+        tool="vrcforge_apply_shader_tuning",
+        arguments={"avatarPath": "Avatar"},
+    )
+    assert context is not None
+    completion = approval_completion(
+        context,
+        raw_result={"ok": True},
+        outcome=ok_outcome("applied"),
+    )
+    assert completion is not None
+
+    resumed = AgentTaskLoop.from_approval_context(context, completion)
+
+    assert resumed.tool_calls_used == 7
+    assert resumed.approval_seed()["toolCallsUsed"] == 7
+
+
 def test_managed_capture_identity_survives_beyond_the_bounded_action_window() -> None:
     loop = AgentTaskLoop("capture, inspect, then audit", session_id="session-visual")
     capture_arguments = {"angles": ["front", "back"]}

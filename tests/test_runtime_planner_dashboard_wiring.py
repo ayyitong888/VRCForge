@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -123,9 +125,19 @@ def test_model_worker_routes_three_visual_journey_samples_through_one_turn_owner
         ]
     )
 
-    def request(settings, prompt: str, *, stream_callback=None) -> LlmPlanResponse:
+    def request(
+        settings,
+        prompt: str,
+        *,
+        stream_callback=None,
+        stream_activity_callback=None,
+        cancel_event=None,
+    ) -> LlmPlanResponse:
         settings_seen.append(settings)
         prompts.append(prompt)
+        assert callable(stream_callback)
+        assert callable(stream_activity_callback)
+        assert cancel_event is not None
         return LlmPlanResponse(text=next(responses), reasoning={}, usage={})
 
     turn_context = {
@@ -177,6 +189,61 @@ def test_model_worker_routes_three_visual_journey_samples_through_one_turn_owner
     assert all(settings.llm_model == config.model for settings in settings_seen)
     assert all(result.planner_label.endswith(config.model) for result in results)
     assert model.active_call_count() == 0
+
+
+def test_four_cancelled_provider_workers_release_capacity_and_fifth_enters() -> None:
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    config = fixture_config()
+    calls = 0
+    def request(_settings, _prompt, *, stream_callback=None, cancel_event=None, **_kwargs):
+        nonlocal calls
+        calls += 1
+        while not cancel_event.is_set():
+            time.sleep(0.001)
+        raise RuntimeError("cancelled")
+    context = {"sessionId":"s", "turnId":"t", "clientTurnId":"c"}
+    with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=config), \
+         patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()), \
+         patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request), \
+         patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "stream_context", return_value=context), \
+         patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "cancel_requested", return_value=True):
+        with binding.bind({"provider":"custom", "model":"fixture-model"}):
+            model = dashboard_server._RuntimePlannerModel(binding)
+            for _ in range(5):
+                with pytest.raises(dashboard_server.RuntimePlannerProviderCancelledError):
+                    model.plan("cancel")
+                assert model.active_call_count() == 0
+    assert calls == 5
+
+
+@pytest.mark.parametrize("phase,activity", [("first_byte", False), ("idle", True), ("overall", True)])
+def test_provider_deadline_errors_are_structured_and_reclaim_worker(phase: str, activity: bool) -> None:
+    binding = dashboard_server._RuntimePlannerProviderTurnBinding()
+    config = fixture_config()
+    context = {"sessionId":"s", "turnId":"t", "clientTurnId":"c"}
+    def request(_settings, _prompt, *, stream_activity_callback=None, cancel_event=None, **_kwargs):
+        if activity:
+            stream_activity_callback({"kind":"reasoning_activity"})
+        while not cancel_event.is_set():
+            if activity and phase == "overall":
+                stream_activity_callback({"kind":"reasoning_activity"})
+            time.sleep(0.005)
+        raise RuntimeError("closed")
+    with patch.object(dashboard_server.PROVIDER_CONFIGURATION, "current_api_config", return_value=config), \
+         patch.object(dashboard_server.PROVIDER_TEXT_PROBE, "probe_settings", return_value=SimpleNamespace()), \
+         patch.object(dashboard_server, "request_llm_plan_with_metadata", side_effect=request), \
+         patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "stream_context", return_value=context), \
+         patch.object(type(dashboard_server.AGENT_GATEWAY.runtime_sessions), "cancel_requested", return_value=False):
+        with binding.bind({"provider":"custom", "model":"fixture-model"}):
+            model = dashboard_server._RuntimePlannerModel(binding)
+            model._FIRST_BYTE_TIMEOUT_SECONDS = 0.03
+            model._IDLE_TIMEOUT_SECONDS = 0.03
+            model._OVERALL_TIMEOUT_SECONDS = 0.05
+            with pytest.raises(dashboard_server.RuntimePlannerProviderTimeoutError) as raised:
+                model.plan("timeout")
+            assert raised.value.code == "provider_timeout"
+            assert raised.value.phase == phase
+            assert model.active_call_count() == 0
 
 
 def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() -> None:

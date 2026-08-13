@@ -5068,23 +5068,82 @@ async function invokeContextualReadinessRuntime(sessionId) {
       },
       timeoutMs: 180000,
     });
-    return payload?.skill || {};
+    return payload || {};
   } finally {
     plannerProvider.finishToolSelection(selection);
   }
 }
 
-async function exerciseContextualPathToSkillUi(report, cdp) {
+async function persistContextualRuntimeResponse(cdp, chat, response) {
+  const current = await appApi("/api/app/chats");
+  if (current?.writeBlocked === true || (Array.isArray(current?.recoveries) && current.recoveries.length > 0)) {
+    throw new Error("Contextual Path-to-Skill response could not be persisted; chat storage is blocked.");
+  }
+  const now = new Date().toISOString();
+  const clientTurnId = String(response?.clientTurnId || "");
+  if (!clientTurnId) throw new Error("Contextual Path-to-Skill runtime returned no clientTurnId.");
+  const stored = (Array.isArray(current?.chats) ? current.chats : []).find((candidate) => candidate?.id === chat.id) || chat;
+  const nextChat = {
+    ...stored,
+    sessionId: String(response?.sessionId || response?.session_id || chat.sessionId),
+    updatedAt: now,
+    items: [
+      {
+        id: `user-${clientTurnId}`,
+        type: "user",
+        text: "Contextual Path-to-Skill readiness capture.",
+        createdAt: now,
+      },
+      {
+        id: String(response?.turnId || response?.turn_id || `agent-${clientTurnId}`),
+        type: "agent",
+        response,
+        providerLabel: String(response?.plan?.plannerLabel || "packaged-skill-context-probe"),
+        model: "",
+        createdAt: now,
+      },
+    ],
+  };
+  const chats = (Array.isArray(current?.chats) ? current.chats : [])
+    .filter((candidate) => String(candidate?.id || "") !== chat.id);
+  await tauriInvoke(cdp, "save_chats", {
+    request: {
+      body: {
+        chats: [...chats, nextChat],
+        sourceRevisions: Array.isArray(current?.sources) ? current.sources : [],
+      },
+      timeoutMs: 60000,
+    },
+  });
+  await reloadRenderer(cdp);
+  const activation = await waitForEval(
+    cdp,
+    `(() => {
+      const chatId = ${JSON.stringify(chat.id)};
+      const row = document.querySelector('[data-vrcforge-chat-id="' + CSS.escape(chatId) + '"]');
+      const target = row?.querySelector(':scope > button');
+      if (!target) return { ok: false };
+      target.click();
+      return { ok: true };
+    })()`,
+    30000,
+  );
+  if (activation?.ok !== true) throw new Error("Contextual Path-to-Skill response chat could not be reactivated.");
+  return clientTurnId;
+}
+
+async function exerciseContextualPathToSkillUi(report, cdp, clientTurnId) {
   const result = await evalValue(
     cdp,
     `(async () => {
       const sleep = (ms) => new Promise((resolveWait) => setTimeout(resolveWait, ms));
       const deadline = Date.now() + 60000;
       const checks = {
-        activityPanelFound: false,
-        activityPanelOpened: false,
+        centralRuntimeLedgerAbsent: false,
+        matchedAgentMessageFound: false,
         environmentPanelFound: false,
         operationOutsideEnvironmentPanel: false,
+        operationInMatchedAgentMessage: false,
         saveOperationButtonFound: false,
         prefillBadgeFound: false,
         operationTextareaFound: false,
@@ -5094,43 +5153,39 @@ async function exerciseContextualPathToSkillUi(report, cdp) {
         structuredSummary: false,
       };
       let target;
-      let activityPanelOpened = false;
       while (Date.now() < deadline) {
-        const activityPanel = document.querySelector('[data-vrcforge-runtime-activity-panel]');
         const environmentPanel = document.querySelector('[data-vrcforge-environment-status]');
-        checks.activityPanelFound = Boolean(activityPanel);
+        const agentMessage = document.querySelector(
+          '[data-vrcforge-agent-client-turn="' + CSS.escape(${JSON.stringify(clientTurnId)}) + '"]',
+        );
+        checks.centralRuntimeLedgerAbsent = !document.querySelector('[data-vrcforge-runtime-activity-panel]');
+        checks.matchedAgentMessageFound = Boolean(agentMessage);
         checks.environmentPanelFound = Boolean(environmentPanel);
-        if (activityPanel && !activityPanelOpened) {
-          if (!activityPanel.querySelector('[data-vrcforge-current-run-ledger]')) {
-            activityPanel.querySelector(':scope > button')?.click();
-          }
-          activityPanelOpened = true;
-          checks.activityPanelOpened = true;
-          await sleep(100);
-        }
-        target = document.querySelector(
+        target = agentMessage?.querySelector(
           'button[data-vrcforge-save-operation-as-skill][data-vrcforge-save-operation-tool="vrcforge_build_test_readiness"]',
         );
         if (target) {
           checks.operationOutsideEnvironmentPanel = !environmentPanel || !environmentPanel.contains(target);
-          if (checks.operationOutsideEnvironmentPanel) break;
+          checks.operationInMatchedAgentMessage = agentMessage.contains(target);
+          if (checks.centralRuntimeLedgerAbsent && checks.operationOutsideEnvironmentPanel && checks.operationInMatchedAgentMessage) break;
         }
         await sleep(200);
       }
-      checks.saveOperationButtonFound = Boolean(target && checks.operationOutsideEnvironmentPanel);
+      checks.saveOperationButtonFound = Boolean(
+        target
+        && checks.centralRuntimeLedgerAbsent
+        && checks.operationOutsideEnvironmentPanel
+        && checks.operationInMatchedAgentMessage
+      );
       if (!checks.saveOperationButtonFound) {
         const observedTools = [...document.querySelectorAll('button[data-vrcforge-save-operation-as-skill]')]
           .map((button) => button.getAttribute("data-vrcforge-save-operation-tool") || "")
           .filter((value) => /^vrcforge_[a-z0-9_]+$/.test(value))
           .slice(0, 10);
-        const observedRuns = [...document.querySelectorAll('[data-vrcforge-runtime-run-tool]')]
+        const observedAgentTurns = [...document.querySelectorAll('[data-vrcforge-agent-client-turn]')]
           .slice(0, 10)
-          .map((row) => ({
-            tool: row.getAttribute("data-vrcforge-runtime-run-tool") || "",
-            status: row.getAttribute("data-vrcforge-runtime-run-status") || "",
-            capturable: row.getAttribute("data-vrcforge-runtime-run-capturable") === "true",
-          }));
-        return { ok: false, failureStage: "save-operation-button", checks, observedTools, observedRuns };
+          .map((row) => row.getAttribute("data-vrcforge-agent-client-turn") || "");
+        return { ok: false, failureStage: "save-operation-button", checks, observedTools, observedAgentTurns };
       }
       target.click();
       while (Date.now() < deadline) {
@@ -5506,17 +5561,18 @@ async function runUiAcceptance(report, cdp, signerFingerprint, records) {
   console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-runtime:start`);
   const contextualRuntime = await invokeContextualReadinessRuntime(contextualChat.sessionId);
   console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-runtime:done`);
-  const contextualReadiness = contextualRuntime?.result;
+  const contextualReadiness = contextualRuntime?.skill?.result;
   if (
-    contextualRuntime?.ok !== true
-    || String(contextualRuntime?.status || "") !== "executed"
+    contextualRuntime?.skill?.ok !== true
+    || String(contextualRuntime?.skill?.status || "") !== "executed"
     || !contextualReadiness
     || typeof contextualReadiness !== "object"
   ) {
     addAssertion(report, "contextual Path-to-Skill readiness runtime did not execute successfully");
   }
+  const contextualClientTurnId = await persistContextualRuntimeResponse(cdp, contextualChat, contextualRuntime);
   console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-prefill:start`);
-  await exerciseContextualPathToSkillUi(report, cdp);
+  await exerciseContextualPathToSkillUi(report, cdp, contextualClientTurnId);
   console.log(`[skill-probe] ${new Date().toISOString()} ui.contextual-prefill:done`);
   console.log(`[skill-probe] ${new Date().toISOString()} ui.skills-workspace:start`);
   const opened = await openSkillsWorkspace(cdp);

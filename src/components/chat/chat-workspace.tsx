@@ -1,7 +1,7 @@
 import { AlertTriangle, Loader2, MonitorUp, X } from "lucide-react";
 import { useMemo, type FormEvent, type ReactNode, type Ref } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentApproval, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, PermissionState } from "../../lib/api";
+import type { AgentApproval, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
 import type {
   ApprovalActionState,
   ChatAttachment,
@@ -16,6 +16,7 @@ import { AgentQuestionCard } from "./agent-question-card";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard, UserImageAttachments } from "./conversation-card";
 import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-card";
+import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 
 export type QueuedChatTurn = {
   id: string;
@@ -29,6 +30,7 @@ export function ChatWorkspace({
   input,
   setInput,
   sending,
+  queueAllowed,
   permission,
   onSubmit,
   onStop,
@@ -79,13 +81,15 @@ export function ChatWorkspace({
   onModifyApproval,
   onImportAttachment,
   onOpenDoctor,
-  activityPanel,
+  runtimeRuns,
+  onSaveOperationAsSkill,
   subAgentPanel,
 }: {
   projectPromptTitle: string;
   input: string;
   setInput: (value: string) => void;
   sending: boolean;
+  queueAllowed: boolean;
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
   onStop?: () => void;
@@ -136,7 +140,8 @@ export function ChatWorkspace({
   onModifyApproval: (approval: AgentApproval) => void;
   onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenDoctor: () => void;
-  activityPanel?: ReactNode;
+  runtimeRuns: AgentRuntimeRun[];
+  onSaveOperationAsSkill: (summary: PathToSkillOperationSummary) => void;
   subAgentPanel?: ReactNode;
 }) {
   const { t } = useTranslation();
@@ -152,6 +157,7 @@ export function ChatWorkspace({
       input={input}
       setInput={setInput}
       sending={sending}
+      queueAllowed={queueAllowed}
       permission={permission}
       onSubmit={onSubmit}
       onStop={onStop}
@@ -203,7 +209,6 @@ export function ChatWorkspace({
               />
             </div>
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
-            {activityPanel}
             {subAgentPanel}
             {!approvalComposer ? composer(false) : null}
           </div>
@@ -235,6 +240,9 @@ export function ChatWorkspace({
           />
           {conversation.map((item) => {
             const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
+            const capturedOperation = item.type === "agent"
+              ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
+              : null;
             return (
               <ConversationCard
                 key={item.id}
@@ -258,6 +266,9 @@ export function ChatWorkspace({
                 onModifyApproval={onModifyApproval}
                 onImportAttachment={onImportAttachment}
                 onOpenDoctor={onOpenDoctor}
+                saveOperationSummary={capturedOperation?.summary}
+                saveOperationTool={capturedOperation?.tool}
+                onSaveOperationAsSkill={onSaveOperationAsSkill}
               />
             );
           })}
@@ -288,7 +299,6 @@ export function ChatWorkspace({
               </div>
             );
           })}
-          {activityPanel}
           {subAgentPanel}
           <div ref={conversationEndRef} />
         </div>

@@ -2,6 +2,7 @@ import {
   Bot,
   Check,
   Copy,
+  FilePlus2,
   Loader2,
   MessageSquare,
   Pencil,
@@ -15,7 +16,9 @@ import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import type { AgentApproval } from "../../lib/api";
 import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../../lib/chat-types";
+import type { AgentRuntimePhase } from "../../lib/chat-streaming";
 import { copyableAgentDialogueText } from "../../lib/conversation-utils";
+import type { PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { displaySubAgentStatus, subAgentRoleLabel, subAgentStatusTone } from "../../lib/subagent-ui";
 import { cn, formatCount } from "../../lib/utils";
 import { Badge } from "../ui/badge";
@@ -45,6 +48,9 @@ export function ConversationCard({
   onModifyApproval,
   onImportAttachment,
   onOpenDoctor,
+  saveOperationSummary,
+  saveOperationTool,
+  onSaveOperationAsSkill,
 }: {
   item: ConversationItem;
   approval?: AgentApproval | null;
@@ -66,6 +72,9 @@ export function ConversationCard({
   onModifyApproval?: (approval: AgentApproval) => void;
   onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenDoctor?: () => void;
+  saveOperationSummary?: PathToSkillOperationSummary;
+  saveOperationTool?: string;
+  onSaveOperationAsSkill?: (summary: PathToSkillOperationSummary) => void;
 }) {
   const { t } = useTranslation();
   if (item.type === "user") {
@@ -79,7 +88,7 @@ export function ConversationCard({
     if (hasEditingState) {
       return (
         <div className="group flex justify-end">
-          <div className="relative flex max-w-[78%] flex-col items-end gap-2">
+          <div className="relative flex w-full max-w-[78%] flex-col items-end gap-2">
             {item.queuedFrom ? (
               <div className="flex items-center gap-1 rounded-full bg-muted/70 px-2 py-1 text-[11px] text-muted-foreground">
                 <MessageSquare className="h-3 w-3" />
@@ -171,6 +180,7 @@ export function ConversationCard({
           <MessageActions
             align="right"
             createdAt={item.createdAt || item.id}
+            onCopy={() => onCopyItem?.(item)}
             onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
             onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
           />
@@ -200,14 +210,11 @@ export function ConversationCard({
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
-          {item.text ? (
-            <ChatMarkdown text={item.text} />
-          ) : (
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              <span>{t("chat.executingHint")}</span>
-            </div>
-          )}
+          <div className="flex items-center gap-2 text-muted-foreground" data-vrcforge-streaming-phase={item.phase || "unknown"}>
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <span>{streamingPhaseLabel(item.phase, t)}</span>
+          </div>
+          {item.text ? <ChatMarkdown text={item.text} /> : null}
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
             <span>{item.providerLabel || displayPlanner("llm")}{item.model ? ` / ${item.model}` : ""}</span>
           </div>
@@ -336,7 +343,7 @@ export function ConversationCard({
   });
 
   return (
-    <div className="group flex justify-start">
+    <div className="group flex justify-start" data-vrcforge-agent-client-turn={response.clientTurnId || undefined}>
       <div className="relative flex w-full max-w-[85%] flex-col gap-1.5">
         {timelineRows}
         <MessageActions
@@ -344,6 +351,9 @@ export function ConversationCard({
           onCopy={copyableReply ? () => onCopyItem?.(item) : undefined}
           onRetry={canRetry ? () => onRetryItem?.(item.id) : undefined}
           onEdit={canEdit ? () => onEditItem?.(item.id) : undefined}
+          onSaveAsSkill={saveOperationSummary ? () => onSaveOperationAsSkill?.(saveOperationSummary) : undefined}
+          saveOperationTool={saveOperationTool}
+          saveOperationClientTurnId={response.clientTurnId}
         />
       </div>
     </div>
@@ -435,22 +445,47 @@ export function UserImageAttachments({
   );
 }
 
+function streamingPhaseLabel(phase: AgentRuntimePhase | undefined, t: typeof i18n.t): string {
+  switch (phase) {
+    case "preparing":
+      return t("chat.runtimePhase.preparing");
+    case "waiting_for_model":
+      return t("chat.runtimePhase.waitingForModel");
+    case "receiving_response":
+      return t("chat.runtimePhase.receivingResponse");
+    case "running_tool":
+      return t("chat.runtimePhase.runningTool");
+    case "waiting_for_approval":
+      return t("chat.runtimePhase.waitingForApproval");
+    case "verifying":
+      return t("chat.runtimePhase.verifying");
+    default:
+      return t("chat.executingHint");
+  }
+}
+
 function MessageActions({
   align = "left",
   createdAt,
   onCopy,
   onRetry,
   onEdit,
+  onSaveAsSkill,
+  saveOperationTool,
+  saveOperationClientTurnId,
 }: {
   align?: "left" | "right";
   createdAt?: string;
   onCopy?: () => void;
   onRetry?: () => void;
   onEdit?: () => void;
+  onSaveAsSkill?: () => void;
+  saveOperationTool?: string;
+  saveOperationClientTurnId?: string;
 }) {
   const { t } = useTranslation();
   const timeLabel = formatMessageTime(createdAt, i18n.language);
-  const hasActions = Boolean(timeLabel || onCopy || onRetry || onEdit);
+  const hasActions = Boolean(timeLabel || onCopy || onRetry || onEdit || onSaveAsSkill);
   if (!hasActions) {
     return null;
   }
@@ -471,6 +506,20 @@ function MessageActions({
           aria-label={t("chat.copyMessage")}
         >
           <Copy className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+      {onSaveAsSkill ? (
+        <button
+          type="button"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          onClick={onSaveAsSkill}
+          title={t("workspace.saveOperationAsSkill")}
+          aria-label={t("workspace.saveOperationAsSkill")}
+          data-vrcforge-save-operation-as-skill
+          data-vrcforge-save-operation-tool={saveOperationTool || ""}
+          data-vrcforge-save-operation-client-turn={saveOperationClientTurnId || ""}
+        >
+          <FilePlus2 className="h-3.5 w-3.5" />
         </button>
       ) : null}
       {onRetry ? (

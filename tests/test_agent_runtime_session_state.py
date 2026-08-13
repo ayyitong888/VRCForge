@@ -135,3 +135,119 @@ def test_stream_context_is_turn_local_between_threads() -> None:
         "first": {"turnId": "first"},
         "second": {"turnId": "second"},
     }
+
+
+def test_runtime_steer_mailbox_is_scoped_bounded_fifo_and_single_drain() -> None:
+    state, _lock = make_state()
+    state.begin_turn(
+        session_id="session-1",
+        turn_id="turn-1",
+        client_turn_id="client-1",
+    )
+
+    accepted = state.submit_steer(
+        session_id="session-1",
+        target_client_turn_id="client-1",
+        input_id="input-1",
+        message="inspect the package first",
+    )
+    assert accepted["accepted"] is True
+    assert accepted["mode"] == "steer"
+    assert state.submit_steer(
+        session_id="session-1",
+        target_client_turn_id="wrong-turn",
+        input_id="input-wrong",
+        message="must not cross turns",
+    )["accepted"] is False
+
+    assert state.drain_steer(
+        session_id="session-1",
+        client_turn_id="client-1",
+    ) == [
+        {"inputId": "input-1", "message": "inspect the package first"}
+    ]
+    assert state.drain_steer(session_id="session-1", client_turn_id="client-1") == []
+    assert state.submit_steer(
+        session_id="session-1", target_client_turn_id="client-1", input_id="input-1", message="replay"
+    )["reason"] == "duplicate_input"
+
+    for index in range(8):
+        assert state.submit_steer(
+            session_id="session-1",
+            target_client_turn_id="client-1",
+            input_id=f"burst-{index}",
+            message=f"message {index}",
+        )["accepted"] is True
+    assert state.submit_steer(
+        session_id="session-1",
+        target_client_turn_id="client-1",
+        input_id="overflow",
+        message="overflow",
+    )["reason"] == "mailbox_full"
+
+    state.finish_turn(session_id="session-1", client_turn_id="client-1")
+    assert state.submit_steer(
+        session_id="session-1",
+        target_client_turn_id="client-1",
+        input_id="late",
+        message="late follow-up",
+    )["reason"] == "turn_not_active"
+
+
+def test_runtime_finish_clears_client_cancel_marker() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="session-cancel", turn_id="turn-cancel", client_turn_id="client-cancel")
+    state.mark_cancel_requested(session_id="session-cancel", client_turn_id="client-cancel")
+    assert state.cancel_requested(client_turn_id="client-cancel") is True
+    state.finish_turn(session_id="session-cancel", client_turn_id="client-cancel")
+    assert state.cancel_requested(client_turn_id="client-cancel") is False
+
+
+def test_runtime_active_turns_are_exact_pairs_for_concurrent_session_turns() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="shared", turn_id="a", client_turn_id="client-a")
+    state.begin_turn(session_id="shared", turn_id="b", client_turn_id="client-b")
+    assert state.submit_steer(session_id="shared", target_client_turn_id="client-a", input_id="a1", message="a")['accepted']
+    assert state.submit_steer(session_id="shared", target_client_turn_id="client-b", input_id="b1", message="b")['accepted']
+    state.finish_turn(session_id="shared", client_turn_id="client-a")
+    assert state.submit_steer(session_id="shared", target_client_turn_id="client-b", input_id="b2", message="b2")['accepted']
+    state.mark_cancel_requested(session_id="shared", client_turn_id="client-a")
+    assert state.drain_steer(session_id="shared", client_turn_id="client-b")
+
+
+def test_discard_session_clears_every_active_turn_and_mailbox() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="discarded", turn_id="turn-a", client_turn_id="client-a")
+    state.begin_turn(session_id="discarded", turn_id="turn-b", client_turn_id="client-b")
+    assert state.submit_steer(
+        session_id="discarded",
+        target_client_turn_id="client-a",
+        input_id="input-a",
+        message="a",
+    )["accepted"]
+    state.discard_session("discarded")
+    assert state.submit_steer(
+        session_id="discarded",
+        target_client_turn_id="client-a",
+        input_id="late-a",
+        message="late",
+    )["reason"] == "turn_not_active"
+
+
+def test_stale_finish_cannot_clear_a_reused_client_turn_owner() -> None:
+    state, _lock = make_state()
+    state.begin_turn(session_id="shared", turn_id="old-turn", client_turn_id="reused-client")
+    state.begin_turn(session_id="shared", turn_id="new-turn", client_turn_id="reused-client")
+    state.finish_turn(session_id="shared", turn_id="old-turn", client_turn_id="reused-client")
+    assert state.submit_steer(
+        session_id="shared",
+        target_client_turn_id="reused-client",
+        input_id="new-owner-input",
+        message="belongs to new owner",
+    )["accepted"]
+    assert state.submit_steer(
+        session_id="discarded",
+        target_client_turn_id="client-b",
+        input_id="late-b",
+        message="late",
+    )["reason"] == "turn_not_active"

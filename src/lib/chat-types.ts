@@ -1,4 +1,5 @@
 import type { AgentContextUsage, AgentRuntimeResponse, AgentShellResult, SubAgentTask } from "./api";
+import type { AgentRuntimePhase } from "./chat-streaming";
 
 export const SELECTED_TEXT_ATTACHMENT_NAME = "Selected text";
 
@@ -117,7 +118,7 @@ export type ChatCompactionState = {
 
 export type ConversationItem =
   | { id: string; type: "user"; text: string; attachments?: ChatAttachment[]; queuedFrom?: boolean; createdAt?: string }
-  | { id: string; type: "streaming"; clientTurnId: string; text: string; providerLabel?: string; model?: string; createdAt?: string }
+  | { id: string; type: "streaming"; clientTurnId: string; text: string; phase?: AgentRuntimePhase; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "agent"; response: AgentRuntimeResponse; elapsedSeconds?: number; providerLabel?: string; model?: string; createdAt?: string }
   | { id: string; type: "result"; approvalId: string; result?: AgentShellResult; error?: string; createdAt?: string }
   | {

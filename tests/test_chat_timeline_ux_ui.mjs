@@ -34,10 +34,10 @@ assert.doesNotMatch(timeline, /deterministic-local/);
 assert.doesNotMatch(timeline, /planner\.local/);
 
 const copyBindings = card.match(/onCopy=\{copyableReply \? \(\) => onCopyItem\?\.\(item\) : undefined\}/g) || [];
-assert.equal(copyBindings.length, 1, "only the natural-language agent card may bind copy");
+assert.equal(copyBindings.length, 1, "the natural-language agent card must bind copy once");
 assert.match(card, /copyableAgentDialogueText\(response\)/);
 assert.match(card, /onCopy=\{copyableReply \? \(\) => onCopyItem\?\.\(item\) : undefined\}/);
-assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "user"\)'), card.indexOf('if \(item.type === "error"\)')), /onCopy=/);
+assert.match(card.slice(card.indexOf('if (item.type === "user")'), card.indexOf('if (item.type === "error")')), /onCopy=\{\(\) => onCopyItem\?\.\(item\)\}/);
 assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "result"\)'), card.indexOf('if \(item.type === "approval_revision"\)')), /onCopy=/);
 assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "approval_revision"\)'), card.indexOf('if \(item.type === "compact"\)')), /onCopy=/);
 assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "subagent"\)'), card.indexOf("const response = item.response")), /onCopy=/);
@@ -45,7 +45,7 @@ assert.doesNotMatch(card.slice(card.indexOf('if \(item.type === "subagent"\)'), 
 assert.match(projection, /return String\(response\.plan\?\.reply \|\| response\.plan\?\.summary \|\| ""\)/);
 assert.doesNotMatch(projection, /`Tool:|`Command:|`Write:/);
 assert.match(projection, /export function copyableAgentDialogueText/);
-assert.match(projection, /if \(item\.type !== "agent"\)/);
+assert.match(projection, /if \(item\.type === "user"\)[\s\S]*return item\.text/);
 assert.doesNotMatch(
   projection.slice(projection.indexOf("export function conversationItemText"), projection.indexOf("export function latestConversationItemId")),
   /item\.type === "result"|item\.type === "approval_revision"|item\.type === "subagent"/,

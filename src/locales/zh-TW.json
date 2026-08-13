@@ -502,6 +502,14 @@
     "stop": "停止",
     "send": "發送",
     "queue": "排隊",
+    "runtimePhase": {
+      "preparing": "正在準備請求",
+      "waitingForModel": "正在等待模型",
+      "receivingResponse": "正在接收回覆",
+      "runningTool": "正在執行工具",
+      "waitingForApproval": "正在等待審批",
+      "verifying": "正在驗證結果"
+    },
     "providerNotConfigured": "尚未設定模型 API Key。請開啟設定，或連接外部 agent。",
     "connectProviderBeforeSend": "請先連接模型供應商或外部 agent，再發送訊息。",
     "queueFull": "佇列已滿（{{max}} 條）。請等待目前任務結束，或按停止。",
@@ -535,7 +543,7 @@
     "retryMessage": "重試",
     "regenerateMessage": "重新生成",
     "copiedMessage": "已複製訊息",
-    "copyNoText": "沒有可複製的 Agent 回答文字。",
+    "copyNoText": "沒有可複製的訊息文字。",
     "copyClipboardUnavailable": "系統剪貼簿目前無法使用。",
     "copyUnknownReason": "剪貼簿拒絕了複製要求。",
     "saveEdit": "儲存",

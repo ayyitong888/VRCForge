@@ -185,6 +185,7 @@ export async function recordAgentRunQueued(
   payload: {
     sessionId?: string;
     clientTurnId: string;
+    targetClientTurnId?: string;
     message?: string;
     attachments?: AgentMessageAttachment[];
     provider?: string;
@@ -193,7 +194,14 @@ export async function recordAgentRunQueued(
     projectPath?: string;
     projectRoot?: string;
   },
-): Promise<{ ok: boolean; status?: string; event?: AgentRuntimeRun }> {
+): Promise<{
+  ok: boolean;
+  accepted?: boolean;
+  mode?: "steer" | "followup";
+  reason?: string;
+  status?: string;
+  event?: AgentRuntimeRun;
+}> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("record_agent_run_queued", { request: { ...payload, timeoutMs: 30000 } });
   }

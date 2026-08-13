@@ -502,6 +502,14 @@
     "stop": "停止",
     "send": "送信",
     "queue": "キュー",
+    "runtimePhase": {
+      "preparing": "リクエストを準備中",
+      "waitingForModel": "モデルを待機中",
+      "receivingResponse": "応答を受信中",
+      "runningTool": "ツールを実行中",
+      "waitingForApproval": "承認を待機中",
+      "verifying": "結果を検証中"
+    },
     "providerNotConfigured": "モデル API キーが未設定です。設定を開くか、外部 agent を接続してください。",
     "connectProviderBeforeSend": "送信前にモデルプロバイダまたは外部 agent を接続してください。",
     "queueFull": "キューが満杯です（{{max}} 件）。現在のターンを待つか、停止してください。",
@@ -535,7 +543,7 @@
     "retryMessage": "再試行",
     "regenerateMessage": "再生成",
     "copiedMessage": "メッセージをコピーしました",
-    "copyNoText": "コピーできる Agent の回答テキストがありません。",
+    "copyNoText": "コピーできるメッセージテキストがありません。",
     "copyClipboardUnavailable": "システムのクリップボードを利用できません。",
     "copyUnknownReason": "クリップボードがコピー要求を拒否しました。",
     "saveEdit": "保存",

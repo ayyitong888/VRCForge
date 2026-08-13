@@ -124,9 +124,9 @@ def test_question_probe_contract_covers_auth_scope_redaction_and_restart() -> No
     assert "optionScroller.scrollHeight > optionScroller.clientHeight" in source
     assert "progressInTodoPanel" in source
     assert 'document.querySelector("[data-vrcforge-agent-todo]")' in source
-    assert 'document.querySelector("[data-vrcforge-runtime-activity-panel]")' in source
-    assert "environmentPanelFound && todoPanelFound && todoInsideEnvironment && !activityInsideEnvironment" in source
-    assert "!progressInActivityPanel" in source
+    assert 'centralRuntimeLedgerAbsent = !document.querySelector("[data-vrcforge-runtime-activity-panel]")' in source
+    assert "environmentPanelFound && todoPanelFound && todoInsideEnvironment && centralRuntimeLedgerAbsent" in source
+    assert "progressInActivityPanel" not in source
     assert "questionInRightRail" in source
     assert "recommendedVisible" in source
     assert "phase.clickOption = await evalValue" in source

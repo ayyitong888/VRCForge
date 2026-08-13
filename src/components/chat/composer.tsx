@@ -1,5 +1,5 @@
 import { Archive, Camera, Check, ChevronDown, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, X } from "lucide-react";
-import { type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useRef, useState } from "react";
+import { type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { executionModeLabel, EXECUTION_MODES, permissionVisualState } from "../../lib/permission-ui";
@@ -35,6 +35,7 @@ export function Composer({
   input,
   setInput,
   sending,
+  queueAllowed = false,
   permission,
   onSubmit,
   onStop,
@@ -58,6 +59,7 @@ export function Composer({
   input: string;
   setInput: (value: string) => void;
   sending: boolean;
+  queueAllowed?: boolean;
   permission?: PermissionState;
   onSubmit: (event?: FormEvent) => void;
   onStop?: () => void;
@@ -81,12 +83,15 @@ export function Composer({
   const { t } = useTranslation();
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
+  const [paletteIndex, setPaletteIndex] = useState(0);
+  const [paletteDismissed, setPaletteDismissed] = useState(false);
   const [dragDepth, setDragDepth] = useState(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const currentMode = (permission?.executionMode || "approval") as ExecutionMode;
   const currentModeVisual = permissionVisualState(permission, currentMode);
   const canSubmit = !disabledReason && (input.trim().length > 0 || attachments.length > 0);
-  const commandActions: ComposerSlashCommand[] = actions.map((action) => ({
+  const availableActions: ComposerAction[] = actions.length ? actions : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
+  const commandActions: ComposerSlashCommand[] = availableActions.map((action) => ({
     name: action.id,
     title: action.disabled ? action.disabledReason || action.description : action.description,
     action,
@@ -107,9 +112,11 @@ export function Composer({
       }
     }
   }
-  const visibleActions: ComposerAction[] = actions.length
-    ? actions
-    : [{ id: "attach", label: t("composerAction.attach"), description: t("composerAction.attachDesc") }];
+  const paletteOpen = actionMenuOpen || (!paletteDismissed && slashMatches.length > 0);
+  const paletteCommands: ComposerSlashCommand[] = actionMenuOpen ? commandActions : slashMatches;
+  useEffect(() => {
+    setPaletteIndex((current) => Math.min(current, Math.max(0, paletteCommands.length - 1)));
+  }, [actionMenuOpen, paletteCommands.length, slashQuery]);
   const dragActive = dragDepth > 0;
   const hasDraggedFiles = (event: DragEvent) =>
     Array.from(event.dataTransfer.types || []).includes("Files") ||
@@ -181,18 +188,20 @@ export function Composer({
       onPaste={handlePaste}
       className={cn("relative rounded-3xl bg-muted/70 shadow-composer", dragActive && "ring-2 ring-primary/35")}
     >
-      {slashMatches.length > 0 ? (
-        <div className="absolute bottom-full left-0 right-0 z-20 mb-2 overflow-hidden rounded-xl border border-border bg-card shadow-panel">
-          {slashMatches.map((command) => (
+      {paletteOpen ? (
+        <div className="absolute bottom-full left-0 right-0 z-30 mb-2 max-h-72 overflow-y-auto rounded-xl border border-border bg-card p-1 shadow-panel" data-composer-command-palette>
+          {paletteCommands.map((command, index) => (
             <button
               key={command.name}
               type="button"
               data-composer-slash-command={command.name}
-              className={cn(
-                "flex w-full min-w-0 items-center gap-3 px-3 py-2 text-left hover:bg-muted",
-                command.action?.disabled ? "opacity-60" : "",
-              )}
+              data-composer-action={command.action?.id}
+              data-composer-palette-item
+              disabled={Boolean(command.action?.disabled)}
+              className={cn("flex w-full min-w-0 items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors hover:bg-muted", command.action?.disabled ? "opacity-60" : "", index === paletteIndex ? "bg-muted" : "")}
+              onMouseEnter={() => setPaletteIndex(index)}
               onClick={() => {
+                setActionMenuOpen(false);
                 if (command.action) {
                   setInput("");
                   if (command.action.id === "attach" && !command.action.disabled) {
@@ -205,8 +214,8 @@ export function Composer({
                 setInput(`/${command.name} `);
               }}
             >
-              <span className="shrink-0 font-mono text-xs text-primary">/{command.name}</span>
-              <span className="truncate text-xs text-muted-foreground">{command.title}</span>
+              <span className="shrink-0 text-muted-foreground">{command.action ? composerActionIcon(command.action.id) : <MessageSquare className="h-4 w-4" />}</span>
+              <span className="grid min-w-0 flex-1 grid-cols-[minmax(0,auto)_minmax(0,1fr)] items-center gap-3"><span className="truncate text-sm font-medium">{slashMatches.length && !actionMenuOpen ? `/${command.name}` : (command.action?.label || command.name)}</span><span className="truncate text-right text-xs text-muted-foreground">{command.title}</span></span>
             </button>
           ))}
         </div>
@@ -214,11 +223,37 @@ export function Composer({
       <div className={cn("rounded-3xl border bg-card transition-colors", dragActive ? "border-primary/50 bg-primary/5" : "border-border", compact ? "p-3" : "p-4")}>
         <textarea
           value={input}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => { setPaletteDismissed(false); setInput(event.target.value); }}
           className="min-h-[76px] w-full resize-none bg-transparent px-1 text-base outline-none placeholder:text-muted-foreground"
           placeholder={disabledReason || t("chat.inputPlaceholder")}
           disabled={Boolean(disabledReason)}
           onKeyDown={(event) => {
+            if (paletteOpen && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+              event.preventDefault();
+              setPaletteIndex((current) => event.key === "ArrowDown"
+                ? (current + 1) % Math.max(1, paletteCommands.length)
+                : (current - 1 + paletteCommands.length) % Math.max(1, paletteCommands.length));
+              return;
+            }
+            if (paletteOpen && event.key === "Escape") {
+              event.preventDefault();
+              setActionMenuOpen(false);
+              setPaletteDismissed(true);
+              return;
+            }
+            if (paletteOpen && event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+              const command = paletteCommands[paletteIndex];
+              if (command && !command.action?.disabled) {
+                event.preventDefault();
+                if (command.action) {
+                  setActionMenuOpen(false);
+                  setInput("");
+                  if (command.action.id === "attach") fileInputRef.current?.click();
+                  else onAction?.(command.action.id);
+                } else setInput(`/${command.name} `);
+                return;
+              }
+            }
             if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
               event.preventDefault();
               onSubmit();
@@ -252,42 +287,6 @@ export function Composer({
               <Plus className="h-4 w-4" />
             </button>
             {actionMenuOpen ? <div className="fixed inset-0 z-20" onClick={() => setActionMenuOpen(false)} /> : null}
-            {actionMenuOpen ? (
-              <div className="absolute bottom-[96px] left-4 z-30 w-80 rounded-lg border border-border bg-card p-1.5 shadow-panel">
-                {visibleActions.map((action) => (
-                  <button
-                    key={action.id}
-                    type="button"
-                    className={cn(
-                      "flex w-full min-w-0 items-start gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors",
-                      action.disabled ? "cursor-not-allowed opacity-55" : "hover:bg-muted",
-                    )}
-                    onClick={() => {
-                      setActionMenuOpen(false);
-                      if (action.disabled) {
-                        onAction?.(action.id);
-                        return;
-                      }
-                      if (action.id === "attach") {
-                        fileInputRef.current?.click();
-                        return;
-                      }
-                      onAction?.(action.id);
-                    }}
-                    title={action.disabled ? action.disabledReason : action.description}
-                    data-composer-action={action.id}
-                  >
-                    <span className="mt-0.5 shrink-0 text-muted-foreground">{composerActionIcon(action.id)}</span>
-                    <span className="min-w-0">
-                      <span className="block truncate font-medium">{action.label}</span>
-                      <span className="block text-xs text-muted-foreground">
-                        {action.disabled ? action.disabledReason || t("common.unavailable") : action.description}
-                      </span>
-                    </span>
-                  </button>
-                ))}
-              </div>
-            ) : null}
             <div className="relative">
               <button
                 type="button"
@@ -352,9 +351,23 @@ export function Composer({
                 </Button>
               </>
             ) : sending ? (
-              <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")} data-composer-stop>
-                <Square className="h-4 w-4" />
-              </Button>
+              <>
+                <Button type="button" variant="outline" className="h-10 w-10 rounded-full px-0" onClick={onStop} title={t("chat.stop")} data-composer-stop>
+                  <Square className="h-4 w-4" />
+                </Button>
+                {queueAllowed ? (
+                  <Button
+                    className="h-10 min-w-10 rounded-full px-3"
+                    disabled={!canSubmit}
+                    type="submit"
+                    title={t("chat.queue")}
+                    aria-label={t("chat.queue")}
+                    data-composer-send
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                ) : null}
+              </>
             ) : (
               <Button
                 className="h-10 min-w-10 rounded-full px-3"

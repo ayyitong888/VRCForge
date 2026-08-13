@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import re
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -1349,6 +1350,8 @@ def request_llm_plan_with_metadata(
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
+    cancel_event: Any | None = None,
+    stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> LlmPlanResponse:
     image_paths = normalize_reference_image_paths(reference_image_path, reference_image_paths)
     provider = normalize_provider_name(settings.llm_provider)
@@ -1371,6 +1374,8 @@ def request_llm_plan_with_metadata(
             prompt,
             image_paths,
             candidate_stream_callback,
+            cancel_event,
+            stream_activity_callback,
         )
 
     return execute_provider_protocol_negotiation(
@@ -1388,6 +1393,8 @@ def _request_llm_protocol_with_metadata(
     prompt: str,
     image_paths: Sequence[str | Path],
     stream_callback: Callable[[str], None] | None,
+    cancel_event: Any | None = None,
+    stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> LlmPlanResponse:
     if api_type == "responses":
         return request_responses_plan_with_metadata(
@@ -1395,6 +1402,8 @@ def _request_llm_protocol_with_metadata(
             prompt,
             reference_image_paths=image_paths,
             stream_callback=stream_callback,
+            cancel_event=cancel_event,
+            stream_activity_callback=stream_activity_callback,
         )
     if api_type == "generate_content":
         if normalize_provider_name(settings.llm_provider) == "vertexai":
@@ -1409,7 +1418,9 @@ def _request_llm_protocol_with_metadata(
             settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
         )
     return request_openai_compatible_plan_with_metadata(
-        settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback
+        settings, prompt, reference_image_paths=image_paths, stream_callback=stream_callback,
+        cancel_event=cancel_event,
+        stream_activity_callback=stream_activity_callback,
     )
 
 
@@ -1419,6 +1430,8 @@ def request_responses_plan_with_metadata(
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
     client_factory: Callable[..., Any] | None = None,
+    cancel_event: Any | None = None,
+    stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> LlmPlanResponse:
     """Use one configured Responses endpoint without executing returned calls."""
 
@@ -1432,7 +1445,7 @@ def request_responses_plan_with_metadata(
         api_key=settings.llm_api_key,
         base_url=settings.llm_base_url,
         client_factory=client_factory,
-        **_llm_sdk_retry_kwargs(settings),
+        **(_llm_sdk_retry_kwargs(settings) | _openrouter_transport_kwargs(settings)),
     )
     response = adapter.send_request(
         ProviderRuntimeRequest(
@@ -1443,6 +1456,8 @@ def request_responses_plan_with_metadata(
             max_output_tokens=llm_max_output_tokens(settings),
             reference_image_paths=tuple(str(path) for path in image_paths),
             stream_callback=stream_callback,
+            cancel_event=cancel_event,
+            stream_activity_callback=stream_activity_callback,
         )
     )
     source = f"{normalize_provider_name(settings.llm_provider)}-responses"
@@ -2128,12 +2143,37 @@ def _llm_sdk_retry_kwargs(settings: Settings) -> dict[str, int]:
     return {"max_retries": value}
 
 
+# Keep interactive provider calls bounded.  In particular, OpenRouter can leave
+# an SSE connection open while emitting only reasoning deltas; the SDK defaults
+# (600s read timeout and two retries) make that look like a permanently stuck
+# turn.  These are transport limits, not model-generation limits.
+_INTERACTIVE_HTTP_TIMEOUT = (10.0, 120.0, 10.0, 10.0)  # connect, read, write, pool
+
+
+def _httpx_timeout(httpx: Any) -> Any:
+    connect, read, write, pool = _INTERACTIVE_HTTP_TIMEOUT
+    return httpx.Timeout(connect=connect, read=read, write=write, pool=pool)
+
+
+def _openrouter_transport_kwargs(settings: Settings) -> dict[str, Any]:
+    if normalize_provider_name(settings.llm_provider) != "openrouter":
+        return {}
+    # Explicitly disable implicit SDK retries for interactive requests. A
+    # caller may opt into one bounded retry via Settings, but never the SDK's
+    # unbounded/default retry behaviour.
+    configured = getattr(settings, "llm_sdk_max_retries", None)
+    retries = 0 if configured is None else min(max(int(configured), 0), 1)
+    return {"max_retries": retries}
+
+
 def request_openai_compatible_plan_with_metadata(
     settings: Settings,
     prompt: str,
     reference_image_path: str | Path | None = None,
     reference_image_paths: Sequence[str | Path] | None = None,
     stream_callback: Callable[[str], None] | None = None,
+    stream_activity_callback: Callable[[dict[str, Any]], None] | None = None,
+    cancel_event: Any | None = None,
 ) -> LlmPlanResponse:
     validate_provider_api_key(settings.llm_api_key)
     if not settings.llm_base_url:
@@ -2159,13 +2199,26 @@ def request_openai_compatible_plan_with_metadata(
             ],
         ]
 
-    http_client = httpx.Client(follow_redirects=False)
+    http_client = httpx.Client(follow_redirects=False, timeout=_httpx_timeout(httpx))
+    retry_kwargs = _llm_sdk_retry_kwargs(settings)
+    retry_kwargs.update(_openrouter_transport_kwargs(settings))
     client = OpenAI(
         api_key=settings.llm_api_key or "ollama",
         base_url=settings.llm_base_url,
         http_client=http_client,
-        **_llm_sdk_retry_kwargs(settings),
+        **retry_kwargs,
     )
+    watcher_stop = threading.Event()
+    if cancel_event is not None:
+        def close_on_cancel() -> None:
+            while not watcher_stop.is_set():
+                if cancel_event.wait(0.05):
+                    _close_provider_client(client)
+                    return
+        watcher = threading.Thread(target=close_on_cancel, name="vrcforge-provider-cancel", daemon=True)
+        watcher.start()
+    else:
+        watcher = None
     try:
         request_payload = build_openai_compatible_request_payload(settings, user_content)
         if stream_callback is not None and not image_paths:
@@ -2175,22 +2228,35 @@ def request_openai_compatible_plan_with_metadata(
 
             def consume_stream(stream: Any) -> None:
                 nonlocal usage_event
+                terminal_seen = False
                 for event in stream:
-                    if getattr(event, "usage", None) is not None:
+                    error = get_value(event, "error")
+                    if error:
+                        raise RuntimeError(f"{provider_display_name(settings.llm_provider)} stream error: {stringify_provider_error(error)}")
+                    if get_value(event, "usage") is not None:
                         usage_event = event
-                    choices = getattr(event, "choices", []) or []
+                    choices = get_value(event, "choices") or []
                     if not choices:
                         continue
-                    delta = getattr(choices[0], "delta", None)
+                    finish_reason = get_value(choices[0], "finish_reason")
+                    if finish_reason is not None:
+                        if str(finish_reason).lower() in {"error", "failed"}:
+                            raise RuntimeError(f"{provider_display_name(settings.llm_provider)} stream reported finish_reason={finish_reason}.")
+                        terminal_seen = True
+                    delta = get_value(choices[0], "delta")
                     for field in ("reasoning_content", "reasoning", "thinking", "reasoning_details"):
                         value = get_value(delta, field)
                         if value:
                             reasoning_chunks.append({field: value})
-                    text = str(getattr(delta, "content", "") or "")
+                            if stream_activity_callback is not None:
+                                stream_activity_callback({"kind": "reasoning_activity"})
+                    text = str(get_value(delta, "content") or "")
                     if not text:
                         continue
                     chunks.append(text)
                     stream_callback(text)
+                if normalize_provider_name(settings.llm_provider) == "openrouter" and not terminal_seen:
+                    raise RuntimeError("OpenRouter stream ended before a terminal finish_reason.")
 
             try:
                 stream = client.chat.completions.create(
@@ -2238,6 +2304,19 @@ def request_openai_compatible_plan_with_metadata(
                 if not should_retry_without_streaming(exc, settings):
                     raise
         response = client.chat.completions.create(**request_payload)
+        response_error = get_value(response, "error")
+        if response_error:
+            raise RuntimeError(
+                f"{provider_display_name(settings.llm_provider)} returned an error: "
+                f"{stringify_provider_error(response_error)}"
+            )
+        response_choices = get_value(response, "choices") or []
+        if response_choices:
+            response_finish = get_value(response_choices[0], "finish_reason")
+            if str(response_finish or "").lower() in {"error", "failed"}:
+                raise RuntimeError(
+                    f"{provider_display_name(settings.llm_provider)} returned finish_reason={response_finish}."
+                )
         return LlmPlanResponse(
             text=extract_openai_message_text(response),
             reasoning=extract_llm_reasoning_trace(response, settings, source="openai-compatible"),
@@ -2248,6 +2327,9 @@ def request_openai_compatible_plan_with_metadata(
             raise RuntimeError(format_multimodal_error(exc, settings, True, provider_display_name(settings.llm_provider))) from exc
         raise RuntimeError(format_openai_compatible_error(exc, settings)) from exc
     finally:
+        watcher_stop.set()
+        if watcher is not None:
+            watcher.join(0.2)
         _close_provider_client(client)
         http_client.close()
 
@@ -2469,6 +2551,18 @@ def extract_openai_message_text(response: Any) -> str:
         return "\n".join(parts)
 
     return str(content or "")
+
+
+def stringify_provider_error(error: Any) -> str:
+    """Return a bounded, non-secret provider error summary."""
+
+    if isinstance(error, dict):
+        for key in ("message", "code", "type"):
+            value = error.get(key)
+            if value:
+                return str(value)[:500]
+        return "provider error"
+    return str(error)[:500]
 
 
 def extract_anthropic_message_text(response: Any) -> str:

@@ -13,6 +13,14 @@ const runtimeActivitySource = await readFile(
   new URL("../src/components/runtime/runtime-activity-panel.tsx", import.meta.url),
   "utf8",
 );
+const chatCardSource = await readFile(
+  new URL("../src/components/chat/conversation-card.tsx", import.meta.url),
+  "utf8",
+);
+const chatWorkspaceSource = await readFile(
+  new URL("../src/components/chat/chat-workspace.tsx", import.meta.url),
+  "utf8",
+);
 const appSource = await readFile(
   new URL("../src/App.tsx", import.meta.url),
   "utf8",
@@ -54,13 +62,15 @@ assert.ok(runtimeSource.includes("data-vrcforge-runtime-run-capturable="));
 assert.ok(runtimeActivitySource.includes("RuntimeRunRow"));
 assert.ok(runtimeActivitySource.includes("data-vrcforge-runtime-activity-panel"));
 assert.ok(
-  appSource.includes("activityPanel={runtimeActivityPanel}"),
-  "project chats must retain the central runtime ledger that owns Save operation as Skill",
+  !appSource.includes("RuntimeActivityPanel") && !appSource.includes("activityPanel={runtimeActivityPanel}"),
+  "the central runtime ledger must not remain in chat",
 );
 assert.ok(
-  !appSource.includes("activityPanel={projectChatWorkspace ? undefined : runtimeActivityPanel}"),
-  "project chat routing must not hide the only runtime ledger",
+  chatWorkspaceSource.includes("matchPathToSkillRuntimeOperation(item.response, runtimeRuns)"),
+  "Save operation as Skill must use the exact agent-response/runtime-run match",
 );
+assert.ok(chatCardSource.includes("data-vrcforge-save-operation-as-skill"));
+assert.ok(chatCardSource.includes("data-vrcforge-agent-client-turn="));
 assert.ok(sidebarSource.includes('semanticId="skills"'));
 assert.ok(sidebarSource.includes("data-vrcforge-sidebar-nav={semanticId}"));
 assert.ok(sidebarSource.includes("chatId={chat.id}"));
@@ -95,7 +105,7 @@ for (const selector of [
   "[data-vrcforge-skill-audit-field]",
   "[data-vrcforge-save-operation-tool=",
   "[data-vrcforge-chat-id=",
-  "[data-vrcforge-runtime-run-tool]",
+  "[data-vrcforge-agent-client-turn",
   "[data-vrcforge-sidebar-nav=",
   "[data-vrcforge-path-to-skill-panel=",
   "[data-vrcforge-path-to-skill-preview]",
@@ -105,8 +115,9 @@ for (const selector of [
 }
 assert.ok(probeSource.includes("seedAndActivateContextualRuntimeChat"));
 assert.ok(probeSource.includes("session_id: sessionId"));
-assert.ok(probeSource.includes("if (!activityPanel.querySelector('[data-vrcforge-current-run-ledger]'))"));
-assert.ok(probeSource.includes("activityPanel.querySelector(':scope > button')?.click()"));
+assert.ok(probeSource.includes("persistContextualRuntimeResponse"));
+assert.ok(probeSource.includes("checks.centralRuntimeLedgerAbsent = !document.querySelector('[data-vrcforge-runtime-activity-panel]')"));
+assert.ok(probeSource.includes("checks.operationInMatchedAgentMessage = agentMessage.contains(target)"));
 assert.ok(probeSource.includes("operationOutsideEnvironmentPanel"));
 
 console.log("skill package audit and Path-to-Skill semantic UI contract passed");

@@ -20,14 +20,25 @@ class AgentRuntimeSessionStatePorts:
 
 
 class AgentRuntimeSessionState:
-    """Own runtime sessions, cancellation markers, and turn-local stream identity."""
+    """Own runtime sessions, cancellation markers, steer mailboxes, and stream identity."""
 
-    __slots__ = ("_ports", "_sessions", "_cancelled_ids", "_stream_context")
+    __slots__ = (
+        "_ports",
+        "_sessions",
+        "_cancelled_ids",
+        "_active_turns",
+        "_steer_mailboxes",
+        "_steer_seen_ids",
+        "_stream_context",
+    )
 
     def __init__(self, ports: AgentRuntimeSessionStatePorts) -> None:
         self._ports = ports
         self._sessions: dict[str, dict[str, Any]] = {}
         self._cancelled_ids: set[str] = set()
+        self._active_turns: dict[tuple[str, str], str] = {}
+        self._steer_mailboxes: dict[tuple[str, str], list[dict[str, str]]] = {}
+        self._steer_seen_ids: dict[tuple[str, str], set[str]] = {}
         self._stream_context = threading.local()
 
     @property
@@ -38,6 +49,9 @@ class AgentRuntimeSessionState:
         with self._ports.shared_state_lock:
             self._sessions.clear()
             self._cancelled_ids.clear()
+            self._active_turns.clear()
+            self._steer_mailboxes.clear()
+            self._steer_seen_ids.clear()
 
     def session_count(self) -> int:
         with self._ports.shared_state_lock:
@@ -46,6 +60,10 @@ class AgentRuntimeSessionState:
     def discard_session(self, session_id: str) -> None:
         with self._ports.shared_state_lock:
             self._sessions.pop(session_id, None)
+            for key in [key for key in self._active_turns if key[0] == session_id]:
+                self._active_turns.pop(key, None)
+                self._steer_mailboxes.pop(key, None)
+                self._steer_seen_ids.pop(key, None)
 
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self._ports.shared_state_lock:
@@ -155,6 +173,81 @@ class AgentRuntimeSessionState:
                 self._cancelled_ids.add(turn_id)
             if client_turn_id:
                 self._cancelled_ids.add(client_turn_id)
+            if session_id and client_turn_id:
+                self._steer_mailboxes.pop((session_id, client_turn_id), None)
+
+    def begin_turn(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        client_turn_id: str,
+    ) -> None:
+        if not session_id or not client_turn_id:
+            return
+        with self._ports.shared_state_lock:
+            key = (session_id, client_turn_id)
+            self._active_turns[key] = turn_id
+            self._steer_mailboxes.setdefault(key, [])
+
+    def finish_turn(self, *, session_id: str, turn_id: str = "", client_turn_id: str) -> None:
+        if not session_id or not client_turn_id:
+            return
+        with self._ports.shared_state_lock:
+            key = (session_id, client_turn_id)
+            active_turn_id = self._active_turns.get(key)
+            if turn_id and active_turn_id != turn_id:
+                return
+            self._active_turns.pop(key, None)
+            self._steer_mailboxes.pop(key, None)
+            self._steer_seen_ids.pop(key, None)
+            # A completed turn must not leave cancellation/steer state behind
+            # that could affect a later turn reusing either identifier.
+            self._cancelled_ids.discard(client_turn_id)
+            if active_turn_id:
+                self._cancelled_ids.discard(active_turn_id)
+
+    def submit_steer(
+        self,
+        *,
+        session_id: str,
+        target_client_turn_id: str,
+        input_id: str,
+        message: str,
+    ) -> dict[str, Any]:
+        session_id = str(session_id or "").strip()[:180]
+        target_client_turn_id = str(target_client_turn_id or "").strip()[:180]
+        input_id = str(input_id or "").strip()[:180]
+        message = str(message or "").strip()[:4000]
+        if not session_id or not target_client_turn_id or not input_id or not message:
+            return {"accepted": False, "mode": "followup", "reason": "invalid_request"}
+        with self._ports.shared_state_lock:
+            key = (session_id, target_client_turn_id)
+            if key not in self._active_turns:
+                return {"accepted": False, "mode": "followup", "reason": "turn_not_active"}
+            mailbox = self._steer_mailboxes.setdefault(key, [])
+            seen_ids = self._steer_seen_ids.setdefault(key, set())
+            if input_id in seen_ids:
+                return {"accepted": False, "mode": "followup", "reason": "duplicate_input"}
+            if len(mailbox) >= 8:
+                return {"accepted": False, "mode": "followup", "reason": "mailbox_full"}
+            mailbox.append({"inputId": input_id, "message": message})
+            seen_ids.add(input_id)
+            return {
+                "accepted": True,
+                "mode": "steer",
+                "reason": "accepted",
+                "queuedCount": len(mailbox),
+            }
+
+    def drain_steer(self, *, session_id: str, client_turn_id: str) -> list[dict[str, str]]:
+        if not session_id or not client_turn_id:
+            return []
+        with self._ports.shared_state_lock:
+            key = (session_id, client_turn_id)
+            items = self._steer_mailboxes.get(key, [])
+            self._steer_mailboxes[key] = []
+            return copy.deepcopy(items)
 
     def cancel_requested(
         self,

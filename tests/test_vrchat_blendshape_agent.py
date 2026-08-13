@@ -1,6 +1,8 @@
 import json
 import sys
 import tempfile
+import threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -29,6 +31,7 @@ from vrchat_blendshape_agent import (
     request_anthropic_plan_with_metadata,
     request_gemini_plan_with_metadata,
     request_openai_compatible_plan_with_metadata,
+    request_responses_plan_with_metadata,
     request_vertex_ai_plan_with_metadata,
     validate_plan,
 )
@@ -420,6 +423,98 @@ class ProviderStreamingTests(unittest.TestCase):
             request_openai_compatible_plan_with_metadata(settings, "prompt", stream_callback=lambda _text: None)
 
         self.assertEqual([call.get("stream", False) for call in FakeOpenAI.instances[0].chat.completions.calls], [True])
+
+    def test_openrouter_reasoning_only_stream_requires_terminal_and_reports_activity(self) -> None:
+        class Completions:
+            def create(self, **kwargs):
+                return [
+                    {"choices": [{"delta": {"reasoning": "hidden"}, "finish_reason": None}]},
+                    {"choices": [{"delta": {"content": '{"reply":"ok"}'}, "finish_reason": "stop"}]},
+                ]
+
+        class Client:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=Completions())
+
+        module = types.ModuleType("openai")
+        module.OpenAI = Client
+        self.addCleanup(lambda: sys.modules.pop("openai", None))
+        sys.modules["openai"] = module
+        chunks: list[str] = []
+        activity: list[dict] = []
+        response = request_openai_compatible_plan_with_metadata(
+            make_llm_settings("openrouter", model="deepseek/deepseek-v3.2"),
+            "prompt",
+            stream_callback=chunks.append,
+            stream_activity_callback=activity.append,
+        )
+        self.assertEqual(response.text, '{"reply":"ok"}')
+        self.assertEqual(chunks, ['{"reply":"ok"}'])
+        self.assertEqual(activity, [{"kind": "reasoning_activity"}])
+
+    def test_openrouter_stream_eof_without_terminal_fails_closed(self) -> None:
+        class Completions:
+            def create(self, **kwargs):
+                return [{"choices": [{"delta": {"reasoning": "hidden"}, "finish_reason": None}]}]
+
+        class Client:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=Completions())
+
+        module = types.ModuleType("openai")
+        module.OpenAI = Client
+        self.addCleanup(lambda: sys.modules.pop("openai", None))
+        sys.modules["openai"] = module
+        with self.assertRaisesRegex(RuntimeError, "terminal finish_reason"):
+            request_openai_compatible_plan_with_metadata(
+                make_llm_settings("openrouter", model="deepseek/deepseek-v3.2"),
+                "prompt",
+                stream_callback=lambda _text: None,
+            )
+
+
+    def test_provider_cancel_watchers_return_to_baseline(self) -> None:
+        baseline = lambda: sum(
+            thread.is_alive() and thread.name in {"vrcforge-provider-cancel", "vrcforge-responses-cancel"}
+            for thread in threading.enumerate()
+        )
+        class Completions:
+            def create(self, **kwargs):
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"reply":"ok"}'))])
+        class Client:
+            def __init__(self, **kwargs):
+                self.chat = SimpleNamespace(completions=Completions())
+        module = types.ModuleType("openai")
+        module.OpenAI = Client
+        self.addCleanup(lambda: sys.modules.pop("openai", None))
+        sys.modules["openai"] = module
+        before = baseline()
+        for _ in range(3):
+            request_openai_compatible_plan_with_metadata(
+                make_llm_settings("openrouter"), "prompt", cancel_event=threading.Event()
+            )
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and baseline() != before:
+            time.sleep(0.01)
+        self.assertEqual(baseline(), before)
+
+        class Responses:
+            def create(self, **kwargs):
+                return SimpleNamespace(output_text='{"reply":"ok"}', output=[], usage={})
+        class ResponsesClient:
+            def __init__(self, **kwargs):
+                self.responses = Responses()
+            def close(self):
+                return None
+        before = baseline()
+        for _ in range(3):
+            request_responses_plan_with_metadata(
+                make_llm_settings("openrouter"), "prompt", client_factory=lambda **kwargs: ResponsesClient(**kwargs), cancel_event=threading.Event()
+            )
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and baseline() != before:
+            time.sleep(0.01)
+        self.assertEqual(baseline(), before)
 
 
 class LlmReasoningTraceTests(unittest.TestCase):

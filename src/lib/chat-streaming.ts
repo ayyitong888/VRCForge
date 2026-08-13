@@ -4,8 +4,33 @@ export type AgentRuntimeDeltaEvent = {
   turnId?: string;
   clientTurnId?: string;
   textDelta?: string;
+  phase?: string;
   done?: boolean;
 };
+
+export type AgentRuntimePhase =
+  | "preparing"
+  | "waiting_for_model"
+  | "receiving_response"
+  | "running_tool"
+  | "waiting_for_approval"
+  | "verifying";
+
+const AGENT_RUNTIME_PHASES = new Set<AgentRuntimePhase>([
+  "preparing",
+  "waiting_for_model",
+  "receiving_response",
+  "running_tool",
+  "waiting_for_approval",
+  "verifying",
+]);
+
+export function normalizeAgentRuntimePhase(value: unknown): AgentRuntimePhase | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return AGENT_RUNTIME_PHASES.has(normalized as AgentRuntimePhase)
+    ? normalized as AgentRuntimePhase
+    : undefined;
+}
 
 const STREAMING_DIALOGUE_FIELDS = ["reply", "summary"] as const;
 

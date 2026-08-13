@@ -1,7 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildPathToSkillOperationSummary } from "../src/lib/path-to-skill-context.ts";
+import {
+  buildPathToSkillOperationSummary,
+  matchPathToSkillRuntimeOperation,
+} from "../src/lib/path-to-skill-context.ts";
+
+test("agent response capture requires one exact client turn ledger match", () => {
+  const response = { clientTurnId: "client-exact" };
+  const completedRun = {
+    clientTurnId: "client-exact",
+    status: "completed",
+    skillTool: "vrcforge_build_test_readiness",
+    skillStatus: "executed",
+    steps: [{ kind: "validation", tool: "vrcforge_build_test_readiness", status: "completed" }],
+  };
+
+  const matched = matchPathToSkillRuntimeOperation(response, [
+    { ...completedRun, clientTurnId: "client-other" },
+    completedRun,
+  ]);
+  assert.equal(matched?.run, completedRun);
+  assert.equal(matched?.tool, "vrcforge_build_test_readiness");
+  assert.equal(matched?.summary.status, "completed");
+
+  assert.equal(matchPathToSkillRuntimeOperation({}, [completedRun]), null);
+  assert.equal(matchPathToSkillRuntimeOperation(response, [{ ...completedRun, clientTurnId: "client-other" }]), null);
+  assert.equal(matchPathToSkillRuntimeOperation(response, [completedRun, { ...completedRun }]), null);
+  assert.equal(matchPathToSkillRuntimeOperation(response, [{ ...completedRun, status: "failed" }]), null);
+  assert.equal(matchPathToSkillRuntimeOperation(
+    { ...response, sessionId: "session-a" },
+    [{ ...completedRun, sessionId: "session-b" }],
+  ), null);
+});
 
 test("completed structured runtime run becomes a portable operation summary", () => {
   const summary = buildPathToSkillOperationSummary({

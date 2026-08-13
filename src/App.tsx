@@ -38,7 +38,6 @@ import { DoctorWorkspace } from "./components/doctor/doctor-workspace";
 import { OptimizationWorkspace } from "./components/optimization/optimization-workspace";
 import { ProtectionWorkspace } from "./components/protection/protection-workspace";
 import { ComputerUseActivitySurface } from "./components/runtime/computer-use-activity-surface";
-import { RuntimeActivityPanel } from "./components/runtime/runtime-activity-panel";
 import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspace";
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
@@ -844,6 +843,7 @@ export default function App() {
     sending: chatRunSending,
     queued,
     currentTurn,
+    stopRequested,
     isRunning: isChatRunActive,
     submitTurn,
     runTurnNow,
@@ -883,7 +883,6 @@ export default function App() {
     loadingWorkspaceDiffPatch,
     loadingUnityStatus,
     runtimeRuns,
-    runtimeRunsError,
     desktopActions,
     activeDesktopActions,
     desktopBridge,
@@ -3279,13 +3278,6 @@ export default function App() {
   });
 
   const projectChatWorkspace = activeView === "chat" && Boolean(activeChat?.projectPath);
-  const runtimeActivityPanel = sessionId ? (
-    <RuntimeActivityPanel
-      runs={runtimeRuns}
-      error={runtimeRunsError}
-      onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
-    />
-  ) : undefined;
   const subAgentActivityPanel = (
     <SubAgentPanel
       tasks={activeSubAgentTasks}
@@ -3678,6 +3670,7 @@ export default function App() {
               input={input}
               setInput={setInput}
               sending={sending}
+              queueAllowed={chatRunSending && !stopRequested}
               permission={permission}
               onSubmit={submitMessage}
               onStop={stopInteractiveActivity}
@@ -3741,7 +3734,8 @@ export default function App() {
               onModifyApproval={modifyApprovalInComposer}
               onImportAttachment={(attachment) => void importVaultAttachment(attachment)}
               onOpenDoctor={() => void openDoctor()}
-              activityPanel={runtimeActivityPanel}
+              runtimeRuns={runtimeRuns}
+              onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
               subAgentPanel={projectChatWorkspace ? undefined : subAgentActivityPanel}
             />
           )}
