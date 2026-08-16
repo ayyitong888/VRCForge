@@ -88,6 +88,38 @@ EXCLUDED_PACKAGE_ROOTS = (
 GUID_MANIFEST_SHA256 = "6bb92d68a99d648e3179a8de74320c8ae89b333a1a56105588d5edfde6734cbe"
 
 
+def test_non_editor_csharp_cannot_leak_unityeditor_references() -> None:
+    """Runtime/Core assets must remain compilable without UnityEditor.dll.
+
+    A .unitypackage import compiles Core files in runtime-capable assemblies;
+    an unguarded UnityEditor reference can therefore fail player compilation
+    and block an SDK avatar build.  Editor-owned code is intentionally excluded
+    because its assembly already targets UnityEditor.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    source_root = repo_root / "Assets" / "VRCForge"
+    leaked = []
+    reference_pattern = re.compile(r"\b(?:UnityEditor|EditorUtility|GlobalObjectId)\b")
+    for source_path in source_root.rglob("*.cs"):
+        relative = source_path.relative_to(source_root).as_posix()
+        if "/Editor/" in f"/{relative}" or relative.startswith("Editor/"):
+            continue
+        text = source_path.read_text(encoding="utf-8-sig")
+        # Remove comments before checking references so documentation does not
+        # accidentally become a compile contract.
+        code = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+        code = re.sub(r"//[^\r\n]*", "", code)
+        if not reference_pattern.search(code):
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines or not re.match(r"^#if\s+UNITY_EDITOR$", lines[0]):
+            leaked.append(relative)
+            continue
+        if lines[-1] != "#endif":
+            leaked.append(relative)
+    assert leaked == [], f"UnityEditor references escaped the Editor guard: {leaked}"
+
+
 def test_public_guid_manifest_pins_the_published_1_3_6_common_paths() -> None:
     manifest_path = Path(__file__).resolve().parents[1] / "packaging" / "unitypackage_guid_manifest.json"
     manifest_bytes = manifest_path.read_bytes()
