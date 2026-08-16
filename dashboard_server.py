@@ -42,13 +42,27 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from bounded_process import BoundedProcessResult, run_bounded_process
+from app_update_service import AppUpdateService
 from agent_command_safety import normalize_filesystem_path
 from general_agent_tools import (
+    GENERAL_AGENT_WEB_TOOL_METADATA,
     find_files as general_find_files,
     list_directory as general_list_directory,
     read_text_file as general_read_text_file,
     search_text as general_search_text,
+    web_fetch as general_web_fetch,
+    web_search as general_web_search,
 )
+from general_agent_write_tools import (
+    GENERAL_AGENT_WRITE_TOOLS,
+    apply_patch as general_apply_patch,
+    delete_path as general_delete_path,
+    edit_file as general_edit_file,
+    move_path as general_move_path,
+    write_file as general_write_file,
+)
+from agent_unity_path_guard import UNITY_PROJECT_ACCESS, UnityPathGuard, path_is_within
+from profiled_tool_registry import CapabilityProfile, ProfiledToolRegistry, ToolSet
 from agent_completion_verifier import UnityConsoleCompletionVerifier
 from agent_harness_journey import JourneyReceiptError, RuntimeJourneyReceiptAuthority
 from agent_visual_capture_evidence import (
@@ -152,6 +166,9 @@ from texture_import_settings import (
     build_wrapper_arguments as build_texture_import_settings_wrapper_arguments,
 )
 from context_compaction import ContextCompactionInputError, compact_context
+from session_handoff import SessionHandoffError, SessionHandoffStore
+from session_handoff_service import SessionHandoffService
+from session_handoff_chat_port import ChatPortConflict, SessionHandoffChatPort
 from developer_options_guard import DeveloperOptionsChallengeError, DeveloperOptionsGuard
 from diagnostic_logging import (
     DiagnosticLogManager,
@@ -1652,6 +1669,15 @@ class ChatTranscriptsRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class SessionHandoffSendRequest(BaseModel):
+    source_chat_id: str = Field(alias="sourceChatId", min_length=1, max_length=180)
+    target_chat_id: str = Field(alias="targetChatId", min_length=1, max_length=180)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    kind: str = Field(default="handoff", max_length=32)
+    reply_to: str | None = Field(default=None, alias="replyTo")
+    model_config = {"populate_by_name": True}
+
+
 class ChatAttachmentImportRequest(BaseModel):
     payload_hash: str = Field(alias="payloadHash")
     project_path: str = Field(default="", alias="projectPath")
@@ -2089,6 +2115,8 @@ app.mount("/artifacts", StaticFiles(directory=str(DASHBOARD_ARTIFACTS_DIR)), nam
 app.mount("/runtime-artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="runtime_artifacts")
 
 EVENT_BUS = DashboardEventBus()
+APP_UPDATE_SERVICE_LOCK = Lock()
+APP_UPDATE_SERVICE: AppUpdateService | None = None
 UVICORN_SERVER_LOCK = Lock()
 CURRENT_UVICORN_SERVER: uvicorn.Server | None = None
 DIAGNOSTIC_PRIVACY = DiagnosticPrivacy(CONFIG_DIR)
@@ -2276,6 +2304,14 @@ DASHBOARD_RUNTIME = DashboardRuntimeState()
 memory_review_idle_gate = MemoryReviewIdleGate()
 
 
+def get_app_update_service() -> AppUpdateService:
+    global APP_UPDATE_SERVICE
+    with APP_UPDATE_SERVICE_LOCK:
+        if APP_UPDATE_SERVICE is None:
+            APP_UPDATE_SERVICE = AppUpdateService(app.version)
+        return APP_UPDATE_SERVICE
+
+
 def attach_agent_harness_journey_receipt(payload: dict[str, Any]) -> dict[str, Any]:
     """Attach a receipt only after the complete Runtime-owned journey validates."""
 
@@ -2397,6 +2433,173 @@ AGENT_GATEWAY = AgentGateway(
     runtime_status_changed=broadcast_runtime_status,
     runtime_timeline_changed=broadcast_runtime_status,
 )
+_SESSION_HANDOFF_SERVICE: SessionHandoffService | None = None
+_SESSION_HANDOFF_SERVICE_LOCK = RLock()
+_SESSION_HANDOFF_QUEUE_LOCK = RLock()
+
+
+def _session_handoff_principal_digest() -> str:
+    root = AGENT_GATEWAY.user_constraints_path.parent / "session-handoff"
+    root.mkdir(parents=True, exist_ok=True)
+    try: os.chmod(root, 0o700)
+    except OSError: pass
+    seed_path = root / "principal.seed"
+    try:
+        seed = seed_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        seed = ""
+    if not seed:
+        seed = secrets.token_urlsafe(32)
+        atomic_write_text(seed_path, seed)
+        try: os.chmod(seed_path, 0o600)
+        except OSError: pass
+    return hashlib.sha256((str(AGENT_GATEWAY.user_constraints_path.parent.resolve()) + ":" + seed).encode()).hexdigest()
+
+
+def _load_handoff_chat(chat_id: str, scope: str) -> Mapping[str, Any] | None:
+    normalized = (normalize_chat_project_key(scope) or str(scope).strip().casefold()) if scope else ""
+    targets: list[tuple[Path, str]] = [(chat_transcripts_path(), "")]
+    for project_path in load_chat_project_index_paths():
+        if not normalized or normalize_chat_project_key(project_path) == normalized:
+            target = project_chat_transcripts_path(project_path)
+            if target is not None:
+                targets.append((target, normalized))
+    for path, target_scope in targets:
+        chats, _source, recovery = load_chat_transcript_file(chat_store_target(path, scope="project" if target_scope else "app", project_path=scope if target_scope else None), scope="project" if target_scope else "app")
+        if recovery:
+            raise ChatPortConflict("chat store recovery required")
+        for chat in chats:
+            if str(chat.get("id") or "") == chat_id:
+                return {**chat, "handoffScope": target_scope}
+    return None
+
+
+def _handoff_runtime_snapshot(chat_id: str, session_id: str, scope: str) -> Mapping[str, Any]:
+    try:
+        runs = AGENT_GATEWAY.runtime_runs.list_runs(limit=100, session_id=session_id, project_root=scope).get("runs", [])
+        approvals = AGENT_GATEWAY.approval_transactions.list_approvals(include_expired=False, project_root=scope)
+        questions = AGENT_GATEWAY.questions._project(include_answered=False).values()
+    except Exception:
+        return {"active_stream": True, "pending_approval": True, "pending_question": True}
+    active = any(str(run.get("status") or "").lower() in {"running", "queued", "active", "waiting_for_model", "waiting_for_approval"} and str(run.get("chatId") or "") in {"", chat_id} for run in runs)
+    pending_approval = any(str(item.get("sessionId") or "") == session_id for item in approvals)
+    pending_question = any(str(item.get("sessionId") or "") == session_id and str(item.get("status") or "pending") == "pending" for item in questions if isinstance(item, Mapping))
+    return {"active_stream": active, "pending_approval": pending_approval, "pending_question": pending_question}
+
+
+def _save_handoff_chat(chat_id: str, scope: str, updated: Mapping[str, Any], expected_revision: int) -> Mapping[str, Any]:
+    with CHAT_TRANSCRIPTS_LOCK:
+        current = _load_handoff_chat(chat_id, scope)
+        if not isinstance(current, Mapping) or int(current.get("revision") or 0) != expected_revision:
+            raise ChatPortConflict("chat revision changed")
+        # Preserve all existing chats; the established writer owns source-digest
+        # CAS, atomic replacement, and rollback semantics.
+        all_chats: list[dict[str, Any]] = []
+        revisions: list[dict[str, Any]] = []
+        app_path = chat_transcripts_path()
+        app_chats, app_source, app_recovery = load_chat_transcript_file(chat_store_target(app_path, scope="app"), scope="app")
+        if app_recovery: raise ChatPortConflict("chat store recovery required")
+        all_chats.extend(dict(item) for item in app_chats); revisions.append(app_source)
+        index_source, index_recovery = inspect_chat_project_index()
+        if index_recovery: raise ChatPortConflict("chat store recovery required")
+        revisions.append(index_source)
+        for project_path in load_chat_project_index_paths():
+            target = project_chat_transcripts_path(project_path)
+            if target is None: continue
+            project_chats, source, recovery = load_chat_transcript_file(chat_store_target(target, scope="project", project_path=project_path), scope="project")
+            if recovery: raise ChatPortConflict("chat store recovery required")
+            all_chats.extend(dict(item) for item in project_chats); revisions.append(source)
+        replaced = False
+        for index, item in enumerate(all_chats):
+            if str(item.get("id") or "") == chat_id:
+                clean = dict(updated); clean.pop("handoffScope", None)
+                all_chats[index] = clean; replaced = True
+        if not replaced: raise ChatPortConflict("chat is not available")
+        # The shared writer owns the durable CAS transaction. Its projection
+        # shape is not commit authority here; the exact chat readback below is.
+        write_chat_transcripts_storage(ChatTranscriptsRequest(chats=all_chats, sourceRevisions=revisions))
+        saved = _load_handoff_chat(chat_id, scope)
+        if not isinstance(saved, Mapping): raise ChatPortConflict("chat save did not persist")
+        return saved
+
+
+def _enqueue_handoff_context(chat_id: str, context: Mapping[str, Any]) -> None:
+    root = AGENT_GATEWAY.user_constraints_path.parent / "session-handoff"
+    queue_path = root / "queue.json"
+    with _SESSION_HANDOFF_QUEUE_LOCK:
+        try:
+            entries = json.loads(queue_path.read_text(encoding="utf-8")) if queue_path.exists() else []
+        except (OSError, ValueError):
+            entries = []
+        if not isinstance(entries, list): entries = []
+        context_id = str(context.get("contextId") or "")
+        if not context_id: raise ChatPortConflict("contextId is required")
+        if not any(isinstance(item, Mapping) and item.get("contextId") == context_id for item in entries):
+            entries.append({"contextId": context_id, "handoffId": context.get("handoffId"), "cardId": context.get("cardId"), "payloadDigest": context.get("payloadDigest"), "chatId": chat_id, "payload": context.get("payload")})
+        atomic_write_text(queue_path, json.dumps(entries[-256:], ensure_ascii=False, separators=(",", ":")))
+        try: os.chmod(queue_path, 0o600)
+        except OSError: pass
+
+
+def _consume_handoff_context(chat_id: str, client_turn_id: str) -> dict[str, Any] | None:
+    if not client_turn_id or len(client_turn_id) > 128:
+        return None
+    root = AGENT_GATEWAY.user_constraints_path.parent / "session-handoff"
+    queue_path = root / "queue.json"
+    with _SESSION_HANDOFF_QUEUE_LOCK:
+        try: entries = json.loads(queue_path.read_text(encoding="utf-8")) if queue_path.exists() else []
+        except (OSError, ValueError): entries = []
+        if not isinstance(entries, list): return None
+        for item in entries:
+            if not isinstance(item, Mapping) or item.get("chatId") != chat_id:
+                continue
+            # A durable turn binding closes the consume/provider crash window:
+            # retries for the same client turn replay the same context, while a
+            # different turn can never steal an already-bound context.
+            bound = str(item.get("clientTurnId") or "")
+            if item.get("deliveredAt"):
+                if bound != client_turn_id:
+                    continue
+                delivered = dict(item)
+            else:
+                delivered = {**item, "clientTurnId": client_turn_id, "deliveredAt": datetime.now(timezone.utc).isoformat()}
+                index = entries.index(item); entries[index] = delivered
+                atomic_write_text(queue_path, json.dumps(entries[-256:], ensure_ascii=False, separators=(",", ":")))
+                try: os.chmod(queue_path, 0o600)
+                except OSError: pass
+            return {"contextId": delivered.get("contextId"), "payloadDigest": delivered.get("payloadDigest"), "payload": delivered.get("payload"), "clientTurnId": client_turn_id}
+    return None
+
+
+def session_handoff_runtime() -> SessionHandoffService:
+    global _SESSION_HANDOFF_SERVICE
+    with _SESSION_HANDOFF_SERVICE_LOCK:
+        if _SESSION_HANDOFF_SERVICE is None:
+            root = AGENT_GATEWAY.user_constraints_path.parent / "session-handoff"
+            lock = CHAT_TRANSCRIPTS_LOCK
+            port = SessionHandoffChatPort(
+                principal_digest=_session_handoff_principal_digest(),
+                lock=lock,
+                load_chat=_load_handoff_chat,
+                save_chat=_save_handoff_chat,
+                runtime_snapshot=_handoff_runtime_snapshot,
+                enqueue_context=_enqueue_handoff_context,
+            )
+            store = SessionHandoffStore(root / "handoffs.db", root / "audit.jsonl")
+            _SESSION_HANDOFF_SERVICE = SessionHandoffService(store, port, state_path=root / "state.json")
+        return _SESSION_HANDOFF_SERVICE
+
+
+def close_session_handoff_runtime() -> None:
+    """Release the App-owned handoff store without leaving a stale holder."""
+    global _SESSION_HANDOFF_SERVICE
+    with _SESSION_HANDOFF_SERVICE_LOCK:
+        service = _SESSION_HANDOFF_SERVICE
+        _SESSION_HANDOFF_SERVICE = None
+    if service is not None:
+        service.store.close()
+
+
 RUNTIME_LANE_BUDGET = RuntimeLaneBudget()
 BACKGROUND_GOAL_PREFLIGHT = ProviderPreflightCache(
     lambda provider, base_url: probe_background_goal_provider(provider, base_url)
@@ -2720,12 +2923,31 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    global APP_UPDATE_SERVICE
     global STATUS_MONITOR_TASK
     global BACKGROUND_GOAL_MONITOR_TASK
     global AGENT_MCP_INIT_TASK
     global AGENT_MCP_APP
     global AGENT_MCP_CONTEXT
     global SUB_AGENT_CONTINUATION_REPLAY_TASK
+
+    with APP_UPDATE_SERVICE_LOCK:
+        app_update_service = APP_UPDATE_SERVICE
+    if app_update_service is not None:
+        await asyncio.to_thread(app_update_service.close)
+    with APP_UPDATE_SERVICE_LOCK:
+        if APP_UPDATE_SERVICE is app_update_service:
+            APP_UPDATE_SERVICE = None
+
+    try:
+        await asyncio.to_thread(close_session_handoff_runtime)
+    except Exception:  # noqa: BLE001 - remaining App owners still require shutdown.
+        emit_log(
+            "warn",
+            "agent",
+            "Session handoff storage shutdown had a bounded warning.",
+            {"failureClass": "store_close"},
+        )
 
     await emit_safety_posture_snapshot("normal_shutdown")
 
@@ -3031,6 +3253,11 @@ def read_agentic_app_bootstrap(
         refresh_projects=refreshProjects,
         defer_agent_catalog=deferAgentCatalog,
     )
+
+
+@app.get("/api/app/update")
+async def check_agentic_app_update() -> dict[str, Any]:
+    return await asyncio.to_thread(get_app_update_service().check)
 
 
 def build_agentic_app_bootstrap_payload(
@@ -5336,6 +5563,103 @@ def capture_automatic_memory_after_chat_storage(
         for key in totals:
             totals[key] += int(result.get(key) or 0)
     return totals
+
+
+def _public_session_handoff(value: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = ("schema", "id", "status", "kind", "source_chat_id", "target_chat_id", "source_revision", "target_revision", "source_scope", "target_scope", "revision", "created_at", "updated_at", "expires_at", "payloadDigest", "materializeAt")
+    return {key: value[key] for key in allowed if key in value}
+
+
+@app.post("/api/app/session-handoff/send")
+def app_session_handoff_send(request: Request, body: SessionHandoffSendRequest) -> dict[str, Any]:
+    validate_app_session_handshake_request(request, dev_only=False)
+    source = _load_handoff_chat(body.source_chat_id, "")
+    target = _load_handoff_chat(body.target_chat_id, "")
+    if not isinstance(source, Mapping) or not isinstance(target, Mapping):
+        raise HTTPException(status_code=404, detail="Chat is unavailable for handoff.")
+    source_session, target_session = str(source.get("sessionId") or ""), str(target.get("sessionId") or "")
+    source_scope = normalize_chat_project_key(str(source.get("projectPath") or "")) if source.get("projectPath") else ""
+    target_scope = normalize_chat_project_key(str(target.get("projectPath") or "")) if target.get("projectPath") else ""
+    if not source_session or source_scope != target_scope or not target_session:
+        raise HTTPException(status_code=409, detail="Chat owner/session/scope binding is unavailable.")
+    service = session_handoff_runtime()
+    try:
+        value = service.send(owner_id=_session_handoff_principal_digest(), source_session_id=source_session, source_chat_id=body.source_chat_id, target_session_id=target_session, target_chat_id=body.target_chat_id, scope=source_scope, payload=body.payload, kind=body.kind, reply_to=body.reply_to)
+    except (PermissionError, ValueError, ChatPortConflict) as exc:
+        raise HTTPException(status_code=409, detail="Handoff source/target snapshot is not valid.") from exc
+    return {"ok": True, "handoff": _public_session_handoff(value)}
+
+
+@app.get("/api/app/session-handoff/{handoff_id}")
+def app_session_handoff_get(request: Request, handoff_id: str, chatId: str, scope: str = "") -> dict[str, Any]:
+    validate_app_session_handshake_request(request, dev_only=False)
+    chat = _load_handoff_chat(chatId, scope)
+    if not isinstance(chat, Mapping): raise HTTPException(status_code=404, detail="Chat unavailable.")
+    service = session_handoff_runtime()
+    value = service.store.get(handoff_id=handoff_id, owner_id=_session_handoff_principal_digest(), session_id=str(chat.get("sessionId") or ""), scope=scope)
+    return {"ok": True, "handoff": _public_session_handoff(value)}
+
+
+@app.post("/api/app/session-handoff/consume")
+def app_session_handoff_consume(request: Request, chatId: str, clientTurnId: str = "") -> dict[str, Any]:
+    validate_app_session_handshake_request(request, dev_only=False)
+    value = _consume_handoff_context(chatId, clientTurnId)
+    return {"ok": True, "context": value}
+
+
+def _handoff_action(request: Request, handoff_id: str, action: str) -> dict[str, Any]:
+    validate_app_session_handshake_request(request, dev_only=False)
+    service = session_handoff_runtime()
+    principal = _session_handoff_principal_digest()
+    if action not in {"deliver", "accept", "dismiss", "cancel", "pause", "resume"}:
+        raise HTTPException(status_code=404, detail="Unknown handoff action.")
+    try:
+        row = service.store.binding(handoff_id=handoff_id, owner_id=principal)
+    except (KeyError, PermissionError, ValueError, SessionHandoffError) as exc:
+        raise HTTPException(status_code=404, detail="Handoff unavailable.") from exc
+    side = "source" if action == "cancel" else "target"
+    chat_id = str(row[f"{side}_chat_id"])
+    session_id = str(row[f"{side}_session_id"])
+    scope = str(row[f"{side}_scope"])
+    chat = _load_handoff_chat(chat_id, scope)
+    chat_scope_value = str((chat.get("handoffScope") or chat.get("projectPath") or "") if isinstance(chat, Mapping) else "")
+    chat_scope = normalize_chat_project_key(chat_scope_value) if chat_scope_value else ""
+    if (
+        not isinstance(chat, Mapping)
+        or str(chat.get("id") or "") != chat_id
+        or str(chat.get("sessionId") or "") != session_id
+        or chat_scope != scope
+    ):
+        raise HTTPException(status_code=409, detail="Handoff chat binding is unavailable.")
+    expected_revision = int(row["revision"])
+    try:
+        if action in {"deliver", "accept"}:
+            value = service.deliver(handoff_id=handoff_id, owner_id=principal, target_session_id=session_id, scope=scope)
+        elif action == "dismiss":
+            value = service.dismiss(handoff_id=handoff_id, owner_id=principal, session_id=session_id, scope=scope, expected_revision=expected_revision)
+        elif action == "cancel":
+            value = service.cancel(handoff_id=handoff_id, owner_id=principal, session_id=session_id, scope=scope, expected_revision=expected_revision)
+        elif action == "pause":
+            value = service.pause(handoff_id=handoff_id, owner_id=principal, target_session_id=session_id, scope=scope, expected_revision=expected_revision)
+        else:
+            value = service.resume(handoff_id=handoff_id, owner_id=principal, target_session_id=session_id, scope=scope, expected_revision=expected_revision)
+    except (KeyError, PermissionError, ValueError, RuntimeError, SessionHandoffError, ChatPortConflict) as exc:
+        raise HTTPException(status_code=409, detail="Handoff action binding changed.") from exc
+    return {"ok": True, "handoff": _public_session_handoff(value.get("handoff", value) if isinstance(value, Mapping) else {})}
+
+
+def _handoff_action_route(action: str):
+    def route(request: Request, handoff_id: str) -> dict[str, Any]:
+        return _handoff_action(request, handoff_id, action)
+    # Keep the established route-table name while binding the action in a
+    # closure that FastAPI cannot expose as a user-overridable query value.
+    route.__name__ = "<lambda>"
+    return route
+
+
+for _handoff_action_name in ("deliver", "accept", "dismiss", "cancel", "pause", "resume"):
+    app.add_api_route(f"/api/app/session-handoff/{{handoff_id}}/{_handoff_action_name}", _handoff_action_route(_handoff_action_name), methods=["POST"])
+
 
 
 def _chat_source_revision_map(request: ChatTranscriptsRequest) -> dict[str, dict[str, Any]]:
@@ -14575,9 +14899,11 @@ class _RuntimePlannerCompactor:
         )
 
 
-def _runtime_planner_tool(tool: Any) -> PlannerTool:
+def _runtime_planner_tool(tool: Any, projection: Any) -> PlannerTool:
     return PlannerTool(
-        name=str(tool.name),
+        name=str(projection.model_name),
+        runtime_name=str(projection.internal_name),
+        capabilities=tuple(projection.capabilities),
         description=str(tool.description),
         category=str(tool.category),
         write=bool(tool.write),
@@ -14587,9 +14913,11 @@ def _runtime_planner_tool(tool: Any) -> PlannerTool:
     )
 
 
-def _runtime_planner_write_tool(handler: Any) -> PlannerTool:
+def _runtime_planner_write_tool(handler: Any, projection: Any) -> PlannerTool:
     return PlannerTool(
-        name=str(handler.name),
+        name=str(projection.model_name),
+        runtime_name=str(projection.internal_name),
+        capabilities=tuple(projection.capabilities),
         description=str(handler.description),
         category="supervised-write",
         write=True,
@@ -14608,6 +14936,13 @@ RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
         "vrcforge_read_text_file",
         "vrcforge_find_files",
         "vrcforge_search_text",
+        "vrcforge_edit_file",
+        "vrcforge_write_file",
+        "vrcforge_delete_path",
+        "vrcforge_move_path",
+        "vrcforge_apply_patch",
+        "vrcforge_web_fetch",
+        "vrcforge_web_search",
         "vrcforge_agent_desktop_action",
         "vrcforge_progress_list",
         "vrcforge_progress_replace",
@@ -14624,6 +14959,56 @@ RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
         "vrcforge_vision_audit_multi",
     }
 )
+
+RUNTIME_PLANNER_CORE_AGENT_TOOLS = frozenset(
+    {
+        "vrcforge_agent_desktop_action",
+        "vrcforge_progress_list",
+        "vrcforge_progress_replace",
+        "vrcforge_progress_create",
+        "vrcforge_progress_update",
+        "vrcforge_progress_delete",
+        "vrcforge_ask_user",
+        "vrcforge_delegate_subagent",
+        "vrcforge_classify_shell",
+        "vrcforge_execute_shell",
+        "vrcforge_shell_process",
+        "vrcforge_inspect_chat_attachment",
+        "vrcforge_vision_audit",
+        "vrcforge_vision_audit_multi",
+    }
+)
+
+
+def _runtime_tool_set(tool_name: str) -> ToolSet:
+    if tool_name in RUNTIME_PLANNER_CORE_AGENT_TOOLS:
+        return ToolSet.CORE
+    if tool_name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS:
+        return ToolSet.GENERAL
+    return ToolSet.UNITY
+
+
+def _build_runtime_profiled_tool_registry() -> ProfiledToolRegistry:
+    registry = ProfiledToolRegistry()
+    for tool in AGENT_GATEWAY._tools.values():
+        registry.register(
+            tool.name,
+            tool.handler,
+            _runtime_tool_set(tool.name),
+            model_name="shell" if tool.name == "vrcforge_execute_shell" else None,
+            metadata={"source": "tool"},
+        )
+    for handler in AGENT_GATEWAY._write_handlers.values():
+        if handler.name in AGENT_GATEWAY._tools or handler.name in WRAPPER_ONLY_WRITE_TARGETS:
+            continue
+        registry.register(
+            handler.name,
+            handler.handler,
+            _runtime_tool_set(handler.name),
+            metadata={"source": "write"},
+        )
+    registry.add_unity_shell("vrcforge_execute_shell")
+    return registry
 
 
 def _runtime_planner_provider_capability_visible(tool: Any) -> bool:
@@ -14648,44 +15033,40 @@ class _RuntimePlannerCatalog:
     ) -> PlannerCatalogSnapshot:
         layer = normalize_exposure_layer(exposure_layer)
         gateway_config = AGENT_GATEWAY.ensure_config()
+        profile = (
+            CapabilityProfile.UNITY_PROJECT
+            if project_context_active
+            else CapabilityProfile.GENERAL
+        )
+        projections = _RUNTIME_PROFILED_TOOL_REGISTRY.project(profile)
         visible_direct_tools = tuple(
-            _runtime_planner_tool(tool)
-            for tool in AGENT_GATEWAY._tools.values()
+            _runtime_planner_tool(tool, projection)
+            for projection in projections
+            for tool in [AGENT_GATEWAY._tools.get(projection.internal_name)]
+            if tool is not None
             if AGENT_GATEWAY._tool_runtime_visible(tool, gateway_config, layer)
             and _runtime_planner_provider_capability_visible(tool)
-            and (
-                project_context_active
-                or tool.name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
-            )
         )
         visible_write_tools = tuple(
-            _runtime_planner_write_tool(handler)
-            for handler in AGENT_GATEWAY._write_handlers.values()
-            if handler.name not in AGENT_GATEWAY._tools
-            and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
-            and (
-                project_context_active
-                or handler.name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
-            )
+            _runtime_planner_write_tool(handler, projection)
+            for projection in projections
+            for handler in [AGENT_GATEWAY._write_handlers.get(projection.internal_name)]
+            if handler is not None and projection.internal_name not in AGENT_GATEWAY._tools
             and gateway_config.allow_write_requests
             and AGENT_GATEWAY._write_handler_visible(handler, gateway_config, layer)
         )
         routable_write_tools = tuple(
-            _runtime_planner_write_tool(handler)
-            for handler in AGENT_GATEWAY._write_handlers.values()
-            if handler.name not in AGENT_GATEWAY._tools
-            and handler.name not in WRAPPER_ONLY_WRITE_TARGETS
-            and (
-                project_context_active
-                or handler.name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
-            )
+            _runtime_planner_write_tool(handler, projection)
+            for projection in projections
+            for handler in [AGENT_GATEWAY._write_handlers.get(projection.internal_name)]
+            if handler is not None and projection.internal_name not in AGENT_GATEWAY._tools
         )
         visible_tools = (*visible_direct_tools, *visible_write_tools)
         routable_tools = tuple(
-            _runtime_planner_tool(tool)
-            for tool in AGENT_GATEWAY._tools.values()
-            if project_context_active
-            or tool.name in RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+            _runtime_planner_tool(tool, projection)
+            for projection in projections
+            for tool in [AGENT_GATEWAY._tools.get(projection.internal_name)]
+            if tool is not None
         ) + routable_write_tools
         skill_payloads = AGENT_GATEWAY.skills.build_skill_registry(
             gateway_config,
@@ -17166,13 +17547,15 @@ def discover_projects(project_roots: list[Path], include_external: bool = False)
         for custom_project in load_project_prefs().get("customProjects", []):
             custom_path = str(custom_project.get("path") or "")
             custom_type = str(custom_project.get("projectType") or "unity")
+            if custom_type == "general":
+                continue
             candidate = Path(custom_path)
             if candidate.is_dir():
                 upsert_project(
                     name=candidate.name,
                     path=str(candidate),
                     source="custom",
-                    project_type="general" if custom_type == "general" else "unity",
+                    project_type="unity",
                 )
 
         status = CURRENT_UNITY_STATUS
@@ -20655,6 +21038,38 @@ def delegate_sub_agent_runtime(params: dict[str, Any] | None = None) -> dict[str
     }
 
 
+UNITY_PROJECT_PATH_GUARD = UnityPathGuard()
+
+
+def refresh_unity_project_path_guard() -> UnityPathGuard:
+    """Refresh cooperative write boundaries from the cached project registry."""
+
+    try:
+        payload = PROJECT_SNAPSHOT_SELECTION.project_snapshot_payload(
+            use_cache=True,
+            refresh_async=False,
+        )
+    except Exception:  # noqa: BLE001 - keep the selected root protected if the cache is stale.
+        payload = {}
+    projects = payload.get("projects") if isinstance(payload, dict) else []
+    roots = [
+        str(project.get("path") or "").strip()
+        for project in projects or []
+        if isinstance(project, dict)
+        and str(project.get("projectType") or "unity").strip().casefold() != "general"
+        and str(project.get("path") or "").strip()
+    ]
+    selected = str(getattr(DASHBOARD_STATE, "selected_project_path", "") or "").strip()
+    UNITY_PROJECT_PATH_GUARD.replace_roots(roots)
+    UNITY_PROJECT_PATH_GUARD.clear_current_root()
+    if selected and any(
+        path_is_within(selected, root) and path_is_within(root, selected)
+        for root in UNITY_PROJECT_PATH_GUARD.registered_roots
+    ):
+        UNITY_PROJECT_PATH_GUARD.set_current_root(selected)
+    return UNITY_PROJECT_PATH_GUARD
+
+
 def register_agent_gateway_tools() -> None:
     def register_write_handler(
         name: str,
@@ -20724,7 +21139,7 @@ def register_agent_gateway_tools() -> None:
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        result["notice"] = "Directory listing is complete. Do not repeat it through Shell dir/ls/Get-ChildItem; continue with vrcforge_find_files, vrcforge_search_text, or vrcforge_read_text_file when more evidence is needed."
+        result["notice"] = "Directory listing is complete. Do not repeat it through Shell dir/ls/Get-ChildItem; continue with find_files, search_text, or read_text_file when more evidence is needed."
         return result
 
     def general_read_text_file_tool(params: object) -> dict[str, Any]:
@@ -20791,6 +21206,67 @@ def register_agent_gateway_tools() -> None:
         )
         return result
 
+    def general_write_guard(path: object, **_context: Any) -> bool:
+        return refresh_unity_project_path_guard().is_write_allowed(path)
+
+    def general_edit_file_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        return general_edit_file(
+            str(raw.get("path") or ""),
+            raw.get("content", ""),
+            path_guard=general_write_guard,
+        )
+
+    def general_write_file_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        return general_write_file(
+            str(raw.get("path") or ""),
+            raw.get("content", ""),
+            path_guard=general_write_guard,
+            overwrite=normalize_bool(raw.get("overwrite"), False),
+        )
+
+    def general_delete_path_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        return general_delete_path(str(raw.get("path") or ""), path_guard=general_write_guard)
+
+    def general_move_path_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        return general_move_path(
+            str(raw.get("source") or ""),
+            str(raw.get("destination") or ""),
+            path_guard=general_write_guard,
+            overwrite=normalize_bool(raw.get("overwrite"), False),
+        )
+
+    def general_apply_patch_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        return general_apply_patch(
+            str(raw.get("path") or ""),
+            str(raw.get("patch") or ""),
+            path_guard=general_write_guard,
+        )
+
+    def general_web_fetch_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        result = general_web_fetch(
+            str(raw.get("url") or ""),
+            timeout=float(raw.get("timeout") or 10.0),
+            max_bytes=bounded_int(raw.get("maxBytes", raw.get("max_bytes", 2 * 1024 * 1024)), 2 * 1024 * 1024, 2 * 1024 * 1024),
+        )
+        result["summary"] = str(result.get("text") or "")
+        return result
+
+    def general_web_search_tool(params: object) -> dict[str, Any]:
+        raw = general_params(params)
+        result = general_web_search(
+            str(raw.get("query") or ""),
+            timeout=float(raw.get("timeout") or 10.0),
+            max_results=bounded_int(raw.get("maxResults", raw.get("max_results", 5)), 5, 10),
+        )
+        result["summary"] = json.dumps(result.get("results") or [], ensure_ascii=False, separators=(",", ":"))
+        return result
+
     AGENT_GATEWAY.register_tool(
         "vrcforge_list_directory",
         "when-to-use: inspect a bounded local directory tree during read-only planning. when-NOT-to-use: do not use for writes, deletion, process control, or Unity project changes. Negative example: do not call it merely to explain what directory listing means.",
@@ -20814,6 +21290,38 @@ def register_agent_gateway_tools() -> None:
         "when-to-use: search bounded UTF-8 text files for a requested string during read-only planning. when-NOT-to-use: do not use for binary files, writes, secrets, or Unity project changes. Negative example: do not call it for general questions unrelated to local evidence.",
         "read/debug",
         general_search_text_tool,
+    )
+    general_write_handlers = {
+        "edit_file": general_edit_file_tool,
+        "write_file": general_write_file_tool,
+        "delete_path": general_delete_path_tool,
+        "move_path": general_move_path_tool,
+        "apply_patch": general_apply_patch_tool,
+    }
+    for metadata in GENERAL_AGENT_WRITE_TOOLS:
+        model_name = str(metadata["name"])
+        internal_name = f"vrcforge_{model_name}"
+        description = str(metadata["description"])
+        handler = general_write_handlers[model_name]
+        AGENT_GATEWAY.register_tool(
+            internal_name,
+            description,
+            "supervised-write",
+            handler,
+            write=True,
+        )
+        register_write_handler(internal_name, description, "medium", handler)
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_web_fetch",
+        str(GENERAL_AGENT_WEB_TOOL_METADATA["web_fetch"]["description"]),
+        "read/debug",
+        general_web_fetch_tool,
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_web_search",
+        str(GENERAL_AGENT_WEB_TOOL_METADATA["web_search"]["description"]),
+        "read/debug",
+        general_web_search_tool,
     )
 
     AGENT_GATEWAY.register_tool(
@@ -22285,6 +22793,8 @@ AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = reload_unity_chec
 AGENT_GATEWAY.approval_transactions.scoped_approval_reviewer = _review_saved_project_category_approval
 
 register_agent_gateway_tools()
+AGENT_GATEWAY.shell.bind_project_path_guard(refresh_unity_project_path_guard)
+_RUNTIME_PROFILED_TOOL_REGISTRY = _build_runtime_profiled_tool_registry()
 
 _RUNTIME_PLANNER_TURN = _RuntimePlannerProviderTurnBinding()
 _RUNTIME_PLANNER_MODEL = _RuntimePlannerModel(_RUNTIME_PLANNER_TURN)
@@ -22294,6 +22804,7 @@ RUNTIME_PLANNER = RuntimePlannerService(
     model=_RUNTIME_PLANNER_MODEL,
     compactor=_RuntimePlannerCompactor(_RUNTIME_PLANNER_TURN),
     turn=_RUNTIME_PLANNER_TURN,
+    global_instructions=lambda: AGENT_GATEWAY.read_user_constraints().content,
 )
 AGENT_GATEWAY.bind_runtime_planner(RUNTIME_PLANNER)
 

@@ -1,0 +1,10 @@
+import { readFile } from "node:fs/promises";
+import assert from "node:assert/strict";
+const source = await readFile(new URL("../src/lib/api/session-handoff.ts", import.meta.url), "utf8");
+assert.match(source, /\/api\/app\/session-handoff\/send/);
+assert.match(source, /accept.*dismiss.*cancel.*pause.*resume/);
+assert.match(source, /consumeSessionHandoffContext/);
+assert.match(source, /clientTurnId/);
+assert.match(source, /session-handoff\/consume\?chatId=.*clientTurnId/);
+assert.doesNotMatch(source, /owner_id|claim_token|materializeReceipt|rawTranscript|provider|toolOutput|credential/);
+console.log("session handoff api contract passed");

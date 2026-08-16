@@ -35,6 +35,58 @@ export type TimelinePresentation = {
   entries: TimelinePresentationEntry[];
 };
 
+/**
+ * Keep full persisted tool results outside the bounded safe timeline summary.
+ * Queues preserve occurrence order when a semantic action id is reused after
+ * an intervening observation (for example A -> B -> A).
+ */
+export function buildRuntimeStepResultQueues(
+  steps: AgentRuntimeResponse["steps"] = [],
+): Map<string, unknown[]> {
+  const queues = new Map<string, unknown[]>();
+  for (const step of steps || []) {
+    const actionId = String(step.actionId || "").trim();
+    if (!actionId || !Object.prototype.hasOwnProperty.call(step, "result")) continue;
+    queues.set(actionId, [...(queues.get(actionId) || []), step.result]);
+  }
+  return queues;
+}
+
+const GENERAL_AGENT_TOOL_IDS = new Set([
+  "vrcforge_list_directory",
+  "vrcforge_read_text_file",
+  "vrcforge_find_files",
+  "vrcforge_search_text",
+  "vrcforge_edit_file",
+  "vrcforge_write_file",
+  "vrcforge_delete_path",
+  "vrcforge_move_path",
+  "vrcforge_apply_patch",
+  "vrcforge_web_fetch",
+  "vrcforge_web_search",
+  "vrcforge_agent_desktop_action",
+  "vrcforge_progress_list",
+  "vrcforge_progress_replace",
+  "vrcforge_progress_create",
+  "vrcforge_progress_update",
+  "vrcforge_progress_delete",
+  "vrcforge_ask_user",
+  "vrcforge_delegate_subagent",
+  "vrcforge_classify_shell",
+  "vrcforge_execute_shell",
+  "vrcforge_shell_process",
+  "vrcforge_inspect_chat_attachment",
+  "vrcforge_vision_audit",
+  "vrcforge_vision_audit_multi",
+]);
+
+export function timelineInvocationDisplayLabel(label: string): string {
+  if (GENERAL_AGENT_TOOL_IDS.has(label)) return label.slice("vrcforge_".length);
+  if (!label.startsWith("vrcforge_")) return label;
+  const unityName = label.slice("vrcforge_".length);
+  return unityName.startsWith("unity_") ? unityName : `unity_${unityName}`;
+}
+
 type RuntimePresentationTranslator = (key: string) => string;
 
 const RUNTIME_FAILURE_MESSAGE_KEYS: Record<string, string> = {
@@ -160,19 +212,44 @@ function invocationIdentity(event: ChatTimelineEvent): string {
 }
 
 function materializeInvocations(events: ChatTimelineEvent[]): TimelineInvocation[] {
-  const invocations = new Map<string, { first: ChatTimelineEvent; last: ChatTimelineEvent }>();
+  const invocations: Array<{ first: ChatTimelineEvent; last: ChatTimelineEvent }> = [];
+  const openToolCalls = new Map<string, number[]>();
+  const openSubagents = new Map<string, number>();
   for (const event of events) {
     if (event.kind === "assistant") continue;
     const identity = invocationIdentity(event);
-    const current = invocations.get(identity);
-    if (!current) {
-      invocations.set(identity, { first: event, last: event });
+
+    if (event.kind === "tool_call") {
+      const index = invocations.push({ first: event, last: event }) - 1;
+      openToolCalls.set(identity, [...(openToolCalls.get(identity) || []), index]);
       continue;
     }
-    if (compareTimelineEvents(event, current.first) < 0) current.first = event;
-    if (compareTimelineEvents(event, current.last) >= 0) current.last = event;
+
+    if (event.kind === "tool_result") {
+      const pending = openToolCalls.get(identity) || [];
+      const index = pending.shift();
+      if (pending.length) openToolCalls.set(identity, pending);
+      else openToolCalls.delete(identity);
+      if (index !== undefined) invocations[index].last = event;
+      else invocations.push({ first: event, last: event });
+      continue;
+    }
+
+    if (event.kind === "subagent") {
+      const currentIndex = openSubagents.get(identity);
+      const index = currentIndex === undefined
+        ? invocations.push({ first: event, last: event }) - 1
+        : currentIndex;
+      invocations[index].last = event;
+      const lifecycle = String(event.payload?.subagentStatus || event.payload?.status || "").toLowerCase();
+      if (["completed", "failed", "cancelled", "canceled"].includes(lifecycle)) openSubagents.delete(identity);
+      else openSubagents.set(identity, index);
+      continue;
+    }
+
+    invocations.push({ first: event, last: event });
   }
-  return [...invocations.values()]
+  return invocations
     .sort((left, right) => compareTimelineEvents(left.first, right.first))
     .map(({ first, last }) => {
       const firstPayload = first.payload || {};
@@ -218,18 +295,7 @@ export function buildTimelinePresentation(events: ChatTimelineEvent[] = [], elap
   const ordered = sortAndDedupeTimelineEvents(events);
   if (!ordered.length) return { entries: [] };
   const invocations = materializeInvocations(ordered);
-  const processInvocations = invocations.filter((entry) => entry.kind === "process");
-  const executionInvocations = invocations.filter((entry) => entry.kind !== "process");
-  const entries = contiguousExecutionBatches(executionInvocations);
-  if (processInvocations.length) {
-    entries.push({
-      type: "batch",
-      id: `timeline-batch-process-${processInvocations[0].id}`,
-      kind: "process",
-      startedAt: processInvocations[0].startedAt,
-      invocations: processInvocations,
-    });
-  }
+  const entries = contiguousExecutionBatches(invocations);
   const finalAssistant = [...ordered].reverse().find((event) => event.kind === "assistant" && event.payload?.summary);
   if (finalAssistant) {
     entries.push({

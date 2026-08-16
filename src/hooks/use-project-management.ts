@@ -32,7 +32,6 @@ type UseProjectManagementParams = {
   activeProjectType: ProjectType;
   projects: ProjectEntry[];
   refresh: (target?: string) => Promise<void>;
-  refreshSilently: (target?: string) => Promise<void>;
   startRuntime: () => Promise<string | null>;
   setError: (message: string) => void;
   onProjectAdded: (projectPath: string, projectType?: ProjectType) => void;
@@ -46,7 +45,6 @@ export function useProjectManagement({
   activeProjectType,
   projects,
   refresh,
-  refreshSilently,
   startRuntime,
   setError,
   onProjectAdded,
@@ -98,7 +96,9 @@ export function useProjectManagement({
   );
   const allProjectItems = useMemo(() => {
     const byPath = new Map(
-      projects.map((project) => [normalizeProjectPathKey(project.path || ""), project]),
+      projects
+        .filter((project) => project.projectType !== "general")
+        .map((project) => [normalizeProjectPathKey(project.path || ""), project]),
     );
     for (const customProject of projectPrefs.customProjects) {
       const key = normalizeProjectPathKey(customProject.path);
@@ -176,7 +176,6 @@ export function useProjectManagement({
     try {
       const saved = await saveProjectPrefs(endpoint, next);
       setProjectPrefs(saved);
-      await refreshSilently();
       return saved;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -207,10 +206,12 @@ export function useProjectManagement({
     }
     setNewProjectPath("");
     setShowProjectModal(false);
-    try {
-      await refresh();
-    } catch {
-      // The project list will refresh on the next poll.
+    if (newProjectType === "unity") {
+      try {
+        await refresh();
+      } catch {
+        // The cached Unity list stays usable until the next background refresh.
+      }
     }
     onProjectAdded(path, newProjectType);
   }

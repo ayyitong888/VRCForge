@@ -23,6 +23,7 @@ from agent_shell_service import (
     command_hash,
     stable_hash,
 )
+from agent_unity_path_guard import UnityPathGuard
 
 
 @dataclass
@@ -186,6 +187,41 @@ def service(
         process_ports=process_owner.ports(),
     )
     return shell, approval_owner, process_owner, audits
+
+
+def test_profiled_path_guard_blocks_ordinary_shell_and_scopes_unity_shell(tmp_path: Path) -> None:
+    current = tmp_path / "current"
+    other = tmp_path / "other"
+    outside = tmp_path / "outside"
+    for root in (current, other):
+        for marker in ("Assets", "Packages", "ProjectSettings"):
+            (root / marker).mkdir(parents=True, exist_ok=True)
+    outside.mkdir()
+    guard = UnityPathGuard([current, other], current_root=current)
+    shell, _approvals, _processes, _audits = service(outside)
+    shell.bind_project_path_guard(lambda: guard)
+
+    assert shell.classify({"command": "Get-ChildItem", "cwd": str(current)})["risk"] == "reject"
+    assert shell.classify(
+        {
+            "command": "Get-ChildItem",
+            "cwd": str(current),
+            "unity_project_access": True,
+            "_unityProjectAccess": True,
+        }
+    )["risk"] == "reject"
+    assert shell.classify({"command": f'Get-Content "{current / "Assets" / "a.txt"}"', "cwd": str(outside)})["risk"] == "reject"
+    assert shell.classify({"command": "Get-ChildItem", "cwd": str(outside)})["risk"] == "low"
+    unity = shell.classify(
+        {"command": "Set-Content Assets/a.txt ok", "cwd": str(current), "projectRoot": str(current)},
+        unity_project_access=True,
+    )
+    assert unity["risk"] == "high"
+    assert unity["protectionScope"] == "unity_project"
+    assert shell.classify(
+        {"command": "Set-Content Assets/a.txt no", "cwd": str(other), "projectRoot": str(other)},
+        unity_project_access=True,
+    )["risk"] == "reject"
 
 
 @pytest.mark.parametrize(

@@ -294,6 +294,12 @@ pub(crate) struct DesktopBootstrapRequest {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopAppUpdateRequest {
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopTimeoutRequest {
     timeout_ms: Option<u64>,
@@ -408,6 +414,23 @@ pub(crate) struct DesktopAdjustmentCheckpointIdRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DesktopJsonBodyRequest {
     body: serde_json::Value,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionHandoffActionRequest {
+    handoff_id: String,
+    action: String,
+    body: Option<serde_json::Value>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopSessionHandoffConsumeRequest {
+    chat_id: String,
+    client_turn_id: String,
     timeout_ms: Option<u64>,
 }
 
@@ -1186,6 +1209,22 @@ pub async fn fetch_app_bootstrap(
     .await
 }
 
+#[tauri::command]
+pub async fn check_app_update(
+    request: DesktopAppUpdateRequest,
+) -> Result<serde_json::Value, String> {
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "GET",
+            "/api/app/update".to_string(),
+            None,
+            request.timeout_ms.or(Some(4_000)),
+        )
+        .map(sanitize_webview_response)
+    })
+    .await
+}
+
 pub(crate) fn bootstrap_query(request: &DesktopBootstrapRequest) -> String {
     let mut query = Vec::new();
     if request.refresh_projects.unwrap_or(false) {
@@ -1203,7 +1242,7 @@ pub(crate) fn bootstrap_query(request: &DesktopBootstrapRequest) -> String {
 
 #[cfg(test)]
 mod bootstrap_transport_tests {
-    use super::{bootstrap_query, DesktopBootstrapRequest};
+    use super::{bootstrap_query, DesktopAppUpdateRequest, DesktopBootstrapRequest};
 
     #[test]
     fn deferred_catalog_deserializes_and_reaches_the_backend_query() {
@@ -1217,6 +1256,21 @@ mod bootstrap_transport_tests {
         assert_eq!(
             bootstrap_query(&request),
             "?refreshProjects=true&deferAgentCatalog=true"
+        );
+    }
+
+    #[test]
+    fn app_update_transport_accepts_no_mode_or_url() {
+        let request: DesktopAppUpdateRequest = serde_json::from_value(serde_json::json!({
+            "timeoutMs": 4000
+        }))
+        .expect("startup update request should deserialize");
+        assert_eq!(request.timeout_ms, Some(4000));
+        assert!(
+            serde_json::from_value::<DesktopAppUpdateRequest>(serde_json::json!({
+                "mode": "manual"
+            }))
+            .is_err()
         );
     }
 }
@@ -2714,6 +2768,85 @@ pub async fn compact_agent_history(
 ) -> Result<serde_json::Value, String> {
     blocking_backend_json_request(move || {
         post_json_body_command("/api/app/agent/compact", request, 120_000)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn session_handoff_action(
+    request: DesktopSessionHandoffActionRequest,
+) -> Result<serde_json::Value, String> {
+    let action = request.action.trim().to_string();
+    if !matches!(
+        action.as_str(),
+        "send" | "deliver" | "accept" | "dismiss" | "cancel" | "pause" | "resume"
+    ) {
+        return Err("unsupported session handoff action".to_string());
+    }
+    let handoff_id = bounded_session_handoff_id(&request.handoff_id, "id", 180)?;
+    let (path, body) = if action == "send" {
+        if handoff_id != "send" {
+            return Err("invalid session handoff send id".to_string());
+        }
+        (
+            "/api/app/session-handoff/send".to_string(),
+            Some(
+                request
+                    .body
+                    .ok_or_else(|| "session handoff send body is required".to_string())?,
+            ),
+        )
+    } else {
+        if request.body.is_some() {
+            return Err("session handoff action body is not accepted".to_string());
+        }
+        (
+            format!(
+                "/api/app/session-handoff/{}/{}",
+                percent_encode_query_component(&handoff_id),
+                action
+            ),
+            None,
+        )
+    };
+    blocking_backend_json_request(move || {
+        backend_json_request("POST", path, body, request.timeout_ms.or(Some(60_000)))
+            .map(sanitize_webview_response)
+    })
+    .await
+}
+
+fn bounded_session_handoff_id(
+    value: &str,
+    field: &str,
+    max_chars: usize,
+) -> Result<String, String> {
+    let normalized = value.trim();
+    if normalized.is_empty() || normalized.chars().count() > max_chars {
+        return Err(format!("invalid session handoff {field}"));
+    }
+    Ok(normalized.to_string())
+}
+
+#[tauri::command]
+pub async fn consume_session_handoff_context(
+    request: DesktopSessionHandoffConsumeRequest,
+) -> Result<serde_json::Value, String> {
+    let chat_id = bounded_session_handoff_id(&request.chat_id, "chat id", 180)?;
+    let client_turn_id =
+        bounded_session_handoff_id(&request.client_turn_id, "client turn id", 128)?;
+    blocking_backend_json_request(move || {
+        backend_json_request(
+            "POST",
+            format!(
+                "/api/app/session-handoff/consume?chatId={}&clientTurnId={}",
+                percent_encode_query_component(&chat_id),
+                percent_encode_query_component(&client_turn_id),
+            ),
+            None,
+            request.timeout_ms.or(Some(60_000)),
+        )
+        .map(sanitize_webview_response)
     })
     .await
 }

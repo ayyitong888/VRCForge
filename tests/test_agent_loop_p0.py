@@ -58,6 +58,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
         self.original_paths = (self.gateway.config_path, self.gateway.audit_dir)
+        self.original_shell_path_guard = self.gateway.shell._project_path_guard
+        guard = dashboard_server.UNITY_PROJECT_PATH_GUARD
+        self.original_unity_guard_state = (guard.registered_roots, guard.current_root)
+        self.gateway.shell.bind_project_path_guard(
+            lambda: dashboard_server.UNITY_PROJECT_PATH_GUARD
+        )
         self.original_runtime_continuation_accepting = (
             self.gateway._runtime_continuation_accepting
         )
@@ -103,6 +109,13 @@ class AgentLoopP0Tests(unittest.TestCase):
             "vrcforge_create_gameobject"
         ].verification_finalize_handler = self.original_create_verification_finalize
         self.gateway.configure_paths(*self.original_paths)
+        guard = dashboard_server.UNITY_PROJECT_PATH_GUARD
+        original_roots, original_current = self.original_unity_guard_state
+        guard.replace_roots(original_roots)
+        if original_current:
+            guard.set_current_root(original_current)
+        if self.original_shell_path_guard is not None:
+            self.gateway.shell.bind_project_path_guard(self.original_shell_path_guard)
         if not self.original_runtime_continuation_accepting:
             self.gateway.shutdown_runtime_continuations(0)
         self.temp_dir.cleanup()
@@ -150,6 +163,9 @@ class AgentLoopP0Tests(unittest.TestCase):
             "m_EditorVersion: 2022.3",
             encoding="utf-8",
         )
+        guard = dashboard_server.UNITY_PROJECT_PATH_GUARD
+        guard.register_root(project)
+        guard.set_current_root(project)
         return project
 
     @contextmanager
@@ -182,12 +198,16 @@ class AgentLoopP0Tests(unittest.TestCase):
                 }
             if params.get("shell_command") or params.get("shellCommand"):
                 command = params.get("shell_command") or params.get("shellCommand")
+                project_root = params.get("projectRoot") or params.get("projectPath")
                 return {
                     **base,
                     "summary": "Run the requested Shell command.",
                     "shellNeeded": True,
                     "shellCommand": command,
                     "shellParams": {},
+                    "toolCapabilities": (
+                        ["unity_project_access"] if project_root else []
+                    ),
                     "continueLoop": False,
                     "nextStep": "call_shell",
                 }
@@ -551,7 +571,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         task_context = approval["taskContext"]
         self.assertEqual(task_context["taskId"], initial["task"]["taskId"])
         self.assertEqual(task_context["kind"], "shell")
-        self.assertEqual(task_context["tool"], "shell")
+        self.assertEqual(task_context["tool"], "unity_shell")
         self.assertEqual(
             initial["task"]["actions"][0]["actionId"],
             task_context["requestedActionId"],
@@ -1192,7 +1212,13 @@ class AgentLoopP0Tests(unittest.TestCase):
         gateway = self.gateway
         calls: list[dict] = []
 
-        def execute_shell(params, agent_name="desktop-agent", *, task_context=None):
+        def execute_shell(
+            params,
+            agent_name="desktop-agent",
+            *,
+            task_context=None,
+            unity_project_access=False,
+        ):
             calls.append({**params, "agentName": agent_name, "taskContext": task_context})
             return {
                 "ok": True,
@@ -1256,12 +1282,18 @@ class AgentLoopP0Tests(unittest.TestCase):
                     reasoning={},
                 )
             return SimpleNamespace(
-                text='{"action":"skill","skill_tool":"vrcforge_health","skill_params":{}}',
+                text='{"action":"skill","skill_tool":"unity_health","skill_params":{}}',
                 usage={},
                 reasoning={},
             )
 
-        def execute_shell(_params, agent_name="desktop-agent", *, task_context=None):
+        def execute_shell(
+            _params,
+            agent_name="desktop-agent",
+            *,
+            task_context=None,
+            unity_project_access=False,
+        ):
             captured_task_context.append(dict(task_context or {}))
             return {
                 "ok": True,
@@ -1320,7 +1352,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     text=json.dumps(
                         {
                             "action": "skill",
-                            "skill_tool": "vrcforge_delegate_subagent",
+                            "skill_tool": "delegate_subagent",
                             "skill_params": delegate_arguments,
                             "summary": "delegate the project review",
                         }
@@ -1445,7 +1477,13 @@ class AgentLoopP0Tests(unittest.TestCase):
     def test_projectless_fast_terminal_shell_uses_one_inline_action_identity(self) -> None:
         gateway = self.gateway
 
-        def execute_shell(params, agent_name="desktop-agent", *, task_context=None):
+        def execute_shell(
+            params,
+            agent_name="desktop-agent",
+            *,
+            task_context=None,
+            unity_project_access=False,
+        ):
             assert task_context is not None
             return {
                 "ok": True,
@@ -1529,7 +1567,13 @@ class AgentLoopP0Tests(unittest.TestCase):
                 },
             }
 
-        def execute_shell(_params, agent_name="desktop-agent", *, task_context=None):
+        def execute_shell(
+            _params,
+            agent_name="desktop-agent",
+            *,
+            task_context=None,
+            unity_project_access=False,
+        ):
             self.assertIsNotNone(task_context)
             return {
                 "ok": True,
@@ -1918,7 +1962,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         gateway = self.gateway
         llm_results = [
             SimpleNamespace(
-                text='{"action":"skill","skill_tool":"vrcforge_scan_materials","skill_params":{}}',
+                text='{"action":"skill","skill_tool":"unity_scan_materials","skill_params":{}}',
                 usage={},
                 reasoning={},
             ),
@@ -1988,7 +2032,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         llm_results = iter(
             [
                 SimpleNamespace(
-                    text='{"action":"skill","skill_tool":"vrcforge_scan_materials","skill_params":{}}',
+                    text='{"action":"skill","skill_tool":"unity_scan_materials","skill_params":{}}',
                     usage={},
                     reasoning={},
                 ),
@@ -2110,12 +2154,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         llm_results = iter(
             [
                 SimpleNamespace(
-                    text='{"action":"skill","skill_tool":"vrcforge_scan_materials","skill_params":{}}',
+                    text='{"action":"skill","skill_tool":"unity_scan_materials","skill_params":{}}',
                     usage={},
                     reasoning={},
                 ),
                 SimpleNamespace(
-                    text='{"action":"skill","skill_tool":"vrcforge_health","skill_params":{}}',
+                    text='{"action":"skill","skill_tool":"unity_health","skill_params":{}}',
                     usage={},
                     reasoning={},
                 ),
@@ -2196,17 +2240,17 @@ class AgentLoopP0Tests(unittest.TestCase):
         llm_results = iter(
             [
                 SimpleNamespace(
-                    text='{"action":"skill","skill_tool":"vrcforge_scan_materials","skill_params":{"avatarPath":"A"}}',
+                    text='{"action":"skill","skill_tool":"unity_scan_materials","skill_params":{"avatarPath":"A"}}',
                     usage={},
                     reasoning={},
                 ),
                 SimpleNamespace(
-                    text='{"action":"skill","skill_tool":"vrcforge_health","skill_params":{"scope":"B"}}',
+                    text='{"action":"skill","skill_tool":"unity_health","skill_params":{"scope":"B"}}',
                     usage={},
                     reasoning={},
                 ),
                 SimpleNamespace(
-                    text='{"action":"skill","skill_tool":"vrcforge_health","skill_params":{"scope":"B"}}',
+                    text='{"action":"skill","skill_tool":"unity_health","skill_params":{"scope":"B"}}',
                     usage={},
                     reasoning={},
                 ),
@@ -2394,6 +2438,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_llm_schema_failure_is_refed_for_correction_without_handler_call(self) -> None:
         gateway = self.gateway
+        project = self._unity_project()
         prompts: list[str] = []
         responses = iter(
             [
@@ -2401,7 +2446,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     text=json.dumps(
                         {
                             "action": "skill",
-                            "skill_tool": "vrcforge_scan_materials",
+                            "skill_tool": "unity_scan_materials",
                             "skill_params": {"avatarPath": 42},
                         }
                     ),
@@ -2438,6 +2483,8 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "message": "inspect the selected avatar materials",
                     "provider": "fixture",
                     "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
                     "session_id": "schema-refeed-session",
                     "client_turn_id": "schema-refeed-turn",
                 }
@@ -2453,7 +2500,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             "planner_invalid_response",
         )
         self.assertEqual(result["steps"][0]["kind"], "planner_validation")
-        self.assertEqual(result["steps"][0]["tool"], "vrcforge_scan_materials")
+        self.assertEqual(result["steps"][0]["tool"], "unity_scan_materials")
         self.assertEqual(result["steps"][0]["status"], "failed")
 
     def test_supervised_write_misclassified_as_skill_is_refed_then_requests_approval(self) -> None:
@@ -2476,7 +2523,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     text=json.dumps(
                         {
                             "action": "skill",
-                            "skill_tool": "vrcforge_capture_multi_screenshot",
+                            "skill_tool": "unity_capture_multi_screenshot",
                             "skill_params": {"angles": angles},
                         }
                     ),
@@ -2487,7 +2534,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     text=json.dumps(
                         {
                             "action": "write",
-                            "write_tool": "vrcforge_capture_multi_screenshot",
+                            "write_tool": "unity_capture_multi_screenshot",
                             "write_params": {"angles": angles},
                         }
                     ),
@@ -2610,14 +2657,14 @@ class AgentLoopP0Tests(unittest.TestCase):
             elif len(planner_prompts) == 2:
                 payload = {
                     "action": "write",
-                    "write_tool": "vrcforge_capture_multi_screenshot",
+                    "write_tool": "unity_capture_multi_screenshot",
                     "write_params": capture_arguments,
                     "summary": "Capture the approved fixed-angle views.",
                 }
             elif len(planner_prompts) == 3:
                 payload = {
                     "action": "skill",
-                    "skill_tool": "vrcforge_vision_audit_multi",
+                    "skill_tool": "vision_audit_multi",
                     "skill_params": audit_arguments,
                     "summary": "Audit the managed fixed-angle capture.",
                 }
@@ -2843,14 +2890,14 @@ class AgentLoopP0Tests(unittest.TestCase):
             elif len(planner_prompts) == 2:
                 payload = {
                     "action": "write",
-                    "write_tool": "vrcforge_capture_multi_screenshot",
+                    "write_tool": "unity_capture_multi_screenshot",
                     "write_params": {},
                     "summary": "Capture the approved fixed-angle views.",
                 }
             else:
                 payload = {
                     "action": "skill",
-                    "skill_tool": "vrcforge_vision_audit_multi",
+                    "skill_tool": "vision_audit_multi",
                     "skill_params": {
                         "captureReceipt": "managed-rejected-visual-receipt"
                     },
@@ -3110,10 +3157,12 @@ class AgentLoopP0Tests(unittest.TestCase):
                 },
                 {
                     "planner": "llm",
-                    "summary": "Stop after the rejected arguments.",
-                    "reply": "The invalid tool arguments were not executed.",
-                    "continueLoop": False,
-                    "nextStep": "done",
+                    "summary": "Repeat the same invalid arguments.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_scan_materials",
+                    "skillParams": {"avatarPath": ["still", "not", "a string"]},
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
                 },
             ]
         )
@@ -3141,7 +3190,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             result["plan"]["plannerFailure"]["code"],
             "planner_invalid_response",
         )
-        self.assertEqual(len(result["steps"]), 1)
+        self.assertEqual(len(result["steps"]), 2)
         self.assertEqual(result["steps"][0]["kind"], "planner_validation")
         self.assertEqual(result["steps"][0]["tool"], "vrcforge_scan_materials")
 
@@ -3152,7 +3201,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             [
                 SimpleNamespace(
                     text=(
-                        '{"action":"skill","skill_tool":"vrcforge_create_gameobject",'
+                        '{"action":"skill","skill_tool":"unity_create_gameobject",'
                         '"skill_params":{"name":"Probe"}}'
                     ),
                     usage={},
@@ -3160,7 +3209,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 ),
                 SimpleNamespace(
                     text=(
-                        '{"action":"write","write_tool":"vrcforge_create_gameobject",'
+                        '{"action":"write","write_tool":"unity_create_gameobject",'
                         '"write_params":{"name":"Probe"}}'
                     ),
                     usage={},
@@ -3205,6 +3254,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_schema_failure_requires_a_real_valid_action_before_exact_completion(self) -> None:
         gateway = self.gateway
+        project = self._unity_project()
         valid_arguments = {"avatarPath": "Avatar"}
         completed_action_id = canonical_action_id(
             "skill",
@@ -3218,7 +3268,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     text=json.dumps(
                         {
                             "action": "skill",
-                            "skill_tool": "vrcforge_scan_materials",
+                            "skill_tool": "unity_scan_materials",
                             "skill_params": {"avatarPath": 42},
                         }
                     ),
@@ -3229,7 +3279,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     text=json.dumps(
                         {
                             "action": "skill",
-                            "skill_tool": "vrcforge_scan_materials",
+                            "skill_tool": "unity_scan_materials",
                             "skill_params": valid_arguments,
                         }
                     ),
@@ -3287,6 +3337,8 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "message": "inspect the selected avatar materials",
                     "provider": "fixture",
                     "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
                     "session_id": "schema-valid-correction-session",
                     "client_turn_id": "schema-valid-correction-turn",
                 }
@@ -3304,6 +3356,7 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_repeated_schema_failure_stops_after_one_correction_without_handler_call(self) -> None:
         gateway = self.gateway
+        project = self._unity_project()
         planner_calls = 0
 
         def invalid_llm(*_args, **_kwargs):
@@ -3313,7 +3366,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 text=json.dumps(
                     {
                         "action": "skill",
-                        "skill_tool": "vrcforge_scan_materials",
+                        "skill_tool": "unity_scan_materials",
                         "skill_params": {"avatarPath": planner_calls},
                     }
                 ),
@@ -3334,6 +3387,8 @@ class AgentLoopP0Tests(unittest.TestCase):
                     "message": "inspect materials with bounded schema correction",
                     "provider": "fixture",
                     "model": "fixture",
+                    "projectPath": str(project),
+                    "projectRoot": str(project),
                     "session_id": "schema-bounded-session",
                     "client_turn_id": "schema-bounded-turn",
                 }

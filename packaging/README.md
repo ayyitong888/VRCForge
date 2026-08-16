@@ -67,10 +67,11 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-As of 2026-08-12, `1.5.1` remains the latest published stable package; check the
-GitHub Releases page before preparing a later build. The Avatar
+The current stable release is `1.6.2`. This corrective release replaces
+published `1.6.0` and supersedes the unpublished `v1.6.1` tag. Check the
+GitHub Releases page before preparing any later build. The Avatar
 Encryption / Anti-Rip addon remains a connector preview and is not bundled with
-the latest published `v1.5.1` package. The public repo must not contain encryption
+the `v1.6.2` package. The public repo must not contain encryption
 implementation files; it may only expose connector/request interfaces for a
 separately installed private addon module. Profile docs must list Lite,
 Standard, and Paranoid, with Standard as the default recommendation and
@@ -83,12 +84,12 @@ with approval, checkpoint, rollback, and proof gates.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 1.6.0 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.6.0/VRCForge_Windows_x64_1.6.0.zip `
+  -Version 1.6.2 `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.6.2/VRCForge_Windows_x64_1.6.2.zip `
   -UvDownloadSha256 ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 1.6.0
+  -Version 1.6.2
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -156,15 +157,15 @@ conditions before mutation and refuses to run without the exact confirmation:
 python scripts\smoke_installer_install_uninstall.py `
   --scope production-clean `
   --production-clean-confirmation I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT `
-  --upgrade-installer "<downloaded official v1.5.1 offline installer>" `
+  --upgrade-installer "<downloaded official v1.6.0 offline installer>" `
   --installer "dist\release\VRCForge_Offline_Installer_x64.exe" `
   --backend-port 8791
 ```
 
 Do not run `production-clean` on a normal workstation or an environment that
 contains user data. Do not pass `--smoke-id`, `--install-dir`, or
-`--user-data-root` in this mode. For 1.6 stable evidence the report must show a
-successful production-identity 1.5.1-to-1.6 upgrade, health check, uninstall, and
+`--user-data-root` in this mode. For 1.6.2 stable evidence the report must show a
+successful production-identity 1.6.0-to-1.6.2 upgrade, health check, uninstall, and
 user-data preservation, and its current-installer SHA-256 must exactly match the
 strict release manifest.
 
@@ -211,26 +212,27 @@ Before publishing or refreshing a stable release, run the stable-readiness gate:
 
 ```powershell
 python scripts\smoke_stable_readiness_gate.py `
-  --version 1.6.0 `
-  --latest-stable 1.5.1 `
+  --version 1.6.2 `
+  --latest-stable 1.6.0 `
   --installer-smoke "<production-clean installer report>" `
   --upgrade-from-installer-sha256 853dfce74830e73098cc55240abf1e23162d66e579225d16f5b13d44089ca2d4 `
   --max-artifact-age-hours 24 `
   --require-live-writes
 ```
 
-For the owner-approved 1.6.0 hot-fix-first publication, fresh warm-start,
-Golden Path, visual-completion, packaged Skill, optimizer, external-Agent, and
-clean-Windows install/upgrade/uninstall inputs are explicitly deferred until
-after publication. Do not relabel a blocked or incomplete readiness report as a
-pass, and do not claim these probes as pre-release evidence. All non-deferred
-build, policy, provenance, document, manifest and artifact checks remain
-authoritative; the deferred probes must later be refreshed against the exact
-published hashes.
+For the owner-approved 1.6.2 corrective publication, fresh warm-start,
+Golden Path, packaged Skill, optimizer, external-Agent, and clean-Windows
+install/upgrade/uninstall inputs are explicitly deferred until after
+publication. The user-attested live 1.6.2 UI/UX comparison is not deferred and
+does not require a screenshot artifact. Do not
+relabel a blocked or incomplete readiness report as a pass, and do not claim
+deferred probes as pre-release evidence. All non-deferred UI, build, policy,
+provenance, document, manifest and artifact checks remain authoritative; the
+deferred probes must later be refreshed against the exact published hashes.
 
 This gate checks current target-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
-pointers when they exist in the checkout. For the current `1.6.0` target release,
+pointers when they exist in the checkout. For the current `1.6.2` target release,
 the gate also checks that public docs distinguish source/target from the latest published release,
 direct avatar-encryption writers are not exposed, and the public surface is
 only the private-addon connector request interface with explicit approval,

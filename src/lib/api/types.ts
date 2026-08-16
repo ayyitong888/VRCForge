@@ -645,8 +645,10 @@ export type AgentRuntimeResponse = {
     index?: number;
     kind?: string;
     tool?: string;
+    actionId?: string;
     summary?: string;
     status?: string;
+    result?: unknown;
     provider?: string;
     providerLabel?: string;
     model?: string;

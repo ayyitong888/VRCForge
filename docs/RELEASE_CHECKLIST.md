@@ -2,6 +2,55 @@
 
 Before publishing a release package:
 
+* [ ] Run the 1.6.2 no-regression gates for General Cowork/right-rail order,
+      conditional Goal placement and `/goal` plus Agent control, compact generic
+      slash commands plus `/handoff`, sole right-rail collapse ownership,
+      jump-to-bottom with no first wheel-arrival bounce, complete Provider/model
+      identity, continuous context ring thresholds, startup-only silent App
+      Update and the General-read
+      `A -> B -> A` / third-no-progress boundary. Confirm General uses cached
+      project metadata while only Unity discovery refreshes without blocking
+      native window drag; empty groups have no fold control; zero-source General
+      chats have no `Context`/`Sources` placeholder. Run one real ordinary Agent
+      task and verify every non-CoT planner update, tool invocation and final
+      answer remains visibly interleaved in authoritative sequence/timestamp
+      order. Only adjacent same-kind events may be compacted; any intervening
+      commentary, status, tool call or tool result must split the batch, with no
+      single-event generic `Work segment` / `Used tools` wrapper.
+      General Agent tool rows use plain capability names without `vrcforge_`;
+      Unity-specific rows use the `unity_` namespace.
+      Expand a result longer than 1000 characters and confirm its tail remains
+      present inside the internally scrolling card; repeated action IDs must
+      bind full stored results in occurrence order rather than reuse the last.
+      Confirm App-global and bound-project `AGENTS.md` rules reach planning
+      without entering tool arguments, logs or the visible timeline. Each changed UI contract also
+      needs user-attested live manual acceptance at an equivalent state against
+      the approved Codex/Claude Cowork references; no screenshot artifact is required.
+      Confirm General Settings never renders the local identity-map alias list;
+      enable Developer Options and confirm the diagnostic map is available only
+      on the Developer page.
+* [ ] Confirm the profiled registry exposes Core + General in General Mode and
+      Core + General + Unity in Unity Project Mode using the same handlers.
+      Registered Unity roots remain readable by General tools but reject
+      ordinary Edit/Write/Delete/Move/apply_patch and ordinary Shell cwd/direct
+      path references; `unity_shell` is current-root-only, and external paths
+      remain open. Reject any Shadow Workspace, OS sandbox/ACL, separate-user,
+      filesystem-interception or adversarial-bypass scope expansion.
+* [ ] Review `git diff --numstat <release-base> -- agent_gateway.py` as a
+      diagnostic, not a zero-growth gate. Every net increase must have a
+      written per-hunk reason showing that the code is Gateway-owned
+      coordination or a trust-boundary seam, that moving it to an existing
+      focused module would weaken ownership or duplicate behavior, and that a
+      regression test binds the behavior. Reject unexplained growth and domain,
+      presentation, registration-catalog or helper logic that belongs outside
+      the Gateway; do not reject justified growth by line count alone.
+* [ ] Confirm the user slash list contains only the approved Agent-generic
+      commands (`/compact`, `/goal`, `/memory`, `/delegate`, `/handoff`, plus
+      Developer-only `/desktop` when enabled); domain skills remain Agent-owned.
+* [ ] Confirm App Update runs once in the startup background and only a
+      successful newer version opens an in-App dialog. Current/offline/error
+      paths must be silent; manual/periodic/system-notification paths are absent.
+
 * [ ] Include LICENSE in the release package.
 * [ ] Include NOTICE in the release package.
 * [ ] Include README.md or a link to the official repository.
@@ -40,6 +89,12 @@ Before publishing a release package:
       `packaging/THIRD_PARTY_LICENSES.json` before publishing it.
 * [ ] Confirm `VRCForge.unitypackage` contains only VRCForge-owned MCP Core and
       tool sources under `Assets/VRCForge`, with no external Unity MCP package.
+* [ ] Extract
+      `Assets/VRCForge/Core/MCP/VRCForgeApprovedObjectReceipt.cs` from the built
+      package and confirm GUID `c03999e57815100961016fab067f9c2b`, first-line
+      `#if UNITY_EDITOR`, final-line `#endif`, and guarded `EditorUtility` /
+      `GlobalObjectId` references. Reject any package that can reproduce
+      `CS0103` in `Assembly-CSharp.dll` or break Player/VRChat `Build & Test`.
 * [ ] Confirm the package exposes exactly 64 tools and only protocol
       `2026-07-28`; old protocol/transport/fallback strings must be absent.
 * [ ] Confirm the package-generated trusted desktop/backend SHA-256 values
@@ -70,6 +125,7 @@ Before publishing a release package:
       request guard, direct-apply exposure, validation delta, screenshots, and
       rollback proof.
 * [ ] For releases that ship `VRCForge.unitypackage`, run a fresh-project
-      direct import smoke and confirm folder entries do not contain empty
-      `asset` payloads.
+      direct import smoke; confirm folder entries do not contain empty `asset`
+      payloads, Editor and Player compilation have zero errors and no unexpected
+      warnings, and VRChat `Build & Test` reaches validation/build normally.
 * [ ] Do not remove GPL-3.0 notices from redistributed or modified versions.

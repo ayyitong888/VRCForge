@@ -2,7 +2,7 @@
 
 ![VRCForge — 还差多久？还差 4 小时](docs/assets/vrcforge-four-hours-meme.jpg)
 
-[![Target](https://img.shields.io/badge/target-v1.6.0-4f46e5?style=flat-square)](docs/RELEASE_NOTES_1.6.0.md)
+[![Target](https://img.shields.io/badge/target-v1.6.2-4f46e5?style=flat-square)](docs/RELEASE_NOTES_1.6.2.md)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-22c55e?style=flat-square)](LICENSE)
 ![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 ![Status: Work in progress](https://img.shields.io/badge/status-WIP-f59e0b?style=flat-square)
@@ -23,8 +23,8 @@ Avatar 改动。
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source / target release: `1.6.0`. Latest published stable release:
-`1.5.1` (`v1.5.1`).
+Current stable source and release: `1.6.2` (`v1.6.2`). VRCForge 1.6.2 replaces
+1.6.0, and the unpublished v1.6.1 tag is superseded.
 
 Official repository: <https://github.com/ayyitong888/VRCForge>
 
@@ -68,8 +68,8 @@ memories, checkpoints, and unrelated assets must be preserved.
 Program files: `%ProgramFiles%\VRCForge`. User data:
 `%LOCALAPPDATA%\VRCForge\agentic-app` (preserved during update/uninstall).
 
-The portable zip (`VRCForge_Windows_x64_1.5.1.zip`) is also available for
-no-install/debug use.
+The 1.6.2 release includes a portable zip
+(`VRCForge_Windows_x64_1.6.2.zip`) for no-install/debug use.
 
 ---
 
@@ -79,7 +79,7 @@ Status / 状态: **✅ Available** · **🔧 In Development** · **📋 Planned*
 
 | Status | Area | What it does |
 | --- | --- | --- |
-| ✅ Available | **MCP 2.0 (`2026-07-28`)** | In the latest published `v1.5.1` package, the project Core advertises 64 VRCForge Unity tools over protocol revision `2026-07-28` and connects directly to the App. The release provenance scan reported no bundled third-party Unity MCP runtime or package. |
+| ✅ Available | **MCP 2.0 (`2026-07-28`)** | The `v1.6.2` release target keeps the project Core at 64 VRCForge Unity tools over protocol revision `2026-07-28` and connects directly to the App. Its release build must report no bundled third-party Unity MCP runtime or package. |
 | ✅ Available | **Avatar editing / Avatar 编辑** | BlendShape scan, face tuning (natural-language and reference-image), shader/material tuning (lilToon, Poiyomi, Generic), and vision review with Gesture Manager screenshots. |
 | ✅ Available | **Optimization / 优化** | VRAM, material, mesh, and parameter audits with conservative one-step optimization planning. |
 | ✅ Available | **Wardrobe / 衣柜管理** | Integer-parameter-based wardrobe scan, outfit import planning (`.unitypackage`, Booth folder, loose prefab), and supervised apply. |
@@ -163,8 +163,8 @@ checkpoint, and rollback remain mandatory.
 
 ## Unity Plugin / Unity 插件
 
-In the latest published `v1.5.1` release, `VRCForge.unitypackage` contains the project-scoped
-MCP 2.0 Core (`2026-07-28`), lifecycle bootstrap, and the 64 product tools under
+The `v1.6.2` release target keeps `VRCForge.unitypackage` project-scoped. The
+package contains the MCP 2.0 Core (`2026-07-28`), lifecycle bootstrap, and the 64 product tools under
 `Assets/VRCForge`. After import, the App discovers and connects the selected
 project directly. No separate MCP server/package, manifest edit, command, MCP
 token copy, or manual Core configuration is required, and normal in-Editor
@@ -172,7 +172,7 @@ Core startup does not open a separate console window. This release accepts
 protocol revision `2026-07-28`; older clients receive an update error, while
 known third-party MCP packages produce a conflict warning. App-mediated writes
 use the selected permission mode and the supervised checkpoint/readback/restore
-path. Reimporting the same `1.5.1` integration is supported as a repair path;
+path. Reimporting the same `1.6.2` integration is supported as a repair path;
 it is not an overwrite-upgrade path from `1.3.6`. Package import is performed
 in Unity; the App connects after the project Core reports ready.
 
@@ -221,11 +221,11 @@ This path is for development only. Normal users should use the installer.
 
 GPL-3.0-only. The Unity MCP 2.0 Core runtime, command catalogue, input schema
 metadata, and tool-result contract are VRCForge-owned implementations. The
-`v1.5.1` release provenance scan reported no bundled third-party Unity MCP code
-or runtime. Binary releases may also bundle the uv runtime (MIT OR Apache-2.0).
+The `v1.6.2` release gate requires a provenance scan with no bundled third-party
+Unity MCP code or runtime. Binary releases may also bundle the uv runtime (MIT OR Apache-2.0).
 See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 VRCForge 以 GPL-3.0-only 发布。Unity MCP 2.0 Core、命令目录、输入 Schema 元数据和
-工具结果契约均为 VRCForge 自有实现；`v1.5.1` 发行包的来源扫描未报告捆绑的第三方
+工具结果契约均为 VRCForge 自有实现；`v1.6.2` 发布门禁要求来源扫描不得发现捆绑的第三方
 Unity MCP 代码或运行时。二进制发行包也可能包含采用 MIT OR Apache-2.0 许可证的 uv
 运行时。

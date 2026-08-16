@@ -482,6 +482,8 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
     } == PUBLISHED_1_3_6_COMMON_GUIDS
     assert {path: packaged_guids[path] for path in FROZEN_SOURCE_META_GUIDS} == FROZEN_SOURCE_META_GUIDS
     assert {path: packaged_guids[path] for path in RELEASE_PAIRING_ASSET_GUIDS} == RELEASE_PAIRING_ASSET_GUIDS
+    receipt_path = "Assets/VRCForge/Core/MCP/VRCForgeApprovedObjectReceipt.cs"
+    assert packaged_guids[receipt_path] == "c03999e57815100961016fab067f9c2b"
     source_cs = {
         "Assets/VRCForge/" + path.relative_to(repo_root / "Assets" / "VRCForge").as_posix()
         for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")
@@ -531,6 +533,13 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
             if member.isfile() and member.name.endswith("/pathname")
         }
         archive_names = set(archive.getnames())
+        receipt_entry = pathname_members[receipt_path]
+        receipt_source = archive.extractfile(f"{receipt_entry}/asset").read().decode("utf-8-sig")
+        receipt_lines = [line.strip() for line in receipt_source.splitlines() if line.strip()]
+        assert receipt_lines[0] == "#if UNITY_EDITOR"
+        assert receipt_lines[-1] == "#endif"
+        assert "EditorUtility" in receipt_source
+        assert "GlobalObjectId" in receipt_source
         for packaged_path, entry in pathname_members.items():
             for entry_file_name in ("asset", "asset.meta"):
                 member_name = f"{entry}/{entry_file_name}"

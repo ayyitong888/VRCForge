@@ -15,6 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS_PATH = ROOT / "artifacts" / "acceptance-harness" / "smoke_unity_mcp_64_live.py"
 PROFILE_PATH = ROOT / "artifacts" / "acceptance-harness" / "mcp64-live-profile.json"
 
+pytestmark = pytest.mark.skipif(
+    not HARNESS_PATH.is_file(),
+    reason="local Unity MCP live acceptance harness is not part of a clean source checkout",
+)
+
 
 def load_harness_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("vrcforge_mcp64_live_harness", HARNESS_PATH)

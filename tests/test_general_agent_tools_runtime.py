@@ -5,16 +5,18 @@ from runtime_planner_service import EXPOSURE_LAYER_PLANNING
 
 
 NAMES = {
-    "vrcforge_list_directory",
-    "vrcforge_read_text_file",
-    "vrcforge_find_files",
-    "vrcforge_search_text",
+    "list_directory",
+    "read_text_file",
+    "find_files",
+    "search_text",
 }
+
+INTERNAL_NAMES = {f"vrcforge_{name}" for name in NAMES}
 
 
 def test_general_filesystem_tools_are_registered_read_only() -> None:
-    registered = {name: dashboard_server.AGENT_GATEWAY._tools[name] for name in NAMES}
-    assert set(registered) == NAMES
+    registered = {name: dashboard_server.AGENT_GATEWAY._tools[name] for name in INTERNAL_NAMES}
+    assert set(registered) == INTERNAL_NAMES
     assert all(tool.write is False for tool in registered.values())
     assert all("when-to-use:" in tool.description for tool in registered.values())
     assert all("when-NOT-to-use:" in tool.description for tool in registered.values())
@@ -28,6 +30,8 @@ def test_general_filesystem_tools_are_visible_without_unity_project() -> None:
     visible = {tool.name: tool for tool in catalog.visible_tools}
     assert NAMES <= set(visible)
     assert all(visible[name].write is False for name in NAMES)
+    assert {visible[name].runtime_name for name in NAMES} == INTERNAL_NAMES
+    assert all(not name.startswith("unity_") for name in visible)
 
 
 def test_general_filesystem_handlers_work_with_camel_case_bounds(tmp_path: Path) -> None:
@@ -59,7 +63,8 @@ def test_directory_listing_directs_the_loop_to_materially_new_evidence(tmp_path:
     )
 
     assert "Do not repeat" in result["notice"]
-    assert "vrcforge_find_files" in result["notice"]
+    assert "find_files" in result["notice"]
+    assert "vrcforge_" not in result["notice"]
     planner = dashboard_server.RuntimePlannerService(
         catalog=dashboard_server._RuntimePlannerCatalog(),
         desktop=dashboard_server._RuntimePlannerDesktopObservation(),

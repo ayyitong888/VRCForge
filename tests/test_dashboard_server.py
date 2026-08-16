@@ -46,6 +46,7 @@ from agent_shell_service import (
     resolve_powershell_executable,
 )
 from agent_shell_process_supervisor import ShellProcessSupervisor, ShellSessionPorts
+from agent_unity_path_guard import UnityPathGuard
 from wardrobe_outfit_workflow_service import (
     build_create_wardrobe_request,
     build_manage_wardrobe_request,
@@ -262,16 +263,31 @@ def bind_test_runtime_planner(
 def use_test_runtime_planner(
     gateway: AgentGateway,
     respond: Callable[[str], object],
+    *,
+    catalog: object | None = None,
 ):
     """Temporarily replace only the Provider port of an already-bound App gateway."""
     planner = RuntimePlannerService(
-        catalog=_TestRuntimePlannerCatalog(gateway),
+        catalog=catalog or _TestRuntimePlannerCatalog(gateway),
         desktop=_TestRuntimePlannerDesktop(gateway),
         model=_TestRuntimePlannerModel(respond),
         turn=_TestRuntimePlannerTurn(),
     )
     with patch.object(gateway, "_runtime_planner", planner):
         yield planner
+
+
+@contextmanager
+def bind_test_unity_path_guard(guard: UnityPathGuard):
+    """Bind an explicit registered-project guard for shell contract tests."""
+
+    shell = dashboard_server.AGENT_GATEWAY.shell
+    previous = shell._project_path_guard
+    shell.bind_project_path_guard(lambda: guard)
+    try:
+        yield guard
+    finally:
+        shell._project_path_guard = previous
 
 
 def _test_runtime_provider_config(*, model: str = "test-model") -> ProviderApiConfig:
@@ -3370,18 +3386,20 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_background_goal_pending_approval_is_denied_not_green_and_acknowledged(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
-            workspace_path = Path(workspace)
+            workspace_path = Path(workspace) / "UnityProject"
             for directory in ("Assets", "Packages", "ProjectSettings"):
-                (workspace_path / directory).mkdir()
+                (workspace_path / directory).mkdir(parents=True)
             target = workspace_path / "Assets" / "background-goal.txt"
+            guard = UnityPathGuard([workspace_path], current_root=workspace_path)
             past = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
             shell_command = "Set-Content -Path Assets/background-goal.txt -Value guarded -Encoding utf8"
+            responses = iter([PlannerModelResult(text=json.dumps({"action": "enter_execution"})), PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": shell_command, "cwd": str(workspace_path), "workspace_root": str(workspace_path), "projectRoot": str(workspace_path)}}))])
             with (
+                bind_test_unity_path_guard(guard),
                 use_test_runtime_planner(
                     dashboard_server.AGENT_GATEWAY,
-                    lambda _prompt: PlannerModelResult(
-                        text=json.dumps({"action": "shell", "shell_command": shell_command})
-                    ),
+                    lambda _prompt: next(responses),
+                    catalog=dashboard_server._RuntimePlannerCatalog(),
                 ),
                 TestClient(dashboard_server.app) as client,
             ):
@@ -3402,9 +3420,9 @@ class DashboardServerTests(unittest.TestCase):
                         "clientTurnId": delivery["clientTurnId"],
                         "goalDeliveryId": delivery["deliveryId"],
                         "shell_command": shell_command,
-                        "workspace_root": workspace,
-                        "cwd": workspace,
-                        "projectPath": workspace,
+                        "workspace_root": str(workspace_path),
+                        "cwd": str(workspace_path),
+                        "projectPath": str(workspace_path),
                     },
                 )
 
@@ -3425,7 +3443,7 @@ class DashboardServerTests(unittest.TestCase):
 
                 rejected = client.post(
                     f"/api/app/agent/approvals/{approval_id}/reject",
-                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                    json={"expectedProjectRoot": str(workspace_path), "globalOnly": False},
                 )
                 denied_state = client.get("/api/app/agent/goals/background").json()
                 acknowledged = client.post(
@@ -6760,17 +6778,27 @@ class DashboardServerTests(unittest.TestCase):
                 "skillParams": {"target": "same"},
                 "continueLoop": True,
             }
+            planner_calls = 0
+
+            def repeat_plan(_prompt):
+                nonlocal planner_calls
+                planner_calls += 1
+                return plan
+
             gateway.register_tool(
                 tool,
                 "Consecutive success fixture.",
                 "read/debug",
                 lambda _params: calls.append(tool) or {"ok": True, "status": "executed"},
             )
-            bind_test_runtime_planner(gateway, lambda _prompt: plan)
+            bind_test_runtime_planner(gateway, repeat_plan)
 
             payload = gateway.runtime_message({"message": "repeat the exact same read"})
 
         self.assertEqual(calls, [tool])
+        # The first plan executes. Two duplicate correction passes are returned
+        # to the planner, and the third duplicate proposal hard-stops the turn.
+        self.assertEqual(planner_calls, 4)
         self.assertEqual(len(payload["steps"]), 1)
         # AGT-009: a successful observation replay with no new evidence is
         # bounded no-progress, not an unverified completion claim.
@@ -7855,9 +7883,10 @@ class DashboardServerTests(unittest.TestCase):
             execution = dashboard_server._RuntimePlannerCatalog().read("execution")
 
         planning_visible = {tool.name for tool in planning.visible_tools}
-        planning_routable = {tool.name: tool for tool in planning.routable_tools}
-        execution_tools = {tool.name: tool for tool in execution.visible_tools}
-        execution_routable = {tool.name for tool in execution.routable_tools}
+        planning_routable = {tool.runtime_name: tool for tool in planning.routable_tools}
+        execution_visible_names = {tool.name for tool in execution.visible_tools}
+        execution_tools = {tool.runtime_name: tool for tool in execution.visible_tools}
+        execution_routable = {tool.runtime_name for tool in execution.routable_tools}
         with patch.object(gateway, "ensure_config", return_value=config):
             external_planning = {
                 item["name"] for item in gateway.build_manifest("planning")["tools"]
@@ -7880,6 +7909,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("vrcforge_vision_audit_multi", external_planning)
         self.assertIn("vrcforge_vision_audit_multi", execution_tools)
         self.assertIn("vrcforge_vision_audit_multi", execution_routable)
+        self.assertIn("vision_audit_multi", execution_visible_names)
         self.assertTrue(all(execution_tools[name].write for name in real_write_handlers))
         self.assertTrue(
             all(execution_tools[name].category == "supervised-write" for name in real_write_handlers)
@@ -8239,16 +8269,28 @@ class DashboardServerTests(unittest.TestCase):
             project = Path(project_root)
             for marker in ("Assets", "Packages", "ProjectSettings"):
                 (project / marker).mkdir()
-            project_write = dashboard_server.AGENT_GATEWAY.shell.classify(
-                {
-                    "command": "Set-Content Assets/test.txt hi",
-                    "workspace_root": project_root,
-                    "cwd": project_root,
-                    "projectRoot": project_root,
-                }
+            # Marker-shaped directories are ordinary host paths until explicitly registered.
+            unregistered = dashboard_server.AGENT_GATEWAY.shell.classify(
+                {"command": "Set-Content Assets/test.txt hi", "workspace_root": project_root, "cwd": project_root}
             )
-            self.assertEqual(project_write["risk"], "high")
-            self.assertEqual(project_write["protectionScope"], "unity_project")
+            self.assertEqual(unregistered["risk"], "low")
+            guard = UnityPathGuard([project], current_root=project)
+            with bind_test_unity_path_guard(guard):
+                ordinary = dashboard_server.AGENT_GATEWAY.shell.classify(
+                    {"command": "Set-Content Assets/test.txt hi", "workspace_root": project_root, "cwd": project_root}
+                )
+                self.assertEqual(ordinary["risk"], "reject")
+                unity = dashboard_server.AGENT_GATEWAY.shell.classify(
+                    {
+                        "command": "Set-Content Assets/test.txt hi",
+                        "workspace_root": project_root,
+                        "cwd": project_root,
+                        "projectRoot": project_root,
+                    },
+                    unity_project_access=True,
+                )
+                self.assertEqual(unity["risk"], "high")
+                self.assertEqual(unity["protectionScope"], "unity_project")
 
         rejected = dashboard_server.AGENT_GATEWAY.shell.classify({"command": "", "workspace_root": workspace_root})
         self.assertEqual(rejected["risk"], "reject")
@@ -8334,9 +8376,11 @@ class DashboardServerTests(unittest.TestCase):
         self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY.shell, "_process", original_process_ports)
         self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY.shell, "_sessions", original_sessions)
         with tempfile.TemporaryDirectory() as workspace:
+            project = Path(workspace) / "UnityProject"
             for directory in ("Assets", "Packages", "ProjectSettings"):
-                (Path(workspace) / directory).mkdir()
-            target = Path(workspace) / "Assets" / "agent-loop.txt"
+                (project / directory).mkdir(parents=True)
+            target = project / "Assets" / "agent-loop.txt"
+            guard = UnityPathGuard([project], current_root=project)
             low_command = "Get-ChildItem"
             high_command = "Set-Content -Path Assets/agent-loop.txt -Value hi -Encoding utf8"
             responses = iter(
@@ -8352,19 +8396,38 @@ class DashboardServerTests(unittest.TestCase):
                                 "completion_claim": {
                                     "satisfied": True,
                                     "evidence_action_ids": [
-                                        canonical_action_id("shell", "shell", {"command": low_command})
+                                        canonical_action_id(
+                                            "shell",
+                                            "shell",
+                                            {"command": low_command, "yieldMs": 10_000, "timeout": 1_800},
+                                        )
                                     ],
                                 },
                             }
                         )
                     ),
                     PlannerModelResult(
-                        text=json.dumps({"action": "shell", "shell_command": high_command})
+                        text=json.dumps({"action": "enter_execution"})
+                    ),
+                    PlannerModelResult(
+                        text=json.dumps(
+                            {
+                                "action": "write",
+                                "write_tool": "unity_shell",
+                                "write_params": {
+                                    "command": high_command,
+                                    "cwd": str(project),
+                                    "workspace_root": str(project),
+                                    "projectRoot": str(project),
+                                },
+                            }
+                        )
                     ),
                 ]
             )
             with (
-                use_test_runtime_planner(dashboard_server.AGENT_GATEWAY, lambda _prompt: next(responses)),
+                bind_test_unity_path_guard(guard),
+                use_test_runtime_planner(dashboard_server.AGENT_GATEWAY, lambda _prompt: next(responses), catalog=dashboard_server._RuntimePlannerCatalog()),
                 TestClient(dashboard_server.app) as client,
             ):
                 low = client.post(
@@ -8385,9 +8448,9 @@ class DashboardServerTests(unittest.TestCase):
                     "/api/app/agent/message",
                     json={
                         "message": "写入测试文件",
-                        "shell_command": high_command,
                         "workspace_root": workspace,
                         "cwd": workspace,
+                        "projectPath": str(project),
                     },
                 )
                 self.assertEqual(high.status_code, 200)
@@ -8399,7 +8462,7 @@ class DashboardServerTests(unittest.TestCase):
                 with patch("dashboard_server.asyncio.to_thread", wraps=dashboard_server.asyncio.to_thread) as to_thread:
                     approved = client.post(
                         f"/api/app/agent/approvals/{approval_id}/approve",
-                        json={"expectedProjectRoot": workspace, "globalOnly": False},
+                        json={"expectedProjectRoot": str(project), "globalOnly": False},
                     )
                 self.assertEqual(approved.status_code, 200, approved.text)
                 approved_payload = approved.json()
@@ -8416,23 +8479,26 @@ class DashboardServerTests(unittest.TestCase):
 
                 replay = client.post(
                     f"/api/app/agent/approvals/{approval_id}/approve",
-                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                    json={"expectedProjectRoot": str(project), "globalOnly": False},
                 )
                 self.assertEqual(replay.status_code, 200)
                 self.assertFalse(replay.json()["ok"])
 
     def test_app_approval_revision_supersedes_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
+            project = Path(workspace) / "UnityProject"
             for directory in ("Assets", "Packages", "ProjectSettings"):
-                (Path(workspace) / directory).mkdir()
-            target = Path(workspace) / "Assets" / "revision.txt"
+                (project / directory).mkdir(parents=True)
+            target = project / "Assets" / "revision.txt"
+            guard = UnityPathGuard([project], current_root=project)
             command = "Set-Content -Path Assets/revision.txt -Value hi -Encoding utf8"
+            responses = iter([PlannerModelResult(text=json.dumps({"action": "enter_execution"})), PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}}))])
             with (
+                bind_test_unity_path_guard(guard),
                 use_test_runtime_planner(
                     dashboard_server.AGENT_GATEWAY,
-                    lambda _prompt: PlannerModelResult(
-                        text=json.dumps({"action": "shell", "shell_command": command})
-                    ),
+                    lambda _prompt: next(responses),
+                    catalog=dashboard_server._RuntimePlannerCatalog(),
                 ),
                 TestClient(dashboard_server.app) as client,
             ):
@@ -8440,9 +8506,9 @@ class DashboardServerTests(unittest.TestCase):
                     "/api/app/agent/message",
                     json={
                         "message": "write test file",
-                        "workspace_root": workspace,
-                        "cwd": workspace,
-                        "projectPath": workspace,
+                        "workspace_root": str(project),
+                        "cwd": str(project),
+                        "projectPath": str(project),
                     },
                 )
                 self.assertEqual(high.status_code, 200)
@@ -8453,7 +8519,7 @@ class DashboardServerTests(unittest.TestCase):
                     json={
                         "reason": "change request",
                         "note": "use another name",
-                        "expectedProjectRoot": workspace,
+                        "expectedProjectRoot": str(project),
                         "globalOnly": False,
                     },
                 )
@@ -8466,7 +8532,7 @@ class DashboardServerTests(unittest.TestCase):
 
                 stale_approval = client.post(
                     f"/api/app/agent/approvals/{approval_id}/approve",
-                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                    json={"expectedProjectRoot": str(project), "globalOnly": False},
                 )
                 self.assertEqual(stale_approval.status_code, 200)
                 self.assertFalse(stale_approval.json()["ok"])
@@ -8478,16 +8544,19 @@ class DashboardServerTests(unittest.TestCase):
         dashboard_server.AGENT_GATEWAY.shell._process = shell_process_ports
         self.addCleanup(setattr, dashboard_server.AGENT_GATEWAY.shell, "_process", original_process_ports)
         with tempfile.TemporaryDirectory() as workspace:
+            project = Path(workspace) / "UnityProject"
             for directory in ("Assets", "Packages", "ProjectSettings"):
-                (Path(workspace) / directory).mkdir()
-            target = Path(workspace) / "Assets" / "terminal.txt"
+                (project / directory).mkdir(parents=True)
+            target = project / "Assets" / "terminal.txt"
+            guard = UnityPathGuard([project], current_root=project)
             command = "Set-Content -Path Assets/terminal.txt -Value hi -Encoding utf8"
+            responses = iter([PlannerModelResult(text=json.dumps({"action": "enter_execution"})), PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}}))])
             with (
+                bind_test_unity_path_guard(guard),
                 use_test_runtime_planner(
                     dashboard_server.AGENT_GATEWAY,
-                    lambda _prompt: PlannerModelResult(
-                        text=json.dumps({"action": "shell", "shell_command": command})
-                    ),
+                    lambda _prompt: next(responses),
+                    catalog=dashboard_server._RuntimePlannerCatalog(),
                 ),
                 TestClient(dashboard_server.app) as client,
             ):
@@ -8495,16 +8564,16 @@ class DashboardServerTests(unittest.TestCase):
                     "/api/app/agent/message",
                     json={
                         "message": "write test file",
-                        "workspace_root": workspace,
-                        "cwd": workspace,
-                        "projectPath": workspace,
+                        "workspace_root": str(project),
+                        "cwd": str(project),
+                        "projectPath": str(project),
                     },
                 )
                 self.assertEqual(high.status_code, 200)
                 approval_id = high.json()["shell"]["approval_id"]
                 approved = client.post(
                     f"/api/app/agent/approvals/{approval_id}/approve",
-                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                    json={"expectedProjectRoot": str(project), "globalOnly": False},
                 )
                 self.assertEqual(approved.status_code, 200)
                 self.assertTrue(approved.json()["ok"])
@@ -8513,7 +8582,7 @@ class DashboardServerTests(unittest.TestCase):
 
                 rejected = client.post(
                     f"/api/app/agent/approvals/{approval_id}/reject",
-                    json={"expectedProjectRoot": workspace, "globalOnly": False},
+                    json={"expectedProjectRoot": str(project), "globalOnly": False},
                 )
                 self.assertEqual(rejected.status_code, 200)
                 rejected_payload = rejected.json()

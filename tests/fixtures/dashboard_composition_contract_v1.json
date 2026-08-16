@@ -5,26 +5,26 @@
     "runtimeCommit": "49aa5d1"
   },
   "routes": {
-    "count": 252,
+    "count": 262,
     "kinds": {
-      "APIRoute": 243,
+      "APIRoute": 253,
       "APIWebSocketRoute": 1,
       "Mount": 4,
       "Route": 4
     },
     "methods": {
       "DELETE": 6,
-      "GET": 70,
+      "GET": 72,
       "HEAD": 4,
-      "POST": 168,
+      "POST": 176,
       "PUT": 3
     },
-    "tableSha256": "baa201d0b82d2b5a7e6ab4587896acabd87e5bc57845fe6be053a61fcab27cb7"
+    "tableSha256": "ad3ec877fc960343165abb1280f4f082173fe58a9e323d732c343c86d898f1e3"
   },
   "openApi": {
-    "pathCount": 217,
-    "schemaCount": 130,
-    "sha256WithoutRuntimeVersion": "c84a0f56e64980aabc93e4931bec5fc6455475ce01633db3fc2adf1df1c3d5d7"
+    "pathCount": 227,
+    "schemaCount": 131,
+    "sha256WithoutRuntimeVersion": "d40269368ebfa162aca5040ae5f908114d9c7cee952f085d5509868c94bf0490"
   },
   "events": {
     "envelopeKeys": [

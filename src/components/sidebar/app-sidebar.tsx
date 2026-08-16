@@ -9,8 +9,6 @@ import {
   Gauge,
   History,
   MessageSquare,
-  PanelLeftClose,
-  PanelLeftOpen,
   Plug,
   RefreshCw,
   Settings,
@@ -63,7 +61,6 @@ type AppSidebarProps = {
   renamingChatId: string;
   renameDraft: string;
   projectDisplayName: (project?: SidebarProjectItem) => string;
-  onToggleSidebar: () => void;
   onNewTemporaryChat: () => void;
   onOpenProjectPicker: () => void;
   onOpenDoctor: () => void;
@@ -110,7 +107,6 @@ export function AppSidebar({
   renamingChatId,
   renameDraft,
   projectDisplayName,
-  onToggleSidebar,
   onNewTemporaryChat,
   onOpenProjectPicker,
   onOpenDoctor,
@@ -158,14 +154,6 @@ export function AppSidebar({
         <div className={cn("flex h-9 items-center gap-2 px-2", collapsed ? "justify-center" : "justify-between")}>
           <Settings className="h-4 w-4 shrink-0 text-primary" />
           {collapsed ? null : <div className="hidden min-w-0 flex-1 truncate text-sm font-semibold md:block">{t("sidebar.settings")}</div>}
-          <button
-            type="button"
-            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            onClick={onToggleSidebar}
-            title={collapsed ? t("sidebar.expandSidebar") : t("sidebar.collapseSidebar")}
-          >
-            {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-          </button>
         </div>
         <nav className="mt-4 space-y-0.5">
           <SidebarNavButton
@@ -200,14 +188,6 @@ export function AppSidebar({
       <div className={cn("flex h-9 items-center gap-2 px-2", collapsed ? "justify-center" : "justify-between")}>
         <Bot className="h-4 w-4 shrink-0 text-primary" />
         {collapsed ? null : <div className="hidden min-w-0 flex-1 truncate text-sm font-semibold md:block">VRCForge</div>}
-        <button
-          type="button"
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          onClick={onToggleSidebar}
-          title={collapsed ? t("sidebar.expandSidebar") : t("sidebar.collapseSidebar")}
-        >
-          {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-        </button>
       </div>
 
       <nav className="mt-4 space-y-0.5">
@@ -232,21 +212,7 @@ export function AppSidebar({
       </nav>
 
       {collapsed ? null : (
-        <SidebarSection
-          title={t("project.generalProject")}
-          action={
-            <button
-              type="button"
-              onClick={onRefreshProjects}
-              disabled={!runtimeConnected || loadingProjects}
-              title={t("workspace.refreshStatus")}
-              aria-label={t("workspace.refreshStatus")}
-              className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5", loadingProjects && "animate-spin")} />
-            </button>
-          }
-        >
+        <SidebarSection title={t("project.generalProject")}>
           {projectGroups.general.map((project, index) => {
               const key = projectKey(project) || `project-${index}`;
               const projectChats = chatSidebar.projectChatsByPath.get(normalizeProjectPathKey(key)) || [];
@@ -304,7 +270,21 @@ export function AppSidebar({
       )}
 
       {collapsed ? null : (
-        <SidebarSection title={t("project.unityProject")}>
+        <SidebarSection
+          title={t("project.unityProject")}
+          action={
+            <button
+              type="button"
+              onClick={onRefreshProjects}
+              disabled={!runtimeConnected || loadingProjects}
+              title={t("workspace.refreshStatus")}
+              aria-label={t("workspace.refreshStatus")}
+              className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:pointer-events-none disabled:opacity-50"
+            >
+              <RefreshCw className={cn("h-3.5 w-3.5", loadingProjects && "animate-spin")} />
+            </button>
+          }
+        >
           {projectGroups.unity.length > 0 ? (
             projectGroups.unity.map((project, index) => {
               const key = projectKey(project) || `project-unity-${index}`;

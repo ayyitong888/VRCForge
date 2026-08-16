@@ -29,7 +29,7 @@ import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 import { ChatMarkdown } from "./chat-markdown";
 import { AttachmentStrip } from "./composer";
-import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, displayPlanner, formatPayload } from "./conversation-timeline";
+import { RunRow, buildAgentTimelineRows, buildDurableTimelineRows, displayPlanner, formatPayload, formatRuntimeModelLine } from "./conversation-timeline";
 
 export function ConversationCard({
   item,
@@ -54,7 +54,7 @@ export function ConversationCard({
   saveOperationTool,
   onSaveOperationAsSkill,
 }: {
-  item: ConversationItem;
+  item: Exclude<ConversationItem, { type: "handoff_card" }>;
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
   editing?: boolean;
@@ -209,6 +209,7 @@ export function ConversationCard({
   }
 
   if (item.type === "streaming") {
+    const runtimeModelLabel = formatRuntimeModelLine(item.providerLabel, item.model);
     return (
       <div className="group flex justify-start" data-conversation-streaming-turn={item.clientTurnId}>
         <div className="relative w-full max-w-[85%] space-y-1.5 px-1 text-sm">
@@ -216,7 +217,9 @@ export function ConversationCard({
           {item.timeline?.length ? <div data-vrcforge-live-runtime-timeline>{buildDurableTimelineRows(item.timeline)}</div> : null}
           {item.text ? <ChatMarkdown text={item.text} /> : null}
           <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-            <span>{item.providerLabel || displayPlanner("llm")}{item.model ? ` / ${item.model}` : ""}</span>
+            {runtimeModelLabel ? (
+              <span>{runtimeModelLabel}</span>
+            ) : null}
           </div>
         </div>
       </div>
@@ -329,8 +332,8 @@ export function ConversationCard({
   const vision = response.vision;
   const write = response.write;
   const copyableReply = copyableAgentDialogueText(response);
-  const providerLine = item.providerLabel || response.plan.plannerLabel || displayPlanner(response.plan.planner);
-  const replySource = item.model ? `${providerLine} · ${item.model}` : providerLine;
+  const providerLine = formatRuntimeModelLine(item.providerLabel, item.model);
+  const replySource = providerLine;
   const awaitingApproval = shell?.status === "pending_approval";
   const nextStep = response.plan.nextStep || "";
   const showIntent = Boolean(nextStep) && nextStep !== "await_user_instruction" && nextStep !== "done";

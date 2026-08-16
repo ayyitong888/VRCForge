@@ -9,6 +9,7 @@ import {
   MoreHorizontal,
   Monitor,
   MousePointer2,
+  PanelRightOpen,
   Paperclip,
   RotateCcw,
   Search,
@@ -57,6 +58,9 @@ import { SkillsWorkspace } from "./components/skills/skills-workspace";
 import { SubAgentPanel } from "./components/subagents/sub-agent-panel";
 import { type UserAttachmentSource } from "./components/runtime/project-workbench-sections";
 import { useApprovalExecution } from "./hooks/use-approval-execution";
+import { useAppUpdate } from "./hooks/use-app-update";
+import { AppUpdatePopup } from "./components/ui/app-update-popup";
+import type { AppUpdateResult } from "./lib/api/app-update";
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
@@ -71,15 +75,15 @@ import { useProviderSettings } from "./hooks/use-provider-settings";
 import { useRuntimeWorkspace } from "./hooks/use-runtime-workspace";
 import { useRuntimeTurnContinuationDelivery } from "./hooks/use-runtime-turn-continuation";
 import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-controller";
+import { useSessionHandoff } from "./hooks/use-session-handoff";
 import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
 import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
+import { replyToSessionHandoff } from "./lib/api/session-handoff";
 import {
-  COLLAPSED_LEFT_PANE_WIDTH,
   DEVELOPER_OPTIONS_ENABLED_KEY,
   LAYOUT_PANE_WIDTHS_KEY,
-  LEFT_SIDEBAR_COLLAPSED_KEY,
   MAX_LEFT_PANE_WIDTH,
   MAX_RIGHT_PANE_WIDTH,
   MIN_CENTER_PANE_WIDTH,
@@ -174,6 +178,7 @@ import {
   refreshProjects,
   setAppSessionToken,
   retrySubAgent,
+  updateAgentGoal,
   updatePermission,
   updateAdvancedSettings,
 } from "./lib/api";
@@ -281,13 +286,8 @@ export default function App() {
   const [backgroundGoalRefreshSignal, setBackgroundGoalRefreshSignal] = useState(0);
   const [memoryReviewRefreshSignal, setMemoryReviewRefreshSignal] = useState(0);
   const [savingAdvancedSettings, setSavingAdvancedSettings] = useState(false);
-  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(() => {
-    try {
-      return window.localStorage.getItem(LEFT_SIDEBAR_COLLAPSED_KEY) === "true";
-    } catch {
-      return false;
-    }
-  });
+  const [handoffSendOpen, setHandoffSendOpen] = useState(false);
+  const [appUpdatePrompt, setAppUpdatePrompt] = useState<AppUpdateResult | null>(null);
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem(RIGHT_SIDEBAR_COLLAPSED_KEY) === "true";
@@ -341,7 +341,12 @@ export default function App() {
   const [startupIssue, setStartupIssue] = useState("");
   const [dismissedDoctorPromptSignature, setDismissedDoctorPromptSignature] = useState("");
   const conversationEndRef = useRef<HTMLDivElement | null>(null);
+  const conversationPinnedRef = useRef(true);
   const [pinnedToConversationBottom, setPinnedToConversationBottom] = useState(true);
+  const updateConversationPinned = useCallback((pinned: boolean) => {
+    conversationPinnedRef.current = pinned;
+    setPinnedToConversationBottom(pinned);
+  }, []);
   const projectInitRef = useRef(false);
   const refreshRuntimeRunsRef = useRef<(includeEvents?: boolean, target?: string) => Promise<void>>(async () => undefined);
   const pendingApprovalsRef = useRef<AgentApproval[]>([]);
@@ -392,6 +397,7 @@ export default function App() {
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
   const healthWarnings = Object.values(healthComponents).filter((item) => item.status === "warning").length;
   const runtimeConnected = Boolean(bootstrap?.ok);
+  useAppUpdate(endpoint, runtimeConnected, setAppUpdatePrompt);
   const authoritativeSelectedProjectPath = (
     bootstrap?.health.state?.selectedProjectPath
     || bootstrap?.health.projects?.selectedProjectPath
@@ -631,17 +637,12 @@ export default function App() {
       { name: "memory", title: t("chat.slashMemory") },
       { name: "delegate", title: t("chat.slashDelegate") },
     ];
+    list.push({ name: "handoff", title: t("chat.slashHandoff") });
     if (developerOptionsEnabled && computerUseEnabled) {
       list.push({ name: "desktop", title: t("composerAction.desktop") });
     }
-    for (const skill of skills) {
-      if (!skill.name || skill.enabled === false || skill.available === false || skill.userInvocable === false) {
-        continue;
-      }
-      list.push({ name: skill.name, title: skill.title || skill.description || "" });
-    }
     return list;
-  }, [computerUseEnabled, developerOptionsEnabled, skills, t]);
+  }, [computerUseEnabled, developerOptionsEnabled, t]);
   const projects = bootstrap?.health.projects?.projects ?? [];
   const onboardingSelectedProjectReady = Boolean(
     activeProjectPath
@@ -740,7 +741,6 @@ export default function App() {
     activeProjectType,
     projects,
     refresh,
-    refreshSilently,
     startRuntime,
     setError,
     onProjectAdded: (projectPath, projectType) => {
@@ -801,6 +801,30 @@ export default function App() {
     expandProjectGroup,
     initialChatState,
   });
+  const sessionHandoff = useSessionHandoff(endpoint, activeChatId);
+  const handoffTargetChats = useMemo(() => {
+    const sourceScope = normalizeProjectPathKey(activeChat?.projectPath || "");
+    return chats
+      .filter((chat) => chat.id !== activeChatId && normalizeProjectPathKey(chat.projectPath || "") === sourceScope)
+      .slice(0, 32)
+      .map((chat) => ({ id: chat.id, title: chat.title || t("header.currentSession") }));
+  }, [activeChat?.projectPath, activeChatId, chats, t]);
+  const updateHandoffCardStatus = (handoffId: string, status: string) => {
+    if (!activeChatId) return;
+    updateChat(activeChatId, (chat) => ({
+      ...chat,
+      items: chat.items.map((item) => item.type === "handoff_card" && item.handoffId === handoffId ? { ...item, status } : item),
+    }));
+  };
+  const acceptSessionHandoff = (handoffId: string) => { void sessionHandoff.accept(handoffId).then(() => updateHandoffCardStatus(handoffId, "materialized")); };
+  const dismissSessionHandoff = (handoffId: string) => { void sessionHandoff.dismiss(handoffId).then(() => updateHandoffCardStatus(handoffId, "dismissed")); };
+  const pauseSessionHandoff = (handoffId: string) => { void sessionHandoff.pause(handoffId).then(() => updateHandoffCardStatus(handoffId, "paused")); };
+  const resumeSessionHandoff = (handoffId: string) => { void sessionHandoff.resume(handoffId).then(() => updateHandoffCardStatus(handoffId, "pending_review")); };
+  const replySessionHandoff = (handoffId: string, text: string) => {
+    const card = activeChat?.items.find((item) => item.type === "handoff_card" && item.handoffId === handoffId);
+    if (!card || card.type !== "handoff_card" || !card.sourceChatId || !card.targetChatId) return;
+    void replyToSessionHandoff(endpoint, card.targetChatId, card.sourceChatId, handoffId, text);
+  };
   const sidebarProjectItems = useMemo(
     () => sortSidebarProjects(projectItems, chats, pinnedProjectSet),
     [chats, pinnedProjectSet, projectItems],
@@ -933,6 +957,15 @@ export default function App() {
     setAgentApprovals,
     setError,
   });
+  const activeAgentGoal = useMemo(() => {
+    const currentSessionId = activeChat?.sessionId || sessionId;
+    return agentGoals.find((goal) => {
+      const status = String(goal.status || "").toLowerCase();
+      if (status !== "active" && status !== "paused") return false;
+      if (goal.chatId) return goal.chatId === activeChatId;
+      return Boolean(currentSessionId && goal.sessionId === currentSessionId);
+    }) || null;
+  }, [activeChat?.sessionId, activeChatId, agentGoals, sessionId]);
   refreshRuntimeRunsRef.current = refreshRuntimeRuns;
   const {
     state: backgroundGoalState,
@@ -1531,6 +1564,14 @@ export default function App() {
     const parentChatId = activeChat?.id || "";
     return parentChatId ? subAgentTasks.filter((task) => task.parentChatId === parentChatId) : [];
   }, [activeChat?.id, subAgentTasks]);
+  const runningSubAgentTaskCount = useMemo(
+    () => activeSubAgentTasks.filter((task) => ["queued", "running", "cancelling"].includes(task.status)).length,
+    [activeSubAgentTasks],
+  );
+  const completedSubAgentTaskCount = useMemo(
+    () => activeSubAgentTasks.filter((task) => task.status === "completed").length,
+    [activeSubAgentTasks],
+  );
   useEffect(() => {
     subAgentSelectionIntentRef.current = selectedSubAgent?.id || "";
   }, [selectedSubAgent?.id]);
@@ -1538,15 +1579,14 @@ export default function App() {
   const activeProjectName =
     projectDisplayName(projectItems.find((project) => normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath))) ||
     (activeProjectPath ? shortPath(activeProjectPath) : "");
-  const effectiveLeftPaneWidth = leftSidebarCollapsed ? COLLAPSED_LEFT_PANE_WIDTH : layoutPaneWidths.left;
-  const effectiveRightPaneWidth = rightSidebarCollapsed ? 0 : layoutPaneWidths.right;
+  const effectiveLeftPaneWidth = layoutPaneWidths.left;
+  const effectiveRightPaneWidth = rightSidebarCollapsed ? 44 : layoutPaneWidths.right;
   const workspaceGridColumns = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr) ${RESIZE_HANDLE_WIDTH}px ${effectiveRightPaneWidth}px`;
   const startLayoutResize = (side: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     const startX = event.clientX;
     const startLeftWidth = effectiveLeftPaneWidth;
     const startRightWidth = effectiveRightPaneWidth;
-    const leftCollapseThreshold = MIN_LEFT_PANE_WIDTH * 0.65;
     const rightCollapseThreshold = MIN_RIGHT_PANE_WIDTH * 0.65;
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
@@ -1554,11 +1594,11 @@ export default function App() {
     document.body.style.userSelect = "none";
 
     const maxLeftWidth = () => {
-      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - MIN_CENTER_PANE_WIDTH - (rightSidebarCollapsed ? 0 : layoutPaneWidths.right);
+      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - MIN_CENTER_PANE_WIDTH - effectiveRightPaneWidth;
       return Math.max(MIN_LEFT_PANE_WIDTH, Math.min(MAX_LEFT_PANE_WIDTH, available));
     };
     const maxRightWidth = () => {
-      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - MIN_CENTER_PANE_WIDTH - (leftSidebarCollapsed ? COLLAPSED_LEFT_PANE_WIDTH : layoutPaneWidths.left);
+      const available = window.innerWidth - RESIZE_HANDLE_WIDTH * 2 - MIN_CENTER_PANE_WIDTH - layoutPaneWidths.left;
       return Math.max(MIN_RIGHT_PANE_WIDTH, Math.min(MAX_RIGHT_PANE_WIDTH, available));
     };
 
@@ -1566,11 +1606,6 @@ export default function App() {
       const delta = moveEvent.clientX - startX;
       if (side === "left") {
         const proposed = startLeftWidth + delta;
-        if (proposed <= leftCollapseThreshold) {
-          setLeftSidebarCollapsed(true);
-          return;
-        }
-        setLeftSidebarCollapsed(false);
         setLayoutPaneWidths((current) => ({
           ...current,
           left: clampNumber(proposed, MIN_LEFT_PANE_WIDTH, maxLeftWidth()),
@@ -1762,14 +1797,6 @@ export default function App() {
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(LEFT_SIDEBAR_COLLAPSED_KEY, String(leftSidebarCollapsed));
-    } catch {
-      // Sidebar width is best-effort local UI state.
-    }
-  }, [leftSidebarCollapsed]);
-
-  useEffect(() => {
-    try {
       window.localStorage.setItem(RIGHT_SIDEBAR_COLLAPSED_KEY, String(rightSidebarCollapsed));
     } catch {
       // Sidebar width is best-effort local UI state.
@@ -1861,15 +1888,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!pinnedToConversationBottom) {
-      return;
-    }
-    conversationEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [pinnedToConversationBottom, conversation.length]);
+    updateConversationPinned(true);
+  }, [activeChatId, updateConversationPinned]);
 
   useEffect(() => {
-    setPinnedToConversationBottom(true);
-  }, [activeChatId]);
+    if (!conversationPinnedRef.current) {
+      return;
+    }
+    conversationEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
+  }, [activeChatId, conversation.length]);
 
   useEffect(() => {
     if (projectInitRef.current || activeProjectPath || !authoritativeSelectedProjectPath) {
@@ -2748,6 +2775,50 @@ export default function App() {
     }
   }
 
+  async function handleGoalSlashCommand(raw: string) {
+    const argument = raw.replace(/^\/goal\s*/i, "").trim();
+    const command = argument.toLowerCase();
+    if (!argument) {
+      setRuntimeNotice(
+        activeAgentGoal
+          ? t("goal.current", {
+            title: activeAgentGoal.title || activeAgentGoal.summary || activeAgentGoal.goalId,
+            status: t(activeAgentGoal.status === "paused" ? "goal.statusPaused" : "goal.statusActive"),
+          })
+          : t("goal.noInProgress"),
+      );
+      setInput("");
+      return;
+    }
+    if (command === "pause" || command === "resume" || command === "clear") {
+      if (!activeAgentGoal) {
+        setRuntimeNotice(t("goal.noInProgress"));
+        setInput("");
+        return;
+      }
+      const status = command === "pause" ? "paused" : command === "resume" ? "active" : "cancelled";
+      try {
+        const payload = await updateAgentGoal(endpoint, activeAgentGoal.goalId, {
+          status,
+          sessionId: activeAgentGoal.sessionId,
+          chatId: activeAgentGoal.chatId,
+          projectRoot: activeAgentGoal.projectRoot,
+        });
+        upsertAgentGoal(payload.goal);
+        setRuntimeNotice(t(command === "pause" ? "goal.paused" : command === "resume" ? "goal.resumed" : "goal.cleared"));
+        setInput("");
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+      return;
+    }
+    if (activeAgentGoal) {
+      setError(t("goal.alreadyActive"));
+      return;
+    }
+    await createGoalFromSlash(raw);
+  }
+
   async function createMemoryFromSlash(raw: string) {
     const text = raw.replace(/^\/memory\s*/i, "").trim();
     if (!text) {
@@ -2793,7 +2864,7 @@ export default function App() {
       return;
     }
     if (message === "/goal" || message.startsWith("/goal ")) {
-      void createGoalFromSlash(message);
+      void handleGoalSlashCommand(message);
       return;
     }
     if (message === "/memory" || message.startsWith("/memory ")) {
@@ -2814,6 +2885,11 @@ export default function App() {
       setInput("");
       return;
     }
+    if (message === "/handoff" || message.startsWith("/handoff ")) {
+      setHandoffSendOpen((current) => !current);
+      setInput("");
+      return;
+    }
     if (message === "/desktop" || message.startsWith("/desktop ")) {
       if (!developerOptionsEnabled || !computerUseEnabled) {
         setError(t("computerUse.disabled"));
@@ -2827,9 +2903,26 @@ export default function App() {
       message = task;
       computerUseRequested = true;
     }
+    const nextClientTurnId = `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    try {
+      const handoff = await sessionHandoff.consume(nextClientTurnId);
+      const payload = handoff.context?.payload;
+      if (payload && typeof payload === "object") {
+        const bounded = JSON.stringify({
+          goal: payload.goal,
+          decisions: payload.decisions,
+          blockers: payload.blockers,
+          nextAction: payload.nextAction,
+          question: payload.question,
+        }).slice(0, 3000);
+        if (bounded !== "{}") message = `[Session handoff context]\n${bounded}\n\n${message}`;
+      }
+    } catch {
+      // A failed consume leaves the durable queue untouched for a later turn.
+    }
     const turnContextLimit = resolveContextLimit(providerSnapshot.provider, providerSnapshot.model, currentModelInfo, apiConfig?.contextWindow);
     const turn: QueuedTurn = {
-      id: `turn-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      id: nextClientTurnId,
       text: message,
       attachments,
       providerLabel: providerSnapshot.providerLabel,
@@ -3461,7 +3554,7 @@ export default function App() {
           <Suspense fallback={<SidebarPlaceholder side="left" />}>
             <SidebarMountTracker side="left" onMounted={markLeftSidebarMounted}>
               <AsyncAppSidebar
-          collapsed={leftSidebarCollapsed}
+          collapsed={false}
           activeView={activeView}
           activeSettingsSection={activeSettingsSection}
           developerOptionsEnabled={developerOptionsEnabled}
@@ -3482,7 +3575,6 @@ export default function App() {
           renamingChatId={renamingChatId}
           renameDraft={renameDraft}
           projectDisplayName={projectDisplayName}
-          onToggleSidebar={() => setLeftSidebarCollapsed((value) => !value)}
           onNewTemporaryChat={openTemporaryChat}
           onOpenProjectPicker={() => {
             setProjectModalError("");
@@ -3525,7 +3617,7 @@ export default function App() {
         <LayoutSplitter
           side="left"
           value={effectiveLeftPaneWidth}
-          min={COLLAPSED_LEFT_PANE_WIDTH}
+          min={MIN_LEFT_PANE_WIDTH}
           max={MAX_LEFT_PANE_WIDTH}
           title={t("workspace.resizeLeftPane")}
           onPointerDown={(event) => startLayoutResize("left", event)}
@@ -3541,7 +3633,6 @@ export default function App() {
             permissionBadgeTone={currentPermissionVisual.badgeTone}
             runtimeConnected={runtimeConnected}
             pendingApprovals={pendingApprovals}
-            rightSidebarCollapsed={rightSidebarCollapsed}
             theme={theme}
             showDoctorStartupPrompt={showDoctorStartupPrompt}
             hasStartupIssue={hasStartupIssue}
@@ -3551,7 +3642,6 @@ export default function App() {
             loadingDoctor={loadingDoctor}
             loading={loading}
             error={error}
-            onToggleRightSidebar={() => setRightSidebarCollapsed((value) => !value)}
             onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
             onOpenDoctor={() => void openDoctor()}
             onRetryStartupOrHealth={() => void retryStartupOrHealth()}
@@ -3839,6 +3929,9 @@ export default function App() {
               onCancelCompaction={activeChatId ? () => cancelCompaction(activeChatId) : undefined}
               providerLabel={providerSnapshot.providerLabel}
               model={providerSnapshot.model}
+              activeGoal={activeAgentGoal}
+              onGoalChanged={upsertAgentGoal}
+              goalEndpoint={endpoint}
               projects={projectItems.map((project) => ({
                 key: projectKey(project),
                 name: project.name || shortPath(project.path || ""),
@@ -3861,10 +3954,15 @@ export default function App() {
               onConversationMouseUp={handleConversationMouseUp}
               onConversationScroll={(scrollElement) => {
                 const nearBottom = scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight < 24;
-                setPinnedToConversationBottom(nearBottom);
+                updateConversationPinned(nearBottom);
                 if (selectionMenu) {
                   setSelectionMenu(null);
                 }
+              }}
+              showScrollToBottom={!pinnedToConversationBottom}
+              onScrollToBottom={() => {
+                updateConversationPinned(true);
+                conversationEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
               }}
               pendingApprovalForResponse={pendingApprovalForResponse}
               scopedPendingApprovals={pendingApprovalItems}
@@ -3888,6 +3986,17 @@ export default function App() {
               onOpenDoctor={() => void openDoctor()}
               runtimeRuns={runtimeRuns}
               onSaveOperationAsSkill={(summary) => void openSkillsWithCapturedPath(summary)}
+              onAcceptHandoff={acceptSessionHandoff}
+              onDismissHandoff={dismissSessionHandoff}
+              onPauseHandoff={pauseSessionHandoff}
+              onResumeHandoff={resumeSessionHandoff}
+              onReplyHandoff={replySessionHandoff}
+              handoffBusyId={sessionHandoff.busyId}
+              sessionHandoffEndpoint={endpoint}
+              sessionHandoffSourceChatId={activeChatId}
+              sessionHandoffTargetChats={handoffTargetChats}
+              handoffSendOpen={handoffSendOpen}
+              onHandoffSendOpenChange={setHandoffSendOpen}
             />
           )}
           {activeView !== "chat" ? (
@@ -3913,7 +4022,20 @@ export default function App() {
           title={t("workspace.resizeRightPane")}
           onPointerDown={(event) => startLayoutResize("right", event)}
         />
-        {rightSidebarCollapsed ? null : sidebarsVisible ? (
+        {rightSidebarCollapsed ? (
+          <aside className="flex h-screen items-start justify-center border-l border-border/80 bg-sidebar pt-2">
+            <button
+              type="button"
+              className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              onClick={() => setRightSidebarCollapsed(false)}
+              title={t("workspace.showSidebar")}
+              aria-label={t("workspace.showSidebar")}
+              data-vrcforge-right-sidebar-restore
+            >
+              <PanelRightOpen className="h-4 w-4" />
+            </button>
+          </aside>
+        ) : sidebarsVisible ? (
           <Suspense fallback={<SidebarPlaceholder side="right" />}>
             <SidebarMountTracker side="right" onMounted={markRightSidebarMounted}>
               <AsyncRightRuntimeSidebar
@@ -3931,11 +4053,15 @@ export default function App() {
               projectWorkspace={projectChatWorkspace}
               subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}
               subAgentTaskCount={activeSubAgentTasks.length}
+              subAgentRunningTaskCount={runningSubAgentTaskCount}
+              subAgentCompletedTaskCount={completedSubAgentTaskCount}
               userAttachmentSources={userAttachmentSources}
               onLocateUserAttachmentSource={locateUserAttachmentSource}
               onOpenUserAttachmentSource={openUserAttachmentSource}
               approvalsLoaded={agentApprovals !== null}
               pendingApprovals={pendingApprovals}
+              workspaceSummary={workspaceDiff}
+              activeDesktopActions={activeDesktopActions}
               refreshUnityStatus={refreshUnityStatus}
               onHideSidebar={() => setRightSidebarCollapsed(true)}
               localizeHealthMessage={localizeHealthMessage}
@@ -4057,6 +4183,8 @@ export default function App() {
           onDismiss={dismissTransientFailure}
         />
       ) : null}
+
+      <AppUpdatePopup result={appUpdatePrompt} onDismiss={() => setAppUpdatePrompt(null)} />
 
     </main>
   );

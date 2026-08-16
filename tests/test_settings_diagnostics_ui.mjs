@@ -82,6 +82,13 @@ assert.ok(panel.includes("data-vrcforge-log-level={effectiveSelectedLevel}"));
 assert.ok(panel.includes("data-vrcforge-open-logs"));
 assert.ok(panel.includes("data-vrcforge-export-support"));
 assert.ok(panel.includes("data-vrcforge-log-identities"));
+assert.ok(panel.includes("export function DiagnosticIdentityMap"));
+assert.ok(workspace.includes("<DiagnosticIdentityMap status={diagnosticsStatus}"));
+assert.ok(
+  workspace.indexOf('{visibleSection === "developer" && developerOptionsEnabled')
+    < workspace.indexOf("<DiagnosticIdentityMap status={diagnosticsStatus}"),
+  "the local identity map must live only inside the Developer section",
+);
 assert.ok(!panel.includes("logsDir"));
 
 assert.ok(control.includes("beginDeveloperOptionsChallenge(endpoint)"));
@@ -137,7 +144,7 @@ for (const [name, entries] of flattened) {
     const description = entries.get(`settings.logLevel${level}Desc`) || "";
     assert.ok(description.trim().length >= 20, `${name}:settings.logLevel${level}Desc must explain the level`);
   }
-  assert.match(entries.get("settings.aboutProduct") || "", /VRCForge 1\.6\.0/);
+  assert.match(entries.get("settings.aboutProduct") || "", /VRCForge 1\.6\.2/);
   assert.match(entries.get("settings.aboutMcp") || "", /MCP 2\.0.*2026-07-28.*64/s);
   assert.match(entries.get("settings.aboutSafety") || "", /(approval|审批|審批|承認).*?(checkpoint|检查点|檢查點|チェックポイント).*?(rollback|回滚|回滾|ロールバック)/is);
   assert.match(entries.get("settings.aboutLicense") || "", /GPL-3\.0-only.*NOTICE.*DEPENDENCIES/is);

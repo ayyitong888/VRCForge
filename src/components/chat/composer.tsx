@@ -1,4 +1,4 @@
-import { Archive, Camera, Check, ChevronDown, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, X } from "lucide-react";
+import { Archive, Camera, Check, ChevronDown, Globe, MessageSquare, MousePointer2, Paperclip, Pencil, Plus, Send, Shield, Square, Target, X } from "lucide-react";
 import { type ClipboardEvent, type DragEvent, type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
@@ -7,7 +7,7 @@ import { cn, formatCount } from "../../lib/utils";
 import { formatAttachmentSize } from "../../lib/chat-format";
 import type { ChatAttachment, ComposerAction, ComposerActionId, ComposerSlashCommand, ContextUsage } from "../../lib/chat-types";
 import { SELECTED_TEXT_ATTACHMENT_NAME } from "../../lib/chat-types";
-import type { PermissionState, ExecutionMode } from "../../lib/api";
+import type { AgentGoal, PermissionState, ExecutionMode } from "../../lib/api";
 import { Button } from "../ui/button";
 
 function composerActionIcon(action: ComposerActionId): ReactNode {
@@ -51,6 +51,8 @@ export function Composer({
   contextUsage,
   providerLabel,
   model,
+  goalEndpoint,
+  activeGoal,
   editing = false,
   onCancelEdit,
   projects: _projects = [],
@@ -75,6 +77,8 @@ export function Composer({
   contextUsage?: ContextUsage;
   providerLabel?: string;
   model?: string;
+  goalEndpoint?: string;
+  activeGoal?: AgentGoal | null;
   editing?: boolean;
   onCancelEdit?: () => void;
   projects?: Array<{ key: string; name: string }>;
@@ -114,6 +118,22 @@ export function Composer({
   }
   const paletteOpen = actionMenuOpen || (!paletteDismissed && slashMatches.length > 0);
   const paletteCommands: ComposerSlashCommand[] = actionMenuOpen ? commandActions : slashMatches;
+  const providerModelLabel = [providerLabel?.trim(), model?.trim()].filter(Boolean).join(" · ");
+  const hasProviderIdentity = Boolean(providerLabel?.trim() || model?.trim());
+  const effectiveContextUsage = contextUsage
+    ?? (hasProviderIdentity
+      ? {
+          used: 0,
+          limit: 0,
+          limitKnown: false,
+          source: "unavailable" as const,
+          exact: false,
+          ratio: 0,
+          label: i18n.t("chat.contextUsageUnavailable"),
+          title: "",
+          warning: false,
+        }
+      : undefined);
   useEffect(() => {
     setPaletteIndex((current) => Math.min(current, Math.max(0, paletteCommands.length - 1)));
   }, [actionMenuOpen, paletteCommands.length, slashQuery]);
@@ -265,8 +285,8 @@ export function Composer({
             <AttachmentStrip attachments={attachments} onRemove={onRemoveAttachment} />
           </div>
         ) : null}
-        <div className="mt-3 flex min-w-0 items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="mt-3 grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 xl:grid-cols-[auto_minmax(0,1fr)_auto]">
+          <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-2">
             <input
               ref={fileInputRef}
               type="file"
@@ -331,15 +351,19 @@ export function Composer({
                 </div>
               ) : null}
             </div>
-            {providerLabel || model ? (
-              <span className="max-w-[260px] truncate px-1 text-sm text-muted-foreground">
-                {providerLabel || t("provider.apiProvider")}{model ? ` · ${model}` : ""}
+            {!editing && goalEndpoint && activeGoal ? (
+              <span
+                className="flex h-8 items-center gap-1.5 rounded-md px-2 text-sm text-muted-foreground"
+                data-composer-goal
+              >
+                <Target className="h-4 w-4 shrink-0" />
+                <span>{t("goal.managementTitle", "Goals")}</span>
               </span>
             ) : null}
           </div>
-          <div className="flex shrink-0 items-center gap-2">
-            {contextUsage ? (
-              <ContextUsageMeter usage={contextUsage} className="w-36" />
+          <div className="col-start-2 row-start-1 flex shrink-0 items-center gap-2 xl:col-start-3">
+            {effectiveContextUsage ? (
+              <ContextUsageMeter usage={effectiveContextUsage} />
             ) : null}
             {editing && !sending ? (
               <>
@@ -381,6 +405,15 @@ export function Composer({
               </Button>
             )}
           </div>
+          {providerModelLabel ? (
+            <span
+              className="col-span-2 col-start-1 row-start-2 min-w-0 break-words px-1 text-sm text-muted-foreground xl:col-span-1 xl:col-start-2 xl:row-start-1 xl:whitespace-nowrap"
+              title={providerModelLabel}
+              aria-label={providerModelLabel}
+            >
+              {providerModelLabel}
+            </span>
+          ) : null}
         </div>
       </div>
     </form>
@@ -392,7 +425,7 @@ export function Composer({
 export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsage; className?: string }) {
   const knownRatio = usage.limitKnown && usage.exact;
   const percent = knownRatio ? Math.round(Math.min(1, Math.max(0, usage.ratio)) * 100) : 0;
-  const fillColorClass = percent >= 90 ? "bg-destructive" : percent >= 60 ? "bg-amber-500" : "bg-primary";
+  const strokeColorClass = percent >= 90 ? "stroke-destructive" : percent >= 60 ? "stroke-amber-500" : "stroke-primary";
   const tooltipTitle = usage.cached
     ? i18n.t("chat.contextUsageCached", { value: knownRatio ? `${percent}%` : usage.label })
     : knownRatio
@@ -404,24 +437,41 @@ export function ContextUsageMeter({ usage, className = "" }: { usage: ContextUsa
   const nativeTitle = tooltipDetail ? `${tooltipTitle}\n${tooltipDetail}` : tooltipTitle;
   return (
     <div
-      className={cn("group relative flex h-8 w-32 shrink-0 items-center rounded-md px-1", className)}
+      className={cn("group relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full", className)}
       tabIndex={0}
       aria-label={nativeTitle}
       title={nativeTitle}
       data-context-meter="true"
       data-context-percent={knownRatio ? String(percent) : "unknown"}
     >
-      <div className="h-2.5 w-full overflow-hidden rounded-full border border-border bg-muted">
+      <svg className="h-6 w-6 -rotate-90" viewBox="0 0 24 24" aria-hidden="true" data-context-ring>
+        <circle cx="12" cy="12" r="9" fill="none" strokeWidth="2.5" className="stroke-border" />
         {knownRatio ? (
-          <div
-            className={cn("h-full rounded-full transition-[width,background-color] duration-500", fillColorClass)}
-            style={{ width: `${percent}%` }}
+          <circle
+            cx="12"
+            cy="12"
+            r="9"
+            pathLength="100"
+            fill="none"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeDasharray={`${percent} 100`}
+            className={cn("transition-[stroke-dasharray,stroke] duration-500", strokeColorClass)}
             data-context-segment={percent >= 90 ? "high" : percent >= 60 ? "medium" : "low"}
           />
         ) : (
-          <div className="h-full w-full bg-muted-foreground/35" data-context-segment="unknown" />
+          <circle
+            cx="12"
+            cy="12"
+            r="9"
+            pathLength="100"
+            fill="none"
+            strokeWidth="2.5"
+            className="stroke-muted-foreground/45"
+            data-context-segment="unknown"
+          />
         )}
-      </div>
+      </svg>
       <div className="pointer-events-none absolute bottom-full left-1/2 z-40 mb-2 hidden w-52 -translate-x-1/2 rounded-lg border border-border bg-card px-3 py-2 text-center text-xs text-foreground shadow-panel group-hover:block group-focus:block">
         <div className="font-medium">{i18n.t("chat.contextMeterTitle")}</div>
         <div className="mt-1 text-muted-foreground">{tooltipTitle}</div>

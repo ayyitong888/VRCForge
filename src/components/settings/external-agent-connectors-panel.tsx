@@ -395,8 +395,8 @@ function GenericConnectorRow({
   const handshake = action?.handshake;
   const installedHere = Boolean(state?.installed && statusMatchesCurrent);
   return (
-    <div className="grid min-w-0 gap-3 rounded-lg border border-border bg-background/40 p-3 md:grid-cols-[minmax(0,1fr)_auto]">
-      <div className="min-w-0">
+    <div className="min-w-0 rounded-lg border border-border bg-background/40 p-3">
+      <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
           <span className="min-w-0 truncate text-sm font-semibold">{t("connector.genericTitle")}</span>
           <Badge tone={installedHere ? "ok" : state?.conflict ? "warn" : "muted"} className="shrink-0">
@@ -406,7 +406,26 @@ function GenericConnectorRow({
             {t("connector.customConfig")}
           </Badge>
         </div>
-        <div className="mt-2 grid gap-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-start justify-end gap-2">
+          <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !stdioText} onClick={() => onCopy(stdioText, "Generic stdio config")}>
+            <Copy className="h-3.5 w-3.5" />
+            {t("connector.copyStdio")}
+          </Button>
+          <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !httpText} onClick={() => onCopy(httpText, "Generic HTTP config")}>
+            <Copy className="h-3.5 w-3.5" />
+            {t("connector.copyHttp")}
+          </Button>
+          <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !trimmedPath} onClick={() => onInstall("generic", trimmedPath)}>
+            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+            Install
+          </Button>
+          <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installedHere} onClick={() => onUninstall("generic", trimmedPath)}>
+            <Trash2 className="h-3.5 w-3.5" />
+            {t("connector.remove")}
+          </Button>
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2 text-xs text-muted-foreground">
           <div className="break-words">{t("connector.genericHint")}</div>
           <input
             type="text"
@@ -443,25 +462,6 @@ function GenericConnectorRow({
               {action.backupPath ? <div className="truncate font-mono text-[11px]">Backup {action.backupPath}</div> : null}
             </div>
           ) : null}
-        </div>
-      </div>
-      <div className="flex flex-wrap items-start justify-end gap-2">
-        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !stdioText} onClick={() => onCopy(stdioText, "Generic stdio config")}>
-          <Copy className="h-3.5 w-3.5" />
-          {t("connector.copyStdio")}
-        </Button>
-        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !httpText} onClick={() => onCopy(httpText, "Generic HTTP config")}>
-          <Copy className="h-3.5 w-3.5" />
-          {t("connector.copyHttp")}
-        </Button>
-        <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !trimmedPath} onClick={() => onInstall("generic", trimmedPath)}>
-          {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-          Install
-        </Button>
-        <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installedHere} onClick={() => onUninstall("generic", trimmedPath)}>
-          <Trash2 className="h-3.5 w-3.5" />
-          {t("connector.remove")}
-        </Button>
       </div>
     </div>
   );

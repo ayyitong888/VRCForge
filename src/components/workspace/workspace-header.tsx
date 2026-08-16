@@ -1,9 +1,8 @@
-import { AlertTriangle, Moon, PanelRightClose, PanelRightOpen, Sun } from "lucide-react";
+import { AlertTriangle, Moon, Sun } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ActiveView } from "../../lib/app-view";
 import type { ThemeMode } from "../../lib/app-preferences";
 import { formatCount } from "../../lib/utils";
-import { RuntimeToolButton } from "../runtime/runtime-sidebar-ui";
 import { Badge, type BadgeTone } from "../ui/badge";
 import { Button } from "../ui/button";
 
@@ -24,7 +23,6 @@ export function WorkspaceHeader({
   permissionBadgeTone,
   runtimeConnected,
   pendingApprovals,
-  rightSidebarCollapsed,
   theme,
   showDoctorStartupPrompt,
   hasStartupIssue,
@@ -34,7 +32,6 @@ export function WorkspaceHeader({
   loadingDoctor,
   loading,
   error,
-  onToggleRightSidebar,
   onToggleTheme,
   onOpenDoctor,
   onRetryStartupOrHealth,
@@ -49,7 +46,6 @@ export function WorkspaceHeader({
   permissionBadgeTone: BadgeTone;
   runtimeConnected: boolean;
   pendingApprovals: number;
-  rightSidebarCollapsed: boolean;
   theme: ThemeMode;
   showDoctorStartupPrompt: boolean;
   hasStartupIssue: boolean;
@@ -59,7 +55,6 @@ export function WorkspaceHeader({
   loadingDoctor: boolean;
   loading: boolean;
   error: string;
-  onToggleRightSidebar: () => void;
   onToggleTheme: () => void;
   onOpenDoctor: () => void;
   onRetryStartupOrHealth: () => void;
@@ -101,11 +96,6 @@ export function WorkspaceHeader({
           <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>
             {formatCount(pendingApprovals)} {t("header.pendingApprovals")}
           </Badge>
-          <RuntimeToolButton
-            icon={rightSidebarCollapsed ? <PanelRightOpen className="h-4 w-4" /> : <PanelRightClose className="h-4 w-4" />}
-            label={rightSidebarCollapsed ? t("workspace.showSidebar") : t("workspace.hideSidebar")}
-            onClick={onToggleRightSidebar}
-          />
           <Button variant="ghost" className="h-9 w-9 px-0" onClick={onToggleTheme}>
             {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </Button>

@@ -23,6 +23,13 @@ assert.match(timeline, /normalizeAgentSteps/);
 assert.match(timeline, /buildDurableTimelineRows/);
 assert.match(timelinePresentation, /finalAssistant/);
 assert.match(timeline, /<ChatMarkdown text=\{entry\.text\}/);
+assert.match(timeline, /data-agent-invocation-output-card/);
+assert.match(timeline, /max-h-64 overflow-auto whitespace-pre-wrap break-words/);
+assert.match(timeline, /response\.steps/);
+assert.match(timeline, /buildRuntimeStepResultQueues\(steps\)/);
+assert.match(timeline, /detail !== undefined[\s\S]*formatPayload\(detail\)/, "expanded completed invocations must render the full stored step result instead of the bounded timeline summary");
+assert.match(timeline, /detailCard/);
+assert.match(timeline, /<Check className="h-3\.5 w-3\.5"/);
 assert.match(timelinePresentation, /"tool_call"|"tool_result"|"file_edit"|"command"|"subagent"/);
 assert.match(timeline, /for \(const \{ step, sourceIndex \} of steps\)/);
 assert.match(timeline, /return left\.sourceIndex - right\.sourceIndex/);
@@ -68,12 +75,15 @@ assert.match(app, /showTransientNotice\("success", "copy"/);
 assert.match(app, /showTransientNotice\("error", "copy"/);
 
 assert.match(workspace, /data-chat-history-scroll/);
-assert.match(workspace, /min-h-0 flex-1 overflow-auto/);
+assert.match(workspace, /className="h-full overflow-auto[^"]*"[\s\S]*data-chat-history-scroll/);
 assert.match(workspace, /data-chat-composer-dock/);
 assert.ok(
   workspace.indexOf("data-chat-history-scroll") < workspace.lastIndexOf("data-chat-composer-dock"),
   "the independently scrollable history must remain above the fixed decision/composer dock",
 );
-assert.match(app, /setPinnedToConversationBottom\(nearBottom\)/);
+assert.match(app, /updateConversationPinned\(nearBottom\)/);
+assert.match(app, /if \(!conversationPinnedRef\.current\)/);
+assert.match(app, /scrollIntoView\(\{ behavior: "auto", block: "end" \}\)/);
+assert.doesNotMatch(app, /\[pinnedToConversationBottom, conversation\.length\]/);
 
 console.log("chat timeline UX contract: ok");

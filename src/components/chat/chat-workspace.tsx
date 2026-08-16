@@ -1,7 +1,8 @@
-import { AlertTriangle, Loader2, Pause, Play, X } from "lucide-react";
-import { useMemo, type FormEvent, type Ref } from "react";
+import { AlertTriangle, ArrowDown, Loader2, Pause, Play, X } from "lucide-react";
+import { useMemo, useState, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
-import type { AgentApproval, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
+import { updateAgentGoal } from "../../lib/api";
+import type { AgentApproval, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
 import type {
   ApprovalActionState,
   ChatAttachment,
@@ -15,6 +16,8 @@ import { Composer } from "./composer";
 import { AgentQuestionCard } from "./agent-question-card";
 import { BackgroundGoalCatchUpCard } from "./background-goal-catch-up-card";
 import { ConversationCard } from "./conversation-card";
+import { SessionHandoffCard } from "./session-handoff-card";
+import { SessionHandoffSend, type SessionHandoffTargetChat } from "./session-handoff-send";
 import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-card";
 import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
@@ -51,6 +54,9 @@ export function ChatWorkspace({
   onCancelCompaction,
   providerLabel,
   model,
+  activeGoal,
+  onGoalChanged,
+  goalEndpoint,
   projects,
   onBindProject,
   conversation,
@@ -65,6 +71,8 @@ export function ChatWorkspace({
   conversationEndRef,
   onConversationMouseUp,
   onConversationScroll,
+  showScrollToBottom,
+  onScrollToBottom,
   pendingApprovalForResponse,
   scopedPendingApprovals,
   approvalActions,
@@ -87,6 +95,17 @@ export function ChatWorkspace({
   onOpenDoctor,
   runtimeRuns,
   onSaveOperationAsSkill,
+  onAcceptHandoff,
+  onDismissHandoff,
+  onPauseHandoff,
+  onResumeHandoff,
+  onReplyHandoff,
+  handoffBusyId,
+  sessionHandoffEndpoint,
+  sessionHandoffSourceChatId,
+  sessionHandoffTargetChats,
+  handoffSendOpen,
+  onHandoffSendOpenChange,
 }: {
   projectPromptTitle: string;
   input: string;
@@ -111,6 +130,9 @@ export function ChatWorkspace({
   onCancelCompaction?: () => void;
   providerLabel: string;
   model: string;
+  activeGoal: AgentGoal | null;
+  onGoalChanged: (goal: AgentGoal) => void;
+  goalEndpoint: string;
   projects: Array<{ key: string; name: string }>;
   onBindProject: (path: string) => void;
   conversation: ConversationItem[];
@@ -125,6 +147,8 @@ export function ChatWorkspace({
   conversationEndRef: Ref<HTMLDivElement>;
   onConversationMouseUp: () => void;
   onConversationScroll: (scrollElement: HTMLDivElement) => void;
+  showScrollToBottom: boolean;
+  onScrollToBottom: () => void;
   pendingApprovalForResponse: (response: AgentRuntimeResponse) => AgentApproval | null;
   approvalActions: Record<string, ApprovalActionState>;
   latestRetryableItemId: string;
@@ -147,6 +171,17 @@ export function ChatWorkspace({
   onOpenDoctor: () => void;
   runtimeRuns: AgentRuntimeRun[];
   onSaveOperationAsSkill: (summary: PathToSkillOperationSummary) => void;
+  onAcceptHandoff?: (handoffId: string) => void;
+  onDismissHandoff?: (handoffId: string) => void;
+  onPauseHandoff?: (handoffId: string) => void;
+  onResumeHandoff?: (handoffId: string) => void;
+  onReplyHandoff?: (handoffId: string, text: string) => void;
+  handoffBusyId?: string;
+  sessionHandoffEndpoint: string;
+  sessionHandoffSourceChatId: string;
+  sessionHandoffTargetChats: SessionHandoffTargetChat[];
+  handoffSendOpen: boolean;
+  onHandoffSendOpenChange: (open: boolean) => void;
 }) {
   const { t } = useTranslation();
   const pendingAgentQuestions = useMemo(
@@ -157,6 +192,26 @@ export function ChatWorkspace({
     [agentQuestions],
   );
   const conversationItems = mergeConversationTimelineItems(conversation);
+  const [goalActionBusy, setGoalActionBusy] = useState(false);
+  const [goalActionError, setGoalActionError] = useState("");
+  async function setActiveGoalStatus(status: "active" | "paused" | "cancelled") {
+    if (!activeGoal || goalActionBusy) return;
+    setGoalActionBusy(true);
+    setGoalActionError("");
+    try {
+      const payload = await updateAgentGoal(goalEndpoint, activeGoal.goalId, {
+        status,
+        sessionId: activeGoal.sessionId,
+        chatId: activeGoal.chatId,
+        projectRoot: activeGoal.projectRoot,
+      });
+      onGoalChanged(payload.goal);
+    } catch {
+      setGoalActionError(t("goal.updateFailed"));
+    } finally {
+      setGoalActionBusy(false);
+    }
+  }
   const composer = (compact = false) => (
     <Composer
       input={input}
@@ -178,6 +233,8 @@ export function ChatWorkspace({
       contextUsage={contextUsage}
       providerLabel={providerLabel}
       model={model}
+      goalEndpoint={goalEndpoint}
+      activeGoal={activeGoal}
       projects={projects}
       onBindProject={onBindProject}
     />
@@ -209,6 +266,43 @@ export function ChatWorkspace({
       </div>
     </div>
   ) : null;
+  const activeGoalBar = activeGoal ? (
+    <div
+      className="mb-1 flex min-h-11 items-center gap-2 rounded-xl border border-border/80 bg-background/95 px-3 py-2 text-sm shadow-sm"
+      data-chat-active-goal
+    >
+      <span className="shrink-0 text-muted-foreground" aria-hidden="true">◎</span>
+      <span className="shrink-0 font-medium">{t("goal.inProgress")}</span>
+      <span className="min-w-0 flex-1 truncate text-muted-foreground" title={activeGoal.title || activeGoal.summary || activeGoal.goalId}>
+        {activeGoal.title || activeGoal.summary || activeGoal.goalId}
+      </span>
+      {goalActionError ? <span className="shrink-0 text-xs text-destructive">{goalActionError}</span> : null}
+      <Button
+        type="button"
+        variant="ghost"
+        className="h-8 w-8 shrink-0 p-0"
+        disabled={goalActionBusy}
+        onClick={() => void setActiveGoalStatus(activeGoal.status === "paused" ? "active" : "paused")}
+        aria-label={activeGoal.status === "paused" ? t("goal.resume") : t("goal.pause")}
+        title={activeGoal.status === "paused" ? t("goal.resume") : t("goal.pause")}
+        data-chat-active-goal-toggle
+      >
+        {activeGoal.status === "paused" ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        className="h-8 w-8 shrink-0 p-0"
+        disabled={goalActionBusy}
+        onClick={() => void setActiveGoalStatus("cancelled")}
+        aria-label={t("goal.cancel")}
+        title={t("goal.cancel")}
+        data-chat-active-goal-cancel
+      >
+        <X className="h-4 w-4" />
+      </Button>
+    </div>
+  ) : null;
 
   if (conversation.length === 0) {
     return (
@@ -216,6 +310,17 @@ export function ChatWorkspace({
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-5 md:p-8" data-empty-chat-content>
           <div className="w-full max-w-3xl">
             {projectPromptTitle ? <h1 className="mb-5 text-center text-2xl font-semibold tracking-normal">{projectPromptTitle}</h1> : null}
+            {handoffSendOpen ? (
+              <div className="mb-3">
+                <SessionHandoffSend
+                  endpoint={sessionHandoffEndpoint}
+                  sourceChatId={sessionHandoffSourceChatId}
+                  targetChats={sessionHandoffTargetChats}
+                  open={handoffSendOpen}
+                  onOpenChange={onHandoffSendOpenChange}
+                />
+              </div>
+            ) : null}
             {pendingAgentQuestions.length ? (
               <div className="mb-3">
                 <AgentQuestionCard questions={pendingAgentQuestions} onAnswerQuestion={onAnswerQuestion} />
@@ -232,12 +337,12 @@ export function ChatWorkspace({
             </div>
             {queueControls}
             <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
-            {!approvalComposer ? composer(false) : null}
+            {!approvalComposer ? <>{activeGoalBar}{composer(false)}</> : null}
           </div>
         </div>
         {approvalComposer ? (
           <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
-            <div className="mx-auto max-w-3xl">{approvalComposer}</div>
+            <div className="mx-auto max-w-3xl">{activeGoalBar}{approvalComposer}</div>
           </div>
         ) : null}
       </div>
@@ -246,13 +351,14 @@ export function ChatWorkspace({
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
-      <div
-        className="min-h-0 flex-1 overflow-auto px-4 py-6 md:px-6 md:py-8"
-        data-chat-history-scroll
-        onMouseUp={onConversationMouseUp}
-        onScroll={(event) => onConversationScroll(event.currentTarget)}
-      >
-        <div className="mx-auto max-w-3xl space-y-7">
+      <div className="relative min-h-0 flex-1">
+        <div
+          className="h-full overflow-auto px-4 py-6 md:px-6 md:py-8"
+          data-chat-history-scroll
+          onMouseUp={onConversationMouseUp}
+          onScroll={(event) => onConversationScroll(event.currentTarget)}
+        >
+          <div className="mx-auto max-w-3xl space-y-7">
           <BackgroundGoalCatchUpCard
             deliveries={backgroundGoalDeliveries}
             providerWarnings={backgroundGoalProviderWarnings}
@@ -261,6 +367,31 @@ export function ChatWorkspace({
             onDismiss={onBackgroundGoalCatchUpDismiss}
           />
           {conversationItems.map((item) => {
+            if (item.type === "handoff_card") {
+              return (
+                <SessionHandoffCard
+                  key={item.id}
+                  handoff={{
+                    id: item.handoffId,
+                    status: item.status || "pending_review",
+                    kind: item.kind,
+                    source_chat_id: item.sourceChatId || "",
+                    target_chat_id: item.targetChatId || "",
+                    source_revision: item.sourceRevision || 0,
+                    target_revision: item.targetRevision || 0,
+                    revision: 0,
+                    payloadDigest: item.payloadDigest,
+                    summary: typeof item.summary?.goal === "string" ? item.summary.goal : undefined,
+                  }}
+                  onAccept={() => onAcceptHandoff?.(item.handoffId)}
+                  onDismiss={() => onDismissHandoff?.(item.handoffId)}
+                  onPause={() => onPauseHandoff?.(item.handoffId)}
+                  onResume={() => onResumeHandoff?.(item.handoffId)}
+                  onReply={(text) => onReplyHandoff?.(item.handoffId, text)}
+                  busy={handoffBusyId === item.handoffId}
+                />
+              );
+            }
             const approval = item.type === "agent" ? pendingApprovalForResponse(item.response) : null;
             const capturedOperation = item.type === "agent"
               ? matchPathToSkillRuntimeOperation(item.response, runtimeRuns)
@@ -295,8 +426,22 @@ export function ChatWorkspace({
               </div>
             );
           })}
-          <div ref={conversationEndRef} />
+            <div ref={conversationEndRef} />
+          </div>
         </div>
+        {showScrollToBottom ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="absolute bottom-4 right-5 z-20 h-9 w-9 rounded-full bg-background/95 p-0 shadow-md backdrop-blur md:right-7"
+            aria-label={t("chat.scrollToBottom")}
+            title={t("chat.scrollToBottom")}
+            onClick={onScrollToBottom}
+            data-chat-scroll-to-bottom
+          >
+            <ArrowDown className="h-4 w-4" />
+          </Button>
+        ) : null}
       </div>
       <div className="shrink-0 bg-workspace/95 px-4 pb-4 pt-2 md:px-6 md:pb-5 md:pt-2" data-chat-composer-dock>
         <div className="mx-auto max-w-3xl">
@@ -307,6 +452,18 @@ export function ChatWorkspace({
           ) : null}
           {queueControls}
           <CompactionStatus state={compaction} onCancel={onCancelCompaction} />
+          {handoffSendOpen ? (
+            <div className="mb-2">
+              <SessionHandoffSend
+                endpoint={sessionHandoffEndpoint}
+                sourceChatId={sessionHandoffSourceChatId}
+                targetChats={sessionHandoffTargetChats}
+                open={handoffSendOpen}
+                onOpenChange={onHandoffSendOpenChange}
+              />
+            </div>
+          ) : null}
+          {activeGoalBar}
           {approvalComposer || composer(true)}
         </div>
       </div>

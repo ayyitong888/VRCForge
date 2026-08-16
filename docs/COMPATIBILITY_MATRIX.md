@@ -1,26 +1,29 @@
 # VRCForge Compatibility Matrix
 
-This matrix is the public compatibility checklist for the 1.6.0 target release
-and future stable refreshes. Version 1.5.1 remains the latest published stable
-release until 1.6.0 is formally published. It
+This matrix is the public compatibility checklist for the corrective 1.6.2
+stable release and future stable refreshes. Version 1.6.2 replaces 1.6.0 and
+supersedes the unpublished v1.6.1 tag. It
 does not claim that every avatar, outfit, or shader stack is supported. It
 records the components VRCForge must detect, report, and gate before stable
 release work can be accepted or refreshed.
 
-For the 1.6.0 hot-fix-first publication, the release owner explicitly deferred
-fresh warm-start, Golden Path, visual-completion, packaged Skill, optimizer,
-external-Agent, and clean-Windows install/upgrade/uninstall evidence until
-after publication. Those exact-version probes remain unverified and must not be
-represented as passed release evidence.
+The 1.6.2 corrective release carries forward the reviewed 1.6.x product
+behavior and closes the Unity-package/source evidence gap. Automated source,
+package-construction and no-regression gates do not replace the release-paired
+manual checks: the final `VRCForge.unitypackage` still requires a disposable
+fresh-project Import All, Editor and Player compilation, VRChat Build & Test,
+and the official upgrade-path review. Any exact-version probe not performed on
+the final artifact remains unverified and must not be represented as passed
+release evidence.
 
 ## Stable Compatibility Targets
 
 | Area | Current target | Release evidence | Stable expectation |
 | --- | --- | --- | --- |
-| Windows | Windows x64 installer and portable payload | Local candidate build and packaged smokes; the exact-version clean-environment install/upgrade/uninstall refresh is deferred and unverified for 1.6.0 | Use the release notes for the tested installation, migration, uninstall, and portable-launch boundaries |
-| Unity | Unity 2022.3 LTS VRChat avatar projects | Golden Path Matrix and Unity-package import smokes use Unity project roots; the exact 1.6.0 refresh is deferred and unverified | Doctor reports Unity version and project validity clearly |
+| Windows | Windows x64 installer and portable payload | Single clean `v1.6.2` build plus manifest/hash checks; exact-version clean-environment install/upgrade/uninstall results must be recorded when run | Use the release notes for the tested installation, migration, uninstall, and portable-launch boundaries |
+| Unity | Unity 2022.3 LTS VRChat avatar projects | Static/package-construction gates plus release-paired fresh-project Import All, Editor/Player compile, VRChat Build & Test, and upgrade review | Doctor reports Unity version and project validity clearly; unrun final-artifact checks remain unverified |
 | VRCForge MCP 2.0 Core | Self-contained Unity package, MCP 2.0 (`2026-07-28`), fixed 64-tool contract | Clean import, direct App connection, `tools/list`, approval/checkpoint/write/readback/restore/reconnect evidence | No external Unity MCP runtime is required; the Unity Core remains `2026-07-28` only |
-| External-Agent MCP edge | App-side MCP 2026 preferred; pinned supported standard MCP 1.x selected only from the first valid initialize frame | Profile selection/freeze and client-compatibility tests; fresh external-Agent release smoke is deferred and unverified for 1.6.0 | No mid-connection switch, silent catalogue downgrade, or direct external Unity write |
+| External-Agent MCP edge | App-side MCP 2026 preferred; pinned supported standard MCP 1.x selected only from the first valid initialize frame | Profile selection/freeze and client-compatibility tests; any unrun fresh external-Agent 1.6.2 smoke remains unverified | No mid-connection switch, silent catalogue downgrade, or direct external Unity write |
 | VRChat SDK | VRChat SDK3 Avatar package | Validation report and Build/Test readiness detect SDK state | Missing SDK is a clear blocker, not a generic scan failure |
 | Modular Avatar | Optional package, read/write only through VRCForge approval paths | MA scan and rollback coverage audit metadata exist | MA-heavy writes require checkpoint, validation, and rollback proof |
 | NDMF | Optional dependency for optimizer/plugin ecosystems | Rollback coverage audit records NDMF package baseline metadata | NDMF generated residue is detected or explicitly marked not present |

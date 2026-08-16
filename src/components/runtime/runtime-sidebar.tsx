@@ -2,7 +2,7 @@ import { Box, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, 
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { AgentProgress } from "../../lib/api";
+import type { AgentDesktopAction, AgentProgress, WorkspaceDiffSummary } from "../../lib/api";
 import type { ProjectType } from "../../lib/chat-types";
 import { cn } from "../../lib/utils";
 import { AgentTodoPanel } from "./agent-todo-panel";
@@ -34,11 +34,15 @@ export function RightRuntimeSidebar({
   projectWorkspace,
   subAgentPanel,
   subAgentTaskCount,
+  subAgentRunningTaskCount,
+  subAgentCompletedTaskCount,
   userAttachmentSources,
   onLocateUserAttachmentSource,
   onOpenUserAttachmentSource,
   approvalsLoaded,
   pendingApprovals,
+  workspaceSummary,
+  activeDesktopActions,
   refreshUnityStatus,
   onHideSidebar,
   localizeHealthMessage,
@@ -57,11 +61,15 @@ export function RightRuntimeSidebar({
   projectWorkspace: boolean;
   subAgentPanel?: ReactNode;
   subAgentTaskCount: number;
+  subAgentRunningTaskCount: number;
+  subAgentCompletedTaskCount: number;
   userAttachmentSources: UserAttachmentSource[];
   onLocateUserAttachmentSource?: (source: UserAttachmentSource) => void;
   onOpenUserAttachmentSource?: (source: UserAttachmentSource) => void;
   approvalsLoaded: boolean;
   pendingApprovals: number;
+  workspaceSummary: WorkspaceDiffSummary | null;
+  activeDesktopActions: AgentDesktopAction[];
   refreshUnityStatus: () => void | Promise<void>;
   onHideSidebar: () => void;
   localizeHealthMessage: (message?: string) => string;
@@ -90,15 +98,17 @@ export function RightRuntimeSidebar({
         <div className="min-w-0 flex-1 truncate text-sm font-semibold">
           {t(projectWorkspace ? "workspace.title" : "workspace.environment")}
         </div>
-        <button
-          type="button"
-          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
-          onClick={() => void refreshUnityStatus()}
-          title={t("workspace.refreshStatus")}
-          disabled={!runtimeConnected || loadingUnityStatus}
-        >
-          <RefreshCw className={cn("h-4 w-4", loadingUnityStatus && "animate-spin")} />
-        </button>
+        {workspaceProjectType === "unity" ? (
+          <button
+            type="button"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+            onClick={() => void refreshUnityStatus()}
+            title={t("workspace.refreshStatus")}
+            disabled={!runtimeConnected || loadingUnityStatus}
+          >
+            <RefreshCw className={cn("h-4 w-4", loadingUnityStatus && "animate-spin")} />
+          </button>
+        ) : null}
         <button
           type="button"
           className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
@@ -125,11 +135,15 @@ export function RightRuntimeSidebar({
             agentProgress={agentProgress}
             subAgentPanel={subAgentPanel}
             subAgentTaskCount={subAgentTaskCount}
+            subAgentRunningTaskCount={subAgentRunningTaskCount}
+            subAgentCompletedTaskCount={subAgentCompletedTaskCount}
             userAttachmentSources={userAttachmentSources}
             onLocateUserAttachmentSource={onLocateUserAttachmentSource}
             onOpenUserAttachmentSource={onOpenUserAttachmentSource}
             approvalsLoaded={approvalsLoaded}
             pendingApprovals={pendingApprovals}
+            workspaceSummary={workspaceSummary}
+            activeDesktopActions={activeDesktopActions}
           />
         ) : (
           <>

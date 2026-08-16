@@ -163,6 +163,12 @@ class AgentShellService:
         self._accepting = True
         self._sessions = ShellProcessSupervisor(session_ports)
         self._session_input_buffers: dict[str, str] = {}
+        self._project_path_guard: Callable[[], Any] | None = None
+
+    def bind_project_path_guard(self, provider: Callable[[], Any]) -> None:
+        """Bind the cooperative registered-project guard used by shared Shell."""
+
+        self._project_path_guard = provider
 
     @property
     def active_process_count(self) -> int:
@@ -236,7 +242,12 @@ class AgentShellService:
             except BaseException:
                 return False
 
-    def classify(self, params: dict[str, Any] | str) -> dict[str, Any]:
+    def classify(
+        self,
+        params: dict[str, Any] | str,
+        *,
+        unity_project_access: bool = False,
+    ) -> dict[str, Any]:
         if isinstance(params, str):
             params = {"command": params}
         command = str(params.get("command") or "").strip()
@@ -268,6 +279,52 @@ class AgentShellService:
             or params.get("project_path")
             or ""
         ).strip()
+        if self._project_path_guard is not None:
+            try:
+                guard = self._project_path_guard()
+                capability = "unity_project_access" if unity_project_access else None
+                allowed = guard.is_shell_allowed(command, cwd=cwd, capability=capability)
+                if requested_project_value and not unity_project_access:
+                    allowed = allowed and guard.is_write_allowed(requested_project_value)
+                if requested_project_value and unity_project_access:
+                    allowed = allowed and guard.is_write_allowed(
+                        requested_project_value,
+                        capability=capability,
+                    )
+            except Exception as exc:  # noqa: BLE001 - path policy errors fail closed.
+                return self._classification(
+                    command,
+                    cwd,
+                    workspace_root,
+                    "reject",
+                    [f"Registered Unity project path guard failed: {exc}"],
+                )
+            if not allowed:
+                return self._classification(
+                    command,
+                    cwd,
+                    workspace_root,
+                    "reject",
+                    ["Ordinary Shell cannot enter or directly reference a registered Unity project."],
+                )
+            protected_project = (
+                Path(str(guard.current_root))
+                if unity_project_access and str(guard.current_root or "").strip()
+                else None
+            )
+            read_only = self._command_is_read_only(command)
+            return self._classification(
+                command,
+                cwd,
+                workspace_root,
+                "high" if protected_project is not None and not read_only else "low",
+                [
+                    "Unity Shell may modify the current registered Unity project."
+                    if protected_project is not None and not read_only
+                    else "Shell execution is outside registered Unity project roots."
+                ],
+                project_root=protected_project,
+            )
         if requested_project_value:
             try:
                 requested_project = Path(requested_project_value).expanduser().resolve()
@@ -317,9 +374,13 @@ class AgentShellService:
         agent_name: str = "desktop-agent",
         *,
         task_context: dict[str, Any] | None = None,
+        unity_project_access: bool = False,
     ) -> dict[str, Any]:
         with self._execution_admission() as admission_id:
-            classification = self.classify(params)
+            classification = self.classify(
+                params,
+                unity_project_access=unity_project_access,
+            )
             command = classification["command"]
             if classification["risk"] == "reject":
                 self._ports.append_audit(
@@ -523,7 +584,8 @@ class AgentShellService:
                 "cwd": str(cwd),
                 "workspace_root": str(workspace_root),
                 "projectRoot": str(project_root),
-            }
+            },
+            unity_project_access=True,
         )
         if classification.get("risk") == "reject":
             self._raise(

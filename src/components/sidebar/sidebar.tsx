@@ -121,7 +121,7 @@ export function SidebarProject({
           <MoreHorizontal className="h-3.5 w-3.5" />
         </button>
       ) : null}
-      {onToggleCollapse ? (
+      {onToggleCollapse && hasChats ? (
         <button
           type="button"
           title={collapsed ? i18n.t("project.expandChats") : i18n.t("project.collapseChats")}

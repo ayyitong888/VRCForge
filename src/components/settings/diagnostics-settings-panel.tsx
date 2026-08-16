@@ -40,6 +40,43 @@ function identityDetails(identity: DiagnosticIdentitySummary, t: (key: string, o
   return parts;
 }
 
+export function DiagnosticIdentityMap({ status }: { status: DiagnosticsStatus | null }) {
+  const { t } = useTranslation();
+  const identities = useMemo(
+    () => (status?.identities || []).filter((identity) => Boolean(identity?.alias)),
+    [status?.identities],
+  );
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-4" data-vrcforge-log-identities>
+      <div className="text-sm font-medium">{t("settings.logIdentityMapping")}</div>
+      <p className="mt-1 text-xs text-muted-foreground">{t("settings.logIdentityMappingDesc")}</p>
+      {identities.length ? (
+        <div className="mt-3 space-y-2">
+          {identities.map((identity) => {
+            const details = identityDetails(identity, t);
+            return (
+              <div key={`${identity.kind}:${identity.alias}`} className="rounded-lg border border-border bg-background px-3 py-2 text-xs">
+                <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <code className="shrink-0 font-semibold text-foreground">{identity.alias}</code>
+                  <span aria-hidden="true" className="text-muted-foreground">→</span>
+                  <span className="min-w-0 break-words text-muted-foreground">
+                    {details.length ? details.join(" · ") : t("settings.logIdentitySafeLabelPending")}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="mt-3 rounded-lg border border-dashed border-border bg-background px-3 py-2 text-xs text-muted-foreground">
+          {t("settings.logIdentityEmpty")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function DiagnosticsSettingsPanel({
   developerOptionsEnabled,
   status,
@@ -76,10 +113,6 @@ export function DiagnosticsSettingsPanel({
   const selectedDescription = t(logLevelDescriptionKey(effectiveSelectedLevel));
   const activeLogFile = safeBasename(status?.activeLogFile);
   const redactionEnabled = Boolean(status?.redaction?.enabled ?? status?.redaction?.beforeWrite);
-  const identities = useMemo(
-    () => (status?.identities || []).filter((identity) => Boolean(identity?.alias)),
-    [status?.identities],
-  );
 
   const handleLevelChange = (nextIndex: number) => {
     const level = availableLevels[nextIndex];
@@ -208,32 +241,6 @@ export function DiagnosticsSettingsPanel({
         </div>
       </div>
 
-      <div className="mt-4 rounded-xl border border-border bg-card p-4" data-vrcforge-log-identities>
-        <div className="text-sm font-medium">{t("settings.logIdentityMapping")}</div>
-        <p className="mt-1 text-xs text-muted-foreground">{t("settings.logIdentityMappingDesc")}</p>
-        {identities.length ? (
-          <div className="mt-3 space-y-2">
-            {identities.map((identity) => {
-              const details = identityDetails(identity, t);
-              return (
-                <div key={`${identity.kind}:${identity.alias}`} className="rounded-lg border border-border bg-background px-3 py-2 text-xs">
-                  <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
-                    <code className="shrink-0 font-semibold text-foreground">{identity.alias}</code>
-                    <span aria-hidden="true" className="text-muted-foreground">→</span>
-                    <span className="min-w-0 break-words text-muted-foreground">
-                      {details.length ? details.join(" · ") : t("settings.logIdentitySafeLabelPending")}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="mt-3 rounded-lg border border-dashed border-border bg-background px-3 py-2 text-xs text-muted-foreground">
-            {t("settings.logIdentityEmpty")}
-          </div>
-        )}
-      </div>
     </div>
   );
 }

@@ -2321,14 +2321,14 @@ class AgentGateway:
             # A presentation-only event must never fail or delay the Runtime.
             return
 
-    def execute_shell_tool(self, params: dict[str, Any]) -> dict[str, Any]:
+    def execute_shell_tool(self, params: dict[str, Any], *, unity_project_access: bool = False) -> dict[str, Any]:
         agent_name = self._tool_agent_context.get() or "external-agent"
         owner_id = self._tool_owner_context.get() or f"agent:{agent_name}"
         trusted = dict(params or {})
         for key in (
             "agent_name", "agentName", "agent_id", "agentId",
             "runtime_session_id", "runtimeSessionId", "owner_session_id", "ownerSessionId",
-            "_trusted_owner_id", "_trustedOwnerId",
+            "_trusted_owner_id", "_trustedOwnerId", "unity_project_access", "_unityProjectAccess",
         ):
             trusted.pop(key, None)
         trusted["_trusted_owner_id"] = owner_id
@@ -2336,7 +2336,7 @@ class AgentGateway:
         if classification.get("protectionScope") == "host" and classification.get("risk") == "low":
             trusted.setdefault("yieldMs", 10_000)
             trusted.setdefault("timeout", 30 * 60)
-        return self.shell.execute(trusted, agent_name=agent_name)
+        return self.shell.execute(trusted, agent_name=agent_name, unity_project_access=unity_project_access)
 
     def control_shell_tool(self, params: dict[str, Any]) -> dict[str, Any]:
         agent_name = self._tool_agent_context.get() or "external-agent"
@@ -3488,27 +3488,26 @@ class AgentGateway:
             else bool(project_root)
         )
         general_allowed_roots: list[str] = []
-        if not project_context_active:
-            root_candidates = [
-                project_root,
-                str(params.get("workspace_root") or params.get("workspaceRoot") or "").strip(),
-                str(params.get("cwd") or "").strip(),
-            ]
-            if not project_root:
-                root_candidates.extend(extract_explicit_local_roots(message))
-            seen_general_roots: set[str] = set()
-            for candidate in root_candidates:
-                if not candidate:
-                    continue
-                try:
-                    resolved = Path(candidate).expanduser().resolve(strict=True)
-                except (OSError, RuntimeError, ValueError):
-                    continue
-                normalized = os.path.normcase(str(resolved))
-                if normalized in seen_general_roots:
-                    continue
-                seen_general_roots.add(normalized)
-                general_allowed_roots.append(str(resolved))
+        root_candidates = [
+            project_root,
+            str(params.get("workspace_root") or params.get("workspaceRoot") or "").strip(),
+            str(params.get("cwd") or "").strip(),
+        ]
+        if not project_root:
+            root_candidates.extend(extract_explicit_local_roots(message))
+        seen_general_roots: set[str] = set()
+        for candidate in root_candidates:
+            if not candidate:
+                continue
+            try:
+                resolved = Path(candidate).expanduser().resolve(strict=True)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            normalized = os.path.normcase(str(resolved))
+            if normalized in seen_general_roots:
+                continue
+            seen_general_roots.add(normalized)
+            general_allowed_roots.append(str(resolved))
         continuation_context = ensure_dict(ensure_dict(task_continuation).get("context"))
         continuation_completion = ensure_dict(ensure_dict(task_continuation).get("completion"))
         if continuation_context and continuation_completion:
@@ -3748,7 +3747,7 @@ class AgentGateway:
         planner_argument_failures = 0
         completion_claim_correction_attempted = False
         general_no_progress_attempts = 0
-        observed_general_read_keys: set[str] = set()
+        last_general_read_key = ""
         unresolved_planner_argument_failure: dict[str, Any] | None = None
         runtime_compaction_usage_checkpoint: dict[str, Any] | None = None
         unresolved_completion_outcomes: dict[tuple[str, str], dict[str, Any]] = {}
@@ -4352,7 +4351,15 @@ class AgentGateway:
             planned_tool = str(
                 plan.get("writeTool")
                 or plan.get("skillTool")
-                or ("shell" if action_kind == "shell" else "")
+                or (
+                    "unity_shell"
+                    if action_kind == "shell"
+                    and "unity_project_access"
+                    in ensure_list(plan.get("toolCapabilities"))
+                    else "shell"
+                    if action_kind == "shell"
+                    else ""
+                )
             )
             planned_arguments: dict[str, Any] = (
                 dict(ensure_dict(plan.get("writeParams")))
@@ -4412,7 +4419,7 @@ class AgentGateway:
                 else ""
             )
             semantic_general_replay = bool(
-                general_read_key and general_read_key in observed_general_read_keys
+                general_read_key and general_read_key == last_general_read_key
             )
             consecutive_general_replay = bool(
                 not project_context_active
@@ -4522,7 +4529,7 @@ class AgentGateway:
             )
             tool_calls_used += 1
             if action_kind == "shell":
-                step_tool = "shell"
+                step_tool = "unity_shell" if "unity_project_access" in ensure_list(plan.get("toolCapabilities")) else "shell"
                 general_shell_root = general_allowed_roots[0] if general_allowed_roots else ""
                 shell_workspace_root = (
                     params.get("workspace_root")
@@ -4569,15 +4576,15 @@ class AgentGateway:
                         tool_calls_used=tool_calls_used,
                         exposure_layer=runtime_exposure_layer,
                         requested_kind="shell",
-                        requested_tool="shell",
+                        requested_tool=step_tool,
                         requested_arguments={"command": command, **shell_step_params},
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     ),
+                    unity_project_access=step_tool == "unity_shell",
                 )
-                # Runtime turns already have a trusted per-turn owner. The
-                # external control capability is unnecessary here and must
-                # not enter model context or durable chat/run projections.
+                # Runtime turns already have a trusted owner; external control
+                # capability must not enter model context or durable projections.
                 step_payload.pop("controlToken", None)
                 if not isinstance(step_payload.get("outcome"), dict):
                     shell_failure_fallback = "Shell command did not complete successfully."
@@ -4943,15 +4950,22 @@ class AgentGateway:
             else:
                 repeated_failure_guard.record_success()
                 last_successful_action_id = planned_action_id
-                if general_read_key:
-                    observed_general_read_keys.add(general_read_key)
+                general_no_progress_attempts = 0
+                last_general_read_key = general_read_key
                 if (
                     unresolved_planner_argument_failure is not None
                     and task_action.get("status") == "completed"
                     and action_kind
                     == str(unresolved_planner_argument_failure.get("actionKind") or "")
-                    and step_tool
-                    == str(unresolved_planner_argument_failure.get("tool") or "")
+                    and str(unresolved_planner_argument_failure.get("tool") or "")
+                    in {
+                        step_tool,
+                        str(
+                            plan.get("writeDisplayTool")
+                            or plan.get("skillDisplayTool")
+                            or ""
+                        ),
+                    }
                 ):
                     unresolved_planner_argument_failure = None
 
@@ -6450,7 +6464,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.6.1",
+        server_version="1.6.2",
     )
     return create_agent_mcp_2026_asgi_app(
         router,

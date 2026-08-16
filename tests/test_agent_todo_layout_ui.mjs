@@ -42,25 +42,26 @@ assert.match(runtimeUi, /title=\{value \? `\$\{label\}: \$\{value\}` : label\}/)
 assert.match(sidebar, /<AgentTodoPanel progress=\{agentProgress\}/);
 assert.match(sidebar, /data-vrcforge-project-workbench/);
 assert.match(sidebar, /data-vrcforge-environment-status=\{projectWorkspace \? undefined : true\}/);
-assert.match(sections, /title=\{t\("workspace\.todo"\)\}/);
+assert.match(sections, /title=\{isUnityProject \? t\("workspace\.todo"\) : t\("workspace\.progress"\)\}/);
 assert.match(sections, /title=\{t\("workspace\.subAgents"\)\}/);
-assert.match(sections, /title=\{t\("workspace\.environment"\)\}/);
-assert.match(sections, /title=\{t\("workspace\.userAttachmentSources"\)\}/);
+assert.match(sections, /title=\{workspaceSectionTitle\}/);
+assert.match(sections, /attachmentCount > 0 \? \(/);
+assert.match(sections, /title=\{t\("workspace\.sources"\)\}/);
 assert.ok(
-  sections.indexOf('title={t("workspace.todo")}') > -1,
-  "Project workbench TODO title should exist",
+  sections.indexOf('title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}') > -1,
+  "Project workbench Progress/TODO title should exist",
 );
 assert.ok(
-  sections.indexOf('title={t("workspace.todo")}') < sections.indexOf('title={t("workspace.subAgents")}'),
-  "TODO must appear before Sub Agents in the project workbench",
+  sections.indexOf('title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}') < sections.indexOf('title={t("workspace.subAgents")}'),
+  "Progress/TODO must appear before Sub Agents in the project workbench",
 );
 assert.ok(
-  sections.indexOf('title={t("workspace.subAgents")}') < sections.indexOf('title={t("workspace.environment")}'),
-  "Sub Agents must appear before Environment in the project workbench",
+  sections.indexOf('title={t("workspace.subAgents")}') < sections.indexOf('title={workspaceSectionTitle}'),
+  "Sub Agents must appear before the workspace/environment section",
 );
 assert.ok(
-  sections.indexOf('title={t("workspace.environment")}') < sections.indexOf('title={t("workspace.userAttachmentSources")}'),
-  "Environment must appear before User attachment sources in the project workbench",
+  sections.indexOf('title={workspaceSectionTitle}') < sections.indexOf('title={t("workspace.sources")}'),
+  "Workspace/environment must appear before conditional attachment sources",
 );
 assert.match(sections, /subAgentPanel/);
 assert.match(sections, /userAttachmentSources/);
@@ -78,7 +79,7 @@ assert.doesNotMatch(sidebar, /hasStartupIssue/);
 assert.doesNotMatch(sidebar, /openDoctor/);
 assert.doesNotMatch(sidebar, /sidebar\.doctor/);
 assert.doesNotMatch(sidebar, /\{hasEnvironmentAttention \|\| hasStartupIssue \? \(/);
-const todoTitleIndex = sections.indexOf('title={t("workspace.todo")}');
+const todoTitleIndex = sections.indexOf('title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}');
 const subAgentsTitleIndex = sections.indexOf('title={t("workspace.subAgents")}');
 const embeddedTodoIndex = sections.indexOf("<AgentTodoPanelEmbedded progress={agentProgress}");
 const projectTodoBlock = sections.slice(todoTitleIndex, subAgentsTitleIndex);
@@ -92,7 +93,9 @@ assert.ok(
   "Project-workbench TODO should not reuse full panel in todo section",
 );
 assert.doesNotMatch(sidebar, /activityPanel=\{/);
-assert.doesNotMatch(sections, /GitBranch|workspace\.changedFiles|workspaceDiff|filesSeen|workspaceDiffStatus/);
+assert.match(sections, /workspaceSummary/);
+assert.match(sections, /workspaceChangedFiles/);
+assert.doesNotMatch(sections, /title=\{t\("workspace\.context"\)\}/);
 assert.doesNotMatch(sidebar, /GitBranch|workspace\.changedFiles|workspaceDiff|filesSeen|workspaceDiffStatus/);
 assert.match(app, /agentProgress=\{agentProgress\}/);
 assert.match(app, /const projectChatWorkspace = activeView === "chat" && Boolean\(activeChat\?\.projectPath\)/);

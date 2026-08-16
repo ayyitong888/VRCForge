@@ -1,14 +1,17 @@
-import { AlertTriangle, ChevronDown, ChevronRight, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Eye, ListChecks, Pencil, TerminalSquare, Wrench } from "lucide-react";
 import { ReactNode, useState } from "react";
 import { useTranslation } from "react-i18next";
 import i18n from "../../i18n";
 import { presentApproval } from "../../lib/approval-presentation";
 import type { AgentApproval, AgentRuntimeResponse, AgentShellResult, AgentSkillResult } from "../../lib/api";
 import {
+  buildRuntimeStepResultQueues,
   buildTimelinePresentation,
   hasDurableExecutionEvents,
   runtimeTerminalStatusKey,
+  timelineInvocationDisplayLabel,
   type TimelineBatchKind,
+  type TimelineInvocation,
 } from "../../lib/chat-timeline-presentation";
 import type { ApprovalActionState, ChatTimelineEvent } from "../../lib/chat-types";
 import { cn } from "../../lib/utils";
@@ -69,9 +72,12 @@ export function buildAgentTimelineRows({
     durableTimeline,
     elapsedSeconds,
     response.plan.plannerFailure?.code,
+    response.steps,
   );
+  const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
   if (durableRows.length) {
     const durableKinds = new Set(durableTimeline.map((event) => event.kind || ""));
+    const fallbackAnswer = response.plan.reply || response.plan.summary;
     const rows = [...durableRows];
     const orderedSteps = normalizeAgentSteps(response.steps);
     const hasDurableExecution = hasDurableExecutionEvents(durableTimeline);
@@ -94,10 +100,13 @@ export function buildAgentTimelineRows({
       }));
     }
     if (!durableKinds.has("assistant")) {
-      const fallbackAnswer = response.plan.reply || response.plan.summary;
       if (fallbackAnswer) {
         rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+      } else if (shouldSurfaceModelIdentity) {
+        rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t));
       }
+    } else if (!fallbackAnswer && shouldSurfaceModelIdentity && planLabel) {
+      rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "assistant-model"));
     }
     return rows;
   }
@@ -144,6 +153,8 @@ export function buildAgentTimelineRows({
     const fallbackAnswer = response.plan.reply || response.plan.summary;
     if (fallbackAnswer) {
       rows.push(renderPlanReplyRow(fallbackAnswer, planLabel, elapsedSeconds, t));
+    } else if (shouldSurfaceModelIdentity) {
+      rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t));
     }
   }
   return rows.length ? rows : buildLegacyAgentTimelineRows({
@@ -170,9 +181,19 @@ export function buildDurableTimelineRows(
   events: ChatTimelineEvent[] = [],
   elapsedSeconds?: number,
   terminalFailureCode = "",
+  steps: AgentRuntimeResponse["steps"] = [],
 ): ReactNode[] {
   const presentation = buildTimelinePresentation(events, elapsedSeconds);
   if (!presentation.entries.length) return [];
+  const resultQueues = buildRuntimeStepResultQueues(steps);
+  const takeFullResult = (invocation: TimelineInvocation): unknown => {
+    if (!invocation.actionId) return undefined;
+    const queue = resultQueues.get(invocation.actionId);
+    if (!queue?.length) return undefined;
+    const result = queue.shift();
+    if (!queue.length) resultQueues.delete(invocation.actionId);
+    return result;
+  };
   const rows: ReactNode[] = [];
   if (Number.isFinite(presentation.elapsedSeconds)) {
     rows.push(
@@ -204,6 +225,16 @@ export function buildDurableTimelineRows(
       ));
       continue;
     }
+    if (entry.kind === "process") {
+      for (const invocation of entry.invocations) {
+        rows.push(renderDirectTimelineInvocation(invocation, takeFullResult(invocation)));
+      }
+      continue;
+    }
+    if (entry.invocations.length === 1) {
+      rows.push(renderDirectTimelineInvocation(entry.invocations[0], takeFullResult(entry.invocations[0])));
+      continue;
+    }
     const failed = entry.invocations.some((invocation) => ["failed", "error"].includes(invocation.status.toLowerCase()));
     rows.push(
       <WorkSegmentRow
@@ -215,15 +246,17 @@ export function buildDurableTimelineRows(
       >
         {entry.invocations.map((invocation) => {
           const danger = ["failed", "error"].includes(invocation.status.toLowerCase());
+          const fullResult = takeFullResult(invocation);
           return (
             <RunRow
               key={invocation.id}
               icon={workBatchIcon(entry.kind)}
-              title={invocation.label}
+              title={timelineInvocationDisplayLabel(invocation.label)}
               statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
               statusLabel={invocation.status}
+              detailCard
             >
-              {invocation.summary ? <div className="text-xs text-muted-foreground">{invocation.summary}</div> : null}
+              <InvocationDetailCard invocation={invocation} detail={fullResult} />
             </RunRow>
           );
         })}
@@ -231,6 +264,75 @@ export function buildDurableTimelineRows(
     );
   }
   return rows;
+}
+
+function renderDirectTimelineInvocation(invocation: TimelineInvocation, detail?: unknown): ReactNode {
+  if (invocation.kind === "process") {
+    const commentary = invocation.summary || invocation.label;
+    return (
+      <div
+        key={invocation.id}
+        data-agent-timeline-invocation="process"
+        className="px-1 text-sm leading-relaxed text-muted-foreground"
+      >
+        <ChatMarkdown text={commentary} />
+      </div>
+    );
+  }
+  const danger = ["failed", "error"].includes(invocation.status.toLowerCase());
+  return (
+    <RunRow
+      key={invocation.id}
+      icon={workBatchIcon(invocation.kind)}
+      title={timelineInvocationDisplayLabel(invocation.label)}
+      statusTone={danger ? "danger" : invocation.status === "started" ? "warn" : "ok"}
+      statusLabel={invocation.status}
+      detailCard
+    >
+      <InvocationDetailCard invocation={invocation} detail={detail} />
+    </RunRow>
+  );
+}
+
+function InvocationDetailCard({ invocation, detail }: { invocation: TimelineInvocation; detail?: unknown }) {
+  const normalizedStatus = invocation.status.toLowerCase();
+  const danger = ["failed", "error"].includes(normalizedStatus);
+  const running = ["started", "running", "pending"].includes(normalizedStatus);
+  const content = detail !== undefined
+    ? formatPayload(detail)
+    : invocation.summary || (invocation.kind === "command" ? `$ ${invocation.label}` : "-");
+  const title = invocation.kind === "command"
+    ? "Shell"
+    : invocation.kind === "file_edit"
+      ? "File edit"
+      : invocation.kind === "subagent"
+        ? "Sub-agent"
+        : "Tool";
+  const status = danger
+    ? i18n.t("skillStatus.failed")
+    : running
+      ? invocation.status
+      : i18n.t("step.done");
+  return (
+    <div
+      data-agent-invocation-output-card
+      className="min-w-0 overflow-hidden rounded-xl border border-border bg-muted/20 shadow-sm"
+    >
+      <div className="border-b border-border px-3 py-2 text-xs font-medium text-foreground">{title}</div>
+      <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words px-3 py-2.5 font-mono text-xs leading-relaxed text-foreground">
+        {content}
+      </pre>
+      <div
+        className={cn(
+          "flex items-center justify-end gap-1.5 border-t border-border px-3 py-2 text-xs",
+          danger ? "text-destructive" : running ? "text-amber-600" : "text-muted-foreground",
+        )}
+      >
+        {danger ? <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" /> : !running ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+        <span>{status}</span>
+      </div>
+    </div>
+  );
 }
 
 function workBatchTitle(kind: TimelineBatchKind, count: number): string {
@@ -527,15 +629,19 @@ function buildLegacyAgentTimelineRows({
 }): ReactNode[] {
   const rows: ReactNode[] = [];
   const planReply = response.plan.reply || response.plan.summary;
+  const shouldSurfaceModelIdentity = Boolean(response.plan.plannerFailure?.code);
   rows.push(
     <div key="reply" className="px-1 text-sm">
       <ChatMarkdown text={planReply} />
       <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-        <span>{planLabel}</span>
+        {planLabel ? <span>{planLabel}</span> : null}
         {elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
       </div>
     </div>,
   );
+  if (!planReply && shouldSurfaceModelIdentity && planLabel) {
+    rows.push(renderPlanIdentityRow(planLabel, elapsedSeconds, t, "reply-model"));
+  }
   if (showIntent && nextStep) {
     rows.push(
       <RunRow
@@ -750,11 +856,34 @@ function renderPlanReplyRow(
     <div key={key} className="px-1 text-sm">
       <ChatMarkdown text={answer} />
       <div className="mt-1 flex items-center gap-2 text-[10px] text-muted-foreground">
-        <span>{planLabel}</span>
+        {planLabel ? <span>{planLabel}</span> : null}
         {elapsedSeconds ? <span>{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
       </div>
     </div>
   );
+}
+
+function renderPlanIdentityRow(
+  planLabel: string,
+  elapsedSeconds: number | undefined,
+  t: typeof i18n.t,
+  key = "plan-model-identity",
+) {
+  if (!planLabel) {
+    return null;
+  }
+  return (
+    <div key={key} className="px-1 text-[10px] text-muted-foreground">
+      <span>{planLabel}</span>
+      {elapsedSeconds ? <span className="ml-2">{t("agent.elapsed", { time: formatDuration(elapsedSeconds) })}</span> : null}
+    </div>
+  );
+}
+
+export function formatRuntimeModelLine(providerLabel: string | undefined, model: string | undefined): string {
+  const provider = providerLabel?.trim();
+  const modelName = model?.trim();
+  return [provider, modelName].filter(Boolean).join(" · ");
 }
 
 function nextStepLabel(step: OrderedAgentStep["step"]): string {
@@ -770,6 +899,7 @@ export function RunRow({
   statusLabel,
   children,
   timelineOrder,
+  detailCard = false,
 }: {
   icon: "shell" | "skill" | "plan" | "vision";
   title: string;
@@ -777,6 +907,7 @@ export function RunRow({
   statusLabel: string;
   children: ReactNode;
   timelineOrder?: number;
+  detailCard?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const Icon = icon === "shell" ? TerminalSquare : icon === "skill" ? Wrench : icon === "vision" ? Eye : ListChecks;
@@ -798,7 +929,11 @@ export function RunRow({
           {statusLabel}
         </span>
       </button>
-      {open ? <div className="ml-6 mt-1 space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs">{children}</div> : null}
+      {open ? (
+        <div className={cn("ml-6 mt-1", detailCard ? "" : "space-y-2 rounded-lg bg-muted/40 px-3 py-2 text-xs")}>
+          {children}
+        </div>
+      ) : null}
     </div>
   );
 }

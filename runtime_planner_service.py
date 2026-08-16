@@ -9,7 +9,13 @@ from pathlib import Path
 import re
 import time
 from types import MappingProxyType
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
+
+from project_instruction_context import (
+    global_instruction_prompt_block,
+    load_project_instructions,
+    project_instruction_prompt_block,
+)
 
 CONTEXT_USAGE_SCHEMA = "vrcforge.context_usage.v1"
 RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
@@ -41,6 +47,14 @@ _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
     "vrcforge_read_text_file": ("path:string", "maxBytes?:integer", "maxOutputChars?:integer"),
     "vrcforge_find_files": ("path:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer"),
     "vrcforge_search_text": ("path:string", "query:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer", "maxFileBytes?:integer", "caseSensitive?:boolean"),
+    "vrcforge_edit_file": ("path:string", "content:string"),
+    "vrcforge_write_file": ("path:string", "content:string", "overwrite?:boolean"),
+    "vrcforge_delete_path": ("path:string",),
+    "vrcforge_move_path": ("source:string", "destination:string", "overwrite?:boolean"),
+    "vrcforge_apply_patch": ("path:string", "patch:string"),
+    "vrcforge_web_fetch": ("url:string", "timeout?:number", "maxBytes?:integer"),
+    "vrcforge_web_search": ("query:string", "timeout?:number", "maxResults?:integer"),
+    "vrcforge_execute_shell": ("command:string", "cwd?:string", "timeout?:number"),
     "vrcforge_get_compile_errors": ("projectPath?:string", "maxErrors?:integer"),
     "vrcforge_list_avatars": ("projectPath?:string",),
     "vrcforge_scan_materials": ("projectPath?:string", "avatarPath?:string"),
@@ -282,6 +296,8 @@ class PlannerTool:
     name: str
     description: str
     category: str
+    runtime_name: str = ""
+    capabilities: tuple[str, ...] = ()
     write: bool = False
     advanced: bool = False
     requires_user_activation: bool = False
@@ -289,12 +305,18 @@ class PlannerTool:
     input_schema: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        contract = tuple(self.input_contract or planner_tool_input_contract(self.name))[
+        runtime_name = str(self.runtime_name or self.name).strip()
+        capabilities = tuple(
+            dict.fromkeys(str(item).strip() for item in self.capabilities if str(item).strip())
+        )
+        contract = tuple(self.input_contract or planner_tool_input_contract(runtime_name))[
             :_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES
         ]
         schema = bounded_planner_tool_schema(
             self.input_schema or _contract_shallow_schema(contract)
         )
+        object.__setattr__(self, "runtime_name", runtime_name)
+        object.__setattr__(self, "capabilities", capabilities)
         object.__setattr__(self, "input_contract", contract)
         object.__setattr__(self, "input_schema", MappingProxyType(schema))
 
@@ -961,12 +983,21 @@ def redact_sensitive(value: object) -> object:
 
 
 class RuntimePlannerService:
-    def __init__(self, *, catalog: PlannerCatalogPort, desktop: DesktopPlanningObservationPort, model: PlannerModelPort | None = None, compactor: RuntimeHistoryCompactionPort | None = None, turn: PlannerTurnPort | None = None) -> None:
+    def __init__(self, *, catalog: PlannerCatalogPort, desktop: DesktopPlanningObservationPort, model: PlannerModelPort | None = None, compactor: RuntimeHistoryCompactionPort | None = None, turn: PlannerTurnPort | None = None, global_instructions: Callable[[], str] | None = None) -> None:
         self._catalog = catalog
         self._desktop = desktop
         self._model = model
         self._compactor = compactor
         self._turn = turn
+        self._global_instructions = global_instructions
+
+    def _read_global_instructions(self) -> str:
+        if self._global_instructions is None:
+            return ""
+        try:
+            return str(self._global_instructions() or "").strip()
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            return ""
 
     def bind_turn(self, request: Mapping[str, object]) -> AbstractContextManager[PlannerTurnMetadata]:
         if self._turn is None:
@@ -996,6 +1027,9 @@ class RuntimePlannerService:
                     phase="initial",
                     planner_label=planner_label,
                 )
+            instruction_snapshot = load_project_instructions(
+                params.get("projectRoot") or params.get("projectPath")
+            )
             llm_plan = self._llm_plan_agent_turn(
                 message,
                 observe,
@@ -1007,6 +1041,8 @@ class RuntimePlannerService:
                 exposure_layer=exposure_layer,
                 planner_label=planner_label,
                 project_context_active=params.get("_projectContextActive") is not False,
+                global_instructions=self._read_global_instructions(),
+                project_instructions=instruction_snapshot.content,
             )
             if llm_plan is not None:
                 return llm_plan
@@ -1156,11 +1192,12 @@ class RuntimePlannerService:
             exposure_layer: str,
         ) -> dict[str, object]:
             catalog = self._catalog.read(exposure_layer)
+            requested_name = str(tool_name or "").strip()
             tool = next(
                 (
                     item
                     for item in (*catalog.visible_tools, *catalog.routable_tools)
-                    if item.name == str(tool_name or "").strip()
+                    if item.name == requested_name or item.runtime_name == requested_name
                 ),
                 None,
             )
@@ -1186,6 +1223,8 @@ class RuntimePlannerService:
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
             planner_label: str = "",
             project_context_active: bool = True,
+            global_instructions: str = "",
+            project_instructions: str = "",
         ) -> dict[str, object] | None:
             model_port = self._model
             if model_port is None:
@@ -1206,6 +1245,8 @@ class RuntimePlannerService:
                     observe=observe,
                     exposure_layer=exposure_layer,
                     project_context_active=project_context_active,
+                    global_instructions=global_instructions,
+                    project_instructions=project_instructions,
                 )
                 raw_response = model_port.plan(prompt)
                 provider_reasoning = dict(raw_response.reasoning)
@@ -1278,12 +1319,15 @@ class RuntimePlannerService:
                 "shellParams": {},
                 "skillNeeded": False,
                 "skillTool": "",
+                "skillDisplayTool": "",
                 "skillCategory": "",
                 "skillParams": {},
                 "skillReason": "",
                 "writeNeeded": False,
                 "writeTool": "",
+                "writeDisplayTool": "",
                 "writeParams": {},
+                "toolCapabilities": [],
                 "correctionForActionId": correction_for_action_id,
                 # 工具型动作执行后，把结果回灌给 LLM 再决定下一步（真正的多步循环）。
                 "continueLoop": False,
@@ -1314,6 +1358,9 @@ class RuntimePlannerService:
                     None,
                 )
                 selected_tool = visible_tool or routable_tool
+                selected_runtime_tool = (
+                    selected_tool.runtime_name if selected_tool is not None else skill_tool
+                )
                 if selected_tool is not None and selected_tool.write:
                     return {
                         **self._planner_argument_error_plan(
@@ -1363,7 +1410,7 @@ class RuntimePlannerService:
                                 validation=argument_validation,
                                 phase=phase,
                             )
-                    if skill_tool == "vrcforge_vision_audit_multi":
+                    if selected_runtime_tool == "vrcforge_vision_audit_multi":
                         active_capture_receipt = managed_multi_capture_receipt(
                             loop_state or []
                         )
@@ -1466,7 +1513,17 @@ class RuntimePlannerService:
                         **base,
                         "summary": summary or f"调用 {skill_tool} 处理该请求。",
                         "skillNeeded": True,
-                        "skillTool": skill_tool,
+                        "skillTool": (
+                            selected_tool.runtime_name
+                            if selected_tool is not None
+                            else skill_tool
+                        ),
+                        "skillDisplayTool": skill_tool,
+                        "toolCapabilities": (
+                            list(selected_tool.capabilities)
+                            if selected_tool is not None
+                            else []
+                        ),
                         "skillCategory": (
                             visible_tool.category
                             if visible_tool is not None
@@ -1505,11 +1562,32 @@ class RuntimePlannerService:
                             validation=argument_validation,
                             phase=phase,
                         )
+                    if known_write_tool.runtime_name == "vrcforge_execute_shell":
+                        command = str(write_params.get("command") or "").strip()
+                        shell_options = {
+                            str(key): value
+                            for key, value in write_params.items()
+                            if str(key) != "command"
+                        }
+                        return {
+                            **base,
+                            "summary": summary or "Prepared Shell execution for the requested scope.",
+                            "shellNeeded": True,
+                            "shellCommand": command,
+                            "shellParams": shell_options,
+                            "writeDisplayTool": write_tool,
+                            "toolCapabilities": list(known_write_tool.capabilities),
+                            "continueLoop": True,
+                            "expectedResult": "Shell output will be returned inline.",
+                            "nextStep": "classify_shell",
+                        }
                     return {
                         **base,
                         "summary": summary or f"Prepared supervised execution for {write_tool}.",
                         "writeNeeded": True,
-                        "writeTool": write_tool,
+                        "writeTool": known_write_tool.runtime_name,
+                        "writeDisplayTool": write_tool,
+                        "toolCapabilities": list(known_write_tool.capabilities),
                         "writeParams": write_params,
                         "continueLoop": True,
                         "expectedResult": "The supervised write result will be returned inline.",
@@ -1668,6 +1746,10 @@ class RuntimePlannerService:
             if last_input_tokens is None or previous_prompt_tokens is None:
                 return history, None, False
 
+            project_instructions = load_project_instructions(
+                params.get("projectRoot") or params.get("projectPath")
+            ).content
+            global_instructions = self._read_global_instructions()
             next_prompt = self._build_llm_plan_prompt(
                 self._message_with_runtime_context(message, observe),
                 history,
@@ -1675,6 +1757,8 @@ class RuntimePlannerService:
                 observe=observe,
                 exposure_layer=runtime_exposure_layer,
                 project_context_active=params.get("_projectContextActive") is not False,
+                global_instructions=global_instructions,
+                project_instructions=project_instructions,
             )
             next_prompt_tokens = estimate_runtime_context_tokens(next_prompt)
             provider_overhead = max(0, last_input_tokens - previous_prompt_tokens)
@@ -1728,6 +1812,9 @@ class RuntimePlannerService:
                     loop_state,
                     observe=observe,
                     exposure_layer=runtime_exposure_layer,
+                    project_context_active=params.get("_projectContextActive") is not False,
+                    global_instructions=global_instructions,
+                    project_instructions=project_instructions,
                 )
                 after_tokens = provider_overhead + estimate_runtime_context_tokens(replacement_prompt)
                 minimum_reduction = max(1024, int(context_limit * 0.10 + 0.999999))
@@ -2072,6 +2159,8 @@ class RuntimePlannerService:
             observe: dict[str, object] | None = None,
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
             project_context_active: bool = True,
+            global_instructions: str = "",
+            project_instructions: str = "",
         ) -> str:
             observe = observe or {}
             tool_lines: list[str] = []
@@ -2135,6 +2224,11 @@ class RuntimePlannerService:
                     "the user must explicitly open a project conversation before those capabilities exist."
                 )
             )
+            global_instructions_block = global_instruction_prompt_block(global_instructions)
+            project_instructions_block = project_instruction_prompt_block(project_instructions)
+            instruction_blocks = "\n\n".join(
+                block for block in (global_instructions_block, project_instructions_block) if block
+            )
             prompt = (
                 f"{runtime_scope_instruction}\n"
                 "你是 VRCForge 桌面智能体的规划器，负责把用户的请求转换成下一步动作。\n"
@@ -2142,7 +2236,7 @@ class RuntimePlannerService:
                 "直到信息足够后再用 reply 收尾。\n"
                 "可选动作：\n"
                 '1. 调用工具：{"action": "skill", "skill_tool": "<工具名>", "skill_params": {…}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}\n'
-                '2. 执行 Shell 命令（系统级问题，如看日志/查文件/git）：{"action": "shell", "shell_command": "<命令>", "shell_params": {"cwd": "<可选目录>"}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}。background/pty/yieldMs/timeout/env 只在确实需要主机后台或交互进程时按需添加；可能写 Unity 项目的命令必须省略这些高级选项，以进入审批和回滚事务。\n'
+                '2. 执行普通 Shell 命令（系统级问题，如看日志/查工程外文件/git）：{"action": "shell", "shell_command": "<命令>", "shell_params": {"cwd": "<可选目录>"}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}。普通 Shell 不得把已注册 Unity 工程作为 cwd，也不得直接引用其路径；Unity Project Mode 中需要操作当前工程时，改用 write 动作调用 unity_shell。background/pty/yieldMs/timeout/env 只在确实需要主机后台或交互进程时按需添加。\n'
                 '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：未执行工具时用 {"action": "reply", "reply": "<回答>"}；执行过工具后必须用 {"action": "reply", "reply": "<回答>", "completion_claim":{"satisfied":true,"evidence_action_ids":["<每个已完成步骤的精确 actionId>"]}}\n'
                 '4. 进入执行模式（仅当用户明确要求项目写入或控制已启动的主机进程）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
                 "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
@@ -2153,12 +2247,14 @@ class RuntimePlannerService:
                 "先读懂错误原因；能靠改参数解决就用『不同的参数』重试（不要原样重复同一个调用），"
                 "换个工具或思路能绕过就绕过；确实做不到时用 reply 如实说明卡在哪、需要用户补什么——"
                 "绝不能在没真正做完时假装已完成（严禁「做了做了」式的虚假收尾）；"
+                "最终 reply 只能把工具结果直接支持的内容写成事实；推断必须明确标注，证据不足且仍有相关只读工具时继续查证，不能把 package name 或 private 标记当作产品用途证据；"
                 "拿不准时选 reply 并说明你需要什么信息。\n"
                 "reply 字段是直接展示给用户的对话内容：用第一人称，回复语言必须跟随用户实际使用的语言——用户用哪种语言提问就用哪种语言回复，用户中途换语言也跟着换；"
                 "自然地说明你理解了什么、打算怎么做（例如「好的，我去看一下 D 盘根目录有什么」，该示例仅演示语气，实际回复语言以用户为准），不要复述 JSON 或工具名。\n\n"
                 f"可用工具列表：\n{chr(10).join(tool_lines)}\n\n"
                 f"最近对话：\n{history_block}\n\n"
                 f"本轮已执行步骤+结果：\n{steps_block}\n\n"
+                f"{instruction_blocks + chr(10) + chr(10) if instruction_blocks else ''}"
                 f"用户最新消息：{message}"
             )
             return prompt + (

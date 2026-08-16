@@ -14,6 +14,7 @@ from runtime_planner_service import (
     EXPOSURE_LAYER_PLANNING,
     PlannerModelResult,
 )
+from profiled_tool_registry import CapabilityProfile
 from vrchat_blendshape_agent import LlmPlanResponse
 
 
@@ -290,15 +291,26 @@ def test_catalog_filters_only_visible_tools_and_keeps_full_routing_metadata() ->
         if str(item.get("name") or "")
     }
 
-    assert {item.name for item in planning.visible_tools} == expected_planning
-    assert {item.name for item in execution.visible_tools} == expected_execution
-    assert {item.name for item in planning.routable_tools} == expected_routable
-    assert {item.name for item in execution.routable_tools} == expected_routable
+    # Planner-facing names are the profile's plain aliases; runtime_name keeps
+    # the registered/internal identity used for routing and handler lookup.
+    assert {item.runtime_name for item in planning.visible_tools} == expected_planning
+    assert {item.runtime_name for item in execution.visible_tools} == expected_execution
+    assert {item.runtime_name for item in planning.routable_tools} == expected_routable
+    assert {item.runtime_name for item in execution.routable_tools} == expected_routable
+    for profile, snapshot in (
+        (CapabilityProfile.UNITY_PROJECT, planning),
+        (CapabilityProfile.UNITY_PROJECT, execution),
+    ):
+        aliases: dict[str, set[str]] = {}
+        for item in dashboard_server._RUNTIME_PROFILED_TOOL_REGISTRY.project(profile):
+            aliases.setdefault(item.internal_name, set()).add(item.model_name)
+        assert all(item.name in aliases[item.runtime_name] for item in snapshot.visible_tools)
+        assert all(item.name in aliases[item.runtime_name] for item in snapshot.routable_tools)
     assert {item.name for item in planning.skills} == expected_skills
     assert {item.name for item in execution.skills} == expected_skills
-    planning_routable = {item.name: item for item in planning.routable_tools}
+    planning_routable = {item.runtime_name: item for item in planning.routable_tools}
     assert all(planning_routable[name].write for name in routable_writes)
-    assert not routable_writes.intersection(item.name for item in planning.visible_tools)
+    assert not routable_writes.intersection(item.runtime_name for item in planning.visible_tools)
 
 
 def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
@@ -316,15 +328,19 @@ def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
     planning_names = {item.name for item in planning.visible_tools}
     execution_names = {item.name for item in execution.visible_tools}
     routable_names = {item.name for item in execution.routable_tools}
-    assert planning_names <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
-    assert execution_names <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
-    assert routable_names <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
-    assert "vrcforge_ask_user" in planning_names
-    assert "vrcforge_delegate_subagent" in planning_names
-    assert "vrcforge_execute_shell" in execution_names
-    assert "vrcforge_avatar_encryption_scan" not in routable_names
-    assert "vrcforge_scan_project_index" not in routable_names
-    assert "vrcforge_unity_status" not in routable_names
+    planning_runtime = {item.runtime_name for item in planning.visible_tools}
+    execution_runtime = {item.runtime_name for item in execution.visible_tools}
+    routable_runtime = {item.runtime_name for item in execution.routable_tools}
+    assert planning_runtime <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+    assert execution_runtime <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+    assert routable_runtime <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
+    assert "ask_user" in planning_names
+    assert "delegate_subagent" in planning_names
+    assert "shell" in execution_names
+    assert "vrcforge_avatar_encryption_scan" not in routable_runtime
+    assert "vrcforge_scan_project_index" not in routable_runtime
+    assert "vrcforge_unity_status" not in routable_runtime
+    assert all(not name.startswith("unity_") for name in planning_names | execution_names | routable_names)
     assert planning.skills == ()
     assert execution.skills == ()
 
@@ -350,9 +366,9 @@ def test_no_project_planner_prompt_is_general_and_omits_unity_tools() -> None:
     assert "a top-level directory listing alone is not sufficient evidence" in prompt
     assert "a reply is invalid after only a top-level directory listing" in prompt
     assert '"completion_claim":{"satisfied":true,"evidence_action_ids"' in prompt
-    assert "vrcforge_avatar_encryption_scan" not in prompt
-    assert "vrcforge_scan_project_index" not in prompt
-    assert "vrcforge_unity_status" not in prompt
+    assert "avatar_encryption_scan" not in prompt
+    assert "scan_project_index" not in prompt
+    assert "unity_status" not in prompt
 
 
 def test_no_project_planner_rejects_unity_tool_while_project_turn_keeps_it() -> None:
@@ -360,7 +376,7 @@ def test_no_project_planner_rejects_unity_tool_while_project_turn_keeps_it() -> 
         def plan(self, _prompt: str) -> PlannerModelResult:
             return PlannerModelResult(
                 text=(
-                    '{"action":"skill","skill_tool":"vrcforge_avatar_encryption_scan",'
+                        '{"action":"skill","skill_tool":"unity_avatar_encryption_scan",'
                     '"skill_params":{},"summary":"scan"}'
                 )
             )
@@ -464,5 +480,7 @@ def test_catalog_exposes_visual_audit_for_any_configured_vision_capability(
 
     visible = {item.name for item in planning.visible_tools}
     routable = {item.name for item in planning.routable_tools}
-    assert ("vrcforge_vision_audit_multi" in visible) is expected_visible
-    assert "vrcforge_vision_audit_multi" in routable
+    assert ("vision_audit_multi" in visible) is expected_visible
+    assert "vision_audit_multi" in routable
+    assert any(item.runtime_name == "vrcforge_vision_audit_multi" for item in planning.visible_tools) is expected_visible
+    assert any(item.runtime_name == "vrcforge_vision_audit_multi" for item in planning.routable_tools)

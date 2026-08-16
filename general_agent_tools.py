@@ -8,8 +8,12 @@ from __future__ import annotations
 
 import os
 import re
+from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Protocol
+from urllib.parse import urlencode
+
+import httpx
 
 
 MAX_DEPTH = 32
@@ -17,6 +21,109 @@ MAX_COUNT = 2_000
 MAX_READ_BYTES = 4 * 1024 * 1024
 MAX_OUTPUT_CHARS = 1_000_000
 MAX_MATCH_LINE_CHARS = 2_000
+WEB_DEFAULT_TIMEOUT = 10.0
+WEB_MAX_TIMEOUT = 30.0
+WEB_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+WEB_MAX_REDIRECTS = 3
+WEB_MAX_SEARCH_RESULTS = 10
+
+WEB_FETCH_TOOL_NAME = "web_fetch"
+WEB_SEARCH_TOOL_NAME = "web_search"
+GENERAL_AGENT_WEB_TOOL_METADATA = {
+    WEB_FETCH_TOOL_NAME: {
+        "name": WEB_FETCH_TOOL_NAME,
+        "description": (
+            "Fetch bounded text from a public URL when-to-use: use when the user needs "
+            "content or metadata from a specific web page. when-NOT-to-use: do not use "
+            "for local files, authenticated/private resources, or unrestricted downloads. "
+            "Negative example: do not fetch a URL merely because it appears in quoted text."
+        ),
+        "write": False,
+    },
+    WEB_SEARCH_TOOL_NAME: {
+        "name": WEB_SEARCH_TOOL_NAME,
+        "description": (
+            "Search the public web and return normalized results when-to-use: use when "
+            "the user needs discovery by topic or keywords. when-NOT-to-use: do not use "
+            "for private data, authenticated search, or a known URL (use web_fetch). "
+            "Negative example: do not search when the user asked only for a local file check."
+        ),
+        "write": False,
+    },
+}
+
+
+class _HttpClient(Protocol):
+    def get(self, url: str, **kwargs: Any) -> Any: ...
+
+
+class _WebPageParser(HTMLParser):
+    """Small dependency-free HTML title/text and search-result parser."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.title = ""
+        self._in_title = False
+        self._skip_depth = 0
+        self._parts: list[str] = []
+        self.results: list[dict[str, str]] = []
+        self._result: dict[str, str] | None = None
+        self._result_depth = 0
+        self._snippet_target: dict[str, str] | None = None
+        self._snippet_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attrs_map = dict(attrs)
+        if tag == "title":
+            self._in_title = True
+        if tag in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+        classes = (attrs_map.get("class") or "").split()
+        if tag == "a" and "result__a" in classes:
+            self._result = {"title": "", "url": attrs_map.get("href") or "", "snippet": ""}
+            self._result_depth = 1
+        elif tag == "a" and "result__snippet" in classes and self.results:
+            self._snippet_target = self.results[-1]
+            self._snippet_depth = 1
+        elif self._result is not None:
+            self._result_depth += 1
+        elif self._snippet_target is not None:
+            self._snippet_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
+        if tag in {"script", "style", "noscript"} and self._skip_depth:
+            self._skip_depth -= 1
+        if self._result is not None:
+            self._result_depth -= 1
+            if self._result_depth <= 0:
+                if self._result["title"] and self._result["url"]:
+                    self.results.append(self._result)
+                self._result = None
+        elif self._snippet_target is not None:
+            self._snippet_depth -= 1
+            if self._snippet_depth <= 0:
+                self._snippet_target = None
+
+    def handle_data(self, data: str) -> None:
+        text = " ".join(data.split())
+        if not text or self._skip_depth:
+            return
+        if self._in_title:
+            self.title += text
+        self._parts.append(text)
+        if self._result is not None:
+            if not self._result["title"]:
+                self._result["title"] = text
+            else:
+                self._result["snippet"] = (self._result["snippet"] + " " + text).strip()
+        elif self._snippet_target is not None:
+            self._snippet_target["snippet"] = (self._snippet_target["snippet"] + " " + text).strip()
+
+    @property
+    def text(self) -> str:
+        return " ".join(self._parts)
 
 _SENSITIVE_NAMES = {
     ".env",
@@ -350,4 +457,127 @@ def search_text(
     return {"path": str(_lexical_absolute(path)), "matches": matches, "truncated": files["truncated"], "skipped_binary": skipped_binary}
 
 
-__all__ = ["extract_explicit_local_roots", "list_directory", "read_text_file", "find_files", "search_text"]
+def _web_timeout(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("timeout must be a positive number")
+    if value > WEB_MAX_TIMEOUT:
+        raise ValueError(f"timeout exceeds the maximum of {WEB_MAX_TIMEOUT:g} seconds")
+    return float(value)
+
+
+def _web_client(client: _HttpClient | None, timeout: float) -> tuple[_HttpClient, bool]:
+    if client is not None:
+        return client, False
+    return httpx.Client(
+        follow_redirects=True,
+        max_redirects=WEB_MAX_REDIRECTS,
+        timeout=timeout,
+        headers={"User-Agent": "VRCForge-General-Agent/1.0"},
+    ), True
+
+
+def _response_bytes(response: Any, max_bytes: int) -> tuple[bytes, bool]:
+    content = getattr(response, "content", None)
+    if content is None:
+        content = str(getattr(response, "text", "")).encode("utf-8")
+    if not isinstance(content, (bytes, bytearray)):
+        content = bytes(content)
+    return bytes(content[:max_bytes]), len(content) > max_bytes
+
+
+def _content_type(response: Any) -> str:
+    headers = getattr(response, "headers", {}) or {}
+    return str(headers.get("content-type", headers.get("Content-Type", ""))).split(";", 1)[0].strip().lower()
+
+
+def web_fetch(
+    url: str,
+    *,
+    client: _HttpClient | None = None,
+    timeout: float = WEB_DEFAULT_TIMEOUT,
+    max_bytes: int = WEB_MAX_RESPONSE_BYTES,
+) -> dict[str, Any]:
+    """Fetch bounded public text/HTML/JSON with injectable client support."""
+    if not isinstance(url, str) or not re.match(r"^https?://\S+$", url, re.IGNORECASE):
+        raise ValueError("url must be an absolute http(s) URL")
+    timeout = _web_timeout(timeout)
+    max_bytes = _limit(max_bytes, "max_bytes", WEB_MAX_RESPONSE_BYTES)
+    http, owned = _web_client(client, timeout)
+    try:
+        try:
+            response = http.get(url, timeout=timeout)
+        except Exception as exc:
+            raise RuntimeError(f"web_fetch request failed: {exc}") from exc
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            raise RuntimeError(f"web_fetch returned HTTP {status}")
+        content_type = _content_type(response)
+        if content_type and not (
+            content_type.startswith("text/")
+            or content_type in {"application/json", "application/xml", "application/xhtml+xml"}
+        ):
+            raise ValueError(f"web_fetch does not support content type: {content_type}")
+        raw, truncated = _response_bytes(response, max_bytes)
+        text = raw.decode("utf-8", errors="replace")
+        parser = _WebPageParser()
+        if "html" in content_type or "xhtml" in content_type or "<html" in text[:512].lower():
+            parser.feed(text)
+            useful_text = parser.text
+            title = parser.title.strip()
+        else:
+            useful_text = text
+            title = ""
+        return {
+            "url": str(getattr(response, "url", url)),
+            "status_code": status,
+            "content_type": content_type or "text/plain",
+            "title": title,
+            "text": useful_text,
+            "truncated": truncated,
+            "bytes": len(raw),
+        }
+    finally:
+        if owned:
+            http.close()  # type: ignore[attr-defined]
+
+
+def web_search(
+    query: str,
+    *,
+    client: _HttpClient | None = None,
+    timeout: float = WEB_DEFAULT_TIMEOUT,
+    max_results: int = 5,
+) -> dict[str, Any]:
+    """Search DuckDuckGo's public HTML endpoint without credentials."""
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("query must be a non-empty string")
+    max_results = _limit(max_results, "max_results", WEB_MAX_SEARCH_RESULTS)
+    if max_results == 0:
+        return {"query": query, "results": [], "truncated": False}
+    timeout = _web_timeout(timeout)
+    url = "https://html.duckduckgo.com/html/?" + urlencode({"q": query.strip()})
+    http, owned = _web_client(client, timeout)
+    try:
+        try:
+            response = http.get(url, timeout=timeout)
+        except Exception as exc:
+            raise RuntimeError(f"web_search request failed: {exc}") from exc
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status >= 400:
+            raise RuntimeError(f"web_search returned HTTP {status}")
+        if _content_type(response) and "html" not in _content_type(response):
+            raise ValueError("web_search provider returned non-HTML content")
+        raw, truncated = _response_bytes(response, WEB_MAX_RESPONSE_BYTES)
+        parser = _WebPageParser()
+        parser.feed(raw.decode("utf-8", errors="replace"))
+        results = parser.results[:max_results]
+        return {"query": query.strip(), "results": results, "truncated": truncated or len(parser.results) > max_results}
+    finally:
+        if owned:
+            http.close()  # type: ignore[attr-defined]
+
+
+__all__ = [
+    "extract_explicit_local_roots", "list_directory", "read_text_file", "find_files", "search_text",
+    "web_fetch", "web_search", "WEB_FETCH_TOOL_NAME", "WEB_SEARCH_TOOL_NAME", "GENERAL_AGENT_WEB_TOOL_METADATA",
+]

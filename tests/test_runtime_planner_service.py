@@ -149,6 +149,7 @@ def service(
     model: FakeModel | None = None,
     compactor: FakeCompactor | None = None,
     turn: FakeTurn | None = None,
+    global_instructions=None,
 ) -> RuntimePlannerService:
     return RuntimePlannerService(
         catalog=catalog or FakeCatalog(),
@@ -156,6 +157,7 @@ def service(
         model=model,
         compactor=compactor,
         turn=turn,
+        global_instructions=global_instructions,
     )
 
 
@@ -434,6 +436,37 @@ def test_model_prompt_includes_bounded_input_contract_for_high_confusion_tool() 
     assert "inputs={projectPath?:string, avatarPath?:string}" in tool_line
 
 
+def test_model_prompt_requires_evidence_grounded_final_reply_without_hiding_safe_updates() -> None:
+    prompt = service()._build_llm_plan_prompt("inspect the project", [])
+
+    assert "推断必须明确标注" in prompt
+    assert "不能把 package name 或 private 标记当作产品用途证据" in prompt
+    assert "reply 字段是直接展示给用户的对话内容" in prompt
+
+
+def test_bound_general_project_agents_file_is_injected_before_current_user_message(tmp_path) -> None:
+    (tmp_path / "AGENTS.md").write_text(
+        "Read PROJECT_STATUS.md before project work.",
+        encoding="utf-8",
+    )
+    model = FakeModel(PlannerModelResult('{"action":"reply","reply":"done"}'))
+    planner = service(model=model, global_instructions=lambda: "Reply in the user's language.")
+
+    plan = planner.plan_agent_turn(
+        "Inspect the entry documents.",
+        {"projectPath": str(tmp_path), "_projectContextActive": False},
+        {},
+    )
+
+    assert plan["reply"] == "done"
+    prompt = model.prompts[0]
+    assert "Reply in the user's language." in prompt
+    assert "Read PROJECT_STATUS.md before project work." in prompt
+    assert prompt.index("<global_user_instructions>") < prompt.index("<project_instructions>")
+    assert prompt.index("<project_instructions>") < prompt.index("用户最新消息：Inspect the entry documents.")
+    assert "never authorize a write" in prompt
+
+
 def test_multi_angle_visual_tool_requires_managed_capture_receipt() -> None:
     schema = planner_tool_input_schema("vrcforge_vision_audit_multi")
 
@@ -591,6 +624,86 @@ def test_llm_execution_layer_has_a_first_class_supervised_write_action() -> None
     assert plan["writeParams"] == {"name": "Probe"}
     assert plan["correctionForActionId"] == "action_failed"
     assert plan["nextStep"] == "request_write"
+
+
+def test_profiled_tool_alias_returns_internal_runtime_name() -> None:
+    write_tool = PlannerTool(
+        name="edit_file",
+        runtime_name="vrcforge_edit_file",
+        description="Edit an existing file.",
+        category="supervised-write",
+        write=True,
+        input_contract=("path:string", "content:string"),
+    )
+    catalog = FakeCatalog(
+        execution=PlannerCatalogSnapshot(
+            visible_tools=(write_tool,),
+            routable_tools=(write_tool,),
+        )
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "write",
+                    "write_tool": "edit_file",
+                    "write_params": {"path": "C:/notes/a.txt", "content": "updated"},
+                }
+            )
+        )
+    )
+
+    plan = service(catalog=catalog, model=model)._llm_plan_agent_turn(
+        "edit the note",
+        {},
+        [],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert plan["writeTool"] == "vrcforge_edit_file"
+    assert plan["writeDisplayTool"] == "edit_file"
+
+
+def test_unity_shell_projection_becomes_capability_bound_shell_step() -> None:
+    unity_shell = PlannerTool(
+        name="unity_shell",
+        runtime_name="vrcforge_execute_shell",
+        capabilities=("unity_project_access",),
+        description="Run Shell for the current Unity project.",
+        category="supervised-write",
+        write=True,
+        input_contract=("command:string", "cwd?:string"),
+    )
+    catalog = FakeCatalog(
+        execution=PlannerCatalogSnapshot(
+            visible_tools=(unity_shell,),
+            routable_tools=(unity_shell,),
+        )
+    )
+    model = FakeModel(
+        PlannerModelResult(
+            json.dumps(
+                {
+                    "action": "write",
+                    "write_tool": "unity_shell",
+                    "write_params": {"command": "git status", "cwd": "C:/Unity/Avatar"},
+                }
+            )
+        )
+    )
+
+    plan = service(catalog=catalog, model=model)._llm_plan_agent_turn(
+        "inspect the current Unity project",
+        {},
+        [],
+        exposure_layer=EXPOSURE_LAYER_EXECUTION,
+    )
+
+    assert plan["shellNeeded"] is True
+    assert plan["shellCommand"] == "git status"
+    assert plan["shellParams"] == {"cwd": "C:/Unity/Avatar"}
+    assert plan["toolCapabilities"] == ["unity_project_access"]
+    assert plan["writeDisplayTool"] == "unity_shell"
 
 
 @pytest.mark.parametrize(

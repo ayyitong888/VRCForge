@@ -34,10 +34,11 @@ def test_project_chat_uses_a_lazy_workbench_while_quick_chat_keeps_the_status_su
         assert required in source
 
     for required in (
-        'title={t("workspace.todo")}',
+        'title={isUnityProject ? t("workspace.todo") : t("workspace.progress")}',
         'title={t("workspace.subAgents")}',
-        'title={t("workspace.environment")}',
-        'title={t("workspace.userAttachmentSources")}',
+        'title={workspaceSectionTitle}',
+        'attachmentCount > 0 ? (',
+        'title={t("workspace.sources")}',
         'data-vrcforge-status="project"',
         'data-vrcforge-status="core"',
         'data-vrcforge-status="mcp-core"',
@@ -214,7 +215,7 @@ def test_main_window_close_hides_to_tray_while_explicit_quit_stops_backend() -> 
     assert "thread::sleep" not in quit_commands
 
 
-def test_startup_paints_static_shell_before_loading_app_and_records_visible_shell() -> None:
+def test_startup_paints_neutral_shell_without_showing_a_separate_startup_page() -> None:
     index_source = _read("index.html")
     main_source = _read("src/main.tsx")
     app_source = _read("src/App.tsx")
@@ -223,7 +224,9 @@ def test_startup_paints_static_shell_before_loading_app_and_records_visible_shel
     assert 'const appModule = startupShellPainted.then(() => import("./App"))' in main_source
     assert "Promise.all([initializeI18n(), appModule])" in main_source
     assert "data-vrcforge-startup-shell" in index_source
-    assert "Local AI Workbench for VRChat Avatar Editing" in index_source
+    assert 'aria-hidden="true"' in index_source
+    assert "Local AI Workbench for VRChat Avatar Editing" not in index_source
+    assert "border-radius:1rem" not in index_source
     assert "/vrcforge-startup-shell.js" not in index_source
     assert index_source.index("__vrcforgeStartupShellPaintedPromise") < index_source.index("/src/main.tsx")
     assert "startupShellPaintedMs" in index_source

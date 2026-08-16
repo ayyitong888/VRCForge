@@ -15,6 +15,26 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_release_checklist_pins_complete_tool_results_and_unity_receipt_hotfix() -> None:
+    checklist = (REPO_ROOT / "docs" / "RELEASE_CHECKLIST.md").read_text(encoding="utf-8")
+
+    assert "result longer than 1000 characters" in checklist
+    assert "internally scrolling card" in checklist
+    assert "bind full stored results in occurrence order" in checklist
+    assert "no first wheel-arrival bounce" in checklist
+    assert "never renders the" in checklist
+    assert "local identity-map alias list" in checklist
+    assert "only" in checklist and "Developer page" in checklist
+    assert "Assets/VRCForge/Core/MCP/VRCForgeApprovedObjectReceipt.cs" in checklist
+    assert "c03999e57815100961016fab067f9c2b" in checklist
+    assert "#if UNITY_EDITOR" in checklist
+    assert "final-line `#endif`" in checklist
+    assert "CS0103" in checklist
+    assert "Assembly-CSharp.dll" in checklist
+    assert "Editor and Player compilation have zero errors" in checklist
+    assert "VRChat `Build & Test`" in checklist
+
+
 def test_runtime_and_localized_about_versions_follow_release_version() -> None:
     version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
 
@@ -212,7 +232,7 @@ def test_installer_smoke_documentation_uses_the_exact_isolated_identity() -> Non
     assert '--user-data-root "$env:LOCALAPPDATA\\VRCForge\\installer-smoke\\$smokeId"' in source
     assert "--scope production-clean" in source
     assert "--production-clean-confirmation I-OWN-THIS-DISPOSABLE-WINDOWS-ENVIRONMENT" in source
-    assert '--upgrade-installer "<downloaded official v1.5.1 offline installer>"' in source
+    assert '--upgrade-installer "<downloaded official v1.6.0 offline installer>"' in source
     assert "Do not run `production-clean` on a normal workstation" in source
     assert "--upgrade-from-installer-sha256 853dfce74830e73098cc55240abf1e23162d66e579225d16f5b13d44089ca2d4" in source
 

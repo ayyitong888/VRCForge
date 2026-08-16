@@ -23,7 +23,7 @@ import { Button } from "../ui/button";
 import { BackgroundGoalSettings } from "./background-goal-settings";
 import { CheckpointStoragePanel } from "./checkpoint-storage-panel";
 import { DeveloperOptionsControl } from "./developer-options-control";
-import { DiagnosticsSettingsPanel } from "./diagnostics-settings-panel";
+import { DiagnosticIdentityMap, DiagnosticsSettingsPanel } from "./diagnostics-settings-panel";
 import { ExternalAgentConnectorsPanel } from "./external-agent-connectors-panel";
 import { MemorySettingsPanel } from "./memory-settings";
 import { MemoryReviewSettings } from "./memory-review-settings";
@@ -464,6 +464,9 @@ export function SettingsWorkspace({
                 {computerUseEnabled ? t("settings.turnOff") : t("settings.turnOn")}
               </Button>
             </div>
+          </div>
+          <div className="mt-6">
+            <DiagnosticIdentityMap status={diagnosticsStatus} />
           </div>
           <div className="mt-6 rounded-lg border border-border bg-card p-4">
             <div className="text-sm font-medium">{t("settings.compactDebugTitle")}</div>
