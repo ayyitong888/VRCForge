@@ -299,7 +299,7 @@ def run_stdio_server(
         lambda: list_tools({"exposureLayer": exposure_layer}),
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.7.0",
+        server_version="1.7.1",
     )
     if protocol_profile == "mcp-1x":
         run_standard_stdio_loop(router_standard)
@@ -309,7 +309,7 @@ def run_stdio_server(
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.7.0",
+        server_version="1.7.1",
     )
     if protocol_profile == "vrcforge-2026":
         run_stdio_loop(router_2026)

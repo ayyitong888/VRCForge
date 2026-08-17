@@ -67,11 +67,12 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-The current stable release is `1.6.2`. This corrective release replaces
-published `1.6.0` and supersedes the unpublished `v1.6.1` tag. Check the
-GitHub Releases page before preparing any later build. The Avatar
+The current source / target release is `1.7.1`; `1.6.2` remains the latest
+published stable package. This documentation-corrected package supersedes the
+unpublished `v1.7.0` Draft without changing the verified 1.7 behavior. Check
+the GitHub Releases page before preparing any later build. The Avatar
 Encryption / Anti-Rip addon remains a connector preview and is not bundled with
-the `v1.6.2` package. The public repo must not contain encryption
+the `v1.7.1` package. The public repo must not contain encryption
 implementation files; it may only expose connector/request interfaces for a
 separately installed private addon module. Profile docs must list Lite,
 Standard, and Paranoid, with Standard as the default recommendation and
@@ -84,12 +85,12 @@ with approval, checkpoint, rollback, and proof gates.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\build_release.ps1 `
-  -Version 1.6.2 `
-  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.6.2/VRCForge_Windows_x64_1.6.2.zip `
+  -Version 1.7.1 `
+  -PayloadDownloadUrl https://github.com/ayyitong888/VRCForge/releases/download/v1.7.1/VRCForge_Windows_x64_1.7.1.zip `
   -UvDownloadSha256 ebc76197bf3e1a58f9dac6f70f49b0ebd3e6907ab35289ce228bce5ba8a3f201
 
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\publish_release.ps1 `
-  -Version 1.6.2
+  -Version 1.7.1
 ```
 
 Publishing uploads the Unity package, Windows payload zip, offline installer,
@@ -232,7 +233,7 @@ deferred probes must later be refreshed against the exact published hashes.
 
 This gate checks current target-version public docs, the public golden-path wording,
 the privacy boundary, `docs/COMPATIBILITY_MATRIX.md`, and local evidence
-pointers when they exist in the checkout. For the current `1.6.2` target release,
+pointers when they exist in the checkout. For the current `1.7.1` target release,
 the gate also checks that public docs distinguish source/target from the latest published release,
 direct avatar-encryption writers are not exposed, and the public surface is
 only the private-addon connector request interface with explicit approval,

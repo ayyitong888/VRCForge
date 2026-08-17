@@ -615,6 +615,37 @@ def test_release_payload_bundles_public_docs_and_requires_all_license_notices() 
         assert f'"{required_member}"' in payload_smoke
 
 
+def test_packaged_public_docs_track_current_release_identity() -> None:
+    version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    user_manual = (REPO_ROOT / "USER_MANUAL.md").read_text(encoding="utf-8")
+    packaging_guide = (REPO_ROOT / "packaging" / "README.md").read_text(encoding="utf-8")
+    release_notes = (REPO_ROOT / "docs" / f"RELEASE_NOTES_{version}.md").read_text(
+        encoding="utf-8"
+    )
+
+    for required in (
+        f"target-v{version}",
+        f"docs/RELEASE_NOTES_{version}.md",
+        "status-release--ready",
+        f"Current source / target release: `{version}` (`v{version}`).",
+        f"VRCForge_Windows_x64_{version}.zip",
+        f"The `v{version}` release target",
+        f"Reimporting the same `{version}` integration",
+        f"`v{version}` release gate",
+    ):
+        assert required in readme
+
+    assert "status-WIP" not in readme
+    assert "Current stable source and release:" not in readme
+    assert f"Current source / target release: `{version}` (`v{version}`)." in user_manual
+    assert f"current source / target release is `{version}`" in packaging_guide
+    assert f"-Version {version}" in packaging_guide
+    assert f"releases/download/v{version}/VRCForge_Windows_x64_{version}.zip" in packaging_guide
+    assert f"# VRCForge {version}" in release_notes
+    assert "documentation-corrected package" in release_notes
+
+
 def test_release_publish_rechecks_web_payload_manifest_binding() -> None:
     source = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
 
