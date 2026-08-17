@@ -19,6 +19,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
+import { ApprovalRevisionEditor } from "../approvals/approval-revision-editor";
 import { ChatMarkdown } from "./chat-markdown";
 
 type AgentTimelineStep = NonNullable<AgentRuntimeResponse["steps"]>[number] & {
@@ -58,7 +59,7 @@ export function buildAgentTimelineRows({
   write?: AgentRuntimeResponse["write"];
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
-  onModifyApproval?: (approval: AgentApproval) => void;
+  onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
   showIntent: boolean;
   nextStep: string;
   planLabel: string;
@@ -373,7 +374,7 @@ function buildAgentTimelineRowsFromSteps({
   write?: AgentRuntimeResponse["write"];
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
-  onModifyApproval?: (approval: AgentApproval) => void;
+  onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
   providerLine: string;
   planLabel: string;
   awaitingApproval: boolean;
@@ -618,7 +619,7 @@ function buildLegacyAgentTimelineRows({
   write?: AgentRuntimeResponse["write"];
   approval?: AgentApproval | null;
   approvalAction?: ApprovalActionState;
-  onModifyApproval?: (approval: AgentApproval) => void;
+  onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
   showIntent: boolean;
   nextStep: string;
   planLabel: string;
@@ -977,22 +978,39 @@ export function InlineApprovalCard({
 }: {
   approval: AgentApproval;
   action?: ApprovalActionState;
-  onModify?: (approval: AgentApproval) => void;
+  onModify?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
 }) {
   const { t } = useTranslation();
+  const [revisionOpen, setRevisionOpen] = useState(false);
   const presentation = presentApproval(approval, t);
+  const canRequestChanges = Boolean(
+    !approval.goalDeliveryId?.trim()
+    && approval.taskContext
+    && approval.taskContext.approvalRevisionUsed !== true,
+  );
   return (
-    <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
-      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
-      <div className="min-w-0 flex-1 text-muted-foreground">
-        <span className="font-medium text-foreground">{presentation.title}</span>
-        {` · ${t("approval.awaitingInline")}`}
+    <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs">
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+        <div className="min-w-0 flex-1 text-muted-foreground">
+          <span className="font-medium text-foreground">{presentation.title}</span>
+          {` · ${t("approval.awaitingInline")}`}
+        </div>
+        {canRequestChanges ? (
+          <Button type="button" variant="outline" className="h-7 shrink-0 px-2 text-xs" disabled={Boolean(action)} onClick={() => setRevisionOpen((current) => !current)}>
+            <Pencil className="h-3.5 w-3.5" />
+            {action === "modify" ? t("approval.modifying") : t("approval.modify")}
+          </Button>
+        ) : null}
       </div>
-      {!approval.goalDeliveryId?.trim() ? (
-        <Button type="button" variant="outline" className="h-7 shrink-0 px-2 text-xs" disabled={Boolean(action)} onClick={() => onModify?.(approval)}>
-          <Pencil className="h-3.5 w-3.5" />
-          {action === "modify" ? t("approval.modifying") : t("approval.modify")}
-        </Button>
+      {revisionOpen && action !== "modify" ? (
+        <ApprovalRevisionEditor
+          onCancel={() => setRevisionOpen(false)}
+          onSubmit={(reason, reasonCode) => {
+            setRevisionOpen(false);
+            onModify?.(approval, reason, reasonCode);
+          }}
+        />
       ) : null}
     </div>
   );

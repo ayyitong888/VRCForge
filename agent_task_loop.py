@@ -536,6 +536,7 @@ def approval_task_context(
             "normalToolCallLimit": None,
         },
         "continueAfterApproval": seed.get("continueAfterApproval") is True,
+        "approvalRevisionUsed": seed.get("approvalRevisionUsed") is True,
         "exposureLayer": (
             "execution"
             if _status(seed.get("exposureLayer")) == "execution"
@@ -632,11 +633,35 @@ def rejected_approval_completion(
     }
 
 
+def revision_requested_approval_completion(
+    context: Mapping[str, Any] | None,
+    *,
+    reason: str = "",
+) -> dict[str, Any] | None:
+    if not isinstance(context, Mapping) or context.get("schema") != TASK_APPROVAL_CONTEXT_SCHEMA:
+        return None
+    summary = _bounded_text(reason, 600) or "The user requested changes before approval."
+    return {
+        "schema": TASK_LOOP_SCHEMA,
+        "taskId": _bounded_text(context.get("taskId"), 80),
+        "status": "needs_user_action",
+        "objective": _bounded_text(context.get("objective"), 600),
+        "actionId": _bounded_text(context.get("actionId"), 80),
+        "tool": _bounded_text(context.get("tool"), 160),
+        "outcome": {
+            "status": "needs_user_action",
+            "summary": summary,
+            "verification": {"state": "not_run", "checks": []},
+        },
+    }
+
+
 def prepare_approval_task_continuation(
     approval: Mapping[str, Any] | None,
     execution: Mapping[str, Any] | None = None,
     *,
     rejected: bool = False,
+    revision_requested: bool = False,
 ) -> dict[str, Any] | None:
     """Build the inert inputs needed to return an approval to its task loop."""
 
@@ -645,7 +670,12 @@ def prepare_approval_task_continuation(
     context = approval.get("taskContext")
     if not isinstance(context, Mapping) or not context:
         return None
-    if rejected:
+    if revision_requested:
+        completion = revision_requested_approval_completion(
+            context,
+            reason=_bounded_text(approval.get("revisionReason"), 600),
+        )
+    elif rejected:
         completion = rejected_approval_completion(context)
     else:
         if _status(execution.get("status")) not in {"applied", "failed", "needs_user_action"}:
@@ -658,10 +688,11 @@ def prepare_approval_task_continuation(
 
     approval_id = _bounded_text(approval.get("id"), 100)
     original_client_turn_id = _bounded_text(context.get("clientTurnId"), 180)
+    continuation_marker = "revision" if revision_requested else "approval"
     continuation_client_turn_id = (
-        f"{original_client_turn_id}:approval:{approval_id}"
+        f"{original_client_turn_id}:{continuation_marker}:{approval_id}"
         if original_client_turn_id
-        else f"approval:{approval_id}"
+        else f"{continuation_marker}:{approval_id}"
     )[:240]
     params: dict[str, Any] = {
         "message": _bounded_text(context.get("objective"), 600),
@@ -678,7 +709,9 @@ def prepare_approval_task_continuation(
     terminal_plan: dict[str, Any] | None = None
     outcome = completion.get("outcome")
     outcome = outcome if isinstance(outcome, Mapping) else {}
-    if task_status == "completed" and context.get("continueAfterApproval") is False:
+    if revision_requested:
+        terminal_plan = None
+    elif task_status == "completed" and context.get("continueAfterApproval") is False:
         summary = _bounded_text(outcome.get("summary"), 600) or "The approved task completed."
         terminal_plan = {
             "summary": summary,
@@ -702,9 +735,12 @@ def prepare_approval_task_continuation(
         }
     requested_arguments = context.get("requestedArguments")
     approval_arguments = approval.get("arguments")
+    continuation_context = dict(context)
+    if revision_requested:
+        continuation_context["approvalRevisionUsed"] = True
     task_continuation: dict[str, Any] = {
-        "source": "approval_finished",
-        "context": dict(context),
+        "source": "approval_revision_requested" if revision_requested else "approval_finished",
+        "context": continuation_context,
         "completion": dict(completion),
         "approvalId": approval_id,
         "arguments": dict(
@@ -717,6 +753,18 @@ def prepare_approval_task_continuation(
         "execution": dict(execution),
         "terminalPlan": terminal_plan,
     }
+    if revision_requested:
+        task_continuation["plannerObservation"] = {
+            "tool": _bounded_text(context.get("tool"), 160),
+            "kind": "approval_revision",
+            "status": "revision_requested",
+            "result": {
+                "reasonCode": _bounded_text(approval.get("denyReasonCode"), 80),
+                "reason": _bounded_text(approval.get("revisionReason"), 600),
+                "note": _bounded_text(approval.get("revisionNote"), 600),
+            },
+            "outcome": _bounded_outcome(completion.get("outcome")),
+        }
     execution_result = execution.get("result")
     execution_result = execution_result if isinstance(execution_result, Mapping) else {}
     capture_data = execution_result.get("data")
@@ -954,6 +1002,7 @@ class AgentTaskLoop:
     model_turns_used: int = 0
     budget_policy: AgentBudgetPolicy = field(default_factory=AgentBudgetPolicy)
     exposure_layer: str = "planning"
+    approval_revision_used: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
     _actions: dict[str, dict[str, Any]] = field(default_factory=dict)
     _requirements: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -1010,6 +1059,7 @@ class AgentTaskLoop:
             model_turns_used=max(0, min(int(context.get("modelTurnsUsed") or 0), 4096)),
             budget_policy=freeze_agent_budget_policy(context.get("budgetPolicy")),
             exposure_layer=str(context.get("exposureLayer") or "execution"),
+            approval_revision_used=context.get("approvalRevisionUsed") is True,
             history=_bounded_history(context.get("history")),
         )
         for item in list(context.get("priorActions") or [])[:3]:
@@ -1136,6 +1186,7 @@ class AgentTaskLoop:
                 else ""
             ),
             "continueAfterApproval": bool(continue_after_approval),
+            "approvalRevisionUsed": self.approval_revision_used,
         }
 
     def planner_observations(self) -> list[dict[str, Any]]:

@@ -111,7 +111,53 @@ function safeDate(value?: string): string {
 }
 
 function safeCount(value: number, minimum = 0): number {
-  return Math.max(minimum, Number.isFinite(value) ? value : minimum);
+  return Number.isFinite(value) && value > minimum ? value : minimum;
+}
+
+const JOURNAL_EVENT_LABELS: Record<string, string> = {
+  candidate_proposed: "settings.memoryReviewJournalEventProposed",
+  candidate_transitioned: "settings.memoryReviewJournalEventTransitioned",
+  candidate_promotion_started: "settings.memoryReviewJournalEventPromotionStarted",
+  candidate_promotion_finished: "settings.memoryReviewJournalEventPromotionFinished",
+  candidate_acceptance_undone: "settings.memoryReviewJournalEventUndone",
+  candidate_undo_started: "settings.memoryReviewJournalEventUndoStarted",
+  candidate_erase_started: "settings.memoryReviewJournalEventEraseStarted",
+  candidate_erase_finished: "settings.memoryReviewJournalEventEraseFinished",
+  candidate_invalidated: "settings.memoryReviewJournalEventInvalidated",
+  candidate_invalidated_before_accept: "settings.memoryReviewJournalEventInvalidated",
+  candidate_conflict_marked: "settings.memoryReviewJournalEventConflictMarked",
+  candidate_conflict_cleared: "settings.memoryReviewJournalEventConflictCleared",
+  candidate_retention_erased: "settings.memoryReviewJournalEventRetentionErased",
+  candidate_read: "settings.memoryReviewJournalEventRead",
+  review_run_started: "settings.memoryReviewJournalEventRunStarted",
+  review_run_finished: "settings.memoryReviewJournalEventRunFinished",
+  review_run_state_updated: "settings.memoryReviewJournalEventRunStateUpdated",
+  config_updated: "settings.memoryReviewJournalEventConfigUpdated",
+  shadow_scan_recorded: "settings.memoryReviewJournalEventShadowScan",
+};
+
+const MEMORY_CONSOLIDATION_STAGES = [
+  {
+    label: "settings.memoryConsolidationStageOrganize",
+    description: "settings.memoryConsolidationStageOrganizeDesc",
+  },
+  {
+    label: "settings.memoryConsolidationStageDedupe",
+    description: "settings.memoryConsolidationStageDedupeDesc",
+  },
+  {
+    label: "settings.memoryConsolidationStagePromote",
+    description: "settings.memoryConsolidationStagePromoteDesc",
+  },
+  {
+    label: "settings.memoryConsolidationStageRollback",
+    description: "settings.memoryConsolidationStageRollbackDesc",
+  },
+] as const;
+
+function journalEventLabel(event: string | undefined, t: (key: string) => string): string {
+  const key = event ? JOURNAL_EVENT_LABELS[event] : "";
+  return key ? t(key) : event || "";
 }
 
 export function MemoryReviewSettings({
@@ -298,6 +344,25 @@ export function MemoryReviewSettings({
 
       {draft && snapshot ? (
         <>
+          <div className="rounded-lg border border-border bg-card p-4" data-memory-consolidation-stages>
+            <h3 className="mb-3 text-sm font-semibold">{t("settings.memoryConsolidationStages")}</h3>
+            <ol className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {MEMORY_CONSOLIDATION_STAGES.map((stage, index) => (
+                <li
+                  key={stage.label}
+                  className="rounded-md border border-border/70 bg-muted/30 p-3"
+                  data-memory-consolidation-stage
+                >
+                  <div className="mb-1 flex items-center gap-2">
+                    <Badge tone="muted">{index + 1}</Badge>
+                    <span className="text-sm font-medium text-foreground">{t(stage.label)}</span>
+                  </div>
+                  <p className="text-xs leading-5 text-muted-foreground">{t(stage.description)}</p>
+                </li>
+              ))}
+            </ol>
+          </div>
+
           <div>
             <h3 className="text-sm font-semibold">{t("settings.memoryReviewModeLabel")}</h3>
             <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
@@ -624,6 +689,32 @@ export function MemoryReviewSettings({
               onDecision={controller.decideCandidate}
             />
           </div>
+
+          {snapshot.journal && snapshot.journal.length > 0 ? (
+            <div className="rounded-lg border border-border bg-card p-4" data-memory-review-journal>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold">{t("settings.memoryReviewJournal")}</h3>
+                <Badge tone="muted">{snapshot.journal.length}</Badge>
+              </div>
+              <ul className="max-h-64 space-y-2 overflow-auto pr-1" data-memory-review-journal-list>
+                {snapshot.journal.map((entry) => (
+                  <li
+                    key={entry.eventId || `${entry.event || "event"}-${entry.createdAt || entry.candidateId || "row"}`}
+                    className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs"
+                    data-memory-review-journal-entry
+                  >
+                    <span className="font-medium text-foreground">{journalEventLabel(entry.event, t)}</span>
+                    {entry.createdAt ? <span className="text-muted-foreground">{safeDate(entry.createdAt)}</span> : null}
+                    {entry.state ? <Badge tone="muted">{entry.state}</Badge> : null}
+                    {entry.phase ? <Badge tone="muted">{entry.phase}</Badge> : null}
+                    {entry.candidateId ? (
+                      <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">{entry.candidateId}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </>
       ) : null}
     </section>

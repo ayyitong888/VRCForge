@@ -292,6 +292,8 @@ class ExternalAgentBridgeSmoke:
             **result,
             "ok": bool(result.get("ok"))
             and bool(result.get("hasRequestApply"))
+            and bool(result.get("preflightCalled"))
+            and bool(result.get("preflightOk"))
             and direct_apply_listed == [],
             "requestApplyListed": bool(result.get("hasRequestApply")),
             "directApplyListed": direct_apply_listed,

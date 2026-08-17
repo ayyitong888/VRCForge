@@ -127,6 +127,27 @@ export type MemoryReviewCandidate = {
   usage?: MemoryReviewUsage;
 };
 
+export type MemoryReviewJournalEntry = {
+  event?: string;
+  eventId?: string;
+  createdAt?: string;
+  candidateId?: string;
+  promotionId?: string;
+  memoryId?: string;
+  scopeKind?: string;
+  previousState?: string;
+  state?: string;
+  runId?: string;
+  runStatus?: string;
+  phase?: string;
+  failureClass?: string;
+  attempt?: number;
+  provider?: string;
+  model?: string;
+  revision?: number;
+  policyVersion?: string;
+};
+
 export type MemoryReviewSnapshot = {
   ok?: boolean;
   schema: string;
@@ -155,6 +176,7 @@ export type MemoryReviewSnapshot = {
   nextRunAt?: string;
   lastRun?: MemoryReviewLastRun;
   shadowSummary?: MemoryReviewShadowSummary;
+  journal?: MemoryReviewJournalEntry[];
 };
 
 export type MemoryReviewConfigMutation = {

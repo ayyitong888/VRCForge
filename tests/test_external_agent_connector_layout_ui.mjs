@@ -8,13 +8,22 @@ const source = await readFile(
 );
 const genericRow = source.slice(source.indexOf("function GenericConnectorRow"), source.indexOf("function ConnectorToggle"));
 
-assert.match(genericRow, /flex min-w-0 flex-wrap items-start justify-between gap-3/);
-assert.match(genericRow, /mt-3 grid gap-2 text-xs text-muted-foreground/);
+assert.match(genericRow, /connector\.genericGuideTitle/);
+assert.match(genericRow, /connector\.genericStepConfig/);
+assert.match(genericRow, /connector\.genericStepTransport/);
+assert.match(genericRow, /connector\.genericStepReload/);
+assert.match(genericRow, /sm:grid-cols-2/);
+assert.match(genericRow, /connector\.genericStdioHint/);
+assert.match(genericRow, /connector\.genericHttpHint/);
+assert.match(genericRow, /connector\.genericAutoTitle/);
+assert.match(genericRow, /htmlFor="generic-mcp-config-path"/);
+assert.match(genericRow, /id="generic-mcp-config-path"/);
+assert.match(genericRow, /connector\.genericInstallStdio/);
 assert.match(genericRow, /className="h-9 w-full min-w-0/);
 assert.doesNotMatch(genericRow, /md:grid-cols-\[minmax\(0,1fr\)_auto\]/);
 assert.ok(
-  genericRow.indexOf("connector.copyStdio") < genericRow.indexOf("connector.genericHint"),
-  "generic connector actions belong in the header before the full-width description and path input",
+  genericRow.indexOf("connector.copyStdio") < genericRow.indexOf("connector.genericAutoTitle"),
+  "transport choices must appear before the optional automatic JSON installation path",
 );
 
 console.log("external Agent connector layout UI contract: ok");

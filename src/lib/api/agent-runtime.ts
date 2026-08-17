@@ -903,8 +903,14 @@ export async function rejectAgentApproval(
 export async function requestApprovalRevision(
   endpoint: string,
   approvalId: string,
-  payload: { reason?: string; note?: string; expectedProjectRoot?: string; globalOnly?: boolean } = {},
-): Promise<{ ok: boolean; approval?: AgentApproval; message?: string }> {
+  payload: { reason: string; denyReasonCode?: string; note?: string; expectedProjectRoot?: string; globalOnly?: boolean },
+): Promise<{
+  ok: boolean;
+  approval?: AgentApproval;
+  message?: string;
+  continuation?: AgentRuntimeResponse;
+  continuationError?: string;
+}> {
   if (hasTauriInternals()) {
     return invokeTauriWithAbort("request_approval_revision", {
       request: { approvalId, ...payload, timeoutMs: 60000 },

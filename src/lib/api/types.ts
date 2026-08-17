@@ -265,6 +265,7 @@ export type AgentApproval = {
   revisionRequestedAt?: string;
   revisionReason?: string;
   revisionNote?: string;
+  denyReasonCode?: string;
   arguments?: Record<string, unknown>;
   paramsSummary?: Record<string, unknown>;
   taskContext?: {
@@ -273,6 +274,7 @@ export type AgentApproval = {
     turnId?: string;
     clientTurnId?: string;
     actionId?: string;
+    approvalRevisionUsed?: boolean;
   } & Record<string, unknown>;
   taskCompletion?: Record<string, unknown>;
   preview?: {
@@ -810,6 +812,8 @@ export type AgentGoal = {
   wakeCount?: number;
   revision?: number;
   blockedReason?: string;
+  lastActiveAt?: string;
+  elapsedSeconds?: number;
 };
 
 export type AgentGoalUsage = {

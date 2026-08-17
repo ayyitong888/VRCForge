@@ -94,6 +94,16 @@ assert.match(settings, /snapshot\.lastRun\.model/);
 assert.match(settings, /snapshot\.lastRun\.budget\?\.inputCharCap/);
 assert.match(settings, /data-memory-review-last-run-evidence/);
 assert.match(settings, /data-memory-review-shadow-summary/);
+assert.match(settings, /data-memory-consolidation-stages/);
+assert.match(settings, /MEMORY_CONSOLIDATION_STAGES\.map/);
+assert.match(settings, /data-memory-consolidation-stage/);
+assert.match(settings, /data-memory-review-journal/);
+assert.match(settings, /snapshot\.journal && snapshot\.journal\.length > 0/);
+assert.match(settings, /data-memory-review-journal-entry/);
+assert.match(settings, /journalEventLabel\(entry\.event, t\)/);
+assert.match(api, /MemoryReviewJournalEntry/);
+assert.match(api, /journal\?: MemoryReviewJournalEntry\[\]/);
+
 assert.match(settings, /controller\.saveConfig\(draft\)/);
 assert.match(settings, /controller\.startReview\(draft\.scope\)/);
 assert.match(settings, /const configDirty = Boolean/);

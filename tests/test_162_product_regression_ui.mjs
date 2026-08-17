@@ -24,6 +24,10 @@ assert.match(workspace, /\{activeGoalBar\}/);
 assert.match(app, /message === "\/goal" \|\| message\.startsWith\("\/goal "\)/);
 assert.match(app, /createAgentGoal\(/);
 assert.doesNotMatch(workbench, /AgentGoalManagement|WorkflowManagement/);
+assert.match(workspace, /data-chat-active-goal-elapsed/);
+assert.match(workspace, /formatGoalElapsed\(goalElapsedSeconds\)/);
+assert.match(workspace, /t\("goal\.elapsed", \{ time: formatGoalElapsed/);
+assert.match(workspace, /window\.setInterval\(\(\) => setGoalLocalTick/);
 
 // Only the right rail owns a collapse control; the left and center duplicates
 // stay removed. A detached restore control remains available when collapsed.

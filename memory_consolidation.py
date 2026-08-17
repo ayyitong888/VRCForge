@@ -133,6 +133,31 @@ _USAGE_COST_REASONS = frozenset(
 _USAGE_COST_ACCOUNTING = frozenset({"bounded_retry", "retry_usage_unavailable"})
 
 _ALLOWED_CANDIDATE_KINDS = frozenset({"preference", "fact", "correction", "decision"})
+
+_JOURNAL_EVENTS = frozenset({
+    "candidate_proposed",
+    "candidate_transitioned",
+    "candidate_conflict_marked",
+    "candidate_conflict_cleared",
+    "candidate_invalidated",
+    "candidate_invalidated_before_accept",
+    "candidate_retention_erased",
+    "candidate_read",
+    "candidate_promotion_started",
+    "candidate_promotion_finished",
+    "candidate_acceptance_undone",
+    "candidate_undo_started",
+    "candidate_duplicate_acceptance_reopened",
+    "candidate_erase_started",
+    "candidate_erase_finished",
+    "candidate_physically_erased",
+    "candidate_external_memory_deleted",
+    "review_run_started",
+    "review_run_finished",
+    "review_run_state_updated",
+    "config_updated",
+    "shadow_scan_recorded",
+})
 _ALLOWED_SOURCE_TYPES = frozenset({"user_chat", "adopted_task", "validated_project_result"})
 _ALLOWED_CONFIDENCE_FACTORS = frozenset(
     {
@@ -2098,6 +2123,52 @@ class MemoryReviewStore:
                 projected.append(card)
             state["candidates"] = projected
         return state
+
+    def decision_journal(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Bounded metadata-only phase/decision journal, newest first.
+
+        Every accepted promotion, rejection, deferral, erase, undo and review
+        run transition remains visible in this journal. Entries carry only
+        bounded metadata (no raw evidence or proposed prose).
+        """
+        bounded = max(1, min(int(limit or 0), 200))
+        try:
+            rows = self._metadata_audit.read_recent(limit=bounded)
+        except (OSError, ValueError, TypeError):
+            return []
+        journal: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            event = str(row.get("event") or "").strip()
+            if event not in _JOURNAL_EVENTS:
+                continue
+            entry: dict[str, Any] = {
+                "event": event,
+                "eventId": str(row.get("eventId") or ""),
+                "createdAt": str(row.get("createdAt") or ""),
+            }
+            for field in (
+                "candidateId",
+                "promotionId",
+                "memoryId",
+                "scopeKind",
+                "scopeKey",
+                "previousState",
+                "state",
+                "runId",
+                "runStatus",
+                "phase",
+                "failureClass",
+                "attempt",
+                "provider",
+                "model",
+                "revision",
+                "policyVersion",
+            ):
+                value = row.get(field)
+                if value is not None:
+                    entry[field] = value
+            journal.append(entry)
+        return journal[:bounded]
 
     def get(self, candidate_id: str, *, include_backups: bool = False) -> dict[str, Any] | None:
         normalized = _bounded_identifier(candidate_id, field="candidateId")
@@ -4341,6 +4412,13 @@ class MemoryConsolidationService:
         ):
             keys.add(configured_scope_key)
         snapshot = self.review_store.snapshot(scope_keys=keys)
+        journal = [
+            copy.deepcopy(entry)
+            for entry in self.review_store.decision_journal(limit=200)
+            if str(entry.get("scopeKey") or "") in keys
+        ][:50]
+        for entry in journal:
+            entry.pop("scopeKey", None)
         if scope == "project" and not resolved_project and allow_unavailable_project_erase:
             snapshot["candidates"] = [
                 {
@@ -4522,6 +4600,7 @@ class MemoryConsolidationService:
             "nextRunAt": next_run_at,
             "lastRun": last_run_public,
             "shadowSummary": shadow_summary,
+            "journal": journal,
         }
 
     def update_config(self, payload: Mapping[str, Any], expected_revision: int) -> dict[str, Any]:

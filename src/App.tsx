@@ -78,6 +78,7 @@ import { useSettingsWorkspaceController } from "./hooks/use-settings-workspace-c
 import { useSessionHandoff } from "./hooks/use-session-handoff";
 import { useSkillsWorkspaceController } from "./hooks/use-skills-workspace-controller";
 import { useTransientFailureNotice } from "./hooks/use-transient-failure-notice";
+import { useThemeCustomization } from "./hooks/use-theme-customization";
 import { TEMP_CHATS_COLLAPSE_KEY, type ActiveView, type SettingsSection } from "./lib/app-view";
 import { presentApproval } from "./lib/approval-presentation";
 import { replyToSessionHandoff } from "./lib/api/session-handoff";
@@ -273,6 +274,7 @@ export default function App() {
     dismissTransientFailure,
   } = useTransientFailureNotice();
   const [theme, setTheme] = useState<ThemeMode>(() => loadThemePreference());
+  const { themeCustomization, updateThemeCustomization, resetThemeCustomization } = useThemeCustomization();
   const [input, setInput] = useState("");
   const [activeProjectPath, setActiveProjectPath] = useState("");
   const [activeProjectType, setActiveProjectType] = useState<ProjectType>("general");
@@ -1118,9 +1120,6 @@ export default function App() {
     activeChatId,
     activeView,
     pendingApprovalItems,
-    maxAttachmentsPerTurn: MAX_ATTACHMENTS_PER_TURN,
-    setInput,
-    setAttachments,
     setRuntimeNotice,
     setError,
     appendToChat,
@@ -3814,6 +3813,7 @@ export default function App() {
               loading={loading}
               runtimeConnected={runtimeConnected}
               currentLanguage={i18n.language}
+              themeCustomization={themeCustomization}
               apiProvider={apiProvider}
               apiKey={apiKey}
               apiBaseUrl={apiBaseUrl}
@@ -3870,6 +3870,8 @@ export default function App() {
               onSwitchMode={(mode) => void switchMode(mode)}
               onRestartOnboarding={restartOnboarding}
               onLocaleChange={(code) => void setLocale(code)}
+              onThemeCustomizationChange={updateThemeCustomization}
+              onResetThemeCustomization={resetThemeCustomization}
               onLoadModels={() => void loadModels()}
               onProviderTest={(capability) => void runProviderTest(capability)}
               onProviderChange={handleProviderChange}

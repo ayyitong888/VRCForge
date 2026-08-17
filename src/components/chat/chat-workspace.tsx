@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowDown, Loader2, Pause, Play, X } from "lucide-react";
-import { useMemo, useState, type FormEvent, type Ref } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { updateAgentGoal } from "../../lib/api";
 import type { AgentApproval, AgentGoal, AgentGoalBackgroundAcknowledgement, AgentGoalDelivery, AgentGoalProviderWarning, AgentGoalRenderedRecap, AgentQuestion, AgentRuntimeResponse, AgentRuntimeRun, PermissionState } from "../../lib/api";
@@ -22,6 +22,14 @@ import { ScopedPendingApprovalCard } from "../approvals/scoped-pending-approval-
 import { Button } from "../ui/button";
 import { matchPathToSkillRuntimeOperation, type PathToSkillOperationSummary } from "../../lib/path-to-skill-context";
 import { mergeConversationTimelineItems } from "../../lib/chat-thread";
+
+function formatGoalElapsed(totalSeconds: number): string {
+  const seconds = Math.max(0, Math.round(totalSeconds));
+  if (seconds < 60) return String(seconds) + "s";
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return String(minutes) + "m " + String(rest) + "s";
+}
 
 export type QueuedChatTurn = {
   id: string;
@@ -166,7 +174,7 @@ export function ChatWorkspace({
   scopedPendingApprovals: AgentApproval[];
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
-  onModifyApproval: (approval: AgentApproval) => void;
+  onModifyApproval: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
   onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenDoctor: () => void;
   runtimeRuns: AgentRuntimeRun[];
@@ -194,6 +202,16 @@ export function ChatWorkspace({
   const conversationItems = mergeConversationTimelineItems(conversation);
   const [goalActionBusy, setGoalActionBusy] = useState(false);
   const [goalActionError, setGoalActionError] = useState("");
+  const [goalLocalTick, setGoalLocalTick] = useState(0);
+  useEffect(() => {
+    setGoalLocalTick(0);
+  }, [activeGoal?.goalId, activeGoal?.status, activeGoal?.elapsedSeconds]);
+  useEffect(() => {
+    if (!activeGoal || activeGoal.status !== "active") return;
+    const timer = window.setInterval(() => setGoalLocalTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [activeGoal?.goalId, activeGoal?.status]);
+  const goalElapsedSeconds = (activeGoal?.elapsedSeconds ?? 0) + (activeGoal?.status === "active" ? goalLocalTick : 0);
   async function setActiveGoalStatus(status: "active" | "paused" | "cancelled") {
     if (!activeGoal || goalActionBusy) return;
     setGoalActionBusy(true);
@@ -275,6 +293,9 @@ export function ChatWorkspace({
       <span className="shrink-0 font-medium">{t("goal.inProgress")}</span>
       <span className="min-w-0 flex-1 truncate text-muted-foreground" title={activeGoal.title || activeGoal.summary || activeGoal.goalId}>
         {activeGoal.title || activeGoal.summary || activeGoal.goalId}
+      </span>
+      <span className="shrink-0 text-xs text-muted-foreground" data-chat-active-goal-elapsed>
+        {t("goal.elapsed", { time: formatGoalElapsed(goalElapsedSeconds) })}
       </span>
       {goalActionError ? <span className="shrink-0 text-xs text-destructive">{goalActionError}</span> : null}
       <Button

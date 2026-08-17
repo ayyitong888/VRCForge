@@ -71,7 +71,7 @@ export function ConversationCard({
   onEditItem?: (itemId: string) => void;
   onApprove?: (approvalId: string) => void;
   onReject?: (approvalId: string) => void;
-  onModifyApproval?: (approval: AgentApproval) => void;
+  onModifyApproval?: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
   onImportAttachment?: (attachment: ChatAttachment) => void;
   onOpenDoctor?: () => void;
   saveOperationSummary?: PathToSkillOperationSummary;
@@ -260,7 +260,8 @@ export function ConversationCard({
         <div className="relative w-full max-w-[85%] rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
           <div className="font-medium text-foreground">{t("approval.revisionRequestedTitle")}</div>
           <p className="mt-1">{t("approval.revisionRequestedDescription", { target: item.targetTool || t("approval.thisApproval") })}</p>
-          <p className="mt-1">{t("approval.revisionAwaitingUserInput")}</p>
+          <p className="mt-1">{t("approval.revisionRetrying")}</p>
+          {item.reason ? <p className="mt-1" data-approval-revision-reason>{t("approval.revisionReasonLabel")}: {item.reason}</p> : null}
           <MessageActions createdAt={item.createdAt || item.id} />
         </div>
       </div>

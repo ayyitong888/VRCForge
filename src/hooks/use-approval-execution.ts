@@ -8,8 +8,7 @@ import {
   rejectAgentApproval,
   requestApprovalRevision,
 } from "../lib/api";
-import type { ApprovalActionState, ChatAttachment, ConversationItem } from "../lib/chat-types";
-import { textContextAttachment } from "../lib/conversation-utils";
+import type { ApprovalActionState, ConversationItem } from "../lib/chat-types";
 import { approvalIdFromResponse, asRecord, isAgentShellResult } from "../lib/runtime-parsing";
 
 type UseApprovalExecutionParams = {
@@ -18,9 +17,6 @@ type UseApprovalExecutionParams = {
   activeChatId: string;
   activeView: ActiveView;
   pendingApprovalItems: AgentApproval[];
-  maxAttachmentsPerTurn: number;
-  setInput: Dispatch<SetStateAction<string>>;
-  setAttachments: Dispatch<SetStateAction<ChatAttachment[]>>;
   setRuntimeNotice: (message: string) => void;
   setError: (message: string) => void;
   appendToChat: (chatId: string, item: ConversationItem) => void;
@@ -37,9 +33,6 @@ export function useApprovalExecution({
   activeChatId,
   activeView,
   pendingApprovalItems,
-  maxAttachmentsPerTurn,
-  setInput,
-  setAttachments,
   setRuntimeNotice,
   setError,
   appendToChat,
@@ -86,20 +79,21 @@ export function useApprovalExecution({
     return null;
   }
 
-  async function modifyApprovalInComposer(approval: AgentApproval) {
+  async function modifyApprovalInComposer(approval: AgentApproval, revisionReasonText = "", denyReasonCode = "") {
     // Goal-linked approvals have durable terminal semantics. They cannot be
     // converted into an interactive revision turn from the chat UI.
     if (approval.goalDeliveryId?.trim()) {
       return;
     }
     const target = approval.targetTool || t("approval.thisApproval");
-    const reason = t("approval.revisionReason");
+    const reason = revisionReasonText.trim() || t("approval.revisionReason");
     const note = t("approval.revisionNote", { id: approval.id, target });
     setApprovalActions((current) => ({ ...current, [approval.id]: "modify" }));
     setError("");
     const approvalScope = scopeForApproval(approval.id);
     try {
       const payload = await requestApprovalRevision(endpoint, approval.id, {
+        denyReasonCode,
         reason,
         note,
         ...approvalScope,
@@ -110,33 +104,28 @@ export function useApprovalExecution({
       const revisedApproval = payload.approval || approval;
       const safeTarget = revisedApproval.targetTool || approval.targetTool || "";
       const requestedAt = revisedApproval.revisionRequestedAt || new Date().toISOString();
-      const approvalContext = [
-        `${t("approval.contextPending")}: ${approval.id}`,
-        `${t("approval.contextTarget")}: ${safeTarget || t("approval.thisApproval")}`,
-        t("approval.revisionAwaitingUserInput"),
-      ].join("\n");
-      if (activeChatId) {
-        appendToChat(activeChatId, {
+      const ownerChatId = chatIdForSessionId(revisedApproval.taskContext?.sessionId || "");
+      const revisionChatId = ownerChatId || activeChatId;
+      if (revisionChatId) {
+        appendToChat(revisionChatId, {
           id: `approval-revision-${approval.id}-${Date.now()}`,
           type: "approval_revision",
           approvalId: approval.id,
           targetTool: safeTarget,
           requestedAt,
+          denyReasonCode,
           reason,
           note,
-          status: "awaiting_user_input",
+          status: "retrying",
           createdAt: requestedAt,
         });
       }
-      setInput((current) => {
-        const prefix = current.trim() ? `${current.trimEnd()}\n\n` : "";
-        return `${prefix}${t("approval.modifyPrompt", { id: approval.id, target: safeTarget || target })}\n`;
-      });
-      setAttachments((current) => [
-        ...current,
-        textContextAttachment(t("approval.pendingContextTitle"), approvalContext),
-      ].slice(0, maxAttachmentsPerTurn));
-      setRuntimeNotice(t("approval.modifyNotice"));
+      if (payload.continuationError) {
+        setRuntimeNotice(payload.continuationError);
+      } else {
+        setRuntimeNotice(t("approval.modifyNotice"));
+      }
+      appendContinuation(payload.continuation);
       await refresh();
       await refreshRuntimeRuns(false);
     } catch (cause) {

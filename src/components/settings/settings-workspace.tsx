@@ -28,6 +28,8 @@ import { ExternalAgentConnectorsPanel } from "./external-agent-connectors-panel"
 import { MemorySettingsPanel } from "./memory-settings";
 import { MemoryReviewSettings } from "./memory-review-settings";
 import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
+import { ThemeCustomizationPanel } from "./theme-customization-panel";
+import type { ThemeCustomization } from "../../lib/theme-customization";
 
 type SettingsWorkspaceProps = {
   activeSection: SettingsSection;
@@ -42,6 +44,7 @@ type SettingsWorkspaceProps = {
   loading: boolean;
   runtimeConnected: boolean;
   currentLanguage: string;
+  themeCustomization: ThemeCustomization;
   apiProvider: string;
   apiKey: string;
   apiBaseUrl: string;
@@ -90,6 +93,8 @@ type SettingsWorkspaceProps = {
   onSwitchMode: (mode: ExecutionMode) => void;
   onRestartOnboarding: () => void;
   onLocaleChange: (code: string) => void;
+  onThemeCustomizationChange: (next: Partial<ThemeCustomization>) => void;
+  onResetThemeCustomization: () => void;
   onLoadModels: () => void;
   onProviderTest: (capability: "text" | "structured" | "vision") => void;
   onProviderChange: (value: string) => void;
@@ -138,6 +143,7 @@ export function SettingsWorkspace({
   loading,
   runtimeConnected,
   currentLanguage,
+  themeCustomization,
   apiProvider,
   apiKey,
   apiBaseUrl,
@@ -186,6 +192,8 @@ export function SettingsWorkspace({
   onSwitchMode,
   onRestartOnboarding,
   onLocaleChange,
+  onThemeCustomizationChange,
+  onResetThemeCustomization,
   onLoadModels,
   onProviderTest,
   onProviderChange,
@@ -245,6 +253,14 @@ export function SettingsWorkspace({
                   {t("settings.restartOnboarding")}
                 </Button>
               </div>
+            </section>
+
+            <section className="mt-10">
+              <ThemeCustomizationPanel
+                value={themeCustomization}
+                onChange={onThemeCustomizationChange}
+                onReset={onResetThemeCustomization}
+              />
             </section>
 
             <section className="mt-10">

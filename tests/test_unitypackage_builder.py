@@ -391,7 +391,8 @@ def test_builder_rejects_emitted_path_missing_from_complete_manifest(tmp_path: P
     result = _run_builder_with_isolated_guid_manifest(tmp_path, manifest)
 
     assert result.returncode != 0
-    assert "emitted pathname is absent from guid manifest" in (result.stdout + result.stderr).lower()
+    output = " ".join((result.stdout + result.stderr).lower().split())
+    assert "emitted pathname is absent from guid manifest" in output
     assert not (tmp_path / "VRCForge.unitypackage").exists()
 
 
@@ -402,7 +403,8 @@ def test_builder_rejects_complete_manifest_path_that_was_not_emitted(tmp_path: P
     result = _run_builder_with_isolated_guid_manifest(tmp_path, manifest)
 
     assert result.returncode != 0
-    assert "guid manifest pathname was not emitted" in (result.stdout + result.stderr).lower()
+    output = " ".join((result.stdout + result.stderr).lower().split())
+    assert "guid manifest pathname was not emitted" in output
     assert not (tmp_path / "VRCForge.unitypackage").exists()
 
 

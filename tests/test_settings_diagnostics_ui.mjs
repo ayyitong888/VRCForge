@@ -6,6 +6,7 @@ import ts from "typescript";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = (relativePath) => readFile(path.join(root, relativePath), "utf8");
+const releaseVersion = (await read("VERSION")).trim();
 
 const challengeLogicPath = path.join(root, "src/components/settings/developer-options-challenge.ts");
 const challengeLogicSource = await readFile(challengeLogicPath, "utf8");
@@ -144,7 +145,7 @@ for (const [name, entries] of flattened) {
     const description = entries.get(`settings.logLevel${level}Desc`) || "";
     assert.ok(description.trim().length >= 20, `${name}:settings.logLevel${level}Desc must explain the level`);
   }
-  assert.match(entries.get("settings.aboutProduct") || "", /VRCForge 1\.6\.2/);
+  assert.equal(entries.get("settings.aboutProduct") || "", `VRCForge ${releaseVersion}`);
   assert.match(entries.get("settings.aboutMcp") || "", /MCP 2\.0.*2026-07-28.*64/s);
   assert.match(entries.get("settings.aboutSafety") || "", /(approval|审批|審批|承認).*?(checkpoint|检查点|檢查點|チェックポイント).*?(rollback|回滚|回滾|ロールバック)/is);
   assert.match(entries.get("settings.aboutLicense") || "", /GPL-3\.0-only.*NOTICE.*DEPENDENCIES/is);

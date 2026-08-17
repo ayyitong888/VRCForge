@@ -11,7 +11,7 @@ from contextlib import AbstractContextManager
 from typing import Any, Callable, Mapping
 
 from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
-from agent_task_loop import approval_completion, approval_task_context
+from agent_task_loop import TASK_APPROVAL_CONTEXT_SCHEMA, approval_completion, approval_task_context
 from agent_tool_result_contract import normalize_agent_tool_result
 from agent_gateway import (
     APPLY_RECOVERY_ACTIVE_STATUSES,
@@ -2344,6 +2344,7 @@ class AgentApprovalTransactionService:
         approval_id: str,
         *,
         reason: str = "",
+        deny_reason_code: str = "",
         note: str = "",
         expected_project_root: str = "",
         global_only: bool = False,
@@ -2364,10 +2365,33 @@ class AgentApprovalTransactionService:
             status = str(approval.get("status") or "")
             if status != "pending":
                 return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": f"Approval is {status}."}
+            task_context = ensure_dict(approval.get("taskContext"))
+            goal_delivery_id = str(approval.get("goalDeliveryId") or "").strip()
+            if not goal_delivery_id and task_context.get("schema") != TASK_APPROVAL_CONTEXT_SCHEMA:
+                return {
+                    "ok": False,
+                    "approval": redact_sensitive(dict(approval)),
+                    "message": "Request Changes is available only for an approval linked to an active Agent task.",
+                }
+            if task_context.get("approvalRevisionUsed") is True:
+                return {
+                    "ok": False,
+                    "approval": redact_sensitive(dict(approval)),
+                    "message": "This Agent task already used its single approval revision.",
+                }
+            if not str(reason or "").strip():
+                return {
+                    "ok": False,
+                    "approval": redact_sensitive(dict(approval)),
+                    "message": "A change reason is required.",
+                }
+            if str(approval.get("revisionRequestedAt") or "").strip():
+                return {"ok": False, "approval": redact_sensitive(dict(approval)), "message": "Revision already requested for this approval; exactly one revision is allowed."}
             previous = dict(approval)
             approval["status"] = "revision_requested"
             approval["revisionRequestedAt"] = utc_now_iso()
             approval["revisionReason"] = reason.strip()
+            approval["denyReasonCode"] = deny_reason_code.strip()
             approval["revisionNote"] = note.strip()
             self._ports.state.approvals[approval_id] = approval
             try:

@@ -552,9 +552,11 @@ class AgentGoalStore:
                     "chatId": chat_id,
                     "approvalPolicy": "uses_vrcforge_approval_checkpoint_rollback",
                     "wakeCount": 0,
+                    "lastActiveAt": _iso(now),
+                    "elapsedSeconds": 0,
                 }
             )
-            return self.project_goals()[goal_id]
+            return self.with_live_elapsed(self.project_goals()[goal_id])
 
     def update(self, goal_id: str, params: dict[str, Any]) -> dict[str, Any]:
         goal_id = str(goal_id or "").strip()
@@ -573,10 +575,26 @@ class AgentGoalStore:
             requested_revision = params.get("expectedRevision", params.get("expected_revision"))
             if requested_revision is not None and int(requested_revision) != int(current.get("revision") or 0):
                 raise AgentGoalStoreError("Goal revision changed; refresh before updating.", 409)
-            wake_fields = self.parse_wake_fields(params, now=_utc_now())
+            now = _utc_now()
+            wake_fields = self.parse_wake_fields(params, now=now)
             scheduled = bool(str(wake_fields.get("wakeAt", current.get("wakeAt")) or "").strip() or int(wake_fields.get("wakeEveryMinutes", current.get("wakeEveryMinutes")) or 0))
             if scheduled and not str(current.get("chatId") or "").strip():
                 raise AgentGoalStoreError("Legacy scheduled goal has no owner chat; bind it explicitly before resuming.", 409)
+            current_status = str(current.get("status") or "")
+            next_elapsed_seconds = float(current.get("elapsedSeconds") or 0)
+            next_last_active_at = str(current.get("lastActiveAt") or "")
+            if current_status == "active" and status != "active":
+                started = _parse_timestamp(current.get("lastActiveAt"))
+                if started is not None:
+                    next_elapsed_seconds += max(0.0, (now - started).total_seconds())
+                next_last_active_at = ""
+            elif status == "active" and current_status != "active":
+                next_last_active_at = _iso(now)
+            next_summary = (
+                _summarize(params.get("summary") or params.get("note"), 1000)
+                if "summary" in params or "note" in params
+                else str(current.get("summary") or "")
+            )
             self._append(
                 {
                     "event": "goal_updated",
@@ -584,10 +602,12 @@ class AgentGoalStore:
                     "revision": int(current.get("revision") or 0) + 1,
                     **wake_fields,
                     "goalId": goal_id,
-                    "summary": _summarize(params.get("summary") or params.get("note"), 1000),
+                    "summary": next_summary,
+                    "elapsedSeconds": int(next_elapsed_seconds),
+                    "lastActiveAt": next_last_active_at,
                 }
             )
-            return self.project_goals()[goal_id]
+            return self.with_live_elapsed(self.project_goals()[goal_id])
 
     def bind_owner(self, goal_id: str, params: dict[str, Any]) -> dict[str, Any]:
         chat_id = str(params.get("chatId") or params.get("chat_id") or "").strip()
@@ -611,7 +631,7 @@ class AgentGoalStore:
                     "projectRoot": str(params.get("projectRoot") or params.get("project_root") or current.get("projectRoot") or "").strip(),
                 }
             )
-            return self.project_goals()[goal_id]
+            return self.with_live_elapsed(self.project_goals()[goal_id])
 
     def _scope_matches(self, row: dict[str, Any], project_root: str, session_id: str) -> bool:
         if project_root:
@@ -625,7 +645,26 @@ class AgentGoalStore:
     def list(self, *, limit: int, project_root: str = "", session_id: str = "") -> list[dict[str, Any]]:
         rows = [row for row in self.project_goals().values() if self._scope_matches(row, project_root, session_id)]
         rows.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
-        return rows[: max(1, min(limit, 200))]
+        return [self.with_live_elapsed(row) for row in rows[: max(1, min(limit, 200))]]
+
+    def live_elapsed_seconds(self, goal: dict[str, Any], *, now: datetime | None = None) -> int:
+        """Current active-accumulated seconds, including the running active interval."""
+
+        stored = float(goal.get("elapsedSeconds") or 0)
+        if str(goal.get("status") or "") != "active":
+            return int(stored)
+        started = _parse_timestamp(goal.get("lastActiveAt"))
+        if started is None:
+            return int(stored)
+        now = now or _utc_now()
+        return int(stored + max(0.0, (now - started).total_seconds()))
+
+    def with_live_elapsed(self, goal: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+        """Return a copy with the live elapsedSeconds projection for API consumers."""
+
+        projected = dict(goal)
+        projected["elapsedSeconds"] = self.live_elapsed_seconds(goal, now=now)
+        return projected
 
     def _eligible_at(self, goal: dict[str, Any]) -> str:
         wake_at = _parse_timestamp(goal.get("wakeAt"))

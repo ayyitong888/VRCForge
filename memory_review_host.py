@@ -379,6 +379,9 @@ class MemoryReviewHost:
             "nextRunAt": str(raw.get("nextRunAt") or ""),
             "lastRun": last_run,
             "shadowSummary": raw.get("shadowSummary"),
+            "journal": _redact_journal(
+                raw.get("journal") if isinstance(raw.get("journal"), list) else []
+            ),
         }
 
     @staticmethod
@@ -1279,6 +1282,27 @@ def raise_memory_review_http_error(exc: Exception) -> None:
     if isinstance(exc, (MemoryConsolidationError, MemoryReviewProviderError, ValueError)):
         raise HTTPException(status_code=400, detail="Memory Review request failed validation.") from exc
     raise HTTPException(status_code=500, detail="Memory Review could not complete the durable operation.") from exc
+
+
+def _redact_journal(journal: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bound the public journal to safe metadata; no raw evidence or prose."""
+
+    redacted: list[dict[str, Any]] = []
+    for entry in journal:
+        if not isinstance(entry, dict):
+            continue
+        row: dict[str, Any] = {}
+        for key, value in entry.items():
+            if key == "scopeKey":
+                continue
+            if isinstance(value, str):
+                row[key] = value[:240]
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                row[key] = value
+            else:
+                row[key] = value
+        redacted.append(row)
+    return redacted
 
 
 def build_memory_review_router(host: MemoryReviewHost) -> APIRouter:

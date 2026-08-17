@@ -75,6 +75,86 @@ class AgentGoalStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(AgentGoalStoreError, "owner chatId"):
             store.create({"title": "orphan", "wakeAt": self.due_time()})
 
+    def test_pause_is_drain_not_hard_stop(self) -> None:
+        store = self.make_store()
+        goal, delivery = self.start_delivery(store)
+        self.assertEqual(delivery["status"], "running")
+        paused = store.update(goal["goalId"], {"status": "paused"})
+        self.assertEqual(paused["status"], "paused")
+        self.assertFalse(store.is_due(paused, now=datetime.now(timezone.utc)))
+        self.assertEqual(store.list_due(limit=5), [])
+        completed = store.complete_delivery(delivery["deliveryId"], {"turnId": "finish-current-turn"})
+        self.assertEqual(completed["status"], "completed")
+
+    def test_goal_elapsed_accumulates_on_pause_and_freezes_while_paused(self) -> None:
+        t0 = datetime(2026, 8, 17, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("agent_goal_store._utc_now", return_value=t0):
+            store = self.make_store()
+            goal = store.create({"title": "timed", "chatId": "chat-a"})
+        self.assertEqual(goal["status"], "active")
+        self.assertEqual(goal["elapsedSeconds"], 0)
+        self.assertEqual(goal["lastActiveAt"], t0.isoformat())
+        self.assertEqual(store.live_elapsed_seconds(goal, now=t0 + timedelta(seconds=90)), 90)
+
+        with patch("agent_goal_store._utc_now", return_value=t0 + timedelta(seconds=90)):
+            paused = store.update(goal["goalId"], {"status": "paused"})
+        self.assertEqual(paused["elapsedSeconds"], 90)
+        self.assertEqual(paused["lastActiveAt"], "")
+
+        with patch("agent_goal_store._utc_now", return_value=t0 + timedelta(seconds=300)):
+            still_paused = store.update(paused["goalId"], {"status": "paused"})
+        self.assertEqual(still_paused["elapsedSeconds"], 90)
+        self.assertEqual(store.live_elapsed_seconds(still_paused, now=t0 + timedelta(hours=1)), 90)
+
+    def test_goal_elapsed_resume_accumulates_and_is_restart_safe(self) -> None:
+        t0 = datetime(2026, 8, 17, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("agent_goal_store._utc_now", return_value=t0):
+            store = self.make_store()
+            goal = store.create({"title": "timed-restart", "chatId": "chat-a"})
+        with patch("agent_goal_store._utc_now", return_value=t0 + timedelta(seconds=90)):
+            paused = store.update(goal["goalId"], {"status": "paused"})
+        self.assertEqual(paused["elapsedSeconds"], 90)
+
+        with patch("agent_goal_store._utc_now", return_value=t0 + timedelta(seconds=500)):
+            resumed = store.update(paused["goalId"], {"status": "active"})
+        self.assertEqual(resumed["elapsedSeconds"], 90)
+        self.assertEqual(resumed["lastActiveAt"], (t0 + timedelta(seconds=500)).isoformat())
+        self.assertEqual(store.live_elapsed_seconds(resumed, now=t0 + timedelta(seconds=560)), 150)
+
+        with patch("agent_goal_store._utc_now", return_value=t0 + timedelta(seconds=560)):
+            reopened = self.make_store()
+            rows = {row["goalId"]: row for row in reopened.list(limit=200)}
+        reloaded = rows[goal["goalId"]]
+        self.assertEqual(reloaded["status"], "active")
+        self.assertEqual(reloaded["elapsedSeconds"], 150)
+        with patch("agent_goal_store._utc_now", return_value=t0 + timedelta(seconds=620)):
+            repaused = reopened.update(reloaded["goalId"], {"status": "paused"})
+        self.assertEqual(repaused["elapsedSeconds"], 210)
+
+    def test_goal_elapsed_does_not_reset_on_active_update(self) -> None:
+        t0 = datetime(2026, 8, 17, 12, 0, 0, tzinfo=timezone.utc)
+        with patch("agent_goal_store._utc_now", return_value=t0):
+            store = self.make_store()
+            goal = store.create({"title": "timed-live", "chatId": "chat-a"})
+        with patch("agent_goal_store._utc_now", return_value=t0 + timedelta(seconds=30)):
+            refreshed = store.update(goal["goalId"], {"status": "active", "summary": "still active"})
+        self.assertEqual(refreshed["elapsedSeconds"], 30)
+        self.assertEqual(refreshed["lastActiveAt"], t0.isoformat())
+        stored_row = store.project_goals()[goal["goalId"]]
+        self.assertEqual(stored_row["elapsedSeconds"], 0)
+        self.assertEqual(stored_row["lastActiveAt"], t0.isoformat())
+        self.assertEqual(store.live_elapsed_seconds(stored_row, now=t0 + timedelta(seconds=45)), 45)
+
+    def test_status_only_update_preserves_goal_summary_context(self) -> None:
+        store = self.make_store()
+        goal = store.create({"title": "persistent", "summary": "Keep this context", "chatId": "chat-a"})
+
+        paused = store.update(goal["goalId"], {"status": "paused"})
+        resumed = store.update(goal["goalId"], {"status": "active"})
+
+        self.assertEqual(paused["summary"], "Keep this context")
+        self.assertEqual(resumed["summary"], "Keep this context")
+
     def test_wake_does_not_consume_schedule_and_completion_is_restart_safe(self) -> None:
         store = self.make_store()
         goal = store.create({"title": "durable", "chatId": "chat-a", "wakeAt": self.due_time()})

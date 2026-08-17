@@ -555,6 +555,38 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
         connected = "vrcforge_bridge_preflight" in tool_names
         ready = "vrcforge_request_apply" in tool_names
         direct_apply_listed = sorted(_HIDDEN_EXTERNAL_EXECUTION_TOOLS.intersection(tool_names))
+        preflight_called = False
+        preflight_result: dict[str, Any] = {}
+        if connected:
+            _send_json_rpc(
+                process,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        **_modern_stdio_request_metadata(),
+                        "name": "vrcforge_bridge_preflight",
+                        "arguments": {},
+                    },
+                },
+            )
+            called = _read_json_rpc_response(
+                process,
+                stdout_queue,
+                stderr_queue,
+                3,
+                timeout_seconds,
+                transcript,
+                stderr_lines,
+            )
+            _validate_modern_stdio_result(called, "tools/call")
+            call_result = called.get("result")
+            structured = call_result.get("structuredContent") if isinstance(call_result, dict) else None
+            if not isinstance(structured, dict):
+                raise RuntimeError("MCP tools/call did not return structuredContent for bridge preflight.")
+            preflight_called = True
+            preflight_result = structured
         ok = connected
         return {
             "ok": ok,
@@ -568,9 +600,13 @@ def run_stdio_mcp_handshake(bridge: StdioBridgeSpec, *, timeout_seconds: float =
             "toolsSample": tool_names[:12],
             "hasBridgePreflight": connected,
             "hasRequestApply": ready,
+            "preflightCalled": preflight_called,
+            "preflightOk": bool(preflight_result.get("ok")),
+            "preflightRuntimeOnline": bool(preflight_result.get("runtimeOnline")),
+            "preflightError": str(preflight_result.get("error") or ""),
             "directApplyListed": direct_apply_listed,
             "stderrTail": _tail(stderr_lines),
-            "transcriptTail": transcript[-4:],
+            "transcriptTail": transcript[-6:],
             "error": "" if ok else "MCP tools/list did not expose the VRCForge bridge preflight tool.",
             "warning": "" if ready else "Connector is visible, but Gateway/token readiness may be incomplete. Run bridge preflight from the client or open VRCForge Doctor.",
             "suggestion": "" if ok else "Open VRCForge, run Doctor, then retry connector install.",

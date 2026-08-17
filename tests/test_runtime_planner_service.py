@@ -259,6 +259,38 @@ def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
     assert "privateDump" not in observation
 
 
+def test_model_observation_keeps_bounded_know_yourself_guidance() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_know_yourself",
+            "status": "executed",
+            "result": {
+                "ok": True,
+                "schema": "vrcforge.know_yourself.v1",
+                "readyForUnityWork": False,
+                "notice": "Reply to the user now; do not inspect project files.",
+                "summary": (
+                    "readyForUnityWork=false; blockingGaps=editor_plugin_present; "
+                    "nextSafeAction=install_or_repair_editor_plugin"
+                ),
+                "message": "Use the VRCForge project setup surface, then re-run this check.",
+                "privateDump": "must-not-enter-model-context",
+            },
+            "outcome": {
+                "status": "ok",
+                "summary": "Know Yourself readiness was inspected.",
+                "verification": {"state": "not_required"},
+            },
+        }
+    )
+
+    assert "readyForUnityWork=false" in observation
+    assert "nextSafeAction=install_or_repair_editor_plugin" in observation
+    assert "Reply to the user now" in observation
+    assert "Use the VRCForge project setup surface" in observation
+    assert "privateDump" not in observation
+
+
 def test_model_observation_enforces_contract_600_char_ceiling() -> None:
     observation = service()._llm_loop_step_observation(
         {

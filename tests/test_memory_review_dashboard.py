@@ -477,6 +477,7 @@ def test_get_is_authoritative_flat_schema_without_candidate_internals(
     assert payload["revision"] == 0
     assert payload["scope"] == "user"
     assert payload["projectRoot"] == ""
+    assert payload["journal"] == []
     assert "config" not in payload
     serialized = json.dumps(payload, ensure_ascii=False)
     for internal in (
@@ -601,11 +602,14 @@ def test_switching_projects_does_not_masquerade_as_the_saved_binding(
     assert switched["configuredProjectMatches"] is False
     assert switched["revision"] == generated.json()["revision"]
     assert switched["candidates"] == []
+    assert switched["journal"] == []
     returned = env.client.get(
         "/api/app/agent/memory/review",
         params={"scope": "project", "projectRoot": str(env.project)},
     ).json()
     assert [candidate["candidateId"] for candidate in returned["candidates"]] == [candidate_id]
+    assert any(entry["candidateId"] == candidate_id for entry in returned["journal"])
+    assert "scopeKey" not in json.dumps(returned["journal"], ensure_ascii=False)
 
 
 def test_off_and_shadow_make_no_provider_call_or_candidate_prose_persistence(

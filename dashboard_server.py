@@ -1617,9 +1617,15 @@ class AgentMemoryClearRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+APPROVAL_REVISION_REASON_CODES = frozenset({
+    "wrong_arguments", "wrong_target", "insufficient_context", "policy_objection", "other",
+})
+
+
 class AgentApprovalRevisionRequest(BaseModel):
-    reason: str = ""
-    note: str = ""
+    reason: str = Field(default="", max_length=1000)
+    deny_reason_code: str = Field(default="", alias="denyReasonCode")
+    note: str = Field(default="", max_length=2000)
     expected_project_root: str | None = Field(default=None, alias="expectedProjectRoot")
     global_only: bool = Field(default=False, alias="globalOnly")
 
@@ -5038,18 +5044,69 @@ async def app_agent_reject(
 
 @app.post("/api/app/agent/approvals/{approval_id}/revision")
 async def app_agent_request_approval_revision(approval_id: str, request: AgentApprovalRevisionRequest) -> dict[str, Any]:
-    try:
-        payload = AGENT_GATEWAY.approval_transactions.request_approval_revision(
+    if not request.reason.strip():
+        raise HTTPException(status_code=422, detail="A change reason is required.")
+    if request.deny_reason_code and request.deny_reason_code not in APPROVAL_REVISION_REASON_CODES:
+        raise HTTPException(status_code=422, detail=f"Unknown deny reason code: {request.deny_reason_code}")
+
+    def request_revision_and_resume() -> dict[str, Any]:
+        result = AGENT_GATEWAY.approval_transactions.request_approval_revision(
             approval_id,
+            deny_reason_code=request.deny_reason_code,
             reason=request.reason,
             note=request.note,
             expected_project_root=request.expected_project_root or "",
             global_only=bool(request.global_only),
         )
+        approval = ensure_dict(result.get("approval"))
+        if result.get("ok") and result.get("goalDelivery") is None:
+            try:
+                continuation = AGENT_GATEWAY.resume_runtime_task_after_approval(
+                    approval,
+                    revision_requested=True,
+                )
+            except Exception as exc:  # noqa: BLE001 - the decision remains durable.
+                emit_log(
+                    "error",
+                    "agent",
+                    "Task continuation failed after approval revision request.",
+                    {"approvalId": approval_id, "errorType": type(exc).__name__},
+                    essential=True,
+                )
+                result["continuationError"] = (
+                    "The requested changes were recorded, but the Agent task could not start its "
+                    "single revision attempt. The original approval remains closed."
+                )
+            else:
+                if continuation is not None:
+                    result["continuation"] = continuation
+        return result
+
+    try:
+        payload = await asyncio.to_thread(request_revision_and_resume)
     except AgentGatewayError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     denied_goal = payload.get("goalDelivery")
     await EVENT_BUS.broadcast("agentApprovals", {"approvals": AGENT_GATEWAY.approval_transactions.list_approvals()})
+    continuation = ensure_dict(payload.get("continuation"))
+    if continuation:
+        continuation = attach_agent_harness_journey_receipt(continuation)
+        persisted = persist_runtime_turn_journey_receipt(continuation)
+        if isinstance(continuation.get("harnessJourneyReceipt"), dict) and not isinstance(
+            ensure_dict(persisted).get("harnessJourneyReceipt"),
+            dict,
+        ):
+            continuation = dict(continuation)
+            continuation.pop("harnessJourneyReceipt", None)
+        payload["continuation"] = continuation
+        await EVENT_BUS.broadcast("agentRuntimeTurn", continuation)
+        await EVENT_BUS.broadcast(
+            "agentRuntimeRuns",
+            AGENT_GATEWAY.runtime_runs.list_runs(
+                limit=30,
+                session_id=continuation.get("sessionId") or continuation.get("session_id") or "",
+            ),
+        )
     if denied_goal is not None:
         await broadcast_background_goal_state({})
     return payload
@@ -14932,6 +14989,7 @@ _RUNTIME_PLANNER_VISUAL_AUDIT_TOOLS = frozenset(
 
 RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
     {
+        "vrcforge_know_yourself",
         "vrcforge_list_directory",
         "vrcforge_read_text_file",
         "vrcforge_find_files",
@@ -21420,7 +21478,7 @@ def register_agent_gateway_tools() -> None:
     AGENT_GATEWAY.register_tool("vrcforge_health", "Read VRCForge backend and component health.", "read/debug", lambda _params: build_full_health_payload())
     AGENT_GATEWAY.register_tool(
         "vrcforge_know_yourself",
-        "Read the current work-start preparation, Unity/MCP readiness, capability map, gaps, and safe operating boundaries without changing the Unity project.",
+        "When to use: first-run/readiness questions or any VRCForge, Unity, MCP, bridge, editor-plugin, or Provider connection problem, including 'cannot connect', 'not connected', and 'what should I do'. When NOT to use: ordinary Internet, GitHub, or unrelated network troubleshooting, or when the user asks to execute a repair instead of diagnose it. Negative example: answer a general Wi-Fi question without inspecting VRCForge state.",
         "read/debug",
         KNOW_YOURSELF_READINESS.know_yourself_sync,
     )

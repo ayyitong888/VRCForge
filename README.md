@@ -114,6 +114,36 @@ approval. Connector templates can be installed for supported local clients
 detected on the machine, and availability depends on the client and its
 configuration.
 
+For another MCP client, open **Settings → Connectors → Generic MCP client**:
+
+1. Find that client's MCP configuration file and confirm whether it uses JSON,
+   TOML, or YAML. The automatic installer accepts the full path to a JSON file,
+   not a folder; it preserves existing `mcpServers` entries.
+2. Choose **STDIO** for a local desktop/CLI client that accepts `command` and
+   `args` (recommended), or **Streamable HTTP** only when the client explicitly
+   supports it. HTTP also requires Agent Gateway to be enabled and the client
+   process to receive `VRCFORGE_AGENT_TOKEN`.
+3. Keep VRCForge running, restart or reconnect the MCP client, and confirm that
+   a `vrcforge` server and its tools appear. TOML/YAML clients should use the
+   copy button and add the block manually.
+
+If the App, Unity, MCP bridge, editor plugin, or Provider says it cannot connect,
+ask the ordinary Agent a beginner question such as **“Unity and MCP are not
+connected—what should I do?”** It will first run the read-only **Know Yourself**
+Skill against current local state, then explain the observed blocker and next
+user action. The Skill never installs, launches, repairs, or writes by itself.
+
+通用 MCP 用戶端可在 **設定 → 連接器 → 通用 MCP 用戶端** 依相同步驟設定：
+先找到用戶端實際使用的 MCP 設定檔，再選本機 STDIO（建議）或明確支援的
+Streamable HTTP；保持 VRCForge 執行並重新連線，看到 `vrcforge` 伺服器與工具
+清單才算完成。自動安裝只接受 JSON 設定檔的完整路徑；TOML/YAML 請複製後
+手動加入，HTTP 則另需啟用 Agent Gateway 並提供 `VRCFORGE_AGENT_TOKEN`。
+
+若 App、Unity、MCP 橋接、編輯器外掛或 Provider 顯示無法連線，可直接在普通
+Agent 對話問「Unity 和 MCP 未連線，該怎麼辦？」Agent 會先執行唯讀的 **Know
+Yourself** Skill，依本機當前狀態說明實際阻塞與使用者下一步；Skill 本身不會安裝、
+啟動、修復或寫入任何內容。
+
 VRCForge keeps provider configuration local-first. Model and external-agent
 data handling still depends on the provider, action, and content the user
 selects; see [Privacy / 隐私](#privacy--隐私).

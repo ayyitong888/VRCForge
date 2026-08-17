@@ -1091,8 +1091,10 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "riskLevel": "low",
         "whenToUse": (
             "after connecting a provider, before opening or changing a Unity project, "
-            "after dependency installation, or whenever the agent must explain what it "
-            "can and cannot currently do"
+            "after dependency installation, whenever the agent must explain what it "
+            "can and cannot currently do, or for any VRCForge, Unity, MCP, bridge, "
+            "editor-plugin, or Provider connection problem such as 'cannot connect', "
+            "'not connected', or 'what should I do'"
         ),
         "inputs": [
             "Optional editorFocusConfirmed and the current editorFocusScope only after "
@@ -1113,7 +1115,10 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
         "instructions": (
             "Run this Skill before the first project operation and whenever the selected "
             "project, dependencies, Unity process, connection, permissions, or Skill "
-            "registry changes. Treat only observed evidence in the current report as fact. "
+            "registry changes. When the user asks what to do about a VRCForge-stack "
+            "connection problem, run this Skill before filesystem, Shell, or repair tools. "
+            "Do not use it for ordinary Internet, GitHub, or unrelated network support. "
+            "Treat only observed evidence in the current report as fact. "
             "If dependencies are installed and the report requests editor activation, ask "
             "the user to click once inside the intended Unity editor window, then run the "
             "Skill again with editorFocusConfirmed=true and the exact editorFocusScope "
@@ -1125,7 +1130,7 @@ BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
             "reasons, and preserve approval, checkpoint, validation, and rollback "
             "boundaries for every later write."
         ),
-        "tags": ["builtin", "group", "self-check", "work-start", "unity", "readiness"],
+        "tags": ["builtin", "group", "self-check", "work-start", "unity", "mcp", "connection", "readiness"],
     },
     {
         "name": "runtime-diagnostics",
@@ -3066,6 +3071,7 @@ class AgentGateway:
         execution: dict[str, Any] | None = None,
         *,
         rejected: bool = False,
+        revision_requested: bool = False,
     ) -> dict[str, Any] | None:
         """Resume only a task-linked approval, after its transaction is terminal.
 
@@ -3077,6 +3083,7 @@ class AgentGateway:
             approval,
             execution,
             rejected=rejected,
+            revision_requested=revision_requested,
         )
         if prepared is None:
             return None
@@ -6464,7 +6471,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.6.2",
+        server_version="1.7.0",
     )
     return create_agent_mcp_2026_asgi_app(
         router,

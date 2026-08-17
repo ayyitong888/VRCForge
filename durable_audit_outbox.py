@@ -464,5 +464,19 @@ class DurableMetadataAudit:
                 pass
             return False
 
+    def read_recent(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return the newest validated audit rows without mutating the ledger."""
+
+        bounded = max(1, min(int(limit or 0), 200))
+        with self._lock:
+            rows = self._read(
+                self.audit_path,
+                label="Durable audit ledger",
+            )
+            return [
+                self.validate_prepared(row)
+                for row in rows[-bounded:]
+            ]
+
 
 __all__ = ["DurableMetadataAudit"]

@@ -2242,6 +2242,7 @@ class RuntimePlannerService:
                 "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
                 f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，执行类工具必须先进入 execution 层；Unity 项目写入按当前权限模式走审批或全权限自动执行；"
                 "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
+                "If the user asks what to do about a VRCForge, Unity, MCP, bridge, editor plugin, or Provider connection problem (for example cannot connect, not connected, disconnected, or connection failed), choose know_yourself before filesystem, Shell, or repair tools. After its successful report, answer from that report. This rule does not apply to ordinary Internet, GitHub, or unrelated network troubleshooting;"
                 # VRCForge 自纠回环：失败要读错误、修正后重试或换路，绝不假装成功。
                 "如果『已执行步骤』里某一步失败或报错（status 是 failed/error，或结果里带 error/异常/traceback）："
                 "先读懂错误原因；能靠改参数解决就用『不同的参数』重试（不要原样重复同一个调用），"

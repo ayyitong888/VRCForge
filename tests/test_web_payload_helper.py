@@ -276,7 +276,8 @@ def test_web_payload_helper_rejects_non_official_url_before_any_staging(tmp_path
         capture_output=True,
     )
     assert result.returncode != 0
-    assert "exact version-bound official release URL" in (result.stderr + result.stdout)
+    output = " ".join((result.stderr + result.stdout).split())
+    assert "exact version-bound official release URL" in output
 
 
 @pytest.mark.skipif(not SHELL, reason="PowerShell is required")

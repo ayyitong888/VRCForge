@@ -336,6 +336,8 @@ def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
     assert routable_runtime <= dashboard_server.RUNTIME_PLANNER_GENERAL_AGENT_TOOLS
     assert "ask_user" in planning_names
     assert "delegate_subagent" in planning_names
+    assert "know_yourself" in planning_names
+    assert "vrcforge_know_yourself" in planning_runtime
     assert "shell" in execution_names
     assert "vrcforge_avatar_encryption_scan" not in routable_runtime
     assert "vrcforge_scan_project_index" not in routable_runtime
@@ -365,10 +367,55 @@ def test_no_project_planner_prompt_is_general_and_omits_unity_tools() -> None:
     assert "Never repeat an already successful bounded directory listing through Shell" in prompt
     assert "a top-level directory listing alone is not sufficient evidence" in prompt
     assert "a reply is invalid after only a top-level directory listing" in prompt
+    assert "know_yourself" in prompt
     assert '"completion_claim":{"satisfied":true,"evidence_action_ids"' in prompt
     assert "avatar_encryption_scan" not in prompt
     assert "scan_project_index" not in prompt
     assert "unity_status" not in prompt
+
+
+def test_no_project_planner_can_select_know_yourself_readiness() -> None:
+    class Model:
+        def plan(self, _prompt: str) -> PlannerModelResult:
+            return PlannerModelResult(
+                text=(
+                    '{"action":"skill","skill_tool":"know_yourself",'
+                    '"skill_params":{},"summary":"check readiness"}'
+                )
+            )
+
+    planner = dashboard_server.RuntimePlannerService(
+        catalog=dashboard_server._RuntimePlannerCatalog(),
+        desktop=dashboard_server._RuntimePlannerDesktopObservation(),
+        model=Model(),
+    )
+
+    plan = planner.plan_agent_turn(
+        "I am new. Is VRCForge ready, and what should I do next?",
+        {"_projectContextActive": False},
+        {},
+    )
+
+    assert plan["skillNeeded"] is True
+    assert plan["skillDisplayTool"] == "know_yourself"
+    assert plan["skillTool"] == "vrcforge_know_yourself"
+
+
+def test_connection_help_prompt_requires_know_yourself_before_generic_tools() -> None:
+    planner = dashboard_server.RuntimePlannerService(
+        catalog=dashboard_server._RuntimePlannerCatalog(),
+        desktop=dashboard_server._RuntimePlannerDesktopObservation(),
+    )
+
+    prompt = planner._build_llm_plan_prompt(
+        "MCP 一直连不上怎么办？",
+        [],
+        project_context_active=False,
+    )
+
+    assert "VRCForge, Unity, MCP, bridge, editor plugin, or Provider connection problem" in prompt
+    assert "choose know_yourself before filesystem, Shell, or repair tools" in prompt
+    assert "ordinary Internet, GitHub, or unrelated network troubleshooting" in prompt
 
 
 def test_no_project_planner_rejects_unity_tool_while_project_turn_keeps_it() -> None:

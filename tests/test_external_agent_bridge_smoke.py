@@ -147,7 +147,14 @@ def test_stdio_mcp_tools_uses_explicit_gateway_config_env(monkeypatch: Any, tmp_
     def fake_handshake(spec: Any, timeout_seconds: float) -> dict[str, Any]:
         nonlocal seen_gateway_config
         seen_gateway_config = smoke.os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG", "")
-        return {"ok": True, "hasRequestApply": True, "directApplyListed": [], "toolCount": 1}
+        return {
+            "ok": True,
+            "hasRequestApply": True,
+            "preflightCalled": True,
+            "preflightOk": True,
+            "directApplyListed": [],
+            "toolCount": 1,
+        }
 
     monkeypatch.setattr(smoke, "run_stdio_mcp_handshake", fake_handshake)
 

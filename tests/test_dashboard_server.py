@@ -517,6 +517,7 @@ class DashboardServerTests(unittest.TestCase):
         dashboard_server.DASHBOARD_RUNTIME.manual_undo_stack.clear()
         dashboard_server.DASHBOARD_RUNTIME.current_avatar_path = ""
         dashboard_server.DASHBOARD_RUNTIME.current_avatar_name = ""
+        dashboard_server.DASHBOARD_STATE.selected_project_path = ""
         self.tuning_store_dir = tempfile.TemporaryDirectory()
         self.original_tuning_paths = (
             dashboard_server.TUNING_HISTORY_PATH,
@@ -4092,12 +4093,22 @@ class DashboardServerTests(unittest.TestCase):
             project_a.mkdir()
             project_b.mkdir()
             gateway.goal.create_agent_goal({"title": "Goal A", "projectRoot": str(project_a)})
+            paused = gateway.goal.create_agent_goal(
+                {"title": "Goal A paused", "summary": "Waiting for review", "projectRoot": str(project_a)}
+            )["goal"]
+            gateway.goal.update_agent_goal(paused["goalId"], {"status": "paused"})
             gateway.goal.create_agent_goal({"title": "Goal B private", "projectRoot": str(project_b)})
 
             observe = gateway.runtime_observe(project_root=str(project_a))
             titles = {item["title"] for item in observe["goals"]["items"]}
+            bind_test_runtime_planner(gateway, lambda _prompt: {})
+            prompt = gateway.runtime_planner._message_with_runtime_context("continue", observe)  # noqa: SLF001
 
-        self.assertEqual(titles, {"Goal A"})
+        self.assertEqual(titles, {"Goal A", "Goal A paused"})
+        self.assertIn("Long-running goals:", prompt)
+        self.assertIn("[active] Goal A", prompt)
+        self.assertIn("[paused] Goal A paused Waiting for review", prompt)
+        self.assertNotIn("Goal B private", prompt)
 
     def test_agent_runtime_context_usage_is_turn_local_for_concurrent_requests(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -8490,9 +8501,15 @@ class DashboardServerTests(unittest.TestCase):
             for directory in ("Assets", "Packages", "ProjectSettings"):
                 (project / directory).mkdir(parents=True)
             target = project / "Assets" / "revision.txt"
+            revised_target = project / "Assets" / "revision-v2.txt"
             guard = UnityPathGuard([project], current_root=project)
             command = "Set-Content -Path Assets/revision.txt -Value hi -Encoding utf8"
-            responses = iter([PlannerModelResult(text=json.dumps({"action": "enter_execution"})), PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}}))])
+            revised_command = "Set-Content -Path Assets/revision-v2.txt -Value hi -Encoding utf8"
+            responses = iter([
+                PlannerModelResult(text=json.dumps({"action": "enter_execution"})),
+                PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}})),
+                PlannerModelResult(text=json.dumps({"action": "write", "write_tool": "unity_shell", "write_params": {"command": revised_command, "cwd": str(project), "workspace_root": str(project), "projectRoot": str(project)}})),
+            ])
             with (
                 bind_test_unity_path_guard(guard),
                 use_test_runtime_planner(
@@ -8518,6 +8535,7 @@ class DashboardServerTests(unittest.TestCase):
                     f"/api/app/agent/approvals/{approval_id}/revision",
                     json={
                         "reason": "change request",
+                        "denyReasonCode": "wrong_arguments",
                         "note": "use another name",
                         "expectedProjectRoot": str(project),
                         "globalOnly": False,
@@ -8528,7 +8546,31 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertTrue(revision_payload["ok"])
                 self.assertEqual(revision_payload["approval"]["status"], "revision_requested")
                 self.assertEqual(revision_payload["approval"]["revisionReason"], "change request")
+                self.assertEqual(revision_payload["approval"]["denyReasonCode"], "wrong_arguments")
+                self.assertIn("continuation", revision_payload)
+                revised_approval_id = revision_payload["continuation"]["shell"]["approval_id"]
+                self.assertNotEqual(revised_approval_id, approval_id)
+                revised_approval = next(
+                    item
+                    for item in dashboard_server.AGENT_GATEWAY.approval_transactions.list_approvals()
+                    if item["id"] == revised_approval_id
+                )
+                self.assertEqual(revised_approval["status"], "pending")
+                self.assertTrue(revised_approval["taskContext"]["approvalRevisionUsed"])
                 self.assertFalse(target.exists())
+                self.assertFalse(revised_target.exists())
+
+                second_revision = client.post(
+                    f"/api/app/agent/approvals/{revised_approval_id}/revision",
+                    json={
+                        "reason": "try again",
+                        "denyReasonCode": "other",
+                        "expectedProjectRoot": str(project),
+                        "globalOnly": False,
+                    },
+                )
+                self.assertEqual(second_revision.status_code, 200)
+                self.assertFalse(second_revision.json()["ok"])
 
                 stale_approval = client.post(
                     f"/api/app/agent/approvals/{approval_id}/approve",
@@ -8537,6 +8579,7 @@ class DashboardServerTests(unittest.TestCase):
                 self.assertEqual(stale_approval.status_code, 200)
                 self.assertFalse(stale_approval.json()["ok"])
                 self.assertFalse(target.exists())
+                self.assertFalse(revised_target.exists())
 
     def test_app_approval_reject_does_not_rewrite_terminal_status(self) -> None:
         shell_process_ports, shell_processes = fake_dashboard_shell_process_ports()

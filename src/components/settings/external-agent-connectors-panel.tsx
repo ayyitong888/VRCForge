@@ -396,38 +396,59 @@ function GenericConnectorRow({
   const installedHere = Boolean(state?.installed && statusMatchesCurrent);
   return (
     <div className="min-w-0 rounded-lg border border-border bg-background/40 p-3">
-      <div className="flex min-w-0 flex-wrap items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="min-w-0 truncate text-sm font-semibold">{t("connector.genericTitle")}</span>
-          <Badge tone={installedHere ? "ok" : state?.conflict ? "warn" : "muted"} className="shrink-0">
-            {installedHere ? t("connector.installed") : t("connector.notInstalled")}
-          </Badge>
-          <Badge tone="muted" className="shrink-0">
-            {t("connector.customConfig")}
-          </Badge>
-        </div>
-        <div className="flex flex-wrap items-start justify-end gap-2">
-          <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !stdioText} onClick={() => onCopy(stdioText, "Generic stdio config")}>
-            <Copy className="h-3.5 w-3.5" />
-            {t("connector.copyStdio")}
-          </Button>
-          <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !httpText} onClick={() => onCopy(httpText, "Generic HTTP config")}>
-            <Copy className="h-3.5 w-3.5" />
-            {t("connector.copyHttp")}
-          </Button>
-          <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !trimmedPath} onClick={() => onInstall("generic", trimmedPath)}>
-            {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-            Install
-          </Button>
-          <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installedHere} onClick={() => onUninstall("generic", trimmedPath)}>
-            <Trash2 className="h-3.5 w-3.5" />
-            {t("connector.remove")}
-          </Button>
-        </div>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="min-w-0 truncate text-sm font-semibold">{t("connector.genericTitle")}</span>
+        <Badge tone={installedHere ? "ok" : state?.conflict ? "warn" : "muted"} className="shrink-0">
+          {installedHere ? t("connector.installed") : t("connector.notInstalled")}
+        </Badge>
+        <Badge tone="muted" className="shrink-0">
+          {t("connector.customConfig")}
+        </Badge>
       </div>
-      <div className="mt-3 grid gap-2 text-xs text-muted-foreground">
+
+      <div className="mt-3 grid gap-3 text-xs text-muted-foreground">
+        <div className="rounded-md border border-border bg-muted/25 p-3">
+          <div className="font-medium text-foreground">{t("connector.genericGuideTitle")}</div>
+          <ol className="mt-2 grid list-decimal gap-1.5 pl-5">
+            <li>{t("connector.genericStepConfig")}</li>
+            <li>{t("connector.genericStepTransport")}</li>
+            <li>{t("connector.genericStepReload")}</li>
+          </ol>
+        </div>
+
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="flex min-w-0 flex-col gap-2 rounded-md border border-border p-3">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span className="font-medium text-foreground">{t("connector.genericStdioTitle")}</span>
+              <Badge tone="ok" className="shrink-0">
+                {t("connector.recommended")}
+              </Badge>
+            </div>
+            <div className="min-w-0 flex-1 break-words">{t("connector.genericStdioHint")}</div>
+            <Button type="button" variant="outline" className="h-8 w-fit px-3 text-xs" disabled={loading || !stdioText} onClick={() => onCopy(stdioText, "Generic stdio config")}>
+              <Copy className="h-3.5 w-3.5" />
+              {t("connector.copyStdio")}
+            </Button>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-2 rounded-md border border-border p-3">
+            <span className="font-medium text-foreground">{t("connector.genericHttpTitle")}</span>
+            <div className="min-w-0 flex-1 break-words">{t("connector.genericHttpHint")}</div>
+            <Button type="button" variant="outline" className="h-8 w-fit px-3 text-xs" disabled={loading || !httpText} onClick={() => onCopy(httpText, "Generic HTTP config")}>
+              <Copy className="h-3.5 w-3.5" />
+              {t("connector.copyHttp")}
+            </Button>
+          </div>
+        </div>
+
+        <div className="grid gap-2 rounded-md border border-dashed border-border p-3">
+          <div className="font-medium text-foreground">{t("connector.genericAutoTitle")}</div>
           <div className="break-words">{t("connector.genericHint")}</div>
+          <label htmlFor="generic-mcp-config-path" className="font-medium text-foreground">
+            {t("connector.genericPathLabel")}
+          </label>
           <input
+            id="generic-mcp-config-path"
             type="text"
             value={configPath}
             disabled={loading}
@@ -438,10 +459,21 @@ function GenericConnectorRow({
             }}
             className="h-9 w-full min-w-0 rounded-md border border-border bg-background px-2 font-mono text-xs text-foreground outline-none focus:border-primary"
           />
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" className="h-8 px-3 text-xs" disabled={loading || !trimmedPath} onClick={() => onInstall("generic", trimmedPath)}>
+              {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+              {t("connector.genericInstallStdio")}
+            </Button>
+            <Button type="button" variant="danger" className="h-8 px-3 text-xs" disabled={loading || !installedHere} onClick={() => onUninstall("generic", trimmedPath)}>
+              <Trash2 className="h-3.5 w-3.5" />
+              {t("connector.remove")}
+            </Button>
+          </div>
+        </div>
+
           {state?.lastError && statusMatchesCurrent ? (
             <div className="break-words text-amber-700 dark:text-amber-300">{state.lastError}</div>
           ) : null}
-          {state?.restartInstruction ? <div className="break-words">{state.restartInstruction}</div> : null}
           {action ? (
             <div
               className={cn(

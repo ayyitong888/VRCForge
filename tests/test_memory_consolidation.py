@@ -542,6 +542,46 @@ def test_promotion_reconciles_after_crash_and_writes_one_accepted_memory(tmp_pat
     assert created[0]["promotionId"] == recovered["candidate"]["promotionId"]
 
 
+def test_decision_journal_is_bounded_metadata_newest_first_and_privacy_safe(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    project.mkdir()
+    projection = _project_source(project)
+    review_store = MemoryReviewStore(tmp_path / "review.json", tmp_path / "review-audit.jsonl")
+    accepted_store = AgentMemoryStore(tmp_path / "agent-memory.jsonl", tmp_path / "accepted-audit.jsonl")
+    run = MemoryConsolidator(review_store, policy_version=POLICY_VERSION).run(
+        mode="suggest_only",
+        sources=[projection],
+        expected_revision=0,
+        provider=_provider_candidate(),
+    )
+    candidate_id = run["candidates"][0]["candidateId"]
+    coordinator = MemoryReviewCoordinator(review_store, accepted_store)
+    accepted = coordinator.accept(candidate_id, expected_revision=run["revision"], project_root=str(project))
+    assert accepted["candidate"]["state"] == "accepted"
+
+    journal = review_store.decision_journal(limit=50)
+    events = [entry["event"] for entry in journal]
+    assert "candidate_proposed" in events
+    assert "candidate_promotion_started" in events
+    assert "candidate_promotion_finished" in events
+    accepted_promotions = [
+        entry for entry in journal
+        if entry["event"] == "candidate_promotion_finished" and entry.get("candidateId") == candidate_id
+    ]
+    assert accepted_promotions
+    assert accepted_promotions[0]["state"] == "accepted"
+    assert accepted_promotions[0].get("promotionId") == accepted["candidate"]["promotionId"]
+    assert journal == sorted(journal, key=lambda entry: entry["createdAt"], reverse=True)
+    for entry in journal:
+        assert "text" not in entry
+        assert "proposedText" not in entry
+        assert "rawEvidence" not in entry
+
+    # Reopening the store must replay the same bounded journal from disk.
+    reopened = MemoryReviewStore(tmp_path / "review.json", tmp_path / "review-audit.jsonl")
+    assert [entry["eventId"] for entry in reopened.decision_journal(limit=50)] == [entry["eventId"] for entry in journal]
+
+
 def test_exact_duplicate_accept_reuses_oldest_foreign_memory_and_exposes_no_identity(tmp_path: Path) -> None:
     project = tmp_path / "Project"
     project.mkdir()

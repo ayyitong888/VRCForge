@@ -844,6 +844,54 @@ def test_rejected_approval_is_a_terminal_needs_user_action_outcome() -> None:
     assert completion["outcome"]["status"] == "needs_user_action"
 
 
+def test_requested_approval_revision_resumes_same_task_once() -> None:
+    loop = AgentTaskLoop(
+        "create one object",
+        session_id="session-1",
+        client_turn_id="turn-1",
+    )
+    requested_arguments = {"name": "Probe", "projectRoot": "D:/Unity/Project"}
+    context = approval_task_context(
+        loop.approval_seed(
+            tool_calls_used=1,
+            exposure_layer="execution",
+            requested_tool="vrcforge_create_gameobject",
+            requested_arguments=requested_arguments,
+        ),
+        tool="vrcforge_create_gameobject",
+        arguments=requested_arguments,
+    )
+
+    prepared = prepare_approval_task_continuation(
+        {
+            "id": "approval-1",
+            "taskContext": context,
+            "revisionReason": "Use a different object name.",
+            "revisionNote": "Keep the same parent.",
+            "denyReasonCode": "wrong_arguments",
+        },
+        revision_requested=True,
+    )
+
+    assert prepared is not None
+    assert prepared["params"]["clientTurnId"] == "turn-1:revision:approval-1"
+    continuation = prepared["taskContinuation"]
+    assert continuation["source"] == "approval_revision_requested"
+    assert continuation["terminalPlan"] is None
+    assert continuation["context"]["approvalRevisionUsed"] is True
+    assert continuation["plannerObservation"]["result"] == {
+        "reasonCode": "wrong_arguments",
+        "reason": "Use a different object name.",
+        "note": "Keep the same parent.",
+    }
+
+    resumed = AgentTaskLoop.from_approval_context(
+        continuation["context"],
+        continuation["completion"],
+    )
+    assert resumed.approval_seed()["approvalRevisionUsed"] is True
+
+
 def test_read_only_skill_requirement_defaults_to_canonical_verification() -> None:
     loop = AgentTaskLoop("inspect the desktop", session_id="session-1")
 

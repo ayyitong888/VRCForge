@@ -459,6 +459,8 @@ def test_stdio_mcp_handshake_runs_2026_discover_and_tools_list(tmp_path: Path) -
                 "    elif msg.get('method') == 'tools/list':",
                 "        tools = [{'name':'vrcforge_bridge_preflight'}, {'name':'vrcforge_request_apply'}]",
                 "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':dict(common, tools=tools) if valid_meta and valid_client_info else {'error':'bad metadata'}}), flush=True)",
+                "    elif msg.get('method') == 'tools/call' and msg.get('params', {}).get('name') == 'vrcforge_bridge_preflight':",
+                "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'result':dict(common, structuredContent={'ok':True,'runtimeOnline':True})}), flush=True)",
                 "    else:",
                 "        print(json.dumps({'jsonrpc':'2.0','id':msg['id'],'error':{'code':-32601,'message':'legacy lifecycle rejected'}}), flush=True)",
             ]
@@ -473,6 +475,9 @@ def test_stdio_mcp_handshake_runs_2026_discover_and_tools_list(tmp_path: Path) -
     assert result["connected"] is True
     assert result["ready"] is True
     assert result["toolCount"] == 2
+    assert result["preflightCalled"] is True
+    assert result["preflightOk"] is True
+    assert result["preflightRuntimeOnline"] is True
     assert result["directApplyListed"] == []
 
 

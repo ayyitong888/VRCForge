@@ -300,6 +300,74 @@ Each item ends with its version history in this exact form:
   `unity_project_access`, other-root refusal and unrestricted external paths.
 - [首次实现: 1.6.2] [强化/修复: 1.6.2] [最近验证: 1.6.2]
 
+### AGT-013 — Locked 1.7 Agentic closeout scope
+
+- Priority: P0 scope guard.
+- Contract: 1.7 contains exactly four product lanes: staged Memory
+  Consolidation with dedupe/promotion/rollback and a review journal; one
+  interactive rejection-reason revision; active Goal context with start,
+  drain-pause/resume and elapsed time; and the existing inbound MCP edge needed
+  for an external Agent to connect, discover and call VRCForge tools. Each lane
+  must reuse the 1.6.2 Runtime, approval and UI contracts and may add only the
+  smallest owning module or surface required by that lane.
+- Explicitly not in 1.7: multi-Sub-Agent scoring/comparison; `/delegate`
+  compete; Session branch or Handoff Inbox; Reviewer shadow-to-advisory;
+  Workflow execution or recovery; token-price lookup, cost conversion or Goal
+  token budgets. Agent/Workflow monitoring remains P2 backlog. These are
+  explicit non-goals, not omitted placeholders, and no hidden route, card,
+  disabled control, migration seam or speculative backend may be added for
+  them.
+- UI boundary: 1.7 receives a bounded UI/UX polish pass only after the four
+  lanes close, followed by Codex dogfooding through VRCForge's own MCP tool
+  chain and one batched repair pass for observed regressions. The 2.0 shell and
+  information-architecture rewrite is a separate version and cannot be mixed
+  into 1.7.
+- Forbidden regression: no revival of Shadow Workspace, OS sandbox, duplicated
+  General/Unity tools or a second Agent Runtime; no constant empty Goal card;
+  no external-MCP connection-status, failure-isolation or call-provenance UI;
+  and no feature from the explicit non-goal list entering source, tests or
+  public claims as unfinished 1.7 scaffolding.
+- Acceptance: source and product-contract scans freeze the exact four-lane
+  allowlist and explicit denylist. Focused tests bind every lane to observable
+  behavior, then the consolidated regression/build gate and attended UI/MCP
+  dogfood pass close the version.
+- Current evidence: the four source lanes, focused failure-first tests,
+  consolidated Python/UI regression and one real Codex CLI inbound MCP
+  discovery/read-only call are green. Clean packaged-backend Know Yourself
+  reachability and a real beginner connection-help turn are also green.
+  Attended Tauri UI acceptance and the consolidated clean release build/package
+  remain release gates; scoped source/package evidence cannot close them.
+- [首次实现: 1.7.0] [强化/修复: 1.7.0] [最近验证: 1.7 source + MCP dogfood；封版待 UI/package]
+
+### AGT-014 — Know Yourself beginner work-start guidance
+
+- Priority: P1.
+- Contract: `Know Yourself` is one project-independent, read-only General tool
+  and built-in Skill. It remains visible before project selection, reports the
+  observed readiness stage, blockers and one safe next action, and never
+  installs, launches, repairs or writes. The Runtime gives the model only a
+  bounded semantic result (`notice`, `summary`, `message`); raw readiness data,
+  local identity mappings, paths and diagnostic payloads stay outside model
+  context.
+- Beginner boundary: a fresh ordinary-Agent conversation asking whether the
+  current machine can start Unity/avatar work must naturally select the Skill,
+  answer whether work can start, name the actual blockers and give the user's
+  next action. The same rule applies whenever a user asks what to do about a
+  VRCForge, Unity, MCP, bridge, editor-plugin or Provider connection problem,
+  including cannot-connect, not-connected, disconnected and connection-failed
+  wording. Know Yourself must run before filesystem, Shell or repair tools.
+  After a successful report the Agent must answer from that report, not perform
+  an unrelated project/list/read probe or invent generic setup. Ordinary
+  Internet, GitHub and unrelated network support stay outside this trigger.
+- Forbidden regression: no Unity-only classification, selected-project
+  prerequisite, mandatory preflight on every Unity read, raw report injection,
+  static checklist answer, hidden mutation or post-report exploratory tool call.
+- Acceptance: General-profile catalogue/prompt/routing tests, connection-help
+  trigger/negative-boundary checks, focused readiness and redaction tests,
+  clean packaged-backend manifest plus authenticated tool call, and one fresh
+  beginner connection conversation through the real App Runtime.
+- [首次实现: 1.4.0] [强化/修复: 1.7.0] [最近验证: 1.7 source + clean packaged backend + real beginner turn]
+
 ## Approval, write and recovery contracts
 
 ### APR-001 — Durable non-expiring approval
@@ -608,19 +676,26 @@ Each item ends with its version history in this exact form:
 
 - Priority: P1.
 - Contract: an active Goal renders one compact control bar immediately above
-  the composer with its objective/state and bounded pause/resume/cancel
-  controls. With no active Goal the bar consumes zero layout space and no Goal
-  card or placeholder appears in the right rail. Users may create, inspect and
-  control a Goal through `/goal`; the Agent may use the existing Goal tool/API
-  path. Both paths operate on the same durable Goal identity and state.
+  the composer with its objective, state, elapsed time and one-click
+  start/pause/resume controls. An active Goal is injected as bounded persistent
+  context on every eligible Agent turn until it completes or is cancelled.
+  Pause is cooperative drain-pause: a running turn finishes normally, no new
+  turn starts, then the Goal becomes paused; it is never a hard interruption.
+  With no active Goal the bar consumes zero layout space and no Goal card or
+  placeholder appears in the right rail. Users may create, inspect and control
+  a Goal through `/goal`; the Agent uses the same Goal tool/API and durable Goal
+  identity. Goal has no token budget, provider-price lookup or cost conversion;
+  users inspect provider billing separately.
 - Forbidden regression: no permanent `Enable independent continuation` card,
   no empty Goal section, no user-only or Agent-only ownership, no second active
-  Goal silently replacing the first, and no Workflow card substituted for Goal.
-- Acceptance: `tests/test_162_product_regression_ui.mjs` freezes conditional
-  placement and both entry paths. User live manual acceptance covers one
-  inactive chat with no Goal surface and one equivalent active-Goal chat with
-  the bar directly above the composer.
-- [首次实现: 1.6.2] [强化/修复: 1.6.2] [最近验证: 1.6.2]
+  Goal silently replacing the first, no hard-stop pause, no timer reset on
+  restart/resume, no Workflow card substituted for Goal and no token/cost UI.
+- Acceptance: UI contracts freeze conditional placement, both entry paths and
+  elapsed time. Runtime tests prove exact persistent-context injection,
+  restart-safe elapsed time, one-click transitions and finish-current-turn
+  pause semantics. User live acceptance covers inactive, running, draining,
+  paused and resumed states.
+- [首次实现: 1.6.2] [强化/修复: 1.7.0] [最近验证: 待 1.7.0 封版]
 
 ### UX-012 — Complete provider/model identity and continuous context ring
 
@@ -863,10 +938,20 @@ Each item ends with its version history in this exact form:
 - Contract: external Agents/connectors are authenticated requesters. VRCForge
   remains the only Unity/project write authority and owns the entire write
   transaction.
+- Beginner setup contract: Settings exposes one three-step Generic MCP client
+  guide. It distinguishes recommended local STDIO from explicitly supported
+  Streamable HTTP, says that VRCForge must stay running, identifies the exact
+  JSON configuration-file path field, preserves unrelated `mcpServers`, and
+  states that TOML/YAML require manual copy. HTTP guidance must also disclose
+  the Agent Gateway and `VRCFORGE_AGENT_TOKEN` prerequisites. Successful setup
+  ends with the user seeing the `vrcforge` server and tools in their client.
 - Forbidden regression: no direct connector write, broad Shell authority or
-  removal of supported compatibility without packaged proof and approval.
-- Acceptance: connector negatives, interop matrix and package boundary scan.
-- [首次实现: 1.3.0] [强化/修复: 1.5.0] [最近验证: 1.5.1]
+  removal of supported compatibility without packaged proof and approval; no
+  unlabeled folder/path input, transport ambiguity, hidden HTTP prerequisite or
+  promise that automatic install supports non-JSON clients.
+- Acceptance: connector negatives, installer-preservation and beginner-layout
+  contracts, locale/TypeScript checks, interop matrix and package boundary scan.
+- [首次实现: 1.3.0] [强化/修复: 1.7.0] [最近验证: 1.7 source]
 
 ### CMP-002 — DeepSeek Harness and host-side multi-MCP compatibility
 

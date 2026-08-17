@@ -221,6 +221,10 @@ def test_api_only_without_project_stops_at_project_selection() -> None:
     assert report["schema"] == KNOW_YOURSELF_SCHEMA
     assert report["readyForUnityWork"] is False
     assert report["stage"] == "select_unity_project"
+    assert "readyForUnityWork=false" in report["summary"]
+    assert "nextSafeAction=select_unity_project" in report["summary"]
+    assert "Reply to the user now" in report["notice"]
+    assert "Select the Unity project root" in report["message"]
     assert report["editorFocusGate"]["status"] == "blocked"
     assert report["nextAction"]["approvalRequired"] is False
     assert report["capabilities"]["unityDependentWorkStartEligible"] is False
@@ -246,6 +250,11 @@ def test_missing_plugin_and_mcp_dependency_follow_setup_order() -> None:
     )
     assert missing_plugin["stage"] == "install_or_repair_editor_plugin"
     assert missing_plugin["nextAction"]["approvalRequired"] is True
+    assert missing_plugin["message"] == (
+        "Open onboarding Step 3. In Unity, Import All from VRCForge.unitypackage; "
+        "keep it open, then select it in VRCForge and recheck."
+    )
+    assert len(missing_plugin["message"]) <= 130
 
     missing_mcp = _report(
         doctor=_doctor(**{"unity.mcp.package": "error"}),
@@ -924,4 +933,7 @@ def test_dashboard_registers_read_only_know_yourself_skill(monkeypatch: Any) -> 
     assert group["entrypointTool"] == "vrcforge_know_yourself"
     assert group["available"] is True
     assert group["permissionMode"] == "read_only"
+    assert "connection problem" in group["whenToUse"]
     assert "acknowledgement never proves readiness" in group["instructions"]
+    assert "connection problem" in tool.description
+    assert "When NOT to use" in tool.description

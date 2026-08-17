@@ -160,7 +160,8 @@ export type ConversationItem =
       requestedAt: string;
       reason: string;
       note: string;
-      status: "awaiting_user_input";
+      denyReasonCode?: string;
+      status: "retrying";
       createdAt?: string;
     }
   | { id: string; type: "error"; text: string; createdAt?: string }

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { ChevronDown, Pencil, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { presentApproval } from "../../lib/approval-presentation";
@@ -6,6 +7,7 @@ import type { ApprovalActionState } from "../../lib/chat-types";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { ApprovalAllowSplitButton } from "./approval-allow-split-button";
+import { ApprovalRevisionEditor } from "./approval-revision-editor";
 
 type ScopedPendingApprovalCardProps = {
   approvals: AgentApproval[];
@@ -13,11 +15,12 @@ type ScopedPendingApprovalCardProps = {
   disabled: boolean;
   onApprove: (approvalId: string, allowFutureCategory?: boolean) => void;
   onReject: (approvalId: string) => void;
-  onModifyApproval: (approval: AgentApproval) => void;
+  onModifyApproval: (approval: AgentApproval, revisionReason?: string, denyReasonCode?: string) => void;
 };
 
 export function ScopedPendingApprovalCard({ approvals, actions, disabled, onApprove, onReject, onModifyApproval }: ScopedPendingApprovalCardProps) {
   const { t } = useTranslation();
+  const [editingApprovalId, setEditingApprovalId] = useState("");
   const visibleApprovals = approvals.filter(
     (approval) => approval.status === "pending" && !["approve", "reject"].includes(actions[approval.id] || ""),
   );
@@ -52,6 +55,11 @@ export function ScopedPendingApprovalCard({ approvals, actions, disabled, onAppr
           const action = actions[approval.id];
           const busy = disabled || Boolean(action);
           const presentation = presentApproval(approval, t);
+          const canRequestChanges = Boolean(
+            !approval.goalDeliveryId?.trim()
+            && approval.taskContext
+            && approval.taskContext.approvalRevisionUsed !== true,
+          );
           return (
             <article key={approval.id} data-approval-id={approval.id} className="rounded-xl border border-border bg-background/70 p-3">
               <div className="text-sm font-medium">{presentation.title}</div>
@@ -81,11 +89,30 @@ export function ScopedPendingApprovalCard({ approvals, actions, disabled, onAppr
                   {action === "reject" ? t("approval.rejecting") : t("approval.reject")}
                 </Button>
                 <div className="ml-auto flex flex-wrap justify-end gap-2">
-                  {!approval.goalDeliveryId?.trim() ? (
-                    <Button variant="outline" disabled={busy} onClick={() => onModifyApproval(approval)}>
-                      <Pencil className="h-4 w-4" />
-                      {action === "modify" ? t("approval.modifying") : t("approval.modify")}
-                    </Button>
+                  {canRequestChanges ? (
+                    <div className="flex flex-col items-end gap-2">
+                      {action === "modify" ? (
+                        <span className="text-xs text-muted-foreground">{t("approval.modifying")}</span>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() => setEditingApprovalId((current) => current === approval.id ? "" : approval.id)}
+                        >
+                          <Pencil className="h-4 w-4" />
+                          {editingApprovalId === approval.id ? t("approval.modifyCancel") : t("approval.modify")}
+                        </Button>
+                      )}
+                      {editingApprovalId === approval.id && action !== "modify" ? (
+                        <ApprovalRevisionEditor
+                          onCancel={() => setEditingApprovalId("")}
+                          onSubmit={(reason, reasonCode) => {
+                            setEditingApprovalId("");
+                            onModifyApproval(approval, reason, reasonCode);
+                          }}
+                        />
+                      ) : null}
+                    </div>
                   ) : null}
                   <ApprovalAllowSplitButton
                     approvalId={approval.id}
