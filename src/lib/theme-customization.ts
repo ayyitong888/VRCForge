@@ -1,37 +1,63 @@
+export const THEME_PALETTE_IDS = ["default", "ocean", "violet", "sakura", "forest", "sunset", "custom"] as const;
+
+export type ThemePaletteId = (typeof THEME_PALETTE_IDS)[number];
+
+export type ThemePaletteOption = {
+  id: ThemePaletteId;
+  swatches: readonly [string, string, string];
+};
+
+export const THEME_PALETTES: readonly ThemePaletteOption[] = [
+  { id: "default", swatches: ["#2563eb", "#f8fafc", "#e2e8f0"] },
+  { id: "ocean", swatches: ["#0891b2", "#38bdf8", "#ecfeff"] },
+  { id: "violet", swatches: ["#7c3aed", "#c084fc", "#f5f3ff"] },
+  { id: "sakura", swatches: ["#db2777", "#fb7185", "#fff1f2"] },
+  { id: "forest", swatches: ["#059669", "#84cc16", "#ecfdf5"] },
+  { id: "sunset", swatches: ["#ea580c", "#f59e0b", "#fff7ed"] },
+  { id: "custom", swatches: ["#2563eb", "#8b5cf6", "#ec4899"] },
+];
+
 export type ThemeCustomization = {
+  palette: ThemePaletteId;
   accentColor: string;
-  backgroundImageDataUrl: string;
+  backgroundImagePath: string;
   backgroundOpacity: number;
 };
 
 export const THEME_CUSTOMIZATION_STORAGE_KEY = "vrcforge_theme_customization";
-export const MAX_THEME_BACKGROUND_BYTES = 2 * 1024 * 1024;
 
 export const DEFAULT_THEME_CUSTOMIZATION: ThemeCustomization = {
+  palette: "default",
   accentColor: "",
-  backgroundImageDataUrl: "",
+  backgroundImagePath: "",
   backgroundOpacity: 0.18,
 };
 
 const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
-const IMAGE_DATA_URL_PATTERN = /^data:image\/(?:png|jpeg|webp|gif);base64,/i;
+const LEGACY_IMAGE_DATA_URL_PATTERN = /^data:image\/(?:png|jpeg|webp|gif);base64,/i;
 
 export function normalizeThemeCustomization(value: unknown): ThemeCustomization {
   const candidate = value && typeof value === "object" ? (value as Partial<ThemeCustomization>) : {};
   const accentColor = typeof candidate.accentColor === "string" && HEX_COLOR_PATTERN.test(candidate.accentColor)
     ? candidate.accentColor.toLowerCase()
     : "";
-  const backgroundImageDataUrl =
-    typeof candidate.backgroundImageDataUrl === "string"
-    && candidate.backgroundImageDataUrl.length <= MAX_THEME_BACKGROUND_BYTES * 1.5
-    && IMAGE_DATA_URL_PATTERN.test(candidate.backgroundImageDataUrl)
-      ? candidate.backgroundImageDataUrl
+  const requestedPalette = typeof candidate.palette === "string" && THEME_PALETTE_IDS.includes(candidate.palette as ThemePaletteId)
+    ? candidate.palette as ThemePaletteId
+    : accentColor
+      ? "custom"
+      : "default";
+  const backgroundImagePath =
+    typeof candidate.backgroundImagePath === "string"
+    && candidate.backgroundImagePath.length <= 4096
+    && !candidate.backgroundImagePath.toLowerCase().startsWith("data:")
+      ? candidate.backgroundImagePath
       : "";
   const opacity = Number(candidate.backgroundOpacity);
   return {
+    palette: requestedPalette,
     accentColor,
-    backgroundImageDataUrl,
-    backgroundOpacity: Number.isFinite(opacity) ? Math.min(0.5, Math.max(0.06, opacity)) : DEFAULT_THEME_CUSTOMIZATION.backgroundOpacity,
+    backgroundImagePath,
+    backgroundOpacity: Number.isFinite(opacity) ? Math.min(1, Math.max(0, opacity)) : DEFAULT_THEME_CUSTOMIZATION.backgroundOpacity,
   };
 }
 
@@ -41,6 +67,19 @@ export function loadThemeCustomization(): ThemeCustomization {
     return raw ? normalizeThemeCustomization(JSON.parse(raw)) : DEFAULT_THEME_CUSTOMIZATION;
   } catch {
     return DEFAULT_THEME_CUSTOMIZATION;
+  }
+}
+
+export function loadLegacyThemeBackgroundDataUrl(): string {
+  try {
+    const raw = window.localStorage.getItem(THEME_CUSTOMIZATION_STORAGE_KEY);
+    if (!raw) return "";
+    const value = JSON.parse(raw) as { backgroundImageDataUrl?: unknown };
+    return typeof value.backgroundImageDataUrl === "string" && LEGACY_IMAGE_DATA_URL_PATTERN.test(value.backgroundImageDataUrl)
+      ? value.backgroundImageDataUrl
+      : "";
+  } catch {
+    return "";
   }
 }
 

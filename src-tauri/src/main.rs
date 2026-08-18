@@ -39,12 +39,14 @@ mod primitive_evidence_authority_windows;
 #[allow(dead_code)]
 mod primitive_evidence_controller_launcher_windows;
 mod sanitize;
+mod theme_background;
 
 use approval_notification_windows::*;
 use backend::*;
 use commands::*;
 use event_bridge::*;
 use sanitize::*;
+use theme_background::*;
 
 const WEBVIEW2_ACCESSIBILITY_ARG: &str = "--force-renderer-accessibility";
 
@@ -169,6 +171,7 @@ fn main() {
             check_app_update,
             check_skills,
             clear_agent_memory,
+            clear_theme_background,
             cancel_agent_desktop_action,
             cancel_agent_memory_review,
             compact_agent_history,
@@ -225,6 +228,7 @@ fn main() {
             fetch_sub_agents,
             fetch_workspace_diff,
             import_skill_package,
+            import_legacy_theme_background,
             install_external_agent_connector,
             issue_computer_use_turn_grant,
             merge_sub_agent,
@@ -233,6 +237,7 @@ fn main() {
             overwrite_adjustment_checkpoint,
             plan_avatar_encryption,
             plan_outfit_import,
+            pick_theme_background,
             preflight_skill_package,
             preview_path_to_skill,
             preview_interrupted_apply_recovery,

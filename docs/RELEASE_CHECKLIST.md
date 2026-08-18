@@ -50,6 +50,12 @@ Before publishing a release package:
 * [ ] Confirm App Update runs once in the startup background and only a
       successful newer version opens an in-App dialog. Current/offline/error
       paths must be silent; manual/periodic/system-notification paths are absent.
+* [ ] Confirm theme customization exposes the seven approved multi-colour
+      palettes, keeps the untouched default appearance unchanged, stores only a
+      managed background path rather than Base64, accepts images above the old
+      2 MiB boundary, and exposes 0–100% visibility. Replacing, removing and
+      **Restore defaults** must clear only VRCForge-managed background files;
+      unrelated/user-named files remain intact.
 
 * [ ] Include LICENSE in the release package.
 * [ ] Include NOTICE in the release package.

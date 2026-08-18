@@ -753,6 +753,28 @@ Each item ends with its version history in this exact form:
   is absent from General and visible only on the enabled Developer page.
 - [首次实现: 1.6.2] [强化/修复: 1.6.2] [最近验证: 1.6.2]
 
+### UX-015 — File-backed multi-colour theme customization
+
+- Priority: P1.
+- Contract: General Settings offers Default, Ocean, Violet, Sakura, Forest,
+  Sunset and Custom palettes without changing the untouched default light/dark
+  appearance. Optional PNG/JPEG/WebP/GIF backgrounds are copied into the
+  App-owned local theme directory and browser storage retains only the managed
+  path plus preferences. Visibility spans 0–100%. Replacing, removing or
+  choosing **Restore defaults** removes the previous VRCForge-managed
+  background after the replacement is ready; unrelated/user-named files are
+  preserved. A legacy Base64 preference is a one-time migration input only.
+- Forbidden regression: no Base64 image persistence, 2 MiB image limit,
+  single-accent-only theme surface, opacity floor/ceiling below the full range,
+  stale managed background after replace/remove/default restore, broad theme
+  directory deletion, or ambiguous **Reset theme** label.
+- Acceptance: `tests/test_theme_customization_ui.mjs` freezes UI, persistence,
+  locale and asset-scope contracts; Rust theme-background tests prove a file
+  larger than 2 MiB, signature validation, atomic replacement, managed cleanup
+  and preservation of unrelated names. TypeScript/build plus attended local UI
+  acceptance verify palette selection and **Restore defaults** behavior.
+- [首次实现: 1.7.1] [强化/修复: 1.7.1] [最近验证: 1.7.1]
+
 ## Vision contracts
 
 ### VIS-001 — Provider-neutral image channel

@@ -1,8 +1,27 @@
 # VRCForge 1.7.1
 
-VRCForge 1.7.1 is the documentation-corrected package of the 1.7 Agentic
-closeout. It carries the verified 1.7 runtime and UI behavior without adding,
-removing, or redesigning product features.
+VRCForge 1.7.1 carries the verified 1.7 Agentic closeout, corrected public
+documentation and the approved file-backed multi-colour theme extension.
+
+## Refreshed 1.7.1 package
+
+The 2026-08-18 package refresh replaces the earlier 1.7.1 binaries while
+retaining the same product version at the release owner's explicit direction.
+The refreshed source commit, moved `v1.7.1` tag, release manifest and all
+replacement assets are rebuilt and verified together; hashes from the earlier
+1.7.1 package no longer identify the current downloads.
+
+- Theme customization now offers Default, Ocean, Violet, Sakura, Forest,
+  Sunset and Custom palettes instead of a single accent-only control.
+- Background images are copied to the App-owned local theme directory instead
+  of being stored as Base64 in browser storage. The former 2 MiB UI limit is
+  removed, and an existing Base64 preference is migrated once on first use.
+- Background visibility covers the complete 0–100% range. Replacing or
+  removing a background deletes the prior VRCForge-managed file; files outside
+  the managed naming boundary are preserved.
+- The theme action is named **Restore defaults**. It restores the default
+  palette and removes the managed background rather than presenting an
+  ambiguous reset action.
 
 ## Corrected packaging evidence
 
@@ -25,8 +44,9 @@ removing, or redesigning product features.
 - Generic MCP setup includes the beginner-facing three-step configuration path,
   and connection-help questions route through the read-only Know Yourself
   Skill.
-- General Settings retains the optional custom accent and local background
-  extension while default light and dark appearance remains unchanged.
+- General Settings retains optional multi-colour palettes and a local
+  file-backed background while default light and dark appearance remains
+  unchanged.
 
 ## Deliberate non-goals
 

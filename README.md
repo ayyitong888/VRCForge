@@ -24,8 +24,9 @@ Avatar 改动。
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
 Current source / target release: `1.7.1` (`v1.7.1`). Latest published stable
-release: `1.6.2`. VRCForge 1.7.1 is the documentation-corrected package of the
-1.7 Agentic closeout and supersedes the unpublished v1.7.0 Draft; the
+release: `1.7.1`. The refreshed VRCForge 1.7.1 package carries the 1.7 Agentic
+closeout, corrected public documentation and the approved file-backed
+multi-colour theme extension. It supersedes the unpublished v1.7.0 Draft; the
 unpublished v1.6.1 tag remains superseded.
 
 Official repository: <https://github.com/ayyitong888/VRCForge>
