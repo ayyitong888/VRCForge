@@ -86,8 +86,8 @@ monitoring.
 
 ## SHA-256
 
-- `VRCForge.unitypackage`: `pending`
-- `VRCForge_Windows_x64_1.7.2.zip`: `pending`
-- `VRCForge_Offline_Installer_x64.exe`: `pending`
-- `VRCForge_Web_Installer_x64.exe`: `pending`
-- `release-manifest.json`: `pending`
+- `VRCForge.unitypackage`: `37779883c0d0034071b8202bf1de20543be92688c393616c05ad1ac097d64002`
+- `VRCForge_Windows_x64_1.7.2.zip`: `7f81ee5ddcd404a07457845684a773963e612b64de51c8ce1768ab6d5edc7a09`
+- `VRCForge_Offline_Installer_x64.exe`: `50cdd566060f3c661fc764844dd127e3e440060bfac7d34f37f3f02f2d416f51`
+- `VRCForge_Web_Installer_x64.exe`: `eca2d1d91c294ceb3cddc52f641297bd79797eb780a0e149e00883468be216ea`
+- `release-manifest.json`: `97046a5c68a24ffeffe9c5f7bff596840f8ab215607d322560dcf09cc06ca106`
