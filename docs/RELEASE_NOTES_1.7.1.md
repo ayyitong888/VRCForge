@@ -65,3 +65,11 @@ monitoring.
   capability superset. Generic writes cannot modify registered Unity roots.
 - The Windows installers are not code-signed. Download only official VRCForge
   assets and verify their published SHA-256 digests.
+
+## SHA-256
+
+- `VRCForge.unitypackage`: `ad14c1b7577c74e7ef6a9bf7751d677f8a9a24ad789d02e71e082f4538012a82`
+- `VRCForge_Windows_x64_1.7.1.zip`: `265ed935bd0828d12933747ab57d8f76945189989f35faad63da00829cf50706`
+- `VRCForge_Offline_Installer_x64.exe`: `25d8e1b2e0cc19c277aeac04d6554182f3e6c088633a65b05b714bcb1b09aa07`
+- `VRCForge_Web_Installer_x64.exe`: `feaaf6436ffdd439da488acad1cdb459625b98d7fef0e91ed76c0cfd4eb9ee68`
+- `release-manifest.json`: `9d1c1ea2408f549915f3f17e4b0270b8df42c2f06c8bdc7898404314052590c2`
