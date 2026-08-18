@@ -724,7 +724,7 @@ Each item ends with its version history in this exact form:
   restart-safe elapsed time, one-click transitions and finish-current-turn
   pause semantics. User live acceptance covers inactive, running, draining,
   paused, blocked and resumed states.
-- [首次实现: 1.6.2] [强化/修复: 1.7.3] [最近验证: 待 1.7.3 封版]
+- [首次实现: 1.6.2] [强化/修复: 1.7.3] [最近验证: 1.7.3]
 
 ### UX-012 — Complete provider/model identity and continuous context ring
 

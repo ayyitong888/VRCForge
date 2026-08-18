@@ -23,11 +23,11 @@ Avatar 改动。
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source / target release: `1.7.3` (`v1.7.3`). Latest published stable
-release: `1.7.2`. The VRCForge 1.7.3 target carries the 1.7.2 package plus the
-verified user-and-Agent Goal control contract. It will supersede v1.7.2 after
-publication; the unpublished v1.7.0 Draft and unpublished v1.6.1 tag remain
-superseded.
+Current source and latest published stable release: `1.7.3` (`v1.7.3`).
+VRCForge 1.7.3 carries the 1.7.2 package plus the verified user-and-Agent Goal
+control contract and supersedes v1.7.2; the v1.7.2 tag and Release page remain
+available and unchanged. The unpublished v1.7.0 Draft and unpublished v1.6.1
+tag remain superseded.
 
 Official repository: <https://github.com/ayyitong888/VRCForge>
 
