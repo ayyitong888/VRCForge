@@ -1,72 +1,22 @@
-import {
-  BrainCircuit,
-  Eye,
-  Lightbulb,
-  Loader2,
-  Play,
-  RefreshCw,
-  Save,
-  ShieldCheck,
-  Square,
-  TimerReset,
-} from "lucide-react";
-import { useEffect, useRef, useState, type SetStateAction } from "react";
+import { Brain, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import {
-  MEMORY_REVIEW_MODES,
-  type MemoryReviewMode,
-  type MemoryReviewSnapshot,
-} from "../../lib/api/memory-review";
+import type { MemoryReviewSnapshot } from "../../lib/api/memory-review";
 import {
   useMemoryReview,
   type MemoryReviewConfigDraft,
 } from "../../hooks/use-memory-review";
 import { cn } from "../../lib/utils";
-import { Badge, type BadgeTone } from "../ui/badge";
-import { Button } from "../ui/button";
-import { MemoryReviewInbox } from "./memory-review-inbox";
 
-const MODE_KEYS: Record<MemoryReviewMode, { label: string; description: string }> = {
-  off: {
-    label: "settings.memoryReviewModeOff",
-    description: "settings.memoryReviewModeOffDesc",
-  },
-  shadow: {
-    label: "settings.memoryReviewModeShadow",
-    description: "settings.memoryReviewModeShadowDesc",
-  },
-  suggest_only: {
-    label: "settings.memoryReviewModeSuggest",
-    description: "settings.memoryReviewModeSuggestDesc",
-  },
-  bounded_background: {
-    label: "settings.memoryReviewModeBackground",
-    description: "settings.memoryReviewModeBackgroundDesc",
-  },
-  auto_safe: {
-    label: "settings.memoryReviewModeAutoSafe",
-    description: "settings.memoryReviewModeAutoSafeDesc",
-  },
-};
-
-function modeIcon(mode: MemoryReviewMode) {
-  if (mode === "off") return <TimerReset className="h-4 w-4" />;
-  if (mode === "shadow") return <Eye className="h-4 w-4" />;
-  if (mode === "suggest_only") return <Lightbulb className="h-4 w-4" />;
-  if (mode === "bounded_background") return <BrainCircuit className="h-4 w-4" />;
-  return <ShieldCheck className="h-4 w-4" />;
-}
-
-function modeTone(mode: MemoryReviewMode): BadgeTone {
-  if (mode === "off") return "muted";
-  if (mode === "shadow") return "default";
-  if (mode === "suggest_only") return "warn";
-  return "ok";
-}
-
-function draftFromSnapshot(snapshot: MemoryReviewSnapshot): MemoryReviewConfigDraft {
+function preferenceDraft(
+  snapshot: MemoryReviewSnapshot,
+  memoryEnabled: boolean,
+  crossSessionEnabled: boolean,
+): MemoryReviewConfigDraft {
+  const effectiveCrossSession = memoryEnabled && crossSessionEnabled;
   return {
-    mode: snapshot.mode,
+    memoryEnabled,
+    crossSessionEnabled: effectiveCrossSession,
+    mode: "off",
     cadenceMinutes: snapshot.cadenceMinutes,
     inputCharCap: snapshot.inputCharCap,
     tokenCap: snapshot.tokenCap,
@@ -74,7 +24,7 @@ function draftFromSnapshot(snapshot: MemoryReviewSnapshot): MemoryReviewConfigDr
     inputCostPerMillionUsd: snapshot.inputCostPerMillionUsd,
     outputCostPerMillionUsd: snapshot.outputCostPerMillionUsd,
     retentionDays: snapshot.retentionDays,
-    automaticCaptureEnabled: snapshot.automaticCaptureEnabled,
+    automaticCaptureEnabled: effectiveCrossSession,
     provider: snapshot.provider || snapshot.providerDisclosure.provider || "",
     model: snapshot.model || snapshot.providerDisclosure.model || "",
     scope: snapshot.scope,
@@ -82,82 +32,52 @@ function draftFromSnapshot(snapshot: MemoryReviewSnapshot): MemoryReviewConfigDr
   };
 }
 
-function configFingerprint(snapshot: MemoryReviewSnapshot): string {
-  const draft = draftFromSnapshot(snapshot);
-  return [
-    draft.mode,
-    draft.cadenceMinutes,
-    draft.inputCharCap,
-    draft.tokenCap,
-    draft.costCapUsd,
-    draft.inputCostPerMillionUsd,
-    draft.outputCostPerMillionUsd,
-    draft.retentionDays,
-    draft.automaticCaptureEnabled,
-    draft.provider,
-    draft.model,
-    draft.scope,
-    draft.projectRoot || "",
-  ].map((value) => {
-    const text = String(value);
-    return `${text.length}:${text}`;
-  }).join("|");
-}
-
-function safeDate(value?: string): string {
-  if (!value) return "";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
-}
-
-function safeCount(value: number, minimum = 0): number {
-  return Number.isFinite(value) && value > minimum ? value : minimum;
-}
-
-const JOURNAL_EVENT_LABELS: Record<string, string> = {
-  candidate_proposed: "settings.memoryReviewJournalEventProposed",
-  candidate_transitioned: "settings.memoryReviewJournalEventTransitioned",
-  candidate_promotion_started: "settings.memoryReviewJournalEventPromotionStarted",
-  candidate_promotion_finished: "settings.memoryReviewJournalEventPromotionFinished",
-  candidate_acceptance_undone: "settings.memoryReviewJournalEventUndone",
-  candidate_undo_started: "settings.memoryReviewJournalEventUndoStarted",
-  candidate_erase_started: "settings.memoryReviewJournalEventEraseStarted",
-  candidate_erase_finished: "settings.memoryReviewJournalEventEraseFinished",
-  candidate_invalidated: "settings.memoryReviewJournalEventInvalidated",
-  candidate_invalidated_before_accept: "settings.memoryReviewJournalEventInvalidated",
-  candidate_conflict_marked: "settings.memoryReviewJournalEventConflictMarked",
-  candidate_conflict_cleared: "settings.memoryReviewJournalEventConflictCleared",
-  candidate_retention_erased: "settings.memoryReviewJournalEventRetentionErased",
-  candidate_read: "settings.memoryReviewJournalEventRead",
-  review_run_started: "settings.memoryReviewJournalEventRunStarted",
-  review_run_finished: "settings.memoryReviewJournalEventRunFinished",
-  review_run_state_updated: "settings.memoryReviewJournalEventRunStateUpdated",
-  config_updated: "settings.memoryReviewJournalEventConfigUpdated",
-  shadow_scan_recorded: "settings.memoryReviewJournalEventShadowScan",
-};
-
-const MEMORY_CONSOLIDATION_STAGES = [
-  {
-    label: "settings.memoryConsolidationStageOrganize",
-    description: "settings.memoryConsolidationStageOrganizeDesc",
-  },
-  {
-    label: "settings.memoryConsolidationStageDedupe",
-    description: "settings.memoryConsolidationStageDedupeDesc",
-  },
-  {
-    label: "settings.memoryConsolidationStagePromote",
-    description: "settings.memoryConsolidationStagePromoteDesc",
-  },
-  {
-    label: "settings.memoryConsolidationStageRollback",
-    description: "settings.memoryConsolidationStageRollbackDesc",
-  },
-] as const;
-
-function journalEventLabel(event: string | undefined, t: (key: string) => string): string {
-  const key = event ? JOURNAL_EVENT_LABELS[event] : "";
-  return key ? t(key) : event || "";
+function ToggleRow({
+  checked,
+  disabled = false,
+  busy = false,
+  label,
+  description,
+  testId,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  busy?: boolean;
+  label: string;
+  description: string;
+  testId: string;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-5 rounded-xl border border-border bg-card px-5 py-4">
+      <div className="min-w-0">
+        <div className="font-medium text-foreground">{label}</div>
+        <div className="mt-1 text-sm leading-6 text-muted-foreground">{description}</div>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        aria-label={label}
+        data-memory-toggle={testId}
+        disabled={disabled || busy}
+        onClick={() => onChange(!checked)}
+        className={cn(
+          "relative h-7 w-12 shrink-0 rounded-full border transition-colors",
+          checked ? "border-primary bg-primary" : "border-border bg-muted",
+          (disabled || busy) && "cursor-not-allowed opacity-50",
+        )}
+      >
+        <span
+          className={cn(
+            "absolute top-0.5 h-5 w-5 rounded-full bg-white shadow-sm transition-transform",
+            checked ? "translate-x-5" : "translate-x-0.5",
+          )}
+        />
+      </button>
+    </div>
+  );
 }
 
 export function MemoryReviewSettings({
@@ -178,544 +98,63 @@ export function MemoryReviewSettings({
     selectedProjectPath,
     refreshSignal,
   });
-  const [draft, setDraft] = useState<MemoryReviewConfigDraft | null>(null);
-  const [draftDirty, setDraftDirty] = useState(false);
-  const [remoteConfigChanged, setRemoteConfigChanged] = useState(false);
-  const observedConfig = useRef("");
-  const observedContext = useRef("");
   const snapshot = controller.snapshot;
-  const snapshotConfig = snapshot ? configFingerprint(snapshot) : "";
-  const draftContext = `${endpoint}\u0000${selectedProjectPath}\u0000${snapshot?.projectRoot || ""}`;
+  const memoryEnabled = snapshot?.memoryEnabled !== false;
+  const crossSessionEnabled = memoryEnabled && snapshot?.crossSessionEnabled !== false;
+  const busy = controller.busyKey === "config";
 
-  useEffect(() => {
-    if (!snapshot) {
-      setDraft(null);
-      setDraftDirty(false);
-      setRemoteConfigChanged(false);
-      observedConfig.current = "";
-      observedContext.current = "";
-      return;
-    }
-    const contextChanged = observedContext.current !== draftContext;
-    const configChanged = Boolean(observedConfig.current) && observedConfig.current !== snapshotConfig;
-    observedContext.current = draftContext;
-    observedConfig.current = snapshotConfig;
-    if (contextChanged || !draftDirty) {
-      setDraft(draftFromSnapshot(snapshot));
-      setDraftDirty(false);
-      setRemoteConfigChanged(false);
-      return;
-    }
-    if (configChanged) {
-      setRemoteConfigChanged(true);
-    }
-  }, [draftContext, draftDirty, snapshot, snapshotConfig]);
-
-  const editDraft = (next: SetStateAction<MemoryReviewConfigDraft | null>) => {
-    setDraftDirty(true);
-    setDraft(next);
+  const updatePreferences = (nextMemoryEnabled: boolean, nextCrossSessionEnabled: boolean) => {
+    if (!snapshot) return;
+    void controller.saveConfig(preferenceDraft(
+      snapshot,
+      nextMemoryEnabled,
+      nextCrossSessionEnabled,
+    ));
   };
-
-  const saveDraft = async () => {
-    if (!draft) return;
-    if (await controller.saveConfig(draft)) {
-      setDraftDirty(false);
-    }
-  };
-
-  const reloadDraft = () => {
-    setDraftDirty(false);
-  };
-
-  const projectScopeBlocked = draft?.scope === "project" && !selectedProjectPath;
-  const providerConfigChanged = snapshot?.providerDisclosure.activeConfigMatches === false;
-  const projectBindingChanged = draft?.scope === "project" && snapshot?.configuredProjectMatches === false;
-  const configDirty = Boolean(draft && snapshot && (
-    draft.mode !== snapshot.mode
-    || draft.cadenceMinutes !== snapshot.cadenceMinutes
-    || draft.inputCharCap !== snapshot.inputCharCap
-    || draft.tokenCap !== snapshot.tokenCap
-    || draft.costCapUsd !== snapshot.costCapUsd
-    || draft.inputCostPerMillionUsd !== snapshot.inputCostPerMillionUsd
-    || draft.outputCostPerMillionUsd !== snapshot.outputCostPerMillionUsd
-    || draft.retentionDays !== snapshot.retentionDays
-    || draft.automaticCaptureEnabled !== snapshot.automaticCaptureEnabled
-    || draft.provider !== (snapshot.provider || snapshot.providerDisclosure.provider || "")
-    || draft.model !== (snapshot.model || snapshot.providerDisclosure.model || "")
-    || draft.scope !== snapshot.scope
-    || projectBindingChanged
-    || providerConfigChanged
-  ));
-  const runState = String(snapshot?.runStatus?.state || "idle").toLowerCase();
-  const runActive = ["queued", "scanning", "provider_call", "persisting"].includes(runState);
-  const runStatusKey = runActive
-    ? "settings.memoryReviewRunActive"
-    : runState === "completed"
-      ? "settings.memoryReviewRunCompleted"
-      : runState === "failed"
-        ? "settings.memoryReviewRunFailed"
-        : runState === "timed_out"
-          ? "settings.memoryReviewRunTimedOut"
-          : runState === "skipped"
-            ? "settings.memoryReviewRunDeferred"
-        : runState === "cancelled"
-          ? "settings.memoryReviewRunCancelled"
-          : "settings.memoryReviewRunIdle";
-  const nextRun = safeDate(snapshot?.nextRunAt);
-  const lastRun = safeDate(snapshot?.lastRun?.completedAt || snapshot?.lastRun?.startedAt);
-  const shadowScannedAt = safeDate(snapshot?.shadowSummary?.scannedAt);
-  const shadowSkipped = Object.entries(snapshot?.shadowSummary?.reasonCounts || {})
-    .filter(([reason]) => reason !== "admitted")
-    .reduce((total, [, count]) => total + safeCount(Number(count)), 0);
-  const lastRunUsage = snapshot?.lastRun?.usage;
-  const providerDisclosure = snapshot?.providerDisclosure;
 
   return (
-    <section className="space-y-5" data-memory-review-settings>
-      <div className="flex flex-wrap items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-base font-semibold">
-              <BrainCircuit className="mr-1.5 inline-block h-4 w-4 align-text-bottom" />
-              {t("settings.memoryReviewTitle")}
-            </h2>
-            {snapshot ? (
-              <Badge tone={modeTone(snapshot.mode)}>
-                {t(MODE_KEYS[snapshot.mode].label)}
-              </Badge>
-            ) : null}
-            {(snapshot?.unreadCount || 0) > 0 ? (
-              <Badge tone="warn">
-                {t("settings.memoryReviewUnreadCount", { count: snapshot?.unreadCount || 0 })}
-              </Badge>
-            ) : null}
-          </div>
-          <p className="mt-1 text-sm text-muted-foreground">{t("settings.memoryReviewDesc")}</p>
+    <section className="space-y-5" data-memory-preferences>
+      <div className="flex items-start gap-3">
+        <Brain className="mt-0.5 h-5 w-5 text-primary" />
+        <div>
+          <h2 className="text-xl font-semibold text-foreground">{t("settings.memoryPreferencesTitle")}</h2>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">{t("settings.memoryPreferencesDesc")}</p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="h-9 px-3"
-          disabled={!runtimeConnected || controller.loading || Boolean(controller.busyKey)}
-          onClick={() => void controller.refresh(true)}
-        >
-          <RefreshCw className={cn("h-4 w-4", controller.loading && "animate-spin")} />
-          {t("common.refresh")}
-        </Button>
       </div>
 
-      {!runtimeConnected ? (
-        <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
-          {t("settings.memoryReviewRuntimeRequired")}
-        </div>
-      ) : null}
-      {controller.error ? (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive" role="alert">
-          {controller.error === "stale_revision"
-            ? t("settings.memoryReviewStaleRevision")
-            : t("settings.memoryReviewRequestFailed")}
-        </div>
-      ) : null}
-      {providerConfigChanged ? (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-foreground" role="status">
-          {t("settings.memoryReviewProviderChanged")}
-        </div>
-      ) : null}
-      {projectBindingChanged ? (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-foreground" role="status">
-          {t("settings.memoryReviewProjectChanged")}
-        </div>
-      ) : null}
-      {remoteConfigChanged ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-foreground" role="status">
-          <span className="min-w-0 flex-1">{t("settings.memoryReviewRemoteConfigChanged")}</span>
-          <Button type="button" variant="outline" className="h-8 px-2" onClick={reloadDraft}>
-            {t("settings.memoryReviewReloadConfig")}
-          </Button>
-        </div>
-      ) : null}
-
-      {controller.loading && !snapshot ? (
-        <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
+      {!runtimeConnected || controller.loading || !snapshot ? (
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-5 py-4 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
-          {t("common.loading")}
+          {t("settings.memoryPreferencesLoading")}
         </div>
-      ) : null}
+      ) : (
+        <div className="space-y-3">
+          <ToggleRow
+            checked={memoryEnabled}
+            busy={busy}
+            label={t("settings.memoryEnabled")}
+            description={t("settings.memoryEnabledDesc")}
+            testId="memory"
+            onChange={(checked) => updatePreferences(checked, checked ? crossSessionEnabled : false)}
+          />
+          <ToggleRow
+            checked={crossSessionEnabled}
+            disabled={!memoryEnabled}
+            busy={busy}
+            label={t("settings.crossSessionMemory")}
+            description={t("settings.crossSessionMemoryDesc")}
+            testId="cross-session"
+            onChange={(checked) => updatePreferences(memoryEnabled, checked)}
+          />
+        </div>
+      )}
 
-      {draft && snapshot ? (
-        <>
-          <div className="rounded-lg border border-border bg-card p-4" data-memory-consolidation-stages>
-            <h3 className="mb-3 text-sm font-semibold">{t("settings.memoryConsolidationStages")}</h3>
-            <ol className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {MEMORY_CONSOLIDATION_STAGES.map((stage, index) => (
-                <li
-                  key={stage.label}
-                  className="rounded-md border border-border/70 bg-muted/30 p-3"
-                  data-memory-consolidation-stage
-                >
-                  <div className="mb-1 flex items-center gap-2">
-                    <Badge tone="muted">{index + 1}</Badge>
-                    <span className="text-sm font-medium text-foreground">{t(stage.label)}</span>
-                  </div>
-                  <p className="text-xs leading-5 text-muted-foreground">{t(stage.description)}</p>
-                </li>
-              ))}
-            </ol>
-          </div>
-
-          <div>
-            <h3 className="text-sm font-semibold">{t("settings.memoryReviewModeLabel")}</h3>
-            <div className="mt-2 grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
-              {MEMORY_REVIEW_MODES.map((mode) => (
-                <button
-                  key={mode}
-                  type="button"
-                  aria-pressed={draft.mode === mode}
-                  disabled={!runtimeConnected || Boolean(controller.busyKey) || mode === "auto_safe"}
-                  onClick={() => editDraft((current) => current ? {
-                    ...current,
-                    mode,
-                    ...(mode === "off" || mode === "shadow"
-                      ? {
-                          costCapUsd: 0,
-                          inputCostPerMillionUsd: 0,
-                          outputCostPerMillionUsd: 0,
-                        }
-                      : {}),
-                  } : current)}
-                  className={cn(
-                    "rounded-lg border p-3 text-left transition-colors",
-                    draft.mode === mode
-                      ? "border-primary bg-primary/10"
-                      : "border-border bg-card hover:bg-accent",
-                  )}
-                  data-memory-review-mode={mode}
-                >
-                  <span className="flex items-center gap-2 text-sm font-medium">
-                    {modeIcon(mode)}
-                    {t(MODE_KEYS[mode].label)}
-                    {mode === "auto_safe" ? (
-                      <Badge tone="muted" className="ml-auto h-6">{t("settings.memoryReviewModePlanned")}</Badge>
-                    ) : null}
-                  </span>
-                  <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
-                    {t(MODE_KEYS[mode].description)}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="grid gap-4 rounded-lg border border-border bg-card p-4 md:grid-cols-2 xl:grid-cols-3">
-            <label className="flex items-start gap-3 text-sm">
-              <input type="checkbox" checked={draft.automaticCaptureEnabled} disabled={Boolean(controller.busyKey)}
-                onChange={(event) => editDraft({ ...draft, automaticCaptureEnabled: event.target.checked })} />
-              <span>
-                <span className="block font-medium">{t("settings.automaticMemoryCapture")}</span>
-                <span className="mt-1 block text-xs leading-relaxed text-muted-foreground">
-                  {t("settings.automaticMemoryCaptureDesc")}
-                </span>
-              </span>
-            </label>
-            <label className="text-sm">
-              <span className="font-medium">{t("settings.memoryReviewScopeLabel")}</span>
-              <select
-                value={draft.scope}
-                disabled={Boolean(controller.busyKey)}
-                onChange={(event) => editDraft({
-                  ...draft,
-                  scope: event.target.value === "project" ? "project" : "user",
-                  projectRoot: event.target.value === "project" ? selectedProjectPath || undefined : undefined,
-                })}
-                className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3"
-              >
-                <option value="user">{t("settings.memoryReviewScopeUser")}</option>
-                <option value="project" disabled={!selectedProjectPath}>{t("settings.memoryReviewScopeProject")}</option>
-              </select>
-              {projectScopeBlocked ? (
-                <span className="mt-1 block text-xs text-destructive">{t("settings.memoryReviewProjectRequired")}</span>
-              ) : null}
-            </label>
-            <label className="text-sm">
-              <span className="font-medium">{t("settings.memoryReviewCadence")}</span>
-              <input
-                type="number"
-                min={30}
-                step={30}
-                value={draft.cadenceMinutes}
-                disabled={Boolean(controller.busyKey)}
-                onChange={(event) => editDraft({ ...draft, cadenceMinutes: safeCount(event.target.valueAsNumber, 30) })}
-                className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="font-medium">{t("settings.memoryReviewRetentionDays")}</span>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={draft.retentionDays}
-                disabled={Boolean(controller.busyKey)}
-                onChange={(event) => editDraft({ ...draft, retentionDays: safeCount(event.target.valueAsNumber, 1) })}
-                className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="font-medium">{t("settings.memoryReviewInputCap")}</span>
-              <input
-                type="number"
-                min={1_000}
-                step={1_000}
-                value={draft.inputCharCap}
-                disabled={Boolean(controller.busyKey)}
-                onChange={(event) => editDraft({ ...draft, inputCharCap: safeCount(event.target.valueAsNumber, 1_000) })}
-                className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="font-medium">{t("settings.memoryReviewTokenCap")}</span>
-              <input
-                type="number"
-                min={128}
-                step={128}
-                value={draft.tokenCap}
-                disabled={Boolean(controller.busyKey)}
-                onChange={(event) => editDraft({ ...draft, tokenCap: safeCount(event.target.valueAsNumber, 128) })}
-                className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="font-medium">{t("settings.memoryReviewCostCap")}</span>
-              <input
-                type="number"
-                min={0}
-                max={100}
-                step={0.01}
-                value={draft.costCapUsd}
-                disabled={Boolean(controller.busyKey) || draft.mode === "off" || draft.mode === "shadow"}
-                onChange={(event) => editDraft({ ...draft, costCapUsd: safeCount(event.target.valueAsNumber) })}
-                className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="font-medium">{t("settings.memoryReviewInputPrice")}</span>
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={draft.inputCostPerMillionUsd}
-                disabled={Boolean(controller.busyKey) || draft.mode === "off" || draft.mode === "shadow"}
-                onChange={(event) => editDraft({ ...draft, inputCostPerMillionUsd: safeCount(event.target.valueAsNumber) })}
-                className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-            <label className="text-sm">
-              <span className="font-medium">{t("settings.memoryReviewOutputPrice")}</span>
-              <input
-                type="number"
-                min={0}
-                step={0.01}
-                value={draft.outputCostPerMillionUsd}
-                disabled={Boolean(controller.busyKey) || draft.mode === "off" || draft.mode === "shadow"}
-                onChange={(event) => editDraft({ ...draft, outputCostPerMillionUsd: safeCount(event.target.valueAsNumber) })}
-                className="mt-1 h-10 w-full rounded-md border border-border bg-background px-3"
-              />
-            </label>
-          </div>
-          {draft.mode === "suggest_only" || draft.mode === "bounded_background" ? (
-            <p className="-mt-2 text-xs text-muted-foreground">
-              {t("settings.memoryReviewPricingHelp")}
-            </p>
-          ) : null}
-
-          <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge tone={providerDisclosure?.paidRun ? "warn" : "ok"}>
-                {providerDisclosure?.paidRun
-                  ? t("settings.memoryReviewPaidRun")
-                  : t("settings.memoryReviewNoPaidRun")}
-              </Badge>
-              <span className="text-muted-foreground">{t(runStatusKey)}</span>
-            </div>
-            {providerDisclosure?.paidRun ? (
-              <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-4">
-                <div>
-                  <dt className="text-muted-foreground">{t("settings.memoryReviewProvider")}</dt>
-                  <dd className="mt-0.5 font-medium">{providerDisclosure.providerLabel || providerDisclosure.provider || t("common.unavailable")}</dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">{t("settings.memoryReviewModel")}</dt>
-                  <dd className="mt-0.5 font-medium">{providerDisclosure.model || t("common.unavailable")}</dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">{t("settings.memoryReviewTokenCap")}</dt>
-                  <dd className="mt-0.5 font-medium">{providerDisclosure.tokenCap ?? t("common.unavailable")}</dd>
-                </div>
-                <div>
-                  <dt className="text-muted-foreground">{t("settings.memoryReviewCostCap")}</dt>
-                  <dd className="mt-0.5 font-medium">
-                    {typeof providerDisclosure.costCapUsd === "number" && providerDisclosure.costCapUsd > 0
-                      ? `$${providerDisclosure.costCapUsd.toFixed(4)}`
-                      : t("settings.memoryReviewCostUnavailable")}
-                  </dd>
-                </div>
-              </dl>
-            ) : null}
-            {snapshot.lastRun?.provider || snapshot.lastRun?.model ? (
-              <div className="mt-3 border-t border-border pt-3" data-memory-review-last-run-evidence>
-                <p className="text-xs font-medium text-foreground">
-                  {t("settings.memoryReviewLastRunEvidence", {
-                    inputCap: snapshot.lastRun.budget?.inputCharCap ?? t("common.unavailable"),
-                    tokenCap: snapshot.lastRun.budget?.tokenCap ?? t("common.unavailable"),
-                  })}
-                </p>
-                <dl className="mt-2 grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-4">
-                  <div>
-                    <dt className="text-muted-foreground">{t("settings.memoryReviewProvider")}</dt>
-                    <dd className="mt-0.5 font-medium">{snapshot.lastRun.provider || t("common.unavailable")}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">{t("settings.memoryReviewModel")}</dt>
-                    <dd className="mt-0.5 font-medium">{snapshot.lastRun.model || t("common.unavailable")}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">{t("settings.memoryReviewTokenUsage")}</dt>
-                    <dd className="mt-0.5 font-medium">{lastRunUsage?.totalTokens ?? t("common.unavailable")}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-muted-foreground">
-                      {typeof lastRunUsage?.costUpperBoundUsd === "number"
-                        ? t("settings.memoryReviewBoundedRunCost")
-                        : t("settings.memoryReviewActualCost")}
-                    </dt>
-                    <dd className="mt-0.5 font-medium">
-                      {typeof lastRunUsage?.costUpperBoundUsd === "number"
-                        ? t("settings.memoryReviewRetryCostUpperBound", {
-                          cost: lastRunUsage.costUpperBoundUsd.toFixed(4),
-                          count: lastRunUsage.attempts || snapshot.lastRun.attempt || 1,
-                        })
-                        : typeof lastRunUsage?.costUsd === "number"
-                        ? `$${lastRunUsage.costUsd.toFixed(4)}`
-                        : t("settings.memoryReviewCostUnavailable")}
-                    </dd>
-                  </div>
-                </dl>
-              </div>
-            ) : null}
-            {nextRun || lastRun ? (
-              <p className="mt-3 text-xs text-muted-foreground">
-                {nextRun ? t("settings.memoryReviewNextRun", { time: nextRun }) : ""}
-                {nextRun && lastRun ? " · " : ""}
-                {lastRun ? t("settings.memoryReviewLastRun", { time: lastRun }) : ""}
-              </p>
-            ) : null}
-          </div>
-
-          {snapshot.shadowSummary ? (
-            <div className="rounded-lg border border-border bg-card p-4 text-sm" data-memory-review-shadow-summary>
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge tone="default">{t("settings.memoryReviewShadowSummary")}</Badge>
-                <span className="font-medium">
-                  {t("settings.memoryReviewShadowEligible", {
-                    count: safeCount(snapshot.shadowSummary.eligibleCount),
-                  })}
-                </span>
-                <span className="text-muted-foreground">
-                  {t("settings.memoryReviewShadowSkipped", { count: shadowSkipped })}
-                </span>
-              </div>
-              {shadowScannedAt ? (
-                <p className="mt-2 text-xs text-muted-foreground">
-                  {t("settings.memoryReviewShadowScannedAt", { time: shadowScannedAt })}
-                </p>
-              ) : null}
-            </div>
-          ) : null}
-
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              disabled={!runtimeConnected || Boolean(controller.busyKey) || projectScopeBlocked}
-              onClick={() => void saveDraft()}
-            >
-              {controller.busyKey === "config" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {t("settings.memoryReviewSave")}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={
-                !runtimeConnected
-                || Boolean(controller.busyKey)
-                || projectScopeBlocked
-                || draft.mode === "off"
-                || runActive
-                || configDirty
-                || providerConfigChanged
-              }
-              onClick={() => void controller.startReview(draft.scope)}
-            >
-              {controller.busyKey === "run" || runActive
-                ? <Loader2 className="h-4 w-4 animate-spin" />
-                : <Play className="h-4 w-4" />}
-              {draft.mode === "shadow"
-                ? t("settings.memoryReviewRunShadow")
-                : t("settings.memoryReviewRun")}
-            </Button>
-            {runActive ? (
-              <Button
-                type="button"
-                variant="danger"
-                disabled={!runtimeConnected || controller.cancelling}
-                onClick={() => void controller.cancelRun()}
-              >
-                {controller.cancelling
-                  ? <Loader2 className="h-4 w-4 animate-spin" />
-                  : <Square className="h-4 w-4" />}
-                {t("settings.memoryReviewCancelRun")}
-              </Button>
-            ) : null}
-          </div>
-
-          <div>
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <h3 className="text-sm font-semibold">{t("settings.memoryReviewInbox")}</h3>
-              <Badge tone="muted">{snapshot.candidates.length}</Badge>
-            </div>
-            <MemoryReviewInbox
-              candidates={snapshot.candidates}
-              busyKey={controller.busyKey}
-              runtimeConnected={runtimeConnected}
-              onDecision={controller.decideCandidate}
-            />
-          </div>
-
-          {snapshot.journal && snapshot.journal.length > 0 ? (
-            <div className="rounded-lg border border-border bg-card p-4" data-memory-review-journal>
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <h3 className="text-sm font-semibold">{t("settings.memoryReviewJournal")}</h3>
-                <Badge tone="muted">{snapshot.journal.length}</Badge>
-              </div>
-              <ul className="max-h-64 space-y-2 overflow-auto pr-1" data-memory-review-journal-list>
-                {snapshot.journal.map((entry) => (
-                  <li
-                    key={entry.eventId || `${entry.event || "event"}-${entry.createdAt || entry.candidateId || "row"}`}
-                    className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-xs"
-                    data-memory-review-journal-entry
-                  >
-                    <span className="font-medium text-foreground">{journalEventLabel(entry.event, t)}</span>
-                    {entry.createdAt ? <span className="text-muted-foreground">{safeDate(entry.createdAt)}</span> : null}
-                    {entry.state ? <Badge tone="muted">{entry.state}</Badge> : null}
-                    {entry.phase ? <Badge tone="muted">{entry.phase}</Badge> : null}
-                    {entry.candidateId ? (
-                      <span className="min-w-0 truncate font-mono text-[10px] text-muted-foreground">{entry.candidateId}</span>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </>
+      {controller.error ? (
+        <div className="text-sm text-destructive">
+          {t(controller.error === "stale_revision"
+            ? "settings.memoryReviewStaleRevision"
+            : "settings.memoryReviewRequestFailed")}
+        </div>
       ) : null}
     </section>
   );

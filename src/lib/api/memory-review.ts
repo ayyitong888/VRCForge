@@ -151,6 +151,8 @@ export type MemoryReviewJournalEntry = {
 export type MemoryReviewSnapshot = {
   ok?: boolean;
   schema: string;
+  memoryEnabled: boolean;
+  crossSessionEnabled: boolean;
   mode: MemoryReviewMode;
   policyVersion: string;
   revision: number;
@@ -180,6 +182,8 @@ export type MemoryReviewSnapshot = {
 };
 
 export type MemoryReviewConfigMutation = {
+  memoryEnabled?: boolean;
+  crossSessionEnabled?: boolean;
   mode: MemoryReviewMode;
   cadenceMinutes: number;
   inputCharCap: number;

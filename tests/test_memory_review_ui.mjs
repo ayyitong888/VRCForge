@@ -9,133 +9,51 @@ const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
 const api = read("src/lib/api/memory-review.ts");
 const hook = read("src/hooks/use-memory-review.ts");
 const settings = read("src/components/settings/memory-review-settings.tsx");
-const inbox = read("src/components/settings/memory-review-inbox.tsx");
+const workspace = read("src/components/settings/settings-workspace.tsx");
 
-for (const mode of ["off", "shadow", "suggest_only", "bounded_background", "auto_safe"]) {
-  assert.match(api, new RegExp(`"${mode}"`), `missing ${mode} transport mode`);
-  assert.match(settings, new RegExp(`${mode}:|mode === "${mode}"|mode=\\{mode\\}`), `missing ${mode} UI state`);
-}
-assert.match(api, /normalizeMemoryReviewMode/);
-assert.match(api, /: "off"/);
-assert.match(api, /MemoryReviewCandidateAction = "accept" \| "reject" \| "defer" \| "erase" \| "undo" \| "read"/);
-assert.match(api, /schema: string/);
-assert.match(api, /policyVersion: string/);
-assert.match(api, /revision: number/);
-assert.match(api, /runStatus: MemoryReviewRunStatus/);
-assert.match(api, /unreadCount: number/);
-assert.match(api, /candidates: MemoryReviewCandidate\[\]/);
-assert.match(api, /providerDisclosure: MemoryReviewProviderDisclosure/);
-assert.match(api, /activeConfigMatches\?: boolean/);
-assert.match(api, /requestedProjectRoot\?: string/);
-assert.match(api, /configuredProjectMatches\?: boolean/);
-assert.match(api, /conflictCount\?: number/);
-assert.doesNotMatch(api, /confidenceFactors\?:/);
-assert.match(api, /usage\?: MemoryReviewUsage/);
-assert.match(api, /provider\?: string/);
-assert.match(api, /model\?: string/);
-assert.match(api, /budget\?: MemoryReviewRunBudget/);
-assert.match(api, /shadowSummary\?: MemoryReviewShadowSummary/);
-for (const field of [
-  "mode",
-  "cadenceMinutes",
-  "inputCharCap",
-  "tokenCap",
-  "costCapUsd",
-  "inputCostPerMillionUsd",
-  "outputCostPerMillionUsd",
-  "retentionDays",
-  "provider",
-  "model",
-  "scope",
-  "projectRoot",
-  "expectedRevision",
-]) {
-  assert.match(api, new RegExp(`${field}[?:]+`), `missing ${field} config contract`);
-}
+assert.match(api, /memoryEnabled: boolean/);
+assert.match(api, /crossSessionEnabled: boolean/);
+assert.match(api, /memoryEnabled\?: boolean/);
+assert.match(api, /crossSessionEnabled\?: boolean/);
+assert.match(api, /expectedRevision: number/);
 assert.match(api, /fetch_agent_memory_review/);
 assert.match(api, /update_agent_memory_review/);
-assert.match(api, /run_agent_memory_review/);
-assert.match(api, /mutate_agent_memory_review_candidate/);
-assert.match(api, /\/api\/app\/agent\/memory\/review/);
-assert.match(api, /\/candidates\/\$\{encodedId\}\/\$\{action\}/);
-assert.match(api, /timeoutMs: 1_200_000/);
 
-assert.match(hook, /contextEpoch = useRef\(0\)/);
-assert.match(hook, /requestSerial = useRef\(0\)/);
-assert.match(hook, /lastAppliedRequest = useRef\(0\)/);
-assert.match(hook, /next\.revision < currentRevision/);
-assert.match(hook, /next\.revision === currentRevision && requestId < lastAppliedRequest\.current/);
-assert.match(hook, /expectedEpoch !== contextEpoch\.current/);
+assert.match(hook, /memoryEnabled: snapshot\.memoryEnabled !== false/);
+assert.match(hook, /crossSessionEnabled: snapshot\.memoryEnabled !== false && snapshot\.crossSessionEnabled !== false/);
 assert.match(hook, /expectedRevision: finiteRevision\(current\.revision\)/);
-assert.match(hook, /candidate\?\.scope === "project"/);
-assert.doesNotMatch(hook, /action === "accept" \|\| action === "erase" \|\| action === "undo"/);
-assert.match(hook, /projectRoot: current\.projectRoot \|\| selectedProjectPath \|\| undefined/);
-assert.match(hook, /previousRefreshSignal\.current === refreshSignal/);
-assert.match(hook, /void refresh\(false\)/);
 assert.match(hook, /setError\("stale_revision"\)/);
 assert.match(hook, /setError\("request_failed"\)/);
-assert.doesNotMatch(hook, /cause\.message|JSON\.stringify\(cause\)/);
 
-assert.match(settings, /data-memory-review-settings/);
-assert.match(settings, /mode === "auto_safe"/);
-assert.match(settings, /memoryReviewModePlanned/);
-assert.match(settings, /min=\{30\}/);
-assert.match(settings, /safeCount\(event\.target\.valueAsNumber, 30\)/);
-assert.match(settings, /providerDisclosure\?\.paidRun/);
-assert.match(settings, /providerDisclosure\.tokenCap/);
-assert.match(settings, /providerDisclosure\.costCapUsd/);
-assert.match(settings, /draft\.inputCostPerMillionUsd/);
-assert.match(settings, /draft\.outputCostPerMillionUsd/);
-assert.match(settings, /memoryReviewPricingHelp/);
-assert.match(settings, /lastRunUsage\?\.totalTokens/);
-assert.match(settings, /lastRunUsage\.costUsd\.toFixed\(4\)/);
-assert.match(settings, /snapshot\.lastRun\.provider/);
-assert.match(settings, /snapshot\.lastRun\.model/);
-assert.match(settings, /snapshot\.lastRun\.budget\?\.inputCharCap/);
-assert.match(settings, /data-memory-review-last-run-evidence/);
-assert.match(settings, /data-memory-review-shadow-summary/);
-assert.match(settings, /data-memory-consolidation-stages/);
-assert.match(settings, /MEMORY_CONSOLIDATION_STAGES\.map/);
-assert.match(settings, /data-memory-consolidation-stage/);
-assert.match(settings, /data-memory-review-journal/);
-assert.match(settings, /snapshot\.journal && snapshot\.journal\.length > 0/);
-assert.match(settings, /data-memory-review-journal-entry/);
-assert.match(settings, /journalEventLabel\(entry\.event, t\)/);
-assert.match(api, /MemoryReviewJournalEntry/);
-assert.match(api, /journal\?: MemoryReviewJournalEntry\[\]/);
+assert.match(settings, /data-memory-preferences/);
+assert.equal((settings.match(/data-memory-toggle=/g) || []).length, 1, "toggle marker must be defined once by the shared row");
+assert.match(settings, /testId="memory"/);
+assert.match(settings, /testId="cross-session"/);
+assert.match(settings, /role="switch"/);
+assert.match(settings, /disabled=\{!memoryEnabled\}/);
+assert.match(settings, /mode: "off"/);
+assert.match(settings, /automaticCaptureEnabled: effectiveCrossSession/);
+assert.match(settings, /settings\.memoryPreferencesTitle/);
+assert.match(settings, /settings\.memoryEnabled/);
+assert.match(settings, /settings\.crossSessionMemory/);
 
-assert.match(settings, /controller\.saveConfig\(draft\)/);
-assert.match(settings, /controller\.startReview\(draft\.scope\)/);
-assert.match(settings, /const configDirty = Boolean/);
-assert.match(settings, /\|\| configDirty/);
-assert.match(settings, /function configFingerprint/);
-assert.match(settings, /const snapshotConfig = snapshot \? configFingerprint\(snapshot\) : ""/);
-assert.match(settings, /if \(contextChanged \|\| !draftDirty\)/);
-assert.match(settings, /if \(configChanged\)/);
-assert.match(settings, /setDraftDirty\(true\)/);
-assert.match(settings, /remoteConfigChanged/);
-assert.match(settings, /memoryReviewRemoteConfigChanged/);
-assert.match(settings, /memoryReviewReloadConfig/);
-assert.doesNotMatch(settings, /\[snapshot\?\.revision, snapshot\?\.projectRoot\]/);
-assert.match(settings, /providerConfigChanged/);
-assert.match(settings, /memoryReviewProviderChanged/);
-assert.match(settings, /projectBindingChanged/);
-assert.match(settings, /memoryReviewProjectChanged/);
-assert.match(settings, /<MemoryReviewInbox/);
-assert.match(settings, /memoryReviewRunTimedOut/);
-assert.match(settings, /memoryReviewRunDeferred/);
-assert.doesNotMatch(settings, /failureLabel|costUnavailableReason|JSON\.stringify/);
-
-for (const action of ["accept", "reject", "defer", "erase", "undo"]) {
-  assert.match(inbox, new RegExp(`"${action}"`), `missing ${action} candidate action`);
+for (const forbidden of [
+  "MEMORY_REVIEW_MODES",
+  "MemoryReviewInbox",
+  "memoryReviewModeShadow",
+  "memoryReviewModeSuggest",
+  "memoryReviewModeBackground",
+  "memoryReviewModeAutoSafe",
+  "memoryConsolidationStage",
+  "memoryReviewJournal",
+  "memoryReviewProvider",
+  "memoryReviewToken",
+  "memoryReviewCost",
+  "startReview",
+]) {
+  assert.doesNotMatch(settings, new RegExp(forbidden), `advanced Memory UI must stay hidden: ${forbidden}`);
 }
-assert.match(inbox, /onDecision\(firstUnreadId, "read"\)/);
-assert.match(inbox, /editedText\.trim\(\)/);
-assert.match(inbox, /candidate\.proposedText/);
-assert.match(inbox, /candidate\.evidenceCount/);
-assert.match(inbox, /candidate\.conflictCount/);
-assert.doesNotMatch(inbox, /candidate\.(projectRoot|confidenceFactors|conflicts|supersedes|usage)/);
-assert.doesNotMatch(inbox, /failureLabel|costUnavailableReason|JSON\.stringify/);
+assert.doesNotMatch(workspace, /MemorySettingsPanel/);
 
 const localeNames = ["en-US", "ja-JP", "zh-CN", "zh-TW"];
 const locales = localeNames.map((name) => [name, JSON.parse(read(`src/locales/${name}.json`))]);
@@ -152,35 +70,13 @@ const placeholders = (value) => [...String(value || "").matchAll(/{{\s*([^}\s]+)
   .sort();
 const reference = flatten(locales[0][1]);
 const requiredKeys = [
-  "settings.memoryReviewTitle",
-  "settings.memoryReviewModeOff",
-  "settings.memoryReviewModeShadow",
-  "settings.memoryReviewModeSuggest",
-  "settings.memoryReviewModeBackground",
-  "settings.memoryReviewModeAutoSafe",
-  "settings.memoryReviewPaidRun",
-  "settings.memoryReviewNoPaidRun",
-  "settings.memoryReviewTokenUsage",
-  "settings.memoryReviewActualCost",
-  "settings.memoryReviewLastRunEvidence",
-  "settings.memoryReviewInputPrice",
-  "settings.memoryReviewOutputPrice",
-  "settings.memoryReviewPricingHelp",
-  "settings.memoryReviewRunTimedOut",
-  "settings.memoryReviewRunDeferred",
-  "settings.memoryReviewShadowSummary",
-  "settings.memoryReviewShadowEligible",
-  "settings.memoryReviewShadowSkipped",
-  "settings.memoryReviewShadowScannedAt",
-  "settings.memoryReviewAccept",
-  "settings.memoryReviewAcceptEdited",
-  "settings.memoryReviewReject",
-  "settings.memoryReviewDefer",
-  "settings.memoryReviewUndo",
-  "settings.memoryReviewPermanentErase",
-  "settings.memoryReviewStaleRevision",
-  "settings.memoryReviewRemoteConfigChanged",
-  "settings.memoryReviewReloadConfig",
+  "settings.memoryPreferencesTitle",
+  "settings.memoryPreferencesDesc",
+  "settings.memoryPreferencesLoading",
+  "settings.memoryEnabled",
+  "settings.memoryEnabledDesc",
+  "settings.crossSessionMemory",
+  "settings.crossSessionMemoryDesc",
 ];
 for (const [name, locale] of locales) {
   const entries = flatten(locale);
@@ -193,4 +89,4 @@ for (const [name, locale] of locales) {
   }
 }
 
-console.log("memory review UI contract: ok");
+console.log("memory preferences UI contract: ok");

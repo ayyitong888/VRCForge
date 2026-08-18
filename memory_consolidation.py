@@ -41,6 +41,12 @@ MEMORY_REVIEW_AUDIT_SCHEMA = "vrcforge.memory_review_audit.v1"
 MEMORY_REVIEW_RUN_SCHEMA = "vrcforge.memory_review_run.v1"
 MEMORY_REVIEW_VALIDATED_RESULT_SCHEMA = "vrcforge.memory_review_validated_result.v1"
 MEMORY_REVIEW_POLICY_VERSION = "memory-review-policy-v1"
+DREAMING_CADENCE_MINUTES = 1_440
+DREAMING_MIN_CHANGED_MEMORIES = 5
+DREAMING_MAX_MEMORIES = 80
+DREAMING_INPUT_CHAR_CAP = 40_000
+DREAMING_OUTPUT_TOKEN_CAP = 2_048
+DREAMING_MAX_REMOVAL_FRACTION = 0.25
 
 MODE_OFF = "off"
 MODE_SHADOW = "shadow"
@@ -157,6 +163,9 @@ _JOURNAL_EVENTS = frozenset({
     "review_run_state_updated",
     "config_updated",
     "shadow_scan_recorded",
+    "dreaming_finished",
+    "dreaming_failed",
+    "dreaming_rolled_back",
 })
 _ALLOWED_SOURCE_TYPES = frozenset({"user_chat", "adopted_task", "validated_project_result"})
 _ALLOWED_CONFIDENCE_FACTORS = frozenset(
@@ -221,6 +230,8 @@ def _review_config_digest(config: Mapping[str, Any]) -> str:
     """Bind a paid run to the complete normalized configuration generation."""
 
     fields = (
+        "memoryEnabled",
+        "crossSessionEnabled",
         "mode",
         "cadenceMinutes",
         "provider",
@@ -793,6 +804,8 @@ class MemoryReviewStore:
             "schema": MEMORY_REVIEW_STORE_SCHEMA,
             "revision": 0,
             "config": {
+                "memoryEnabled": True,
+                "crossSessionEnabled": True,
                 "mode": MODE_OFF,
                 "cadenceMinutes": 1_440,
                 "provider": "",
@@ -804,6 +817,9 @@ class MemoryReviewStore:
                 "outputCostPerMillionUsd": 0.0,
                 "retentionDays": 30,
                 "automaticCaptureEnabled": True,
+                "lastDreamingAt": "",
+                "lastDreamingRunId": "",
+                "lastDreamingDeletedMemoryIds": [],
                 "scopeKind": "user",
                 "projectScopeKey": "",
             },
@@ -870,6 +886,8 @@ class MemoryReviewStore:
             raise StoreCorruptionError("Memory Review config is invalid.")
         raw_config = payload.get("config") if isinstance(payload.get("config"), dict) else {}
         allowed_config = {
+            "memoryEnabled",
+            "crossSessionEnabled",
             "mode",
             "cadenceMinutes",
             "provider",
@@ -881,6 +899,9 @@ class MemoryReviewStore:
             "outputCostPerMillionUsd",
             "retentionDays",
             "automaticCaptureEnabled",
+            "lastDreamingAt",
+            "lastDreamingRunId",
+            "lastDreamingDeletedMemoryIds",
             "scopeKind",
             "projectScopeKey",
             "scope",
@@ -895,6 +916,16 @@ class MemoryReviewStore:
         if loaded_mode == MODE_AUTO_SAFE:
             loaded_mode = MODE_OFF
         payload["config"] = {
+            "memoryEnabled": (
+                raw_config.get("memoryEnabled")
+                if isinstance(raw_config.get("memoryEnabled"), bool)
+                else True
+            ),
+            "crossSessionEnabled": (
+                raw_config.get("crossSessionEnabled")
+                if isinstance(raw_config.get("crossSessionEnabled"), bool)
+                else bool(raw_config.get("automaticCaptureEnabled", True))
+            ),
             "mode": loaded_mode,
             "cadenceMinutes": self._loaded_int(
                 raw_config.get("cadenceMinutes"), defaults["cadenceMinutes"], 30, 10_080
@@ -930,6 +961,17 @@ class MemoryReviewStore:
             ),
             "automaticCaptureEnabled": raw_config.get("automaticCaptureEnabled")
             if isinstance(raw_config.get("automaticCaptureEnabled"), bool) else True,
+            "lastDreamingAt": _bounded_timestamp(raw_config.get("lastDreamingAt"), fallback="")
+            if str(raw_config.get("lastDreamingAt") or "").strip()
+            else "",
+            "lastDreamingRunId": (
+                _loaded_metadata(raw_config.get("lastDreamingRunId"), limit=120)
+                if str(raw_config.get("lastDreamingRunId") or "").strip()
+                else ""
+            ),
+            "lastDreamingDeletedMemoryIds": self._bounded_ids(
+                raw_config.get("lastDreamingDeletedMemoryIds")
+            ),
             "scopeKind": (
                 str(raw_config.get("scopeKind") or raw_config.get("scope") or "user").strip().casefold()
                 if str(raw_config.get("scopeKind") or raw_config.get("scope") or "user").strip().casefold()
@@ -2206,6 +2248,16 @@ class MemoryReviewStore:
                     raise MemoryConsolidationError("User Memory Review cannot retain a projectRoot.")
                 configured_scope_key = ""
             config = {
+                "memoryEnabled": (
+                    payload.get("memoryEnabled")
+                    if isinstance(payload.get("memoryEnabled"), bool)
+                    else bool(current.get("memoryEnabled", True))
+                ),
+                "crossSessionEnabled": (
+                    payload.get("crossSessionEnabled")
+                    if isinstance(payload.get("crossSessionEnabled"), bool)
+                    else bool(current.get("crossSessionEnabled", current.get("automaticCaptureEnabled", True)))
+                ),
                 "mode": requested_mode,
                 "cadenceMinutes": self._bounded_int(
                     payload.get("cadenceMinutes", current.get("cadenceMinutes", 1_440)), 30, 10_080
@@ -2247,6 +2299,11 @@ class MemoryReviewStore:
                 "automaticCaptureEnabled": payload.get("automaticCaptureEnabled")
                 if isinstance(payload.get("automaticCaptureEnabled"), bool)
                 else bool(current.get("automaticCaptureEnabled", True)),
+                "lastDreamingAt": str(current.get("lastDreamingAt") or ""),
+                "lastDreamingRunId": str(current.get("lastDreamingRunId") or ""),
+                "lastDreamingDeletedMemoryIds": self._bounded_ids(
+                    current.get("lastDreamingDeletedMemoryIds")
+                ),
                 "scopeKind": requested_scope,
                 "projectScopeKey": configured_scope_key,
             }
@@ -2260,6 +2317,53 @@ class MemoryReviewStore:
                 [{"event": "config_updated", "revision": state["revision"]}],
             )
             return self.snapshot()
+
+    def record_dreaming_result(
+        self,
+        *,
+        run_id: str,
+        completed_at: str,
+        deleted_memory_ids: Sequence[str],
+        rolled_back: bool = False,
+        failure_class: str = "",
+    ) -> dict[str, Any]:
+        normalized_run_id = _bounded_identifier(run_id, field="runId", limit=120)
+        normalized_completed_at = _bounded_timestamp(completed_at, fallback="")
+        if not normalized_completed_at:
+            raise MemoryConsolidationError("Dreaming completion time is invalid.")
+        normalized_ids = self._bounded_ids(list(deleted_memory_ids))
+        normalized_failure = _loaded_metadata(failure_class, limit=80)
+        if rolled_back and normalized_failure:
+            raise MemoryConsolidationError("Dreaming rollback cannot also be failed.")
+        with self._lock:
+            state = self._sweep_retention_locked(self._load())
+            config = dict(state.get("config") or {})
+            config["lastDreamingAt"] = normalized_completed_at
+            config["lastDreamingRunId"] = (
+                "" if rolled_back or normalized_failure else normalized_run_id
+            )
+            config["lastDreamingDeletedMemoryIds"] = (
+                [] if rolled_back or normalized_failure else normalized_ids
+            )
+            state["config"] = config
+            state["revision"] = int(state.get("revision") or 0) + 1
+            self._commit_with_audit(
+                state,
+                [{
+                    "event": (
+                        "dreaming_rolled_back"
+                        if rolled_back
+                        else "dreaming_failed"
+                        if normalized_failure
+                        else "dreaming_finished"
+                    ),
+                    "runId": normalized_run_id,
+                    "eligibleCount": len(normalized_ids),
+                    **({"failureClass": normalized_failure} if normalized_failure else {}),
+                    "revision": state["revision"],
+                }],
+            )
+            return self.snapshot(include_internal=True)
 
     def record_shadow_summary(
         self,
@@ -4566,6 +4670,10 @@ class MemoryConsolidationService:
             "ok": True,
             "schema": "vrcforge.memory_review_snapshot.v1",
             "mode": mode,
+            "memoryEnabled": bool(config.get("memoryEnabled", True)),
+            "crossSessionEnabled": bool(
+                config.get("crossSessionEnabled", config.get("automaticCaptureEnabled", True))
+            ),
             "policyVersion": self.policy_version,
             "revision": int(snapshot.get("revision") or 0),
             "scope": scope,
@@ -4617,6 +4725,361 @@ class MemoryConsolidationService:
     def ensure_automatic_capture_watermark(self) -> str:
         return self.automatic_policy.ensure()
 
+    def memory_preferences(self) -> dict[str, bool]:
+        config = self.review_store.snapshot(include_internal=True).get("config") or {}
+        memory_enabled = bool(config.get("memoryEnabled", True))
+        cross_session_enabled = bool(
+            config.get("crossSessionEnabled", config.get("automaticCaptureEnabled", True))
+        )
+        return {
+            "memoryEnabled": memory_enabled,
+            "crossSessionEnabled": memory_enabled and cross_session_enabled,
+        }
+
+    def due_dreaming(self, now: datetime | None = None) -> dict[str, Any]:
+        snapshot = self.review_store.snapshot(include_internal=True)
+        config = snapshot.get("config") or {}
+        preferences = self.memory_preferences()
+        if not preferences["memoryEnabled"]:
+            return {"due": False, "reason": "memory_disabled", "revision": snapshot["revision"]}
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        last_text = str(config.get("lastDreamingAt") or "")
+        last_run: datetime | None = None
+        if last_text:
+            try:
+                last_run = datetime.fromisoformat(last_text.replace("Z", "+00:00"))
+            except ValueError:
+                last_run = None
+            if last_run is not None:
+                if last_run.tzinfo is None:
+                    last_run = last_run.replace(tzinfo=timezone.utc)
+                if current.astimezone(timezone.utc) < (
+                    last_run.astimezone(timezone.utc)
+                    + timedelta(minutes=DREAMING_CADENCE_MINUTES)
+                ):
+                    return {"due": False, "reason": "cadence", "revision": snapshot["revision"]}
+        active = self.accepted_store.list_active()
+        changed_memories = [
+            memory
+            for memory in active
+            if last_run is None
+            or self._dreaming_memory_timestamp(memory) > last_run.astimezone(timezone.utc)
+        ]
+        if len(changed_memories) < DREAMING_MIN_CHANGED_MEMORIES:
+            return {
+                "due": False,
+                "reason": "not_enough_memory_changes",
+                "changedMemoryCount": len(changed_memories),
+                "revision": snapshot["revision"],
+            }
+        return {
+            "due": True,
+            "reason": "scheduled",
+            "changedMemoryCount": len(changed_memories),
+            "revision": snapshot["revision"],
+        }
+
+    @staticmethod
+    def _dreaming_identity(memory: Mapping[str, Any]) -> tuple[str, str, str, str]:
+        scope = str(memory.get("scope") or "user").strip().casefold()
+        project_root = os.path.normcase(str(memory.get("projectRoot") or "").strip())
+        kind = str(memory.get("kind") or "preference").strip().casefold()
+        text = " ".join(str(memory.get("text") or "").split()).casefold()
+        return scope, project_root, kind, text
+
+    @staticmethod
+    def _dreaming_memory_timestamp(memory: Mapping[str, Any]) -> datetime:
+        raw = str(memory.get("updatedAt") or memory.get("createdAt") or "")
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _dreaming_scope_key(memory: Mapping[str, Any]) -> str:
+        if str(memory.get("scope") or "user").strip().casefold() == "user":
+            return "user"
+        project_root = os.path.normcase(str(memory.get("projectRoot") or "").strip())
+        return "project:" + hashlib.sha256(project_root.encode("utf-8")).hexdigest()[:24]
+
+    @classmethod
+    def _dreaming_duplicate_groups(
+        cls,
+        active: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        groups: dict[tuple[str, str, str, str], list[Mapping[str, Any]]] = {}
+        for memory in active:
+            identity = cls._dreaming_identity(memory)
+            if identity[-1]:
+                groups.setdefault(identity, []).append(memory)
+        duplicate_groups: list[dict[str, Any]] = []
+        for memories in groups.values():
+            if len(memories) < 2:
+                continue
+            ordered = sorted(
+                memories,
+                key=lambda item: (
+                    str(item.get("createdAt") or item.get("updatedAt") or ""),
+                    str(item.get("memoryId") or item.get("id") or ""),
+                ),
+            )
+            keep_id = str(ordered[0].get("memoryId") or ordered[0].get("id") or "")
+            remove_ids = sorted({
+                str(item.get("memoryId") or item.get("id") or "")
+                for item in ordered[1:]
+                if str(item.get("memoryId") or item.get("id") or "")
+            })
+            if keep_id and remove_ids:
+                duplicate_groups.append({"keepId": keep_id, "removeIds": remove_ids})
+        return duplicate_groups[:64]
+
+    @staticmethod
+    def _dreaming_snapshot_digest(active: Sequence[Mapping[str, Any]]) -> str:
+        rows = [
+            {
+                "memoryId": str(memory.get("memoryId") or memory.get("id") or ""),
+                "scope": str(memory.get("scope") or ""),
+                "projectRoot": str(memory.get("projectRoot") or ""),
+                "kind": str(memory.get("kind") or ""),
+                "text": str(memory.get("text") or ""),
+                "updatedAt": str(memory.get("updatedAt") or memory.get("createdAt") or ""),
+            }
+            for memory in active
+        ]
+        return hashlib.sha256(
+            json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def prepare_dreaming(self, now: datetime | None = None) -> dict[str, Any]:
+        """Prepare one bounded BYOK pass from accepted Memory, never transcripts."""
+
+        with self._transaction_lock:
+            due = self.due_dreaming(now)
+            if not due.get("due"):
+                return {**due, "prepared": False}
+            active = self.accepted_store.list_active()
+            selected: list[dict[str, Any]] = []
+            serialized_chars = 0
+            for memory in active:
+                item = {
+                    "memoryId": str(memory.get("memoryId") or memory.get("id") or ""),
+                    "scopeKey": self._dreaming_scope_key(memory),
+                    "kind": str(memory.get("kind") or "preference")[:80],
+                    "text": str(memory.get("text") or ""),
+                }
+                item_chars = len(json.dumps(item, ensure_ascii=False, separators=(",", ":")))
+                if selected and serialized_chars + item_chars > DREAMING_INPUT_CHAR_CAP:
+                    break
+                if item["memoryId"] and item["text"]:
+                    selected.append(item)
+                    serialized_chars += item_chars
+                if len(selected) >= DREAMING_MAX_MEMORIES:
+                    break
+            if len(selected) < DREAMING_MIN_CHANGED_MEMORIES:
+                return {
+                    "due": False,
+                    "prepared": False,
+                    "reason": "input_too_large",
+                    "revision": due["revision"],
+                }
+            selected_ids = {item["memoryId"] for item in selected}
+            exact_groups = [
+                group
+                for group in self._dreaming_duplicate_groups(active)
+                if group["keepId"] in selected_ids
+                and all(memory_id in selected_ids for memory_id in group["removeIds"])
+            ]
+            run_id = f"dream_{secrets.token_hex(16)}"
+            return {
+                **due,
+                "prepared": True,
+                "runId": run_id,
+                "snapshotDigest": self._dreaming_snapshot_digest(active),
+                "memories": selected,
+                "request": {
+                    "schema": "vrcforge.memory_dreaming_plan_request.v1",
+                    "phase": "organize",
+                    "tools": [],
+                    "instructions": {
+                        "source": "accepted_memory_only",
+                        "sameScopeAndKindRequired": True,
+                        "relatedOrConflictingIsNotDuplicate": True,
+                        "newMemoryTextAllowed": False,
+                    },
+                    "memories": selected,
+                    "exactDuplicateHints": exact_groups,
+                },
+            }
+
+    @staticmethod
+    def _validated_dreaming_groups(
+        prepared: Mapping[str, Any],
+        provider_result: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        memories = prepared.get("memories")
+        raw_groups = provider_result.get("duplicateGroups")
+        if not isinstance(memories, list) or not isinstance(raw_groups, list):
+            raise MemoryConsolidationError("Dreaming provider result is invalid.")
+        by_id = {
+            str(memory.get("memoryId") or ""): memory
+            for memory in memories
+            if isinstance(memory, Mapping) and str(memory.get("memoryId") or "")
+        }
+        validated: list[dict[str, Any]] = []
+        assigned: set[str] = set()
+        for raw_group in raw_groups:
+            if not isinstance(raw_group, Mapping) or set(raw_group) != {"keepId", "removeIds"}:
+                raise MemoryConsolidationError("Dreaming duplicate group is invalid.")
+            keep_id = str(raw_group.get("keepId") or "").strip()
+            raw_remove_ids = raw_group.get("removeIds")
+            if (
+                keep_id not in by_id
+                or not isinstance(raw_remove_ids, list)
+                or not raw_remove_ids
+                or any(
+                    not isinstance(memory_id, str) or memory_id.strip() not in by_id
+                    for memory_id in raw_remove_ids
+                )
+            ):
+                raise MemoryConsolidationError("Dreaming duplicate group references invalid Memory.")
+            remove_ids = sorted({memory_id.strip() for memory_id in raw_remove_ids})
+            if keep_id in remove_ids or len(remove_ids) != len(raw_remove_ids):
+                raise MemoryConsolidationError("Dreaming duplicate group overlaps itself.")
+            group_ids = {keep_id, *remove_ids}
+            if assigned.intersection(group_ids):
+                raise MemoryConsolidationError("Dreaming duplicate groups overlap.")
+            identity = {
+                (
+                    str(by_id[memory_id].get("scopeKey") or ""),
+                    str(by_id[memory_id].get("kind") or "").casefold(),
+                )
+                for memory_id in group_ids
+            }
+            if len(identity) != 1:
+                raise MemoryConsolidationError("Dreaming cannot merge different scopes or kinds.")
+            assigned.update(group_ids)
+            validated.append({"keepId": keep_id, "removeIds": remove_ids})
+        return validated
+
+    def build_dreaming_review_request(
+        self,
+        prepared: Mapping[str, Any],
+        first_pass: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        proposal = self._validated_dreaming_groups(prepared, first_pass)
+        return {
+            "schema": "vrcforge.memory_dreaming_review_request.v1",
+            "phase": "review",
+            "tools": [],
+            "instructions": {
+                "source": "accepted_memory_only",
+                "checkForMissedDuplicates": True,
+                "removeFalsePositiveGroups": True,
+                "returnFinalCompleteSet": True,
+                "newMemoryTextAllowed": False,
+            },
+            "memories": copy.deepcopy(prepared.get("memories") or []),
+            "proposal": proposal,
+        }
+
+    def commit_dreaming(
+        self,
+        prepared: Mapping[str, Any],
+        reviewed_result: Mapping[str, Any],
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Commit only the second model pass after snapshot and loss checks."""
+
+        with self._transaction_lock:
+            if reviewed_result.get("reviewed") is not True:
+                raise MemoryConsolidationError("Dreaming requires a second model review.")
+            current = self.accepted_store.list_active()
+            if self._dreaming_snapshot_digest(current) != str(prepared.get("snapshotDigest") or ""):
+                raise MemoryConsolidationError("Memory changed before Dreaming commit.")
+            groups = self._validated_dreaming_groups(prepared, reviewed_result)
+            remove_ids = sorted({
+                memory_id
+                for group in groups
+                for memory_id in group["removeIds"]
+            })
+            max_removals = max(1, int(len(current) * DREAMING_MAX_REMOVAL_FRACTION))
+            if len(remove_ids) > max_removals:
+                raise MemoryConsolidationError("Dreaming result exceeds the prior-Memory loss limit.")
+            run_id = str(prepared.get("runId") or "")
+            if not run_id:
+                raise MemoryConsolidationError("Dreaming run identity is missing.")
+            deleted: list[str] = []
+            try:
+                for memory_id in remove_ids:
+                    self.accepted_store.delete(memory_id, {"reason": f"dreaming:{run_id}"})
+                    deleted.append(memory_id)
+                completed = now or datetime.now(timezone.utc)
+                if completed.tzinfo is None:
+                    completed = completed.replace(tzinfo=timezone.utc)
+                snapshot = self.review_store.record_dreaming_result(
+                    run_id=run_id,
+                    completed_at=completed.astimezone(timezone.utc).isoformat(),
+                    deleted_memory_ids=deleted,
+                )
+            except BaseException:
+                for memory_id in reversed(deleted):
+                    self.accepted_store.restore(memory_id, {"reason": f"dreaming_rollback:{run_id}"})
+                raise
+            return {
+                "due": True,
+                "reason": "completed",
+                "runId": run_id,
+                "deduplicatedCount": len(deleted),
+                "revision": int(snapshot.get("revision") or 0),
+            }
+
+    def record_dreaming_failure(
+        self,
+        prepared: Mapping[str, Any],
+        failure_class: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        with self._transaction_lock:
+            completed = now or datetime.now(timezone.utc)
+            if completed.tzinfo is None:
+                completed = completed.replace(tzinfo=timezone.utc)
+            return self.review_store.record_dreaming_result(
+                run_id=str(prepared.get("runId") or f"dream_{secrets.token_hex(16)}"),
+                completed_at=completed.astimezone(timezone.utc).isoformat(),
+                deleted_memory_ids=(),
+                failure_class=failure_class or "provider_unavailable",
+            )
+
+    def rollback_last_dreaming(self) -> dict[str, Any]:
+        with self._transaction_lock:
+            snapshot = self.review_store.snapshot(include_internal=True)
+            config = snapshot.get("config") or {}
+            run_id = str(config.get("lastDreamingRunId") or "")
+            memory_ids = MemoryReviewStore._bounded_ids(config.get("lastDreamingDeletedMemoryIds"))
+            if not run_id or not memory_ids:
+                return {"rolledBack": False, "restoredCount": 0, "revision": snapshot["revision"]}
+            restored = 0
+            for memory_id in memory_ids:
+                self.accepted_store.restore(memory_id, {"reason": f"dreaming_rollback:{run_id}"})
+                restored += 1
+            completed_at = datetime.now(timezone.utc).isoformat()
+            updated = self.review_store.record_dreaming_result(
+                run_id=run_id,
+                completed_at=completed_at,
+                deleted_memory_ids=(),
+                rolled_back=True,
+            )
+            return {
+                "rolledBack": True,
+                "restoredCount": restored,
+                "revision": int(updated.get("revision") or 0),
+            }
+
     def capture_automatic_chat_sources(
         self,
         chats: Sequence[Mapping[str, Any]],
@@ -4627,7 +5090,11 @@ class MemoryConsolidationService:
         """Upsert and promote direct sources atomically, without a provider callback."""
         with self._transaction_lock:
             config = self.review_store.snapshot(include_internal=True).get("config") or {}
-            if not bool(config.get("automaticCaptureEnabled", True)):
+            if not (
+                bool(config.get("memoryEnabled", True))
+                and bool(config.get("crossSessionEnabled", config.get("automaticCaptureEnabled", True)))
+                and bool(config.get("automaticCaptureEnabled", True))
+            ):
                 return {"eligibleCount": 0, "acceptedCount": 0, "conflictCount": 0}
             sources = collect_automatic_chat_sources(
                 chats,

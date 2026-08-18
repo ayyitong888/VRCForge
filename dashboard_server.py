@@ -266,7 +266,7 @@ from memory_review_dashboard_adapter import (
 from memory_consolidation_sources import MemoryScope, project_scope_key
 from memory_review_composition import MemoryReviewComposition, MemoryReviewCompositionPorts, build_memory_review_composition
 from memory_review_host import build_memory_review_router
-from memory_review_provider import invoke_memory_review_provider
+from memory_review_provider import invoke_memory_provider
 from memory_review_runtime import MemoryReviewIdleGate, MemoryReviewRuntimeCoordinator
 from optimization_service import (
     OPTIMIZATION_APPLY_REQUEST_DEFINITIONS,
@@ -4471,7 +4471,7 @@ MEMORY_REVIEW: MemoryReviewComposition = build_memory_review_composition(
             {"failureClass": str(failure_class or "runtime")},
         ),
         chat_lock=CHAT_TRANSCRIPTS_LOCK,
-        provider_call=lambda settings, payload, token_cap: invoke_memory_review_provider(
+        provider_call=lambda settings, payload, token_cap: invoke_memory_provider(
             settings,
             payload,
             token_cap=token_cap,
@@ -4479,6 +4479,7 @@ MEMORY_REVIEW: MemoryReviewComposition = build_memory_review_composition(
         sub_agent_source_commit_lock=SUB_AGENT_COLLABORATION.source_commit_lock,
     )
 )
+AGENT_GATEWAY.set_memory_preferences_provider(MEMORY_REVIEW.service.memory_preferences)
 del memory_review_idle_gate
 app.include_router(build_memory_review_router(MEMORY_REVIEW.host))
 

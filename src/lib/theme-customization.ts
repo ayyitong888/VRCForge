@@ -1,6 +1,12 @@
+import { parseThemeColor, themeColorToHsl } from "./theme-color";
+
 export const THEME_PALETTE_IDS = ["default", "ocean", "violet", "sakura", "forest", "sunset", "custom"] as const;
 
 export type ThemePaletteId = (typeof THEME_PALETTE_IDS)[number];
+
+export const THEME_BACKGROUND_SCOPE_IDS = ["workspace", "app"] as const;
+
+export type ThemeBackgroundScope = (typeof THEME_BACKGROUND_SCOPE_IDS)[number];
 
 export type ThemePaletteOption = {
   id: ThemePaletteId;
@@ -20,8 +26,11 @@ export const THEME_PALETTES: readonly ThemePaletteOption[] = [
 export type ThemeCustomization = {
   palette: ThemePaletteId;
   accentColor: string;
+  surfaceColor: string;
+  recentColors: string[];
   backgroundImagePath: string;
   backgroundOpacity: number;
+  backgroundScope: ThemeBackgroundScope;
 };
 
 export const THEME_CUSTOMIZATION_STORAGE_KEY = "vrcforge_theme_customization";
@@ -29,18 +38,24 @@ export const THEME_CUSTOMIZATION_STORAGE_KEY = "vrcforge_theme_customization";
 export const DEFAULT_THEME_CUSTOMIZATION: ThemeCustomization = {
   palette: "default",
   accentColor: "",
+  surfaceColor: "",
+  recentColors: [],
   backgroundImagePath: "",
   backgroundOpacity: 0.18,
+  backgroundScope: "workspace",
 };
 
-const HEX_COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
 const LEGACY_IMAGE_DATA_URL_PATTERN = /^data:image\/(?:png|jpeg|webp|gif);base64,/i;
 
 export function normalizeThemeCustomization(value: unknown): ThemeCustomization {
   const candidate = value && typeof value === "object" ? (value as Partial<ThemeCustomization>) : {};
-  const accentColor = typeof candidate.accentColor === "string" && HEX_COLOR_PATTERN.test(candidate.accentColor)
-    ? candidate.accentColor.toLowerCase()
-    : "";
+  const accentColor = typeof candidate.accentColor === "string" ? parseThemeColor(candidate.accentColor) ?? "" : "";
+  const surfaceColor = typeof candidate.surfaceColor === "string" ? parseThemeColor(candidate.surfaceColor) ?? "" : "";
+  const recentColors = Array.isArray(candidate.recentColors)
+    ? [...new Set(candidate.recentColors.flatMap((color) => typeof color === "string" ? [parseThemeColor(color)] : []))]
+      .filter((color): color is string => Boolean(color))
+      .slice(0, 3)
+    : [];
   const requestedPalette = typeof candidate.palette === "string" && THEME_PALETTE_IDS.includes(candidate.palette as ThemePaletteId)
     ? candidate.palette as ThemePaletteId
     : accentColor
@@ -53,11 +68,18 @@ export function normalizeThemeCustomization(value: unknown): ThemeCustomization 
       ? candidate.backgroundImagePath
       : "";
   const opacity = Number(candidate.backgroundOpacity);
+  const backgroundScope = typeof candidate.backgroundScope === "string"
+    && THEME_BACKGROUND_SCOPE_IDS.includes(candidate.backgroundScope as ThemeBackgroundScope)
+    ? candidate.backgroundScope as ThemeBackgroundScope
+    : DEFAULT_THEME_CUSTOMIZATION.backgroundScope;
   return {
     palette: requestedPalette,
     accentColor,
+    surfaceColor,
+    recentColors,
     backgroundImagePath,
     backgroundOpacity: Number.isFinite(opacity) ? Math.min(1, Math.max(0, opacity)) : DEFAULT_THEME_CUSTOMIZATION.backgroundOpacity,
+    backgroundScope,
   };
 }
 
@@ -84,24 +106,6 @@ export function loadLegacyThemeBackgroundDataUrl(): string {
 }
 
 export function hexColorToHslChannels(color: string): string | null {
-  if (!HEX_COLOR_PATTERN.test(color)) {
-    return null;
-  }
-  const red = Number.parseInt(color.slice(1, 3), 16) / 255;
-  const green = Number.parseInt(color.slice(3, 5), 16) / 255;
-  const blue = Number.parseInt(color.slice(5, 7), 16) / 255;
-  const max = Math.max(red, green, blue);
-  const min = Math.min(red, green, blue);
-  const delta = max - min;
-  let hue = 0;
-  if (delta > 0) {
-    if (max === red) hue = ((green - blue) / delta) % 6;
-    else if (max === green) hue = (blue - red) / delta + 2;
-    else hue = (red - green) / delta + 4;
-    hue *= 60;
-    if (hue < 0) hue += 360;
-  }
-  const lightness = (max + min) / 2;
-  const saturation = delta === 0 ? 0 : delta / (1 - Math.abs(2 * lightness - 1));
-  return `${Math.round(hue)} ${Math.round(saturation * 100)}% ${Math.round(lightness * 100)}%`;
+  const hsl = themeColorToHsl(color);
+  return hsl ? `${Math.round(hsl.h)} ${Math.round(hsl.s)}% ${Math.round(hsl.l)}%` : null;
 }

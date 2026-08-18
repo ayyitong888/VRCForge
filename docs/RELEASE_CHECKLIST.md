@@ -50,10 +50,25 @@ Before publishing a release package:
 * [ ] Confirm App Update runs once in the startup background and only a
       successful newer version opens an in-App dialog. Current/offline/error
       paths must be silent; manual/periodic/system-notification paths are absent.
+* [ ] Confirm Memory Settings shows only **Enable Memory** and **Remember and
+      use Memory across conversations**. Dreaming must read only already-saved
+      Memory, reuse the configured BYOK Provider/Model, keep all Memory intact
+      through the proposal pass, and make a separate second model call over the
+      same batch plus proposal. Commit only the second pass's final duplicate
+      set after local scope/kind/ID/snapshot/removal checks; failed review leaves
+      Memory unchanged and no Dreaming workflow/provider/budget UI is visible.
 * [ ] Confirm theme customization exposes the seven approved multi-colour
       palettes, keeps the untouched default appearance unchanged, stores only a
       managed background path rather than Base64, accepts images above the old
-      2 MiB boundary, and exposes 0–100% visibility. Replacing, removing and
+      2 MiB boundary, exposes 0–100% visibility, and offers both center-only and
+      continuous whole-App background coverage (including both sidebars).
+      Custom mode must expose accent/background-base seeds through a palette,
+      editable HEX/RGB/HSL values and a capability-gated screen eyedropper;
+      verify automatic light/dark derivation and exactly three deduplicated
+      recent colours retained across **Restore defaults**. Typed fields retain
+      raw partial text while editing, commit only on valid blur/Enter, and never
+      commit a composing IME Enter.
+      Replacing, removing and
       **Restore defaults** must clear only VRCForge-managed background files;
       unrelated/user-named files remain intact.
 

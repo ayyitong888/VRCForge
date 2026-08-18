@@ -1,4 +1,4 @@
-import { Download, FolderOpen, Loader2, ShieldCheck } from "lucide-react";
+import { Download, FolderOpen, Loader2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { DiagnosticIdentitySummary, DiagnosticLogLevel, DiagnosticsStatus } from "../../lib/api";
@@ -112,7 +112,6 @@ export function DiagnosticsSettingsPanel({
   const selectedIndex = Math.max(0, availableLevels.indexOf(effectiveSelectedLevel));
   const selectedDescription = t(logLevelDescriptionKey(effectiveSelectedLevel));
   const activeLogFile = safeBasename(status?.activeLogFile);
-  const redactionEnabled = Boolean(status?.redaction?.enabled ?? status?.redaction?.beforeWrite);
 
   const handleLevelChange = (nextIndex: number) => {
     const level = availableLevels[nextIndex];
@@ -190,33 +189,6 @@ export function DiagnosticsSettingsPanel({
             {t("settings.logLevelTraceLockedHint")}
           </p>
         ) : null}
-
-        <div className="mt-5 grid gap-3 sm:grid-cols-2">
-          <div className="rounded-lg border border-border bg-background p-3">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-300" />
-              {t("settings.logRedaction")}
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {status
-                ? redactionEnabled
-                  ? t("settings.logRedactionEnabled")
-                  : t("settings.logRedactionUnavailable")
-                : t("common.loading")}
-            </p>
-          </div>
-          <div className="rounded-lg border border-border bg-background p-3">
-            <div className="text-sm font-medium">{t("settings.logRetention")}</div>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {t("settings.logRetentionSummary", {
-                days: status?.retentionDays ?? 5,
-                files: status?.maxFiles ?? 40,
-                total: Math.round((status?.maxTotalBytes ?? 52_428_800) / 1_048_576),
-                file: Math.round((status?.maxFileBytes ?? 8_388_608) / 1_048_576),
-              })}
-            </p>
-          </div>
-        </div>
 
         <div className="mt-4 flex min-w-0 flex-wrap items-center gap-2">
           <Button type="button" variant="outline" data-vrcforge-open-logs onClick={onOpenLogsFolder}>

@@ -9,9 +9,13 @@ from types import SimpleNamespace
 import pytest
 
 from memory_review_provider import (
+    DREAMING_PLAN_SYSTEM_INSTRUCTION,
+    DREAMING_REVIEW_SYSTEM_INSTRUCTION,
     MEMORY_REVIEW_SYSTEM_INSTRUCTION,
     MemoryReviewProviderError,
     dedicated_memory_review_settings,
+    invoke_memory_dreaming_provider,
+    invoke_memory_provider,
     invoke_memory_review_provider,
 )
 from vrchat_blendshape_agent import (
@@ -70,6 +74,38 @@ def _payload() -> dict:
         ],
         "tools": [],
     }
+
+
+def _dreaming_payload(*, review: bool = False) -> dict:
+    payload = {
+        "schema": (
+            "vrcforge.memory_dreaming_review_request.v1"
+            if review
+            else "vrcforge.memory_dreaming_plan_request.v1"
+        ),
+        "phase": "review" if review else "organize",
+        "tools": [],
+        "instructions": {"source": "accepted_memory_only"},
+        "memories": [
+            {
+                "memoryId": "mem-a",
+                "scopeKey": "user",
+                "kind": "preference",
+                "text": "Keep status updates compact.",
+            },
+            {
+                "memoryId": "mem-b",
+                "scopeKey": "user",
+                "kind": "preference",
+                "text": "Status updates should stay concise.",
+            },
+        ],
+    }
+    if review:
+        payload["proposal"] = [{"keepId": "mem-a", "removeIds": ["mem-b"]}]
+    else:
+        payload["exactDuplicateHints"] = []
+    return payload
 
 
 def test_dedicated_settings_disable_thinking_and_apply_strict_cap() -> None:
@@ -192,6 +228,59 @@ def test_provider_adapter_rejects_tools_before_call() -> None:
     with pytest.raises(MemoryReviewProviderError):
         invoke_memory_review_provider(_settings(), payload, token_cap=256, request=request)
     assert called is False
+
+
+@pytest.mark.parametrize(
+    ("review", "expected_instruction"),
+    [
+        (False, DREAMING_PLAN_SYSTEM_INSTRUCTION),
+        (True, DREAMING_REVIEW_SYSTEM_INSTRUCTION),
+    ],
+)
+def test_dreaming_provider_uses_byok_model_with_distinct_plan_and_review_prompts(
+    review: bool,
+    expected_instruction: str,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def request(settings: Settings, prompt: str) -> LlmPlanResponse:
+        captured["settings"] = settings
+        captured["prompt"] = json.loads(prompt)
+        return LlmPlanResponse(
+            text='{"duplicateGroups":[{"keepId":"mem-a","removeIds":["mem-b"]}]}',
+            reasoning={"private": "discarded"},
+            usage={"totalTokens": 8},
+        )
+
+    payload = _dreaming_payload(review=review)
+    result = invoke_memory_dreaming_provider(
+        _settings(),
+        payload,
+        token_cap=512,
+        request=request,
+    )
+
+    assert captured["prompt"] == payload
+    assert captured["settings"].llm_system_instruction == expected_instruction
+    assert captured["settings"].llm_max_output_tokens == 512
+    assert result == {
+        "duplicateGroups": [{"keepId": "mem-a", "removeIds": ["mem-b"]}],
+        "usage": {"totalTokens": 8},
+    }
+    assert "reasoning" not in result
+
+
+def test_shared_memory_provider_routes_dreaming_without_separate_provider_config() -> None:
+    result = invoke_memory_provider(
+        _settings(),
+        _dreaming_payload(),
+        token_cap=256,
+        request=lambda _settings, _prompt: LlmPlanResponse(
+            text='{"duplicateGroups":[]}',
+            reasoning={},
+        ),
+    )
+    assert result["duplicateGroups"] == []
 
 
 @pytest.mark.parametrize(

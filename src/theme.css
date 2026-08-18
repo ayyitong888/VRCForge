@@ -109,6 +109,29 @@
     --ring: 22 88% 48%;
   }
 
+  html[data-vrcforge-palette="custom"] {
+    --primary: var(--vrcforge-custom-accent-h) var(--vrcforge-custom-accent-s) var(--vrcforge-custom-accent-light-l);
+    --primary-foreground: var(--vrcforge-custom-accent-light-foreground);
+    --ring: var(--vrcforge-custom-accent-h) var(--vrcforge-custom-accent-s) var(--vrcforge-custom-accent-light-l);
+  }
+
+  html[data-vrcforge-palette="custom"][data-vrcforge-custom-surfaces="active"] {
+    --background: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-s) 98%;
+    --foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 14%;
+    --card: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 99%;
+    --card-foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 14%;
+    --sidebar: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-s) 97%;
+    --workspace: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-s) 98%;
+    --secondary: var(--vrcforge-custom-accent-h) var(--vrcforge-custom-accent-soft-s) 94%;
+    --secondary-foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 14%;
+    --muted: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 94%;
+    --muted-foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 42%;
+    --border: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 86%;
+    --input: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 86%;
+    --scrollbar-track: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 94%;
+    --scrollbar-thumb: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 58%;
+  }
+
   html[data-theme="dark"][data-vrcforge-palette="ocean"],
   html.dark[data-vrcforge-palette="ocean"] {
     --background: 202 34% 8%;
@@ -182,6 +205,31 @@
     --ring: 32 95% 60%;
   }
 
+  html[data-theme="dark"][data-vrcforge-palette="custom"],
+  html.dark[data-vrcforge-palette="custom"] {
+    --primary: var(--vrcforge-custom-accent-h) var(--vrcforge-custom-accent-s) var(--vrcforge-custom-accent-dark-l);
+    --primary-foreground: var(--vrcforge-custom-accent-dark-foreground);
+    --ring: var(--vrcforge-custom-accent-h) var(--vrcforge-custom-accent-s) var(--vrcforge-custom-accent-dark-l);
+  }
+
+  html[data-theme="dark"][data-vrcforge-palette="custom"][data-vrcforge-custom-surfaces="active"],
+  html.dark[data-vrcforge-palette="custom"][data-vrcforge-custom-surfaces="active"] {
+    --background: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 9%;
+    --foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 96%;
+    --card: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 13%;
+    --card-foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 96%;
+    --sidebar: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-s) 8%;
+    --workspace: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-s) 7%;
+    --secondary: var(--vrcforge-custom-accent-h) var(--vrcforge-custom-accent-soft-s) 22%;
+    --secondary-foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 96%;
+    --muted: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 18%;
+    --muted-foreground: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 70%;
+    --border: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 26%;
+    --input: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 26%;
+    --scrollbar-track: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 9%;
+    --scrollbar-thumb: var(--vrcforge-custom-surface-h) var(--vrcforge-custom-surface-muted-s) 40%;
+  }
+
   html,
   body,
   #root {
@@ -237,7 +285,7 @@
       Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   }
 
-  html[data-vrcforge-wallpaper="active"] .bg-workspace {
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="workspace"] .bg-workspace {
     background-image:
       linear-gradient(
         hsl(var(--workspace) / var(--vrcforge-wallpaper-scrim)),
@@ -247,6 +295,21 @@
     background-position: center;
     background-repeat: no-repeat;
     background-size: cover;
+  }
+
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] #root > main {
+    background-image: var(--vrcforge-background-image);
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: cover;
+  }
+
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-workspace {
+    background-color: hsl(var(--workspace) / var(--vrcforge-wallpaper-scrim));
+  }
+
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-sidebar {
+    background-color: hsl(var(--sidebar) / var(--vrcforge-wallpaper-scrim));
   }
 
   button,

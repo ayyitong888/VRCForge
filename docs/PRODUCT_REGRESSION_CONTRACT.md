@@ -303,13 +303,24 @@ Each item ends with its version history in this exact form:
 ### AGT-013 — Locked 1.7 Agentic closeout scope
 
 - Priority: P0 scope guard.
-- Contract: 1.7 contains exactly four product lanes: staged Memory
-  Consolidation with dedupe/promotion/rollback and a review journal; one
+- Contract: 1.7 contains exactly four product lanes: Memory with internal
+  consolidation and rollback; one
   interactive rejection-reason revision; active Goal context with start,
   drain-pause/resume and elapsed time; and the existing inbound MCP edge needed
   for an external Agent to connect, discover and call VRCForge tools. Each lane
   must reuse the 1.6.2 Runtime, approval and UI contracts and may add only the
   smallest owning module or surface required by that lane.
+- Memory boundary: the user-facing Memory surface contains only **Enable
+  Memory** and **Remember and use Memory across conversations**. Dreaming is
+  internal housekeeping over already-saved Memory only; it never reads raw
+  chats and has no phases, modes, candidate inbox, journal, provider, model,
+  token, cost, budget or manual-run UI. It reuses the user's current BYOK
+  Provider/Model. One bounded model pass proposes duplicate groups, then a
+  mandatory second model pass rereads the same Memory batch plus that proposal
+  to remove false positives and add missed duplicates. Nothing is changed
+  before the second pass succeeds; only its final complete group set may be
+  committed. Scope/kind/ID/snapshot and maximum-removal checks are local and
+  fail closed, and the pre-change Memory can be restored.
 - Explicitly not in 1.7: multi-Sub-Agent scoring/comparison; `/delegate`
   compete; Session branch or Handoff Inbox; Reviewer shadow-to-advisory;
   Workflow execution or recovery; token-price lookup, cost conversion or Goal
@@ -325,6 +336,8 @@ Each item ends with its version history in this exact form:
 - Forbidden regression: no revival of Shadow Workspace, OS sandbox, duplicated
   General/Unity tools or a second Agent Runtime; no constant empty Goal card;
   no external-MCP connection-status, failure-isolation or call-provenance UI;
+  no transcript-fed Dreaming, one-pass merge, separate Dreaming Provider
+  configuration or reappearance of the retired Memory workflow controls;
   and no feature from the explicit non-goal list entering source, tests or
   public claims as unfinished 1.7 scaffolding.
 - Acceptance: source and product-contract scans freeze the exact four-lane
@@ -743,11 +756,12 @@ Each item ends with its version history in this exact form:
 
 - Priority: P1.
 - Contract: the local identity map remains available only on the Developer
-  page while Developer Options is enabled. Normal Settings keeps redaction, retention,
-  log-level and support-bundle controls without rendering the potentially long
-  alias-to-user/project/avatar list.
+  page while Developer Options is enabled. Normal Settings keeps the log-level,
+  open-folder and support-bundle actions without rendering the potentially long
+  alias-to-user/project/avatar list or redundant redaction/retention policy cards.
 - Forbidden regression: no local identity map, alias list, Windows user,
-  project identity or Avatar mapping in normal Settings.
+  project identity, Avatar mapping, or standalone redaction/retention explainer
+  cards in normal Settings.
 - Acceptance: `tests/test_settings_diagnostics_ui.mjs` freezes the Developer
   page placement and Options gate; user live manual acceptance verifies the map
   is absent from General and visible only on the enabled Developer page.
@@ -758,22 +772,41 @@ Each item ends with its version history in this exact form:
 - Priority: P1.
 - Contract: General Settings offers Default, Ocean, Violet, Sakura, Forest,
   Sunset and Custom palettes without changing the untouched default light/dark
-  appearance. Optional PNG/JPEG/WebP/GIF backgrounds are copied into the
+  appearance. Custom accepts independent accent and background-base seeds via
+  the native colour palette, editable HEX/RGB/HSL fields and, when supported,
+  the platform screen eyedropper. The two seeds deterministically derive
+  readable light/dark workspace, sidebar, card, border and interaction tokens;
+  foreground contrast is automatic. The three most recently committed unique
+  colours are shared by both editors, newest first, and survive **Restore
+  defaults**. Optional PNG/JPEG/WebP/GIF backgrounds are copied into the
   App-owned local theme directory and browser storage retains only the managed
-  path plus preferences. Visibility spans 0–100%. Replacing, removing or
-  choosing **Restore defaults** removes the previous VRCForge-managed
-  background after the replacement is ready; unrelated/user-named files are
-  preserved. A legacy Base64 preference is a one-time migration input only.
+  path plus preferences. Visibility spans 0–100%. A persisted two-option scope
+  keeps the background in the center workspace by default or extends one
+  continuous image across the entire App, including both sidebars. Replacing,
+  removing or choosing **Restore defaults** removes the previous
+  VRCForge-managed background after the replacement is ready;
+  unrelated/user-named files are preserved. A legacy Base64 preference is a
+  one-time migration input only.
 - Forbidden regression: no Base64 image persistence, 2 MiB image limit,
-  single-accent-only theme surface, opacity floor/ceiling below the full range,
+  single-accent-only custom theme, RGB/HEX-only input, more than three recent
+  colours, recent-colour loss on **Restore defaults**, always-visible broken
+  eyedropper control, opacity floor/ceiling below the full range,
+  missing center-only/full-App scope choice, independently repeated wallpaper
+  crops per column,
   stale managed background after replace/remove/default restore, broad theme
-  directory deletion, or ambiguous **Reset theme** label.
+  directory deletion, ambiguous **Reset theme** label, per-keystroke colour
+  normalization, IME composition commit, or invalid partial input overwriting
+  the last committed colour. HEX/RGB/HSL fields keep the user's raw draft while
+  editing and apply a valid value only on blur or non-composing Enter.
 - Acceptance: `tests/test_theme_customization_ui.mjs` freezes UI, persistence,
-  locale and asset-scope contracts; Rust theme-background tests prove a file
+  locale and asset-scope contracts; `tests/test_theme_color.mjs` proves colour
+  parsing, synchronized formatting and readable foreground selection. Rust
+  theme-background tests prove a file
   larger than 2 MiB, signature validation, atomic replacement, managed cleanup
   and preservation of unrelated names. TypeScript/build plus attended local UI
-  acceptance verify palette selection and **Restore defaults** behavior.
-- [首次实现: 1.7.1] [强化/修复: 1.7.1] [最近验证: 1.7.1]
+  acceptance verify palette selection, background scope and **Restore
+  defaults** behavior.
+- [首次实现: 1.7.1] [强化/修复: 1.7.2] [最近验证: 1.7.2]
 
 ## Vision contracts
 

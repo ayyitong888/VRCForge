@@ -351,6 +351,8 @@ class AgentMemoryStore:
                 continue
             if str(event.get("status") or "") == "deleted" or event.get("event") == "memory_deleted":
                 deleted.add(memory_id)
+            elif str(event.get("status") or "") == "active":
+                deleted.discard(memory_id)
             previous = memories.get(memory_id, {})
             memories[memory_id] = {
                 **previous,
@@ -514,6 +516,34 @@ class AgentMemoryStore:
             }
             self._append_jsonl(self.log_path, row)
             return dict(self._project(include_deleted=True)[normalized_id])
+
+    def restore(self, memory_id: str, params: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        """Reactivate one tombstoned Memory without changing its identity or content."""
+
+        normalized_id = _safe_id(memory_id, field="memoryId")
+        with self._lock:
+            current = self._project(include_deleted=True)
+            record = current.get(normalized_id)
+            if record is None:
+                raise KeyError(normalized_id)
+            if str(record.get("status") or "") == "active":
+                return dict(record)
+            now = _utc_now_iso()
+            row = {
+                "schema": AGENT_MEMORY_SCHEMA,
+                "id": f"evt_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(3)}",
+                "createdAt": now,
+                "updatedAt": now,
+                "event": "memory_restored",
+                "status": "active",
+                "memoryId": normalized_id,
+                "reason": _summarize_text((params or {}).get("reason"), 500),
+            }
+            self._append_jsonl(self.log_path, row)
+            restored = self._project().get(normalized_id)
+            if restored is None:
+                raise OSError("Memory restore event was not durable.")
+            return dict(restored)
 
     @staticmethod
     def _normalized_project(value: str) -> str:

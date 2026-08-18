@@ -2,9 +2,15 @@ import { Check, ImagePlus, Loader2, RotateCcw, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { clearThemeBackground, pickThemeBackground } from "../../lib/theme-background";
-import { THEME_PALETTES, type ThemeCustomization, type ThemePaletteId } from "../../lib/theme-customization";
+import {
+  THEME_PALETTES,
+  type ThemeBackgroundScope,
+  type ThemeCustomization,
+  type ThemePaletteId,
+} from "../../lib/theme-customization";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
+import { ThemeColorEditor } from "./theme-color-editor";
 
 type ThemeCustomizationPanelProps = {
   value: ThemeCustomization;
@@ -12,13 +18,28 @@ type ThemeCustomizationPanelProps = {
   onReset: () => void;
 };
 
+const BACKGROUND_SCOPE_OPTIONS: readonly ThemeBackgroundScope[] = ["workspace", "app"];
+
 export function ThemeCustomizationPanel({ value, onChange, onReset }: ThemeCustomizationPanelProps) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const [backgroundBusy, setBackgroundBusy] = useState(false);
 
   const choosePalette = (palette: ThemePaletteId) => {
+    if (palette === "custom") {
+      onChange({
+        palette,
+        accentColor: value.accentColor || "#2563eb",
+        surfaceColor: value.surfaceColor || "#f8fafc",
+      });
+      return;
+    }
     onChange({ palette });
+  };
+
+  const commitCustomColor = (field: "accentColor" | "surfaceColor", color: string) => {
+    const recentColors = [color, ...value.recentColors.filter((recent) => recent !== color)].slice(0, 3);
+    onChange({ [field]: color, recentColors });
   };
 
   const chooseBackground = async () => {
@@ -97,16 +118,22 @@ export function ThemeCustomizationPanel({ value, onChange, onReset }: ThemeCusto
             })}
           </div>
           {value.palette === "custom" ? (
-            <label className="mt-3 flex items-center justify-between gap-4 text-sm font-medium">
-              {t("settings.themeCustomAccent")}
-              <input
-                type="color"
-                value={value.accentColor || "#2563eb"}
-                onChange={(event) => onChange({ accentColor: event.target.value })}
-                className="h-9 w-14 cursor-pointer rounded-md border border-input bg-background p-1"
-                aria-label={t("settings.themeCustomAccent")}
+            <div className="mt-3 grid gap-3 lg:grid-cols-2">
+              <ThemeColorEditor
+                label={t("settings.themeCustomAccent")}
+                value={value.accentColor}
+                fallbackColor="#2563eb"
+                recentColors={value.recentColors}
+                onCommit={(color) => commitCustomColor("accentColor", color)}
               />
-            </label>
+              <ThemeColorEditor
+                label={t("settings.themeCustomSurface")}
+                value={value.surfaceColor}
+                fallbackColor="#f8fafc"
+                recentColors={value.recentColors}
+                onCommit={(color) => commitCustomColor("surfaceColor", color)}
+              />
+            </div>
           ) : null}
         </fieldset>
 
@@ -125,18 +152,43 @@ export function ThemeCustomizationPanel({ value, onChange, onReset }: ThemeCusto
             ) : null}
           </div>
           {value.backgroundImagePath ? (
-            <label className="mt-3 block text-xs text-muted-foreground">
-              {t("settings.themeBackgroundOpacity")}: {Math.round(value.backgroundOpacity * 100)}%
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value={value.backgroundOpacity}
-                onChange={(event) => onChange({ backgroundOpacity: Number(event.target.value) })}
-                className="mt-2 w-full accent-primary"
-              />
-            </label>
+            <div className="mt-3 grid gap-3">
+              <fieldset>
+                <legend className="text-xs text-muted-foreground">{t("settings.themeBackgroundScope")}</legend>
+                <div className="mt-2 grid grid-cols-2 gap-2" role="radiogroup">
+                  {BACKGROUND_SCOPE_OPTIONS.map((scope) => {
+                    const selected = value.backgroundScope === scope;
+                    return (
+                      <button
+                        key={scope}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => onChange({ backgroundScope: scope })}
+                        className={cn(
+                          "rounded-lg border px-3 py-2 text-left text-xs transition-colors",
+                          selected ? "border-primary bg-primary/10 text-foreground" : "border-border bg-background text-muted-foreground hover:bg-muted",
+                        )}
+                      >
+                        {t(scope === "workspace" ? "settings.themeBackgroundScopeWorkspace" : "settings.themeBackgroundScopeApp")}
+                      </button>
+                    );
+                  })}
+                </div>
+              </fieldset>
+              <label className="block text-xs text-muted-foreground">
+                {t("settings.themeBackgroundOpacity")}: {Math.round(value.backgroundOpacity * 100)}%
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={value.backgroundOpacity}
+                  onChange={(event) => onChange({ backgroundOpacity: Number(event.target.value) })}
+                  className="mt-2 w-full accent-primary"
+                />
+              </label>
+            </div>
           ) : null}
           {message ? <p className="mt-2 text-xs text-muted-foreground" role="status">{message}</p> : null}
         </div>

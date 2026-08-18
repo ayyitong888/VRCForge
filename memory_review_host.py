@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from background_goal_runtime import TOTAL_PROVIDER_ATTEMPTS
 from memory_consolidation import (
     CandidateStateError,
+    DREAMING_OUTPUT_TOKEN_CAP,
     MemoryConsolidationError,
     MemoryConsolidationService,
     RevisionConflictError,
@@ -57,6 +58,8 @@ class MemoryReviewSourceInventory:
 
 
 class MemoryReviewConfigRequest(BaseModel):
+    memory_enabled: bool | None = Field(default=None, alias="memoryEnabled")
+    cross_session_enabled: bool | None = Field(default=None, alias="crossSessionEnabled")
     mode: Literal["off", "shadow", "suggest_only", "bounded_background", "auto_safe"] = "off"
     cadence_minutes: int = Field(default=1440, alias="cadenceMinutes", ge=30, le=10080)
     input_char_cap: int = Field(default=12000, alias="inputCharCap", ge=1000, le=50000)
@@ -342,6 +345,10 @@ class MemoryReviewHost:
             "ok": True,
             "schema": "vrcforge.memory_review_snapshot.v1",
             "mode": mode,
+            "memoryEnabled": bool(raw.get("memoryEnabled", True)),
+            "crossSessionEnabled": bool(
+                raw.get("crossSessionEnabled", raw.get("automaticCaptureEnabled", True))
+            ),
             "policyVersion": str(raw.get("policyVersion") or ""),
             "revision": int(raw.get("revision") or 0),
             "scope": configured_scope,
@@ -415,6 +422,49 @@ class MemoryReviewHost:
                 raise MemoryConsolidationError("Memory Review project-read lease was lost.")
 
     async def update_config(self, request: MemoryReviewConfigRequest) -> dict[str, Any]:
+        simple_preferences = (
+            request.memory_enabled is not None
+            or request.cross_session_enabled is not None
+        )
+        if simple_preferences:
+            current = await asyncio.to_thread(
+                self.service.review_store.snapshot,
+                include_internal=True,
+            )
+            current_config = current.get("config") if isinstance(current.get("config"), dict) else {}
+            memory_enabled = (
+                request.memory_enabled
+                if request.memory_enabled is not None
+                else bool(current_config.get("memoryEnabled", True))
+            )
+            cross_session_enabled = (
+                request.cross_session_enabled
+                if request.cross_session_enabled is not None
+                else bool(
+                    current_config.get(
+                        "crossSessionEnabled",
+                        current_config.get("automaticCaptureEnabled", True),
+                    )
+                )
+            )
+            cross_session_enabled = bool(memory_enabled and cross_session_enabled)
+            await asyncio.to_thread(
+                self.service.update_config,
+                {
+                    "memoryEnabled": bool(memory_enabled),
+                    "crossSessionEnabled": cross_session_enabled,
+                    "automaticCaptureEnabled": cross_session_enabled,
+                    # The legacy candidate-review scheduler stays disabled.
+                    # Dreaming has its own organizer-only background path.
+                    "mode": "off",
+                    "scope": str(current_config.get("scopeKind") or "user"),
+                    "projectRoot": "",
+                },
+                request.expected_revision,
+            )
+            await self._cancel_active_runs()
+            await self._await_callback(self._on_changed)
+            return self.snapshot(requested_project_root=request.project_root or "")
         scope, canonical_project = self._resolve_scope(request.scope, request.project_root or "")
         provider = ""
         model = ""
@@ -1170,9 +1220,129 @@ class MemoryReviewHost:
             return None
         return "project", project_root, int(state.get("revision") or 0)
 
+    async def _execute_dreaming(self, generation: int) -> dict[str, Any]:
+        if not self._idle_gate.is_current(generation):
+            raise asyncio.CancelledError
+        prepared = await asyncio.to_thread(self.service.prepare_dreaming)
+        if not prepared.get("prepared"):
+            return {**prepared, "deduplicatedCount": 0}
+        try:
+            provider_context = await asyncio.to_thread(self._load_provider_context)
+        except Exception:  # noqa: BLE001 - optional housekeeping fails closed.
+            provider_context = MemoryReviewProviderContext(None, "", "", "", "", False)
+        if (
+            not provider_context.provider
+            or not provider_context.model
+            or not provider_context.credential_ready
+        ):
+            failure_class = "auth" if provider_context.provider and provider_context.model else "schema"
+            await asyncio.to_thread(
+                self.service.record_dreaming_failure,
+                prepared,
+                failure_class,
+            )
+            if self._on_bounded_warning is not None:
+                self._on_bounded_warning(failure_class)
+            await self._await_callback(self._on_changed)
+            return {
+                "due": True,
+                "reason": "provider_unavailable",
+                "runId": prepared.get("runId"),
+                "deduplicatedCount": 0,
+            }
+
+        def provider_call() -> Mapping[str, Any]:
+            first_pass = self._provider_call(
+                provider_context.settings,
+                prepared["request"],
+                DREAMING_OUTPUT_TOKEN_CAP,
+            )
+            review_request = self.service.build_dreaming_review_request(
+                prepared,
+                first_pass,
+            )
+            reviewed = self._provider_call(
+                provider_context.settings,
+                review_request,
+                DREAMING_OUTPUT_TOKEN_CAP,
+            )
+            return {
+                "reviewed": True,
+                "duplicateGroups": list(reviewed.get("duplicateGroups") or []),
+            }
+
+        committed: dict[str, Any] = {}
+
+        def commit_reviewed(reviewed: Any) -> None:
+            if not isinstance(reviewed, Mapping):
+                raise MemoryConsolidationError("Dreaming review result is invalid.")
+
+            def commit_current() -> None:
+                committed.update(self.service.commit_dreaming(prepared, reviewed))
+
+            if not self._idle_gate.run_if_current(generation, commit_current):
+                raise MemoryReviewCommitDeferred(
+                    "Dreaming commit was revoked by interactive activity."
+                )
+
+        runtime_result = await self.runtime.run(
+            lane="background",
+            token=f"memory-dreaming:{prepared['runId']}",
+            provider=provider_context.provider,
+            base_url=provider_context.base_url,
+            call=provider_call,
+            commit=commit_reviewed,
+            continue_guard=lambda: self._idle_gate.is_current(generation),
+        )
+        if not runtime_result.ok:
+            if runtime_result.status not in {"cancelled", "capacity", "duplicate"}:
+                await asyncio.to_thread(
+                    self.service.record_dreaming_failure,
+                    prepared,
+                    runtime_result.failure_class or runtime_result.status,
+                )
+                if self._on_bounded_warning is not None:
+                    self._on_bounded_warning(
+                        runtime_result.failure_class or runtime_result.status
+                    )
+                await self._await_callback(self._on_changed)
+            return {
+                "due": True,
+                "reason": runtime_result.status,
+                "runId": prepared.get("runId"),
+                "deduplicatedCount": 0,
+            }
+
+        result = committed
+        await self._await_callback(self._on_changed)
+        if int(result.get("deduplicatedCount") or 0) > 0:
+            await self._await_callback(self._on_memory_changed, "")
+        return result
+
     async def schedule_due_background(self, blocker: BackgroundBlocker) -> bool:
         if self.background_active:
             return False
+        dreaming_due = await asyncio.to_thread(self.service.due_dreaming)
+        if dreaming_due.get("due"):
+            generation = self._idle_gate.try_acquire(
+                blocker,
+                self._cancel_background_from_idle_gate,
+            )
+            if generation is None:
+                return False
+            try:
+                task = asyncio.create_task(self._execute_dreaming(generation))
+            except BaseException:
+                self._idle_gate.release(generation)
+                raise
+            self._background_task = task
+            task.add_done_callback(
+                lambda completed, active_generation=generation: self._background_done(
+                    completed,
+                    active_generation,
+                )
+            )
+            return True
         configured = self.configured_background_scope()
         if configured is None:
             return False

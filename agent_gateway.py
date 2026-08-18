@@ -22,7 +22,7 @@ from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Sequence
 
 from agent_memory_store import AgentMemoryStore
 import agent_command_safety as command_safety
@@ -1782,6 +1782,10 @@ class AgentGateway:
             lambda: self.audit_dir / "memory-review" / "accepted-audit.jsonl",
             lock=self._lock,
         )
+        self._memory_preferences_provider: Callable[[], Mapping[str, Any]] = lambda: {
+            "memoryEnabled": True,
+            "crossSessionEnabled": True,
+        }
         self._goal = AgentGoalService(
             GoalStorePorts(
                 log_path=lambda: self.audit_dir / "agent-goals.jsonl",
@@ -2527,6 +2531,26 @@ class AgentGateway:
     @property
     def agent_memory_store(self) -> AgentMemoryStore:
         return self._agent_memory_store
+
+    def set_memory_preferences_provider(
+        self,
+        provider: Callable[[], Mapping[str, Any]],
+    ) -> None:
+        if not callable(provider):
+            raise TypeError("memory preferences provider must be callable")
+        self._memory_preferences_provider = provider
+
+    def memory_preferences(self) -> dict[str, bool]:
+        try:
+            raw = self._memory_preferences_provider()
+        except Exception:
+            raw = {}
+        memory_enabled = bool(raw.get("memoryEnabled", False))
+        cross_session_enabled = bool(raw.get("crossSessionEnabled", False))
+        return {
+            "memoryEnabled": memory_enabled,
+            "crossSessionEnabled": memory_enabled and cross_session_enabled,
+        }
 
     @property
     def agent_progress_log_path(self) -> Path:
@@ -5344,11 +5368,16 @@ class AgentGateway:
             ).get("goals", [])
             if str(goal.get("status") or "") in {"active", "paused"}
         ]
-        memories = self.list_agent_memory(
-            limit=12,
-            project_root=project_root,
-            scope="" if project_root else "user",
-        ).get("memories", [])
+        memory_preferences = self.memory_preferences()
+        memories = (
+            self.list_agent_memory(
+                limit=12,
+                project_root=project_root,
+                scope="" if project_root else "user",
+            ).get("memories", [])
+            if memory_preferences["crossSessionEnabled"]
+            else []
+        )
         return {
             "ok": True,
             "runtime": {
@@ -5740,6 +5769,11 @@ class AgentGateway:
         return {"ok": True, "schema": "vrcforge.agent_progress.v1", "items": [redact_sensitive(item) for item in progress], "count": len(progress)}
 
     def create_agent_memory(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        preferences = self.memory_preferences()
+        if not preferences["memoryEnabled"]:
+            raise AgentGatewayError("Memory is disabled in Settings.", status_code=409)
+        if not preferences["crossSessionEnabled"]:
+            raise AgentGatewayError("Cross-conversation Memory is disabled in Settings.", status_code=409)
         try:
             payload = self._agent_memory_store.create_agent_memory(params)
         except ValueError as exc:
@@ -6471,7 +6505,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.7.1",
+        server_version="1.7.2",
     )
     return create_agent_mcp_2026_asgi_app(
         router,

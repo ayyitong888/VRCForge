@@ -24,6 +24,8 @@ function finiteRevision(value: unknown): number {
 function normalizeSnapshot(snapshot: MemoryReviewSnapshot): MemoryReviewSnapshot {
   return {
     ...snapshot,
+    memoryEnabled: snapshot.memoryEnabled !== false,
+    crossSessionEnabled: snapshot.memoryEnabled !== false && snapshot.crossSessionEnabled !== false,
     mode: normalizeMemoryReviewMode(snapshot.mode),
     revision: finiteRevision(snapshot.revision),
     unreadCount: Math.max(0, Number(snapshot.unreadCount) || 0),

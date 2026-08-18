@@ -25,7 +25,6 @@ import { CheckpointStoragePanel } from "./checkpoint-storage-panel";
 import { DeveloperOptionsControl } from "./developer-options-control";
 import { DiagnosticIdentityMap, DiagnosticsSettingsPanel } from "./diagnostics-settings-panel";
 import { ExternalAgentConnectorsPanel } from "./external-agent-connectors-panel";
-import { MemorySettingsPanel } from "./memory-settings";
 import { MemoryReviewSettings } from "./memory-review-settings";
 import { ProviderSetup, VisionProfileSetup } from "./provider-settings";
 import { ThemeCustomizationPanel } from "./theme-customization-panel";
@@ -508,16 +507,13 @@ export function SettingsWorkspace({
         ) : null}
 
         {visibleSection === "memory" ? (
-        <section className="space-y-8 pb-6">
+        <section className="pb-6">
           <MemoryReviewSettings
             endpoint={endpoint}
             runtimeConnected={runtimeConnected}
             selectedProjectPath={selectedProjectPath}
             refreshSignal={memoryReviewRefreshSignal}
           />
-          <div className="border-t border-border pt-8">
-            <MemorySettingsPanel endpoint={endpoint} runtimeConnected={runtimeConnected} selectedProjectPath={selectedProjectPath} />
-          </div>
         </section>
         ) : null}
 

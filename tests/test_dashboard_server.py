@@ -3935,6 +3935,40 @@ class DashboardServerTests(unittest.TestCase):
             {"Project A private memory.", "User-wide memory."},
         )
 
+    def test_memory_preferences_gate_durable_create_and_runtime_injection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config.json", root / "audit")
+            gateway.create_agent_memory({
+                "scope": "user",
+                "kind": "preference",
+                "text": "Keep status updates compact.",
+            })
+            gateway.set_memory_preferences_provider(lambda: {
+                "memoryEnabled": True,
+                "crossSessionEnabled": False,
+            })
+
+            observation = gateway.runtime_observe(session_id="memory-pref-test")
+            with self.assertRaises(AgentGatewayError) as blocked:
+                gateway.create_agent_memory({
+                    "scope": "user",
+                    "kind": "preference",
+                    "text": "Do not persist this Memory.",
+                })
+
+            self.assertEqual(observation["memory"]["count"], 0)
+            self.assertEqual(blocked.exception.status_code, 409)
+            self.assertIn("Cross-conversation", str(blocked.exception))
+            gateway.set_memory_preferences_provider(lambda: {
+                "memoryEnabled": False,
+                "crossSessionEnabled": True,
+            })
+            self.assertEqual(gateway.memory_preferences(), {
+                "memoryEnabled": False,
+                "crossSessionEnabled": False,
+            })
+
     def test_agent_project_filters_normalize_windows_style_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

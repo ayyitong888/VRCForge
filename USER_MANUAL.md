@@ -5,11 +5,11 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.7.1` (`v1.7.1`). Latest published stable
-release: `1.7.1`. The refreshed 1.7.1 package carries the 1.7 Agentic closeout,
-corrected public documentation and the approved file-backed multi-colour theme
-extension. It supersedes the unpublished v1.7.0 Draft; the unpublished v1.6.1
-tag remains superseded.
+Current source / target release: `1.7.2` (`v1.7.2`). Latest published stable
+release: `1.7.2`. The 1.7.2 package carries the 1.7 Agentic closeout, corrected
+public documentation, the approved file-backed multi-colour theme extension and
+the Memory Dreaming convergence. It supersedes the v1.7.1 refresh; the
+unpublished v1.7.0 Draft and unpublished v1.6.1 tag remain superseded.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.

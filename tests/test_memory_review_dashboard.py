@@ -1859,6 +1859,117 @@ def test_background_due_scope_and_blocker_are_backend_authoritative(
     assert dashboard_server.AGENT_GATEWAY._background_project_read_leases == set()
 
 
+def test_simple_memory_preferences_are_global_and_ignore_stale_project_scope(
+    memory_review_dashboard: DashboardMemoryReviewHarness,
+    tmp_path: Path,
+) -> None:
+    env = memory_review_dashboard
+    assert env.host is not None
+    before = env.host.snapshot(requested_project_root="")
+    missing_project = tmp_path / "not-a-registered-project"
+
+    updated = asyncio.run(env.host.update_config(
+        MemoryReviewConfigRequest(
+            memoryEnabled=True,
+            crossSessionEnabled=False,
+            mode="off",
+            scope="project",
+            projectRoot=str(missing_project),
+            expectedRevision=before["revision"],
+        )
+    ))
+
+    assert updated["memoryEnabled"] is True
+    assert updated["crossSessionEnabled"] is False
+    assert updated["automaticCaptureEnabled"] is False
+    assert updated["mode"] == "off"
+
+
+def test_dreaming_rechecks_the_same_memory_batch_before_any_merge(
+    memory_review_dashboard: DashboardMemoryReviewHarness,
+) -> None:
+    env = memory_review_dashboard
+    assert env.host is not None
+    service = env.host.service
+    memories = [
+        service.accepted_store.create({
+            "scope": "user",
+            "kind": kind,
+            "text": text,
+        })
+        for kind, text in (
+            ("preference", "Keep status updates compact."),
+            ("preference", "Status updates should stay compact."),
+            ("fact", "The project uses Unity 2022.3."),
+            ("fact", "The preferred editor language is English."),
+            ("fact", "Status reports include validation results."),
+            ("fact", "Include validation results in status reports."),
+            ("fact", "The release branch is main."),
+            ("preference", "Use concise release notes."),
+        )
+    ]
+    ids = [str(memory["memoryId"]) for memory in memories]
+    active_before = set(ids)
+
+    def dreaming_provider(
+        _settings: Settings,
+        payload: dict[str, Any],
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        # Both paid passes receive the same complete bounded Memory batch, and
+        # no deletion is allowed while either pass is still inspecting it.
+        assert {str(item["memoryId"]) for item in payload["memories"]} == active_before
+        assert {
+            str(item["memoryId"])
+            for item in service.accepted_store.list_active()
+        } == active_before
+        if payload["schema"] == "vrcforge.memory_dreaming_plan_request.v1":
+            return {
+                "duplicateGroups": [
+                    {"keepId": ids[0], "removeIds": [ids[1]]},
+                    {"keepId": ids[2], "removeIds": [ids[3]]},
+                ]
+            }
+        assert payload["schema"] == "vrcforge.memory_dreaming_review_request.v1"
+        assert payload["proposal"] == [
+            {"keepId": ids[0], "removeIds": [ids[1]]},
+            {"keepId": ids[2], "removeIds": [ids[3]]},
+        ]
+        # The review removes the false positive and adds a missed duplicate.
+        return {
+            "duplicateGroups": [
+                {"keepId": ids[0], "removeIds": [ids[1]]},
+                {"keepId": ids[4], "removeIds": [ids[5]]},
+            ]
+        }
+
+    env.provider["call"] = dreaming_provider
+
+    async def schedule() -> dict[str, Any]:
+        assert await env.host.schedule_due_background(lambda: "") is True
+        task = env.host._background_task  # noqa: SLF001 - exact two-pass scheduler contract.
+        assert task is not None
+        return await task
+
+    result = asyncio.run(schedule())
+
+    assert [
+        call["payload"]["schema"] for call in env.provider_calls
+    ] == [
+        "vrcforge.memory_dreaming_plan_request.v1",
+        "vrcforge.memory_dreaming_review_request.v1",
+    ]
+    assert result["deduplicatedCount"] == 2
+    active_after = {
+        str(memory["memoryId"])
+        for memory in service.accepted_store.list_active()
+    }
+    assert ids[1] not in active_after
+    assert ids[5] not in active_after
+    assert ids[3] in active_after
+    assert active_after == active_before - {ids[1], ids[5]}
+
+
 def test_background_schedule_epoch_closes_blocker_to_task_race(
     memory_review_dashboard: DashboardMemoryReviewHarness,
     monkeypatch: pytest.MonkeyPatch,

@@ -5,6 +5,8 @@ const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf
 const app = read("src/App.tsx");
 const settings = read("src/components/settings/settings-workspace.tsx");
 const panel = read("src/components/settings/theme-customization-panel.tsx");
+const colorEditor = read("src/components/settings/theme-color-editor.tsx");
+const themeColor = read("src/lib/theme-color.ts");
 const preference = read("src/lib/theme-customization.ts");
 const background = read("src/lib/theme-background.ts");
 const hook = read("src/hooks/use-theme-customization.ts");
@@ -28,13 +30,39 @@ for (const palette of ["ocean", "violet", "sakura", "forest", "sunset", "custom"
 assert.match(panel, /THEME_PALETTES\.map/);
 assert.match(panel, /aria-pressed=\{selected\}/);
 assert.match(panel, /value\.palette === "custom"/);
+assert.match(panel, /themeCustomSurface/);
+assert.match(panel, /recentColors = \[color, \.\.\.value\.recentColors/);
+assert.match(preference, /surfaceColor: string/);
+assert.match(preference, /recentColors: string\[\]/);
+assert.match(preference, /\.slice\(0, 3\)/);
+assert.match(hook, /recentColors: current\.recentColors/);
+
+// Both custom seeds expose a native palette, editable HEX/RGB/HSL values and
+// the platform eyedropper when available. The stored color remains opaque.
+assert.match(colorEditor, /type="color"/);
+assert.match(colorEditor, /const FORMATS: readonly ThemeColorFormat\[\] = \["hex", "rgb", "hsl"\]/);
+assert.match(colorEditor, /window as Window & \{ EyeDropper\?/);
+assert.match(colorEditor, /new eyeDropper\(\)\.open\(\)/);
+assert.match(colorEditor, /error\.name !== "AbortError"/);
+assert.match(colorEditor, /event\.nativeEvent\.isComposing/);
+assert.match(colorEditor, /Blur owns the single commit/);
+assert.doesNotMatch(colorEditor, /finishDraft\(format\);\s*event\.currentTarget\.blur/);
+assert.doesNotMatch(colorEditor, /onPreview/);
+assert.doesNotMatch(themeColor, /rgba|hsla/);
+assert.match(css, /data-vrcforge-palette="custom"\]\[data-vrcforge-custom-surfaces="active"\]/);
+assert.match(css, /--vrcforge-custom-accent-light-foreground/);
+assert.match(hook, /readableForegroundForHsl/);
 
 // New backgrounds are selected and copied by the native App. localStorage
 // contains only a managed path and preferences, never the selected image.
 assert.match(background, /invoke<string \| null>\("pick_theme_background"\)/);
 assert.match(background, /convertFileSrc\(path\)/);
 assert.match(preference, /backgroundImagePath: string/);
+assert.match(preference, /backgroundScope: ThemeBackgroundScope/);
+assert.match(preference, /THEME_BACKGROUND_SCOPE_IDS = \["workspace", "app"\]/);
+assert.match(preference, /backgroundScope: "workspace"/);
 assert.match(hook, /themeBackgroundAssetUrl\(customization\.backgroundImagePath\)/);
+assert.match(hook, /root\.dataset\.vrcforgeWallpaperScope = customization\.backgroundScope/);
 assert.match(rust, /persist_theme_background_file/);
 assert.match(rust, /remove_managed_backgrounds\(&theme_dir, Some\(&destination\)\)/);
 assert.match(rust, /pub\(crate\) fn clear_theme_background/);
@@ -50,6 +78,22 @@ assert.match(hook, /backgroundImagePath/);
 assert.match(panel, /min="0"/);
 assert.match(panel, /max="1"/);
 assert.match(preference, /Math\.min\(1, Math\.max\(0, opacity\)\)/);
+
+// Users can keep the image in the center workspace or extend one continuous
+// background across the whole App, including both sidebars.
+assert.match(panel, /BACKGROUND_SCOPE_OPTIONS\.map/);
+assert.match(panel, /role="radio"/);
+assert.match(panel, /aria-checked=\{selected\}/);
+assert.match(css, /data-vrcforge-wallpaper-scope="workspace"\] \.bg-workspace/);
+assert.match(css, /data-vrcforge-wallpaper-scope="app"\] #root > main/);
+assert.match(css, /data-vrcforge-wallpaper-scope="app"\] \.bg-sidebar/);
+assert.equal(en.settings.themeBackgroundScopeWorkspace, "Center workspace only");
+assert.equal(en.settings.themeBackgroundScopeApp, "Entire app (including sidebars)");
+assert.equal(zhCn.settings.themeBackgroundScopeWorkspace, "仅中间工作区");
+assert.equal(zhCn.settings.themeBackgroundScopeApp, "整个应用（含左右栏）");
+assert.equal(en.settings.themeCustomSurface, "Background base color");
+assert.equal(zhCn.settings.themeCustomSurface, "背景基色");
+assert.equal(zhCn.settings.themeRecentColors, "最近使用");
 
 // This action restores all theme settings and removes the managed background;
 // it is not presented as the ambiguous "reset theme" action.
