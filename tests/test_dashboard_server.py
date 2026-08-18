@@ -4539,12 +4539,14 @@ class DashboardServerTests(unittest.TestCase):
         project = dashboard_server.agent_runtime_request_payload(
             dashboard_server.AgentRuntimeMessageRequest(
                 message="inspect the selected avatar",
+                chatId="chat-project",
                 projectPath=r"E:\Unity\AvatarProject",
             )
         )
 
         self.assertIs(general["_projectContextActive"], False)
         self.assertIs(project["_projectContextActive"], True)
+        self.assertEqual(project["chatId"], "chat-project")
 
     def test_agent_gateway_requires_token_and_is_disabled_by_default(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()

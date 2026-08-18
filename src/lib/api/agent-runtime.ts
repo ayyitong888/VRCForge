@@ -77,11 +77,12 @@ export async function sendAgentMessage(
   sessionId?: string,
   history?: ChatHistoryEntry[],
   agentName?: string,
-  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; projectPath?: string; projectType?: "general" | "unity"; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; maxAgenticTurns?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; followupQueueId?: string; followupLaneId?: string } = {},
+  options: { signal?: AbortSignal; attachments?: AgentMessageAttachment[]; chatId?: string; projectPath?: string; projectType?: "general" | "unity"; provider?: string; providerLabel?: string; model?: string; contextLimit?: number; maxAgenticTurns?: number; clientTurnId?: string; goalDeliveryId?: string; computerUseRequested?: boolean; computerUseGrantId?: string; computerUseVisualTheme?: "light" | "dark"; computerUseVisualAccent?: string; followupQueueId?: string; followupLaneId?: string } = {},
 ): Promise<AgentRuntimeResponse> {
   const request = {
     agentName: agentName || "desktop-agent",
     sessionId: sessionId || undefined,
+    chatId: options.chatId || undefined,
     clientTurnId: options.clientTurnId || undefined,
     goalDeliveryId: options.goalDeliveryId || undefined,
     message,
@@ -111,6 +112,7 @@ export async function sendAgentMessage(
     body: JSON.stringify({
       agent_name: request.agentName,
       session_id: request.sessionId || null,
+      chatId: request.chatId,
       clientTurnId: request.clientTurnId,
       goalDeliveryId: request.goalDeliveryId,
       message: request.message,

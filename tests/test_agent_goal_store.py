@@ -155,6 +155,60 @@ class AgentGoalStoreTests(unittest.TestCase):
         self.assertEqual(paused["summary"], "Keep this context")
         self.assertEqual(resumed["summary"], "Keep this context")
 
+    def test_agent_goal_create_is_scoped_and_rejects_an_unfinished_goal(self) -> None:
+        store = self.make_store()
+        created = store.create_if_no_unfinished(
+            {"objective": "unused", "title": "Agent-owned", "chatId": "chat-a", "sessionId": "session-a"}
+        )
+
+        self.assertEqual(created["createdBy"], "agent_tool")
+        self.assertEqual(store.current(chat_id="chat-a")["goalId"], created["goalId"])
+        self.assertIsNone(store.current(chat_id="chat-b"))
+        with self.assertRaisesRegex(AgentGoalStoreError, "unfinished goal"):
+            store.create_if_no_unfinished({"title": "duplicate", "chatId": "chat-a", "sessionId": "session-a"})
+
+    def test_agent_blocked_requires_three_distinct_same_reason_turns(self) -> None:
+        store = self.make_store()
+        goal = store.create({"title": "Blocked audit", "chatId": "chat-a", "sessionId": "session-a"})
+        scope = {"chatId": "chat-a", "sessionId": "session-a", "status": "blocked", "reason": "same condition"}
+
+        first = store.update_from_agent(goal["goalId"], {**scope, "turnId": "turn-1"})
+        duplicate = store.update_from_agent(goal["goalId"], {**scope, "turnId": "turn-1"})
+        second = store.update_from_agent(goal["goalId"], {**scope, "turnId": "turn-2"})
+        reset = store.update_from_agent(goal["goalId"], {**scope, "turnId": "turn-3", "reason": "different condition"})
+        again = store.update_from_agent(goal["goalId"], {**scope, "turnId": "turn-4", "reason": "different condition"})
+        blocked = store.update_from_agent(goal["goalId"], {**scope, "turnId": "turn-5", "reason": "different condition"})
+
+        self.assertEqual((first["status"], first["agentBlockedAttempts"]), ("active", 1))
+        self.assertEqual(duplicate["agentBlockedAttempts"], 1)
+        self.assertEqual(second["agentBlockedAttempts"], 2)
+        self.assertEqual(reset["agentBlockedAttempts"], 1)
+        self.assertEqual(again["agentBlockedAttempts"], 2)
+        self.assertEqual((blocked["status"], blocked["agentBlockedAttempts"]), ("blocked", 3))
+
+        resumed = store.update(goal["goalId"], {"status": "active"})
+        self.assertEqual(resumed["agentBlockedAttempts"], 0)
+        self.assertEqual(resumed["agentBlockedReason"], "")
+
+    def test_agent_can_complete_active_goal_with_evidence_only(self) -> None:
+        store = self.make_store()
+        goal = store.create({"title": "Verify completion", "chatId": "chat-a"})
+
+        with self.assertRaisesRegex(AgentGoalStoreError, "complete or blocked"):
+            store.update_from_agent(
+                goal["goalId"],
+                {"status": "paused", "reason": "User controls this transition.", "chatId": "chat-a"},
+            )
+        with self.assertRaisesRegex(AgentGoalStoreError, "evidence"):
+            store.update_from_agent(goal["goalId"], {"status": "complete", "chatId": "chat-a"})
+        completed = store.update_from_agent(
+            goal["goalId"],
+            {"status": "complete", "reason": "All required checks passed.", "chatId": "chat-a"},
+        )
+
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["completionEvidence"], "All required checks passed.")
+
     def test_wake_does_not_consume_schedule_and_completion_is_restart_safe(self) -> None:
         store = self.make_store()
         goal = store.create({"title": "durable", "chatId": "chat-a", "wakeAt": self.due_time()})

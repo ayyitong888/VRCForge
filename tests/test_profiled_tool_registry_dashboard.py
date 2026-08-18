@@ -20,6 +20,9 @@ def test_runtime_profiles_keep_general_capabilities_and_add_unity_tools() -> Non
     }
 
     assert {
+        "get_goal",
+        "create_goal",
+        "update_goal",
         "list_directory",
         "read_text_file",
         "find_files",
@@ -48,6 +51,9 @@ def test_planner_catalog_preserves_model_alias_and_internal_runtime_name() -> No
     by_name = {tool.name: tool for tool in catalog.visible_tools}
 
     assert by_name["list_directory"].runtime_name == "vrcforge_list_directory"
+    assert by_name["get_goal"].runtime_name == "vrcforge_get_goal"
+    assert by_name["create_goal"].runtime_name == "vrcforge_create_goal"
+    assert by_name["update_goal"].runtime_name == "vrcforge_update_goal"
     assert by_name["unity_shell"].runtime_name == "vrcforge_execute_shell"
     assert by_name["unity_shell"].capabilities == (UNITY_PROJECT_ACCESS,)
 

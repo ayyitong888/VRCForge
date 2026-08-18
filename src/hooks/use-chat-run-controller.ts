@@ -764,6 +764,7 @@ export function useChatRunController({
       const response = await sendAgentMessage(targetEndpoint, messageForModel, chatSessionId || undefined, history, chatAgentName, {
         signal: abortController.signal,
         attachments: serializeChatAttachments(requestAttachments),
+        chatId,
         projectPath: chat?.projectPath || activeRuntimeProjectPath || undefined,
         projectType: turn.projectType || chat?.projectType || ((chat?.projectPath || activeRuntimeProjectPath) ? "unity" : "general"),
         provider: turn.provider,

@@ -3502,6 +3502,7 @@ class AgentGateway:
                 status_code=409,
             )
         goal_delivery_id = str(params.get("goal_delivery_id") or params.get("goalDeliveryId") or "").strip()
+        chat_id = str(params.get("chat_id") or params.get("chatId") or "").strip()
         self._desktop.bind_runtime_identity(
             session_id=session_id,
             turn_id=turn_id,
@@ -4722,6 +4723,14 @@ class AgentGateway:
                         step_params.setdefault("goalDeliveryId", goal_delivery_id)
                     if project_root:
                         step_params.setdefault("projectRoot", project_root)
+                if step_tool in {"vrcforge_get_goal", "vrcforge_create_goal", "vrcforge_update_goal"}:
+                    # Goal ownership comes from the active App turn, never from
+                    # model-supplied scope fields. The turn id also prevents one
+                    # runtime turn from counting the same blocked report twice.
+                    step_params["sessionId"] = session_id
+                    step_params["chatId"] = chat_id
+                    step_params["projectRoot"] = project_root
+                    step_params["turnId"] = turn_id
                 if step_tool == "vrcforge_shell_process":
                     step_params["_trusted_owner_id"] = self._runtime_shell_owner(
                         turn_id,
@@ -6505,7 +6514,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.7.2",
+        server_version="1.7.3",
     )
     return create_agent_mcp_2026_asgi_app(
         router,

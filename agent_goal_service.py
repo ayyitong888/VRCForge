@@ -102,6 +102,55 @@ class AgentGoalService:
         goal = self._store_call(self._store.create, params or {})
         return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": self._redact(goal)}
 
+    def get_current_agent_goal(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        raw = params or {}
+        goal = self._store.current(
+            chat_id=str(raw.get("chatId") or raw.get("chat_id") or "").strip(),
+            session_id=str(raw.get("sessionId") or raw.get("session_id") or "").strip(),
+            project_root=str(raw.get("projectRoot") or raw.get("project_root") or "").strip(),
+        )
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goal.current.v1",
+            "goal": self._redact(goal) if goal is not None else None,
+            "summary": str(goal.get("title") or goal.get("summary") or "No unfinished goal.") if goal else "No unfinished goal.",
+        }
+
+    def create_agent_goal_from_agent(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        raw = dict(params or {})
+        raw["title"] = raw.get("objective") or raw.get("title") or raw.get("goal")
+        goal = self._store_call(self._store.create_if_no_unfinished, raw)
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goal.v2",
+            "goal": self._redact(goal),
+            "summary": f"Goal created: {goal.get('title') or goal.get('goalId')}",
+        }
+
+    def update_agent_goal_from_agent(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        raw = dict(params or {})
+        current = self._store.current(
+            chat_id=str(raw.get("chatId") or raw.get("chat_id") or "").strip(),
+            session_id=str(raw.get("sessionId") or raw.get("session_id") or "").strip(),
+            project_root=str(raw.get("projectRoot") or raw.get("project_root") or "").strip(),
+        )
+        if current is None:
+            raise AgentGoalServiceError("No unfinished goal exists for this conversation.", 404)
+        goal = self._store_call(self._store.update_from_agent, str(current.get("goalId") or ""), raw)
+        attempts = int(goal.get("agentBlockedAttempts") or 0)
+        return {
+            "ok": True,
+            "schema": "vrcforge.agent_goal.v2",
+            "goal": self._redact(goal),
+            "blockedAttempts": attempts,
+            "blockedThreshold": 3,
+            "summary": (
+                f"Goal completed: {goal.get('title') or goal.get('goalId')}"
+                if str(goal.get("status") or "") == "completed"
+                else f"Blocked evidence recorded ({attempts}/3)."
+            ),
+        }
+
     def update_agent_goal(self, goal_id: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         goal = self._store_call(self._store.update, goal_id, params or {})
         return {"ok": True, "schema": "vrcforge.agent_goal.v2", "goal": self._redact(goal)}

@@ -5,11 +5,11 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.7.2` (`v1.7.2`). Latest published stable
-release: `1.7.2`. The 1.7.2 package carries the 1.7 Agentic closeout, corrected
-public documentation, the approved file-backed multi-colour theme extension and
-the Memory Dreaming convergence. It supersedes the v1.7.1 refresh; the
-unpublished v1.7.0 Draft and unpublished v1.6.1 tag remain superseded.
+Current source / target release: `1.7.3` (`v1.7.3`). Latest published stable
+release: `1.7.2`. The 1.7.3 target carries the 1.7.2 package plus the verified
+user-and-Agent Goal control contract. It will supersede v1.7.2 after
+publication; the unpublished v1.7.0 Draft and unpublished v1.6.1 tag remain
+superseded.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
@@ -60,7 +60,7 @@ Paranoid 仍仅提供预览。
 | Automatic and `/compact` history compaction | Exact provider/model usage drives bounded prefire, automatic compaction, and a hard safety gate; manual `/compact`, visible cancellation, deterministic fallback, and restart recovery remain available | Available |
 | Slash-command skill invocation | 斜杠命令直接调用 skill | 已可用 / Available |
 | Steering queue and run visualization | 插队队列与运行可视化 | 已可用 / Available |
-| Scheduled Goals | Durable background wake/resume into the owning chat with restart recovery and idempotent materialization | Available |
+| Scheduled Goals | `/goal` user create/view/pause/resume/clear plus scoped Agent `get_goal` / `create_goal` / `update_goal`, durable background wake/resume, restart recovery and idempotent materialization | Available |
 | Agent Memory controls | Explicit user-wide or exact-project memory create, review, and clear controls; local persistence only | Available |
 | Explicit Computer Use | User-started desktop turns with protected-target checks, visible activity/Stop controls, cancellation, and capture feedback | Beta, Developer Options and explicit activation required |
 | Provider reasoning/thinking trace | API-returned visible reasoning, thinking, or thought-summary items appear as default-collapsed chat rows | 已可用 / Available |

@@ -127,6 +127,7 @@ pub(crate) struct DesktopDeveloperOptionsChallengeRequest {
 pub(crate) struct DesktopAgentMessageRequest {
     message: String,
     session_id: Option<String>,
+    chat_id: Option<String>,
     history: Option<Vec<serde_json::Value>>,
     agent_name: Option<String>,
     attachments: Option<Vec<serde_json::Value>>,
@@ -804,6 +805,7 @@ pub async fn send_agent_message(
         let mut payload = serde_json::json!({
             "agent_name": request.agent_name.unwrap_or_else(|| "desktop-agent".to_string()),
             "session_id": request.session_id,
+            "chatId": request.chat_id,
             "clientTurnId": request.client_turn_id,
             "goalDeliveryId": request.goal_delivery_id,
             "message": request.message,

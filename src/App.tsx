@@ -963,7 +963,7 @@ export default function App() {
     const currentSessionId = activeChat?.sessionId || sessionId;
     return agentGoals.find((goal) => {
       const status = String(goal.status || "").toLowerCase();
-      if (status !== "active" && status !== "paused") return false;
+      if (status !== "active" && status !== "paused" && status !== "blocked") return false;
       if (goal.chatId) return goal.chatId === activeChatId;
       return Boolean(currentSessionId && goal.sessionId === currentSessionId);
     }) || null;
@@ -2782,7 +2782,13 @@ export default function App() {
         activeAgentGoal
           ? t("goal.current", {
             title: activeAgentGoal.title || activeAgentGoal.summary || activeAgentGoal.goalId,
-            status: t(activeAgentGoal.status === "paused" ? "goal.statusPaused" : "goal.statusActive"),
+            status: t(
+              activeAgentGoal.status === "blocked"
+                ? "goal.statusBlocked"
+                : activeAgentGoal.status === "paused"
+                  ? "goal.statusPaused"
+                  : "goal.statusActive",
+            ),
           })
           : t("goal.noInProgress"),
       );

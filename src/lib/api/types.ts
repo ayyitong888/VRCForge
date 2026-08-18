@@ -798,7 +798,7 @@ export type AgentGoal = {
   goalId: string;
   title?: string;
   summary?: string;
-  status?: "active" | "paused" | "completed" | "cancelled" | string;
+  status?: "active" | "paused" | "blocked" | "completed" | "cancelled" | string;
   projectRoot?: string;
   sessionId?: string;
   chatId?: string;
@@ -812,6 +812,8 @@ export type AgentGoal = {
   wakeCount?: number;
   revision?: number;
   blockedReason?: string;
+  agentBlockedReason?: string;
+  agentBlockedAttempts?: number;
   lastActiveAt?: string;
   elapsedSeconds?: number;
 };

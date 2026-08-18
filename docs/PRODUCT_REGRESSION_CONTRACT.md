@@ -310,6 +310,15 @@ Each item ends with its version history in this exact form:
   for an external Agent to connect, discover and call VRCForge tools. Each lane
   must reuse the 1.6.2 Runtime, approval and UI contracts and may add only the
   smallest owning module or surface required by that lane.
+- Goal boundary: users retain `/goal <objective>`, bare `/goal` and `/goal
+  pause|resume|clear`. The Runtime exposes exactly `get_goal`, `create_goal`
+  and `update_goal` to the Agent. `create_goal` is valid only after an explicit
+  user request and must conflict instead of replacing an unfinished Goal.
+  `update_goal` may only complete with concise evidence or report a blocking
+  reason; the same reason must recur in three distinct consecutive Goal turns
+  before the Goal becomes blocked, and user resume resets that audit. The Agent
+  cannot pause, resume, clear, cancel or attach token/cost budgets. Runtime-owned
+  chat/session/project/turn scope overrides model-supplied scope fields.
 - Memory boundary: the user-facing Memory surface contains only **Enable
   Memory** and **Remember and use Memory across conversations**. Dreaming is
   internal housekeeping over already-saved Memory only; it never reads raw
@@ -696,19 +705,26 @@ Each item ends with its version history in this exact form:
   turn starts, then the Goal becomes paused; it is never a hard interruption.
   With no active Goal the bar consumes zero layout space and no Goal card or
   placeholder appears in the right rail. Users may create, inspect and control
-  a Goal through `/goal`; the Agent uses the same Goal tool/API and durable Goal
-  identity. Goal has no token budget, provider-price lookup or cost conversion;
-  users inspect provider billing separately.
+  a Goal through `/goal`; the Agent sees the same durable identity through
+  exactly `get_goal`, `create_goal` and `update_goal`. Agent creation requires
+  an explicit user request and conflicts with an unfinished Goal. Agent update
+  is limited to evidence-backed completion or the same blocking reason across
+  three distinct consecutive Goal turns; user resume clears the blocked audit.
+  Pause, resume and clear remain user controls. Goal has no token budget,
+  provider-price lookup or cost conversion; users inspect provider billing
+  separately.
 - Forbidden regression: no permanent `Enable independent continuation` card,
   no empty Goal section, no user-only or Agent-only ownership, no second active
   Goal silently replacing the first, no hard-stop pause, no timer reset on
   restart/resume, no Workflow card substituted for Goal and no token/cost UI.
 - Acceptance: UI contracts freeze conditional placement, both entry paths and
-  elapsed time. Runtime tests prove exact persistent-context injection,
+  elapsed time. Runtime/store/profile tests prove exact persistent-context and
+  scope injection, the exact three Agent tool names, explicit-create conflict,
+  evidence-backed completion, distinct-turn blocked threshold and resume reset,
   restart-safe elapsed time, one-click transitions and finish-current-turn
   pause semantics. User live acceptance covers inactive, running, draining,
-  paused and resumed states.
-- [首次实现: 1.6.2] [强化/修复: 1.7.0] [最近验证: 待 1.7.0 封版]
+  paused, blocked and resumed states.
+- [首次实现: 1.6.2] [强化/修复: 1.7.3] [最近验证: 待 1.7.3 封版]
 
 ### UX-012 — Complete provider/model identity and continuous context ring
 

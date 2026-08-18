@@ -1330,6 +1330,7 @@ class AgentSessionRequest(BaseModel):
 class AgentRuntimeMessageRequest(BaseModel):
     agent_name: str = "desktop-agent"
     session_id: str | None = None
+    chat_id: str | None = Field(default=None, alias="chatId")
     client_turn_id: str | None = Field(default=None, alias="clientTurnId")
     goal_delivery_id: str | None = Field(default=None, alias="goalDeliveryId")
     message: str
@@ -3783,6 +3784,7 @@ def agent_runtime_request_payload(
     project_type = runtime_request.project_type or ("unity" if bound_project else "general")
     return {
         "session_id": runtime_request.session_id,
+        "chatId": runtime_request.chat_id,
         "clientTurnId": runtime_request.client_turn_id,
         "goalDeliveryId": runtime_request.goal_delivery_id,
         "message": runtime_request.message,
@@ -15003,6 +15005,9 @@ RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
         "vrcforge_web_fetch",
         "vrcforge_web_search",
         "vrcforge_agent_desktop_action",
+        "vrcforge_get_goal",
+        "vrcforge_create_goal",
+        "vrcforge_update_goal",
         "vrcforge_progress_list",
         "vrcforge_progress_replace",
         "vrcforge_progress_create",
@@ -15022,6 +15027,9 @@ RUNTIME_PLANNER_GENERAL_AGENT_TOOLS = frozenset(
 RUNTIME_PLANNER_CORE_AGENT_TOOLS = frozenset(
     {
         "vrcforge_agent_desktop_action",
+        "vrcforge_get_goal",
+        "vrcforge_create_goal",
+        "vrcforge_update_goal",
         "vrcforge_progress_list",
         "vrcforge_progress_replace",
         "vrcforge_progress_create",
@@ -21391,6 +21399,24 @@ def register_agent_gateway_tools() -> None:
             str(params.get("session_id") or params.get("sessionId") or ""),
             project_root=str(params.get("projectRoot") or params.get("project_root") or params.get("projectPath") or ""),
         ),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_get_goal",
+        "when-to-use: inspect the unfinished Goal for the current conversation before creating or updating it. when-NOT-to-use: do not use it for ordinary TODO lists, workflow status, or to infer a Goal that the user did not request. Negative example: do not call it merely because the user mentions a general objective.",
+        "read/debug",
+        lambda params: AGENT_GATEWAY.goal.get_current_agent_goal(params or {}),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_create_goal",
+        "when-to-use: create a durable Goal only when the user explicitly asks to start or create one; the App keeps it in context across turns. when-NOT-to-use: do not create a Goal for an ordinary multi-step task, and do not set token budgets. Negative example: do not turn every user request into a Goal.",
+        "plan/preview",
+        lambda params: AGENT_GATEWAY.goal.create_agent_goal_from_agent(params or {}),
+    )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_update_goal",
+        "when-to-use: mark the current active Goal complete after evidence is verified, or report the same blocking condition; blocked is applied only after three distinct consecutive turns with the same reason. when-NOT-to-use: do not pause, resume, clear, cancel, or budget a Goal because those controls belong to the user. Negative example: do not mark complete because work merely started.",
+        "plan/preview",
+        lambda params: AGENT_GATEWAY.goal.update_agent_goal_from_agent(params or {}),
     )
     AGENT_GATEWAY.register_tool("vrcforge_agent_message", "Run one VRCForge agent runtime turn.", "plan/preview", lambda params: AGENT_GATEWAY.runtime_message(params, agent_name=str(params.get("agent_name") or params.get("agentName") or "external-agent")))
     AGENT_GATEWAY.register_tool(

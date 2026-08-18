@@ -303,12 +303,12 @@ export function ChatWorkspace({
         variant="ghost"
         className="h-8 w-8 shrink-0 p-0"
         disabled={goalActionBusy}
-        onClick={() => void setActiveGoalStatus(activeGoal.status === "paused" ? "active" : "paused")}
-        aria-label={activeGoal.status === "paused" ? t("goal.resume") : t("goal.pause")}
-        title={activeGoal.status === "paused" ? t("goal.resume") : t("goal.pause")}
+        onClick={() => void setActiveGoalStatus(activeGoal.status === "paused" || activeGoal.status === "blocked" ? "active" : "paused")}
+        aria-label={activeGoal.status === "paused" || activeGoal.status === "blocked" ? t("goal.resume") : t("goal.pause")}
+        title={activeGoal.status === "paused" || activeGoal.status === "blocked" ? t("goal.resume") : t("goal.pause")}
         data-chat-active-goal-toggle
       >
-        {activeGoal.status === "paused" ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
+        {activeGoal.status === "paused" || activeGoal.status === "blocked" ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />}
       </Button>
       <Button
         type="button"

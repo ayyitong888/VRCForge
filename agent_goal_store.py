@@ -21,6 +21,7 @@ from background_goal_runtime import (
 
 
 GOAL_TERMINAL_STATUSES = {"completed", "cancelled"}
+AGENT_GOAL_BLOCK_THRESHOLD = 3
 DELIVERY_TERMINAL_STATUSES = {"completed", "materialized", "denied", "blocked", "parked", "answered"}
 WAKE_MIN_INTERVAL_MINUTES = 5
 WAKE_MAX_INTERVAL_MINUTES = 10_080
@@ -554,6 +555,103 @@ class AgentGoalStore:
                     "wakeCount": 0,
                     "lastActiveAt": _iso(now),
                     "elapsedSeconds": 0,
+                    "createdBy": _summarize(params.get("createdBy"), 80),
+                }
+            )
+            return self.with_live_elapsed(self.project_goals()[goal_id])
+
+    def current(
+        self,
+        *,
+        chat_id: str = "",
+        session_id: str = "",
+        project_root: str = "",
+    ) -> dict[str, Any] | None:
+        """Return the newest unfinished goal owned by the current conversation scope."""
+
+        rows = []
+        for row in self.project_goals().values():
+            if str(row.get("status") or "").strip().lower() not in {"active", "paused", "blocked"}:
+                continue
+            if chat_id:
+                if str(row.get("chatId") or "").strip() != chat_id:
+                    continue
+            elif session_id and str(row.get("sessionId") or "").strip() not in {"", session_id}:
+                continue
+            if project_root:
+                existing = str(row.get("projectRoot") or "").strip()
+                if existing and self._normalize_path(existing) != self._normalize_path(project_root):
+                    continue
+            rows.append(row)
+        rows.sort(key=lambda item: str(item.get("updatedAt") or item.get("createdAt") or ""), reverse=True)
+        return self.with_live_elapsed(rows[0]) if rows else None
+
+    def create_if_no_unfinished(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Create one Agent-owned goal without racing another unfinished goal."""
+
+        chat_id = str(params.get("chatId") or params.get("chat_id") or "").strip()
+        session_id = str(params.get("sessionId") or params.get("session_id") or "").strip()
+        project_root = str(params.get("projectRoot") or params.get("project_root") or "").strip()
+        with self._lock:
+            if self.current(chat_id=chat_id, session_id=session_id, project_root=project_root) is not None:
+                raise AgentGoalStoreError("An unfinished goal already exists for this conversation.", 409)
+            return self.create({**params, "createdBy": "agent_tool"})
+
+    def update_from_agent(self, goal_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Apply the narrow model-owned Goal transitions used by Codex/Claude-style tools."""
+
+        goal_id = str(goal_id or "").strip()
+        status = str(params.get("status") or "").strip().lower()
+        reason = _summarize(params.get("reason") or params.get("evidence"), 1000)
+        if status not in {"complete", "blocked"}:
+            raise AgentGoalStoreError("Agent Goal status must be complete or blocked.")
+        if not reason:
+            raise AgentGoalStoreError("Agent Goal updates require a concise evidence or blocking reason.")
+        with self._lock:
+            current = self.project_goals().get(goal_id)
+            if current is None:
+                raise AgentGoalStoreError(f"Goal was not found: {goal_id}", 404)
+            self._assert_owner(current, params)
+            if str(current.get("status") or "") != "active":
+                raise AgentGoalStoreError("Only an active goal can be completed or blocked by the Agent.", 409)
+            if status == "complete":
+                return self.update(
+                    goal_id,
+                    {
+                        "status": "completed",
+                        "summary": str(current.get("summary") or ""),
+                        "completionEvidence": reason,
+                        "updatedBy": "agent_tool",
+                    },
+                )
+
+            turn_id = str(params.get("turnId") or params.get("turn_id") or "").strip()
+            previous_turn_id = str(current.get("agentBlockedTurnId") or "").strip()
+            previous_reason = str(current.get("agentBlockedReason") or "").strip()
+            if turn_id and previous_turn_id == turn_id:
+                return self.with_live_elapsed(current)
+            attempts = int(current.get("agentBlockedAttempts") or 0) + 1 if previous_reason == reason else 1
+            next_status = "blocked" if attempts >= AGENT_GOAL_BLOCK_THRESHOLD else "active"
+            now = _utc_now()
+            elapsed_seconds = float(current.get("elapsedSeconds") or 0)
+            last_active_at = str(current.get("lastActiveAt") or "")
+            if next_status == "blocked":
+                started = _parse_timestamp(last_active_at)
+                if started is not None:
+                    elapsed_seconds += max(0.0, (now - started).total_seconds())
+                last_active_at = ""
+            self._append(
+                {
+                    "event": "goal_agent_blocked_attempted",
+                    "goalId": goal_id,
+                    "status": next_status,
+                    "revision": int(current.get("revision") or 0) + 1,
+                    "agentBlockedReason": reason,
+                    "agentBlockedAttempts": attempts,
+                    "agentBlockedTurnId": turn_id,
+                    "elapsedSeconds": int(elapsed_seconds),
+                    "lastActiveAt": last_active_at,
+                    "updatedBy": "agent_tool",
                 }
             )
             return self.with_live_elapsed(self.project_goals()[goal_id])
@@ -605,6 +703,25 @@ class AgentGoalStore:
                     "summary": next_summary,
                     "elapsedSeconds": int(next_elapsed_seconds),
                     "lastActiveAt": next_last_active_at,
+                    **(
+                        {
+                            "agentBlockedReason": "",
+                            "agentBlockedAttempts": 0,
+                            "agentBlockedTurnId": "",
+                        }
+                        if status == "active" and current_status != "active"
+                        else {}
+                    ),
+                    **(
+                        {"completionEvidence": _summarize(params.get("completionEvidence"), 1000)}
+                        if "completionEvidence" in params
+                        else {}
+                    ),
+                    **(
+                        {"updatedBy": _summarize(params.get("updatedBy"), 80)}
+                        if "updatedBy" in params
+                        else {}
+                    ),
                 }
             )
             return self.with_live_elapsed(self.project_goals()[goal_id])

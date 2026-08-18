@@ -29,6 +29,15 @@ Before publishing a release package:
       Confirm General Settings never renders the local identity-map alias list;
       enable Developer Options and confirm the diagnostic map is available only
       on the Developer page.
+* [ ] Confirm Goal keeps both entry paths: users can `/goal <objective>`, view,
+      pause, resume and clear; the Agent sees exactly `get_goal`, `create_goal`
+      and `update_goal`. Agent create requires an explicit user request and
+      conflicts with any unfinished Goal. Agent update accepts only
+      evidence-backed completion or blocked evidence; the same reason must be
+      observed on three distinct consecutive Goal turns, and user resume resets
+      the audit. Runtime scope must override model-supplied chat/session/project/
+      turn identifiers. Reject Agent pause/resume/clear/cancel, silent Goal
+      replacement, token budgets, price lookup and cost-conversion UI.
 * [ ] Confirm the profiled registry exposes Core + General in General Mode and
       Core + General + Unity in Unity Project Mode using the same handlers.
       Registered Unity roots remain readable by General tools but reject

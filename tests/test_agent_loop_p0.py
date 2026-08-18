@@ -3671,6 +3671,75 @@ class AgentLoopP0Tests(unittest.TestCase):
             [expected_action_id],
         )
 
+    def test_runtime_goal_tool_receives_current_chat_scope_not_model_scope(self) -> None:
+        gateway = self.gateway
+        arguments = {"objective": "Ship the verified Goal slice"}
+        model_arguments = {**arguments, "chatId": "spoofed-chat"}
+        expected_action_id = canonical_action_id("skill", "vrcforge_create_goal", model_arguments)
+        plans = iter(
+            [
+                {
+                    "planner": "llm",
+                    "summary": "Create the explicitly requested goal.",
+                    "skillNeeded": True,
+                    "skillTool": "vrcforge_create_goal",
+                    "skillParams": model_arguments,
+                    "continueLoop": True,
+                    "nextStep": "call_skill",
+                },
+                {
+                    "planner": "llm",
+                    "summary": "Goal created.",
+                    "reply": "Goal created.",
+                    "continueLoop": False,
+                    "nextStep": "done",
+                    "completionClaim": {
+                        "satisfied": True,
+                        "evidenceActionIds": [expected_action_id],
+                    },
+                },
+            ]
+        )
+        captured: dict[str, object] = {}
+
+        def execute_skill(_owner, tool, params, agent_name=None, owner_id=""):
+            captured.update(params)
+            return {
+                "ok": True,
+                "tool": tool,
+                "status": "executed",
+                "result": {"goal": {"goalId": "goal-live"}},
+                "outcome": {
+                    "status": "ok",
+                    "summary": "goal created",
+                    "verification": {"state": "not_required", "checks": []},
+                },
+            }
+
+        with patch.object(
+            gateway.runtime_planner,
+            "plan_agent_turn",
+            side_effect=lambda *_args, **_kwargs: next(plans),
+        ), patch.object(
+            type(gateway.runtime_skills),
+            "execute",
+            autospec=True,
+            side_effect=execute_skill,
+        ):
+            result = gateway.runtime_message(
+                {
+                    "message": "Create a goal to ship this slice",
+                    "session_id": "goal-scope-session",
+                    "chatId": "goal-scope-chat",
+                    "clientTurnId": "goal-scope-client-turn",
+                }
+            )
+
+        self.assertEqual(captured["sessionId"], "goal-scope-session")
+        self.assertEqual(captured["chatId"], "goal-scope-chat")
+        self.assertNotEqual(captured["turnId"], "")
+        self.assertEqual(result["plan"]["nextStep"], "done")
+
     def test_repeated_tool_steps_keep_their_own_results_in_execution_order(self) -> None:
         gateway = self.gateway
         first_arguments = {"avatarPath": "AvatarA"}

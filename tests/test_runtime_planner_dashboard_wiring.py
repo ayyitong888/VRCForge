@@ -337,6 +337,7 @@ def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
     assert "ask_user" in planning_names
     assert "delegate_subagent" in planning_names
     assert "know_yourself" in planning_names
+    assert {"get_goal", "create_goal", "update_goal"} <= planning_names
     assert "vrcforge_know_yourself" in planning_runtime
     assert "shell" in execution_names
     assert "vrcforge_avatar_encryption_scan" not in routable_runtime
