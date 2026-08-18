@@ -6,6 +6,11 @@ const source = await readFile(
   resolve(import.meta.dirname, "..", "src", "components", "settings", "external-agent-connectors-panel.tsx"),
   "utf8",
 );
+const checkpointStorage = await readFile(
+  resolve(import.meta.dirname, "..", "src", "components", "settings", "checkpoint-storage-panel.tsx"),
+  "utf8",
+);
+const zhCn = JSON.parse(await readFile(resolve(import.meta.dirname, "..", "src", "locales", "zh-CN.json"), "utf8"));
 const genericRow = source.slice(source.indexOf("function GenericConnectorRow"), source.indexOf("function ConnectorToggle"));
 
 assert.match(genericRow, /connector\.genericGuideTitle/);
@@ -25,5 +30,11 @@ assert.ok(
   genericRow.indexOf("connector.copyStdio") < genericRow.indexOf("connector.genericAutoTitle"),
   "transport choices must appear before the optional automatic JSON installation path",
 );
+
+assert.match(checkpointStorage, /protectionReason === "active_recovery"/);
+assert.match(checkpointStorage, /checkpointArchiveRecentProtected/);
+assert.match(checkpointStorage, /checkpointArchiveRecoveryProtected/);
+assert.equal(zhCn.settings.checkpointArchiveRecentProtected, "最新保留");
+assert.equal(zhCn.settings.checkpointArchiveRecoveryProtected, "恢复中保留");
 
 console.log("external Agent connector layout UI contract: ok");

@@ -3263,8 +3263,8 @@ def read_agentic_app_bootstrap(
 
 
 @app.get("/api/app/update")
-async def check_agentic_app_update() -> dict[str, Any]:
-    return await asyncio.to_thread(get_app_update_service().check)
+async def check_agentic_app_update(refresh: bool = False) -> dict[str, Any]:
+    return await asyncio.to_thread(get_app_update_service().check, refresh=refresh)
 
 
 def build_agentic_app_bootstrap_payload(

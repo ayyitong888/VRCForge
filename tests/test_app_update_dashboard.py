@@ -9,8 +9,9 @@ class FakeAppUpdateService:
     def __init__(self) -> None:
         self.calls = 0
 
-    def check(self) -> dict[str, object]:
+    def check(self, *, refresh: bool = False) -> dict[str, object]:
         self.calls += 1
+        self.refresh = refresh
         return {
             "ok": False,
             "schema": "vrcforge.app_update.v1",
@@ -40,3 +41,13 @@ def test_app_update_route_is_app_only_and_has_no_mode(monkeypatch) -> None:
     assert "app_update" not in tool_names
     assert "check_app_update" not in tool_names
     assert "vrcforge_check_app_update" not in tool_names
+
+
+def test_app_update_route_forwards_explicit_refresh(monkeypatch) -> None:
+    fake = FakeAppUpdateService()
+    monkeypatch.setattr(dashboard_server, "APP_UPDATE_SERVICE", fake)
+
+    asyncio.run(dashboard_server.check_agentic_app_update(refresh=True))
+
+    assert fake.calls == 1
+    assert fake.refresh is True

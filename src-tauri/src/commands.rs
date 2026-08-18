@@ -298,6 +298,13 @@ pub(crate) struct DesktopBootstrapRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct DesktopAppUpdateRequest {
     timeout_ms: Option<u64>,
+    refresh: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DesktopOpenAppReleaseUrlRequest {
+    release_url: String,
 }
 
 #[derive(Deserialize)]
@@ -1215,16 +1222,81 @@ pub async fn fetch_app_bootstrap(
 pub async fn check_app_update(
     request: DesktopAppUpdateRequest,
 ) -> Result<serde_json::Value, String> {
+    let path = if request.refresh.unwrap_or(false) {
+        "/api/app/update?refresh=true"
+    } else {
+        "/api/app/update"
+    };
     blocking_backend_json_request(move || {
         backend_json_request(
             "GET",
-            "/api/app/update".to_string(),
+            path.to_string(),
             None,
             request.timeout_ms.or(Some(4_000)),
         )
         .map(sanitize_webview_response)
     })
     .await
+}
+
+fn validate_app_release_url(raw: &str) -> Result<String, String> {
+    const PREFIX: &str = "https://github.com/ayyitong888/VRCForge/releases/tag/v";
+    let url = raw.trim();
+    let version = url
+        .strip_prefix(PREFIX)
+        .ok_or_else(|| "Only official VRCForge GitHub release URLs can be opened.".to_string())?;
+    let parts = version.split('.').collect::<Vec<_>>();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err("The VRCForge release URL is invalid.".to_string());
+    }
+    Ok(url.to_string())
+}
+
+#[tauri::command]
+pub fn open_app_release_url(request: DesktopOpenAppReleaseUrlRequest) -> Result<(), String> {
+    let release_url = validate_app_release_url(&request.release_url)?;
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+        let wide_url = release_url
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                wide_url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if result as isize <= 32 {
+            return Err("Unable to open GitHub Releases in the default browser.".to_string());
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
+        Command::new(opener)
+            .arg(release_url)
+            .spawn()
+            .map_err(|error| format!("Unable to open GitHub Releases: {error}"))?;
+        Ok(())
+    }
 }
 
 pub(crate) fn bootstrap_query(request: &DesktopBootstrapRequest) -> String {
@@ -1244,7 +1316,9 @@ pub(crate) fn bootstrap_query(request: &DesktopBootstrapRequest) -> String {
 
 #[cfg(test)]
 mod bootstrap_transport_tests {
-    use super::{bootstrap_query, DesktopAppUpdateRequest, DesktopBootstrapRequest};
+    use super::{
+        bootstrap_query, validate_app_release_url, DesktopAppUpdateRequest, DesktopBootstrapRequest,
+    };
 
     #[test]
     fn deferred_catalog_deserializes_and_reaches_the_backend_query() {
@@ -1264,16 +1338,29 @@ mod bootstrap_transport_tests {
     #[test]
     fn app_update_transport_accepts_no_mode_or_url() {
         let request: DesktopAppUpdateRequest = serde_json::from_value(serde_json::json!({
-            "timeoutMs": 4000
+            "timeoutMs": 4000,
+            "refresh": true
         }))
         .expect("startup update request should deserialize");
         assert_eq!(request.timeout_ms, Some(4000));
+        assert_eq!(request.refresh, Some(true));
         assert!(
             serde_json::from_value::<DesktopAppUpdateRequest>(serde_json::json!({
                 "mode": "manual"
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn app_release_url_only_accepts_the_official_tag_page() {
+        let expected = "https://github.com/ayyitong888/VRCForge/releases/tag/v1.7.3";
+        assert_eq!(validate_app_release_url(expected), Ok(expected.to_string()));
+        assert!(validate_app_release_url("https://attacker.invalid/v1.7.3").is_err());
+        assert!(validate_app_release_url(
+            "https://github.com/ayyitong888/VRCForge/releases/tag/v1.7.3/extra"
+        )
+        .is_err());
     }
 }
 

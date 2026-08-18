@@ -58,7 +58,18 @@ Before publishing a release package:
       Developer-only `/desktop` when enabled); domain skills remain Agent-owned.
 * [ ] Confirm App Update runs once in the startup background and only a
       successful newer version opens an in-App dialog. Current/offline/error
-      paths must be silent; manual/periodic/system-notification paths are absent.
+      startup paths stay silent. The tray **Check for updates** action performs
+      one fresh bounded check and reports update/current/failure; the update
+      action opens only the validated official GitHub Release. Confirm the
+      automatic-check opt-out survives restart and upgrade. Periodic polling,
+      system notifications, downloads and automatic installation stay absent.
+* [ ] With both sidebars visible, verify Optimization, Protection and Skills
+      derive their columns from the center workspace width: cards and fields
+      stack before labels clip or wrap character by character. Wider center
+      widths retain useful multi-column density.
+* [ ] Confirm checkpoint Storage distinguishes **Latest retained** from
+      **Recovery in progress**, keeps delete disabled for both, and never
+      derives either reason from client-side list order.
 * [ ] Confirm Memory Settings shows only **Enable Memory** and **Remember and
       use Memory across conversations**. Dreaming must read only already-saved
       Memory, reuse the configured BYOK Provider/Model, keep all Memory intact

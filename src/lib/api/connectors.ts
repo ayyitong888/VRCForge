@@ -45,6 +45,7 @@ export type ExternalAgentConnectorStatus = {
         sizeMb?: number;
         modifiedAt?: number;
         protected?: boolean;
+        protectionReason?: "recent" | "active_recovery" | string;
         label?: string;
       }>;
     };

@@ -209,7 +209,7 @@
     "modelProvider": "モデルプロバイダ",
     "diagnostics": "診断",
     "aboutTitle": "VRCForge について",
-    "aboutProduct": "VRCForge 1.7.3",
+    "aboutProduct": "VRCForge 1.7.4",
     "aboutMcp": "VRCForge 独自の MCP 2.0（2026-07-28）Core と 64 個の Unity ツール。",
     "aboutSafety": "すべての書き込みには承認とチェックポイントが必要です。ロールバックには別の承認が必要です。",
     "aboutLicense": "GPL-3.0-only。配布の詳細は同梱の NOTICE と DEPENDENCIES を参照してください。",
@@ -267,8 +267,10 @@
     "checkpointArchiveSelectAll": "すべて選択",
     "checkpointArchiveInvertSelection": "選択を反転",
     "checkpointArchiveCleanSelected": "選択を削除",
-    "checkpointArchiveProtected": "保護中",
-    "checkpointArchiveProtectedHint": "最新 2 件のアーカイブと復旧中の checkpoint を支えるアーカイブは選択できません。",
+    "checkpointArchiveRecentProtected": "最新として保持",
+    "checkpointArchiveRecentProtectedHint": "使用可能なロールバック地点を残すため、最新 2 件の一つとして保持されています。",
+    "checkpointArchiveRecoveryProtected": "復旧のため保持",
+    "checkpointArchiveRecoveryProtectedHint": "進行中の checkpoint 復旧がこのアーカイブを使用しているため、まだ削除できません。",
     "checkpointArchiveSelectedCount": "{{count}} 件選択中",
     "checkpointArchiveNewDirectory": "アーカイブを新しいディレクトリへ移動",
     "checkpointArchiveNewDirectoryHint": "システムドライブ以外の絶対パスを使用してください。VRCForge は ZIP をコピーし、checkpoint 記録を書き換えてから古いコピーを削除します。復旧中の checkpoint があると移動できません。",
@@ -795,6 +797,18 @@
     "slashCallable": "Slash callable",
     "manualOnly": "Manual only",
     "signedRelease": "Signed release",
+    "permissionInstruction": "説明のみ",
+    "permissionReadOnly": "読み取り専用",
+    "permissionPreview": "プレビュー",
+    "permissionApproval": "承認が必要",
+    "permissionAdvanced": "高度な権限",
+    "riskLow": "低",
+    "riskMedium": "中",
+    "riskHigh": "高",
+    "riskCritical": "重大",
+    "checkOk": "正常",
+    "checkWarning": "要確認",
+    "checkError": "エラー",
     "domainFallback": "その他"
   },
   "skillStatus": {
@@ -1116,10 +1130,18 @@
     "profiles": {
       "liteTitle": "ライト保護",
       "liteDesc": "最も軽量。ローエンドデバイスに最適。",
+      "liteLabel": "ライト",
+      "liteProtection": "基本保護",
+      "liteDevice": "一般的な Windows PC",
       "standardTitle": "標準保護",
       "standardDesc": "推奨デフォルト。保護とパフォーマンスのバランス。",
+      "standardProtection": "バランス保護",
+      "standardDevice": "多くの PC",
       "paranoidTitle": "最高保護",
-      "paranoidDesc": "最強。ハイエンド PC に最適。"
+      "paranoidDesc": "最強。ハイエンド PC に最適。",
+      "paranoidLabel": "最高",
+      "paranoidProtection": "最強保護",
+      "paranoidDevice": "ハイエンド PC"
     },
     "gates": {
       "windowsOnly": "Windows アバターのみ",
@@ -1128,13 +1150,16 @@
       "experimental": "レイヤーはまだテスト中",
       "targetsNotFound": "選択したターゲットが見つかりません",
       "planNeedsScan": "プランには新しいスキャンが必要です",
-      "needsReview": "レビューが必要"
+      "needsReview": "レビューが必要",
+      "noShaderTarget": "対応するマテリアルがありません",
+      "adapterMissing": "マテリアルアダプターがありません"
     },
     "cost": {
       "lowest": "最低",
       "balanced": "バランス",
       "highest": "最高"
-    }
+    },
+    "maxImpact": "最大 {{value}}%"
   },
   "optimization": {
     "title": "最適化ダッシュボード",
@@ -1177,8 +1202,45 @@
     "skinnedMeshes": "Skinned meshes",
     "physBones": "PhysBones",
     "generatedResidue": "Generated residue",
-    "unknown": "unknown",
-    "rendererPath": "Renderer path",
+    "unknown": "不明",
+    "modeAuto": "自動実行",
+    "modePreview": "プレビューのみ",
+    "modeApproval": "承認が必要",
+    "profiles": {
+      "pcConservative": "PC 保守",
+      "pcMedium": "PC バランス",
+      "questMedium": "Quest バランス",
+      "eventLight": "イベント軽量",
+      "custom": "カスタム"
+    },
+    "rendererPath": "Renderer パス",
+    "version": "バージョン",
+    "benefit": "効果",
+    "nextAction": "次の操作",
+    "shots": "スクリーンショット",
+    "playMode": "再生モード",
+    "scoring": "評価",
+    "notRun": "未実行",
+    "project": "プロジェクト",
+    "residue": "残留物",
+    "checkpoint": "チェックポイント",
+    "readable": "読み取り可能",
+    "notReady": "未準備",
+    "required": "必要",
+    "cases": "ケース",
+    "blocked": "ブロック済み",
+    "apply": "適用",
+    "blockedState": "ブロック済み",
+    "convertible": "変換可能",
+    "skipped": "スキップ",
+    "reasons": "理由",
+    "passed": "合格",
+    "failed": "失敗",
+    "delta": "変更",
+    "matched": "一致",
+    "rollbackGate": "ロールバック確認",
+    "severityGate": "重大度 / ゲート",
+    "size": "サイズ",
     "proofStages": {
       "before": "Before",
       "afterApply": "After apply",
@@ -1629,6 +1691,12 @@
   "appUpdate": {
     "dialogTitle": "VRCForge の更新があります",
     "dialogBody": "VRCForge {{version}} を GitHub Releases で確認できます。",
-    "openRelease": "GitHub Releases で見る"
+    "openRelease": "GitHub Releases で見る",
+    "upToDateTitle": "VRCForge は最新版です",
+    "upToDateBody": "現在の VRCForge {{version}} が最新版です。",
+    "failedTitle": "更新を確認できませんでした",
+    "failedBody": "GitHub Releases に接続できません。ネットワーク接続を確認して、もう一度お試しください。",
+    "disableAutomaticCheck": "今後、更新を自動確認しない",
+    "openReleaseFailed": "GitHub Releases を開けませんでした。もう一度お試しください。"
   }
 }

@@ -5,8 +5,11 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source and latest published stable release: `1.7.3` (`v1.7.3`). The
-1.7.3 package carries the 1.7.2 package plus the verified user-and-Agent Goal
+Current source / target release: `1.7.4` (`v1.7.4`). The latest published
+stable remains 1.7.3 until the 1.7.4 publication readback completes. The 1.7.4
+package carries the 1.7.3 package plus corrected update controls, preserved
+personal appearance settings, clearer checkpoint retention, responsive
+Optimization/Protection/Skills workspaces, and the verified user-and-Agent Goal
 control contract and supersedes v1.7.2; the v1.7.2 tag and Release page remain
 available and unchanged. The unpublished v1.7.0 Draft and unpublished v1.6.1
 tag remain superseded.
@@ -334,7 +337,7 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- `v1.5.0` 的 `VRCForge.unitypackage`，包含该版本的 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 64 个声明的 Unity 工具
+- `v1.7.4` 的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 64 个声明的 Unity 工具
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 
@@ -410,7 +413,24 @@ Use locks when you want to keep part of a good result. Locked Blendshapes are hi
 | Parameters | Reviews Expression Parameter usage | 参数 | 查看表达参数占用 |
 | Screenshots | Captures and reviews avatar screenshots | 截图 | 捕获并查看 Avatar 截图 |
 | Checkpoints | Lists pre-write checkpoints and requests restore | Checkpoints | 查看写入前快照并申请回退 |
+| Optimization | Finds expensive Avatar content and prepares a reviewable plan | 优化 | 找出主要性能问题并生成可审查方案 |
+| Protection | Chooses a protection level and previews its impact before approval | 保护 | 选择保护级别并在确认前查看影响 |
+| Skills | Finds, checks, and configures Agent capabilities | 能力 | 查找、检查和配置 Agent 能力 |
 | Connection diagnostics | Shows connection results and failure reasons | 连接诊断 | 显示连接结果和失败原因 |
+
+Startup update checking runs in the background and stays silent unless a newer
+release exists. The tray **Check for updates** action always reports one result:
+update available, already current, or check failed. The update dialog can turn
+off future automatic checks. That choice, themes, custom colours and background
+images are personal settings and survive App upgrades.
+
+启动检查更新在后台进行，只有发现新版才提示。托盘的「检查更新」一定会显示
+一种结果：有新版、已是最新版或检查失败。更新弹窗可关闭以后自动检查；这个
+选择以及主题、自选颜色和背景图都会在 App 更新后保留。
+
+Checkpoint Storage labels protected archives as **Latest retained** or
+**Recovery in progress**, so the reason they cannot be deleted is visible.
+Checkpoint 存储页会分别标出「最新保留」和「恢复中保留」，直接说明为何不能删除。
 
 ## Agent Workspace / Agent 工作台
 

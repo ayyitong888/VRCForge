@@ -19,6 +19,7 @@ export const RIGHT_SIDEBAR_COLLAPSED_KEY = "vrcforge_right_sidebar_collapsed";
 export const LAYOUT_PANE_WIDTHS_KEY = "vrcforge_layout_pane_widths";
 export const RIGHT_RUNTIME_SECTION_COLLAPSED_KEY = "vrcforge_right_runtime_sections_collapsed";
 export const DEVELOPER_OPTIONS_ENABLED_KEY = "vrcforge_developer_options_enabled";
+export const AUTOMATIC_UPDATE_CHECK_DISABLED_KEY = "vrcforge_automatic_update_check_disabled";
 
 export const DEFAULT_LEFT_PANE_WIDTH = 280;
 export const DEFAULT_RIGHT_PANE_WIDTH = 320;
@@ -68,6 +69,26 @@ export function loadDeveloperOptionsEnabled(): boolean {
     return window.localStorage.getItem(DEVELOPER_OPTIONS_ENABLED_KEY) === "true";
   } catch {
     return false;
+  }
+}
+
+export function loadAutomaticUpdateCheckEnabled(): boolean {
+  try {
+    return window.localStorage.getItem(AUTOMATIC_UPDATE_CHECK_DISABLED_KEY) !== "true";
+  } catch {
+    return true;
+  }
+}
+
+export function persistAutomaticUpdateCheckEnabled(enabled: boolean): void {
+  try {
+    if (enabled) {
+      window.localStorage.removeItem(AUTOMATIC_UPDATE_CHECK_DISABLED_KEY);
+    } else {
+      window.localStorage.setItem(AUTOMATIC_UPDATE_CHECK_DISABLED_KEY, "true");
+    }
+  } catch {
+    // A blocked preference store must not prevent update checks or dismissal.
   }
 }
 

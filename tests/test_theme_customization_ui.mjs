@@ -12,6 +12,9 @@ const background = read("src/lib/theme-background.ts");
 const hook = read("src/hooks/use-theme-customization.ts");
 const css = read("src/theme.css");
 const rust = read("src-tauri/src/theme_background.rs");
+const backend = read("src-tauri/src/backend.rs");
+const offlineInstaller = read("installer/VRCForge_Offline_Installer_x64.nsi");
+const webInstaller = read("installer/VRCForge_Web_Installer_x64.nsi");
 const tauriConfig = JSON.parse(read("src-tauri/tauri.conf.json"));
 const en = JSON.parse(read("src/locales/en-US.json"));
 const zhCn = JSON.parse(read("src/locales/zh-CN.json"));
@@ -111,5 +114,16 @@ assert.deepEqual(tauriConfig.app.security.assetProtocol.scope, [
   "$DATA/VRCForge/agentic-app/theme/**/*",
 ]);
 assert.match(tauriConfig.app.security.csp, /asset:/);
+
+// Theme choices are personal data. Upgrades keep the stable WebView identity
+// that owns localStorage and keep the managed background under the persistent
+// user-data root. Only the explicit uninstall checkbox may clear that root.
+assert.equal(tauriConfig.identifier, "app.vrcforge.agentic");
+assert.match(backend, /join\("VRCForge"\)\.join\("agentic-app"\)/);
+for (const installer of [offlineInstaller, webInstaller]) {
+  assert.match(installer, /!define USER_DATA_RELATIVE "VRCForge\\agentic-app"/);
+  assert.match(installer, /\$\{If\} \$ClearUserData == \$\{BST_CHECKED\}[\s\S]*RMDir \/r "\$UserDataRoot"/);
+  assert.match(installer, /\$\{NSD_SetState\} \$ClearUserDataCheckbox \$\{BST_UNCHECKED\}/);
+}
 
 console.log("theme customization UI contract: ok");

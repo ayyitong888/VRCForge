@@ -10,12 +10,12 @@ import { DataLine } from "../ui/data-line";
 const PROTECTION_PROFILE_FALLBACKS: AvatarEncryptionProfileCard[] = [
   {
     id: "lite",
-    label: "Lite",
+    label: i18n.t("encryption.profiles.liteLabel"),
     title: i18n.t("encryption.profiles.liteTitle"),
     description: i18n.t("encryption.profiles.liteDesc"),
-    protection: "Low-overhead encryption.",
+    protection: i18n.t("encryption.profiles.liteProtection"),
     cost: "lowest",
-    deviceFit: "Windows / low-end PC",
+    deviceFit: i18n.t("encryption.profiles.liteDevice"),
     applyStatus: "available",
   },
   {
@@ -23,23 +23,36 @@ const PROTECTION_PROFILE_FALLBACKS: AvatarEncryptionProfileCard[] = [
     label: i18n.t("package.standard"),
     title: i18n.t("encryption.profiles.standardTitle"),
     description: i18n.t("encryption.profiles.standardDesc"),
-    protection: "Recommended encryption.",
+    protection: i18n.t("encryption.profiles.standardProtection"),
     cost: "balanced",
-    deviceFit: "PC default",
+    deviceFit: i18n.t("encryption.profiles.standardDevice"),
     recommended: true,
     applyStatus: "available",
   },
   {
     id: "paranoid",
-    label: "Paranoid",
+    label: i18n.t("encryption.profiles.paranoidLabel"),
     title: i18n.t("encryption.profiles.paranoidTitle"),
     description: i18n.t("encryption.profiles.paranoidDesc"),
-    protection: "Highest preview mode.",
+    protection: i18n.t("encryption.profiles.paranoidProtection"),
     cost: "highest",
-    deviceFit: "high-end PC",
+    deviceFit: i18n.t("encryption.profiles.paranoidDevice"),
     applyStatus: "blocked_until_blendshape_proof",
   },
 ];
+
+const PROTECTION_PROFILE_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 18rem), 1fr))",
+};
+const PROTECTION_WORKSPACE_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 24rem), 1fr))",
+};
+const PROTECTION_CONTROL_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 12rem), 1fr))",
+};
+const PROTECTION_METRIC_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 10rem), 1fr))",
+};
 
 export function ProtectionWorkspace({
   plan,
@@ -80,6 +93,7 @@ export function ProtectionWorkspace({
 }) {
   const planPayload = protectionPlanPayload(plan);
   const activeProfile = protectionProfileCards(plan).find((item) => item.id === profile) || PROTECTION_PROFILE_FALLBACKS[1];
+  const activeProfileText = protectionProfileText(activeProfile);
   const benchmarkRows = protectionBenchmarkRows(plan);
   const benchmarkGroups = groupProtectionBenchmarks(benchmarkRows);
   const hardGate = protectionRecord(planPayload.hardGate);
@@ -97,11 +111,11 @@ export function ProtectionWorkspace({
   return (
     <div className="min-h-0 flex-1 overflow-auto px-3 py-4 sm:px-6 sm:py-8">
       <div className="mx-auto grid max-w-6xl gap-6">
-        <section className="flex min-w-0 flex-wrap items-center gap-3">
-          <div className="min-w-0 flex-1">
+        <section className="grid min-w-0 gap-3">
+          <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
               <Shield className="h-4 w-4 shrink-0 text-primary" />
-              <h1 className="truncate text-lg font-semibold">{i18n.t("encryption.title")}</h1>
+              <h1 className="min-w-0 break-words text-lg font-semibold">{i18n.t("encryption.title")}</h1>
               {activeProfile.recommended ? (
                 <Badge tone="ok" className="shrink-0">
                   {i18n.t("encryption.recommended")}
@@ -110,21 +124,28 @@ export function ProtectionWorkspace({
             </div>
             <div className="mt-1 truncate text-xs text-muted-foreground">{selectedProjectPath || i18n.t("encryption.noUnityProject")}</div>
           </div>
-          <Badge tone={requestReady ? "ok" : "warn"} className="shrink-0">
-            {requestReady ? i18n.t("encryption.readyToRequest") : connectorConfigured ? i18n.t("encryption.needsReview") : i18n.t("encryption.privateAddonRequired")}
-          </Badge>
-          <Badge tone={profileApplyBlocked ? "warn" : "muted"} className="shrink-0">
-            {activeProfile.label || profile}
-          </Badge>
-          <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            Refresh
-          </Button>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Badge tone={requestReady ? "ok" : "warn"} className="shrink-0">
+              {requestReady ? i18n.t("encryption.readyToRequest") : connectorConfigured ? i18n.t("encryption.needsReview") : i18n.t("encryption.privateAddonRequired")}
+            </Badge>
+            <Badge tone={profileApplyBlocked ? "warn" : "muted"} className="shrink-0">
+              {activeProfileText.label || profile}
+            </Badge>
+            <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              {i18n.t("common.refresh")}
+            </Button>
+          </div>
         </section>
 
-        <section className="grid gap-3 md:grid-cols-3">
+        <section
+          data-vrcforge-protection-profiles
+          className="grid gap-3"
+          style={PROTECTION_PROFILE_GRID}
+        >
           {protectionProfileCards(plan).map((card) => {
             const selected = card.id === profile;
+            const display = protectionProfileText(card);
             return (
               <button
                 key={card.id}
@@ -137,18 +158,18 @@ export function ProtectionWorkspace({
               >
                 <div className="flex min-w-0 items-center gap-2">
                   <Shield className="h-4 w-4 shrink-0 text-primary" />
-                  <div className="min-w-0 flex-1 truncate text-sm font-semibold">{card.title || card.label || card.id}</div>
+                  <div className="min-w-0 flex-1 truncate text-sm font-semibold">{display.title || display.label || card.id}</div>
                   {card.recommended ? (
                     <Badge tone="ok" className="shrink-0">
                       {i18n.t("encryption.default")}
                     </Badge>
                   ) : null}
                 </div>
-                <div className="mt-2 text-xs text-muted-foreground">{card.description || "-"}</div>
+                <div className="mt-2 text-xs text-muted-foreground">{display.description || "-"}</div>
                 <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
-                  <DataLine label={i18n.t("encryption.protection")} value={card.protection || "-"} />
-                  <DataLine label={i18n.t("encryption.device")} value={card.deviceFit || "-"} />
-                  <DataLine label={i18n.t("encryption.impact")} value={protectionCostLabel(card.cost)} />
+                  <ProtectionProfileLine label={i18n.t("encryption.protection")} value={display.protection || "-"} />
+                  <ProtectionProfileLine label={i18n.t("encryption.device")} value={display.deviceFit || "-"} />
+                  <ProtectionProfileLine label={i18n.t("encryption.impact")} value={protectionCostLabel(card.cost)} />
                 </div>
                 {String(card.applyStatus || "").startsWith("blocked") ? (
                   <Badge tone="warn" className="mt-3">
@@ -160,13 +181,13 @@ export function ProtectionWorkspace({
           })}
         </section>
 
-        <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.75fr)]">
+        <section className="grid gap-4" style={PROTECTION_WORKSPACE_GRID}>
           <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-3 flex min-w-0 items-center gap-2">
               <Sparkles className="h-4 w-4 shrink-0 text-primary" />
               <div className="truncate text-sm font-semibold">{i18n.t("encryption.planTarget")}</div>
             </div>
-            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <div className="grid gap-2" style={PROTECTION_CONTROL_GRID}>
               <select
                 value={avatars.some((item) => item.avatarPath === avatarPath) ? avatarPath : ""}
                 onChange={(event) => onAvatarPathChange(event.target.value)}
@@ -185,7 +206,7 @@ export function ProtectionWorkspace({
               </select>
               <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loadingAvatars} onClick={onRefreshAvatars}>
                 {loadingAvatars ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                Avatars
+                {i18n.t("encryption.avatars")}
               </Button>
             </div>
             <div className="mt-2 flex min-w-0 items-center gap-2">
@@ -197,7 +218,7 @@ export function ProtectionWorkspace({
               />
               <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loading} onClick={onRefresh}>
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                Plan
+                {i18n.t("encryption.plan")}
               </Button>
             </div>
             <label className="mt-3 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
@@ -218,9 +239,9 @@ export function ProtectionWorkspace({
               <Shield className="h-4 w-4 shrink-0 text-primary" />
               <div className="truncate text-sm font-semibold">{i18n.t("encryption.preview")}</div>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2">
+            <div className="grid gap-2" style={PROTECTION_METRIC_GRID}>
               <ProtectionMetric label={i18n.t("encryption.targets")} value={formatProtectionMetric(planPayload.selectedCandidateCount)} />
-              <ProtectionMetric label={i18n.t("encryption.mode")} value={activeProfile.label || profile} />
+              <ProtectionMetric label={i18n.t("encryption.mode")} value={activeProfileText.label || profile} />
               <ProtectionMetric label={i18n.t("encryption.plan")} value={String(planPayload.status || i18n.t("encryption.notLoaded"))} />
               <ProtectionMetric label={i18n.t("encryption.expected")} value={impact} />
             </div>
@@ -332,6 +353,10 @@ function protectionProfileCards(result: AvatarEncryptionPlanResult | null): Avat
   });
 }
 
+function protectionProfileText(card: AvatarEncryptionProfileCard): AvatarEncryptionProfileCard {
+  return PROTECTION_PROFILE_FALLBACKS.find((fallback) => fallback.id === card.id) || card;
+}
+
 
 
 function protectionBenchmarkRows(result: AvatarEncryptionPlanResult | null): AvatarEncryptionBenchmarkRow[] {
@@ -374,13 +399,13 @@ function protectionFamilyAvailable(candidates: unknown[], family: "liltoon" | "p
 function protectionCostLabel(value?: string): string {
   const cost = String(value || "").toLowerCase();
   if (cost === "lowest") {
-    return "Lowest";
+    return i18n.t("encryption.cost.lowest");
   }
   if (cost === "balanced") {
-    return "Balanced";
+    return i18n.t("encryption.cost.balanced");
   }
   if (cost === "highest") {
-    return "Highest";
+    return i18n.t("encryption.cost.highest");
   }
   return value || "-";
 }
@@ -389,30 +414,30 @@ function protectionCostLabel(value?: string): string {
 
 function protectionGateLabel(value: string): string {
   if (value === "platform.windows_only") {
-    return "Windows avatar only";
+    return i18n.t("encryption.gates.windowsOnly");
   }
   if (value === "profile.paranoid_blendshape_proof_required") {
-    return "Highest mode needs proof";
+    return i18n.t("encryption.gates.paranoidProof");
   }
   if (value === "profile.custom_layers_not_supported") {
-    return "Choose one of the three modes";
+    return i18n.t("encryption.gates.customLayers");
   }
   if (value === "layer.experimental_or_research_only") {
-    return "Layer still in testing";
+    return i18n.t("encryption.gates.experimental");
   }
   if (value === "targets.requested_targets_not_found") {
-    return "Selected target not found";
+    return i18n.t("encryption.gates.targetsNotFound");
   }
   if (value === "shader_family.no_liltoon_or_poiyomi_candidate") {
-    return "No supported shader target";
+    return i18n.t("encryption.gates.noShaderTarget");
   }
   if (value === "shader_family.requested_restore_adapter_missing") {
-    return "Shader adapter missing";
+    return i18n.t("encryption.gates.adapterMissing");
   }
   if (value === "plan.untrusted_external_plan") {
-    return "Plan needs fresh scan";
+    return i18n.t("encryption.gates.planNeedsScan");
   }
-  return "Needs review";
+  return i18n.t("encryption.gates.needsReview");
 }
 
 
@@ -420,10 +445,10 @@ function protectionGateLabel(value: string): string {
 function protectionImpactSummary(rows: AvatarEncryptionBenchmarkRow[], profile: string): string {
   const candidates = rows.filter((row) => row.profile === profile);
   if (!candidates.length) {
-    return "not estimated";
+    return i18n.t("encryption.notEstimated");
   }
   const maxImpact = Math.max(...candidates.map((row) => Number(row.estimatedImpactPercent || 0)));
-  return `${formatProtectionProofValue(maxImpact)}% max`;
+  return i18n.t("encryption.maxImpact", { value: formatProtectionProofValue(maxImpact) });
 }
 
 
@@ -436,6 +461,15 @@ function ProtectionMetric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function ProtectionProfileLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex min-w-0 items-start justify-between gap-3">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 whitespace-normal break-words text-right font-medium text-foreground">{value}</span>
+    </div>
+  );
+}
+
 function formatProtectionMetric(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value >= 1000 ? Math.round(value).toLocaleString() : String(value);
@@ -443,7 +477,7 @@ function formatProtectionMetric(value: unknown): string {
   if (typeof value === "string" && value.trim()) {
     return value;
   }
-  return "unknown";
+  return i18n.t("optimization.unknown");
 }
 
 function formatProtectionProofValue(value: unknown): string {

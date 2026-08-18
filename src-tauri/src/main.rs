@@ -115,12 +115,22 @@ fn main() {
                 window.set_title(&app_window_title(&app.package_info().version.to_string()))?;
             }
             let open_chat_item =
-                MenuItem::with_id(app, "open_chat", "打开对话", true, None::<&str>)?;
-            let show_item = MenuItem::with_id(app, "show", "打开窗口", true, None::<&str>)?;
+                MenuItem::with_id(app, "open_chat", "前往对话", true, None::<&str>)?;
+            let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let check_update_item =
+                MenuItem::with_id(app, "check_update", "检查更新", true, None::<&str>)?;
             let separator = PredefinedMenuItem::separator(app)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出 VRCForge", true, None::<&str>)?;
-            let menu =
-                Menu::with_items(app, &[&open_chat_item, &show_item, &separator, &quit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &open_chat_item,
+                    &show_item,
+                    &check_update_item,
+                    &separator,
+                    &quit_item,
+                ],
+            )?;
             let mut tray = TrayIconBuilder::new()
                 .tooltip("VRCForge")
                 .menu(&menu)
@@ -131,6 +141,10 @@ fn main() {
                         let _ = app.emit("vrcforge-tray-open-chat", ());
                     }
                     "show" => show_main_window(app),
+                    "check_update" => {
+                        show_main_window(app);
+                        let _ = app.emit("vrcforge-tray-check-update", ());
+                    }
                     "quit" => {
                         shutdown_and_exit_app(app);
                     }
@@ -169,6 +183,7 @@ fn main() {
             cancel_developer_options_challenge,
             cancel_sub_agent,
             check_app_update,
+            open_app_release_url,
             check_skills,
             clear_agent_memory,
             clear_theme_background,

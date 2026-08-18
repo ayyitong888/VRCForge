@@ -801,15 +801,19 @@ Each item ends with its version history in this exact form:
   continuous image across the entire App, including both sidebars. Replacing,
   removing or choosing **Restore defaults** removes the previous
   VRCForge-managed background after the replacement is ready;
-  unrelated/user-named files are preserved. A legacy Base64 preference is a
-  one-time migration input only.
+  unrelated/user-named files are preserved. Palette, custom colours, recent
+  colours, background scope/opacity and the managed background are personal
+  settings: an App upgrade preserves them under the stable App identity and
+  persistent user-data root. A legacy Base64 preference is a one-time migration
+  input only.
 - Forbidden regression: no Base64 image persistence, 2 MiB image limit,
   single-accent-only custom theme, RGB/HEX-only input, more than three recent
   colours, recent-colour loss on **Restore defaults**, always-visible broken
   eyedropper control, opacity floor/ceiling below the full range,
   missing center-only/full-App scope choice, independently repeated wallpaper
   crops per column,
-  stale managed background after replace/remove/default restore, broad theme
+  stale managed background after replace/remove/default restore, theme or
+  background loss during an App upgrade, broad theme
   directory deletion, ambiguous **Reset theme** label, per-keystroke colour
   normalization, IME composition commit, or invalid partial input overwriting
   the last committed colour. HEX/RGB/HSL fields keep the user's raw draft while
@@ -822,7 +826,41 @@ Each item ends with its version history in this exact form:
   and preservation of unrelated names. TypeScript/build plus attended local UI
   acceptance verify palette selection, background scope and **Restore
   defaults** behavior.
-- [首次实现: 1.7.1] [强化/修复: 1.7.2] [最近验证: 1.7.2]
+- [首次实现: 1.7.1] [强化/修复: 1.7.4] [最近验证: 1.7.4]
+
+### UX-016 — Center-width-responsive workspaces
+
+- Priority: P1.
+- Contract: Optimization, Protection and Skills derive card and form columns
+  from the actual center-column width remaining after the visible sidebars,
+  not from viewport breakpoints. At constrained widths, overview panels,
+  profiles, proof rows and editor fields stack before controls collapse;
+  labels and values wrap at words rather than individual characters. Wider
+  center columns retain the useful multi-column density.
+- Forbidden regression: no viewport-only `md`/`lg`/`xl` grid that leaves the
+  center workspace squeezed between sidebars, character-by-character values,
+  clipped labels or data, horizontal page overflow, or a fixed empty detail
+  column. Text or translation changes alone do not change this contract.
+- Acceptance: `tests/test_workspace_layout_resilience_ui.mjs`, production
+  frontend build and attended UI checks with both sidebars visible and at full
+  width.
+- [首次实现: 1.7.4] [强化/修复: 1.7.4] [最近验证: 1.7.4]
+
+### UX-017 — Checkpoint retention reasons stay distinguishable
+
+- Priority: P1.
+- Contract: the two newest checkpoint archives and an archive participating in
+  an active recovery are both protected from deletion, but the Storage page
+  exposes their different reasons as **Latest retained** and **Recovery in
+  progress**. The backend remains the source of the protection reason and the
+  delete action stays unavailable for either class.
+- Forbidden regression: no generic **Protected** label that hides why an
+  archive cannot be deleted, client-side guessing from list order, active
+  recovery archive deletion, or loss of the latest-two retention floor.
+- Acceptance: checkpoint recovery backend tests and
+  `tests/test_external_agent_connector_layout_ui.mjs` freeze the reason field,
+  localized labels and disabled delete path.
+- [首次实现: 1.7.4] [强化/修复: 1.7.4] [最近验证: 1.7.4]
 
 ## Vision contracts
 
@@ -979,8 +1017,10 @@ Each item ends with its version history in this exact form:
 ### PKG-002 — Safe upgrade and user-data preservation
 
 - Contract: upgrades preserve credentials, chats, memory, instructions,
-  checkpoints and unrelated Unity content. Cleanup deletes only exact owned
-  filename plus exact hash matches.
+  checkpoints, theme/custom-colour choices, managed background images and
+  update-check preference, plus unrelated Unity content. Cleanup deletes only
+  exact owned filename plus exact hash matches. Uninstall preserves personal
+  data by default; only an explicit checked clear-user-data option removes it.
 - Forbidden regression: no broad cleanup, renamed/modified user-file deletion,
   GUID conflict, duplicate install or lost saved credentials.
 - Acceptance: disposable-Windows install/upgrade/uninstall and official Unity
@@ -1081,7 +1121,7 @@ Each item ends with its version history in this exact form:
 - Acceptance: publication preflight and GitHub release readback.
 - [首次实现: 1.1.2] [强化/修复: 1.5.0] [最近验证: 1.5.0]
 
-### REL-004 — Startup-only silent App Update check
+### REL-004 — Startup-only automatic and explicit tray App Update checks
 
 - Priority: P1.
 - Contract: once per App process, after startup is usable, start one background
@@ -1090,15 +1130,25 @@ Each item ends with its version history in this exact form:
   response that proves a newer version opens one in-App update dialog. An
   up-to-date response, unreachable GitHub, timeout, malformed response or any
   other failure is silent.
+- Contract: the startup update dialog offers **Do not automatically check for
+  updates again** and persists that personal preference across restarts and App
+  upgrades. The tray **Check for updates** action always performs one fresh
+  bounded check and opens exactly one result dialog: update available, already
+  up to date, or a concise failure such as a network connection failure. The
+  update action opens only the validated official GitHub Release in the default
+  browser; it does not download or install anything.
 - Forbidden regression: no startup delay, 30-second wait, periodic/six-hour
   polling, manual Settings check, system notification, notification-permission
-  prompt, automatic download/install, error popup, or `no update` popup.
+  prompt, automatic download/install, startup error/`no update` popup, lost
+  automatic-check preference after restart/upgrade, cached tray result, or
+  inert raw WebView link.
 - Acceptance: `tests/test-app-update-ui.mjs`,
   `tests/test_app_update_dashboard.py` and `tests/test_app_update_service.py`
-  freeze once-only startup wiring, fixed GitHub boundary, semantic comparison
-  and silent negatives. Packaged acceptance covers newer, current and offline
-  startup states without delaying first usable paint.
-- [首次实现: 1.6.2] [强化/修复: 1.6.2] [最近验证: 1.6.2]
+  freeze once-only startup wiring, fixed GitHub boundary, semantic comparison,
+  persistent opt-out, fresh tray checks and silent automatic negatives.
+  Packaged acceptance covers newer, current and offline startup states without
+  delaying first usable paint, plus all three explicit tray results.
+- [首次实现: 1.6.2] [强化/修复: 1.7.4] [最近验证: 1.7.4]
 
 ## Change procedure
 

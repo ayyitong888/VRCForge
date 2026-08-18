@@ -184,6 +184,13 @@ export function CheckpointStoragePanel({
             {archives.map((item) => {
               const id = item.checkpointId;
               const isProtected = Boolean(item.protected);
+              const protectionReason = item.protectionReason === "active_recovery" ? "active_recovery" : "recent";
+              const protectionLabel = protectionReason === "active_recovery"
+                ? t("settings.checkpointArchiveRecoveryProtected")
+                : t("settings.checkpointArchiveRecentProtected");
+              const protectionHint = protectionReason === "active_recovery"
+                ? t("settings.checkpointArchiveRecoveryProtectedHint")
+                : t("settings.checkpointArchiveRecentProtectedHint");
               const checked = selected.has(id);
               return (
                 <li
@@ -203,8 +210,8 @@ export function CheckpointStoragePanel({
                   </div>
                   <div className="shrink-0 text-xs text-muted-foreground">{formatStorageSize(item.sizeBytes)}</div>
                   {isProtected ? (
-                    <Badge tone="warn" className="shrink-0" title={t("settings.checkpointArchiveProtectedHint")}>
-                      {t("settings.checkpointArchiveProtected")}
+                    <Badge tone="warn" className="shrink-0" title={protectionHint}>
+                      {protectionLabel}
                     </Badge>
                   ) : null}
                 </li>

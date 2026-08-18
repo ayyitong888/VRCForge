@@ -60,7 +60,7 @@ import { type UserAttachmentSource } from "./components/runtime/project-workbenc
 import { useApprovalExecution } from "./hooks/use-approval-execution";
 import { useAppUpdate } from "./hooks/use-app-update";
 import { AppUpdatePopup } from "./components/ui/app-update-popup";
-import type { AppUpdateResult } from "./lib/api/app-update";
+import type { AppUpdatePromptState, AppUpdateResult } from "./lib/api/app-update";
 import { useCheckpointWorkspaceController } from "./hooks/use-checkpoint-workspace-controller";
 import { useChatRunController, type QueuedTurn } from "./hooks/use-chat-run-controller";
 import { useChatSessions } from "./hooks/use-chat-sessions";
@@ -96,8 +96,10 @@ import {
   THEME_STORAGE_KEY,
   clampNumber,
   loadLayoutPaneWidths,
+  loadAutomaticUpdateCheckEnabled,
   loadDeveloperOptionsEnabled,
   loadThemePreference,
+  persistAutomaticUpdateCheckEnabled,
   type LayoutPaneWidths,
   type ThemeMode,
 } from "./lib/app-preferences";
@@ -289,7 +291,10 @@ export default function App() {
   const [memoryReviewRefreshSignal, setMemoryReviewRefreshSignal] = useState(0);
   const [savingAdvancedSettings, setSavingAdvancedSettings] = useState(false);
   const [handoffSendOpen, setHandoffSendOpen] = useState(false);
-  const [appUpdatePrompt, setAppUpdatePrompt] = useState<AppUpdateResult | null>(null);
+  const [appUpdatePrompt, setAppUpdatePrompt] = useState<AppUpdatePromptState | null>(null);
+  const [automaticUpdateCheckEnabled, setAutomaticUpdateCheckEnabled] = useState(
+    () => loadAutomaticUpdateCheckEnabled(),
+  );
   const [rightSidebarCollapsed, setRightSidebarCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem(RIGHT_SIDEBAR_COLLAPSED_KEY) === "true";
@@ -399,7 +404,15 @@ export default function App() {
   const healthErrors = Object.values(healthComponents).filter((item) => item.status === "error").length;
   const healthWarnings = Object.values(healthComponents).filter((item) => item.status === "warning").length;
   const runtimeConnected = Boolean(bootstrap?.ok);
-  useAppUpdate(endpoint, runtimeConnected, setAppUpdatePrompt);
+  const showStartupUpdate = useCallback((result: AppUpdateResult) => {
+    setAppUpdatePrompt({ source: "startup", result });
+  }, []);
+  const checkForAppUpdateNow = useAppUpdate(
+    endpoint,
+    runtimeConnected,
+    automaticUpdateCheckEnabled,
+    showStartupUpdate,
+  );
   const authoritativeSelectedProjectPath = (
     bootstrap?.health.state?.selectedProjectPath
     || bootstrap?.health.projects?.selectedProjectPath
@@ -2052,6 +2065,7 @@ export default function App() {
     }
     let active = true;
     let unlistenTrayOpenChat: (() => void) | undefined;
+    let unlistenTrayCheckUpdate: (() => void) | undefined;
     void listen("vrcforge-tray-open-chat", () => {
       setActiveView("chat");
       setError("");
@@ -2067,11 +2081,30 @@ export default function App() {
         }
       })
       .catch(() => undefined);
+    void listen("vrcforge-tray-check-update", () => {
+      void (async () => {
+        try {
+          const result = await checkForAppUpdateNow();
+          setAppUpdatePrompt({ source: "tray", result });
+        } catch {
+          setAppUpdatePrompt({ source: "tray", result: null });
+        }
+      })();
+    })
+      .then((unlisten) => {
+        if (active) {
+          unlistenTrayCheckUpdate = unlisten;
+        } else {
+          unlisten();
+        }
+      })
+      .catch(() => undefined);
     return () => {
       active = false;
       unlistenTrayOpenChat?.();
+      unlistenTrayCheckUpdate?.();
     };
-  }, [activeChatId, chats]);
+  }, [activeChatId, chats, checkForAppUpdateNow]);
 
   useEffect(() => {
     if (!runtimeConnected) {
@@ -4192,7 +4225,15 @@ export default function App() {
         />
       ) : null}
 
-      <AppUpdatePopup result={appUpdatePrompt} onDismiss={() => setAppUpdatePrompt(null)} />
+      <AppUpdatePopup
+        prompt={appUpdatePrompt}
+        automaticCheckEnabled={automaticUpdateCheckEnabled}
+        onAutomaticCheckEnabledChange={(enabled) => {
+          setAutomaticUpdateCheckEnabled(enabled);
+          persistAutomaticUpdateCheckEnabled(enabled);
+        }}
+        onDismiss={() => setAppUpdatePrompt(null)}
+      />
 
     </main>
   );

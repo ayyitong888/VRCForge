@@ -1,21 +1,29 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { AppUpdateResult } from "../../lib/api/app-update";
+import { openAppReleaseUrl, type AppUpdatePromptState } from "../../lib/api/app-update";
 import { Button } from "./button";
 
 export function AppUpdatePopup({
-  result,
+  prompt,
+  automaticCheckEnabled,
+  onAutomaticCheckEnabledChange,
   onDismiss,
 }: {
-  result: AppUpdateResult | null;
+  prompt: AppUpdatePromptState | null;
+  automaticCheckEnabled: boolean;
+  onAutomaticCheckEnabledChange: (enabled: boolean) => void;
   onDismiss: () => void;
 }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement | null>(null);
+  const [openingRelease, setOpeningRelease] = useState(false);
+  const [openReleaseError, setOpenReleaseError] = useState("");
   const dismiss = useCallback(() => onDismiss(), [onDismiss]);
 
   useEffect(() => {
-    if (!result) return;
+    if (!prompt) return;
+    setOpeningRelease(false);
+    setOpenReleaseError("");
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     dialogRef.current?.querySelector<HTMLButtonElement>("[data-vrcforge-app-update-dismiss]")?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
@@ -29,9 +37,36 @@ export function AppUpdatePopup({
       window.removeEventListener("keydown", onKeyDown);
       previousFocus?.focus();
     };
-  }, [result, dismiss]);
+  }, [prompt, dismiss]);
 
-  if (!result) return null;
+  if (!prompt) return null;
+
+  const result = prompt.result;
+  const updateAvailable = result?.status === "update_available";
+  const upToDate = result?.status === "up_to_date";
+  const titleKey = updateAvailable
+    ? "appUpdate.dialogTitle"
+    : upToDate
+      ? "appUpdate.upToDateTitle"
+      : "appUpdate.failedTitle";
+  const bodyKey = updateAvailable
+    ? "appUpdate.dialogBody"
+    : upToDate
+      ? "appUpdate.upToDateBody"
+      : "appUpdate.failedBody";
+
+  const openRelease = async () => {
+    if (!result?.releaseUrl || openingRelease) return;
+    setOpeningRelease(true);
+    setOpenReleaseError("");
+    try {
+      await openAppReleaseUrl(result.releaseUrl);
+    } catch {
+      setOpenReleaseError(t("appUpdate.openReleaseFailed"));
+    } finally {
+      setOpeningRelease(false);
+    }
+  };
 
   return (
     <div
@@ -49,24 +84,42 @@ export function AppUpdatePopup({
     >
       <section ref={dialogRef} className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-panel">
         <h2 id="app-update-popup-title" className="text-base font-semibold">
-          {t("appUpdate.dialogTitle")}
+          {t(titleKey)}
         </h2>
         <p id="app-update-popup-body" className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          {t("appUpdate.dialogBody", { version: result.latestVersion })}
+          {t(bodyKey, { version: result?.latestVersion || result?.currentVersion || "" })}
         </p>
+        {prompt.source === "startup" ? (
+          <label className="mt-4 flex cursor-pointer items-center gap-2 text-sm text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={!automaticCheckEnabled}
+              data-vrcforge-disable-automatic-update-check
+              onChange={(event) => onAutomaticCheckEnabledChange(!event.currentTarget.checked)}
+              className="h-4 w-4 accent-primary"
+            />
+            {t("appUpdate.disableAutomaticCheck")}
+          </label>
+        ) : null}
+        {openReleaseError ? (
+          <p className="mt-3 text-sm text-destructive" role="alert">
+            {openReleaseError}
+          </p>
+        ) : null}
         <div className="mt-5 flex flex-wrap justify-end gap-2">
           <Button type="button" variant="secondary" data-vrcforge-app-update-dismiss onClick={dismiss}>
             {t("common.dismiss")}
           </Button>
-          <a
-            href={result.releaseUrl}
-            target="_blank"
-            rel="noreferrer"
-            data-vrcforge-app-update-open
-            className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
-          >
-            {t("appUpdate.openRelease")}
-          </a>
+          {updateAvailable ? (
+            <Button
+              type="button"
+              data-vrcforge-app-update-open
+              disabled={openingRelease}
+              onClick={() => void openRelease()}
+            >
+              {t("appUpdate.openRelease")}
+            </Button>
+          ) : null}
         </div>
       </section>
     </div>

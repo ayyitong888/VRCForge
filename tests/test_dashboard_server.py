@@ -8946,6 +8946,28 @@ class DashboardServerTests(unittest.TestCase):
             self.assertEqual(config.checkpoint_archive_max_size_mb, CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
             self.assertEqual(gateway.checkpoint_recovery.checkpoint_archive_usage(config)["maxSizeMb"], CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB)
 
+    def test_checkpoint_archive_usage_explains_why_each_archive_is_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            archive_dir = gateway.checkpoint_store_dir / "project"
+            archive_dir.mkdir(parents=True)
+            base_time = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+            for index in range(3):
+                path = archive_dir / f"ckpt_{index}.zip"
+                path.write_bytes(b"x")
+                os.utime(path, (base_time + index, base_time + index))
+            gateway.checkpoint_recovery._append_apply_recovery_entry(
+                {"id": "rec_reason", "checkpointId": "ckpt_0", "status": "applying"}
+            )
+
+            usage = gateway.checkpoint_recovery.checkpoint_archive_usage()
+            reasons = {item["checkpointId"]: item["protectionReason"] for item in usage["archives"]}
+
+            self.assertEqual(reasons["ckpt_0"], "active_recovery")
+            self.assertEqual(reasons["ckpt_1"], "recent")
+            self.assertEqual(reasons["ckpt_2"], "recent")
+
     def test_external_agent_gateway_checkpoint_ledgers_are_fsynced(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

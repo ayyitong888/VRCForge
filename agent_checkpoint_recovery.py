@@ -386,6 +386,7 @@ class AgentCheckpointRecoveryService:
         config = config or self._ports.ensure_config()
         archives = self._checkpoint_archive_files()
         total_bytes = sum(item["sizeBytes"] for item in archives)
+        active_recovery_ids = self._protected_checkpoint_archive_ids(include_recent=False)
         protected_ids = self._protected_checkpoint_archive_ids(include_recent=True)
         labels = self._checkpoint_archive_labels()
         items = [
@@ -396,6 +397,13 @@ class AgentCheckpointRecoveryService:
                 "sizeMb": round(item["sizeBytes"] / CHECKPOINT_ARCHIVE_BYTES_PER_MB, 2),
                 "modifiedAt": item["modifiedAt"],
                 "protected": item["checkpointId"] in protected_ids,
+                "protectionReason": (
+                    "active_recovery"
+                    if item["checkpointId"] in active_recovery_ids
+                    else "recent"
+                    if item["checkpointId"] in protected_ids
+                    else ""
+                ),
                 "label": labels.get(item["checkpointId"], ""),
             }
             for item in sorted(archives, key=lambda x: x["modifiedAt"], reverse=True)

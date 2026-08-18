@@ -17,12 +17,43 @@ import { DataLine } from "../ui/data-line";
 import { OutputBlock } from "../ui/output-block";
 
 const OPTIMIZATION_TARGET_PROFILES = [
-  { id: "pc_conservative", label: "PC Conservative" },
-  { id: "pc_medium", label: "PC Medium" },
-  { id: "quest_medium", label: "Quest Medium" },
-  { id: "event_light", label: "Event Light" },
-  { id: "custom", label: "Custom" },
+  { id: "pc_conservative", labelKey: "optimization.profiles.pcConservative" },
+  { id: "pc_medium", labelKey: "optimization.profiles.pcMedium" },
+  { id: "quest_medium", labelKey: "optimization.profiles.questMedium" },
+  { id: "event_light", labelKey: "optimization.profiles.eventLight" },
+  { id: "custom", labelKey: "optimization.profiles.custom" },
 ];
+
+const OPTIMIZATION_OVERVIEW_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 26rem), 1fr))",
+};
+const OPTIMIZATION_PROFILE_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 8.5rem), 1fr))",
+};
+const OPTIMIZATION_METRIC_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 9.5rem), 1fr))",
+};
+const OPTIMIZATION_PROOF_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 15rem), 1fr))",
+};
+const OPTIMIZATION_CONTROL_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 12rem), 1fr))",
+};
+const OPTIMIZATION_DEPENDENCY_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 18rem), 1fr))",
+};
+const OPTIMIZATION_ACTION_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 24rem), 1fr))",
+};
+const OPTIMIZATION_PROOF_HEADER_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 20rem), 1fr))",
+};
+const OPTIMIZATION_PROOF_METRIC_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 10rem), 1fr))",
+};
+const OPTIMIZATION_PROOF_STAGE_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 16rem), 1fr))",
+};
 
 type OptimizationActionCardItem = NonNullable<OptimizationPlannerReport["actionCards"]>[number];
 
@@ -90,35 +121,41 @@ export function OptimizationWorkspace({
   const profile = report?.targetProfile;
   const optimizerApproval = optimizerApprovalBadge(permission);
   return (
-    <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
+    <div className="min-h-0 flex-1 overflow-auto px-3 py-4 sm:px-6 sm:py-8">
       <div className="mx-auto grid max-w-6xl gap-6">
-        <section className="flex min-w-0 flex-wrap items-center gap-3">
-          <div className="min-w-0 flex-1">
+        <section className="grid min-w-0 gap-3">
+          <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
               <Gauge className="h-4 w-4 shrink-0 text-primary" />
-              <h1 className="truncate text-lg font-semibold">{i18n.t("optimization.title")}</h1>
+              <h1 className="min-w-0 break-words text-lg font-semibold">{i18n.t("optimization.title")}</h1>
               <Badge tone="muted" className="shrink-0">
                 {report?.versionStage || "0.7.2-beta"}
               </Badge>
             </div>
             <div className="mt-1 truncate text-xs text-muted-foreground">{selectedProjectPath || i18n.t("encryption.noUnityProject")}</div>
           </div>
-          <Badge tone={report?.readOnly && report?.noProjectWrites ? "ok" : "warn"} className="shrink-0">
-            {report?.readOnly && report?.noProjectWrites ? i18n.t("optimization.readOnly") : i18n.t("encryption.needsReview")}
-          </Badge>
-          <Badge tone={report?.directApplyExposed ? "danger" : "muted"} className="shrink-0">
-            {report?.directApplyExposed ? i18n.t("optimization.directApplyExposed") : i18n.t("optimization.noDirectApply")}
-          </Badge>
-          <Badge tone={optimizerApproval.modeTone} className="shrink-0">
-            mode: {permission?.executionMode || "approval"}
-          </Badge>
-          <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            Refresh
-          </Button>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Badge tone={report?.readOnly && report?.noProjectWrites ? "ok" : "warn"} className="shrink-0">
+              {report?.readOnly && report?.noProjectWrites ? i18n.t("optimization.readOnly") : i18n.t("encryption.needsReview")}
+            </Badge>
+            <Badge tone={report?.directApplyExposed ? "danger" : "muted"} className="shrink-0">
+              {report?.directApplyExposed ? i18n.t("optimization.directApplyExposed") : i18n.t("optimization.noDirectApply")}
+            </Badge>
+            <Badge tone={optimizerApproval.modeTone} className="shrink-0">
+              {optimizationModeLabel(permission?.executionMode)}
+            </Badge>
+            <Button type="button" variant="outline" onClick={onRefresh} disabled={loading}>
+              {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              {i18n.t("common.refresh")}
+            </Button>
+          </div>
         </section>
 
-        <section className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
+        <section
+          data-vrcforge-optimization-overview
+          className="grid gap-4"
+          style={OPTIMIZATION_OVERVIEW_GRID}
+        >
           <div className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
             <div className="mb-3 flex min-w-0 items-center gap-2">
               <Sparkles className="h-4 w-4 shrink-0 text-primary" />
@@ -129,7 +166,7 @@ export function OptimizationWorkspace({
                 </Badge>
               ) : null}
             </div>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
+            <div className="grid gap-2" style={OPTIMIZATION_PROFILE_GRID}>
               {OPTIMIZATION_TARGET_PROFILES.map((item) => (
                 <button
                   key={item.id}
@@ -140,11 +177,11 @@ export function OptimizationWorkspace({
                     targetProfile === item.id ? "border-primary bg-primary/5 text-foreground" : "border-border text-muted-foreground hover:bg-muted",
                   )}
                 >
-                  <span className="block truncate">{item.label}</span>
+                  <span className="block truncate">{i18n.t(item.labelKey)}</span>
                 </button>
               ))}
             </div>
-            <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <div className="mt-3 grid gap-2" style={OPTIMIZATION_CONTROL_GRID}>
               <select
                 value={avatars.some((item) => item.avatarPath === avatarPath) ? avatarPath : ""}
                 onChange={(event) => onAvatarPathChange(event.target.value)}
@@ -163,7 +200,7 @@ export function OptimizationWorkspace({
               </select>
               <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loadingAvatars} onClick={onRefreshAvatars}>
                 {loadingAvatars ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                Avatars
+                {i18n.t("encryption.avatars")}
               </Button>
             </div>
             <div className="mt-2 flex min-w-0 items-center gap-2">
@@ -175,11 +212,11 @@ export function OptimizationWorkspace({
               />
               <Button type="button" variant="ghost" className="h-9 shrink-0 px-3 text-xs" disabled={loading} onClick={onRefresh}>
                 {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                Scan
+                {i18n.t("optimization.scan")}
               </Button>
             </div>
             {avatarMessage ? <div className="mt-2 truncate text-xs text-muted-foreground">{avatarMessage}</div> : null}
-            <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mt-4 grid gap-2" style={OPTIMIZATION_METRIC_GRID}>
               <OptimizationMetric label={i18n.t("optimization.pcRank")} value={report?.baseline?.performanceHeadline?.pc?.rank || i18n.t("optimization.unknown")} />
               <OptimizationMetric label={i18n.t("optimization.questRank")} value={report?.baseline?.performanceHeadline?.quest?.rank || i18n.t("optimization.unknown")} />
               <OptimizationMetric label={i18n.t("optimization.triangles")} value={formatOptimizationMetric(metrics.triangleCount)} />
@@ -209,7 +246,7 @@ export function OptimizationWorkspace({
           </div>
         </section>
 
-        <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        <section className="grid gap-3" style={OPTIMIZATION_METRIC_GRID}>
           <OptimizationMetric label={i18n.t("optimization.textureBytes")} value={formatOptimizationMetric(metrics.textureMemoryBytes)} />
           <OptimizationMetric label={i18n.t("optimization.materialSlots")} value={formatOptimizationMetric(metrics.materialSlots)} />
           <OptimizationMetric label={i18n.t("optimization.skinnedMeshes")} value={formatOptimizationMetric(metrics.skinnedMeshCount)} />
@@ -235,7 +272,7 @@ export function OptimizationWorkspace({
               {dependencies.length}
             </Badge>
           </div>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <div className="grid gap-3" style={OPTIMIZATION_DEPENDENCY_GRID}>
             {dependencies.map((item) => (
               <div key={item.id || item.label} className="min-w-0 rounded-lg border border-border bg-card p-3">
                 <div className="flex min-w-0 items-center gap-2">
@@ -246,7 +283,7 @@ export function OptimizationWorkspace({
                 </div>
                 <div className="mt-2 grid gap-1 text-xs text-muted-foreground">
                   <DataLine label={i18n.t("subagent.roles.outfitPackageInspection")} value={item.matchedPackageId || "-"} />
-                  <DataLine label="Version" value={item.version || "-"} />
+                  <DataLine label={i18n.t("optimization.version")} value={item.version || "-"} />
                   <DataLine label={i18n.t("package.tableRisk")} value={item.riskLevel || "-"} />
                 </div>
                 <div className="mt-2 max-h-10 overflow-hidden text-xs text-muted-foreground">{item.recommendedRole || "-"}</div>
@@ -259,7 +296,7 @@ export function OptimizationWorkspace({
                     onClick={() => onRequestDependency(item)}
                   >
                     {requestingDependencyId === (item.id || item.packageIds[0]) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                    Install request
+                    {i18n.t("optimization.installRequest")}
                   </Button>
                 ) : null}
               </div>
@@ -274,7 +311,7 @@ export function OptimizationWorkspace({
               {report?.recommendedOrder?.length ?? 0}
             </Badge>
           </div>
-          <div className="grid gap-3 lg:grid-cols-2">
+          <div className="grid gap-3" style={OPTIMIZATION_ACTION_GRID}>
             {actions.map((card) => (
               <div key={card.id} className={cn("min-w-0 rounded-lg border bg-card p-4", card.enabled ? "border-border" : "border-border opacity-70")}>
                 <div className="flex min-w-0 items-start gap-2">
@@ -293,9 +330,9 @@ export function OptimizationWorkspace({
                   {card.requestTool ? <Badge tone={optimizerApproval.requestTone}>{optimizerApproval.requestLabel}</Badge> : null}
                 </div>
                 <div className="mt-3 grid gap-1 text-xs text-muted-foreground">
-                  <DataLine label="Benefit" value={card.expectedBenefit || i18n.t("optimization.unknown")} />
+                  <DataLine label={i18n.t("optimization.benefit")} value={card.expectedBenefit || i18n.t("optimization.unknown")} />
                   <DataLine label={i18n.t("doctor.why")} value={card.whyRecommended || "-"} />
-                  <DataLine label="Next" value={card.nextSafeAction || "-"} />
+                  <DataLine label={i18n.t("optimization.nextAction")} value={card.nextSafeAction || "-"} />
                   {card.requestTool ? <DataLine label={i18n.t("optimization.request")} value={card.requestTool} /> : null}
                   {card.blockedReason ? <DataLine label={i18n.t("package.labels.blocked")} value={card.blockedReason} /> : null}
                 </div>
@@ -309,7 +346,7 @@ export function OptimizationWorkspace({
                   />
                 ) : null}
                 {isMeshiaOptimizationRequest(card) ? (
-                  <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_8rem]">
+                  <div className="mt-3 grid gap-2" style={OPTIMIZATION_CONTROL_GRID}>
                     <input
                       value={actionOptions[card.id]?.rendererPath ?? ""}
                       onChange={(event) => onActionOptionChange(card.id, "rendererPath", event.target.value)}
@@ -343,7 +380,7 @@ export function OptimizationWorkspace({
                       onClick={() => onRequestAction(card)}
                     >
                       {requestingActionId === card.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Shield className="h-3.5 w-3.5" />}
-                      Request
+                      {i18n.t("optimization.request")}
                     </Button>
                     <Badge tone={optimizerApproval.requestTone} className="h-8 shrink-0">
                       {optimizerApproval.requestLabel}
@@ -382,6 +419,16 @@ function optimizerApprovalBadge(permission?: PermissionState) {
   };
 }
 
+function optimizationModeLabel(mode?: string): string {
+  if (mode === "full_auto" || mode === "roslyn_full_auto") {
+    return i18n.t("optimization.modeAuto");
+  }
+  if (mode === "read_only" || mode === "preview") {
+    return i18n.t("optimization.modePreview");
+  }
+  return i18n.t("optimization.modeApproval");
+}
+
 function OptimizationMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="min-w-0 rounded-lg border border-border bg-card px-3 py-2">
@@ -413,9 +460,9 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
       title: t("optimization.visualProof"),
       tone: visualShots.length ? ("ok" as const) : ("warn" as const),
       lines: [
-        ["Shots", `${visualShots.length}`],
-        ["Play Mode", `${visualPlayModeShots.length}`],
-        ["Scoring", optimizationRecord(visual.scoring).mode ? String(optimizationRecord(visual.scoring).mode) : "not-run"],
+        [t("optimization.shots"), `${visualShots.length}`],
+        [t("optimization.playMode"), `${visualPlayModeShots.length}`],
+        [t("optimization.scoring"), optimizationRecord(visual.scoring).mode ? String(optimizationRecord(visual.scoring).mode) : t("optimization.notRun")],
       ],
     },
     {
@@ -424,9 +471,9 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
       title: t("optimization.rollbackProof"),
       tone: rollbackReady ? ("ok" as const) : ("warn" as const),
       lines: [
-        ["Project", rollback.projectReadable ? "readable" : "not ready"],
-        ["Residue", formatOptimizationMetric(rollback.generatedResidueCount)],
-        ["Checkpoint", rollback.checkpointInfrastructureRequired ? "required" : t("optimization.unknown")],
+        [t("optimization.project"), rollback.projectReadable ? t("optimization.readable") : t("optimization.notReady")],
+        [t("optimization.residue"), formatOptimizationMetric(rollback.generatedResidueCount)],
+        [t("optimization.checkpoint"), rollback.checkpointInfrastructureRequired ? t("optimization.required") : t("optimization.unknown")],
       ],
     },
     {
@@ -435,9 +482,9 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
       title: t("optimization.parameterGates"),
       tone: Number(parameterSummary.dangerParameterCount || parameterGates.blockedParameterCount || 0) ? ("warn" as const) : ("ok" as const),
       lines: [
-        ["Cases", formatOptimizationMetric(parameterSummary.testCaseCount)],
-        ["Blocked", formatOptimizationMetric(parameterGates.blockedParameterCount ?? parameterSummary.dangerParameterCount)],
-        ["Apply", parameterPath.applyBlocked ? "blocked" : t("optimization.review")],
+        [t("optimization.cases"), formatOptimizationMetric(parameterSummary.testCaseCount)],
+        [t("optimization.blocked"), formatOptimizationMetric(parameterGates.blockedParameterCount ?? parameterSummary.dangerParameterCount)],
+        [t("optimization.apply"), parameterPath.applyBlocked ? t("optimization.blockedState") : t("optimization.review")],
       ],
     },
     {
@@ -446,9 +493,9 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
       title: t("optimization.ma2btDiagnostics"),
       tone: Number(ma2btSummary.skippedLayerCount || 0) ? ("warn" as const) : ("ok" as const),
       lines: [
-        ["Convertible", formatOptimizationMetric(ma2btSummary.convertibleLayerCount)],
-        ["Skipped", formatOptimizationMetric(ma2btSummary.skippedLayerCount)],
-        ["Reasons", `${ma2btDiagnostics.length}`],
+        [t("optimization.convertible"), formatOptimizationMetric(ma2btSummary.convertibleLayerCount)],
+        [t("optimization.skipped"), formatOptimizationMetric(ma2btSummary.skippedLayerCount)],
+        [t("optimization.reasons"), `${ma2btDiagnostics.length}`],
       ],
     },
   ];
@@ -461,7 +508,7 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
           {t("optimization.gates09")}
         </Badge>
       </div>
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-3" style={OPTIMIZATION_PROOF_GRID}>
         {cards.map((card) => {
           const Icon = card.icon;
           return (
@@ -475,7 +522,7 @@ function OptimizationProofReadiness({ report }: { report: OptimizationPlannerRep
               </div>
               <div className="grid gap-1 text-xs text-muted-foreground">
                 {card.lines.map(([label, value]) => (
-                  <DataLine key={label} label={label} value={value || "-"} />
+                  <OptimizationProofLine key={label} label={label} value={value || "-"} />
                 ))}
               </div>
             </div>
@@ -532,15 +579,15 @@ function OptimizationProofViewer({
         <div className="rounded-md border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">{t("optimization.noProofRuns")}</div>
       ) : (
         <div className="grid gap-4">
-          <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+          <div className="grid gap-3" style={OPTIMIZATION_PROOF_HEADER_GRID}>
             <div className="grid gap-2 rounded-lg border border-border bg-background p-3">
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <Badge tone={proof.ok ? "ok" : "danger"} className="shrink-0">
-                  {proof.status || (proof.ok ? "passed" : "failed")}
+                  {proof.status || (proof.ok ? t("optimization.passed") : t("optimization.failed"))}
                 </Badge>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{proof.runId}</span>
               </div>
-              <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+              <div className="grid gap-2" style={OPTIMIZATION_PROOF_METRIC_GRID}>
                 <DataLine label={t("proof.tool")} value={proof.tool || "-"} />
                 <DataLine label={t("recovery.checkpoint")} value={proof.checkpointId || "-"} mono />
                 <DataLine label={t("checkpoint.changedFiles")} value={formatOptimizationMetric(proof.changedFileCount)} />
@@ -561,14 +608,14 @@ function OptimizationProofViewer({
             </select>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3" style={OPTIMIZATION_PROOF_METRIC_GRID}>
             <ProofMetricCard title={t("optimization.pcRank")} before={pc.rankBefore} after={pc.rankAfter} rollback={pc.rankRollback} />
             <ProofMetricCard title={t("optimization.questRank")} before={quest.rankBefore} after={quest.rankAfter} rollback={quest.rankRollback} />
-            <ProofMetricCard title={t("optimization.parameterBits")} before="delta" after={parameters.syncedBitsDelta} rollback={parameters.rollbackMatchesBefore ? "matched" : t("optimization.review")} />
-            <ProofMetricCard title="Rollback gate" before="severity/gate" after={rollback.matchesBeforeSeverityAndGate ? "matched" : t("optimization.review")} rollback={rollback.remainingFindingCount ?? "-"} />
+            <ProofMetricCard title={t("optimization.parameterBits")} before={t("optimization.delta")} after={parameters.syncedBitsDelta} rollback={parameters.rollbackMatchesBefore ? t("optimization.matched") : t("optimization.review")} />
+            <ProofMetricCard title={t("optimization.rollbackGate")} before={t("optimization.severityGate")} after={rollback.matchesBeforeSeverityAndGate ? t("optimization.matched") : t("optimization.review")} rollback={rollback.remainingFindingCount ?? "-"} />
           </div>
 
-          <div className="grid gap-3 lg:grid-cols-3">
+          <div className="grid gap-3" style={OPTIMIZATION_PROOF_STAGE_GRID}>
             {stageIds.map((stage) => {
               const entry = optimizationRecord(screenshots[stage]);
               const imageUrl = proofImageUrl(endpoint, entry.imageUrl);
@@ -591,7 +638,7 @@ function OptimizationProofViewer({
                   )}
                   <div className="grid gap-1 text-xs text-muted-foreground">
                     <DataLine label="SHA" value={String(entry.sha256 || "-")} mono />
-                    <DataLine label="Size" value={formatOptimizationMetric(entry.size)} />
+                    <DataLine label={t("optimization.size")} value={formatOptimizationMetric(entry.size)} />
                   </div>
                 </div>
               );
@@ -618,6 +665,15 @@ function ProofMetricCard({ title, before, after, rollback }: { title: string; be
   );
 }
 
+function OptimizationProofLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid min-w-0 grid-cols-[minmax(5.5rem,auto)_minmax(0,1fr)] gap-2">
+      <span className="min-w-0 text-muted-foreground">{label}</span>
+      <span className="min-w-0 break-words text-right font-medium text-foreground">{value}</span>
+    </div>
+  );
+}
+
 function formatOptimizationMetric(value: unknown): string {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value >= 1000 ? Math.round(value).toLocaleString() : String(value);
@@ -625,7 +681,7 @@ function formatOptimizationMetric(value: unknown): string {
   if (typeof value === "string" && value.trim()) {
     return value;
   }
-  return "unknown";
+  return i18n.t("optimization.unknown");
 }
 
 function optimizationRecord(value: unknown): Record<string, unknown> {
@@ -638,12 +694,12 @@ function optimizationArray(value: unknown): unknown[] {
 
 function proofStageLabel(stage: string): string {
   if (stage === "after_apply") {
-    return "After apply";
+    return i18n.t("optimization.proofStages.afterApply");
   }
   if (stage === "after_rollback") {
-    return "After rollback";
+    return i18n.t("optimization.proofStages.afterRollback");
   }
-  return "Before";
+  return i18n.t("optimization.proofStages.before");
 }
 
 function proofImageUrl(endpoint: string, value: unknown): string {

@@ -209,7 +209,7 @@
     "modelProvider": "Model Provider",
     "diagnostics": "Diagnostics",
     "aboutTitle": "About VRCForge",
-    "aboutProduct": "VRCForge 1.7.3",
+    "aboutProduct": "VRCForge 1.7.4",
     "aboutMcp": "VRCForge-owned MCP 2.0 (2026-07-28) Core with 64 Unity tools.",
     "aboutSafety": "Every write requires approval and creates a checkpoint. Rollback requires separate approval.",
     "aboutLicense": "GPL-3.0-only. See the bundled NOTICE and DEPENDENCIES documents for distribution details.",
@@ -267,8 +267,10 @@
     "checkpointArchiveSelectAll": "Select all",
     "checkpointArchiveInvertSelection": "Invert",
     "checkpointArchiveCleanSelected": "Delete selected",
-    "checkpointArchiveProtected": "Protected",
-    "checkpointArchiveProtectedHint": "The two newest archives and archives backing active recoveries cannot be selected.",
+    "checkpointArchiveRecentProtected": "Latest retained",
+    "checkpointArchiveRecentProtectedHint": "This is one of the two newest archives retained to keep a usable rollback point.",
+    "checkpointArchiveRecoveryProtected": "Retained for recovery",
+    "checkpointArchiveRecoveryProtectedHint": "An active checkpoint recovery depends on this archive, so it cannot be deleted yet.",
     "checkpointArchiveSelectedCount": "{{count}} selected",
     "checkpointArchiveNewDirectory": "Move archives to a new directory",
     "checkpointArchiveNewDirectoryHint": "Use an absolute path on a non-system drive. VRCForge copies the ZIPs, rewrites checkpoint records, then removes the old copies. Active recovery checkpoints block relocation.",
@@ -795,6 +797,18 @@
     "slashCallable": "Slash callable",
     "manualOnly": "Manual only",
     "signedRelease": "Signed release",
+    "permissionInstruction": "Instructions only",
+    "permissionReadOnly": "Read only",
+    "permissionPreview": "Preview",
+    "permissionApproval": "Approval required",
+    "permissionAdvanced": "Advanced access",
+    "riskLow": "Low",
+    "riskMedium": "Medium",
+    "riskHigh": "High",
+    "riskCritical": "Critical",
+    "checkOk": "Ready",
+    "checkWarning": "Needs attention",
+    "checkError": "Error",
     "domainFallback": "Other"
   },
   "skillStatus": {
@@ -1116,10 +1130,18 @@
     "profiles": {
       "liteTitle": "Lite Protection",
       "liteDesc": "Lightest; best for low-end devices.",
+      "liteLabel": "Lite",
+      "liteProtection": "Basic protection",
+      "liteDevice": "Most Windows PCs",
       "standardTitle": "Standard Protection",
       "standardDesc": "Recommended default; balanced protection and performance.",
+      "standardProtection": "Balanced protection",
+      "standardDevice": "Most PCs",
       "paranoidTitle": "Maximum Protection",
-      "paranoidDesc": "Strongest; best for high-end PCs."
+      "paranoidDesc": "Strongest; best for high-end PCs.",
+      "paranoidLabel": "Highest",
+      "paranoidProtection": "Strongest protection",
+      "paranoidDevice": "High-end PCs"
     },
     "gates": {
       "windowsOnly": "Windows avatar only",
@@ -1128,13 +1150,16 @@
       "experimental": "Layer still in testing",
       "targetsNotFound": "Selected target not found",
       "planNeedsScan": "Plan needs fresh scan",
-      "needsReview": "Needs review"
+      "needsReview": "Needs review",
+      "noShaderTarget": "No supported material target",
+      "adapterMissing": "Material adapter missing"
     },
     "cost": {
       "lowest": "Lowest",
       "balanced": "Balanced",
       "highest": "Highest"
-    }
+    },
+    "maxImpact": "Up to {{value}}%"
   },
   "optimization": {
     "title": "Optimization Dashboard",
@@ -1178,7 +1203,44 @@
     "physBones": "PhysBones",
     "generatedResidue": "Generated residue",
     "unknown": "unknown",
+    "modeAuto": "Automatic",
+    "modePreview": "Preview only",
+    "modeApproval": "Approval required",
+    "profiles": {
+      "pcConservative": "PC Conservative",
+      "pcMedium": "PC Balanced",
+      "questMedium": "Quest Balanced",
+      "eventLight": "Event Light",
+      "custom": "Custom"
+    },
     "rendererPath": "Renderer path",
+    "version": "Version",
+    "benefit": "Benefit",
+    "nextAction": "Next",
+    "shots": "Screenshots",
+    "playMode": "Play Mode",
+    "scoring": "Scoring",
+    "notRun": "Not run",
+    "project": "Project",
+    "residue": "Residue",
+    "checkpoint": "Checkpoint",
+    "readable": "Readable",
+    "notReady": "Not ready",
+    "required": "Required",
+    "cases": "Cases",
+    "blocked": "Blocked",
+    "apply": "Apply",
+    "blockedState": "Blocked",
+    "convertible": "Convertible",
+    "skipped": "Skipped",
+    "reasons": "Reasons",
+    "passed": "Passed",
+    "failed": "Failed",
+    "delta": "Change",
+    "matched": "Matched",
+    "rollbackGate": "Rollback check",
+    "severityGate": "Severity / gate",
+    "size": "Size",
     "proofStages": {
       "before": "Before",
       "afterApply": "After apply",
@@ -1629,6 +1691,12 @@
   "appUpdate": {
     "dialogTitle": "VRCForge update available",
     "dialogBody": "VRCForge {{version}} is ready on GitHub Releases.",
-    "openRelease": "View on GitHub Releases"
+    "openRelease": "View on GitHub Releases",
+    "upToDateTitle": "VRCForge is up to date",
+    "upToDateBody": "VRCForge {{version}} is the latest version.",
+    "failedTitle": "Unable to check for updates",
+    "failedBody": "VRCForge could not reach GitHub Releases. Check your network connection and try again.",
+    "disableAutomaticCheck": "Do not automatically check for updates again",
+    "openReleaseFailed": "GitHub Releases could not be opened. Try again."
   }
 }

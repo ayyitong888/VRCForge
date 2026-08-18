@@ -30,6 +30,15 @@ const SKILL_DOMAIN_RULES: Array<{ label: string; pattern: RegExp }> = [
 ];
 const SKILL_DOMAIN_FALLBACK = "skills.domainFallback";
 const SKILL_DOMAIN_ORDER = [...SKILL_DOMAIN_RULES.map((rule) => rule.label), SKILL_DOMAIN_FALLBACK];
+const SKILLS_WORKSPACE_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 30rem), 1fr))",
+};
+const SKILL_FIELD_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 14rem), 1fr))",
+};
+const SKILL_COMPACT_FIELD_GRID = {
+  gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 9rem), 1fr))",
+};
 
 function skillDomain(skill: AgentSkill): string {
   const haystack = `${skill.name} ${skill.title || ""} ${skill.category || ""} ${skill.description || ""}`;
@@ -155,8 +164,12 @@ export function SkillsWorkspace({
   }, [visibleSkills]);
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto px-6 py-8">
-      <div className="mx-auto grid max-w-6xl gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
+    <div className="min-h-0 flex-1 overflow-auto px-3 py-4 sm:px-6 sm:py-8">
+      <div
+        data-vrcforge-skills-layout
+        className="mx-auto grid max-w-6xl gap-6"
+        style={SKILLS_WORKSPACE_GRID}
+      >
         <section className="min-w-0 rounded-xl border border-border bg-card p-4 shadow-panel">
           <div className="mb-4 flex items-center gap-2">
             <Wrench className="h-4 w-4 shrink-0 text-primary" />
@@ -217,7 +230,7 @@ export function SkillsWorkspace({
                               {skill.skillType || skill.source}
                             </Badge>
                           </div>
-                          <div className="truncate text-xs text-muted-foreground">{skill.permissionMode}</div>
+                          <div className="truncate text-xs text-muted-foreground">{skillPermissionLabel(skill.permissionMode)}</div>
                         </button>
                       ))}
                 </div>
@@ -231,11 +244,11 @@ export function SkillsWorkspace({
           <div className="mb-5 flex items-center gap-2">
             <div className="truncate text-sm font-semibold">{editable ? i18n.t("skills.userSkill") : i18n.t("skills.readOnlySkill")}</div>
             <Badge tone={checkTone} className="ml-auto shrink-0">
-              {selectedCheck?.status || draft.permissionMode || "instruction_only"}
+              {selectedCheck?.status ? skillCheckStatusLabel(selectedCheck.status) : skillPermissionLabel(draft.permissionMode)}
             </Badge>
           </div>
           <div className="grid gap-4">
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4" style={SKILL_FIELD_GRID}>
               <SkillFieldLabel label={i18n.t("skillForm.name")}>
                 <input
                   value={draft.name || ""}
@@ -253,7 +266,7 @@ export function SkillsWorkspace({
                 />
               </SkillFieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-4">
+            <div className="grid gap-4" style={SKILL_COMPACT_FIELD_GRID}>
               <SkillFieldLabel label={i18n.t("skillForm.categoryField")}>
                 <input
                   value={draft.category || ""}
@@ -277,11 +290,11 @@ export function SkillsWorkspace({
                   disabled={!editable}
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 >
-                  <option value="instruction_only">instruction_only</option>
-                  <option value="read_only">read_only</option>
-                  <option value="preview">preview</option>
-                  <option value="approval_required">approval_required</option>
-                  <option value="advanced_power_mode">advanced_power_mode</option>
+                  <option value="instruction_only">{i18n.t("skills.permissionInstruction")}</option>
+                  <option value="read_only">{i18n.t("skills.permissionReadOnly")}</option>
+                  <option value="preview">{i18n.t("skills.permissionPreview")}</option>
+                  <option value="approval_required">{i18n.t("skills.permissionApproval")}</option>
+                  <option value="advanced_power_mode">{i18n.t("skills.permissionAdvanced")}</option>
                 </select>
               </SkillFieldLabel>
               <SkillFieldLabel label={i18n.t("package.tableRisk")}>
@@ -291,14 +304,14 @@ export function SkillsWorkspace({
                   disabled={!editable}
                   className="h-10 w-full rounded-md border border-border bg-background px-3 text-sm outline-none focus:border-primary disabled:bg-muted"
                 >
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="critical">critical</option>
+                  <option value="low">{i18n.t("skills.riskLow")}</option>
+                  <option value="medium">{i18n.t("skills.riskMedium")}</option>
+                  <option value="high">{i18n.t("skills.riskHigh")}</option>
+                  <option value="critical">{i18n.t("skills.riskCritical")}</option>
                 </select>
               </SkillFieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4" style={SKILL_COMPACT_FIELD_GRID}>
               <label className="flex h-10 min-w-0 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
                 <input
                   type="checkbox"
@@ -343,7 +356,7 @@ export function SkillsWorkspace({
                 className="min-h-16 w-full resize-none rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary disabled:bg-muted"
               />
             </SkillFieldLabel>
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4" style={SKILL_COMPACT_FIELD_GRID}>
               <SkillFieldLabel label={i18n.t("skillForm.allowedTools")}>
                 <input
                   value={(draft.allowedTools || draft.tools || []).join(", ")}
@@ -372,7 +385,7 @@ export function SkillsWorkspace({
                 />
               </SkillFieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4" style={SKILL_FIELD_GRID}>
               <SkillFieldLabel label={i18n.t("skillForm.argumentHint")}>
                 <input
                   value={draft.argumentHint || ""}
@@ -390,7 +403,7 @@ export function SkillsWorkspace({
                 />
               </SkillFieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4" style={SKILL_FIELD_GRID}>
               <SkillFieldLabel label={i18n.t("skillForm.inputs")}>
                 <textarea
                   value={(draft.inputs || []).join("\n")}
@@ -408,7 +421,7 @@ export function SkillsWorkspace({
                 />
               </SkillFieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4" style={SKILL_FIELD_GRID}>
               <SkillFieldLabel label={i18n.t("skillForm.sideEffects")}>
                 <input
                   value={draft.sideEffects || ""}
@@ -426,7 +439,7 @@ export function SkillsWorkspace({
                 />
               </SkillFieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4" style={SKILL_COMPACT_FIELD_GRID}>
               <SkillFieldLabel label={i18n.t("skillForm.requiresEnv")}>
                 <input
                   value={(draft.requiresEnv || []).join(", ")}
@@ -452,7 +465,7 @@ export function SkillsWorkspace({
                 />
               </SkillFieldLabel>
             </div>
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4" style={SKILL_FIELD_GRID}>
               <SkillFieldLabel label={i18n.t("skillForm.supportFiles")}>
                 <input
                   value={(draft.supportFiles || []).join(", ")}
@@ -499,7 +512,7 @@ export function SkillsWorkspace({
             ) : null}
             <Button type="submit" disabled={!editable || saving || !draft.name}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              Save
+              {i18n.t("skills.save")}
             </Button>
           </div>
         </form>
@@ -538,4 +551,22 @@ function SkillFieldLabel({ label, children }: { label: string; children: ReactNo
       {children}
     </label>
   );
+}
+
+function skillPermissionLabel(value?: string): string {
+  const labels: Record<string, string> = {
+    instruction_only: i18n.t("skills.permissionInstruction"),
+    read_only: i18n.t("skills.permissionReadOnly"),
+    preview: i18n.t("skills.permissionPreview"),
+    approval_required: i18n.t("skills.permissionApproval"),
+    advanced_power_mode: i18n.t("skills.permissionAdvanced"),
+  };
+  return labels[String(value || "instruction_only")] || String(value || "-");
+}
+
+function skillCheckStatusLabel(value: string): string {
+  if (value === "ok") return i18n.t("skills.checkOk");
+  if (value === "warning") return i18n.t("skills.checkWarning");
+  if (value === "error") return i18n.t("skills.checkError");
+  return value;
 }

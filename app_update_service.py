@@ -1,4 +1,4 @@
-"""One bounded startup check for a newer stable VRCForge release."""
+"""Bounded checks for a newer stable VRCForge release."""
 
 from __future__ import annotations
 
@@ -138,7 +138,7 @@ def _unavailable_base() -> dict[str, Any]:
 
 
 class AppUpdateService:
-    """Own at most one GitHub request during an App process lifetime."""
+    """Cache startup evidence while allowing explicit fresh checks."""
 
     def __init__(self, current_version: str, *, client: ReleaseClient | None = None) -> None:
         self._current = StableVersion.parse(current_version)
@@ -186,12 +186,12 @@ class AppUpdateService:
         except Exception:  # noqa: BLE001 - raw transport/response details must not cross this boundary.
             return _cancelled_base() if self._cancel_event.is_set() else _unavailable_base()
 
-    def check(self) -> dict[str, Any]:
+    def check(self, *, refresh: bool = False) -> dict[str, Any]:
         owner = False
         with self._condition:
             if self._closed:
                 base = _cancelled_base()
-            elif self._result is not None:
+            elif self._result is not None and not refresh:
                 return dict(self._result)
             elif self._inflight:
                 while self._inflight and not self._closed:

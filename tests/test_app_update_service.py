@@ -173,6 +173,17 @@ def test_startup_check_is_cached_for_the_app_process() -> None:
     assert client.calls == 1
 
 
+def test_explicit_refresh_performs_a_new_bounded_request() -> None:
+    client = StaticReleaseClient(release_payload("v1.7.0"))
+    service = AppUpdateService("1.6.0", client=client)
+
+    first = service.check()
+    refreshed = service.check(refresh=True)
+
+    assert refreshed == first
+    assert client.calls == 2
+
+
 def test_concurrent_startup_checks_share_one_bounded_inflight_request() -> None:
     client = BlockingReleaseClient(release_payload("v1.7.0"))
     service = AppUpdateService("1.6.0", client=client)
