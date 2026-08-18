@@ -67,10 +67,9 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-The current source / target release is `1.7.4` (`v1.7.4`); 1.7.3 remains the
-latest published stable package until 1.7.4 publication readback completes.
-It supersedes `v1.7.2` and moves the tag, manifest, source and asset evidence
-together; the v1.7.2 tag and Release page remain unchanged. It also supersedes
+The current source and latest published stable package is `1.7.4` (`v1.7.4`).
+It supersedes `v1.7.3` and moves the tag, manifest, source and asset evidence
+together; the v1.7.3 tag and Release page remain unchanged. It also supersedes
 the unpublished `v1.7.0` Draft. Check the GitHub Releases page before preparing
 any later build. The Avatar
 Encryption / Anti-Rip addon remains a connector preview and is not bundled with

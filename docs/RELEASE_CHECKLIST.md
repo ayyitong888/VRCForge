@@ -126,6 +126,9 @@ Before publishing a release package:
       artifact with live writes before enabling `--require-live-writes`.
 * [ ] Run `packaging/check_third_party_licenses.ps1` and stop the release if any
       bundled component fails its license gate.
+* [ ] Upload `release-manifest.json` beside the four binary/package assets,
+      publish only after its version/commit/policy/artifact hashes match the
+      tagged clean build, then download and hash all five remote assets.
 * [ ] Add every bundled third-party component to
       `packaging/THIRD_PARTY_LICENSES.json` before publishing it.
 * [ ] Confirm `VRCForge.unitypackage` contains only VRCForge-owned MCP Core and

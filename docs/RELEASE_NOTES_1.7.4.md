@@ -46,8 +46,8 @@ the 1.7.4 assets below.
 
 ## SHA-256
 
-- `VRCForge.unitypackage`: `pending`
-- `VRCForge_Windows_x64_1.7.4.zip`: `pending`
-- `VRCForge_Offline_Installer_x64.exe`: `pending`
-- `VRCForge_Web_Installer_x64.exe`: `pending`
-- `release-manifest.json`: `pending`
+- `VRCForge.unitypackage`: `b00e34d2658e7180f752f7f0a99dddebe11d87af1ba667f47d9ada40a118e182`
+- `VRCForge_Windows_x64_1.7.4.zip`: `ebda1851b958ba21a72bcbd26f4298078ef38d579cf98eb2b5abb44de0a84780`
+- `VRCForge_Offline_Installer_x64.exe`: `81fe5278c20bd10cb75916eed7c7c1dc19b949f49effedfbed01af7b2f923497`
+- `VRCForge_Web_Installer_x64.exe`: `450a5c0bc6b128f626f370e62fa183bd7ebc6862d4db31e787c23a181fd27efb`
+- `release-manifest.json`: `c1f625c9521a163f35694e271d831cab7b70f80813c385fd4296462bb11ea86b`

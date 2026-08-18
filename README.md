@@ -5,7 +5,7 @@
 [![Target](https://img.shields.io/badge/target-v1.7.4-4f46e5?style=flat-square)](docs/RELEASE_NOTES_1.7.4.md)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-22c55e?style=flat-square)](LICENSE)
 ![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
-![Status: Release ready](https://img.shields.io/badge/status-release--ready-22c55e?style=flat-square)
+![Status: Released](https://img.shields.io/badge/status-released-22c55e?style=flat-square)
 [![GitHub stars](https://img.shields.io/github/stars/ayyitong888/VRCForge?style=social)](https://github.com/ayyitong888/VRCForge/stargazers)
 
 </div>
@@ -23,13 +23,12 @@ Avatar 改动。
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source / target release: `1.7.4` (`v1.7.4`). The latest published
-stable release remains `1.7.3` until the 1.7.4 publication readback completes.
+Current source and latest published stable release: `1.7.4` (`v1.7.4`).
 VRCForge 1.7.4 carries the 1.7.3 package plus corrected update controls,
 upgrade-safe personal appearance settings, clearer checkpoint retention, and
 responsive Optimization, Protection and Skills workspaces. It retains the
 verified user-and-Agent Goal
-control contract and supersedes v1.7.2; the v1.7.2 tag and Release page remain
+control contract and supersedes v1.7.3; the v1.7.3 tag and Release page remain
 available and unchanged. The unpublished v1.7.0 Draft and unpublished v1.6.1
 tag remain superseded.
 

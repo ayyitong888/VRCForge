@@ -1098,8 +1098,9 @@ Each item ends with its version history in this exact form:
   and commit binding, pinned dependency downloads and `releaseEligible=true`.
 - Forbidden regression: local-acceptance, dirty, unpushed, version-mismatch or
   unpinned builds cannot be uploaded as formal release assets.
-- Acceptance: strict manifest, four asset hashes, provenance and sensitive scan.
-- [首次实现: 1.3.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
+- Acceptance: strict manifest, four binary/package asset hashes, the published
+  manifest asset hash, provenance and sensitive scan.
+- [首次实现: 1.3.1] [强化/修复: 1.7.4] [最近验证: 1.7.4]
 
 ### REL-002 — Package-paired external acceptance
 
@@ -1115,11 +1116,13 @@ Each item ends with its version history in this exact form:
 ### REL-003 — Publication remains user-owned
 
 - Contract: tag, release mutation, upload and Latest/public state require
-  explicit user authority. Remote asset sizes and hashes are read back.
+  explicit user authority. The strict manifest is published beside the four
+  binary/package assets, and all five remote asset sizes and hashes are read
+  back.
 - Forbidden regression: no implied publication or completion claim before
   remote readback.
 - Acceptance: publication preflight and GitHub release readback.
-- [首次实现: 1.1.2] [强化/修复: 1.5.0] [最近验证: 1.5.0]
+- [首次实现: 1.1.2] [强化/修复: 1.7.4] [最近验证: 1.7.4]
 
 ### REL-004 — Startup-only automatic and explicit tray App Update checks
 

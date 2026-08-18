@@ -627,8 +627,6 @@ def test_packaged_public_docs_track_current_release_identity() -> None:
     for required in (
         f"target-v{version}",
         f"docs/RELEASE_NOTES_{version}.md",
-        "status-release--ready",
-        f"Current source / target release: `{version}` (`v{version}`).",
         f"VRCForge_Windows_x64_{version}.zip",
         f"The `v{version}` release target",
         f"Reimporting the same `{version}` integration",
@@ -638,12 +636,24 @@ def test_packaged_public_docs_track_current_release_identity() -> None:
 
     assert "status-WIP" not in readme
     assert "Current stable source and release:" not in readme
-    assert f"Current source / target release: `{version}` (`v{version}`)." in user_manual
-    assert f"current source / target release is `{version}`" in packaging_guide
+    candidate_identity = f"Current source / target release: `{version}` (`v{version}`)."
+    published_identity = (
+        f"Current source and latest published stable release: `{version}` (`v{version}`)."
+    )
+    if "status-release--ready" in readme:
+        assert candidate_identity in readme
+        assert candidate_identity in user_manual
+        assert f"current source / target release is `{version}`" in packaging_guide
+    else:
+        assert "status-released" in readme
+        assert published_identity in readme
+        assert published_identity in user_manual
+        assert f"current source and latest published stable package is `{version}`" in packaging_guide
     assert f"-Version {version}" in packaging_guide
     assert f"releases/download/v{version}/VRCForge_Windows_x64_{version}.zip" in packaging_guide
     assert f"# VRCForge {version}" in release_notes
     assert "documentation-corrected package" in release_notes
+    assert "`pending`" not in release_notes
 
 
 def test_release_publish_rechecks_web_payload_manifest_binding() -> None:

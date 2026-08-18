@@ -5,12 +5,11 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.7.4` (`v1.7.4`). The latest published
-stable remains 1.7.3 until the 1.7.4 publication readback completes. The 1.7.4
+Current source and latest published stable release: `1.7.4` (`v1.7.4`). The 1.7.4
 package carries the 1.7.3 package plus corrected update controls, preserved
 personal appearance settings, clearer checkpoint retention, responsive
 Optimization/Protection/Skills workspaces, and the verified user-and-Agent Goal
-control contract and supersedes v1.7.2; the v1.7.2 tag and Release page remain
+control contract and supersedes v1.7.3; the v1.7.3 tag and Release page remain
 available and unchanged. The unpublished v1.7.0 Draft and unpublished v1.6.1
 tag remain superseded.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
