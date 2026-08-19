@@ -1095,17 +1095,21 @@ Each item ends with its version history in this exact form:
 - Priority: P1.
 - Contract: whole-App wallpaper mode uses one continuous image and one uniform
   scrim across the left sidebar, center workspace, splitters and right rail.
+  The image is owned and positioned only by the fixed whole-App parent;
+  dragging either sidebar changes pane widths without moving, recentering,
+  rescaling or independently cropping the wallpaper.
   Static pane borders are transparent in that mode; resize handles remain
   visible on hover/drag. The header contains no duplicate permission, Core or
   pending-approval chips: permission belongs to the composer, while Core and
   pending approval state belong to the right environment rail.
 - Forbidden regression: visible vertical wallpaper seams, different sidebar
-  scrim colours, permanently bright splitters, or removal of the canonical
+  scrim colours, permanently bright splitters, resize-driven wallpaper motion,
+  pane-owned wallpaper positioning, or removal of the canonical
   composer/right-rail state.
 - Acceptance: `tests/test_theme_customization_ui.mjs`,
   `tests/test_workspace_header_status_dedupe_ui.mjs`, TypeScript build and a
   packaged Windows light/dark whole-App wallpaper visual check.
-- [首次实现: 1.7.2] [强化/修复: 1.7.5] [最近验证: 1.7.5]
+- [首次实现: 1.7.2] [强化/修复: 1.7.6] [最近验证: 1.7.6]
 
 ### AGT-019 — General-project boundary and independent Auto Approve review
 
@@ -1136,7 +1140,7 @@ Each item ends with its version history in this exact form:
   `tests/test_agent_gateway_integrity.py`,
   `tests/test_profiled_tool_registry_dashboard.py` and
   `tests/test_approval_notification_summary_ui.mjs`.
-- [首次实现: 1.7.3] [强化/修复: 1.7.5] [最近验证: 1.7.5]
+- [首次实现: 1.7.3] [强化/修复: 1.7.5] [最近验证: 1.7.6]
 
 ## Release contracts
 

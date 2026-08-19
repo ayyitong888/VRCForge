@@ -298,15 +298,21 @@
   }
 
   html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] #root > main {
-    background-image: var(--vrcforge-background-image);
+    background-image:
+      linear-gradient(
+        hsl(var(--workspace) / var(--vrcforge-wallpaper-scrim)),
+        hsl(var(--workspace) / var(--vrcforge-wallpaper-scrim))
+      ),
+      var(--vrcforge-background-image);
     background-position: center;
     background-repeat: no-repeat;
     background-size: cover;
   }
 
-  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-workspace,
-  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-sidebar {
-    background-color: hsl(var(--workspace) / var(--vrcforge-wallpaper-scrim));
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] #root > main > div > .bg-workspace,
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] #root > main > div > .bg-sidebar,
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] #root > main > div > [data-layout-splitter] {
+    background-color: transparent;
   }
 
   html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-sidebar {

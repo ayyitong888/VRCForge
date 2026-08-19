@@ -11,6 +11,7 @@ const preference = read("src/lib/theme-customization.ts");
 const background = read("src/lib/theme-background.ts");
 const hook = read("src/hooks/use-theme-customization.ts");
 const css = read("src/theme.css");
+const layoutSplitter = read("src/components/workspace/layout-splitter.tsx");
 const rust = read("src-tauri/src/theme_background.rs");
 const backend = read("src-tauri/src/backend.rs");
 const offlineInstaller = read("installer/VRCForge_Offline_Installer_x64.nsi");
@@ -92,11 +93,26 @@ assert.match(css, /data-vrcforge-wallpaper-scope="app"\] #root > main/);
 assert.match(css, /data-vrcforge-wallpaper-scope="app"\] \.bg-sidebar/);
 assert.match(
   css,
-  /data-vrcforge-wallpaper-scope="app"\] \.bg-workspace,\s*html\[data-vrcforge-wallpaper="active"\]\[data-vrcforge-wallpaper-scope="app"\] \.bg-sidebar\s*\{\s*background-color: hsl\(var\(--workspace\) \/ var\(--vrcforge-wallpaper-scrim\)\)/,
-  "the app wallpaper must use one continuous scrim across the center and both sidebars",
+  /data-vrcforge-wallpaper-scope="app"\] #root > main\s*\{\s*background-image:\s*linear-gradient\(\s*hsl\(var\(--workspace\) \/ var\(--vrcforge-wallpaper-scrim\)\),\s*hsl\(var\(--workspace\) \/ var\(--vrcforge-wallpaper-scrim\)\)\s*\),\s*var\(--vrcforge-background-image\)/,
+  "the app wallpaper and scrim must be composited once on their shared parent",
+);
+assert.match(
+  css,
+  /#root > main > div > \.bg-workspace,\s*html\[data-vrcforge-wallpaper="active"\]\[data-vrcforge-wallpaper-scope="app"\] #root > main > div > \.bg-sidebar,\s*html\[data-vrcforge-wallpaper="active"\]\[data-vrcforge-wallpaper-scope="app"\] #root > main > div > \[data-layout-splitter\]\s*\{\s*background-color: transparent;/,
+  "the center, sidebars, and both resize hit areas must reveal the same parent composite",
+);
+const appPaneTransparencyRule = css.match(
+  /#root > main > div > \.bg-workspace,[\s\S]*?#root > main > div > \[data-layout-splitter\]\s*\{([\s\S]*?)\}/,
+)?.[1] ?? "";
+assert.doesNotMatch(
+  appPaneTransparencyRule,
+  /background-(?:image|position|repeat|size)\s*:/,
+  "resizable panes must never own or reposition the whole-App wallpaper",
 );
 assert.match(css, /data-vrcforge-wallpaper-scope="app"\] \.bg-sidebar\s*\{\s*border-left-color: transparent;\s*border-right-color: transparent;/);
 assert.match(css, /data-vrcforge-wallpaper-scope="app"\] \[data-layout-splitter\] > div\s*\{\s*background-color: transparent;/);
+assert.match(layoutSplitter, /data-layout-splitter=\{side\}/);
+assert.match(layoutSplitter, /cursor-col-resize touch-none bg-transparent/);
 assert.equal(en.settings.themeBackgroundScopeWorkspace, "Center workspace only");
 assert.equal(en.settings.themeBackgroundScopeApp, "Entire app (including sidebars)");
 assert.equal(zhCn.settings.themeBackgroundScopeWorkspace, "仅中间工作区");

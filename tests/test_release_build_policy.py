@@ -652,7 +652,7 @@ def test_packaged_public_docs_track_current_release_identity() -> None:
     assert f"-Version {version}" in packaging_guide
     assert f"releases/download/v{version}/VRCForge_Windows_x64_{version}.zip" in packaging_guide
     assert f"# VRCForge {version}" in release_notes
-    assert "documentation-corrected package" in release_notes
+    assert "Windows x64" in release_notes
     assert "`pending`" not in release_notes
 
 
