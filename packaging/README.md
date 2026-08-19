@@ -67,9 +67,9 @@ installation. uv is licensed `MIT OR Apache-2.0`; preserve:
 
 ## Commands
 
-The current source / target release is `1.7.6` (`v1.7.6`); the latest published
-stable package remains `1.7.5` until publication. It supersedes `v1.7.5` and moves the
-tag, manifest, source and asset evidence together; the v1.7.5 tag and Release
+The current source and latest published stable package is `1.7.6` (`v1.7.6`).
+It supersedes `v1.7.5` and moves the tag, manifest, source and asset evidence
+together; the v1.7.5 tag and Release
 page remain unchanged. It also supersedes
 the unpublished `v1.7.0` Draft. Check the GitHub Releases page before preparing
 any later build. The Avatar

@@ -5,8 +5,8 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source / target release: `1.7.6` (`v1.7.6`). The latest published
-stable release remains `1.7.5` until publication. The 1.7.6 package removes
+Current source and latest published stable release: `1.7.6` (`v1.7.6`). The
+1.7.6 package removes
 redundant workspace status chips, keeps whole-App
 wallpapers visually continuous, and adds fail-closed independent-model review
 for eligible General-project file creation. Destructive, overwriting, moving,

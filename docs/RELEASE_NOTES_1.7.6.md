@@ -31,5 +31,8 @@ leaving the `v1.7.5` tag and Release page unchanged.
 
 ## SHA-256
 
-Artifact SHA-256 values are filled from the strict release manifest after the
-clean Windows x64 build.
+- `VRCForge.unitypackage`: `c2267462594c0ca31db32c70f1b411e029010b313ac2f2fb779b155a0b6b4392`
+- `VRCForge_Windows_x64_1.7.6.zip`: `6ccf7a3288ccad87be979a4434f8e5a83d0937b083243ac07cdbc97e076920de`
+- `VRCForge_Offline_Installer_x64.exe`: `ce2ef6219e5970e3831a26e7a216d42042949aade2d74d059d545410c514eb23`
+- `VRCForge_Web_Installer_x64.exe`: `4113b5033c71efccf9dfc5c8d9c8477e8f587aeee6144bf1b4f271ed67475dcb`
+- `release-manifest.json`: `fa650285196d166f7785fc54bbd2b08ed75e28c26817217ad14b07a159917531`
