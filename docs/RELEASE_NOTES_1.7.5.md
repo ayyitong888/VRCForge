@@ -44,5 +44,8 @@ safety. It supersedes 1.7.4; the
 
 ## SHA-256
 
-The verified hashes for the Unity package, Windows payload, both installers and
-release manifest are added after the strict release build.
+- `VRCForge.unitypackage`: `4cbd6c0eb53676c4777ccaeb0cf738428ae9745a6ac33a4535222dcda0d6873c`
+- `VRCForge_Windows_x64_1.7.5.zip`: `569bcbb3f0a15509ba6468bfa0500f9f678911925b6ea25ce7abf48e02b73644`
+- `VRCForge_Offline_Installer_x64.exe`: `8141589e8d4627f2ef24af6afe46dd3caf6db3c243263c71d02ff2a57d9beb84`
+- `VRCForge_Web_Installer_x64.exe`: `2a5615b4020c4646d80f90075ee94fe107146f19c4102589bc0d98348679ab85`
+- `release-manifest.json`: `bfe4e6b38ffa5f5b826a3cc541d675b1450d59e202d35fc36751be406206600d`

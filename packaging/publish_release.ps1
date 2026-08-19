@@ -229,7 +229,9 @@ function Assert-GitHubReleaseSnapshot {
         [bool]$ExpectedDraft,
         [bool]$ExpectedPrerelease,
         [string[]]$RequiredArtifactNames,
-        [object[]]$ManifestArtifacts
+        [object[]]$ManifestArtifacts,
+        [string]$ManifestArtifactName,
+        [string]$ManifestSha256
     )
 
     $remoteId = [long](Get-RequiredProperty -InputObject $Release -Name "id" -Context "GitHub Release readback")
@@ -259,19 +261,23 @@ function Assert-GitHubReleaseSnapshot {
         @($remoteAssetNames | Sort-Object -Unique -CaseSensitive).Count -ne $RequiredArtifactNames.Count -or
         @(Compare-Object -ReferenceObject $RequiredArtifactNames -DifferenceObject $remoteAssetNames -CaseSensitive).Count -ne 0
     ) {
-        throw "GitHub Release must contain exactly the four manifest-bound assets after upload."
+        throw "GitHub Release must contain exactly the four manifest-bound assets plus release-manifest.json after upload."
     }
     foreach ($artifactName in $RequiredArtifactNames) {
-        $manifestEntry = @($ManifestArtifacts | Where-Object { [string]$_.name -ceq $artifactName })
-        if ($manifestEntry.Count -ne 1) {
-            throw "Release manifest readback did not return exactly one asset named $artifactName."
-        }
         $remoteEntries = @($remoteAssets | Where-Object { [string]$_.name -ceq $artifactName })
         if ($remoteEntries.Count -ne 1) {
             throw "GitHub Release readback did not return exactly one asset named $artifactName."
         }
         $remoteDigest = [string](Get-RequiredProperty -InputObject $remoteEntries[0] -Name "digest" -Context "GitHub Release asset $artifactName")
-        $expectedRemoteDigest = "sha256:$(([string]$manifestEntry[0].sha256).ToLowerInvariant())"
+        if ($artifactName -ceq $ManifestArtifactName) {
+            $expectedRemoteDigest = "sha256:$($ManifestSha256.ToLowerInvariant())"
+        } else {
+            $manifestEntry = @($ManifestArtifacts | Where-Object { [string]$_.name -ceq $artifactName })
+            if ($manifestEntry.Count -ne 1) {
+                throw "Release manifest readback did not return exactly one asset named $artifactName."
+            }
+            $expectedRemoteDigest = "sha256:$(([string]$manifestEntry[0].sha256).ToLowerInvariant())"
+        }
         if ($remoteDigest.ToLowerInvariant() -ne $expectedRemoteDigest) {
             throw "GitHub Release asset digest does not match the manifest: $artifactName"
         }
@@ -423,14 +429,20 @@ try {
         Copy-Item -LiteralPath $sourceArtifact -Destination $stagedArtifact
         $artifacts += $stagedArtifact
     }
+    $manifestArtifactName = [System.IO.Path]::GetFileName($manifestPath)
+    $stagedManifest = Join-Path $stagingRoot $manifestArtifactName
+    Copy-Item -LiteralPath $manifestPath -Destination $stagedManifest
+    $manifestSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $stagedManifest).Hash.ToLowerInvariant()
+    $artifacts += $stagedManifest
 
     $manifestArtifacts = @($manifest.artifacts)
-    $requiredArtifactNames = @($sourceArtifacts | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+    $manifestBoundArtifactNames = @($sourceArtifacts | ForEach-Object { [System.IO.Path]::GetFileName($_) })
+    $requiredArtifactNames = @($manifestBoundArtifactNames) + @($manifestArtifactName)
     $manifestArtifactNames = @($manifestArtifacts | ForEach-Object { [string]$_.name })
     if (
-        $manifestArtifactNames.Count -ne $requiredArtifactNames.Count -or
-        @($manifestArtifactNames | Sort-Object -Unique -CaseSensitive).Count -ne $requiredArtifactNames.Count -or
-        @(Compare-Object -ReferenceObject $requiredArtifactNames -DifferenceObject $manifestArtifactNames -CaseSensitive).Count -ne 0
+        $manifestArtifactNames.Count -ne $manifestBoundArtifactNames.Count -or
+        @($manifestArtifactNames | Sort-Object -Unique -CaseSensitive).Count -ne $manifestBoundArtifactNames.Count -or
+        @(Compare-Object -ReferenceObject $manifestBoundArtifactNames -DifferenceObject $manifestArtifactNames -CaseSensitive).Count -ne 0
     ) {
         throw "Release manifest must contain exactly the four publishable artifact names."
     }
@@ -441,7 +453,7 @@ try {
     ) {
         throw "Release manifest web payload digest must match the portable payload artifact digest."
     }
-    foreach ($artifact in $artifacts) {
+    foreach ($artifact in $artifacts | Where-Object { [System.IO.Path]::GetFileName($_) -cne $manifestArtifactName }) {
         $artifactName = [System.IO.Path]::GetFileName($artifact)
         $manifestEntry = @($manifestArtifacts | Where-Object { [string]$_.name -ceq $artifactName })
         if ($manifestEntry.Count -ne 1 -or [string]$manifestEntry[0].sha256 -notmatch "^[0-9a-fA-F]{64}$") {
@@ -569,7 +581,9 @@ try {
         -ExpectedDraft $true `
         -ExpectedPrerelease $expectedPrerelease `
         -RequiredArtifactNames $requiredArtifactNames `
-        -ManifestArtifacts $manifestArtifacts
+        -ManifestArtifacts $manifestArtifacts `
+        -ManifestArtifactName $manifestArtifactName `
+        -ManifestSha256 $manifestSha256
 
     Write-Host "Created, uploaded, and verified Draft GitHub Release $tag. It remains unpublished."
 } finally {
