@@ -173,9 +173,11 @@ def test_approval_transaction_hooks_remain_late_bound_after_construction() -> No
             return None
 
         gateway.approval_transactions.apply_lifecycle_observer = observer
+        gateway.approval_transactions.auto_approval_reviewer = lambda _approval: "manual"
         gateway.approval_transactions.scoped_approval_reviewer = lambda _approval: "manual"
 
         assert gateway.approval_transactions.apply_lifecycle_observer is observer
+        assert gateway.approval_transactions.auto_approval_reviewer is not None
         assert gateway.approval_transactions.scoped_approval_reviewer is not None
 
 

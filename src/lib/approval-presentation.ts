@@ -53,6 +53,30 @@ export function presentApproval(approval: AgentApproval, t: TFunction): Approval
     summary = t("approval.presentation.restoreSummary", { checkpoint });
     notificationSummary = t("approval.presentation.restoreNotificationSummary");
     rollback = t("approval.presentation.restoreEffect");
+  } else if (
+    approval.targetTool === "vrcforge_edit_file" ||
+    approval.targetTool === "vrcforge_write_file" ||
+    approval.targetTool === "vrcforge_delete_path" ||
+    approval.targetTool === "vrcforge_move_path" ||
+    approval.targetTool === "vrcforge_apply_patch"
+  ) {
+    const actionKey =
+      approval.targetTool === "vrcforge_edit_file"
+        ? "edit"
+        : approval.targetTool === "vrcforge_write_file"
+          ? (readBoolean(argumentsValue, "overwrite") ? "overwrite" : "create")
+          : approval.targetTool === "vrcforge_delete_path"
+            ? "delete"
+            : approval.targetTool === "vrcforge_move_path"
+              ? "move"
+              : "patch";
+    const action = t(`approval.presentation.generalAction.${actionKey}`);
+    const source = pathLeaf(readString(argumentsValue, "path", "source"));
+    const destination = pathLeaf(readString(argumentsValue, "destination"));
+    const target = [source, destination].filter(Boolean).join(" → ") || t("approval.presentation.generalFile");
+    title = t("approval.presentation.generalTitle");
+    summary = t("approval.presentation.generalSummary", { action, target });
+    notificationSummary = t("approval.presentation.generalNotificationSummary", { action });
   } else if (approval.preview?.command) {
     title = t("approval.presentation.commandTitle");
     summary = t("approval.presentation.commandSummary", { project });
@@ -81,6 +105,11 @@ export function presentApproval(approval: AgentApproval, t: TFunction): Approval
       preview: approval.preview,
     }),
   };
+}
+
+function readBoolean(value: Record<string, unknown>, key: string): boolean {
+  const candidate = value[key];
+  return candidate === true || candidate === 1 || candidate === "true";
 }
 
 function readString(value: Record<string, unknown>, ...keys: string[]): string {

@@ -2,27 +2,12 @@ import { AlertTriangle, Moon, Sun } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ActiveView } from "../../lib/app-view";
 import type { ThemeMode } from "../../lib/app-preferences";
-import { formatCount } from "../../lib/utils";
-import { Badge, type BadgeTone } from "../ui/badge";
 import { Button } from "../ui/button";
-
-function StatusChip({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <Badge tone={ok ? "ok" : "warn"} className="max-w-[180px]">
-      <span className="truncate">{label}</span>
-    </Badge>
-  );
-}
 
 export function WorkspaceHeader({
   activeProjectLabel,
   activeView,
   activeChatTitle,
-  permissionFullAuto,
-  permissionAuto,
-  permissionBadgeTone,
-  runtimeConnected,
-  pendingApprovals,
   theme,
   showDoctorStartupPrompt,
   hasStartupIssue,
@@ -41,11 +26,6 @@ export function WorkspaceHeader({
   activeProjectLabel: string;
   activeView: ActiveView;
   activeChatTitle: string;
-  permissionFullAuto: boolean;
-  permissionAuto: boolean;
-  permissionBadgeTone: BadgeTone;
-  runtimeConnected: boolean;
-  pendingApprovals: number;
   theme: ThemeMode;
   showDoctorStartupPrompt: boolean;
   hasStartupIssue: boolean;
@@ -84,18 +64,6 @@ export function WorkspaceHeader({
           <span className="truncate font-medium">{activeTitle}</span>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {permissionFullAuto ? (
-            <Badge tone={permissionBadgeTone}>
-              <AlertTriangle className="mr-1 h-3.5 w-3.5 shrink-0" />
-              {t("header.fullPermission")}
-            </Badge>
-          ) : permissionAuto ? (
-            <Badge tone={permissionBadgeTone}>{t("header.autoApproval")}</Badge>
-          ) : null}
-          <StatusChip ok={runtimeConnected} label={runtimeConnected ? t("header.coreOnline") : t("header.coreOffline")} />
-          <Badge tone={pendingApprovals > 0 ? "warn" : "muted"}>
-            {formatCount(pendingApprovals)} {t("header.pendingApprovals")}
-          </Badge>
           <Button variant="ghost" className="h-9 w-9 px-0" onClick={onToggleTheme}>
             {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </Button>

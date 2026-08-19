@@ -41,6 +41,29 @@ GENERAL_AGENT_WRITE_TOOLS = tuple(
     for name in GENERAL_AGENT_WRITE_TOOL_NAMES
 )
 
+
+def general_write_manual_approval_reason(tool_name: str, arguments: Mapping[str, Any]) -> str:
+    """Keep destructive or existing-file mutations out of Auto Approve."""
+
+    normalized = str(tool_name or "").strip().removeprefix("vrcforge_")
+    overwrite = arguments.get("overwrite")
+    overwrite_enabled = overwrite is True or overwrite == 1 or str(overwrite).strip().casefold() == "true"
+    if normalized == TOOL_WRITE_FILE and not overwrite_enabled:
+        path = str(arguments.get("path") or "").strip()
+        roots = arguments.get("_generalAllowedRoots")
+        allowed_roots = [str(root) for root in roots] if isinstance(roots, list) else []
+        try:
+            target = _path(path)
+            if path and any(os.path.commonpath((target, _path(root))) == str(_path(root)) for root in allowed_roots):
+                return ""
+        except (OSError, ValueError):
+            pass
+        return "Creating a file outside the current General project requires manual approval in Auto Approve mode."
+    return (
+        "Editing, overwriting, patching, moving, or deleting files in a General project "
+        "requires manual approval in Auto Approve mode."
+    )
+
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$")
 
 
@@ -254,5 +277,6 @@ def apply_patch(
 
 __all__ = [
     "GENERAL_AGENT_WRITE_TOOL_NAMES", "GENERAL_AGENT_WRITE_TOOLS",
+    "general_write_manual_approval_reason",
     "edit_file", "write_file", "delete_path", "move_path", "apply_patch",
 ]

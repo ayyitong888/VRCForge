@@ -279,6 +279,48 @@ def test_selecting_full_permission_enables_the_write_capability_it_promises(tmp_
 
 
 @pytest.mark.parametrize(
+    ("review_decision", "expected_status"),
+    [("manual", "pending"), ("allow_auto", "executed")],
+)
+def test_auto_mode_honors_independent_reviewer_decision(
+    tmp_path: Path,
+    review_decision: str,
+    expected_status: str,
+) -> None:
+    gateway = _gateway(tmp_path)
+    project = tmp_path / "UnityProject"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
+    executed: list[dict] = []
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_test_reviewed_write",
+        "Reviewed write.",
+        "low",
+        lambda params: executed.append(params) or {"ok": True},
+    )
+    gateway.approval_transactions.auto_approval_reviewer = lambda _approval: review_decision
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.execution_mode = "auto"
+    config.allow_write_requests = True
+    gateway.save_config(config)
+
+    result = gateway.approval_transactions.create_apply_request(
+        {
+            "target_tool": "vrcforge_test_reviewed_write",
+            "arguments": {"value": "safe", "projectRoot": str(project)},
+        }
+    )
+
+    assert result["status"] == expected_status
+    assert executed == (
+        [{"value": "safe", "projectRoot": str(project)}]
+        if expected_status == "executed"
+        else []
+    )
+
+
+@pytest.mark.parametrize(
     ("execution_mode", "expected_status"),
     [("auto", "pending"), ("roslyn_full_auto", "executed")],
 )
@@ -343,6 +385,34 @@ def test_handler_manual_approval_policy_cannot_be_disabled_by_the_caller(
                 "canonical": True,
             }
         ]
+
+
+def test_auto_mode_still_asks_independent_reviewer_before_static_manual_policy(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
+    reviewer_calls: list[dict] = []
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_test_reviewed_manual_write",
+        "Reviewed manual write.",
+        "medium",
+        lambda _params: {"ok": True},
+        manual_approval_resolver=lambda _arguments, _preview: "Static destructive policy.",
+    )
+    gateway.approval_transactions.auto_approval_reviewer = (
+        lambda approval: reviewer_calls.append(approval) or "allow_auto"
+    )
+    config = gateway.ensure_config()
+    config.enabled = True
+    config.execution_mode = "auto"
+    config.allow_write_requests = True
+    gateway.save_config(config)
+
+    result = gateway.approval_transactions.create_apply_request(
+        {"target_tool": "vrcforge_test_reviewed_manual_write", "arguments": {"path": "safe.txt"}}
+    )
+
+    assert result["status"] == "pending"
+    assert result["approval"]["requiresExplicitApproval"] is True
+    assert len(reviewer_calls) == 1
 
 
 def test_dedicated_checkpoint_preflight_failure_blocks_without_global_fallback(

@@ -9,7 +9,38 @@ from general_agent_write_tools import (
     edit_file,
     move_path,
     write_file,
+    general_write_manual_approval_reason,
 )
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["edit_file", "delete_path", "move_path", "apply_patch"],
+)
+def test_existing_file_mutations_require_manual_approval_in_auto_mode(tool_name: str) -> None:
+    assert general_write_manual_approval_reason(tool_name, {})
+
+
+def test_only_in_project_new_file_creation_is_eligible_for_independent_auto_review(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    assert general_write_manual_approval_reason(
+        "write_file",
+        {
+            "path": str(project / "new.txt"),
+            "overwrite": False,
+            "_generalAllowedRoots": [str(project)],
+        },
+    ) == ""
+    assert general_write_manual_approval_reason("write_file", {"overwrite": True})
+    assert general_write_manual_approval_reason(
+        "write_file",
+        {
+            "path": str(tmp_path / "outside.txt"),
+            "overwrite": False,
+            "_generalAllowedRoots": [str(project)],
+        },
+    )
 
 
 def guard_calls():

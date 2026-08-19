@@ -1090,6 +1090,54 @@ Each item ends with its version history in this exact form:
   an honest comparison, including a rejected or failed final status.
 - [首次实现: 1.5.1] [强化/修复: 1.5.1] [最近验证: 1.5.1]
 
+### UX-011 — Continuous whole-App wallpaper and non-duplicated status ownership
+
+- Priority: P1.
+- Contract: whole-App wallpaper mode uses one continuous image and one uniform
+  scrim across the left sidebar, center workspace, splitters and right rail.
+  Static pane borders are transparent in that mode; resize handles remain
+  visible on hover/drag. The header contains no duplicate permission, Core or
+  pending-approval chips: permission belongs to the composer, while Core and
+  pending approval state belong to the right environment rail.
+- Forbidden regression: visible vertical wallpaper seams, different sidebar
+  scrim colours, permanently bright splitters, or removal of the canonical
+  composer/right-rail state.
+- Acceptance: `tests/test_theme_customization_ui.mjs`,
+  `tests/test_workspace_header_status_dedupe_ui.mjs`, TypeScript build and a
+  packaged Windows light/dark whole-App wallpaper visual check.
+- [首次实现: 1.7.2] [强化/修复: 1.7.5] [最近验证: 1.7.5]
+
+### AGT-019 — General-project boundary and independent Auto Approve review
+
+- Priority: P0.
+- Contract: General tools may propose writes outside the current General
+  project, but out-of-project creation and every edit, overwrite, patch, move
+  or delete require manual approval in Auto Approve mode. Registered Unity
+  project roots remain unavailable to General write tools. Only new-file
+  creation inside the current General project is eligible for automatic
+  approval, and only after a distinct lightweight model available through the
+  user's configured provider and API key returns strict `allow_auto` JSON.
+  Reviewer discovery, transport, model, parse and uncertainty failures all
+  preserve a pending manual approval.
+- Contract: every pending General write appears in the right approval surface
+  with operation and file-name context and emits the existing Windows approval
+  notification. Native notification text names the operation type but excludes
+  file contents, full paths and credentials. Manual approval exposes allow
+  once, reject and exact-project/category allow-this-kind actions. Remembered
+  General categories still require the separate provider reviewer on every
+  future match; they never grant self-approval to the executing model.
+- Forbidden regression: silent destructive General writes in Auto Approve,
+  same-model self-review, reviewer access to raw file content, hard rejection
+  solely for crossing the General-project boundary, or Unity writes through a
+  General tool.
+- Acceptance: `tests/test_general_agent_write_tools.py`,
+  `tests/test_general_auto_approval_review.py`,
+  `tests/test_approval_auto_review.py`,
+  `tests/test_agent_gateway_integrity.py`,
+  `tests/test_profiled_tool_registry_dashboard.py` and
+  `tests/test_approval_notification_summary_ui.mjs`.
+- [首次实现: 1.7.3] [强化/修复: 1.7.5] [最近验证: 1.7.5]
+
 ## Release contracts
 
 ### REL-001 — Strict artifact identity

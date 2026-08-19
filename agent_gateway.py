@@ -4653,6 +4653,14 @@ class AgentGateway:
             elif action_kind == "write":
                 step_tool = str(plan.get("writeTool") or "")
                 action_arguments = dict(planned_arguments)
+                if step_tool in {
+                    "vrcforge_edit_file",
+                    "vrcforge_write_file",
+                    "vrcforge_delete_path",
+                    "vrcforge_move_path",
+                    "vrcforge_apply_patch",
+                }:
+                    action_arguments["_generalAllowedRoots"] = list(general_allowed_roots)
                 step_payload = self.approval_transactions._execute_write_request(
                     step_tool,
                     action_arguments,
@@ -5830,7 +5838,11 @@ class AgentGateway:
         if not write_handler.allow_future_category or not write_handler.approval_category:
             return False
         target_tool = str(approval.get("targetTool") or write_handler.name).lower()
-        if any(token in target_tool for token in SCOPED_ALLOW_RULE_FORBIDDEN_TOKENS):
+        general_file_category = write_handler.approval_category.startswith("general-file-")
+        if (
+            not general_file_category
+            and any(token in target_tool for token in SCOPED_ALLOW_RULE_FORBIDDEN_TOKENS)
+        ):
             return False
         if normalize_risk_level(str(approval.get("riskLevel") or write_handler.risk_level)) in {"high", "critical"}:
             return False
@@ -6514,7 +6526,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.7.4",
+        server_version="1.7.5",
     )
     return create_agent_mcp_2026_asgi_app(
         router,

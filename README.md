@@ -2,7 +2,7 @@
 
 ![VRCForge — 还差多久？还差 4 小时](docs/assets/vrcforge-four-hours-meme.jpg)
 
-[![Target](https://img.shields.io/badge/target-v1.7.4-4f46e5?style=flat-square)](docs/RELEASE_NOTES_1.7.4.md)
+[![Target](https://img.shields.io/badge/target-v1.7.5-4f46e5?style=flat-square)](docs/RELEASE_NOTES_1.7.5.md)
 [![License: GPL-3.0-only](https://img.shields.io/badge/license-GPL--3.0--only-22c55e?style=flat-square)](LICENSE)
 ![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0ea5e9?style=flat-square)
 ![Status: Released](https://img.shields.io/badge/status-released-22c55e?style=flat-square)
@@ -23,14 +23,12 @@ Avatar 改动。
 > Back up your Unity / VRChat Avatar project before using asset-writing features.
 > 使用任何会写入 Unity 资产的功能前，请先备份 Avatar 工程。
 
-Current source and latest published stable release: `1.7.4` (`v1.7.4`).
-VRCForge 1.7.4 carries the 1.7.3 package plus corrected update controls,
-upgrade-safe personal appearance settings, clearer checkpoint retention, and
-responsive Optimization, Protection and Skills workspaces. It retains the
-verified user-and-Agent Goal
-control contract and supersedes v1.7.3; the v1.7.3 tag and Release page remain
-available and unchanged. The unpublished v1.7.0 Draft and unpublished v1.6.1
-tag remain superseded.
+Current source and latest published stable release: `1.7.5` (`v1.7.5`).
+VRCForge 1.7.5 removes redundant workspace status chips, keeps whole-App
+wallpapers visually continuous, and strengthens General-project writes with
+manual approval for destructive or out-of-project operations plus an
+independent-model review gate for eligible in-project file creation. It
+supersedes v1.7.4; older tags and Release pages remain available and unchanged.
 
 Official repository: <https://github.com/ayyitong888/VRCForge>
 
@@ -78,8 +76,8 @@ tray **Check for updates** action when you want an explicit current/update/error
 result. Themes, custom colours, background images and that automatic-check
 preference are personal data and survive App upgrades.
 
-The 1.7.4 release includes a portable zip
-(`VRCForge_Windows_x64_1.7.4.zip`) for no-install/debug use.
+The 1.7.5 release includes a portable zip
+(`VRCForge_Windows_x64_1.7.5.zip`) for no-install/debug use.
 
 ---
 
@@ -89,7 +87,7 @@ Status / 状态: **✅ Available** · **🔧 In Development** · **📋 Planned*
 
 | Status | Area | What it does |
 | --- | --- | --- |
-| ✅ Available | **MCP 2.0 (`2026-07-28`)** | The `v1.7.4` release target keeps the project Core at 64 VRCForge Unity tools over protocol revision `2026-07-28` and connects directly to the App. Its release build must report no bundled third-party Unity MCP runtime or package. |
+| ✅ Available | **MCP 2.0 (`2026-07-28`)** | The `v1.7.5` release target keeps the project Core at 64 VRCForge Unity tools over protocol revision `2026-07-28` and connects directly to the App. Its release build must report no bundled third-party Unity MCP runtime or package. |
 | ✅ Available | **Avatar editing / Avatar 编辑** | BlendShape scan, face tuning (natural-language and reference-image), shader/material tuning (lilToon, Poiyomi, Generic), and vision review with Gesture Manager screenshots. |
 | ✅ Available | **Optimization / 优化** | VRAM, material, mesh, and parameter audits with conservative one-step optimization planning. |
 | ✅ Available | **Wardrobe / 衣柜管理** | Integer-parameter-based wardrobe scan, outfit import planning (`.unitypackage`, Booth folder, loose prefab), and supervised apply. |
@@ -108,6 +106,15 @@ App-mediated Unity asset writes use this flow by default. Auto-approve and
 Advanced Power Mode are optional, visibly confirmed modes with broader
 permissions; back up the project before using any write feature. Restore
 remains a separate decision.
+For General projects, edits, overwrites, patches, moves, deletes, and writes
+outside the current project remain manual approvals in Auto Approve mode.
+Eligible new files inside the current project are auto-approved only after a
+distinct lightweight model available through the user's configured provider
+and API key returns a strict allow decision; missing models, provider errors,
+or uncertainty fall back to manual approval. Windows notifications identify
+the pending operation type without exposing file contents or full paths.
+Manual cards provide allow once, reject and project-scoped allow-this-kind
+choices; remembered categories still pass through the independent review.
 
 Approval requests replace only the conversation composer, so prior chat
 remains visible. The primary button allows once; eligible future-category
@@ -203,7 +210,7 @@ checkpoint, and rollback remain mandatory.
 
 ## Unity Plugin / Unity 插件
 
-The `v1.7.4` release target keeps `VRCForge.unitypackage` project-scoped. The
+The `v1.7.5` release target keeps `VRCForge.unitypackage` project-scoped. The
 package contains the MCP 2.0 Core (`2026-07-28`), lifecycle bootstrap, and the 64 product tools under
 `Assets/VRCForge`. After import, the App discovers and connects the selected
 project directly. No separate MCP server/package, manifest edit, command, MCP
@@ -212,7 +219,7 @@ Core startup does not open a separate console window. This release accepts
 protocol revision `2026-07-28`; older clients receive an update error, while
 known third-party MCP packages produce a conflict warning. App-mediated writes
 use the selected permission mode and the supervised checkpoint/readback/restore
-path. Reimporting the same `1.7.4` integration is supported as a repair path;
+path. Reimporting the same `1.7.5` integration is supported as a repair path;
 it is not an overwrite-upgrade path from `1.3.6`. Package import is performed
 in Unity; the App connects after the project Core reports ready.
 
@@ -261,11 +268,11 @@ This path is for development only. Normal users should use the installer.
 
 GPL-3.0-only. The Unity MCP 2.0 Core runtime, command catalogue, input schema
 metadata, and tool-result contract are VRCForge-owned implementations. The
-`v1.7.4` release gate requires a provenance scan with no bundled third-party
+`v1.7.5` release gate requires a provenance scan with no bundled third-party
 Unity MCP code or runtime. Binary releases may also bundle the uv runtime (MIT OR Apache-2.0).
 See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 VRCForge 以 GPL-3.0-only 发布。Unity MCP 2.0 Core、命令目录、输入 Schema 元数据和
-工具结果契约均为 VRCForge 自有实现；`v1.7.4` 发布门禁要求来源扫描不得发现捆绑的第三方
+工具结果契约均为 VRCForge 自有实现；`v1.7.5` 发布门禁要求来源扫描不得发现捆绑的第三方
 Unity MCP 代码或运行时。二进制发行包也可能包含采用 MIT OR Apache-2.0 许可证的 uv
 运行时。

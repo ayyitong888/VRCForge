@@ -304,12 +304,23 @@
     background-size: cover;
   }
 
-  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-workspace {
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-workspace,
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-sidebar {
     background-color: hsl(var(--workspace) / var(--vrcforge-wallpaper-scrim));
   }
 
   html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] .bg-sidebar {
-    background-color: hsl(var(--sidebar) / var(--vrcforge-wallpaper-scrim));
+    border-left-color: transparent;
+    border-right-color: transparent;
+  }
+
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] [data-layout-splitter] > div {
+    background-color: transparent;
+  }
+
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] [data-layout-splitter]:hover > div,
+  html[data-vrcforge-wallpaper="active"][data-vrcforge-wallpaper-scope="app"] [data-layout-splitter]:active > div {
+    background-color: hsl(var(--primary));
   }
 
   button,

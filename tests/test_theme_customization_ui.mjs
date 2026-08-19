@@ -90,6 +90,13 @@ assert.match(panel, /aria-checked=\{selected\}/);
 assert.match(css, /data-vrcforge-wallpaper-scope="workspace"\] \.bg-workspace/);
 assert.match(css, /data-vrcforge-wallpaper-scope="app"\] #root > main/);
 assert.match(css, /data-vrcforge-wallpaper-scope="app"\] \.bg-sidebar/);
+assert.match(
+  css,
+  /data-vrcforge-wallpaper-scope="app"\] \.bg-workspace,\s*html\[data-vrcforge-wallpaper="active"\]\[data-vrcforge-wallpaper-scope="app"\] \.bg-sidebar\s*\{\s*background-color: hsl\(var\(--workspace\) \/ var\(--vrcforge-wallpaper-scrim\)\)/,
+  "the app wallpaper must use one continuous scrim across the center and both sidebars",
+);
+assert.match(css, /data-vrcforge-wallpaper-scope="app"\] \.bg-sidebar\s*\{\s*border-left-color: transparent;\s*border-right-color: transparent;/);
+assert.match(css, /data-vrcforge-wallpaper-scope="app"\] \[data-layout-splitter\] > div\s*\{\s*background-color: transparent;/);
 assert.equal(en.settings.themeBackgroundScopeWorkspace, "Center workspace only");
 assert.equal(en.settings.themeBackgroundScopeApp, "Entire app (including sidebars)");
 assert.equal(zhCn.settings.themeBackgroundScopeWorkspace, "仅中间工作区");

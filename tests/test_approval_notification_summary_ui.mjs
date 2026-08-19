@@ -35,6 +35,23 @@ assert.equal(single.summary, "approval.presentation.captureSingleSummary");
 assert.equal(single.notificationSummary, "approval.presentation.captureSingleNotificationSummary");
 
 const secretMarker = "SENSITIVE_INPUT_SENTINEL";
+const general = presentApproval(
+  {
+    id: "approval-general-delete",
+    status: "pending",
+    targetTool: "vrcforge_delete_path",
+    arguments: { path: "C:/General Project/old-note.txt" },
+  },
+  translate,
+);
+assert.equal(general.title, "approval.presentation.generalTitle");
+assert.equal(general.summary, "approval.presentation.generalSummary:approval.presentation.generalAction.delete|old-note.txt");
+assert.equal(
+  general.notificationSummary,
+  "approval.presentation.generalNotificationSummary:approval.presentation.generalAction.delete",
+);
+assert.equal(general.notificationSummary.includes("C:/General Project"), false);
+
 const sensitiveCases = [
   {
     expected: "approval.presentation.createObjectNotificationSummary",
@@ -100,6 +117,8 @@ for (const locale of ["en-US", "zh-CN", "zh-TW", "ja-JP"]) {
   assert.ok(messages.approval.presentation.captureMultiSummary);
   assert.ok(messages.approval.presentation.captureSingleTitle);
   assert.ok(messages.approval.presentation.captureSingleSummary);
+  assert.ok(messages.approval.presentation.generalTitle);
+  assert.ok(messages.approval.presentation.generalNotificationSummary);
 }
 
 console.log("approval notification summary UI contract: ok");

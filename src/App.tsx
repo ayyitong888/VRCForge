@@ -3666,11 +3666,6 @@ export default function App() {
             activeProjectLabel={activeProjectPath ? activeProjectName : t("sidebar.tempChat")}
             activeView={activeView}
             activeChatTitle={activeChat ? activeChat.title || t("header.currentSession") : ""}
-            permissionFullAuto={Boolean(permission?.roslynFullAuto)}
-            permissionAuto={permission?.executionMode === "auto"}
-            permissionBadgeTone={currentPermissionVisual.badgeTone}
-            runtimeConnected={runtimeConnected}
-            pendingApprovals={pendingApprovals}
             theme={theme}
             showDoctorStartupPrompt={showDoctorStartupPrompt}
             hasStartupIssue={hasStartupIssue}

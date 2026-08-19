@@ -26,7 +26,7 @@ import zipfile
 from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from http.cookies import SimpleCookie
 from pathlib import Path, PurePosixPath
@@ -58,6 +58,7 @@ from general_agent_write_tools import (
     apply_patch as general_apply_patch,
     delete_path as general_delete_path,
     edit_file as general_edit_file,
+    general_write_manual_approval_reason,
     move_path as general_move_path,
     write_file as general_write_file,
 )
@@ -100,7 +101,11 @@ from agent_question_service import (
 )
 from agent_runtime_event_projection import project_runtime_turn_event
 from agent_goal_service import AgentGoalServiceError
-from approval_auto_review import review_saved_project_category_approval
+from approval_auto_review import (
+    review_general_auto_approval,
+    review_saved_project_category_approval,
+    select_independent_reviewer_model,
+)
 from agent_goal_store import GOAL_DELIVERY_RESULT_SCHEMA
 from authoritative_unity_writes import (
     AuthoritativeUnityWriteError,
@@ -17705,11 +17710,50 @@ def normalize_path_string(value: str) -> str:
 
 
 def _review_saved_project_category_approval(approval: dict[str, Any]) -> str:
+    if str(approval.get("targetTool") or "") in {
+        "vrcforge_edit_file",
+        "vrcforge_write_file",
+        "vrcforge_delete_path",
+        "vrcforge_move_path",
+        "vrcforge_apply_patch",
+    }:
+        return _review_general_auto_approval(approval)
     config = PROVIDER_CONFIGURATION.current_api_config()
     return review_saved_project_category_approval(
         approval,
         model=config.model,
         request_text=lambda prompt: PROVIDER_TESTS.probe_text(config, prompt, structured=True),
+    )
+
+
+def _review_general_auto_approval(approval: dict[str, Any]) -> str:
+    target_tool = str(approval.get("targetTool") or "")
+    if target_tool not in {
+        "vrcforge_edit_file",
+        "vrcforge_write_file",
+        "vrcforge_delete_path",
+        "vrcforge_move_path",
+        "vrcforge_apply_patch",
+    }:
+        return "not_applicable"
+    config = PROVIDER_CONFIGURATION.current_api_config()
+    try:
+        models = PROVIDER_MODEL_CATALOG.fetch_provider_models(config)
+    except Exception:
+        return "manual"
+    reviewer_model = select_independent_reviewer_model(config.model, models)
+    if not reviewer_model:
+        return "manual"
+    reviewer_config = replace(config, model=reviewer_model, api_type="auto", thinking_level="")
+    return review_general_auto_approval(
+        approval,
+        active_model=config.model,
+        reviewer_model=reviewer_model,
+        request_text=lambda prompt: PROVIDER_TESTS.probe_text(
+            reviewer_config,
+            prompt,
+            structured=True,
+        ),
     )
 
 
@@ -21365,6 +21409,7 @@ def register_agent_gateway_tools() -> None:
         "move_path": general_move_path_tool,
         "apply_patch": general_apply_patch_tool,
     }
+
     for metadata in GENERAL_AGENT_WRITE_TOOLS:
         model_name = str(metadata["name"])
         internal_name = f"vrcforge_{model_name}"
@@ -21377,7 +21422,19 @@ def register_agent_gateway_tools() -> None:
             handler,
             write=True,
         )
-        register_write_handler(internal_name, description, "medium", handler)
+        register_write_handler(
+            internal_name,
+            description,
+            "medium",
+            handler,
+            manual_approval_resolver=(
+                lambda arguments, _preview, exact_name=model_name: general_write_manual_approval_reason(
+                    exact_name, arguments
+                )
+            ),
+            approval_category=f"general-file-{model_name.replace('_', '-')}",
+            allow_future_category=True,
+        )
     AGENT_GATEWAY.register_tool(
         "vrcforge_web_fetch",
         str(GENERAL_AGENT_WEB_TOOL_METADATA["web_fetch"]["description"]),
@@ -22875,6 +22932,7 @@ AGENT_GATEWAY.checkpoint_recovery.checkpoint_project_root_resolver = lambda: DAS
 AGENT_GATEWAY.approval_transactions.checkpoint_prepare_handler = prepare_unity_checkpoint_sync
 AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_prepare_handler = prepare_unity_checkpoint_restore_sync
 AGENT_GATEWAY.checkpoint_recovery.checkpoint_restore_handler = reload_unity_checkpoint_sync
+AGENT_GATEWAY.approval_transactions.auto_approval_reviewer = _review_general_auto_approval
 AGENT_GATEWAY.approval_transactions.scoped_approval_reviewer = _review_saved_project_category_approval
 
 register_agent_gateway_tools()

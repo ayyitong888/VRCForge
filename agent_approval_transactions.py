@@ -157,6 +157,7 @@ class AgentApprovalTransactionService:
         "_goal",
         "_ports",
         "_runtime_run_append",
+        "_auto_approval_reviewer",
         "_scoped_approval_reviewer",
     )
 
@@ -172,6 +173,7 @@ class AgentApprovalTransactionService:
         self._runtime_run_append = runtime_run_append
         self._apply_lifecycle_observer: Callable[[str, dict[str, Any]], Any] | None = None
         self._checkpoint_prepare_handler: Callable[[Path], dict[str, Any]] | None = None
+        self._auto_approval_reviewer: Callable[[dict[str, Any]], str] | None = None
         self._scoped_approval_reviewer: Callable[[dict[str, Any]], str] | None = None
         self._restore_pending_approvals()
 
@@ -299,6 +301,14 @@ class AgentApprovalTransactionService:
     @scoped_approval_reviewer.setter
     def scoped_approval_reviewer(self, callback: Callable[[dict[str, Any]], str] | None) -> None:
         self._scoped_approval_reviewer = callback
+
+    @property
+    def auto_approval_reviewer(self) -> Callable[[dict[str, Any]], str] | None:
+        return self._auto_approval_reviewer
+
+    @auto_approval_reviewer.setter
+    def auto_approval_reviewer(self, callback: Callable[[dict[str, Any]], str] | None) -> None:
+        self._auto_approval_reviewer = callback
 
     def _observe_apply_lifecycle(
         self,
@@ -757,10 +767,31 @@ class AgentApprovalTransactionService:
                     "targetTool": target_tool,
                 }
             )
+        auto_review_decision = "not_applicable"
+        if execution_mode == "auto" and self._auto_approval_reviewer is not None:
+            try:
+                auto_review_decision = str(
+                    self._auto_approval_reviewer(redact_sensitive(dict(approval))) or "manual"
+                ).strip()
+            except Exception:
+                auto_review_decision = "manual"
+            if auto_review_decision not in {"allow_auto", "manual", "not_applicable"}:
+                auto_review_decision = "manual"
+            if auto_review_decision != "not_applicable":
+                self._ports.append_audit(
+                    {
+                        "event": "approval_independent_auto_review",
+                        "approvalId": approval.get("id"),
+                        "targetTool": target_tool,
+                        "reviewerDecision": auto_review_decision,
+                        "manualPolicyRequired": requires_explicit_for_mode,
+                    }
+                )
         if self.auto_approval_enabled(config) and not requires_explicit_for_mode:
-            auto_payload = self._auto_execute_approval(approval)
-            if auto_payload is not None:
-                return auto_payload
+            if auto_review_decision in {"allow_auto", "not_applicable"}:
+                auto_payload = self._auto_execute_approval(approval)
+                if auto_payload is not None:
+                    return auto_payload
         if self.auto_approval_enabled(config) and requires_explicit_for_mode:
             self._ports.append_audit(
                 {
