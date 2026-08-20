@@ -209,7 +209,7 @@
     "modelProvider": "模型供应商",
     "diagnostics": "诊断",
     "aboutTitle": "关于 VRCForge",
-    "aboutProduct": "VRCForge 1.7.6",
+    "aboutProduct": "VRCForge 1.7.7",
     "aboutMcp": "VRCForge 自有 MCP 2.0（2026-07-28）Core，内置 64 个 Unity 工具。",
     "aboutSafety": "所有写入都需要审批并创建检查点；回滚仍需单独批准。",
     "aboutLicense": "GPL-3.0-only。发行详情见随附的 NOTICE 与 DEPENDENCIES 文档。",

@@ -343,6 +343,19 @@ def test_native_setup_starts_the_owned_backend_before_webview_hydration() -> Non
     assert "backend_session_verify_cache_valid()" in start_command
 
 
+def test_runtime_session_probe_keeps_busy_backend_distinct_from_replacement() -> None:
+    backend_rs = (ROOT / "src-tauri" / "src" / "backend.rs").read_text(encoding="utf-8")
+    verification = backend_rs[
+        backend_rs.index("pub(crate) fn ensure_backend_session_verified") :
+        backend_rs.index("pub(crate) fn backend_session_verify_cache")
+    ]
+
+    assert "BackendSessionProbe::Accepted" in verification
+    assert "BackendSessionProbe::Unavailable" in verification
+    assert "runtime_session_busy_error()" in verification
+    assert "runtime_session_verification_error()" in verification
+
+
 def test_startup_latency_probe_is_manifest_bound_profile_isolated_and_providerless() -> None:
     source = _read("scripts/diagnose_packaged_latency.mjs")
 

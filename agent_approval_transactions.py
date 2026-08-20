@@ -1846,6 +1846,21 @@ class AgentApprovalTransactionService:
             return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
         git_root = Path(git_root_result["stdout"].strip()).resolve()
         pathspecs = self._ports.checkpoint_pathspecs(git_root, project_root)
+        ignored_pathspecs = [
+            pathspec
+            for pathspec in pathspecs
+            if self._ports.run_git(
+                git_root,
+                ["check-ignore", "--quiet", "--no-index", "--", pathspec],
+            ).get("returncode") == 0
+        ]
+        if ignored_pathspecs:
+            record["warnings"] = [
+                *ensure_string_list(record.get("warnings")),
+                "The enclosing Git repository ignores the Unity project; using file-level checkpoint fallback.",
+            ]
+            record["gitFallbackReason"] = "project_path_ignored_by_enclosing_repository"
+            return self._ports.checkpoint.create_archive_checkpoint(project_root, record)
         base_commit_result = self._ports.run_git(git_root, ["rev-parse", "HEAD"])
         base_commit = base_commit_result["stdout"].strip() if base_commit_result["ok"] else ""
 

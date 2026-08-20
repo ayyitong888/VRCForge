@@ -11131,15 +11131,13 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(restored["ok"])
             self.assertEqual(existing.read_text(encoding="utf-8"), "before")
             self.assertFalse((project / "Assets" / "generated.txt").exists())
-            self.assertFalse(bee_cache.exists())
-            self.assertFalse(script_cache.exists())
+            self.assertTrue(bee_cache.is_dir())
+            self.assertTrue(script_cache.is_dir())
             self.assertTrue(package_cache.is_dir())
             self.assertEqual((package_cache / "stale-package").read_text(encoding="utf-8"), "stale")
-            self.assertFalse(restored["unityCacheCleanup"]["skipped"])
-            self.assertIn(str(bee_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
-            self.assertIn(str(script_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
-            self.assertNotIn(str(package_cache.resolve()), restored["unityCacheCleanup"]["deleted"])
-            self.assertIn(str(package_cache.resolve()), restored["unityCacheCleanup"]["preserved"])
+            self.assertTrue(restored["unityCacheCleanup"]["skipped"])
+            self.assertEqual(restored["unityCacheCleanup"]["reason"], "checkpoint did not restore changed Packages files")
+            self.assertEqual(restored["unityCacheCleanup"]["deleted"], [])
             self.assertEqual(reloaded, [project.resolve()])
 
     def test_archive_restore_closes_unity_before_files_and_reloads_exact_context(self) -> None:
@@ -11170,7 +11168,14 @@ class DashboardServerTests(unittest.TestCase):
                 return dict(restore_context)
 
             def reload_restore(_path: Path, prepared: dict[str, object]) -> dict[str, object]:
-                self.assertEqual(prepared, restore_context)
+                self.assertEqual(
+                    prepared,
+                    {
+                        **restore_context,
+                        "restoredFiles": ["Assets/existing.txt"],
+                        "deletedFiles": [],
+                    },
+                )
                 events.append(("reload", existing.read_text(encoding="utf-8")))
                 return {"ok": True}
 
@@ -11818,16 +11823,68 @@ class DashboardServerTests(unittest.TestCase):
             "ok": True,
             "scenes": ["Assets/Avatar.unity", "Assets/Lighting.unity"],
             "activeScenePath": "Assets/Lighting.unity",
+            "restoredFiles": ["Assets/Avatar.unity", "Assets/Lighting.unity"],
+            "deletedFiles": [],
         }
 
-        result = dashboard_server.reload_unity_checkpoint_sync(project, prepared)
+        ready = {
+            "ok": True,
+            "projectPath": str(project),
+            "coreReady": True,
+            "mainThreadReadVerified": True,
+            "domainReloadObserved": False,
+        }
+        with patch(
+            "dashboard_server._wait_for_checkpoint_reload_ready",
+            return_value=ready,
+        ) as wait_ready:
+            result = dashboard_server.reload_unity_checkpoint_sync(project, prepared)
 
         self.assertTrue(result["ok"])
+        self.assertTrue(result["mainThreadReadVerified"])
+        wait_ready.assert_called_once_with(project, None, require_new_instance=False)
         _settings, tool_name, arguments = invoke.call_args.args
         self.assertEqual(tool_name, "vrc_reload_after_checkpoint_restore")
         self.assertEqual(arguments["scenePaths"], prepared["scenes"])
         self.assertEqual(arguments["activeScenePath"], prepared["activeScenePath"])
+        self.assertFalse(arguments["refreshAssets"])
         self.assertEqual(invoke.call_args.kwargs["execution_context"], {"lane": "app_safety_control"})
+
+    def test_checkpoint_reload_success_waits_for_main_thread_readiness(self) -> None:
+        project = Path("C:/Unity/ReloadProject")
+        settings = SimpleNamespace(
+            unity_mcp_timeout_seconds=30,
+            unity_mcp_retries=3,
+        )
+        previous = SimpleNamespace(process_id=77, project_hash="project-hash", instance_id="same")
+        reload_result = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            payload={"structuredContent": {"success": True, "data": {"ok": True}}},
+        )
+        ready = {
+            "ok": True,
+            "projectPath": str(project),
+            "coreReady": True,
+            "mainThreadReadVerified": True,
+            "domainReloadObserved": False,
+        }
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=settings),
+            patch("dashboard_server.load_unity_mcp_core_connection", return_value=previous),
+            patch("dashboard_server.invoke_unity_mcp", return_value=reload_result),
+            patch(
+                "dashboard_server._wait_for_checkpoint_reload_ready",
+                create=True,
+                return_value=ready,
+            ) as wait_ready,
+        ):
+            result = dashboard_server.reload_unity_checkpoint_sync(project)
+
+        self.assertTrue(result["coreReady"])
+        self.assertTrue(result["mainThreadReadVerified"])
+        wait_ready.assert_called_once_with(project, previous, require_new_instance=False)
 
     def test_checkpoint_reload_transport_close_times_out_without_resending(self) -> None:
         project = Path("C:/Unity/ReloadProject")
@@ -11890,6 +11947,7 @@ class DashboardServerTests(unittest.TestCase):
         core_client.list_tools.return_value = [
             {"name": name} for name in dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
         ]
+        core_client.call_tool.return_value = {"resultType": "complete", "structuredContent": {"success": True}}
         with (
             patch(
                 "dashboard_server.load_unity_mcp_core_connection",
@@ -11908,8 +11966,10 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["domainReloadObserved"])
+        self.assertTrue(result["mainThreadReadVerified"])
         client_type.assert_called_once_with(project, timeout_seconds=1.0)
         core_client.list_tools.assert_called_once_with(exposure_layer="execution")
+        core_client.call_tool.assert_called_once_with("vrc_get_compile_errors", {"maxErrors": 1})
 
     def test_checkpoint_reload_readiness_rejects_wrong_process_and_incomplete_tools(self) -> None:
         project = Path("C:/Unity/ReloadProject")
@@ -12033,6 +12093,12 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("EditorSceneManager.CloseScene(scene, true)", source)
         self.assertIn("ForceSynchronousImport", source)
         self.assertIn("AssetDatabase.Refresh", source)
+        self.assertIn('var refreshAssets = @params?["refreshAssets"]?.Type != JTokenType.Boolean', source)
+        self.assertIn("if (refreshAssets)", source)
+        self.assertLess(
+            source.index("AssetDatabase.Refresh", source.index("public static class CheckpointReloadTool")),
+            source.index("VRCForgeMcpCoreServer.ScheduleInvocationPumpRegistration()"),
+        )
         self.assertEqual(
             source.count("PrimitiveBasisLiveGuard.RequireBoundRequest(@params)"),
             2,
@@ -12930,6 +12996,20 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Undo.DestroyObjectImmediate", source)
         self.assertIn("Undo.RecordObject", source)
         create_source = source[source.index("public static class CreateGameObjectTool") : source.index("public static class RenameGameObjectTool")]
+        get_source = source[source.index("public static class GetGameObjectTool") : source.index("public static class CreateGameObjectTool")]
+        self.assertIn('VRCForgeToolResult.FailedWithCode(\n                    "gameobject_not_found"', get_source)
+        component_source = (editor_dir / "UnityComponentCrud.cs").read_text(encoding="utf-8")
+        self.assertIn("internal sealed class GameObjectNotFoundException", component_source)
+        self.assertIn("throw new GameObjectNotFoundException", component_source)
+        result_source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Core"
+            / "MCP"
+            / "VRCForgeToolResult.cs"
+        ).read_text(encoding="utf-8")
+        self.assertIn("public static VRCForgeToolResult FailedWithCode(", result_source)
         self.assertIn("EditorSceneManager.SaveScene(targetScene)", create_source)
         self.assertIn("GlobalObjectId.GetGlobalObjectIdSlow(readback)", create_source)
         self.assertIn("sceneSaved = true", create_source)
@@ -12949,6 +13029,41 @@ class DashboardServerTests(unittest.TestCase):
             create_source.index('ResolveSavedScene(targetScene.path, "target scene")'),
             create_source.index("created = new GameObject(name)"),
         )
+        active_source = source[source.index("public static class SetGameObjectActiveTool") :]
+        self.assertIn("SceneObjectCopyCore.ResolveSavedScene(targetScene.path, \"target scene\")", active_source)
+        self.assertIn("EditorSceneManager.MarkSceneDirty(targetScene)", active_source)
+        self.assertIn("EditorSceneManager.SaveScene(targetScene)", active_source)
+        self.assertIn("SceneObjectCopyCore.ResolveUniqueGameObject", active_source)
+        self.assertIn("readback.activeSelf != active", active_source)
+        self.assertIn("sceneSaved = true", active_source)
+        self.assertIn("persistedReadback = true", active_source)
+        self.assertIn("checkpointRecoveryRequired = !restored", active_source)
+        self.assertIn("EditorSceneManager.SaveScene(beforeScene.Scene)", active_source)
+        for tool_class, save_target, readback_marker in (
+            ("RenameGameObjectTool", "EditorSceneManager.SaveScene(target.scene)", "renamed object"),
+            ("ReparentGameObjectTool", "EditorSceneManager.SaveScene(target.scene)", "reparented object"),
+            ("DeleteGameObjectTool", "EditorSceneManager.SaveScene(beforeScene.Scene)", "deletedStillExists"),
+        ):
+            start = source.index(f"public static class {tool_class}")
+            end = source.find("public static class ", start + 1)
+            mutation_source = source[start : end if end >= 0 else len(source)]
+            self.assertIn("SceneObjectCopyCore.ResolveSavedScene", mutation_source)
+            self.assertIn("EditorSceneManager.MarkSceneDirty", mutation_source)
+            self.assertIn(save_target, mutation_source)
+            self.assertIn(readback_marker, mutation_source)
+            self.assertIn("sceneSaved = true", mutation_source)
+            self.assertIn("persistedReadback = true", mutation_source)
+            self.assertIn("checkpointRecoveryRequired = !restored", mutation_source)
+            if tool_class == "ReparentGameObjectTool":
+                self.assertIn("newParent.scene.handle != target.scene.handle", mutation_source)
+                self.assertLess(
+                    mutation_source.index("newParent.scene.handle != target.scene.handle"),
+                    mutation_source.index("Undo.SetTransformParent"),
+                )
+            if tool_class == "DeleteGameObjectTool":
+                self.assertIn("canonicalPath = ComponentCrudCore.GetHierarchyPath(target.transform)", mutation_source)
+                self.assertIn("var goPath = canonicalPath", mutation_source)
+                self.assertIn("ResolveUniqueGameObject(\n                                cleanup.Scene,\n                                canonicalPath", mutation_source)
         # read payload must avoid auto-unwrap keys (data/result/payload/value).
         self.assertNotIn("value =", source)
 
@@ -13002,6 +13117,35 @@ class DashboardServerTests(unittest.TestCase):
 
     def test_get_gameobject_requires_path(self) -> None:
         self.assertFalse(dashboard_server.get_gameobject_sync({})["ok"])
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_get_gameobject_preserves_structured_not_found_code(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=1,
+            stdout="rejected",
+            stderr="",
+            payload={
+                "isError": True,
+                "structuredContent": {
+                    "success": False,
+                    "code": "gameobject_not_found",
+                    "error": "GameObject was not found.",
+                    "data": {"gameObjectPath": "Avatar/Missing"},
+                },
+            },
+        )
+
+        result = dashboard_server.get_gameobject_sync({
+            "game_object_path": "Avatar/Missing",
+        })
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "gameobject_not_found")
+        self.assertEqual(result["error"], "GameObject was not found.")
+        self.assertEqual(result["gameObjectPath"], "Avatar/Missing")
+        self.assertTrue(mock_invoke.call_args.kwargs["preserve_tool_error"])
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -17200,6 +17344,24 @@ namespace VRCForge.Editor
         self.assertEqual(bounded_settings.unity_mcp_timeout_seconds, 7)
         self.assertEqual(bounded_settings.unity_mcp_retries, 1)
         self.assertEqual(bounded_settings.unity_mcp_retry_backoff_seconds, 0.0)
+
+    def test_external_core_read_request_binds_current_app_project_selection(self) -> None:
+        current_project = r"C:\Unity\CurrentProject"
+        previous_project = dashboard_server.DASHBOARD_STATE.selected_project_path
+        dashboard_server.DASHBOARD_STATE.selected_project_path = current_project
+        try:
+            request = dashboard_server.build_agent_connection_request({})
+            root_request = dashboard_server.build_agent_connection_request(
+                {"projectRoot": r"C:\Unity\RootProject"}
+            )
+            explicit_request = dashboard_server.build_agent_connection_request(
+                {"projectPath": r"C:\Unity\ExplicitProject", "projectRoot": r"C:\Unity\IgnoredRoot"}
+            )
+        finally:
+            dashboard_server.DASHBOARD_STATE.selected_project_path = previous_project
+        self.assertEqual(request.project_path, current_project)
+        self.assertEqual(root_request.project_path, r"C:\Unity\RootProject")
+        self.assertEqual(explicit_request.project_path, r"C:\Unity\ExplicitProject")
 
     def test_managed_multi_vision_provider_receives_verified_bytes_not_reopened_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

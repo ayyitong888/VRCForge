@@ -17984,7 +17984,18 @@ def extract_websocket_auth_token(headers: Any) -> str:
 
 
 def build_agent_connection_request(params: dict[str, Any]) -> ConnectionRequest:
-    return ConnectionRequest(**params)
+    data = dict(params or {})
+    if not any(str(data.get(key) or "").strip() for key in ("projectPath", "project_path")):
+        project_root = str(data.get("projectRoot") or data.get("project_root") or "").strip()
+        if project_root:
+            data["projectPath"] = project_root
+        else:
+            selected_project = str(
+                getattr(DASHBOARD_STATE, "selected_project_path", "") or ""
+            ).strip()
+            if selected_project:
+                data["projectPath"] = selected_project
+    return ConnectionRequest(**data)
 
 
 def build_agent_dashboard_request(params: dict[str, Any]) -> DashboardRequest:
@@ -18162,10 +18173,11 @@ def _checkpoint_reload_connection_closed(error: BaseException) -> bool:
     return False
 
 
-def _wait_for_reloaded_unity_core(
+def _wait_for_checkpoint_reload_ready(
     project_root: Path,
     previous_connection: Any,
     *,
+    require_new_instance: bool,
     timeout_seconds: float = CHECKPOINT_RELOAD_READY_TIMEOUT_SECONDS,
     poll_seconds: float = CHECKPOINT_RELOAD_READY_POLL_SECONDS,
 ) -> dict[str, Any]:
@@ -18173,16 +18185,21 @@ def _wait_for_reloaded_unity_core(
     while time.monotonic() < deadline:
         try:
             current = load_unity_mcp_core_connection(project_root)
-            if (
+            same_process = previous_connection is None or (
                 current.process_id == previous_connection.process_id
                 and current.project_hash == previous_connection.project_hash
+            )
+            domain_reload_observed = bool(
+                previous_connection is not None
                 and current.instance_id != previous_connection.instance_id
-            ):
+            )
+            if same_process and (domain_reload_observed or not require_new_instance):
                 remaining = max(1.0, deadline - time.monotonic())
-                tools = UnityMcpCoreClient(
+                core_client = UnityMcpCoreClient(
                     project_root,
                     timeout_seconds=min(3.0, remaining),
-                ).list_tools(exposure_layer="execution")
+                )
+                tools = core_client.list_tools(exposure_layer="execution")
                 tool_names = {
                     str(item.get("name") or "")
                     for item in tools
@@ -18193,11 +18210,18 @@ def _wait_for_reloaded_unity_core(
                     or tool_names != set(REQUIRED_VRCFORGE_UNITY_TOOLS)
                 ):
                     raise UnityMcpCoreError("Unity MCP Core tool contract is not ready.")
+                main_thread_read = core_client.call_tool(
+                    "vrc_get_compile_errors",
+                    {"maxErrors": 1},
+                )
+                if not isinstance(main_thread_read, dict) or main_thread_read.get("isError") is True:
+                    raise UnityMcpCoreError("Unity MCP Core main-thread read is not ready.")
                 return {
                     "ok": True,
                     "projectPath": str(project_root),
                     "coreReady": True,
-                    "domainReloadObserved": True,
+                    "mainThreadReadVerified": True,
+                    "domainReloadObserved": domain_reload_observed,
                 }
         except (OSError, UnityMcpCoreError):
             pass
@@ -18206,8 +18230,24 @@ def _wait_for_reloaded_unity_core(
             time.sleep(min(max(0.0, poll_seconds), remaining))
     return {
         "ok": False,
-        "error": "Unity MCP Core did not become ready after the checkpoint reload connection closed.",
+        "error": "Unity MCP Core did not become ready after checkpoint restore.",
     }
+
+
+def _wait_for_reloaded_unity_core(
+    project_root: Path,
+    previous_connection: Any,
+    *,
+    timeout_seconds: float = CHECKPOINT_RELOAD_READY_TIMEOUT_SECONDS,
+    poll_seconds: float = CHECKPOINT_RELOAD_READY_POLL_SECONDS,
+) -> dict[str, Any]:
+    return _wait_for_checkpoint_reload_ready(
+        project_root,
+        previous_connection,
+        require_new_instance=True,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    )
 
 
 def reload_unity_checkpoint_sync(
@@ -18233,6 +18273,14 @@ def reload_unity_checkpoint_sync(
             prepared_scenes_raw if isinstance(prepared_scenes_raw, list) else []
         )
         active_scene_path = str(ensure_dict(restore_prepare).get("activeScenePath") or "").strip()
+        changed_restore_files = [
+            *normalize_string_list(ensure_dict(restore_prepare).get("restoredFiles")),
+            *normalize_string_list(ensure_dict(restore_prepare).get("deletedFiles")),
+        ]
+        refresh_assets = any(
+            not str(path).replace("\\", "/").lower().endswith(".unity")
+            for path in changed_restore_files
+        )
         result = invoke_unity_mcp(
             settings,
             "vrc_reload_after_checkpoint_restore",
@@ -18241,6 +18289,7 @@ def reload_unity_checkpoint_sync(
                 "phase": "reload",
                 "scenePaths": prepared_scenes,
                 "activeScenePath": active_scene_path,
+                "refreshAssets": refresh_assets,
             },
             execution_context={"lane": "app_safety_control"},
             preserve_tool_error=True,
@@ -18252,7 +18301,22 @@ def reload_unity_checkpoint_sync(
                 "error": "Unity did not confirm the checkpoint reload command.",
             }
         return _wait_for_reloaded_unity_core(project_root, previous_connection)
-    return normalize_unity_checkpoint_result(result, project_root)
+    normalized = normalize_unity_checkpoint_result(result, project_root)
+    if normalized.get("ok") is not True:
+        return normalized
+    readiness = _wait_for_checkpoint_reload_ready(
+        project_root,
+        previous_connection,
+        require_new_instance=False,
+    )
+    if readiness.get("ok") is not True:
+        return {
+            **normalized,
+            **readiness,
+            "ok": False,
+            "checkpointRecoveryRequired": True,
+        }
+    return {**normalized, **readiness}
 
 
 def normalize_unity_checkpoint_result(
@@ -20645,8 +20709,30 @@ def get_gameobject_sync(params: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": "gameObjectPath is required."}
     request = {"gameObjectPath": go_path}
     settings = load_dashboard_settings(build_agent_connection_request(params))
+    result = invoke_unity_mcp(
+        settings,
+        "vrc_get_gameobject",
+        request,
+        preserve_tool_error=True,
+    )
+    envelope = result.payload if isinstance(result.payload, dict) else {}
+    structured = envelope.get("structuredContent")
+    structured = structured if isinstance(structured, dict) else {}
+    if result.exit_code != 0 or envelope.get("isError") is True or structured.get("success") is False:
+        data = structured.get("data")
+        data = dict(data) if isinstance(data, dict) else {}
+        return {
+            **data,
+            "ok": False,
+            "code": str(structured.get("code") or "unity_core_tool_rejected"),
+            "error": str(
+                structured.get("error")
+                or structured.get("message")
+                or "Unity rejected the GameObject read."
+            ),
+        }
     payload = ensure_dict_payload(
-        extract_tool_result_payload(invoke_unity_mcp(settings, "vrc_get_gameobject", request)),
+        extract_tool_result_payload(result),
         "get gameobject",
     )
     payload.setdefault("ok", True)
@@ -23149,6 +23235,13 @@ class PrimitiveBasisLiveUnityConnection:
                     prepared.get("scenes") if isinstance(prepared.get("scenes"), list) else []
                 ),
                 "activeScenePath": str(prepared.get("activeScenePath") or "").strip(),
+                "refreshAssets": any(
+                    not str(path).replace("\\", "/").lower().endswith(".unity")
+                    for path in [
+                        *normalize_string_list(prepared.get("restoredFiles")),
+                        *normalize_string_list(prepared.get("deletedFiles")),
+                    ]
+                ),
             },
         )
 

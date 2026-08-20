@@ -203,10 +203,10 @@ def test_missing_verified_wardrobe_requires_separate_approval(tmp_path: Path, mo
     write_calls: list[tuple[str, dict]] = []
     invoke = _read_mock(project, state, write_calls)
 
-    def no_wardrobe(settings, tool, arguments):
+    def no_wardrobe(settings, tool, arguments, **kwargs):
         if tool == "vrc_scan_wardrobe":
             return _mcp({"ok": True, "fingerprint": WARDROBE_FINGERPRINT, "wardrobes": [], "wardrobeCandidates": [{"parameterName": "MaybeClothes"}]})
-        return invoke(settings, tool, arguments)
+        return invoke(settings, tool, arguments, **kwargs)
 
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", no_wardrobe)
@@ -281,11 +281,11 @@ def test_setup_continuation_rejection_stops_wardrobe_and_requires_recovery(tmp_p
     write_calls: list[tuple[str, dict]] = []
     base_invoke = _read_mock(project, state, write_calls)
 
-    def reject_setup(settings, tool: str, arguments: dict):
+    def reject_setup(settings, tool: str, arguments: dict, **kwargs):
         if tool == "vrc_setup_outfit":
             write_calls.append((tool, arguments))
             return _mcp({"ok": False, "error": "Approval-bound object continuation order drifted."})
-        return base_invoke(settings, tool, arguments)
+        return base_invoke(settings, tool, arguments, **kwargs)
 
     monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace(unity_mcp_timeout_seconds=30))
     monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", reject_setup)

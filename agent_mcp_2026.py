@@ -222,7 +222,7 @@ class Mcp2026Router:
         tool_call: ToolCallCallback,
         *,
         server_name: str = "VRCForge",
-        server_version: str = "1.7.6",
+        server_version: str = "1.7.7",
     ) -> None:
         if not _is_nonempty_string(server_name) or not _is_nonempty_string(server_version):
             raise ValueError("server_name and server_version must be non-empty strings")

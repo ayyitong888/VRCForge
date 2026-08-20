@@ -373,17 +373,18 @@ mod tests {
         diagnostics_update_body, extract_challenge_signature, force_child_exit, hmac_sha256_hex,
         percent_encode_query_component, prepare_app_quit, prepare_runtime_files,
         primitive_live_bootstrap_requested, provider_config_body, resolve_logs_folder,
+        runtime_session_busy_error, runtime_session_probe_error,
         runtime_session_verification_error, sanitize_backend_event, sanitize_text_for_webview,
         sanitize_webview_response, send_backend_graceful_shutdown_request_to,
         stop_managed_backend_child, tauri_ipc_bridge_proof, try_ensure_agent_notes_file,
         validate_local_folder_to_open, validate_primitive_live_bootstrap,
         validate_project_folder_to_open, wait_for_child_exit, webview2_args_with_accessibility,
-        webview_error_message, BackendState, DesktopAdvancedSettingsUpdateRequest,
-        DesktopApprovalRevisionRequest, DesktopApprovalScopeRequest,
-        DesktopDiagnosticsUpdateRequest, BACKEND_GRACEFUL_SHUTDOWN_METHOD,
-        BACKEND_GRACEFUL_SHUTDOWN_PATH, DESKTOP_AGENT_MESSAGE_TIMEOUT_MS,
-        PRIMITIVE_LIVE_BOOTSTRAP_MAGIC, PRIMITIVE_LIVE_BOOTSTRAP_SIZE,
-        TRUSTED_LIVE_BOOTSTRAP_MAGIC, TRUSTED_LIVE_BOOTSTRAP_SIZE,
+        webview_error_message, BackendSessionProbe, BackendState,
+        DesktopAdvancedSettingsUpdateRequest, DesktopApprovalRevisionRequest,
+        DesktopApprovalScopeRequest, DesktopDiagnosticsUpdateRequest,
+        BACKEND_GRACEFUL_SHUTDOWN_METHOD, BACKEND_GRACEFUL_SHUTDOWN_PATH,
+        DESKTOP_AGENT_MESSAGE_TIMEOUT_MS, PRIMITIVE_LIVE_BOOTSTRAP_MAGIC,
+        PRIMITIVE_LIVE_BOOTSTRAP_SIZE, TRUSTED_LIVE_BOOTSTRAP_MAGIC, TRUSTED_LIVE_BOOTSTRAP_SIZE,
     };
     use std::{
         env, fs,
@@ -703,6 +704,23 @@ mod tests {
 
         assert!(error.contains("runtime session verification failed"));
         assert!(error.contains("local runtime was replaced"));
+    }
+
+    #[test]
+    fn runtime_session_busy_error_stays_transient() {
+        let error = runtime_session_busy_error();
+
+        assert!(error.contains("runtime is busy"));
+        assert!(!error.contains("runtime session verification failed"));
+        assert!(!error.contains("local runtime was replaced"));
+        assert_eq!(
+            runtime_session_probe_error(BackendSessionProbe::Unavailable),
+            error
+        );
+        assert_eq!(
+            runtime_session_probe_error(BackendSessionProbe::Rejected),
+            runtime_session_verification_error()
+        );
     }
 
     #[test]

@@ -29,6 +29,11 @@ namespace VRCForge.Editor
 
     internal static class ComponentCrudCore
     {
+        internal sealed class GameObjectNotFoundException : InvalidOperationException
+        {
+            internal GameObjectNotFoundException(string message) : base(message) { }
+        }
+
         internal static GameObject ResolveGameObject(string pathOrName)
         {
             var normalized = NormalizePath(pathOrName);
@@ -63,7 +68,7 @@ namespace VRCForge.Editor
                     $"GameObject name '{leaf}' is ambiguous ({nameMatches.Count} matches). Pass a full hierarchy path.");
             }
 
-            throw new InvalidOperationException($"GameObject not found in loaded scenes: '{pathOrName}'.");
+            throw new GameObjectNotFoundException($"GameObject not found in loaded scenes: '{pathOrName}'.");
         }
 
         internal static IEnumerable<GameObject> EnumerateSceneGameObjects()

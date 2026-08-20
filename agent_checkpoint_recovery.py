@@ -1179,7 +1179,7 @@ class AgentCheckpointRecoveryService:
             payload["checkpointId"] = str(checkpoint.get("id") or "")
             payload["restored"] = True
         if payload.get("ok") and not local_state_restore:
-            cache_cleanup = self._cleanup_checkpoint_restore_unity_caches(checkpoint)
+            cache_cleanup = self._cleanup_checkpoint_restore_unity_caches(checkpoint, payload)
             payload["unityCacheCleanup"] = cache_cleanup
             if cache_cleanup.get("errors"):
                 payload["unityCacheCleanupWarning"] = "; ".join(ensure_string_list(cache_cleanup.get("errors")))
@@ -1189,9 +1189,14 @@ class AgentCheckpointRecoveryService:
             and (payload.get("ok") or restore_prepare.get("ok"))
         )
         if should_reload_unity:
+            reload_context = {
+                **restore_prepare,
+                "restoredFiles": ensure_string_list(payload.get("restoredFiles")),
+                "deletedFiles": ensure_string_list(payload.get("deletedFiles")),
+            }
             try:
                 reload_result = ensure_dict(
-                    self._checkpoint_restore_handler(project_root, restore_prepare)
+                    self._checkpoint_restore_handler(project_root, reload_context)
                 )
             except Exception as exc:  # noqa: BLE001
                 reload_result = {"ok": False, "error": str(exc)}
@@ -2712,9 +2717,29 @@ class AgentCheckpointRecoveryService:
         ):
             raise ValueError(f"Unsafe local state archive member: {name}")
 
-    def _cleanup_checkpoint_restore_unity_caches(self, checkpoint: dict[str, Any]) -> dict[str, Any]:
+    def _cleanup_checkpoint_restore_unity_caches(
+        self,
+        checkpoint: dict[str, Any],
+        restore_payload: dict[str, Any],
+    ) -> dict[str, Any]:
         if not self._checkpoint_touches_packages(checkpoint):
             return {"ok": True, "skipped": True, "reason": "checkpoint does not restore Packages", "deleted": [], "errors": []}
+        if checkpoint.get("strategy") == "archive":
+            restored_paths = [
+                *ensure_string_list(restore_payload.get("restoredFiles")),
+                *ensure_string_list(restore_payload.get("deletedFiles")),
+            ]
+            if not any(
+                Path(str(path).replace("\\", "/")).parts[:1] == ("Packages",)
+                for path in restored_paths
+            ):
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "checkpoint did not restore changed Packages files",
+                    "deleted": [],
+                    "errors": [],
+                }
         project_root = Path(str(checkpoint.get("projectRoot") or "")).resolve()
         library_root = (project_root / "Library").resolve()
         deleted: list[str] = []

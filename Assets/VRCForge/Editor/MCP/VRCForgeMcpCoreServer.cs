@@ -117,16 +117,50 @@ namespace VRCForge.Editor
         private static string descriptorPath;
         private static string descriptorInstanceId;
         private static VRCForgeToolDescriptor[] tools = new VRCForgeToolDescriptor[0];
+        private static SynchronizationContext editorSynchronizationContext;
 
         [InitializeOnLoadMethod]
         private static void RegisterEditorDomainInvocationPump()
         {
+            EnsureInvocationPumpRegistered();
+        }
+
+        internal static void EnsureInvocationPumpRegistered()
+        {
+            if (SynchronizationContext.Current != null)
+            {
+                editorSynchronizationContext = SynchronizationContext.Current;
+            }
             // The main-thread pump belongs to the Unity editor domain, not to
             // any listener instance. Register it before Bootstrap can start a
             // listener from an update callback, so a successful Start never
             // depends on mutating the update delegate during its dispatch.
             EditorApplication.update -= DrainInvocations;
             EditorApplication.update += DrainInvocations;
+        }
+
+        internal static void ScheduleInvocationPumpRegistration()
+        {
+            EditorApplication.delayCall -= EnsureInvocationPumpRegistered;
+            EditorApplication.delayCall += EnsureInvocationPumpRegistered;
+        }
+
+        private static void RequestInvocationDrain()
+        {
+            var context = editorSynchronizationContext;
+            if (context == null)
+            {
+                return;
+            }
+            try
+            {
+                context.Post(_ => DrainInvocations(), null);
+            }
+            catch (InvalidOperationException)
+            {
+                // The editor update registration remains the bounded fallback
+                // if Unity is replacing its synchronization context.
+            }
         }
 
         public static void Start()
@@ -939,6 +973,7 @@ namespace VRCForge.Editor
                 Modern = modern,
             };
             PendingInvocations.Enqueue(pending);
+            RequestInvocationDrain();
             var deadline = DateTime.UtcNow.AddMilliseconds(InvocationQueueTimeoutMilliseconds);
             while (!pending.Completion.Wait(250))
             {
@@ -1007,13 +1042,14 @@ namespace VRCForge.Editor
             }
             if (!string.Equals(phase, "reload", StringComparison.Ordinal)
                 || !HasStringArray(arguments, "scenePaths")
-                || !HasString(arguments, "activeScenePath"))
+                || !HasString(arguments, "activeScenePath")
+                || !HasBoolean(arguments, "refreshAssets"))
             {
                 return false;
             }
-            return HasExactKeys(arguments, "projectPath", "phase", "scenePaths", "activeScenePath")
+            return HasExactKeys(arguments, "projectPath", "phase", "scenePaths", "activeScenePath", "refreshAssets")
                 || (HasExactKeys(arguments,
-                        "projectPath", "phase", "scenePaths", "activeScenePath",
+                        "projectPath", "phase", "scenePaths", "activeScenePath", "refreshAssets",
                         "expectedRunIdDigest", "expectedProjectPathDigest", "expectedUnityProcessId",
                         "expectedUnityProcessStartedAtUtc", "expectedUnityExecutableDigest")
                     && HasCompleteSafetyControlLiveBinding(arguments));

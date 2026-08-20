@@ -233,7 +233,7 @@ def _find_diagnostics_payload(value: Any) -> Mapping[str, Any] | None:
         if "isCompiling" in current and ("errors" in current or "warnings" in current):
             return current
         next_value = None
-        for key in ("result", "data", "payload"):
+        for key in ("result", "data", "payload", "structuredContent"):
             candidate = current.get(key)
             if isinstance(candidate, Mapping):
                 next_value = candidate

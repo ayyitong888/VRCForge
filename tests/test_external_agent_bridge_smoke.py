@@ -358,6 +358,27 @@ def test_mcp_call_tool_preserves_core_error_fields_with_data(monkeypatch: Any, t
     }
 
 
+def test_verify_no_residue_rejects_transport_failure(monkeypatch: Any, tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    bridge = make_bridge_smoke(smoke, tmp_path)
+    bridge.created_object_path = "Root/Temporary"
+    bridge.live_project_root = str(tmp_path)
+    monkeypatch.setattr(
+        bridge,
+        "mcp_call_tool",
+        lambda *_args, **_kwargs: {
+            "ok": False,
+            "error": "VRCForge could not reach the selected Unity project's MCP Core.",
+        },
+    )
+
+    bridge.verify_no_residue("rollback.verify_no_residue")
+
+    step = bridge.steps[-1]
+    assert step["ok"] is False
+    assert step["readErrorCode"] == ""
+
+
 def test_live_write_rollback_binds_explicit_parent_and_scene_hashes(monkeypatch: Any, tmp_path: Path) -> None:
     smoke = load_smoke_module()
     bridge = make_bridge_smoke(smoke, tmp_path)
@@ -369,15 +390,21 @@ def test_live_write_rollback_binds_explicit_parent_and_scene_hashes(monkeypatch:
     bridge.args.project_root = str(project)
     bridge.args.parent_path = "Root/SmokeParent"
     requested_create_arguments: dict[str, Any] = {}
+    scoped_calls: list[tuple[str, dict[str, Any]]] = []
 
     def fake_mcp_call(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        scoped_calls.append((tool_name, dict(arguments)))
         if tool_name == "vrcforge_get_compile_errors":
             return {"ok": True, "errorCount": 0}
         if tool_name == "vrcforge_get_gameobject" and arguments["gameObjectPath"] == "Root/SmokeParent":
             return {"ok": True, "gameObjectPath": "Root/SmokeParent", "scenePath": "Assets/Smoke.unity"}
         if tool_name == "vrcforge_get_gameobject":
             if bridge.rollback_done:
-                return {"ok": False, "error": "GameObject was not found."}
+                return {
+                    "ok": False,
+                    "code": "gameobject_not_found",
+                    "error": "GameObject was not found.",
+                }
             return {
                 "ok": True,
                 "gameObjectPath": arguments["gameObjectPath"],
@@ -419,17 +446,59 @@ def test_live_write_rollback_binds_explicit_parent_and_scene_hashes(monkeypatch:
 
     monkeypatch.setattr(bridge, "mcp_call_tool", fake_mcp_call)
     monkeypatch.setattr(bridge, "request_app_json", fake_app_request)
+    monkeypatch.setattr(
+        bridge,
+        "wait_for_unity_core_ready",
+        lambda _project_root: {"ok": True, "planningToolCount": 19},
+        raising=False,
+    )
 
     bridge.live_write_rollback()
 
     assert requested_create_arguments["parentPath"] == "Root/SmokeParent"
     assert requested_create_arguments["projectRoot"] == str(project.resolve())
+    assert requested_create_arguments["projectPath"] == str(project.resolve())
+    for tool_name, arguments in scoped_calls:
+        if tool_name in {
+            "vrcforge_get_compile_errors",
+            "vrcforge_get_gameobject",
+            "vrcforge_run_validation_report",
+        }:
+            assert arguments["projectPath"] == str(project.resolve())
     evidence = {step["name"]: step for step in bridge.steps}
     assert evidence["write.parent_preflight"]["ok"] is True
     assert evidence["write.verify_persisted_create"]["ok"] is True
     assert evidence["write.verify_persisted_create"]["sceneChangedAfterApply"] is True
+    assert evidence["rollback.wait_for_unity_ready"]["ok"] is True
     assert evidence["rollback.verify_no_residue"]["ok"] is True
     assert evidence["rollback.verify_scene_sha256"]["ok"] is True
+
+
+def test_run_pins_live_write_rollback_to_approval_mode(monkeypatch: Any, tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    bridge = make_bridge_smoke(smoke, tmp_path)
+    bridge.args.live_write_rollback = True
+    call_order: list[str] = []
+
+    monkeypatch.setattr(bridge, "client_preflight", lambda: {})
+    monkeypatch.setattr(bridge, "check_runtime_health", lambda: {"ok": True})
+    monkeypatch.setattr(bridge, "check_connector_config", lambda: {"ok": True})
+    monkeypatch.setattr(bridge, "check_stdio_bridge_preflight", lambda: {"ok": True})
+    monkeypatch.setattr(bridge, "check_stdio_mcp_tools", lambda: {"ok": True})
+    monkeypatch.setattr(bridge, "check_manifest", lambda: {"ok": True})
+    monkeypatch.setattr(
+        bridge,
+        "set_execution_mode",
+        lambda mode: call_order.append(mode) or {"ok": mode == "approval", "executionMode": mode},
+    )
+    monkeypatch.setattr(bridge, "live_write_rollback", lambda: call_order.append("live_write_rollback"))
+    monkeypatch.setattr(bridge, "restore_previous_state", lambda: None)
+
+    report = bridge.run()
+
+    assert report["ok"] is True
+    assert call_order == ["approval", "live_write_rollback"]
+    assert any(step["name"] == "permission.set_for_live_write" for step in report["steps"])
 
 
 def test_live_write_rollback_requires_explicit_parent_path_before_project_resolution(monkeypatch: Any, tmp_path: Path) -> None:

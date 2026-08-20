@@ -45,6 +45,23 @@ namespace VRCForge.Core.MCP
                 0.0);
         }
 
+        public static VRCForgeToolResult FailedWithCode(
+            string errorCode,
+            string message,
+            object payload = null)
+        {
+            if (string.IsNullOrWhiteSpace(errorCode))
+            {
+                throw new ArgumentException("errorCode is required.", "errorCode");
+            }
+            return new VRCForgeToolResult(
+                VRCForgeToolResultKind.Failed,
+                message,
+                errorCode,
+                payload,
+                0.0);
+        }
+
         public static VRCForgeToolResult Waiting(
             string message = "",
             double continuationDelaySeconds = 1.0,

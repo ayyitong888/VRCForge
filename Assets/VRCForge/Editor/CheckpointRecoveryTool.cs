@@ -198,6 +198,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Internal restore phase: prepare_restore or reload.", IsRequired = false)] public string phase { get; set; } = "reload";
             [VRCForgeInput("Exact project scene paths captured before restore.", IsRequired = false)] public List<string> scenePaths { get; set; } = new List<string>();
             [VRCForgeInput("Exact active project scene path captured before restore.", IsRequired = false)] public string activeScenePath { get; set; } = "";
+            [VRCForgeInput("Refresh non-scene assets because checkpoint restore changed them.", IsRequired = false)] public bool refreshAssets { get; set; } = true;
             [VRCForgeInput("Live-run SHA-256 digest when a bound fixture request is used.", IsRequired = false)] public string expectedRunIdDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity project-root SHA-256 digest.", IsRequired = false)] public string expectedProjectPathDigest { get; set; } = "";
             [VRCForgeInput("Expected Unity process id.", IsRequired = false)] public int? expectedUnityProcessId { get; set; }
@@ -325,6 +326,8 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed($"Unknown checkpoint restore phase: {phase}");
                 }
+                var refreshAssets = @params?["refreshAssets"]?.Type != JTokenType.Boolean
+                    || @params["refreshAssets"].Value<bool>();
 
                 var requested = @params?["scenePaths"] as JArray;
                 var scenes = requested == null
@@ -467,7 +470,11 @@ namespace VRCForge.Editor
                         EditorSceneManager.CloseScene(scratch, true);
                     }
                 }
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                if (refreshAssets)
+                {
+                    AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                }
+                VRCForgeMcpCoreServer.ScheduleInvocationPumpRegistration();
                 return VRCForgeToolResult.Completed(
                     "Reloaded restored scenes and refreshed project assets.",
                     new
@@ -476,6 +483,7 @@ namespace VRCForge.Editor
                         phase,
                         projectPath = CheckpointPrepareTool.ProjectRoot(),
                         scenes,
+                        refreshAssets,
                         unityProcessId = identity?.ProcessId,
                         unityProcessStartedAtUtc = identity?.StartedAtUtc,
                         unityExecutableDigest = identity?.ExecutableDigest,

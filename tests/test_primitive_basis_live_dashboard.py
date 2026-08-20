@@ -279,11 +279,12 @@ def test_checkpoint_callbacks_preserve_guarded_unity_identity(
             "vrc_reload_after_checkpoint_restore",
             {
                 "projectPath": str(project),
-                "phase": "reload",
-                "scenePaths": restore_prepare["scenes"],
-                "activeScenePath": restore_prepare["activeScenePath"],
-                **guard,
-            },
+                    "phase": "reload",
+                    "scenePaths": restore_prepare["scenes"],
+                    "activeScenePath": restore_prepare["activeScenePath"],
+                    "refreshAssets": False,
+                    **guard,
+                },
         ),
     ]
 

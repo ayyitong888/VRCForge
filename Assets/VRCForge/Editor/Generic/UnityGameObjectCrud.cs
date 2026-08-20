@@ -96,6 +96,12 @@ namespace VRCForge.Editor
                     $"GameObject '{go.name}' at '{payload.gameObjectPath}' ({components.Length} component(s), {t.childCount} child(ren)).",
                     payload);
             }
+            catch (ComponentCrudCore.GameObjectNotFoundException ex)
+            {
+                return VRCForgeToolResult.FailedWithCode(
+                    "gameobject_not_found",
+                    $"Get GameObject failed: {ex.Message}");
+            }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Get GameObject failed: {ex.Message}");
@@ -295,6 +301,10 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<RenameGameObjectParameters>() ?? new RenameGameObjectParameters();
+            var mutationStarted = false;
+            SavedSceneSnapshot beforeScene = null;
+            GameObject target = null;
+            var oldName = string.Empty;
             try
             {
                 if (string.IsNullOrWhiteSpace(p.newName))
@@ -303,9 +313,9 @@ namespace VRCForge.Editor
                 }
                 var newName = p.newName.Trim();
 
-                var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
-                var oldName = go.name;
-                var oldPath = ComponentCrudCore.GetHierarchyPath(go.transform);
+                target = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
+                oldName = target.name;
+                var oldPath = ComponentCrudCore.GetHierarchyPath(target.transform);
 
                 if (p.preview ?? false)
                 {
@@ -322,25 +332,91 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
-                Undo.RecordObject(go, $"Rename {oldName}");
-                go.name = newName;
-                EditorUtility.SetDirty(go);
+                beforeScene = SceneObjectCopyCore.ResolveSavedScene(target.scene.path, "target scene");
+                if (beforeScene.Handle != target.scene.handle)
+                {
+                    throw new InvalidOperationException("The target saved scene changed before renaming.");
+                }
+                Undo.RecordObject(target, $"Rename {oldName}");
+                target.name = newName;
+                mutationStarted = true;
+                EditorUtility.SetDirty(target);
+                EditorSceneManager.MarkSceneDirty(target.scene);
+                if (!EditorSceneManager.SaveScene(target.scene))
+                {
+                    throw new InvalidOperationException("The target scene could not be saved.");
+                }
 
-                var newPath = ComponentCrudCore.GetHierarchyPath(go.transform);
+                var newPath = ComponentCrudCore.GetHierarchyPath(target.transform);
+                var afterScene = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "saved target scene");
+                var readback = SceneObjectCopyCore.ResolveUniqueGameObject(afterScene.Scene, newPath, "renamed object");
+                if (!ReferenceEquals(readback, target)
+                    || readback.name != newName
+                    || afterScene.Guid != beforeScene.Guid
+                    || afterScene.Handle != beforeScene.Handle
+                    || (newName != oldName && afterScene.FileDigest == beforeScene.FileDigest)
+                    || afterScene.MetaDigest != beforeScene.MetaDigest
+                    || afterScene.MetaIdentity != beforeScene.MetaIdentity)
+                {
+                    throw new InvalidOperationException("The renamed GameObject persisted readback was not exact.");
+                }
                 var payload = new
                 {
                     action = "rename_gameobject",
                     preview = false,
                     oldName,
-                    newName = go.name,
+                    newName = readback.name,
                     oldPath,
-                    gameObjectPath = newPath
+                    gameObjectPath = newPath,
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    sceneFileDigestBefore = beforeScene.FileDigest,
+                    sceneFileDigestAfter = afterScene.FileDigest
                 };
-                return VRCForgeToolResult.Completed($"Renamed '{oldName}' to '{go.name}'.", payload);
+                return VRCForgeToolResult.Completed($"Renamed '{oldName}' to '{readback.name}'.", payload);
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Rename GameObject failed: {ex.Message}");
+                var restored = !mutationStarted;
+                try
+                {
+                    if (mutationStarted && target != null && beforeScene != null)
+                    {
+                        target.name = oldName;
+                        EditorUtility.SetDirty(target);
+                        EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
+                        if (EditorSceneManager.SaveScene(beforeScene.Scene))
+                        {
+                            var cleanup = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "restored target scene");
+                            var restoredObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                                cleanup.Scene,
+                                ComponentCrudCore.GetHierarchyPath(target.transform),
+                                "restored object");
+                            restored = ReferenceEquals(restoredObject, target)
+                                && restoredObject.name == oldName
+                                && cleanup.Guid == beforeScene.Guid
+                                && cleanup.Handle == beforeScene.Handle
+                                && cleanup.FileDigest == beforeScene.FileDigest
+                                && cleanup.FileIdentity == beforeScene.FileIdentity
+                                && cleanup.MetaDigest == beforeScene.MetaDigest
+                                && cleanup.MetaIdentity == beforeScene.MetaIdentity;
+                        }
+                    }
+                }
+                catch
+                {
+                    restored = false;
+                }
+                return VRCForgeToolResult.Failed($"Rename GameObject failed: {ex.Message}", new
+                {
+                    mutationStarted,
+                    restored,
+                    cleanupVerified = restored,
+                    cleanupRequired = !restored,
+                    checkpointRecoveryRequired = !restored,
+                    operationState = restored ? "restored" : "checkpoint_restore_required"
+                });
             }
         }
     }
@@ -371,11 +447,26 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<ReparentGameObjectParameters>() ?? new ReparentGameObjectParameters();
+            var mutationStarted = false;
+            SavedSceneSnapshot beforeScene = null;
+            GameObject target = null;
+            Transform oldParent = null;
+            var oldParentPath = (string)null;
+            var oldLocalPosition = Vector3.zero;
+            var oldLocalRotation = Quaternion.identity;
+            var oldLocalScale = Vector3.one;
+            var oldSiblingIndex = 0;
+            var oldPath = string.Empty;
             try
             {
-                var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
-                var oldParent = go.transform.parent;
-                var oldParentPath = oldParent != null ? ComponentCrudCore.GetHierarchyPath(oldParent) : null;
+                target = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
+                oldParent = target.transform.parent;
+                oldParentPath = oldParent != null ? ComponentCrudCore.GetHierarchyPath(oldParent) : null;
+                oldLocalPosition = target.transform.localPosition;
+                oldLocalRotation = target.transform.localRotation;
+                oldLocalScale = target.transform.localScale;
+                oldSiblingIndex = target.transform.GetSiblingIndex();
+                oldPath = ComponentCrudCore.GetHierarchyPath(target.transform);
 
                 var newParentPath = ComponentCrudCore.NormalizePath(p.newParentPath);
                 var toRoot = string.IsNullOrEmpty(newParentPath);
@@ -383,14 +474,19 @@ namespace VRCForge.Editor
                 if (!toRoot)
                 {
                     newParent = ComponentCrudCore.ResolveGameObject(newParentPath);
-                    if (newParent == go)
+                    if (newParent == target)
                     {
                         return VRCForgeToolResult.Failed("Cannot parent a GameObject to itself.");
                     }
-                    if (newParent.transform.IsChildOf(go.transform))
+                    if (newParent.transform.IsChildOf(target.transform))
                     {
                         return VRCForgeToolResult.Failed(
-                            $"Cannot reparent '{go.name}' under its own descendant '{newParent.name}' (would create a cycle).");
+                            $"Cannot reparent '{target.name}' under its own descendant '{newParent.name}' (would create a cycle).");
+                    }
+                    if (newParent.scene.handle != target.scene.handle)
+                    {
+                        return VRCForgeToolResult.Failed(
+                            "Cannot reparent a GameObject across loaded scenes; the target and new parent must share a scene.");
                     }
                 }
 
@@ -403,43 +499,119 @@ namespace VRCForge.Editor
                     {
                         action = "reparent_gameobject",
                         preview = true,
-                        gameObjectPath = ComponentCrudCore.GetHierarchyPath(go.transform),
+                        gameObjectPath = oldPath,
                         oldParentPath,
                         newParentPath = resolvedNewParentPath,
                         worldPositionStays
                     };
                     return VRCForgeToolResult.Completed(
                         toRoot
-                            ? $"Preview: would move '{go.name}' to the scene root."
-                            : $"Preview: would move '{go.name}' under '{resolvedNewParentPath}'.",
+                            ? $"Preview: would move '{target.name}' to the scene root."
+                            : $"Preview: would move '{target.name}' under '{resolvedNewParentPath}'.",
                         previewPayload);
                 }
 
+                beforeScene = SceneObjectCopyCore.ResolveSavedScene(target.scene.path, "target scene");
+                if (beforeScene.Handle != target.scene.handle)
+                {
+                    throw new InvalidOperationException("The target saved scene changed before reparenting.");
+                }
                 Undo.SetTransformParent(
-                    go.transform,
+                    target.transform,
                     toRoot ? null : newParent.transform,
                     worldPositionStays,
-                    $"Reparent {go.name}");
-                EditorUtility.SetDirty(go);
+                    $"Reparent {target.name}");
+                mutationStarted = true;
+                EditorUtility.SetDirty(target);
+                EditorSceneManager.MarkSceneDirty(target.scene);
+                if (!EditorSceneManager.SaveScene(target.scene))
+                {
+                    throw new InvalidOperationException("The target scene could not be saved.");
+                }
 
+                var afterScene = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "saved target scene");
+                var newPath = ComponentCrudCore.GetHierarchyPath(target.transform);
+                var readback = SceneObjectCopyCore.ResolveUniqueGameObject(afterScene.Scene, newPath, "reparented object");
+                var readbackParentPath = readback.transform.parent != null
+                    ? ComponentCrudCore.GetHierarchyPath(readback.transform.parent)
+                    : null;
+                if (!ReferenceEquals(readback, target)
+                    || !string.Equals(readbackParentPath, resolvedNewParentPath, StringComparison.Ordinal)
+                    || readback.transform.GetSiblingIndex() != target.transform.GetSiblingIndex()
+                    || afterScene.Guid != beforeScene.Guid
+                    || afterScene.Handle != beforeScene.Handle
+                    || (!string.Equals(oldPath, newPath, StringComparison.Ordinal)
+                        && afterScene.FileDigest == beforeScene.FileDigest)
+                    || afterScene.MetaDigest != beforeScene.MetaDigest
+                    || afterScene.MetaIdentity != beforeScene.MetaIdentity)
+                {
+                    throw new InvalidOperationException("The reparented GameObject persisted readback was not exact.");
+                }
                 var payload = new
                 {
                     action = "reparent_gameobject",
                     preview = false,
-                    gameObjectPath = ComponentCrudCore.GetHierarchyPath(go.transform),
+                    gameObjectPath = newPath,
                     oldParentPath,
                     newParentPath = resolvedNewParentPath,
-                    worldPositionStays
+                    worldPositionStays,
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    sceneFileDigestBefore = beforeScene.FileDigest,
+                    sceneFileDigestAfter = afterScene.FileDigest
                 };
                 return VRCForgeToolResult.Completed(
                     toRoot
-                        ? $"Moved '{go.name}' to the scene root."
-                        : $"Moved '{go.name}' under '{resolvedNewParentPath}'.",
+                        ? $"Moved '{target.name}' to the scene root."
+                        : $"Moved '{target.name}' under '{resolvedNewParentPath}'.",
                     payload);
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Reparent GameObject failed: {ex.Message}");
+                var restored = !mutationStarted;
+                try
+                {
+                    if (mutationStarted && target != null && beforeScene != null)
+                    {
+                        target.transform.SetParent(oldParent, false);
+                        target.transform.localPosition = oldLocalPosition;
+                        target.transform.localRotation = oldLocalRotation;
+                        target.transform.localScale = oldLocalScale;
+                        target.transform.SetSiblingIndex(oldSiblingIndex);
+                        EditorUtility.SetDirty(target);
+                        EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
+                        if (EditorSceneManager.SaveScene(beforeScene.Scene))
+                        {
+                            var cleanup = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "restored target scene");
+                            var restoredObject = SceneObjectCopyCore.ResolveUniqueGameObject(cleanup.Scene, oldPath, "restored object");
+                            var restoredParentPath = restoredObject.transform.parent != null
+                                ? ComponentCrudCore.GetHierarchyPath(restoredObject.transform.parent)
+                                : null;
+                            restored = ReferenceEquals(restoredObject, target)
+                                && string.Equals(restoredParentPath, oldParentPath, StringComparison.Ordinal)
+                                && cleanup.Guid == beforeScene.Guid
+                                && cleanup.Handle == beforeScene.Handle
+                                && cleanup.FileDigest == beforeScene.FileDigest
+                                && cleanup.FileIdentity == beforeScene.FileIdentity
+                                && cleanup.MetaDigest == beforeScene.MetaDigest
+                                && cleanup.MetaIdentity == beforeScene.MetaIdentity;
+                        }
+                    }
+                }
+                catch
+                {
+                    restored = false;
+                }
+                return VRCForgeToolResult.Failed($"Reparent GameObject failed: {ex.Message}", new
+                {
+                    mutationStarted,
+                    restored,
+                    cleanupVerified = restored,
+                    cleanupRequired = !restored,
+                    checkpointRecoveryRequired = !restored,
+                    operationState = restored ? "restored" : "checkpoint_restore_required"
+                });
             }
         }
     }
@@ -464,12 +636,18 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<DeleteGameObjectParameters>() ?? new DeleteGameObjectParameters();
+            var mutationStarted = false;
+            var undoGroup = -1;
+            SavedSceneSnapshot beforeScene = null;
+            GameObject target = null;
+            var canonicalPath = string.Empty;
             try
             {
-                var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
-                var goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
-                var childCount = go.transform.childCount;
-                var componentCount = go.GetComponents<Component>().Count(c => c != null);
+                target = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
+                canonicalPath = ComponentCrudCore.GetHierarchyPath(target.transform);
+                var goPath = canonicalPath;
+                var childCount = target.transform.childCount;
+                var componentCount = target.GetComponents<Component>().Count(c => c != null);
 
                 if (p.preview ?? false)
                 {
@@ -486,7 +664,32 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
-                Undo.DestroyObjectImmediate(go);
+                beforeScene = SceneObjectCopyCore.ResolveSavedScene(target.scene.path, "target scene");
+                if (beforeScene.Handle != target.scene.handle)
+                {
+                    throw new InvalidOperationException("The target saved scene changed before deletion.");
+                }
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName($"Delete {target.name}");
+                Undo.DestroyObjectImmediate(target);
+                mutationStarted = true;
+                EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
+                if (!EditorSceneManager.SaveScene(beforeScene.Scene))
+                {
+                    throw new InvalidOperationException("The target scene could not be saved.");
+                }
+                var afterScene = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "saved target scene");
+                var deletedStillExists = AssetPrefabCore.CountHierarchyPath(goPath, afterScene.Handle) != 0;
+                if (deletedStillExists
+                    || afterScene.Guid != beforeScene.Guid
+                    || afterScene.Handle != beforeScene.Handle
+                    || afterScene.FileDigest == beforeScene.FileDigest
+                    || afterScene.MetaDigest != beforeScene.MetaDigest
+                    || afterScene.MetaIdentity != beforeScene.MetaIdentity)
+                {
+                    throw new InvalidOperationException("The deleted GameObject persisted readback was not exact.");
+                }
 
                 var payload = new
                 {
@@ -494,13 +697,54 @@ namespace VRCForge.Editor
                     preview = false,
                     gameObjectPath = goPath,
                     childCount,
-                    componentCount
+                    componentCount,
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    sceneFileDigestBefore = beforeScene.FileDigest,
+                    sceneFileDigestAfter = afterScene.FileDigest
                 };
                 return VRCForgeToolResult.Completed($"Deleted '{goPath}'.", payload);
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Delete GameObject failed: {ex.Message}");
+                var restored = !mutationStarted;
+                try
+                {
+                    if (mutationStarted && beforeScene != null && undoGroup >= 0)
+                    {
+                        Undo.RevertAllDownToGroup(undoGroup);
+                        EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
+                        if (EditorSceneManager.SaveScene(beforeScene.Scene))
+                        {
+                            var cleanup = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "restored target scene");
+                            var restoredObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                                cleanup.Scene,
+                                canonicalPath,
+                                "restored object");
+                            restored = restoredObject != null
+                                && cleanup.Guid == beforeScene.Guid
+                                && cleanup.Handle == beforeScene.Handle
+                                && cleanup.FileDigest == beforeScene.FileDigest
+                                && cleanup.FileIdentity == beforeScene.FileIdentity
+                                && cleanup.MetaDigest == beforeScene.MetaDigest
+                                && cleanup.MetaIdentity == beforeScene.MetaIdentity;
+                        }
+                    }
+                }
+                catch
+                {
+                    restored = false;
+                }
+                return VRCForgeToolResult.Failed($"Delete GameObject failed: {ex.Message}", new
+                {
+                    mutationStarted,
+                    restored,
+                    cleanupVerified = restored,
+                    cleanupRequired = !restored,
+                    checkpointRecoveryRequired = !restored,
+                    operationState = restored ? "restored" : "checkpoint_restore_required"
+                });
             }
         }
     }
@@ -528,6 +772,10 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<SetGameObjectActiveParameters>() ?? new SetGameObjectActiveParameters();
+            var mutationStarted = false;
+            SavedSceneSnapshot beforeScene = null;
+            GameObject target = null;
+            var originalActive = false;
             try
             {
                 var rawParams = @params ?? new JObject();
@@ -537,9 +785,10 @@ namespace VRCForge.Editor
                 }
                 var active = rawParams["active"].ToObject<bool>();
 
-                var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
-                var goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
-                var oldActive = go.activeSelf;
+                target = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
+                var goPath = ComponentCrudCore.GetHierarchyPath(target.transform);
+                var oldActive = target.activeSelf;
+                originalActive = oldActive;
 
                 if (p.preview ?? false)
                 {
@@ -556,9 +805,38 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
-                Undo.RecordObject(go, $"Set Active {go.name}");
-                go.SetActive(active);
-                EditorUtility.SetDirty(go);
+                var targetScene = target.scene;
+                beforeScene = SceneObjectCopyCore.ResolveSavedScene(targetScene.path, "target scene");
+                if (beforeScene.Handle != targetScene.handle)
+                {
+                    throw new InvalidOperationException("The target saved scene changed before setting active state.");
+                }
+
+                Undo.RecordObject(target, $"Set Active {target.name}");
+                target.SetActive(active);
+                mutationStarted = true;
+                EditorUtility.SetDirty(target);
+                EditorSceneManager.MarkSceneDirty(targetScene);
+                if (!EditorSceneManager.SaveScene(targetScene))
+                {
+                    throw new InvalidOperationException("The target scene could not be saved.");
+                }
+
+                var afterScene = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "saved target scene");
+                var readback = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    afterScene.Scene,
+                    goPath,
+                    "active-state target");
+                if (!ReferenceEquals(readback, target)
+                    || readback.activeSelf != active
+                    || afterScene.Guid != beforeScene.Guid
+                    || afterScene.Handle != beforeScene.Handle
+                    || (active != oldActive && afterScene.FileDigest == beforeScene.FileDigest)
+                    || afterScene.MetaDigest != beforeScene.MetaDigest
+                    || afterScene.MetaIdentity != beforeScene.MetaIdentity)
+                {
+                    throw new InvalidOperationException("The active state persisted readback was not exact.");
+                }
 
                 var payload = new
                 {
@@ -566,14 +844,58 @@ namespace VRCForge.Editor
                     preview = false,
                     gameObjectPath = goPath,
                     oldActive,
-                    newActive = go.activeSelf,
-                    activeInHierarchy = go.activeInHierarchy
+                    newActive = readback.activeSelf,
+                    activeInHierarchy = readback.activeInHierarchy,
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    sceneFileDigestBefore = beforeScene.FileDigest,
+                    sceneFileDigestAfter = afterScene.FileDigest,
+                    sceneFileIdentityBefore = beforeScene.FileIdentity,
+                    sceneFileIdentityAfter = afterScene.FileIdentity
                 };
-                return VRCForgeToolResult.Completed($"Set '{goPath}' active-self to {go.activeSelf}.", payload);
+                return VRCForgeToolResult.Completed($"Set '{goPath}' active-self to {readback.activeSelf}.", payload);
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Set GameObject active failed: {ex.Message}");
+                var restored = !mutationStarted;
+                try
+                {
+                    if (mutationStarted && target != null && beforeScene != null)
+                    {
+                        target.SetActive(originalActive);
+                        EditorUtility.SetDirty(target);
+                        EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
+                        if (EditorSceneManager.SaveScene(beforeScene.Scene))
+                        {
+                            var cleanup = SceneObjectCopyCore.ResolveSavedScene(
+                                beforeScene.Path,
+                                "restored target scene");
+                            restored = cleanup.Guid == beforeScene.Guid
+                                && cleanup.Handle == beforeScene.Handle
+                                && cleanup.FileDigest == beforeScene.FileDigest
+                                && cleanup.FileIdentity == beforeScene.FileIdentity
+                                && cleanup.MetaDigest == beforeScene.MetaDigest
+                                && cleanup.MetaIdentity == beforeScene.MetaIdentity
+                                && target.activeSelf == originalActive;
+                        }
+                    }
+                }
+                catch
+                {
+                    restored = false;
+                }
+                return VRCForgeToolResult.Failed(
+                    $"Set GameObject active failed: {ex.Message}",
+                    new
+                    {
+                        mutationStarted,
+                        restored,
+                        cleanupVerified = restored,
+                        cleanupRequired = !restored,
+                        checkpointRecoveryRequired = !restored,
+                        operationState = restored ? "restored" : "checkpoint_restore_required"
+                    });
             }
         }
     }

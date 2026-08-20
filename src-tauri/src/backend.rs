@@ -335,14 +335,15 @@ pub(crate) fn backend_json_request(
     let mut response = send_once()?;
     if matches!(response.status, 401 | 403) {
         clear_backend_session_verify_cache();
-        if wait_for_backend_session(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
-            mark_backend_session_verified();
-            response = send_once()?;
-            if matches!(response.status, 401 | 403) {
-                clear_backend_session_verify_cache();
+        match wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+            BackendSessionProbe::Accepted => {
+                mark_backend_session_verified();
+                response = send_once()?;
+                if matches!(response.status, 401 | 403) {
+                    clear_backend_session_verify_cache();
+                }
             }
-        } else {
-            return Err(runtime_session_verification_error());
+            probe => return Err(runtime_session_probe_error(probe)),
         }
     }
     if response.ok {
@@ -406,16 +407,19 @@ pub(crate) fn backend_json_request_with_error_envelope(
     let mut response = send_once()?;
     if matches!(response.status, 401 | 403) {
         clear_backend_session_verify_cache();
-        if wait_for_backend_session(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
-            mark_backend_session_verified();
-            response = send_once()?;
-            if matches!(response.status, 401 | 403) {
-                clear_backend_session_verify_cache();
+        match wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+            BackendSessionProbe::Accepted => {
+                mark_backend_session_verified();
+                response = send_once()?;
+                if matches!(response.status, 401 | 403) {
+                    clear_backend_session_verify_cache();
+                }
             }
-        } else {
-            return Err(BackendJsonErrorEnvelope::transport(
-                runtime_session_verification_error(),
-            ));
+            probe => {
+                return Err(BackendJsonErrorEnvelope::transport(
+                    runtime_session_probe_error(probe),
+                ))
+            }
         }
     }
     if response.ok {
@@ -562,14 +566,15 @@ pub(crate) fn backend_bytes_request(
     let mut response = send_once()?;
     if matches!(response.status, 401 | 403) {
         clear_backend_session_verify_cache();
-        if wait_for_backend_session(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
-            mark_backend_session_verified();
-            response = send_once()?;
-            if matches!(response.status, 401 | 403) {
-                clear_backend_session_verify_cache();
+        match wait_for_backend_session_probe(&app_session_token, BACKEND_SESSION_VERIFY_WAIT) {
+            BackendSessionProbe::Accepted => {
+                mark_backend_session_verified();
+                response = send_once()?;
+                if matches!(response.status, 401 | 403) {
+                    clear_backend_session_verify_cache();
+                }
             }
-        } else {
-            return Err(runtime_session_verification_error());
+            probe => return Err(runtime_session_probe_error(probe)),
         }
     }
     if response.ok {
@@ -1095,13 +1100,24 @@ pub(crate) fn ensure_backend_session_verified(token: &str) -> Result<(), String>
     if backend_session_verify_cache_valid() {
         return Ok(());
     }
-    if wait_for_backend_session(token, BACKEND_SESSION_VERIFY_WAIT) {
-        mark_backend_session_verified();
-        Ok(())
-    } else {
-        clear_backend_session_verify_cache();
-        Err(runtime_session_verification_error())
+    match wait_for_backend_session_probe(token, BACKEND_SESSION_VERIFY_WAIT) {
+        BackendSessionProbe::Accepted => {
+            mark_backend_session_verified();
+            Ok(())
+        }
+        BackendSessionProbe::Unavailable => {
+            clear_backend_session_verify_cache();
+            Err(runtime_session_busy_error())
+        }
+        BackendSessionProbe::Rejected => {
+            clear_backend_session_verify_cache();
+            Err(runtime_session_verification_error())
+        }
     }
+}
+
+pub(crate) fn runtime_session_busy_error() -> String {
+    "VRCForge runtime is busy and did not answer the desktop session challenge in time. Retry after the current operation finishes.".to_string()
 }
 
 pub(crate) fn runtime_session_verification_error() -> String {
@@ -1217,14 +1233,20 @@ pub(crate) fn backend_port_open() -> bool {
     }
 }
 
-pub(crate) fn existing_backend_accepts_session(token: &str) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackendSessionProbe {
+    Accepted,
+    Rejected,
+    Unavailable,
+}
+
+pub(crate) fn probe_backend_session(token: &str) -> BackendSessionProbe {
     let Ok(nonce) = generate_session_token() else {
-        return false;
+        return BackendSessionProbe::Unavailable;
     };
     // Plain-HTTP probe via `ureq` (sync, no tokio/reqwest, no startup wait).
-    // Fail-fast semantics match the old hand-rolled TcpStream client: short
-    // timeouts, no retries, and any non-200 status or malformed body means
-    // "this runtime does not accept our session".
+    // Fail fast, but distinguish a busy owned runtime from a runtime that
+    // explicitly rejects this session or returns an invalid challenge.
     let agent = ureq::builder()
         .timeout_connect(Duration::from_millis(350))
         .timeout(Duration::from_millis(1500))
@@ -1235,35 +1257,67 @@ pub(crate) fn existing_backend_accepts_session(token: &str) -> bool {
         percent_encode_query_component(&nonce)
     );
     let transport_proof = tauri_ipc_bridge_proof(token, "GET", &challenge_path);
-    let Ok(response) = agent
+    let response = match agent
         .get(&format!("{BACKEND_ENDPOINT}{challenge_path}"))
         .set("Origin", "tauri://localhost")
         .set("X-VRCForge-Transport", "tauri-ipc-bridge")
         .set("X-VRCForge-Transport-Proof", &transport_proof)
         .call()
-    else {
-        return false;
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, _)) if matches!(status, 408 | 429 | 500..=599) => {
+            return BackendSessionProbe::Unavailable;
+        }
+        Err(ureq::Error::Status(_, _)) => return BackendSessionProbe::Rejected,
+        Err(ureq::Error::Transport(_)) => return BackendSessionProbe::Unavailable,
     };
     let Ok(payload) = response.into_json::<serde_json::Value>() else {
-        return false;
+        return BackendSessionProbe::Rejected;
     };
     let Some(signature) = extract_challenge_signature(&payload) else {
-        return false;
+        return BackendSessionProbe::Rejected;
     };
-    app_session_challenge_signature_matches(token, &nonce, &signature)
+    if app_session_challenge_signature_matches(token, &nonce, &signature) {
+        BackendSessionProbe::Accepted
+    } else {
+        BackendSessionProbe::Rejected
+    }
 }
 
-pub(crate) fn wait_for_backend_session(token: &str, timeout: Duration) -> bool {
+pub(crate) fn existing_backend_accepts_session(token: &str) -> bool {
+    probe_backend_session(token) == BackendSessionProbe::Accepted
+}
+
+pub(crate) fn runtime_session_probe_error(probe: BackendSessionProbe) -> String {
+    match probe {
+        BackendSessionProbe::Unavailable => runtime_session_busy_error(),
+        BackendSessionProbe::Accepted | BackendSessionProbe::Rejected => {
+            runtime_session_verification_error()
+        }
+    }
+}
+
+pub(crate) fn wait_for_backend_session_probe(
+    token: &str,
+    timeout: Duration,
+) -> BackendSessionProbe {
     let start = Instant::now();
+    let mut result = BackendSessionProbe::Unavailable;
     loop {
-        if existing_backend_accepts_session(token) {
-            return true;
+        match probe_backend_session(token) {
+            BackendSessionProbe::Accepted => return BackendSessionProbe::Accepted,
+            BackendSessionProbe::Rejected => result = BackendSessionProbe::Rejected,
+            BackendSessionProbe::Unavailable => {}
         }
         if start.elapsed() >= timeout {
-            return false;
+            return result;
         }
         thread::sleep(Duration::from_millis(150));
     }
+}
+
+pub(crate) fn wait_for_backend_session(token: &str, timeout: Duration) -> bool {
+    wait_for_backend_session_probe(token, timeout) == BackendSessionProbe::Accepted
 }
 
 pub(crate) fn extract_challenge_signature(payload: &serde_json::Value) -> Option<String> {

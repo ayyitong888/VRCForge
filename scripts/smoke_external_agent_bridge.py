@@ -81,6 +81,7 @@ class ExternalAgentBridgeSmoke:
         self.scene_path: Path | None = None
         self.scene_project_path: str = ""
         self.scene_sha256_before: str = ""
+        self.live_project_root: str = ""
         self.rollback_done = False
         self.connector_payload: dict[str, Any] = {}
 
@@ -111,6 +112,7 @@ class ExternalAgentBridgeSmoke:
                 self.step("permission.set_for_optimizer_request", self.set_execution_mode(self.args.execution_mode))
                 self.optimizer_write_request()
             if self.args.live_write_rollback:
+                self.step("permission.set_for_live_write", self.set_execution_mode("approval"))
                 self.live_write_rollback()
         except Exception as exc:  # noqa: BLE001 - smoke should always produce an evidence report.
             self.step("smoke.error", {"ok": False, "error": str(exc)})
@@ -334,8 +336,14 @@ class ExternalAgentBridgeSmoke:
         if not parent_path:
             raise RuntimeError("--parent-path is required for --live-write-rollback.")
         project_root = self.resolve_project_root()
+        self.live_project_root = project_root
 
-        parent_before = ensure_dict(self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": parent_path}))
+        parent_before = ensure_dict(
+            self.mcp_call_tool(
+                "vrcforge_get_gameobject",
+                {"gameObjectPath": parent_path, "projectPath": project_root},
+            )
+        )
         parent_result = ensure_dict(parent_before.get("result", parent_before))
         parent_game_object_path = str(parent_result.get("gameObjectPath") or "")
         scene_path_text = str(parent_result.get("scenePath") or "")
@@ -360,7 +368,10 @@ class ExternalAgentBridgeSmoke:
 
         object_name = f"VRCForgeExternalAgentSmoke_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         self.created_object_path = f"{parent_path}/{object_name}"
-        compile_before = self.mcp_call_tool("vrcforge_get_compile_errors", {"maxErrors": 20})
+        compile_before = self.mcp_call_tool(
+            "vrcforge_get_compile_errors",
+            {"maxErrors": 20, "projectPath": project_root},
+        )
         self.step("unity.compile_before", compile_result_summary(compile_before))
 
         request = self.mcp_call_tool(
@@ -371,6 +382,7 @@ class ExternalAgentBridgeSmoke:
                     "name": object_name,
                     "parentPath": parent_path,
                     "projectRoot": project_root,
+                    "projectPath": project_root,
                 },
                 "reason": "External agent bridge smoke: create a temporary scene GameObject, then prove rollback.",
                 "preview": {
@@ -412,7 +424,12 @@ class ExternalAgentBridgeSmoke:
             raise RuntimeError("Approved write did not return a checkpoint id.")
 
         create_result = ensure_dict(execution.get("result"))
-        exists_after = ensure_dict(self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": self.created_object_path}))
+        exists_after = ensure_dict(
+            self.mcp_call_tool(
+                "vrcforge_get_gameobject",
+                {"gameObjectPath": self.created_object_path, "projectPath": project_root},
+            )
+        )
         exists_payload = ensure_dict(exists_after.get("result", exists_after))
         scene_sha256_after_apply = sha256_path(self.scene_path)
         self.step(
@@ -480,7 +497,6 @@ class ExternalAgentBridgeSmoke:
             },
         )
 
-        self.verify_no_residue("rollback.verify_no_residue")
         scene_sha256_after_rollback = sha256_path(self.scene_path)
         self.step(
             "rollback.verify_scene_sha256",
@@ -491,7 +507,15 @@ class ExternalAgentBridgeSmoke:
                 "sceneSha256AfterRollback": scene_sha256_after_rollback,
             },
         )
-        compile_after = self.mcp_call_tool("vrcforge_get_compile_errors", {"maxErrors": 20})
+        readiness = self.wait_for_unity_core_ready(project_root)
+        self.step("rollback.wait_for_unity_ready", readiness)
+        if not readiness.get("ok"):
+            raise RuntimeError("Unity MCP Core did not become ready after checkpoint restore.")
+        self.verify_no_residue("rollback.verify_no_residue")
+        compile_after = self.mcp_call_tool(
+            "vrcforge_get_compile_errors",
+            {"maxErrors": 20, "projectPath": project_root},
+        )
         self.step("unity.compile_after_rollback", compile_result_summary(compile_after))
 
     def optimizer_write_request(self) -> None:
@@ -564,19 +588,51 @@ class ExternalAgentBridgeSmoke:
         except Exception as exc:  # noqa: BLE001 - rollback must still be attempted after validation trouble.
             self.step("validation.after_write", {"ok": False, "error": str(exc)})
 
+    def wait_for_unity_core_ready(self, project_root: str) -> dict[str, Any]:
+        from unity_mcp_core_client import UnityMcpCoreClient
+
+        timeout_seconds = min(max(float(self.args.timeout), 5.0), 60.0)
+        deadline = time.monotonic() + timeout_seconds
+        attempts = 0
+        last_error = ""
+        while True:
+            attempts += 1
+            try:
+                tools = UnityMcpCoreClient(project_root, timeout_seconds=2.0).list_tools(exposure_layer="planning")
+                return {
+                    "ok": True,
+                    "attempts": attempts,
+                    "planningToolCount": len(tools),
+                }
+            except Exception as exc:  # noqa: BLE001 - readiness retries must recreate the post-reload client.
+                last_error = str(exc)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {
+                    "ok": False,
+                    "attempts": attempts,
+                    "error": last_error or "Unity MCP Core readiness timed out.",
+                }
+            time.sleep(min(0.5, remaining))
+
     def verify_no_residue(self, step_name: str) -> None:
         if not self.created_object_path:
             self.step(step_name, {"ok": False, "error": "No created object path was recorded."})
             return
         try:
-            exists_after_rollback = self.mcp_call_tool("vrcforge_get_gameobject", {"gameObjectPath": self.created_object_path})
+            arguments = {"gameObjectPath": self.created_object_path}
+            if self.live_project_root:
+                arguments["projectPath"] = self.live_project_root
+            exists_after_rollback = self.mcp_call_tool("vrcforge_get_gameobject", arguments)
             exists_payload = ensure_dict(exists_after_rollback.get("result", exists_after_rollback))
+            error_code = str(exists_payload.get("code") or "")
             self.step(
                 step_name,
                 {
-                    "ok": not bool(exists_payload.get("ok")),
+                    "ok": exists_payload.get("ok") is False and error_code == "gameobject_not_found",
                     "objectPath": self.created_object_path,
                     "readOkAfterRollback": bool(exists_payload.get("ok")),
+                    "readErrorCode": error_code,
                     "readError": exists_payload.get("error"),
                 },
             )

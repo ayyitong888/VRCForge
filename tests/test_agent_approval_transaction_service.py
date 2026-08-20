@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -226,3 +227,39 @@ def test_agent_gateway_facade_respects_approval_transaction_size_budget() -> Non
 
     assert len(source) <= AGENT_GATEWAY_MAX_BYTES
     assert source.count(b"\n") <= AGENT_GATEWAY_MAX_LF_LINES
+
+
+def test_ignored_nested_unity_project_uses_archive_checkpoint_without_parent_staging() -> None:
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        project = root / "NestedProject"
+        for name in ("Assets", "Packages", "ProjectSettings"):
+            (project / name).mkdir(parents=True)
+        (project / "Assets" / "fixture.txt").write_text("fixture", encoding="utf-8")
+        (root / ".gitignore").write_text("NestedProject/\n", encoding="utf-8")
+        subprocess.run(["git", "init", str(root)], check=True, capture_output=True)
+        gateway = _gateway(root / "vrcforge")
+        service = gateway.approval_transactions
+        before = subprocess.run(
+            ["git", "-C", str(root), "diff", "--cached", "--name-only"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        checkpoint = service._create_pre_write_checkpoint(
+            {"id": "approval_nested_ignored", "targetTool": "vrcforge_fixture_write"},
+            {"projectRoot": str(project)},
+        )
+
+        assert checkpoint is not None
+        assert checkpoint["ok"] is True
+        assert checkpoint["strategy"] == "archive"
+        assert checkpoint["gitFallbackReason"] == "project_path_ignored_by_enclosing_repository"
+        assert Path(checkpoint["archivePath"]).is_file()
+        after = subprocess.run(
+            ["git", "-C", str(root), "diff", "--cached", "--name-only"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        assert after == before

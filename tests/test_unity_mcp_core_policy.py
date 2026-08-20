@@ -51,6 +51,16 @@ def test_direct_mcp_tool_call_can_only_queue_explicit_read_only_tools() -> None:
     assert "IsStrictNoWritePayloadRead(pending.ToolName, pending.Arguments)" in SERVER
 
 
+def test_worker_requests_wake_the_unity_main_thread_without_relying_only_on_editor_updates() -> None:
+    assert "private static SynchronizationContext editorSynchronizationContext;" in SERVER
+    assert "editorSynchronizationContext = SynchronizationContext.Current;" in SERVER
+    assert "private static void RequestInvocationDrain()" in SERVER
+    assert "context.Post(_ => DrainInvocations(), null);" in SERVER
+    queue_start = SERVER.index("private static JObject QueueInvocation")
+    queue_end = SERVER.index("private static bool HasAllowedPreviewRequest", queue_start)
+    assert "RequestInvocationDrain();" in SERVER[queue_start:queue_end]
+
+
 def test_direct_mcp_no_write_allowlist_requires_exact_nonwriting_payload_shapes() -> None:
     gate_start = SERVER.index("private static bool IsStrictNoWritePayloadRead")
     gate_end = SERVER.index("private static JObject QueueInvocation", gate_start)
@@ -434,11 +444,12 @@ def test_safety_lane_accepts_only_exact_app_or_complete_live_bound_shapes_and_re
     assert 'isPrepareCheckpoint && HasExactKeys(arguments,' in predicate
     assert 'HasExactKeys(arguments, "projectPath")' in predicate
     assert 'HasExactKeys(arguments, "projectPath", "phase")' in predicate
-    assert 'HasExactKeys(arguments, "projectPath", "phase", "scenePaths", "activeScenePath")' in predicate
+    assert 'HasExactKeys(arguments, "projectPath", "phase", "scenePaths", "activeScenePath", "refreshAssets")' in predicate
     assert 'string.Equals(phase, "prepare_restore", StringComparison.Ordinal)' in predicate
     assert 'string.Equals(phase, "reload", StringComparison.Ordinal)' in predicate
     assert 'HasStringArray(arguments, "scenePaths")' in predicate
     assert 'HasString(arguments, "activeScenePath")' in predicate
+    assert 'HasBoolean(arguments, "refreshAssets")' in predicate
     for field_name in (
         "projectPath",
         "expectedRunIdDigest",

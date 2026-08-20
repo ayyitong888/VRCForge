@@ -60,6 +60,32 @@ def test_console_verifier_accepts_stable_no_delta() -> None:
     assert result["consoleVerification"]["status"] == "passed"
 
 
+def test_console_verifier_accepts_core_structured_content_diagnostics_shape() -> None:
+    payload = _payload()
+    result_shape = {
+        "payload": {
+            "structuredContent": {
+                "data": payload["result"]["data"],
+            }
+        }
+    }
+    reads = [result_shape, result_shape, result_shape]
+    verifier = UnityConsoleCompletionVerifier(
+        lambda _params: reads.pop(0),
+        timeout_seconds=2,
+        poll_seconds=0.01,
+        sleep=lambda _seconds: None,
+    )
+    baseline = verifier.capture_baseline("persisted_scene_write_console", {})
+    result = verifier.finalize(
+        "persisted_scene_write_console",
+        {},
+        baseline,
+        {"ok": True},
+    )
+    assert result["consoleVerified"] is True
+
+
 def test_console_verifier_passes_only_the_remaining_deadline_to_each_read() -> None:
     reads = [_payload(), _payload(), _payload()]
     observed_timeouts: list[int] = []
