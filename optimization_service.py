@@ -946,7 +946,10 @@ def build_texture_vram_audit(validation: dict[str, Any]) -> dict[str, Any]:
     textures = []
     seen: set[str] = set()
     for entry in _walk_dicts(materials):
-        name = _first_text(entry, ("textureName", "texture", "name", "assetPath", "path"))
+        name = _first_text(entry, ("assetPath", "path")) or _first_text(
+            entry,
+            ("textureName", "texture", "name"),
+        )
         if not name or "texture" not in " ".join(str(key).lower() for key in entry.keys()) and not _looks_like_texture_name(name):
             continue
         key = name.lower()
@@ -1053,32 +1056,42 @@ def build_mesh_triangle_audit(validation: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_parameter_budget_audit(validation: dict[str, Any]) -> dict[str, Any]:
-    parameters = _source_payload(_validation_sources(validation), "parameters")
+    inventory = build_parameter_inventory(validation)
     entries = []
-    for entry in _walk_dicts(parameters):
-        name = _first_text(entry, ("parameterName", "name", "param"))
-        value_type = _first_text(entry, ("type", "valueType", "parameterType"))
-        bits = _first_numeric(entry, ("bits", "cost", "syncedBits", "bitCost"))
-        if not name or (value_type is None and bits is None):
+    for entry in inventory.get("parameters") or []:
+        if not isinstance(entry, dict):
             continue
-        flags = []
-        if str(value_type or "").lower() in {"float", "int", "integer"}:
-            flags.append("high-cost type")
-        lower_name = name.lower()
-        if "osc" in lower_name or "tracking" in lower_name or "face" in lower_name:
-            flags.append("OSC/face tracking risk")
-        entries.append({"name": name[:120], "type": value_type or "unknown", "bits": bits, "flags": flags})
-    total_bits = _first_numeric(parameters, ("syncedBits", "bitsUsed", "totalCost", "parameterCost"))
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        entries.append(
+            {
+                "name": name[:120],
+                "type": entry.get("type") or "unknown",
+                "bits": entry.get("syncedBits"),
+                "flags": list(entry.get("flags") or []),
+                "plugin": entry.get("plugin"),
+                "sourcePath": entry.get("sourcePath"),
+            }
+        )
+    inventory_summary = inventory.get("summary") if isinstance(inventory.get("summary"), dict) else {}
     return {
         "readOnly": True,
         "summary": {
-            "knownParameterCount": len(entries),
-            "syncedBits": total_bits,
+            "knownParameterCount": inventory_summary.get("totalCustomParameters", len(entries)),
+            "syncedBits": inventory_summary.get("syncedBits"),
             "flaggedParameterCount": sum(1 for item in entries if item.get("flags")),
-            "scannerCoverage": "metadata" if entries or total_bits is not None else "unknown",
+            "scannerCoverage": inventory_summary.get("scannerCoverage", "unknown"),
         },
         "parameters": entries[:200],
-        "notes": ["This audit does not compress, delete, or rewrite expression parameters."],
+        "inspectionStage": inventory.get("inspectionStage"),
+        "mergedUsageAvailable": inventory.get("mergedUsageAvailable", False),
+        "sourceDescriptorUsage": inventory.get("sourceDescriptorUsage"),
+        "pluginBreakdown": inventory.get("pluginBreakdown") or [],
+        "notes": [
+            "This audit does not compress, delete, or rewrite expression parameters.",
+            "When NDMF introspection is available, synced usage includes Modular Avatar and other NDMF parameter providers instead of reporting the source descriptor alone.",
+        ],
     }
 
 
@@ -1240,12 +1253,37 @@ def build_upload_gate_fix_plan(upload_gate: dict[str, Any]) -> dict[str, Any]:
 
 def build_parameter_inventory(validation: dict[str, Any]) -> dict[str, Any]:
     parameters = _source_payload(_validation_sources(validation), "parameters")
-    entries = _parameter_entries(parameters)
+    merged_usage = _merged_parameter_usage(parameters)
+    effective_parameters = merged_usage or parameters
+    entries = _parameter_entries(effective_parameters)
     computed_synced_bits = sum(int(item.get("syncedBits") or 0) for item in entries)
-    reported_synced_bits = _first_numeric(parameters, ("syncedBits", "bitsUsed", "totalEstimatedCost", "totalCost", "parameterCost"))
-    reported_total = _first_numeric(parameters, ("totalParameters", "totalCustomParameters", "parameterCount", "customParameterCount"))
+    reported_synced_bits = _first_numeric(
+        effective_parameters,
+        (
+            "totalBitUsage",
+            "syncedBits",
+            "bitsUsed",
+            "totalEstimatedCost",
+            "totalCost",
+            "parameterCost",
+        ),
+    )
+    reported_total = _first_numeric(
+        effective_parameters,
+        ("totalParameters", "totalCustomParameters", "parameterCount", "customParameterCount"),
+    )
     synced_bits = int(reported_synced_bits if reported_synced_bits is not None else computed_synced_bits)
     total_parameters = int(reported_total if reported_total is not None else len(entries))
+    source_descriptor_usage = parameters.get("sourceDescriptorUsage")
+    if not isinstance(source_descriptor_usage, dict):
+        source_descriptor_usage = None
+    inspection_stage = (
+        str(merged_usage.get("inspectionStage") or parameters.get("inspectionStage") or "").strip()
+        if merged_usage
+        else str(parameters.get("inspectionStage") or "source_descriptor").strip()
+    )
+    merged_available = bool(merged_usage)
+    merged_synced_count = _first_numeric(merged_usage, ("syncedParameterCount",))
     return {
         "readOnly": True,
         "limits": UPLOAD_GATE_LIMITS["parameters"],
@@ -1254,15 +1292,36 @@ def build_parameter_inventory(validation: dict[str, Any]) -> dict[str, Any]:
             "totalCustomParameterLimit": UPLOAD_GATE_LIMITS["parameters"]["totalCustomParameters"],
             "syncedBits": synced_bits,
             "syncedBitLimit": UPLOAD_GATE_LIMITS["parameters"]["syncedBits"],
-            "syncedParameterCount": sum(1 for item in entries if item.get("networkSynced")),
+            "syncedParameterCount": int(
+                merged_synced_count
+                if merged_available and merged_synced_count is not None
+                else sum(1 for item in entries if item.get("networkSynced"))
+            ),
             "unsyncedParameterCount": sum(1 for item in entries if item.get("networkSynced") is False),
             "boolCount": sum(1 for item in entries if item.get("type") == "Bool"),
             "intCount": sum(1 for item in entries if item.get("type") == "Int"),
             "floatCount": sum(1 for item in entries if item.get("type") == "Float"),
-            "scannerCoverage": "metadata" if entries or reported_synced_bits is not None or reported_total is not None else "unknown",
+            "scannerCoverage": (
+                "ndmf_parameter_introspection"
+                if merged_available
+                else "source_descriptor"
+                if entries or reported_synced_bits is not None or reported_total is not None
+                else "unknown"
+            ),
         },
         "parameters": entries[:500],
-        "notes": ["Synced bits and total custom parameter count are different limits."],
+        "inspectionStage": inspection_stage,
+        "mergedUsageAvailable": merged_available,
+        "sourceDescriptorUsage": source_descriptor_usage,
+        "pluginBreakdown": list(merged_usage.get("pluginBreakdown") or []) if merged_available else [],
+        "notes": [
+            "Synced bits and total custom parameter count are different limits.",
+            (
+                "Counts use NDMF parameter introspection, including Modular Avatar and other loaded NDMF providers."
+                if merged_available
+                else "Counts cover the source VRChat Expression Parameters asset only; they are not final merged build usage."
+            ),
+        ],
     }
 
 
@@ -1680,11 +1739,14 @@ def build_physbone_audit(validation: dict[str, Any]) -> dict[str, Any]:
     android = _source_payload(sources, "performance_quest")
     avatar_items = _source_payload(sources, "avatar_items")
     components = []
+    physbone_components = []
+    collider_components = []
     for entry in _walk_dicts(avatar_items):
         raw_components = _coerce_list(entry.get("component_types") or entry.get("componentTypes") or entry.get("components"))
-        joined_components = " ".join(str(item).replace(" ", "").lower() for item in raw_components)
-        entry_text = json.dumps(entry, ensure_ascii=False, default=str).lower()
-        if "physbone" not in joined_components and "phys bone" not in entry_text and "physbone" not in entry_text:
+        normalized_components = [str(item).replace(" ", "").lower() for item in raw_components]
+        has_physbone = any(item.endswith("vrcphysbone") for item in normalized_components)
+        has_collider = any(item.endswith("vrcphysbonecollider") for item in normalized_components)
+        if not has_physbone and not has_collider:
             continue
         object_path = _direct_text(entry, ("gameObjectPath", "objectPath", "path", "name")) or "unknown"
         affected = _direct_numeric(entry, ("physBoneAffectedTransforms", "affectedTransforms", "affectedTransformCount"))
@@ -1699,21 +1761,28 @@ def build_physbone_audit(validation: dict[str, Any]) -> dict[str, Any]:
             flags.append("pc_collision_check_over_limit")
         if any(token in str(object_path).lower() for token in ("hair", "skirt", "tail", "sleeve", "cloth")):
             flags.append("visual_motion_review")
-        components.append(
-            {
-                "objectPath": _safe_asset_label(object_path),
-                "componentTypes": [str(item)[:120] for item in raw_components],
-                "affectedTransforms": affected,
-                "colliders": colliders,
-                "collisionCheckCount": collision_checks,
-                "flags": flags,
-            }
-        )
+        component_row = {
+            "objectPath": _safe_asset_label(object_path),
+            "componentTypes": [str(item)[:120] for item in raw_components],
+            "affectedTransforms": affected,
+            "colliders": colliders,
+            "collisionCheckCount": collision_checks,
+            "flags": flags,
+        }
+        components.append(component_row)
+        if has_physbone:
+            physbone_components.append(component_row)
+        if has_collider:
+            collider_components.append(component_row)
     unique_components = _unique_by(components, "objectPath")
+    unique_physbones = _unique_by(physbone_components, "objectPath")
+    unique_colliders = _unique_by(collider_components, "objectPath")
+    reported_physbones = _first_numeric(pc, ("physBoneCount", "physBones", "physBoneComponents"))
+    reported_colliders = _first_numeric(pc, ("physBoneColliderCount", "physBoneColliders"))
     metric_rows = [
-        _physbone_metric_row("physbone_components", "PhysBone components", _first_numeric(pc, ("physBoneCount", "physBones", "physBoneComponents")) or len(unique_components) or None, "physBoneComponents"),
+        _physbone_metric_row("physbone_components", "PhysBone components", reported_physbones if reported_physbones is not None else len(unique_physbones) or None, "physBoneComponents"),
         _physbone_metric_row("physbone_affected_transforms", "PhysBone affected transforms", _first_numeric(pc, ("physBoneAffectedTransforms", "affectedTransforms")), "physBoneAffectedTransforms"),
-        _physbone_metric_row("physbone_colliders", "PhysBone colliders", _first_numeric(pc, ("physBoneColliderCount", "physBoneColliders")), "physBoneColliders"),
+        _physbone_metric_row("physbone_colliders", "PhysBone colliders", reported_colliders if reported_colliders is not None else len(unique_colliders) or None, "physBoneColliders"),
         _physbone_metric_row("physbone_collision_checks", "PhysBone collision checks", _first_numeric(pc, ("physBoneCollisionCheckCount", "collisionCheckCount")), "physBoneCollisionCheckCount"),
     ]
     android_metric_rows = [
@@ -1733,7 +1802,8 @@ def build_physbone_audit(validation: dict[str, Any]) -> dict[str, Any]:
             "android": UPLOAD_GATE_LIMITS["android"]["mobileComponentLimits"],
         },
         "summary": {
-            "knownComponentCount": len(unique_components),
+            "knownComponentCount": len(unique_physbones),
+            "knownColliderCount": len(unique_colliders),
             "reportedComponentCount": metric_rows[0]["value"],
             "reviewMetricCount": len([row for row in review_rows if row["status"] != "unknown"]),
             "unknownMetricCount": len([row for row in review_rows if row["status"] == "unknown"]),
@@ -2932,6 +3002,13 @@ def _source_payload(sources: dict[str, Any], name: str) -> dict[str, Any]:
     return {}
 
 
+def _merged_parameter_usage(parameters: dict[str, Any]) -> dict[str, Any]:
+    merged = parameters.get("mergedParameterUsage")
+    if not isinstance(merged, dict) or merged.get("available") is not True:
+        return {}
+    return merged
+
+
 def _scanner_statuses(validation: dict[str, Any]) -> list[dict[str, Any]]:
     statuses = []
     for name, source in _validation_sources(validation).items():
@@ -3279,8 +3356,8 @@ def _parameter_entries(parameters: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         seen.add(name.lower())
         value_type = _normalize_parameter_type(_direct_text(item, ("valueType", "type", "parameterType")))
-        explicit_bits = _direct_numeric(item, ("bits", "cost", "syncedBits", "bitCost"))
-        network_synced = _direct_bool(item, ("networkSynced", "synced"))
+        explicit_bits = _direct_numeric(item, ("bits", "cost", "syncedBits", "bitCost", "bitUsage"))
+        network_synced = _direct_bool(item, ("networkSynced", "synced", "wantSynced"))
         if network_synced is None:
             network_synced = explicit_bits is not None
         bits = _parameter_bit_cost(value_type, network_synced, explicit_bits)
@@ -3293,6 +3370,11 @@ def _parameter_entries(parameters: dict[str, Any]) -> list[dict[str, Any]]:
                 "defaultValue": _direct_numeric(item, ("defaultValue", "default", "value")),
                 "syncedBits": bits,
                 "flags": _parameter_flags(name, value_type),
+                "animatorOnly": _direct_bool(item, ("animatorOnly", "isAnimatorOnly")),
+                "hidden": _direct_bool(item, ("hidden", "isHidden")),
+                "plugin": _direct_text(item, ("plugin", "provider")),
+                "sourcePath": _direct_text(item, ("sourcePath", "componentPath")),
+                "sourceComponentType": _direct_text(item, ("sourceComponentType", "componentType")),
             }
         )
     return entries
@@ -3322,10 +3404,10 @@ def _parameter_bit_cost(value_type: str, network_synced: bool | None, explicit_b
 
 
 def _parameter_flags(name: str, value_type: str) -> list[str]:
-    lower = name.lower()
     flags = []
-    if any(token in lower for token in ("osc", "face", "tracking", "vrcft", "eye")):
+    if _is_osc_or_face_tracking_parameter(name):
         flags.append("OSC/face tracking risk")
+    lower = name.lower()
     if any(token in lower for token in ("puppet", "axis", "joystick", "radial")):
         flags.append("puppet risk")
     if value_type == "Float":
@@ -3380,7 +3462,7 @@ def _classify_parameter_compressibility(
     value_type = str(parameter.get("type") or "unknown")
     usage = usage_map.get(name) or {}
     key = re.sub(r"[^a-z0-9]+", "", lower)
-    if any(token in lower for token in ("osc", "face", "tracking", "vrcft", "eye")):
+    if _is_osc_or_face_tracking_parameter(name):
         return "danger_osc_or_face_tracking", "OSC, face tracking, and eye tracking parameters are excluded from automatic compression."
     if any(token in lower for token in ("puppet", "axis", "joystick", "radial")) or "puppet" in " ".join(usage.get("menuControlTypes") or []).lower():
         return "danger_puppet", "Puppet and axis-style controls can be continuous behavior and are excluded."
@@ -3397,6 +3479,21 @@ def _classify_parameter_compressibility(
     if value_type == "Int" and menu_counts.get(name, 0) > 1:
         return "safe_to_int_exclusive", "Int parameter with multiple menu controls may already represent an exclusive group."
     return "unknown_do_not_touch", "Insufficient evidence for safe compression."
+
+
+def _is_osc_or_face_tracking_parameter(name: str) -> bool:
+    lower = str(name or "").strip().lower()
+    if lower.startswith(("ft/", "osc/", "vrcft/")):
+        return True
+    if lower in {
+        "eyetrackingactive",
+        "liptrackingactive",
+        "eyedilationenable",
+        "visemesenable",
+        "facialexpressionsdisabled",
+    }:
+        return True
+    return any(token in lower for token in ("osc", "face", "tracking", "vrcft", "eye"))
 
 
 def _normalize_key(value: str) -> str:

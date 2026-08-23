@@ -215,6 +215,30 @@ def test_main_window_close_hides_to_tray_while_explicit_quit_stops_backend() -> 
     assert "thread::sleep" not in quit_commands
 
 
+def test_main_window_restore_clears_native_minimized_state_before_showing() -> None:
+    source = _read("src-tauri/src/main.rs")
+    helper_start = source.index("fn restore_main_window")
+    helper_end = source.index("fn show_main_window", helper_start)
+    helper = source[helper_start:helper_end]
+
+    assert "window.is_minimized().unwrap_or(false)" in helper
+    assert helper.index("window.unminimize()") < helper.index("window.show()")
+    assert helper.index("window.show()") < helper.index("window.set_focus()")
+
+    setup_start = source.index(".setup(|app|")
+    setup_end = source.index(".invoke_handler(", setup_start)
+    setup = source[setup_start:setup_end]
+    assert 'app.get_webview_window("main")' in setup
+    assert "restore_main_window(&window)" in setup
+
+    show_start = source.index("fn show_main_window", helper_end)
+    show_end = source.index("/// Acknowledge an app-local Quit request", show_start)
+    show = source[show_start:show_end]
+    assert "restore_main_window(&window)" in show
+    assert "window.show()" not in show
+    assert "window.set_focus()" not in show
+
+
 def test_startup_paints_neutral_shell_without_showing_a_separate_startup_page() -> None:
     index_source = _read("index.html")
     main_source = _read("src/main.tsx")
@@ -423,3 +447,18 @@ def test_i18n_fallback_and_selected_locale_load_in_parallel() -> None:
     assert "const fallbackPromise = loadLocaleMessages(DEFAULT_LOCALE);" in source
     assert "const initialPromise = initialLocale === DEFAULT_LOCALE" in source
     assert "Promise.all([fallbackPromise, initialPromise])" in source
+
+
+def test_desktop_shell_uses_an_app_native_text_edit_context_menu() -> None:
+    app = _read("src/App.tsx")
+    menu = _read("src/components/common/text-edit-context-menu.tsx")
+
+    assert 'window.addEventListener("contextmenu", handler)' not in app
+    assert "<TextEditContextMenu />" in app
+    assert 'window.addEventListener("contextmenu", openMenu)' in menu
+    assert "HTMLInputElement" in menu
+    assert "HTMLTextAreaElement" in menu
+    assert 't("contextMenu.cut")' in menu
+    assert 't("contextMenu.copy")' in menu
+    assert 't("contextMenu.paste")' in menu
+    assert 't("contextMenu.selectAll")' in menu

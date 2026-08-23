@@ -7,6 +7,7 @@ using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.Profiling;
 using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
@@ -140,10 +141,13 @@ namespace VRCForge.Editor
                             mesh_name = meshName,
                             slot_index = slotIndex,
                             material_name = materialName,
+                            material_asset_path = AssetDatabase.GetAssetPath(material) ?? "",
+                            material_asset_guid = AssetDatabase.AssetPathToGUID(AssetDatabase.GetAssetPath(material) ?? ""),
                             shader_name = shaderName,
                             shader_family = shaderFamily,
                             category = category,
                             shared_material_key = $"{materialName}|{shaderName}",
+                            textures = ReadTextureDependencies(material),
                             supported_properties = adapter != null
                                 ? adapter.ReadSupportedProperties(material)
                                 : new Dictionary<string, MaterialPropertyValue>()
@@ -189,6 +193,41 @@ namespace VRCForge.Editor
                     unsupportedCount = materials.Count(item => item.shader_family == "Unsupported")
                 }
             };
+        }
+
+        private static List<MaterialTextureDependency> ReadTextureDependencies(Material material)
+        {
+            if (material == null)
+            {
+                return new List<MaterialTextureDependency>();
+            }
+
+            return material.GetTexturePropertyNames()
+                .OrderBy(propertyName => propertyName, StringComparer.Ordinal)
+                .Select(propertyName => new { propertyName, texture = material.GetTexture(propertyName) })
+                .Where(item => item.texture != null)
+                .Select(item =>
+                {
+                    var assetPath = AssetDatabase.GetAssetPath(item.texture) ?? "";
+                    var importer = string.IsNullOrWhiteSpace(assetPath)
+                        ? null
+                        : AssetImporter.GetAtPath(assetPath) as TextureImporter;
+                    return new MaterialTextureDependency
+                    {
+                        propertyName = item.propertyName,
+                        textureName = item.texture.name ?? "",
+                        assetPath = assetPath,
+                        assetGuid = string.IsNullOrWhiteSpace(assetPath)
+                            ? ""
+                            : AssetDatabase.AssetPathToGUID(assetPath),
+                        width = item.texture.width,
+                        height = item.texture.height,
+                        bytes = Profiler.GetRuntimeMemorySizeLong(item.texture),
+                        importerType = importer != null ? importer.textureType.ToString() : "",
+                        importerMaxTextureSize = importer != null ? importer.maxTextureSize : 0
+                    };
+                })
+                .ToList();
         }
 
         private static string WritePayload(string requestedPath, MaterialInventoryPayload payload, bool refreshAssets)
@@ -428,11 +467,28 @@ namespace VRCForge.Editor
         public int slot_index;
         public string material_name;
         public bool material_id_ambiguous;
+        public string material_asset_path;
+        public string material_asset_guid;
         public string shader_name;
         public string shader_family;
         public string category;
         public string shared_material_key;
+        public List<MaterialTextureDependency> textures;
         public Dictionary<string, MaterialPropertyValue> supported_properties;
+    }
+
+    [Serializable]
+    public class MaterialTextureDependency
+    {
+        public string propertyName;
+        public string textureName;
+        public string assetPath;
+        public string assetGuid;
+        public int width;
+        public int height;
+        public long bytes;
+        public string importerType;
+        public int importerMaxTextureSize;
     }
 
     [Serializable]

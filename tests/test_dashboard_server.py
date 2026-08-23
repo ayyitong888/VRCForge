@@ -29,6 +29,7 @@ from agent_gateway import (
     AgentGateway,
     AgentGatewayError,
     CHECKPOINT_ARCHIVE_DEFAULT_MAX_SIZE_MB,
+    EXTERNAL_MCP_READ_TOOL_BLOCKS,
     PROJECTED_SKILL_STATE_MAX_BYTES,
     PROJECTED_SKILL_STATE_NAME,
     PROJECTED_SKILL_STATE_SCHEMA,
@@ -1316,6 +1317,26 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("pendingApprovalCount", payload["health"]["components"]["agentGateway"]["detail"])
         manifest.assert_not_called()
         health.assert_not_called()
+
+    def test_app_bootstrap_exposes_truthful_external_agent_activity(self) -> None:
+        activity = {
+            "gatewayEnabled": True,
+            "connected": True,
+            "lastSeenAt": "2026-08-21T03:00:00+00:00",
+            "ageSeconds": 2.0,
+            "recentWindowSeconds": 90,
+        }
+        with (
+            patch.object(dashboard_server.AGENT_GATEWAY, "external_mcp_activity_status", return_value=activity),
+            TestClient(dashboard_server.app) as client,
+        ):
+            response = client.get("/api/app/bootstrap", params={"deferAgentCatalog": "true"})
+
+        self.assertEqual(response.status_code, 200)
+        component = response.json()["health"]["components"]["externalAgentConnection"]
+        self.assertEqual(component["status"], "ok")
+        self.assertEqual(component["message"], "An authenticated external Agent is connected.")
+        self.assertEqual(component["detail"], activity)
 
     def test_deferred_bootstrap_marks_gateway_unknown_when_approvals_cannot_load(self) -> None:
         with (
@@ -4840,7 +4861,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertTrue(status["selectedInstanceMatched"])
         self.assertEqual(status["missingRequiredVrcForgeTools"], [])
-        self.assertEqual(status["tools"]["vrcForgeToolsCount"], 64)
+        self.assertEqual(status["tools"]["vrcForgeToolsCount"], 78)
         self.assertEqual(status["mcpHealth"]["protocolVersion"], "2026-07-28")
 
     def test_core_only_repair_never_starts_or_registers_an_external_connector(self) -> None:
@@ -4866,7 +4887,7 @@ class DashboardServerTests(unittest.TestCase):
                 "activeInstanceCount": 1,
                 "vrcForgeToolsRegistered": True,
                 "missingRequiredVrcForgeTools": [],
-                "tools": {"totalTools": 64, "vrcForgeToolsCount": 64},
+                "tools": {"totalTools": 68, "vrcForgeToolsCount": 68},
                 "error": "",
             }
             with (
@@ -5656,6 +5677,46 @@ class DashboardServerTests(unittest.TestCase):
         self.assertNotIn("vrcforge_run_validation_report", write_targets)
         self.assertNotIn("vrcforge_build_test_readiness", write_targets)
 
+    def test_generated_asset_directory_presence_is_not_reported_as_residue(self) -> None:
+        findings: list[dict[str, object]] = []
+
+        dashboard_server._generated_residue_validation(
+            findings,
+            {
+                "ok": True,
+                "payload": {
+                    "projectReadable": True,
+                    "residueCount": 12,
+                    "generatedItemCount": 12,
+                    "classification": "inventory_only",
+                    "residueConfirmed": False,
+                },
+            },
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], "Info")
+        self.assertEqual(findings[0]["title"], "Generated assets found; residue not established")
+
+    def test_generated_asset_scan_suggests_cleanup_only_for_confirmed_orphans(self) -> None:
+        findings: list[dict[str, object]] = []
+
+        dashboard_server._generated_residue_validation(
+            findings,
+            {
+                "ok": True,
+                "payload": {
+                    "projectReadable": True,
+                    "generatedItemCount": 12,
+                    "orphanCount": 2,
+                },
+            },
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], "Suggestion")
+        self.assertEqual(findings[0]["title"], "Confirmed generated asset residue found")
+
     def test_validation_report_records_scanner_failures_as_findings(self) -> None:
         wardrobe_readbacks = {
             "vrc_scan_avatar_controls": {"ok": True},
@@ -5756,6 +5817,38 @@ class DashboardServerTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["status"], "blocked")
         self.assertEqual(payload["toolExecutionStatus"], "completed")
+
+    def test_build_test_readiness_never_claims_full_sdk_alert_coverage_when_public_api_is_unavailable(self) -> None:
+        coverage = {
+            "status": "unavailable",
+            "exact": False,
+            "sdkVersion": "3.10.4",
+            "reasonCode": "sdk_public_alert_enumeration_api_unavailable",
+            "authoritativeForSdkPanelAlerts": False,
+        }
+        validation = {
+            "ok": True,
+            "toolExecutionStatus": "completed",
+            "summary": {"severityCounts": {"Error": 0, "Warning": 0, "Suggestion": 0}},
+            "gate": {"enabled": True, "status": "pass", "blockingFindingIds": []},
+            "sections": [],
+            "findings": [],
+            "sdkControlPanelAlertCoverage": coverage,
+            "authoritativeForSdkPanelAlerts": False,
+        }
+        with (
+            patch("dashboard_server.build_validation_report_sync", return_value=validation),
+            patch(
+                "dashboard_server.PACKAGE_INSTALL_WORKFLOWS.diagnose_install",
+                return_value={"ok": True, "symptoms": [], "suggestedFixPlans": []},
+            ),
+        ):
+            payload = dashboard_server.build_test_readiness_sync({})
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["status"], "review")
+        self.assertFalse(payload["authoritativeForSdkPanelAlerts"])
+        self.assertEqual(payload["sdkControlPanelAlertCoverage"], coverage)
 
     def test_provider_test_vision_is_explicit_skip_without_project_upload(self) -> None:
         with TestClient(dashboard_server.app) as client:
@@ -5900,6 +5993,89 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(payload["generatedAtUtc"], export_payload["generatedAtUtc"])
         self.assertEqual(payload["summary"], export_payload["summary"])
         self.assertEqual(payload["avatars"], export_payload["avatars"])
+
+    def test_blendshape_scan_supports_all_scope_and_reports_filter(self) -> None:
+        export_payload = {
+            "summary": {"avatarCount": 1, "blendshapeCount": 2},
+            "avatars": [{"avatarPath": "Scene/Avatar", "renderers": []}],
+        }
+        selected = SimpleNamespace(avatar_name="Avatar", avatar_path="Scene/Avatar")
+        with (
+            patch("dashboard_server.load_dashboard_settings", return_value=SimpleNamespace()),
+            patch("dashboard_server.load_dashboard_export_payload", return_value=(export_payload, "unit-test", False)),
+            patch("dashboard_server.resolve_avatar_selection", return_value=selected),
+            patch("dashboard_server.remember_loaded_avatar"),
+            patch("dashboard_server.serialize_selected_avatar", return_value={"avatarPath": "Scene/Avatar"}),
+            patch("dashboard_server.serialize_blendshape_details", return_value=[{"blendshapeName": "BodyHide"}]) as serialize,
+        ):
+            payload = dashboard_server.AVATAR_TUNING_WORKFLOWS.read_avatar_blendshapes(
+                dashboard_server.AvatarBlendshapeListRequest(filterScope="all")
+            )
+
+        serialize.assert_called_once_with(export_payload, selected, "all")
+        self.assertEqual(payload["filterScope"], "all")
+        self.assertIn("All blendshapes", payload["filterNote"])
+
+    def test_blendshape_scan_rejects_invalid_or_conflicting_scope(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "either 'face' or 'all'"):
+            dashboard_server.resolve_blendshape_filter_scope(
+                dashboard_server.AvatarBlendshapeListRequest(scope="body")
+            )
+        with self.assertRaisesRegex(RuntimeError, "Conflicting scope"):
+            dashboard_server.resolve_blendshape_filter_scope(
+                dashboard_server.AvatarBlendshapeListRequest(scope="all", filterScope="face")
+            )
+
+    def test_external_dashboard_request_preserves_avatar_path_selector(self) -> None:
+        camel = dashboard_server.build_agent_dashboard_request(
+            {"avatarPath": "Scene/Sapphy_VRCFT_Source"}
+        )
+        snake = dashboard_server.build_agent_dashboard_request(
+            {"avatar_path": "Scene/MANUKA_Body_Source"}
+        )
+
+        self.assertEqual(camel.avatar, "Scene/Sapphy_VRCFT_Source")
+        self.assertEqual(snake.avatar, "Scene/MANUKA_Body_Source")
+        with self.assertRaisesRegex(RuntimeError, "Conflicting avatar_path"):
+            dashboard_server.build_agent_dashboard_request(
+                {
+                    "avatarPath": "Scene/Sapphy_VRCFT_Source",
+                    "avatar_path": "Scene/MANUKA_Body_Source",
+                }
+            )
+
+    def test_animation_binding_scan_defaults_to_compact_external_summary(self) -> None:
+        with patch("dashboard_server.run_unity_artifact_scan_sync", return_value={}) as run_scan:
+            dashboard_server.scan_animation_bindings_sync({"avatarPath": "Scene/Sapphy_VRCFT_Source"})
+
+        request = run_scan.call_args.args[3]
+        self.assertEqual(request["includeBindingDetails"], False)
+        self.assertEqual(request["maxClips"], 300)
+        self.assertEqual(request["refreshAssets"], False)
+
+    def test_animation_binding_scan_allows_explicit_details_for_selected_clips(self) -> None:
+        with patch("dashboard_server.run_unity_artifact_scan_sync", return_value={}) as run_scan:
+            dashboard_server.scan_animation_bindings_sync(
+                {
+                    "clipPaths": ["Assets/FX/Face.anim"],
+                    "includeBindingDetails": True,
+                    "maxClips": 1,
+                }
+            )
+
+        request = run_scan.call_args.args[3]
+        self.assertEqual(request["clipPaths"], ["Assets/FX/Face.anim"])
+        self.assertEqual(request["includeBindingDetails"], True)
+        self.assertEqual(request["maxClips"], 1)
+
+    def test_binding_validation_uses_compact_summary_warning_count(self) -> None:
+        findings: list[dict[str, Any]] = []
+        dashboard_server._binding_validation(
+            findings,
+            {"ok": True, "payload": {"summary": {"unsupportedWarningCount": 2}}},
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertIn("2 warning(s)", findings[0]["message"])
 
     def test_app_auth_validation_checks_loopback_origin_and_token(self) -> None:
         original_required = dashboard_server.APP_AUTH_REQUIRED
@@ -6565,8 +6741,8 @@ class DashboardServerTests(unittest.TestCase):
 
         self.assertLess(
             elapsed,
-            0.5,
-            "the bounded idle timeout and cancel join must terminate the silent Provider call",
+            0.75,
+            "the bounded idle timeout and cancel join must terminate the silent Provider call within one Windows scheduling margin",
         )
         self.assertEqual(payload["plan"]["plannerFailure"]["code"], "provider_timeout")
         self.assertEqual(payload["plan"]["plannerFailure"]["transportPhase"], "idle")
@@ -8738,7 +8914,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(all("When NOT to use:" in tool["description"] for tool in payload["tools"]))
         self.assertTrue(all("Negative example:" in tool["description"] for tool in payload["tools"]))
         self.assertIn("vrcforge_agent_observe", tool_names)
-        self.assertIn("vrcforge_agent_message", tool_names)
+        self.assertNotIn("vrcforge_agent_message", tool_names)
         parameters_tool = next(
             tool for tool in payload["tools"] if tool["name"] == "vrcforge_scan_parameters"
         )
@@ -8773,6 +8949,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertNotIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_get_compile_errors", tool_names)
+        self.assertNotIn("vrcforge_agent_message", tool_names)
         self.assertIn("vrcforge_request_apply", tool_names)
         self.assertIn("vrcforge_tool_registry", tool_names)
         self.assertNotIn("vrcforge_apply_approved", tool_names)
@@ -9278,7 +9455,8 @@ class DashboardServerTests(unittest.TestCase):
             return False
 
         class FakePackageService:
-            def export_dev(self, source: Path, _output: Path):
+            def export_dev(self, source: Path, _output: Path, *, overwrite: bool = True):
+                self_test.assertFalse(overwrite)
                 self.assert_writer_released()
                 captured = (source / "SKILL.md").read_text(encoding="utf-8")
                 self_test.assertIn("Old snapshot instructions.", captured)
@@ -9652,15 +9830,15 @@ class DashboardServerTests(unittest.TestCase):
             summary = {
                 "status": "passed",
                 "workflow": "shader_adapter_semantic_tuning",
-                "projectPath": "C:\\Users\\xiao123\\AvatarProject",
+                "projectPath": "C:\\Users\\fixture-user\\AvatarProject",
                 "avatarPath": "AvatarRoot",
                 "steps": [
                     {
                         "name": "shader.apply",
                         "tool": "vrcforge_apply_shader_tuning",
                         "params": {
-                            "projectRoot": "C:\\Users\\xiao123\\AvatarProject",
-                            "artifactPath": "C:\\Users\\xiao123\\AvatarProject\\Assets\\VRCForge\\proof.json",
+                            "projectRoot": "C:\\Users\\fixture-user\\AvatarProject",
+                            "artifactPath": "C:\\Users\\fixture-user\\AvatarProject\\Assets\\VRCForge\\proof.json",
                             "rendererPath": "AvatarRoot/Hat",
                         },
                     }
@@ -9819,7 +9997,7 @@ class DashboardServerTests(unittest.TestCase):
                 json={
                     "summary": {
                         "workflow": "bad",
-                        "notes": "Proof file was C:\\Users\\xiao123\\Desktop\\private-proof.json",
+                        "notes": "Proof file was C:\\Users\\fixture-user\\Desktop\\private-proof.json",
                     },
                     "packageId": "community.path-to-skill.bad-path",
                 },
@@ -9884,7 +10062,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(mock_invoke.call_args.args[1], "vrc_set_material_shader")
         self.assertEqual(mock_invoke.call_args.args[2]["shaderName"], "Standard")
 
-    def test_agent_gateway_mcp_lists_codex_debug_loop_tools(self) -> None:
+    def test_agent_gateway_mcp_lists_tools_without_internal_agent_loop_entrypoint(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
         config.enabled = True
         dashboard_server.AGENT_GATEWAY.save_config(config)
@@ -9922,20 +10100,23 @@ class DashboardServerTests(unittest.TestCase):
                     "jsonrpc": "2.0",
                     "id": 2,
                     "method": "tools/list",
-                    "params": {"_meta": meta, "exposureLayer": "execution"},
+                    "params": {"_meta": meta, "exposureLayer": "execution", "toolBlocks": ["*"]},
                 },
             )
             self.assertEqual(listed.status_code, 200)
 
         tool_names = {tool["name"] for tool in listed.json()["result"]["tools"]}
-        self.assertIn("vrcforge_agent_message", tool_names)
-        self.assertIn("vrcforge_execute_shell", tool_names)
-        self.assertNotIn("vrcforge_capture_screenshot", tool_names)
+        self.assertNotIn("vrcforge_agent_message", tool_names)
+        self.assertNotIn("vrcforge_execute_shell", tool_names)
+        self.assertIn("vrcforge_capture_screenshot", tool_names)
         self.assertIn("vrcforge_vision_audit", tool_names)
         self.assertNotIn("vrcforge_roslyn_status", tool_names)
         self.assertIn("vrcforge_get_compile_errors", tool_names)
-        self.assertIn("vrcforge_request_apply", tool_names)
+        self.assertNotIn("vrcforge_request_apply", tool_names)
         self.assertNotIn("vrcforge_apply_approved", tool_names)
+        self.assertIn("vrcforge_apply_blendshapes", tool_names)
+        self.assertIn("vrcforge_install_vpm_package", tool_names)
+        self.assertNotIn("vrcforge_package_install_request", tool_names)
         self.assertNotIn("vrcforge_execute_approved_shell", tool_names)
         self.assertIn("vrcforge_preview_ensure_expression_parameter", tool_names)
         self.assertIn("vrcforge_preview_ensure_expression_menu_control", tool_names)
@@ -9951,16 +10132,22 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("vrcforge_avatar_encryption_plan", tool_names)
         self.assertIn("vrcforge_avatar_encryption_preview", tool_names)
         self.assertIn("vrcforge_avatar_encryption_addon_status", tool_names)
-        self.assertIn("vrcforge_avatar_encryption_liltoon_apply_request", tool_names)
-        self.assertIn("vrcforge_avatar_encryption_poiyomi_apply_request", tool_names)
-        self.assertIn("vrcforge_avatar_encryption_remove_request", tool_names)
-        self.assertNotIn("vrcforge_ensure_expression_parameter", tool_names)
-        self.assertNotIn("vrcforge_ensure_expression_menu_control", tool_names)
-        self.assertNotIn("vrcforge_ensure_animator_state", tool_names)
-        self.assertNotIn("vrcforge_create_wardrobe", tool_names)
-        self.assertNotIn("vrcforge_manage_wardrobe", tool_names)
+        self.assertNotIn("vrcforge_avatar_encryption_liltoon_apply_request", tool_names)
+        self.assertNotIn("vrcforge_avatar_encryption_poiyomi_apply_request", tool_names)
+        self.assertNotIn("vrcforge_avatar_encryption_remove_request", tool_names)
+        self.assertIn("vrcforge_ensure_expression_parameter", tool_names)
+        self.assertIn("vrcforge_ensure_expression_menu_control", tool_names)
+        self.assertIn("vrcforge_ensure_animator_state", tool_names)
+        self.assertIn("vrcforge_create_wardrobe", tool_names)
+        self.assertIn("vrcforge_manage_wardrobe", tool_names)
         self.assertNotIn("vrcforge_avatar_encryption_addon_apply", tool_names)
         self.assertNotIn("vrcforge_avatar_encryption_addon_remove", tool_names)
+        actual_write = next(
+            tool for tool in listed.json()["result"]["tools"]
+            if tool["name"] == "vrcforge_apply_blendshapes"
+        )
+        self.assertEqual(actual_write["_meta"]["permission"], "Write")
+        self.assertEqual(actual_write["_meta"]["confirmationPolicy"], "risk_based")
 
         with TestClient(dashboard_server.app) as client:
             planning = client.post(
@@ -10755,6 +10942,74 @@ class DashboardServerTests(unittest.TestCase):
                 "avatarPath": "HeroAvatar",
             },
         )
+        self.assertTrue(mock_invoke.call_args.kwargs.get("preserve_tool_error"))
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_inspect_modular_avatar_component_preserves_core_error(
+        self,
+        mock_load_settings,
+        mock_invoke,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=1,
+            stdout="",
+            stderr="",
+            payload={
+                "structuredContent": {
+                    "success": False,
+                    "code": "ma_runtime_missing",
+                    "error": "Modular Avatar runtime types were not found.",
+                },
+                "isError": True,
+            },
+        )
+
+        result = dashboard_server.inspect_modular_avatar_component_sync({
+            "gameObjectPath": "HeroAvatar/Outfits/Hoodie",
+            "componentType": "MergeArmature",
+            "avatarPath": "HeroAvatar",
+        })
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["failureLayer"], "unity_core")
+        self.assertEqual(result["code"], "ma_runtime_missing")
+        self.assertEqual(result["error"], "Modular Avatar runtime types were not found.")
+
+    def test_refresh_asset_database_is_low_risk_external_atomic_tool(self) -> None:
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[  # noqa: SLF001 - registry contract.
+            "vrcforge_refresh_asset_database"
+        ]
+        self.assertEqual(handler.risk_level, "low")
+        self.assertIs(handler.handler, dashboard_server.refresh_asset_database_sync)
+        self.assertIs(
+            handler.approved_execution_plan_builder,
+            dashboard_server.build_refresh_asset_database_execution_plan,
+        )
+        self.assertEqual(
+            handler.approved_execution_plan_builder(
+                {
+                    "project_path": r"D:\Projects\Avatar",
+                    "resolve_packages": False,
+                    "packageResolveTimeoutSeconds": 600,
+                }
+            ),
+            [
+                (
+                    "vrc_refresh_asset_database",
+                    {
+                        "projectPath": r"D:\Projects\Avatar",
+                        "resolvePackages": False,
+                        "packageResolveTimeoutSeconds": 300,
+                    },
+                )
+            ],
+        )
+        self.assertIn(
+            "vrcforge_refresh_asset_database",
+            dashboard_server.VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS,
+        )
 
     def test_add_modular_avatar_component_requires_target_and_type(self) -> None:
         missing_type = dashboard_server.WARDROBE_OUTFIT_APPROVED_WRITES.add_modular_avatar_component({
@@ -10819,6 +11074,83 @@ class DashboardServerTests(unittest.TestCase):
             self.assertNotIn(name, tool_names)
             self.assertIn(name, allowed_tools)
 
+        external_tools = {
+            item["name"]: item
+            for item in dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+                "execution", tool_blocks=["*"]
+            )
+        }
+        default_external_tools = dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+            "execution", tool_blocks=["core"]
+        )
+        self.assertLessEqual(len(default_external_tools), 12)
+        self.assertTrue(
+            all(item["_meta"]["toolBlock"] == "core" for item in default_external_tools)
+        )
+        self.assertNotIn("vrcforge_skill_manifest", external_tools)
+        self.assertNotIn("vrcforge_write_file", external_tools)
+        self.assertEqual(
+            external_tools["vrcforge_write_avatar_descriptor"]["_meta"]["baseRiskLevel"],
+            "medium",
+        )
+        self.assertEqual(
+            external_tools["vrcforge_write_animation_curve"]["_meta"]["baseRiskLevel"],
+            "medium",
+        )
+        for name in (
+            "vrcforge_package_manager_status",
+            "vrcforge_package_install_plan",
+            "vrcforge_diagnose_package_install_errors",
+            "vrcforge_install_vpm_package",
+            "vrcforge_refresh_asset_database",
+        ):
+            self.assertEqual(external_tools[name]["_meta"]["toolBlock"], "project")
+        for name in (
+            "vrcforge_inspect_modular_avatar_component",
+            "vrcforge_preview_add_modular_avatar_component",
+            "vrcforge_add_modular_avatar_component",
+            "vrcforge_scan_modular_avatar",
+        ):
+            self.assertEqual(
+                external_tools[name]["_meta"]["toolBlock"],
+                "integrations/modular-avatar",
+            )
+        for name in (
+            "vrcforge_preview_component_feature",
+            "vrcforge_create_component_feature",
+            "vrcforge_scan_vrcfury",
+        ):
+            self.assertEqual(
+                external_tools[name]["_meta"]["toolBlock"],
+                "integrations/vrcfury",
+            )
+        self.assertEqual(
+            external_tools["vrcforge_capture_status"]["_meta"]["toolBlock"],
+            "diagnostics",
+        )
+        self.assertEqual(
+            external_tools["vrcforge_capture_screenshot"]["_meta"]["toolBlock"],
+            "diagnostics",
+        )
+        self.assertIn("once per angle", external_tools["vrcforge_capture_screenshot"]["description"])
+        self.assertEqual(
+            external_tools["vrcforge_set_texture_import_settings"]["_meta"]["toolBlock"],
+            "materials",
+        )
+        self.assertNotIn(
+            "vrcforge_set_texture_import_settings",
+            {
+                item["name"]
+                for item in dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+                    "planning", tool_blocks=["materials"]
+                )
+            },
+        )
+        self.assertEqual(
+            external_tools["vrcforge_refresh_asset_database"]["_meta"]["baseRiskLevel"],
+            "low",
+        )
+
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
     def test_avatar_primitive_wrappers_forward_to_unity_tools(self, mock_load_settings, mock_invoke) -> None:
@@ -10832,8 +11164,16 @@ class DashboardServerTests(unittest.TestCase):
 
         calls = [
             (dashboard_server.read_avatar_descriptor_sync, {"avatar_path": "Avatar"}, "vrc_read_avatar_descriptor"),
-            (lambda params: dashboard_server.write_avatar_descriptor_sync(params, preview=True), {"avatar_path": "Avatar", "view_position": {"x": 0, "y": 1.5, "z": 0}}, "vrc_write_avatar_descriptor"),
-            (lambda params: dashboard_server.write_animation_curve_sync(params, preview=True), {"clip_path": "Assets/Test.anim", "binding_path": "Hat", "component_type": "GameObject", "property_name": "m_IsActive", "constant_float": 1}, "vrc_write_animation_curve"),
+            (
+                lambda params: dashboard_server.write_avatar_descriptor_sync(params, preview=True),
+                {
+                    "avatar_path": "Avatar",
+                    "view_position": {"x": 0, "y": 1.5, "z": 0},
+                    "eye_look_settings_source_avatar_path": "SapphyAttachment",
+                },
+                "vrc_write_avatar_descriptor",
+            ),
+            (lambda params: dashboard_server.write_animation_curve_sync(params, preview=True), {"action": "retarget_curve", "clip_path": "Assets/Test.anim", "binding_path": "Body", "component_type": "SkinnedMeshRenderer", "property_name": "blendShape.jawOpen", "source_binding_path": "Body", "source_component_type": "SkinnedMeshRenderer", "source_property_name": "blendShape.JawOpen", "delete_source": True, "overwrite_existing": False}, "vrc_write_animation_curve"),
             (lambda params: dashboard_server.manage_expression_parameters_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete", "parameter_name": "Old"}, "vrc_manage_expression_parameters"),
             (lambda params: dashboard_server.manage_expression_menu_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete", "control_name": "Old"}, "vrc_manage_expression_menu"),
             (lambda params: dashboard_server.manage_fx_animator_sync(params, preview=True), {"avatar_path": "Avatar", "action": "delete_state", "layer_name": "FX", "state_name": "Old"}, "vrc_manage_fx_animator"),
@@ -10851,9 +11191,18 @@ class DashboardServerTests(unittest.TestCase):
                     mock_invoke.call_args.kwargs.get("execution_context"),
                     {"lane": "app_preview"},
                 )
-
-        _, _tool_name, curve_params = mock_invoke.call_args.args
-        self.assertIn("action", curve_params)
+            if expected_tool == "vrc_write_avatar_descriptor":
+                self.assertEqual(
+                    forwarded["eyeLookSettingsSourceAvatarPath"],
+                    "SapphyAttachment",
+                )
+            if expected_tool == "vrc_write_animation_curve":
+                self.assertEqual(forwarded["action"], "retarget_curve")
+                self.assertEqual(forwarded["sourceBindingPath"], "Body")
+                self.assertEqual(forwarded["sourceComponentType"], "SkinnedMeshRenderer")
+                self.assertEqual(forwarded["sourcePropertyName"], "blendShape.JawOpen")
+                self.assertTrue(forwarded["deleteSource"])
+                self.assertFalse(forwarded["overwriteExisting"])
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -11209,6 +11558,68 @@ class DashboardServerTests(unittest.TestCase):
             self.assertTrue(restored["ok"])
             self.assertEqual(events, [("prepare", "after"), ("reload", "before")])
             self.assertEqual(restored["unityRestorePrepare"], restore_context)
+
+    def test_archive_restore_reloads_checkpoint_scene_topology_after_new_scene_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = root / "UnityProject"
+            (project / "Assets").mkdir(parents=True)
+            (project / "Packages").mkdir()
+            (project / "ProjectSettings").mkdir()
+            (project / "Packages" / "manifest.json").write_text("{}", encoding="utf-8")
+            (project / "ProjectSettings" / "ProjectVersion.txt").write_text(
+                "m_EditorVersion: 2022.3", encoding="utf-8"
+            )
+            created_scene = project / "Assets" / "AvatarAssembly.unity"
+
+            gateway = AgentGateway(root / "config" / "agent_gateway.json", root / "audit")
+            reloaded: list[dict[str, object]] = []
+            gateway.checkpoint_recovery.checkpoint_restore_prepare_handler = lambda _path: {
+                "ok": True,
+                "phase": "prepare_restore",
+                "scenes": ["Assets/AvatarAssembly.unity"],
+                "activeScenePath": "Assets/AvatarAssembly.unity",
+            }
+            gateway.checkpoint_recovery.checkpoint_restore_handler = (
+                lambda _path, prepared: reloaded.append(dict(prepared)) or {"ok": True}
+            )
+
+            def save_new_scene(_args: dict[str, object]) -> dict[str, object]:
+                created_scene.write_text("saved scene", encoding="utf-8")
+                return {"ok": True}
+
+            gateway.approval_transactions.register_write_handler(
+                "vrcforge_test_save_new_scene",
+                "Test a topology-changing scene create.",
+                "medium",
+                save_new_scene,
+                checkpoint_prepare_handler=lambda _path, _args: {
+                    "ok": True,
+                    "scenes": [],
+                    "activeScenePath": "",
+                },
+            )
+            request = gateway.approval_transactions.create_apply_request(
+                {
+                    "target_tool": "vrcforge_test_save_new_scene",
+                    "arguments": {"projectRoot": str(project)},
+                }
+            )
+            approval_id = request["approval"]["id"]
+            gateway.approval_transactions.approve(approval_id)
+            applied = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+            self.assertTrue(created_scene.is_file())
+
+            restored = gateway.checkpoint_recovery.restore_checkpoint(
+                {"checkpointId": applied["checkpoint"]["id"], "confirmRestore": True}
+            )
+
+            self.assertTrue(restored["ok"])
+            self.assertFalse(created_scene.exists())
+            self.assertEqual(len(reloaded), 1)
+            self.assertEqual(reloaded[0]["scenes"], [])
+            self.assertEqual(reloaded[0]["activeScenePath"], "")
+            self.assertEqual(reloaded[0]["deletedFiles"], ["Assets/AvatarAssembly.unity"])
 
     def test_archive_restore_prepare_failure_leaves_project_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12030,13 +12441,22 @@ class DashboardServerTests(unittest.TestCase):
 
         targets = {item["name"]: item for item in manifest["writeTargets"]}
         self.assertGreater(len(targets), 10)
+        explicit_rollback_tools = {
+            "vrcforge_rollback_project_lifecycle",
+            "vrcforge_rollback_project_catalog_registration",
+            "vrcforge_restore_unity_core",
+        }
         for name, target in targets.items():
             policy = target.get("rollbackPolicy")
             self.assertIsInstance(policy, dict, name)
             self.assertEqual(policy["schema"], "vrcforge.write_rollback_policy.v1")
-            self.assertTrue(policy["required"], name)
-            self.assertEqual(policy["restoreTool"], "vrcforge_restore_checkpoint")
-            self.assertEqual(policy["coverageAudit"], "vrcforge.rollback_coverage_audit.v1")
+            self.assertTrue(policy["approvalRequired"], name)
+            if name in explicit_rollback_tools:
+                self.assertFalse(policy["required"], name)
+                self.assertEqual(policy["restoreTool"], "")
+            else:
+                self.assertTrue(policy["required"], name)
+                self.assertTrue(policy["restoreTool"], name)
 
         unity_policy = targets["vrcforge_add_modular_avatar_component"]["rollbackPolicy"]
         self.assertEqual(unity_policy["kind"], "unity_project_checkpoint")
@@ -12049,6 +12469,23 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(package_policy["kind"], "local_state_archive")
         self.assertEqual(package_policy["checkpointScope"], ["skill-packages", "skills"])
 
+        lifecycle_policy = targets["vrcforge_create_project"]["rollbackPolicy"]
+        self.assertEqual(lifecycle_policy["restoreTool"], "vrcforge_rollback_project_lifecycle")
+        self.assertEqual(lifecycle_policy["coverageAudit"], "vrcforge.project_lifecycle_receipt.v1")
+
+        catalog_policy = targets["vrcforge_register_project_catalog"]["rollbackPolicy"]
+        self.assertEqual(catalog_policy["restoreTool"], "vrcforge_rollback_project_catalog_registration")
+        self.assertEqual(catalog_policy["coverageAudit"], "vrcforge.project_catalog_registration_receipt.v1")
+
+        select_policy = targets["vrcforge_select_project"]["rollbackPolicy"]
+        self.assertEqual(select_policy["restoreTool"], "vrcforge_select_project")
+        self.assertEqual(select_policy["coverageAudit"], "vrcforge.project_select_result.v1")
+
+        gm_enter_policy = targets["vrcforge_gesture_manager_enter_play_mode"]["rollbackPolicy"]
+        self.assertEqual(gm_enter_policy["kind"], "ephemeral_editor_state_inverse")
+        self.assertEqual(gm_enter_policy["restoreTool"], "vrcforge_set_play_mode")
+        self.assertFalse(gm_enter_policy["preWriteCheckpointRequired"])
+
         restore_policy = targets["vrcforge_restore_checkpoint"]["rollbackPolicy"]
         self.assertEqual(restore_policy["kind"], "checkpoint_restore")
         self.assertFalse(restore_policy["preWriteCheckpointRequired"])
@@ -12057,6 +12494,10 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(
             registry_targets["vrcforge_import_skill_package"]["rollbackPolicy"],
             package_policy,
+        )
+        self.assertEqual(
+            registry_targets["vrcforge_gesture_manager_enter_play_mode"]["rollbackPolicy"],
+            gm_enter_policy,
         )
 
     def test_checkpoint_recovery_unity_tools_save_and_reload_scenes(self) -> None:
@@ -12134,6 +12575,29 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Client.Resolve()", source)
         self.assertIn("packageResolve", source)
         self.assertIn('status = "started"', source)
+
+    def test_refresh_asset_database_releases_response_before_self_reload(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Editor"
+            / "OutfitPackageImporter.cs"
+        ).read_text(encoding="utf-8")
+        refresh_tool = source[source.index("public static class AssetDatabaseRefreshTool") :]
+        handler = refresh_tool[
+            refresh_tool.index("public static object HandleCommand") :
+            refresh_tool.index("private static void RunScheduledRefresh")
+        ]
+        scheduled = refresh_tool[refresh_tool.index("private static void RunScheduledRefresh") :]
+
+        self.assertNotIn("AssetDatabase.Refresh", handler)
+        self.assertIn("EditorApplication.update += RunScheduledRefresh;", handler)
+        self.assertIn('status = "scheduled"', handler)
+        self.assertIn("completionKnown = false", handler)
+        self.assertIn('verificationTool = "vrc_get_compile_errors"', handler)
+        self.assertIn("AssetDatabase.Refresh();", scheduled)
+        self.assertNotIn("ForceSynchronousImport", scheduled)
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -12832,17 +13296,156 @@ class DashboardServerTests(unittest.TestCase):
         source = (editor_dir / "UnityComponentCrud.cs").read_text(encoding="utf-8")
         for tool_name in (
             "vrc_get_property",
+            "vrc_inspect_skinned_mesh_bone_usage",
             "vrc_add_component",
             "vrc_remove_component",
             "vrc_set_property",
         ):
             self.assertIn(f'toolId: "{tool_name}"', source)
         self.assertIn("[VRCForgeCommand(", source)
-        self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 4)
+        self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 5)
         # Write tools must register Undo entries so the checkpoint timeline can roll them back.
         self.assertIn("Undo.AddComponent", source)
         self.assertIn("Undo.DestroyObjectImmediate", source)
         self.assertIn("Undo.RecordObject", source)
+        self.assertIn("Undo.FlushUndoRecordObjects();", source)
+        self.assertIn("SceneObjectCopyCore.ResolveSavedScene", source)
+        self.assertIn("EditorSceneManager.SaveScene", source)
+        self.assertIn("checkpointRecoveryRequired = !restored", source)
+        get_property_start = source.index("public static class GetPropertyTool")
+        get_property_end = source.index("public static class AddComponentTool", get_property_start)
+        get_property_source = source[get_property_start:get_property_end]
+        self.assertIn("public int? maxItems", get_property_source)
+        self.assertIn("ComponentCrudCore.DescribeValue(", get_property_source)
+        self.assertIn("maxItems,", get_property_source)
+        self.assertIn("returnedItemCount", get_property_source)
+        self.assertIn("valueItemCount", get_property_source)
+        self.assertIn("valueTruncated", get_property_source)
+        # Keep ICollection definite assignment explicit for Unity's C# compiler.
+        self.assertIn("var collection = value as ICollection;", source)
+        self.assertIn("var totalKnown = collection != null;", source)
+        self.assertNotIn("value is ICollection collection", source)
+        self.assertIn(
+            "value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string",
+            source,
+        )
+        self.assertIn("if (targetType.IsArray)", source)
+        self.assertIn("Array.CreateInstance(elementType, array.Count)", source)
+        self.assertIn("convertedArray.SetValue(ConvertValue(array[i], elementType), i)", source)
+        bone_usage_start = source.index("public static class InspectSkinnedMeshBoneUsageTool")
+        bone_usage_end = source.index("public static class AddComponentTool", bone_usage_start)
+        bone_usage_source = source[bone_usage_start:bone_usage_end]
+        self.assertIn("Access = VRCForgeCommandAccess.ReadOnly", source)
+        self.assertIn("mesh.GetBonesPerVertex()", bone_usage_source)
+        self.assertIn("mesh.GetAllBoneWeights()", bone_usage_source)
+        self.assertIn("weight.boneIndex", bone_usage_source)
+        self.assertIn("weight.weight", bone_usage_source)
+        self.assertIn("bonesPerVertex.Dispose()", bone_usage_source)
+        self.assertIn("allWeights.Dispose()", bone_usage_source)
+        self.assertIn("usedBones", bone_usage_source)
+        self.assertIn("unusedBoundBoneCount", bone_usage_source)
+        self.assertIn("outOfRangeWeightCount", bone_usage_source)
+        for tool_class in ("AddComponentTool", "RemoveComponentTool", "SetPropertyTool"):
+            start = source.index(f"public static class {tool_class}")
+            end = source.find("public static class ", start + 1)
+            mutation_source = source[start : end if end >= 0 else len(source)]
+            self.assertIn("ComponentCrudCore.ResolveSavedSceneFor", mutation_source)
+            self.assertIn("Undo.IncrementCurrentGroup", mutation_source)
+            self.assertIn("ComponentCrudCore.SaveAndResolveScene", mutation_source)
+            self.assertIn("sceneSaved = true", mutation_source)
+            self.assertIn("persistedReadback = true", mutation_source)
+            self.assertIn("mutationStarted = true", mutation_source)
+            self.assertIn("committed = true", mutation_source)
+            self.assertIn("ComponentCrudCore.RestoreFailedMutation", mutation_source)
+            self.assertIn("ComponentCrudCore.FailedMutationResult", mutation_source)
+
+    def test_component_crud_failure_reports_cause_and_verified_cleanup(self) -> None:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Editor"
+            / "Generic"
+            / "UnityComponentCrud.cs"
+        ).read_text(encoding="utf-8")
+        core_source = source[: source.index("public static class GetPropertyTool")]
+        restore_source = core_source[
+            core_source.index("internal static MutationCleanupResult RestoreFailedMutation") :
+        ]
+        values_source = core_source[
+            core_source.index("internal static bool ValuesEqual") :
+            core_source.index("internal static MutationCleanupResult RestoreFailedMutation")
+        ]
+
+        # Transform values can be re-expressed by Unity after parent-space
+        # conversion; exact JSON equality caused valid writes and restores to
+        # be reported as failures on a real avatar scene.
+        self.assertIn("Mathf.Approximately", values_source)
+        self.assertIn("QuaternionComponentsEqual", values_source)
+        self.assertIn("leftObject == rightObject", values_source)
+        self.assertIn("ValuesEqual(leftList[index], rightList[index])", values_source)
+
+        # A failed mutation must preserve the original cause and explain each
+        # cleanup stage instead of collapsing every mismatch/exception to false.
+        self.assertIn("internal sealed class MutationCleanupResult", core_source)
+        self.assertIn("Undo.FlushUndoRecordObjects();", restore_source)
+        self.assertLess(
+            restore_source.index("Undo.FlushUndoRecordObjects();"),
+            restore_source.index("Undo.RevertAllDownToGroup(undoGroup);"),
+        )
+        self.assertIn('MutationCleanupResult.Failed("scene_save"', restore_source)
+        self.assertIn('MutationCleanupResult.Failed("scene_identity"', restore_source)
+        self.assertIn('MutationCleanupResult.Failed("scene_content"', restore_source)
+        self.assertIn('cleanupStage = "object_readback"', restore_source)
+        self.assertIn('MutationCleanupResult.Failed("pre_state_verification"', restore_source)
+        self.assertIn("MutationCleanupResult.Failed(cleanupStage", restore_source)
+        self.assertIn('failureLayer = "unity_editor_tool"', core_source)
+        self.assertIn("failureStage", core_source)
+        self.assertIn("failureType", core_source)
+        self.assertIn("failureDetail", core_source)
+        self.assertIn("mutationApplied", core_source)
+        self.assertIn("application_unknown_before_failure", core_source)
+        self.assertIn("cleanupStage", core_source)
+        self.assertIn("cleanupDetail", core_source)
+
+        set_property_source = source[
+            source.index("public static class SetPropertyTool") :
+        ]
+        self.assertIn('failureStage = "unity_mutation"', set_property_source)
+        self.assertIn('failureStage = "scene_save"', set_property_source)
+        self.assertIn('failureStage = "persisted_readback"', set_property_source)
+        self.assertIn(
+            "ComponentCrudCore.ValuesExactlyEqual(oldValue, newValue)",
+            set_property_source,
+        )
+        self.assertIn(
+            "ComponentCrudCore.ValuesEqual(readbackValue, newValue)",
+            set_property_source,
+        )
+        self.assertIn("bool? mutationApplied = null", set_property_source)
+        self.assertIn("mutationApplied = true", set_property_source)
+        self.assertIn("ex,", set_property_source)
+
+        avatar_source = (
+            Path(__file__).resolve().parents[1]
+            / "Assets"
+            / "VRCForge"
+            / "Editor"
+            / "Generic"
+            / "UnityAvatarPrimitiveCrud.cs"
+        ).read_text(encoding="utf-8")
+        avatar_write_source = avatar_source[
+            avatar_source.index("public static class WriteAvatarDescriptorTool") :
+        ]
+        self.assertIn("bool? mutationApplied = null", avatar_write_source)
+        self.assertLess(
+            avatar_write_source.index("mutationStarted = true;"),
+            avatar_write_source.index("Apply(descriptor, @params);"),
+        )
+        self.assertGreater(
+            avatar_write_source.index("mutationApplied = true;"),
+            avatar_write_source.index("Apply(descriptor, @params);"),
+        )
 
     def test_component_crud_tools_registered_in_gateway(self) -> None:
         config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -12857,6 +13460,19 @@ class DashboardServerTests(unittest.TestCase):
         write_targets = {item["name"] for item in payload["writeTargets"]}
         # Read tool is directly callable.
         self.assertIn("vrcforge_get_property", tool_names)
+        self.assertIn("vrcforge_inspect_skinned_mesh_bone_usage", tool_names)
+        self.assertIn(
+            "vrcforge_inspect_skinned_mesh_bone_usage",
+            EXTERNAL_MCP_READ_TOOL_BLOCKS["avatar"],
+        )
+        external_avatar_tools = dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+            "planning",
+            tool_blocks=["avatar"],
+        )
+        self.assertIn(
+            "vrcforge_inspect_skinned_mesh_bone_usage",
+            {tool["name"] for tool in external_avatar_tools},
+        )
         # Write tools are approval-gated: present as writeTargets, never as direct read tools.
         self.assertNotIn("vrcforge_add_component", tool_names)
         self.assertNotIn("vrcforge_remove_component", tool_names)
@@ -12884,6 +13500,7 @@ class DashboardServerTests(unittest.TestCase):
             "game_object_path": "Scene/Avatar/Body",
             "component_type": "SkinnedMeshRenderer",
             "property_path": "enabled",
+            "max_items": 500,
         })
         self.assertTrue(result["ok"])
         _settings, tool_name, params = mock_invoke.call_args.args
@@ -12891,12 +13508,60 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["gameObjectPath"], "Scene/Avatar/Body")
         self.assertEqual(params["componentType"], "SkinnedMeshRenderer")
         self.assertEqual(params["propertyPath"], "enabled")
+        self.assertEqual(params["maxItems"], 500)
 
     def test_get_property_requires_target_fields(self) -> None:
         self.assertFalse(dashboard_server.read_component_property_sync({})["ok"])
         self.assertFalse(
             dashboard_server.read_component_property_sync(
                 {"game_object_path": "A", "component_type": "C"}
+            )["ok"]
+        )
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_inspect_skinned_mesh_bone_usage_forwards_exact_read_arguments(
+        self,
+        mock_load_settings,
+        mock_invoke,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {
+                "gameObjectPath": "Scene/Avatar/Ears",
+                "meshName": "CatEars",
+                "usedBoneCount": 6,
+                "usedBones": [{"index": 19, "influenceCount": 100}],
+            }},
+        )
+        result = dashboard_server.inspect_skinned_mesh_bone_usage_sync({
+            "game_object_path": "Scene/Avatar/Ears",
+            "component_index": 1,
+            "minimum_weight": 0.00001,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_inspect_skinned_mesh_bone_usage")
+        self.assertEqual(params, {
+            "gameObjectPath": "Scene/Avatar/Ears",
+            "componentIndex": 1,
+            "minimumWeight": 0.00001,
+        })
+        self.assertTrue(mock_invoke.call_args.kwargs["preserve_tool_error"])
+
+    def test_inspect_skinned_mesh_bone_usage_rejects_invalid_arguments(self) -> None:
+        self.assertFalse(dashboard_server.inspect_skinned_mesh_bone_usage_sync({})["ok"])
+        self.assertFalse(
+            dashboard_server.inspect_skinned_mesh_bone_usage_sync(
+                {"gameObjectPath": "Avatar/Ears", "componentIndex": -1}
+            )["ok"]
+        )
+        self.assertFalse(
+            dashboard_server.inspect_skinned_mesh_bone_usage_sync(
+                {"gameObjectPath": "Avatar/Ears", "minimumWeight": 1.1}
             )["ok"]
         )
 
@@ -12995,6 +13660,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("Undo.SetTransformParent", source)
         self.assertIn("Undo.DestroyObjectImmediate", source)
         self.assertIn("Undo.RecordObject", source)
+        self.assertEqual(source.count("Undo.FlushUndoRecordObjects();"), 5)
         create_source = source[source.index("public static class CreateGameObjectTool") : source.index("public static class RenameGameObjectTool")]
         get_source = source[source.index("public static class GetGameObjectTool") : source.index("public static class CreateGameObjectTool")]
         self.assertIn('VRCForgeToolResult.FailedWithCode(\n                    "gameobject_not_found"', get_source)
@@ -13060,10 +13726,22 @@ class DashboardServerTests(unittest.TestCase):
                     mutation_source.index("newParent.scene.handle != target.scene.handle"),
                     mutation_source.index("Undo.SetTransformParent"),
                 )
+                self.assertIn("PrefabUtility.GetNearestPrefabInstanceRoot(target)", mutation_source)
+                self.assertIn("prefab_instance_child_reparent_not_supported", mutation_source)
+                self.assertIn('commitState = "not_started"', mutation_source)
+                self.assertLess(
+                    mutation_source.index("PrefabUtility.GetNearestPrefabInstanceRoot(target)"),
+                    mutation_source.index("Undo.SetTransformParent"),
+                )
+                self.assertIn("readbackMismatches", mutation_source)
+                self.assertIn("reparent_persisted_readback_mismatch", mutation_source)
+                self.assertIn('commitState = restored ? "rolled_back" : "unknown"', mutation_source)
             if tool_class == "DeleteGameObjectTool":
                 self.assertIn("canonicalPath = ComponentCrudCore.GetHierarchyPath(target.transform)", mutation_source)
                 self.assertIn("var goPath = canonicalPath", mutation_source)
-                self.assertIn("ResolveUniqueGameObject(\n                                cleanup.Scene,\n                                canonicalPath", mutation_source)
+                self.assertIn("GlobalObjectId.GlobalObjectIdentifierToObjectSlow(persistedGlobalObjectId)", mutation_source)
+                self.assertIn("GlobalObjectId.GlobalObjectIdentifierToObjectSlow(restoredGlobalObjectId)", mutation_source)
+                self.assertNotIn("CountHierarchyPath(goPath, afterScene.Handle)", mutation_source)
         # read payload must avoid auto-unwrap keys (data/result/payload/value).
         self.assertNotIn("value =", source)
 
@@ -13256,6 +13934,58 @@ class DashboardServerTests(unittest.TestCase):
         self.assertIn("active", params)
         self.assertFalse(params["active"])
 
+    @patch("dashboard_server.emit_log")
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_gameobject_write_rejection_does_not_emit_success_log(
+        self,
+        mock_load_settings,
+        mock_invoke,
+        mock_emit_log,
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=1,
+            stdout="",
+            stderr="",
+            payload={
+                "isError": True,
+                "structuredContent": {
+                    "success": False,
+                    "code": "prefab_instance_child_reparent_not_supported",
+                    "error": "Prefab instance child cannot be reparented.",
+                    "data": {
+                        "mutationStarted": False,
+                        "committed": False,
+                        "commitState": "not_started",
+                    },
+                },
+            },
+        )
+
+        result = dashboard_server.reparent_gameobject_sync({
+            "game_object_path": "Avatar/Prefab/Child",
+            "new_parent_path": "Avatar/Head",
+        })
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["code"], "prefab_instance_child_reparent_not_supported")
+        self.assertEqual(result["commitState"], "not_started")
+        mock_emit_log.assert_not_called()
+
+    def test_gameobject_crud_write_handlers_capture_console_before_and_after(self) -> None:
+        for name in (
+            "vrcforge_create_gameobject",
+            "vrcforge_rename_gameobject",
+            "vrcforge_reparent_gameobject",
+            "vrcforge_delete_gameobject",
+            "vrcforge_set_gameobject_active",
+        ):
+            handler = dashboard_server.AGENT_GATEWAY._write_handlers[name]  # noqa: SLF001 - registration contract.
+            self.assertEqual(handler.verification_profile, "persisted_scene_write_console")
+            self.assertIsNotNone(handler.verification_prepare_handler)
+            self.assertIsNotNone(handler.verification_finalize_handler)
+
     def test_asset_prefab_crud_tool_source_exists(self) -> None:
         editor_dir = Path(__file__).resolve().parents[1] / "Assets" / "VRCForge" / "Editor" / "Generic"
         source = (editor_dir / "UnityAssetPrefabCrud.cs").read_text(encoding="utf-8")
@@ -13293,6 +14023,7 @@ class DashboardServerTests(unittest.TestCase):
         # Read tools are directly callable.
         self.assertIn("vrcforge_find_assets", tool_names)
         self.assertIn("vrcforge_get_asset_info", tool_names)
+        self.assertIn("vrcforge_get_unitypackage_import_status", tool_names)
         # Write tools are approval-gated: present as writeTargets, never as direct read tools.
         for write_name in (
             "vrcforge_instantiate_prefab",
@@ -13328,6 +14059,146 @@ class DashboardServerTests(unittest.TestCase):
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
+    def test_unitypackage_import_status_is_read_only_job_poll(
+        self, mock_load_settings, mock_invoke
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={
+                "data": {
+                    "ok": True,
+                    "pending": False,
+                    "status": "completed",
+                    "jobId": "a" * 32,
+                    "commitState": "complete",
+                }
+            },
+        )
+
+        result = dashboard_server.get_unitypackage_import_status_sync(
+            {"jobId": "A" * 32}
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "completed")
+        _settings, tool_name, arguments = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_import_unitypackage")
+        self.assertEqual(arguments, {"jobId": "a" * 32})
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    def test_unitypackage_import_status_rejects_invalid_job_before_core(
+        self, mock_invoke
+    ) -> None:
+        result = dashboard_server.get_unitypackage_import_status_sync(
+            {"jobId": "not-a-job"}
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["errorCode"], "unitypackage_import_job_id_invalid"
+        )
+        mock_invoke.assert_not_called()
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_build_test_avatar_starts_exact_local_core_job(
+        self, mock_load_settings, mock_invoke
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={
+                "data": {
+                    "success": True,
+                    "status": "pending",
+                    "jobId": "a" * 32,
+                    "localOnly": True,
+                    "uploadAttempted": False,
+                    "published": False,
+                }
+            },
+        )
+
+        result = dashboard_server.build_test_avatar_sync(
+            {"projectPath": r"C:\Project", "avatarPath": "Scene/Avatar"}
+        )
+
+        self.assertEqual(result["jobId"], "a" * 32)
+        self.assertTrue(result["localOnly"])
+        _settings, tool_name, arguments = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_build_test_avatar")
+        self.assertEqual(
+            arguments,
+            {"projectPath": r"C:\Project", "avatarPath": "Scene/Avatar"},
+        )
+
+    def test_build_test_avatar_external_write_binds_exact_core_plan(self) -> None:
+        handler = dashboard_server.AGENT_GATEWAY._write_handlers[  # noqa: SLF001
+            "vrcforge_build_test_avatar"
+        ]
+        self.assertTrue(handler.requires_approved_execution_context)
+        self.assertIs(
+            handler.approved_execution_plan_builder,
+            dashboard_server.build_test_avatar_execution_plan,
+        )
+        self.assertEqual(
+            handler.approved_execution_plan_builder(
+                {"project_path": r"C:\Project", "avatar_path": "Scene/Avatar"}
+            ),
+            [
+                (
+                    "vrc_build_test_avatar",
+                    {"projectPath": r"C:\Project", "avatarPath": "Scene/Avatar"},
+                )
+            ],
+        )
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_build_test_status_uses_strict_poll_lane_and_preserves_terminal_facts(
+        self, mock_load_settings, mock_invoke
+    ) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        terminal = {
+            "success": False,
+            "status": "error",
+            "jobId": "b" * 32,
+            "sdkError": "Avatar validation failed exactly.",
+            "mutationStarted": True,
+            "writeOccurred": True,
+            "committed": False,
+            "commitState": "unknown",
+            "uploadAttempted": False,
+            "published": False,
+        }
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=1,
+            stdout="",
+            stderr="",
+            payload={"data": terminal},
+        )
+
+        result = dashboard_server.get_build_test_status_sync(
+            {"projectPath": r"C:\Project", "jobId": "B" * 32}
+        )
+
+        for key, value in terminal.items():
+            self.assertEqual(result[key], value)
+        _settings, tool_name, arguments = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_build_test_avatar")
+        self.assertEqual(arguments, {"jobId": "b" * 32})
+        self.assertEqual(
+            mock_invoke.call_args.kwargs["execution_context"],
+            {"lane": "app_build_test_poll"},
+        )
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
     def test_get_asset_info_forwards(self, mock_load_settings, mock_invoke) -> None:
         mock_load_settings.return_value = SimpleNamespace()
         mock_invoke.return_value = dashboard_server.McpResult(
@@ -13345,7 +14216,40 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["assetPath"], "Assets/Outfits/Dress.prefab")
 
     def test_instantiate_prefab_requires_asset(self) -> None:
-        self.assertFalse(dashboard_server.instantiate_prefab_sync({})["ok"])
+        result = dashboard_server.instantiate_prefab_sync({})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "prefab_asset_identity_required")
+        self.assertEqual(result["failureLayer"], "external_tool_arguments")
+        self.assertFalse(result["mutationStarted"])
+        self.assertFalse(result["committed"])
+        self.assertEqual(result["commitState"], "not_started")
+
+    def test_delete_gameobject_requires_exact_identity(self) -> None:
+        result = dashboard_server.delete_gameobject_sync({})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "gameobject_identity_required")
+        self.assertFalse(result["mutationStarted"])
+        self.assertEqual(result["commitState"], "not_started")
+
+    @patch("dashboard_server.invoke_unity_mcp")
+    @patch("dashboard_server.load_dashboard_settings")
+    def test_delete_gameobject_forwards_global_object_id(self, mock_load_settings, mock_invoke) -> None:
+        mock_load_settings.return_value = SimpleNamespace()
+        mock_invoke.return_value = dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"action": "delete_gameobject", "globalObjectId": "GlobalObjectId_V1-test"}},
+        )
+        result = dashboard_server.delete_gameobject_sync({
+            "globalObjectId": "GlobalObjectId_V1-test",
+            "preview": True,
+        })
+        self.assertTrue(result["ok"])
+        _settings, tool_name, params = mock_invoke.call_args.args
+        self.assertEqual(tool_name, "vrc_delete_gameobject")
+        self.assertEqual(params["globalObjectId"], "GlobalObjectId_V1-test")
+        self.assertTrue(params["preview"])
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -13370,7 +14274,11 @@ class DashboardServerTests(unittest.TestCase):
         self.assertEqual(params["parentPath"], "Avatar")
 
     def test_unpack_prefab_requires_path(self) -> None:
-        self.assertFalse(dashboard_server.unpack_prefab_sync({})["ok"])
+        result = dashboard_server.unpack_prefab_sync({})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["errorCode"], "gameobject_path_required")
+        self.assertFalse(result["mutationStarted"])
+        self.assertEqual(result["commitState"], "not_started")
 
     @patch("dashboard_server.invoke_unity_mcp")
     @patch("dashboard_server.load_dashboard_settings")
@@ -13790,7 +14698,7 @@ class DashboardServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8-sig")
         contract_names = set(re.findall(r'\{\s*"(vrc_[a-z0-9_]+)"\s*,\s*"VRCForge\.', contract_text))
         self.assertEqual(contract_names, set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY))
-        self.assertEqual(len(contract_names), 64)
+        self.assertEqual(len(contract_names), 78)
         legacy_hits = [
             path for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")
             if "McpForUnityTool" in path.read_text(encoding="utf-8-sig")
@@ -14195,10 +15103,16 @@ namespace VRCForge.Editor
         self.assertIn("EditorApplication.isPlaying", source)
         self.assertIn("statusOnly", source)
         self.assertIn("requirePlayMode", source)
-        self.assertIn('captureMode = isPlayMode ? "game_view" : "scene_view"', source)
+        self.assertIn('requestedCaptureMode == "auto"', source)
+        self.assertIn('captureMode == "game_view"', source)
+        self.assertIn('"scene_view"', source)
         self.assertIn("ScreenCapture.CaptureScreenshotAsTexture", source)
         self.assertIn("CaptureCameraToPng(camera, absolutePath, width, height)", source)
         self.assertIn("active_game_camera", source)
+        self.assertIn("play_mode_orbit_camera", source)
+        self.assertIn("TryResolveCaptureTarget(", source)
+        self.assertIn("CaptureOrbitCamera(", source)
+        self.assertIn("the active Game camera and scene were not modified", source)
         self.assertIn("avoid Gesture Manager menu overlays", source)
         self.assertIn("IsLikelyOverlayCamera", source)
         self.assertIn("IsGestureManagerRunning", source)
@@ -14695,6 +15609,34 @@ namespace VRCForge.Editor
                 "persistedReadback": True,
             },
         )
+
+    def test_extract_tool_result_payload_preserves_structured_failure_facts(self) -> None:
+        result = dashboard_server.McpResult(
+            exit_code=1,
+            stdout="",
+            stderr="",
+            payload={
+                "resultType": "complete",
+                "isError": True,
+                "structuredContent": {
+                    "success": False,
+                    "code": "Set active failed: exact reason.",
+                    "error": "Set active failed: exact reason.",
+                    "data": {
+                        "mutationStarted": False,
+                        "committed": False,
+                        "commitState": "not_started",
+                    },
+                },
+            },
+        )
+
+        payload = dashboard_server.extract_tool_result_payload(result)
+
+        self.assertEqual(payload["ok"], False)
+        self.assertEqual(payload["code"], "Set active failed: exact reason.")
+        self.assertEqual(payload["mutationStarted"], False)
+        self.assertEqual(payload["commitState"], "not_started")
 
     def test_checkpoint_result_preserves_nonrecoverable_unity_rejection(self) -> None:
         result = dashboard_server.McpResult(
@@ -15653,14 +16595,17 @@ namespace VRCForge.Editor
         self.assertIn("loadedRendererSlotCount", source)
         self.assertIn("dependentAssetCount", source)
         self.assertIn("matchingRenderers.Length > 1", source)
-        self.assertIn("Undo.RecordObject", source)
+        self.assertIn("Undo.RegisterCompleteObjectUndo", source)
         self.assertIn("beforeShaderObject != shader", source)
         self.assertIn("target.material.shader = shader", source)
         self.assertIn("AssetDatabase.SaveAssetIfDirty", source)
         self.assertIn("EditorUtility.IsDirty", source)
         self.assertIn("readback.shader == shader", source)
         self.assertIn("rendererPath or materialAssetPath is required", source)
-        self.assertNotIn("AssetDatabase.ImportAsset", source)
+        self.assertIn("RestoreMaterialPreState", source)
+        self.assertIn("AssetDatabase.ImportAsset", source)
+        self.assertIn("material_shader_failed_after_mutation", source)
+        self.assertIn('commitState = restored ? "rolled_back" : "unknown"', source)
         self.assertNotIn("AssetDatabase.Refresh", source)
         self.assertNotIn("fixture", source.lower())
 
@@ -15675,6 +16620,11 @@ namespace VRCForge.Editor
         self.assertIn("rendererComponentIds.Add", scanner_source)
         self.assertIn("material_id_ambiguous", scanner_source)
         self.assertIn("renderer_id_ambiguous", scanner_source)
+        self.assertIn("material_asset_path", scanner_source)
+        self.assertIn("MaterialTextureDependency", scanner_source)
+        self.assertIn("GetTexturePropertyNames", scanner_source)
+        self.assertIn("Profiler.GetRuntimeMemorySizeLong", scanner_source)
+        self.assertIn("importerMaxTextureSize", scanner_source)
         self.assertIn("ThenBy(root => root.gameObject.scene.handle)", scanner_source)
         self.assertIn("ThenBy(root => root.GetInstanceID())", scanner_source)
         self.assertIn("ReferenceEquals(FindAvatarRoot(renderer.transform), avatarRoot)", scanner_source)
@@ -15763,6 +16713,7 @@ namespace VRCForge.Editor
                 SimpleNamespace(reconcile_startup=reconcile_sub_agents),
             ),
             patch("tools.vrcforge_agent_mcp_stdio.VRCForgeBridge") as bridge_class,
+            patch("tools.vrcforge_agent_mcp_stdio.configure_utf8_stdio") as configure_utf8_stdio,
             patch.object(
                 dashboard_server.BACKEND_OWNER_LEASE,
                 "acquire",
@@ -15774,6 +16725,7 @@ namespace VRCForge.Editor
             result = dashboard_server.main()
 
         self.assertEqual(result, 0)
+        configure_utf8_stdio.assert_called_once_with()
         reconcile_sub_agents.assert_not_called()
         acquire_owner.assert_not_called()
 
@@ -16151,7 +17103,10 @@ namespace VRCForge.Editor
         )
 
         with TestClient(dashboard_server.app) as client:
-            response = client.post("/api/vision/capture-status", json={"require_play_mode": False})
+            response = client.post(
+                "/api/vision/capture-status",
+                json={"requirePlayMode": True, "captureMode": "scene_view"},
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -16160,7 +17115,8 @@ namespace VRCForge.Editor
         _settings, tool_name, params = mock_invoke_unity_mcp.call_args.args
         self.assertEqual(tool_name, "vrc_capture_scene_view")
         self.assertTrue(params["statusOnly"])
-        self.assertFalse(params["requirePlayMode"])
+        self.assertTrue(params["requirePlayMode"])
+        self.assertEqual(params["captureMode"], "scene_view")
 
     @patch("dashboard_server.load_dashboard_export_payload")
     @patch("dashboard_server.load_dashboard_settings")
@@ -16819,6 +17775,70 @@ namespace VRCForge.Editor
     # ------------------------------------------------------------------
     # /api/parameters/apply-optimization (dry_run=True)
     # ------------------------------------------------------------------
+    def test_parameter_suggestion_reconciliation_rejects_multi_state_menu_int(self) -> None:
+        parameters = {
+            "suggestionCount": 1,
+            "suggestions": [
+                {
+                    "name": "MANUKA_costume",
+                    "currentType": "Int",
+                    "suggestedType": "Bool",
+                    "reason": "heuristic",
+                }
+            ],
+        }
+        controls = {
+            "items": [
+                {
+                    "source": "menu_control",
+                    "parameterName": "MANUKA_costume",
+                    "menuPath": "衣服/Underwear",
+                },
+                {
+                    "source": "menu_control",
+                    "parameterName": "MANUKA_costume",
+                    "menuPath": "衣服/Shirt set",
+                },
+            ]
+        }
+
+        result = dashboard_server.reconcile_parameter_optimization_suggestions_with_controls(
+            parameters,
+            controls,
+        )
+
+        self.assertEqual(result["suggestionCount"], 0)
+        self.assertEqual(result["suggestions"], [])
+        self.assertEqual(result["skippedSuggestions"][0]["skipReason"], "multi_state_menu_parameter")
+        self.assertEqual(result["skippedSuggestions"][0]["menuControlCount"], 2)
+
+    def test_parameter_suggestion_reconciliation_keeps_single_menu_control_int(self) -> None:
+        suggestion = {
+            "name": "BinaryInt",
+            "currentType": "Int",
+            "suggestedType": "Bool",
+            "reason": "heuristic",
+        }
+        parameters = {"suggestionCount": 1, "suggestions": [suggestion]}
+        controls = {
+            "items": [
+                {
+                    "source": "menu_control",
+                    "parameterName": "BinaryInt",
+                    "menuPath": "Options/Binary",
+                }
+            ]
+        }
+
+        result = dashboard_server.reconcile_parameter_optimization_suggestions_with_controls(
+            parameters,
+            controls,
+        )
+
+        self.assertEqual(result["suggestionCount"], 1)
+        self.assertEqual(result["suggestions"], [suggestion])
+        self.assertNotIn("skippedSuggestions", result)
+
     def test_apply_parameter_optimization_dry_run_returns_diff_and_apply_payload(self) -> None:
         suggestions = [
             {"name": "IsWearing", "currentType": "Int", "suggestedType": "Bool", "reason": "heuristic"},

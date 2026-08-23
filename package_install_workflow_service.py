@@ -180,7 +180,10 @@ class PackageManagerDiscoveryService:
                 continue
 
         cli_specs = {
-            "vpm": ("VCC vpm CLI", True),
+            # The VCC `vpm` executable is discovered for diagnostics only.  The
+            # prepared executor has no sealed argv adapter for it, so claiming
+            # command-install support here would lie to external Agents.
+            "vpm": ("VCC vpm CLI (discovery only)", False),
             "vrc-get": ("vrc-get CLI", True),
             "alcom": ("ALCOM CLI/UI", False),
         }
@@ -479,7 +482,7 @@ class PackageInstallWorkflowService:
                 if selected_handoff and selected_cli
                 else "Use the selected ALCOM/VCC handoff first."
                 if selected_handoff
-                else "Use the selected VPM CLI after approval."
+                else "Use the selected vrc-get CLI through checkpoint safety."
                 if selected_cli
                 else "No VPM package manager is available; let an external agent prepare a supervised package-manager download/install plan."
             ),
@@ -536,7 +539,6 @@ class PackageInstallWorkflowService:
             "installPolicy": {
                 "managerPriority": [
                     "ALCOM/VCC UI handoff when a human wants to manage repositories visually",
-                    "VCC vpm CLI for non-interactive supervised installs",
                     "vrc-get CLI for non-interactive supervised installs",
                     "agent-managed download/install plan when no package manager is available",
                 ],
@@ -544,8 +546,9 @@ class PackageInstallWorkflowService:
                 "requiresApprovalCheckpoint": True,
             },
             "hint": (
-                "VRCForge detects ALCOM/VCC for user handoff first. Non-interactive installs use the VCC vpm CLI "
-                "or vrc-get after approval; if neither exists, VRCForge returns an agent-managed download plan."
+                "VRCForge detects ALCOM/VCC for user handoff without requiring either one. "
+                "Non-interactive installs currently use the sealed vrc-get adapter; otherwise "
+                "VRCForge returns a backend-neutral plan instead of claiming unsupported execution."
             ),
         }
 

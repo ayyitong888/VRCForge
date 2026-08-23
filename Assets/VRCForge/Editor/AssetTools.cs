@@ -40,6 +40,9 @@ namespace VRCForge.Editor
             [VRCForgeInput("Maximum number of clips to scan.", IsRequired = false)]
             public int? maxClips { get; set; } = 300;
 
+            [VRCForgeInput("Include full binding arrays and warning details. Defaults to true for direct Unity callers; external wrappers may request compact summaries.", IsRequired = false)]
+            public bool? includeBindingDetails { get; set; } = true;
+
             [VRCForgeInput("Asset-relative or absolute output path. Leave empty to skip writing JSON.", IsRequired = false)]
             public string outputPath { get; set; } = DefaultOutputPath;
 
@@ -50,7 +53,7 @@ namespace VRCForge.Editor
         [MenuItem("VRCForge/Scan Animation Bindings")]
         public static void ScanAnimationBindingsFromMenu()
         {
-            var payload = BuildAnimationBindingsPayload("", "", new List<string>(), false, 300);
+            var payload = BuildAnimationBindingsPayload("", "", new List<string>(), false, 300, true);
             var absolutePath = WriteJson(DefaultOutputPath, payload, true);
             Debug.Log($"[{ScanAnimationBindingsToolName}] Animation binding scan complete: {absolutePath}");
         }
@@ -68,7 +71,8 @@ namespace VRCForge.Editor
                     parameters.controllerPath ?? "",
                     parameters.clipPaths ?? new List<string>(),
                     parameters.includeAllProjectClips ?? false,
-                    maxClips);
+                    maxClips,
+                    parameters.includeBindingDetails ?? true);
                 var requestedPath = parameters.outputPath ?? "";
                 if (!string.IsNullOrWhiteSpace(requestedPath))
                 {
@@ -92,7 +96,8 @@ namespace VRCForge.Editor
             string controllerPath,
             List<string> clipPaths,
             bool includeAllProjectClips,
-            int maxClips)
+            int maxClips,
+            bool includeBindingDetails)
         {
             var clips = ResolveClips(avatarPath, controllerPath, clipPaths, includeAllProjectClips)
                 .GroupBy(clip => AssetDatabase.GetAssetPath(clip), StringComparer.OrdinalIgnoreCase)
@@ -101,8 +106,8 @@ namespace VRCForge.Editor
                 .OrderBy(clip => AssetDatabase.GetAssetPath(clip), StringComparer.OrdinalIgnoreCase)
                 .Take(maxClips)
                 .ToList();
-            var clipItems = clips.Select(ScanClip).ToList();
-            var warnings = clipItems
+            var clipItems = clips.Select(clip => ScanClip(clip, includeBindingDetails)).ToList();
+            var warnings = includeBindingDetails ? clipItems
                 .SelectMany(clip => clip.warnings.Select(warning => new WarningItem
                 {
                     clip_path = clip.asset_path,
@@ -111,7 +116,7 @@ namespace VRCForge.Editor
                     severity = warning.severity,
                     message = warning.message
                 }))
-                .ToList();
+                .ToList() : new List<WarningItem>();
 
             return new AnimationBindingsPayload
             {
@@ -123,6 +128,7 @@ namespace VRCForge.Editor
                 requested_avatar_path = NormalizePath(avatarPath),
                 requested_controller_path = NormalizeAssetPath(controllerPath),
                 include_all_project_clips = includeAllProjectClips,
+                include_binding_details = includeBindingDetails,
                 clips = clipItems,
                 warnings = warnings,
                 summary = new AnimationBindingsSummary
@@ -189,7 +195,7 @@ namespace VRCForge.Editor
             return result;
         }
 
-        private static ClipBindingItem ScanClip(AnimationClip clip)
+        private static ClipBindingItem ScanClip(AnimationClip clip, bool includeBindingDetails)
         {
             var bindings = new List<BindingItem>();
             var warnings = new List<BindingWarningItem>();
@@ -213,11 +219,12 @@ namespace VRCForge.Editor
                 material_binding_count = bindings.Count(binding => binding.binding_category == "material_property" || binding.binding_category == "material_reference"),
                 object_toggle_binding_count = bindings.Count(binding => binding.binding_category == "object_active_toggle"),
                 blendshape_binding_count = bindings.Count(binding => binding.binding_category == "blendshape"),
-                bindings = bindings
+                bindings = includeBindingDetails ? bindings
                     .OrderBy(binding => binding.path, StringComparer.OrdinalIgnoreCase)
                     .ThenBy(binding => binding.property_name, StringComparer.OrdinalIgnoreCase)
-                    .ToList(),
-                warnings = warnings
+                    .ToList() : null,
+                warnings = includeBindingDetails ? warnings : null,
+                warning_count = warnings.Count
             };
         }
 
@@ -559,6 +566,7 @@ namespace VRCForge.Editor
             public string requested_avatar_path;
             public string requested_controller_path;
             public bool include_all_project_clips;
+            public bool include_binding_details;
             public List<ClipBindingItem> clips;
             public List<WarningItem> warnings;
             public AnimationBindingsSummary summary;
@@ -588,6 +596,7 @@ namespace VRCForge.Editor
             public int material_binding_count;
             public int object_toggle_binding_count;
             public int blendshape_binding_count;
+            public int warning_count;
             public List<BindingItem> bindings;
             public List<BindingWarningItem> warnings;
         }

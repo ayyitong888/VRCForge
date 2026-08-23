@@ -647,6 +647,14 @@ try {
 
     $dotnetExe = Resolve-DotNetExe
     $pythonExe = Resolve-PythonExe
+    & $dotnetExe run `
+        --project .\packaging\VRCForge.CSharpSyntaxGate\VRCForge.CSharpSyntaxGate.csproj `
+        --configuration Release `
+        -- `
+        .\Assets\VRCForge
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unity C# syntax gate failed. No release payload was built."
+    }
     & $pythonExe .\packaging\check_one_five_seams.py --repo-root $repoRoot --version $Version
     if ($LASTEXITCODE -ne 0) {
         throw "Final 1.5 owner/facade seam gate failed. Retire every declared migration seam before packaging 1.5.0."
@@ -865,6 +873,14 @@ try {
     }
     Copy-Item -LiteralPath .\dashboard -Destination (Join-Path $payloadRoot "dashboard") -Recurse -Force
     Copy-Item -LiteralPath .\tools -Destination (Join-Path $payloadRoot "tools") -Recurse -Force
+    Copy-Item -LiteralPath .\agent_mcp_2026.py -Destination (Join-Path $payloadRoot "agent_mcp_2026.py") -Force
+    Copy-Item -LiteralPath .\agent_mcp_standard.py -Destination (Join-Path $payloadRoot "agent_mcp_standard.py") -Force
+    Copy-Item -LiteralPath .\external_tool_result_contract.py -Destination (Join-Path $payloadRoot "external_tool_result_contract.py") -Force
+    Copy-Item -LiteralPath .\avatar_composition_workflow_skills.py -Destination (Join-Path $payloadRoot "avatar_composition_workflow_skills.py") -Force
+    & $pythonExe (Join-Path $payloadRoot "tools\vrcforge_agent_mcp_stdio.py") --help | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged external stdio bridge import smoke failed."
+    }
     Get-ChildItem -LiteralPath (Join-Path $payloadRoot "tools") -Recurse -Filter "*.ps1" -ErrorAction SilentlyContinue |
         Remove-Item -Force
     $legacyLauncherPayloadRoot = Join-Path $payloadRoot "tools\legacy-launcher"
@@ -899,9 +915,13 @@ try {
     if ([string]::IsNullOrWhiteSpace($UnityPackagePath)) {
         $UnityPackagePath = Join-Path $releaseRoot "VRCForge.unitypackage"
     }
-    & .\packaging\build_unitypackage.ps1 -SourceAssetsPath $vrcforgeCorePayloadRoot -OutputPath $UnityPackagePath
+    $portableCoreRootMeta = Join-Path $unityPluginRoot "Assets\VRCForge.meta"
+    & .\packaging\build_unitypackage.ps1 -SourceAssetsPath $vrcforgeCorePayloadRoot -OutputPath $UnityPackagePath -RootMetaOutputPath $portableCoreRootMeta
     if (-not (Test-Path -LiteralPath $UnityPackagePath)) {
         throw "The paired VRCForge.unitypackage build did not produce an artifact."
+    }
+    if (-not (Test-Path -LiteralPath $portableCoreRootMeta -PathType Leaf)) {
+        throw "The paired portable Unity Core root meta was not produced."
     }
     $releaseUnityPackage = Join-Path $releaseRoot "VRCForge.unitypackage"
     if ([System.IO.Path]::GetFullPath($UnityPackagePath) -ne [System.IO.Path]::GetFullPath($releaseUnityPackage)) {

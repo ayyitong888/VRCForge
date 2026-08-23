@@ -112,6 +112,9 @@ fn main() {
         .setup(|app| {
             start_managed_backend_early(app.handle()).map_err(std::io::Error::other)?;
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(windows)]
+                let _ = bind_main_window_taskbar_icon(&window);
+                restore_main_window(&window);
                 window.set_title(&app_window_title(&app.package_info().version.to_string()))?;
             }
             let open_chat_item =
@@ -330,10 +333,17 @@ fn app_window_title(version: &str) -> String {
     format!("VRCForge {version}")
 }
 
+fn restore_main_window(window: &tauri::WebviewWindow) {
+    if window.is_minimized().unwrap_or(false) {
+        let _ = window.unminimize();
+    }
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
+        restore_main_window(&window);
     }
 }
 

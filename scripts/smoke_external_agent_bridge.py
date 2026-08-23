@@ -51,7 +51,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--optimizer-tool", default="vrcforge_optimization_lac_apply_request")
     parser.add_argument("--avatar-path", default="")
     parser.add_argument("--target-profile", default="pc_conservative")
-    parser.add_argument("--execution-mode", choices=("approval", "auto", "roslyn_full_auto"), default="approval")
     parser.add_argument("--optimizer-option", action="append", default=[], help="Optimizer option as key=value. JSON values are accepted.")
     parser.add_argument("--material", action="append", default=[], help="Append a TexTransTool atlas target material path under Assets/.")
     parser.add_argument("--renderer-path", default="", help="Meshia renderer GameObject path for conservative simplify setup.")
@@ -75,7 +74,6 @@ class ExternalAgentBridgeSmoke:
         self.app_token = read_text_file(self.app_token_path).strip()
         self.steps: list[dict[str, Any]] = []
         self.previous_gateway: dict[str, Any] | None = None
-        self.previous_permission: str = ""
         self.checkpoint_id: str = ""
         self.created_object_path: str = ""
         self.scene_path: Path | None = None
@@ -109,10 +107,8 @@ class ExternalAgentBridgeSmoke:
             self.step("stdio.mcp_tools_list", self.check_stdio_mcp_tools())
             self.step("gateway.manifest", self.check_manifest())
             if self.args.optimizer_write_request:
-                self.step("permission.set_for_optimizer_request", self.set_execution_mode(self.args.execution_mode))
                 self.optimizer_write_request()
             if self.args.live_write_rollback:
-                self.step("permission.set_for_live_write", self.set_execution_mode("approval"))
                 self.live_write_rollback()
         except Exception as exc:  # noqa: BLE001 - smoke should always produce an evidence report.
             self.step("smoke.error", {"ok": False, "error": str(exc)})
@@ -182,30 +178,10 @@ class ExternalAgentBridgeSmoke:
             "/api/app/external-agent/gateway",
             {"enabled": True, "allowWriteRequests": True},
         )
-        permission = self.request_app_json("GET", "/api/app/permission")
-        self.previous_permission = str(ensure_dict(permission.get("permission")).get("executionMode") or "")
-        set_approval = self.request_app_json("POST", "/api/app/permission", {"execution_mode": self.args.execution_mode})
         return {
-            "ok": bool(enabled.get("gateway", {}).get("enabled")) and ensure_dict(set_approval.get("permission")).get("executionMode") == self.args.execution_mode,
+            "ok": bool(enabled.get("gateway", {}).get("enabled")),
             "previousEnabled": self.previous_gateway.get("enabled"),
             "previousAllowWriteRequests": self.previous_gateway.get("allowWriteRequests"),
-            "previousPermission": self.previous_permission,
-            "currentPermission": ensure_dict(set_approval.get("permission")).get("executionMode"),
-        }
-
-    def set_execution_mode(self, mode: str) -> dict[str, Any]:
-        if not self.app_token:
-            return {"ok": False, "error": "App session token is required to set execution mode."}
-        if not self.previous_permission:
-            permission = self.request_app_json("GET", "/api/app/permission")
-            self.previous_permission = str(ensure_dict(permission.get("permission")).get("executionMode") or "")
-        updated = self.request_app_json("POST", "/api/app/permission", {"execution_mode": mode})
-        permission = ensure_dict(updated.get("permission"))
-        return {
-            "ok": permission.get("executionMode") == mode,
-            "previousPermission": self.previous_permission,
-            "executionMode": permission.get("executionMode"),
-            "autoApprove": permission.get("autoApprove"),
         }
 
     def check_stdio_bridge_preflight(self) -> dict[str, Any]:
@@ -293,42 +269,92 @@ class ExternalAgentBridgeSmoke:
         return {
             **result,
             "ok": bool(result.get("ok"))
-            and bool(result.get("hasRequestApply"))
+            and bool(result.get("hasBridgePreflight"))
             and bool(result.get("preflightCalled"))
             and bool(result.get("preflightOk"))
             and direct_apply_listed == [],
-            "requestApplyListed": bool(result.get("hasRequestApply")),
+            "bridgePreflightListed": bool(result.get("hasBridgePreflight")),
             "directApplyListed": direct_apply_listed,
         }
 
     def check_manifest(self) -> dict[str, Any]:
-        planning = self.request_json(
-            "GET", "/api/agent/manifest?exposure_layer=planning", token=self.gateway_token, allow_http_error=False
+        planning_rpc = self.mcp_rpc("tools/list", {"exposureLayer": "planning"})
+        execution_rpc = self.mcp_rpc("tools/list", {"exposureLayer": "execution"})
+        selected_blocks = ["avatar", "checkpoint"]
+        scoped_planning_rpc = self.mcp_rpc(
+            "tools/list",
+            {"exposureLayer": "planning", "toolBlocks": selected_blocks},
         )
-        payload = self.request_json(
-            "GET", "/api/agent/manifest?exposure_layer=execution", token=self.gateway_token, allow_http_error=False
+        scoped_execution_rpc = self.mcp_rpc(
+            "tools/list",
+            {"exposureLayer": "execution", "toolBlocks": selected_blocks},
         )
+        planning = ensure_dict(planning_rpc.get("result"))
+        execution = ensure_dict(execution_rpc.get("result"))
+        scoped_planning = ensure_dict(scoped_planning_rpc.get("result"))
+        scoped_execution = ensure_dict(scoped_execution_rpc.get("result"))
         planning_names = {
             str(tool.get("name") or "")
             for tool in ensure_list(planning.get("tools"))
             if isinstance(tool, dict)
         }
-        tools = ensure_list(payload.get("tools"))
-        tool_names = {str(tool.get("name") or "") for tool in tools if isinstance(tool, dict)}
-        write_targets = {str(item.get("name") or "") for item in ensure_list(payload.get("writeTargets")) if isinstance(item, dict)}
+        default_tools = ensure_list(execution.get("tools"))
+        default_tool_names = {
+            str(tool.get("name") or "")
+            for tool in default_tools
+            if isinstance(tool, dict)
+        }
+        default_write_targets = {
+            str(item.get("name") or "")
+            for item in default_tools
+            if isinstance(item, dict)
+            and ensure_dict(item.get("_meta")).get("permission") == "Write"
+        }
+        scoped_planning_names = {
+            str(tool.get("name") or "")
+            for tool in ensure_list(scoped_planning.get("tools"))
+            if isinstance(tool, dict)
+        }
+        scoped_tools = ensure_list(scoped_execution.get("tools"))
+        scoped_tool_names = {
+            str(tool.get("name") or "")
+            for tool in scoped_tools
+            if isinstance(tool, dict)
+        }
+        write_targets = {
+            str(item.get("name") or "")
+            for item in scoped_tools
+            if isinstance(item, dict)
+            and ensure_dict(item.get("_meta")).get("permission") == "Write"
+        }
+        all_names = planning_names | default_tool_names | scoped_planning_names | scoped_tool_names
         return {
-            "ok": bool(payload.get("enabled"))
-            and "vrcforge_request_apply" not in planning_names
-            and "vrcforge_request_apply" in tool_names
+            "ok": "vrcforge_request_apply" not in planning_names
+            and "vrcforge_request_apply" not in all_names
+            and not default_write_targets
             and "vrcforge_create_gameobject" in write_targets
-            and not bool(HIDDEN_EXTERNAL_TOOLS & tool_names),
-            "enabled": bool(payload.get("enabled")),
-            "toolCount": len(tool_names),
+            and "vrcforge_restore_checkpoint" in write_targets
+            and write_targets.isdisjoint(scoped_planning_names)
+            and not bool(HIDDEN_EXTERNAL_TOOLS & all_names),
+            "enabled": all(
+                "error" not in item
+                for item in (
+                    planning_rpc,
+                    execution_rpc,
+                    scoped_planning_rpc,
+                    scoped_execution_rpc,
+                )
+            ),
+            "toolCount": len(default_tool_names),
+            "defaultWriteTargetCount": len(default_write_targets),
+            "selectedBlocks": selected_blocks,
+            "scopedToolCount": len(scoped_tool_names),
             "writeTargetCount": len(write_targets),
-            "requestApplyAdvertised": "vrcforge_request_apply" in tool_names,
+            "requestApplyAdvertised": False,
             "planningRequestApplyHidden": "vrcforge_request_apply" not in planning_names,
-            "directApplyAdvertised": sorted(HIDDEN_EXTERNAL_TOOLS & tool_names),
+            "directApplyAdvertised": sorted(HIDDEN_EXTERNAL_TOOLS & all_names),
             "createGameObjectTarget": "vrcforge_create_gameobject" in write_targets,
+            "restoreCheckpointTarget": "vrcforge_restore_checkpoint" in write_targets,
         }
 
     def live_write_rollback(self) -> None:
@@ -375,55 +401,30 @@ class ExternalAgentBridgeSmoke:
         self.step("unity.compile_before", compile_result_summary(compile_before))
 
         request = self.mcp_call_tool(
-            "vrcforge_request_apply",
+            "vrcforge_create_gameobject",
             {
-                "target_tool": "vrcforge_create_gameobject",
-                "arguments": {
-                    "name": object_name,
-                    "parentPath": parent_path,
-                    "projectRoot": project_root,
-                    "projectPath": project_root,
-                },
-                "reason": "External agent bridge smoke: create a temporary scene GameObject, then prove rollback.",
-                "preview": {
-                    "action": "create temporary scene GameObject",
-                    "objectPath": self.created_object_path,
-                    "rollbackRequired": True,
-                },
+                "name": object_name,
+                "parentPath": parent_path,
+                "projectRoot": project_root,
+                "projectPath": project_root,
             },
         )
-        approval = ensure_dict(request.get("result", request).get("approval"))
-        self.step(
-            "write.request",
-            {
-                "ok": bool(approval.get("id")) and approval.get("status") == "pending",
-                "approvalId": approval.get("id"),
-                "targetTool": approval.get("targetTool"),
-                "status": approval.get("status"),
-            },
-        )
-        approval_id = str(approval.get("id") or "")
-        if not approval_id:
-            raise RuntimeError("Write request did not produce a pending approval.")
-
-        applied = self.request_app_json("POST", f"/api/app/agent/approvals/{approval_id}/approve", {})
-        execution = ensure_dict(applied.get("execution"))
-        checkpoint = ensure_dict(execution.get("checkpoint"))
+        request_payload = ensure_dict(request.get("result", request))
+        checkpoint = ensure_dict(request.get("checkpoint", request_payload.get("checkpoint")))
         self.checkpoint_id = str(checkpoint.get("id") or "")
         self.step(
-            "write.approve_apply_checkpoint",
+            "write.direct_mcp_create",
             {
-                "ok": bool(applied.get("ok")) and execution.get("status") == "applied" and bool(self.checkpoint_id),
-                "approvalId": approval_id,
-                "executionStatus": execution.get("status"),
+                "ok": bool(request.get("ok")) and request.get("status") == "executed" and bool(self.checkpoint_id),
+                "targetTool": request.get("tool"),
+                "status": request.get("status"),
                 "checkpointId": self.checkpoint_id,
-                "checkpointStrategy": checkpoint.get("strategy"),
             },
         )
         if not self.checkpoint_id:
-            raise RuntimeError("Approved write did not return a checkpoint id.")
+            raise RuntimeError("Direct MCP create did not return a checkpoint id.")
 
-        create_result = ensure_dict(execution.get("result"))
+        create_result = request_payload
         exists_after = ensure_dict(
             self.mcp_call_tool(
                 "vrcforge_get_gameobject",
@@ -462,38 +463,47 @@ class ExternalAgentBridgeSmoke:
         self.record_validation_after_write(project_root)
 
         rollback_request = self.mcp_call_tool(
-            "vrcforge_request_apply",
+            "vrcforge_restore_checkpoint",
             {
-                "target_tool": "vrcforge_restore_checkpoint",
-                "arguments": {"checkpointId": self.checkpoint_id, "confirmRestore": True},
-                "reason": "External agent bridge smoke rollback proof.",
-                "preview": {"checkpointId": self.checkpoint_id, "objectPath": self.created_object_path},
+                "checkpointId": self.checkpoint_id,
+                "confirmRestore": True,
+                "projectRoot": project_root,
             },
         )
-        rollback_approval = ensure_dict(rollback_request.get("result", rollback_request).get("approval"))
-        rollback_approval_id = str(rollback_approval.get("id") or "")
+        rollback_confirmation = ensure_dict(rollback_request.get("confirmation"))
+        rollback_operation_id = str(rollback_confirmation.get("operationId") or "")
         self.step(
-            "rollback.request",
+            "rollback.user_confirmation_required",
             {
-                "ok": bool(rollback_approval_id) and rollback_approval.get("status") == "pending",
-                "approvalId": rollback_approval_id,
-                "targetTool": rollback_approval.get("targetTool"),
-                "status": rollback_approval.get("status"),
+                "ok": rollback_request.get("status") == "user_confirmation_required"
+                and bool(rollback_operation_id)
+                and rollback_request.get("mutationStarted") is False,
+                "operationId": rollback_operation_id,
+                "targetTool": rollback_confirmation.get("targetTool"),
+                "argumentsDigest": rollback_confirmation.get("argumentsDigest"),
+                "status": rollback_request.get("status"),
             },
         )
-        if not rollback_approval_id:
-            raise RuntimeError("Rollback request did not produce a pending approval.")
+        if not rollback_operation_id:
+            raise RuntimeError("Rollback request did not produce a user confirmation operation.")
 
-        rollback = self.request_app_json("POST", f"/api/app/agent/approvals/{rollback_approval_id}/approve", {})
-        rollback_execution = ensure_dict(rollback.get("execution"))
-        self.rollback_done = bool(rollback.get("ok")) and rollback_execution.get("status") == "applied"
+        rollback = self.mcp_call_tool(
+            "vrcforge_restore_checkpoint",
+            {
+                "checkpointId": self.checkpoint_id,
+                "confirmRestore": True,
+                "projectRoot": project_root,
+                "confirmation": {**rollback_confirmation, "decision": "approve"},
+            },
+        )
+        self.rollback_done = bool(rollback.get("ok")) and rollback.get("status") == "executed"
         self.step(
-            "rollback.approve_apply",
+            "rollback.confirmed_mcp_restore",
             {
                 "ok": self.rollback_done,
-                "approvalId": rollback_approval_id,
-                "executionStatus": rollback_execution.get("status"),
-                "unityReloadOk": ensure_dict(ensure_dict(rollback_execution.get("result")).get("unityReload")).get("ok"),
+                "operationId": rollback_operation_id,
+                "executionStatus": rollback.get("status"),
+                "unityReloadOk": ensure_dict(ensure_dict(rollback.get("result")).get("unityReload")).get("ok"),
             },
         )
 
@@ -641,15 +651,23 @@ class ExternalAgentBridgeSmoke:
 
     def try_emergency_rollback(self) -> None:
         try:
-            request = self.request_app_json(
-                "POST",
-                f"/api/app/checkpoints/{self.checkpoint_id}/restore",
-                {},
+            project_root = self.live_project_root or self.resolve_project_root()
+            request = self.mcp_call_tool(
+                "vrcforge_restore_checkpoint",
+                {"checkpointId": self.checkpoint_id, "confirmRestore": True, "projectRoot": project_root},
             )
-            approval_id = str(ensure_dict(request.get("approval")).get("id") or request.get("approvalId") or "")
-            if approval_id:
-                applied = self.request_app_json("POST", f"/api/app/agent/approvals/{approval_id}/approve", {})
-                self.rollback_done = bool(applied.get("ok"))
+            confirmation = ensure_dict(request.get("confirmation"))
+            if confirmation.get("operationId"):
+                applied = self.mcp_call_tool(
+                    "vrcforge_restore_checkpoint",
+                    {
+                        "checkpointId": self.checkpoint_id,
+                        "confirmRestore": True,
+                        "projectRoot": project_root,
+                        "confirmation": {**confirmation, "decision": "approve"},
+                    },
+                )
+                self.rollback_done = bool(applied.get("ok")) and applied.get("status") == "executed"
                 self.step("rollback.emergency", {"ok": self.rollback_done, "checkpointId": self.checkpoint_id})
         except Exception as exc:  # noqa: BLE001
             self.step("rollback.emergency", {"ok": False, "checkpointId": self.checkpoint_id, "error": str(exc)})
@@ -673,12 +691,6 @@ class ExternalAgentBridgeSmoke:
         raise RuntimeError("Unity project root was not provided or selected in VRCForge.")
 
     def restore_previous_state(self) -> None:
-        if self.app_token and self.previous_permission:
-            try:
-                self.request_app_json("POST", "/api/app/permission", {"execution_mode": self.previous_permission})
-                self.step("cleanup.permission_restore", {"ok": True, "permission": self.previous_permission})
-            except Exception as exc:  # noqa: BLE001
-                self.step("cleanup.permission_restore", {"ok": False, "error": str(exc)})
         if self.app_token and self.previous_gateway is not None:
             try:
                 payload = {

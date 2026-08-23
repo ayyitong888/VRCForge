@@ -217,10 +217,6 @@ namespace VRCForge.Editor
         internal const string ApiAssemblyVersion = "0.0.0.0";
         internal const string ApiAssemblyToken = "";
         internal const string ExpectedPackageName = "com.vrcfury.vrcfury";
-        internal const string ExpectedPackageVersion = "1.1334.0";
-        internal const int ExpectedPackageFileCount = 1255;
-        internal const long ExpectedPackageTotalBytes = 1999565;
-        internal const string ExpectedPackageTreeDigest = "d58d5db6083852bb0f5b495248794026b753b494dd88c8f6523e0019ff1a0f59";
         internal const string ExpectedApiSignatureDigest = "71dc4faf929c8da61b8969e2b23a00636ac0aa5a53e9a67f73274213d4a417b1";
         internal const string ToggleSerializedType = "VRCFury VF.Model.Feature.Toggle";
         internal const string ArmatureSerializedType = "VRCFury VF.Model.Feature.ArmatureLink";
@@ -299,11 +295,15 @@ namespace VRCForge.Editor
             var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(apiAssembly);
             var runtimePackage = UnityEditor.PackageManager.PackageInfo.FindForAssembly(runtimeAssembly);
             if (package == null
-                || runtimePackage == null
-                || package.name != ExpectedPackageName
-                || package.version != ExpectedPackageVersion
+                || runtimePackage == null)
+            {
+                throw new ComponentFeatureWriteException(
+                    "dependency_missing: VRCFury package metadata is unavailable; no Unity mutation started.");
+            }
+            if (package.name != ExpectedPackageName
                 || runtimePackage.name != package.name
                 || runtimePackage.version != package.version
+                || string.IsNullOrWhiteSpace(package.version)
                 || string.IsNullOrWhiteSpace(package.resolvedPath)
                 || string.IsNullOrWhiteSpace(runtimePackage.resolvedPath)
                 || !Path.GetFullPath(runtimePackage.resolvedPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
@@ -311,16 +311,37 @@ namespace VRCForge.Editor
                         Path.GetFullPath(package.resolvedPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
                         StringComparison.OrdinalIgnoreCase))
             {
-                throw new ComponentFeatureWriteException("The required component feature package version is unavailable.");
+                throw new ComponentFeatureWriteException(
+                    "dependency_incompatible: the loaded VRCFury API/runtime assemblies do not belong to one compatible package; no Unity mutation started.");
             }
             var packageRoot = Path.GetFullPath(package.resolvedPath);
-            var packageEvidence = ComputePackageTreeEvidence(packageRoot);
-            if (packageEvidence.FileCount != ExpectedPackageFileCount
-                || packageEvidence.TotalBytes != ExpectedPackageTotalBytes
-                || packageEvidence.Digest != ExpectedPackageTreeDigest)
+            var packageManifestPath = Path.Combine(packageRoot, "package.json");
+            EnsureOrdinaryFile(packageManifestPath, "VRCFury package manifest");
+            JObject packageManifest;
+            try
             {
-                throw new ComponentFeatureWriteException("The component feature package tree is unsupported.");
+                packageManifest = JObject.Parse(File.ReadAllText(packageManifestPath));
             }
+            catch (Exception exception)
+            {
+                throw new ComponentFeatureWriteException(
+                    "dependency_incompatible: VRCFury package.json could not be parsed: "
+                    + exception.GetType().Name
+                    + "; no Unity mutation started.");
+            }
+            if (!string.Equals(
+                    packageManifest.Value<string>("name"),
+                    package.name,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    packageManifest.Value<string>("version"),
+                    package.version,
+                    StringComparison.Ordinal))
+            {
+                throw new ComponentFeatureWriteException(
+                    "dependency_incompatible: VRCFury package.json identity does not match Unity Package Manager metadata; no Unity mutation started.");
+            }
+            var packageEvidence = ComputePackageTreeEvidence(packageRoot);
 
             var componentsType = RequireType(apiAssembly, "com.vrcfury.api.FuryComponents");
             var toggleType = RequireType(apiAssembly, "com.vrcfury.api.Components.FuryToggle");

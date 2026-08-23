@@ -527,6 +527,20 @@ def _canonical_compatibility(value: Any) -> dict[str, Any]:
         if key in _ASSEMBLY_DIGEST_KEYS:
             canonical[key] = _lower_hex(actual, label=key, pattern=_DIGEST_PATTERN)
             continue
+        if key == "packageVersion":
+            canonical[key] = _bounded_text(actual, label=key, max_length=128)
+            continue
+        if key in {"packageFileCount", "packageTotalBytes"}:
+            canonical[key] = _bounded_int(
+                actual,
+                label=key,
+                minimum=1,
+                maximum=10_000_000_000,
+            )
+            continue
+        if key == "packageTreeDigest":
+            canonical[key] = _lower_hex(actual, label=key, pattern=_DIGEST_PATTERN)
+            continue
         expected = EXPECTED_COMPATIBILITY[key]
         if isinstance(expected, int):
             actual = _bounded_int(actual, label=key, minimum=0, maximum=10_000_000_000)

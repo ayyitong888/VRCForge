@@ -17,9 +17,11 @@ namespace VRCForge.Editor
     public static class UnityPackageImporterTool
     {
         private const string JobSessionPrefix = "VRCForge.UnityPackageImport.Job.";
+        private const string ActiveJobSessionKey = "VRCForge.UnityPackageImport.ActiveJob";
         private static readonly object JobLock = new object();
         private static readonly Dictionary<string, ImportJob> Jobs = new Dictionary<string, ImportJob>();
         private static string activeJobId = "";
+        private static string importInvocationJobId = "";
 
         private sealed class ImportJob
         {
@@ -37,6 +39,12 @@ namespace VRCForge.Editor
             public DateTime createdUtc { get; set; } = DateTime.UtcNow;
             public DateTime? completedUtc { get; set; }
             public JObject result { get; set; }
+            public bool restoredAfterDomainReload { get; set; }
+            public DateTime? restoredUtc { get; set; }
+            public string readbackFailurePath { get; set; } = "";
+            public string readbackFailureCode { get; set; } = "";
+            public string readbackFailureReason { get; set; } = "";
+            public DateTime? readbackAttemptedUtc { get; set; }
         }
 
         static UnityPackageImporterTool()
@@ -45,6 +53,7 @@ namespace VRCForge.Editor
             AssetDatabase.importPackageCompleted += OnImportCompleted;
             AssetDatabase.importPackageFailed += OnImportFailed;
             AssetDatabase.importPackageCancelled += OnImportCancelled;
+            RestorePersistedActiveJob();
         }
 
         public class ImportUnityPackageParameters
@@ -144,6 +153,7 @@ namespace VRCForge.Editor
                         }
                         activeJobId = job.jobId;
                         Jobs[job.jobId] = job;
+                        SessionState.SetString(ActiveJobSessionKey, job.jobId);
                     }
                     PersistJob(job);
                     failureCode = "unitypackage_import_failed";
@@ -151,12 +161,26 @@ namespace VRCForge.Editor
                     PersistJob(job);
                     try
                     {
+                        lock (JobLock)
+                        {
+                            importInvocationJobId = job.jobId;
+                        }
                         AssetDatabase.ImportPackage(packagePath, parameters.interactive ?? false);
                     }
                     catch
                     {
                         CompleteFailedJob(job, "unitypackage_import_start_failed");
                         throw;
+                    }
+                    finally
+                    {
+                        lock (JobLock)
+                        {
+                            if (string.Equals(importInvocationJobId, job.jobId, StringComparison.Ordinal))
+                            {
+                                importInvocationJobId = "";
+                            }
+                        }
                     }
                     lock (JobLock)
                     {
@@ -193,6 +217,13 @@ namespace VRCForge.Editor
                 ["expectedSize"] = job.expectedSize,
                 ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths),
                 ["mutationStarted"] = job.mutationStarted,
+                ["startedForThisJob"] = job.startedForThisJob,
+                ["restoredAfterDomainReload"] = job.restoredAfterDomainReload,
+                ["expectedAssetCount"] = job.expectedAssetPaths?.Count ?? 0,
+                ["readbackFailurePath"] = job.readbackFailurePath,
+                ["readbackFailureCode"] = job.readbackFailureCode,
+                ["readbackFailureReason"] = job.readbackFailureReason,
+                ["readbackAttemptedUtc"] = job.readbackAttemptedUtc?.ToString("O"),
                 ["createdUtc"] = job.createdUtc.ToString("O"),
             };
         }
@@ -205,14 +236,19 @@ namespace VRCForge.Editor
             {
                 throw new InvalidOperationException("jobId is invalid.");
             }
+            ImportJob activeJob = null;
             lock (JobLock)
             {
-                ImportJob job;
-                if (Jobs.TryGetValue(jobId, out job))
+                Jobs.TryGetValue(jobId, out activeJob);
+            }
+            if (activeJob != null)
+            {
+                TryCompletePendingReadback(activeJob);
+                lock (JobLock)
                 {
-                    return job.result == null
-                        ? BuildPendingPayload(job)
-                        : (JObject)job.result.DeepClone();
+                    return activeJob.result == null
+                        ? BuildPendingPayload(activeJob)
+                        : (JObject)activeJob.result.DeepClone();
                 }
             }
             var persisted = LoadPersistedJob(jobId);
@@ -256,12 +292,16 @@ namespace VRCForge.Editor
                 ImportJob job;
                 if (!string.IsNullOrEmpty(activeJobId)
                     && Jobs.TryGetValue(activeJobId, out job)
-                    && !job.startedForThisJob)
+                    && !job.startedForThisJob
+                    && job.mutationStarted
+                    && string.Equals(importInvocationJobId, job.jobId, StringComparison.Ordinal)
+                    && !string.IsNullOrWhiteSpace(packageName))
                 {
-                    if (!MatchesExpectedPackageEvent(job, packageName))
-                    {
-                        return;
-                    }
+                    // Unity reports the package's embedded display name here,
+                    // which is not guaranteed to equal the source filename.
+                    // Bind it only while this job's exact ImportPackage call is
+                    // on the stack, then require that exact event identity for
+                    // every later terminal callback.
                     job.startedForThisJob = true;
                     job.importEventPackageName = packageName ?? "";
                     job.status = "running";
@@ -300,9 +340,9 @@ namespace VRCForge.Editor
                     ["checkpointRecoveryRequired"] = false,
                 });
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                CompleteFailedJob(job, "unitypackage_async_readback_failed");
+                RecordPendingReadbackFailure(job, "unitypackage_async_readback_failed", exception);
             }
         }
 
@@ -332,16 +372,10 @@ namespace VRCForge.Editor
                 return !string.IsNullOrEmpty(activeJobId)
                     && Jobs.TryGetValue(activeJobId, out job)
                     && job.startedForThisJob
-                    && MatchesExpectedPackageEvent(job, packageName)
                     && string.Equals(job.importEventPackageName, packageName ?? "", StringComparison.Ordinal)
                     ? job
                     : null;
             }
-        }
-
-        private static bool MatchesExpectedPackageEvent(ImportJob job, string packageName)
-        {
-            return string.Equals(job.expectedEventPackageName, packageName ?? "", StringComparison.Ordinal);
         }
 
         private static void CompleteFailedJob(ImportJob job, string reason)
@@ -373,6 +407,127 @@ namespace VRCForge.Editor
                 if (string.Equals(activeJobId, job.jobId, StringComparison.Ordinal))
                 {
                     activeJobId = "";
+                    SessionState.EraseString(ActiveJobSessionKey);
+                }
+            }
+            PersistJob(job);
+        }
+
+        private static void RestorePersistedActiveJob()
+        {
+            var jobId = (SessionState.GetString(ActiveJobSessionKey, "") ?? "")
+                .Trim()
+                .ToLowerInvariant();
+            Guid parsed;
+            if (!Guid.TryParseExact(jobId, "N", out parsed))
+            {
+                SessionState.EraseString(ActiveJobSessionKey);
+                return;
+            }
+            var persisted = LoadPersistedJob(jobId);
+            ImportJob job;
+            try
+            {
+                job = persisted == null ? null : persisted.ToObject<ImportJob>();
+            }
+            catch
+            {
+                job = null;
+            }
+            if (job == null
+                || !string.Equals(job.jobId, jobId, StringComparison.Ordinal)
+                || job.result != null
+                || !job.mutationStarted
+                || (job.status != "pending"
+                    && job.status != "running"
+                    && job.status != "readback_pending")
+                || !string.Equals(job.projectPath, CheckpointPrepareTool.ProjectRoot(), StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(job.expectedEventPackageName))
+            {
+                SessionState.EraseString(ActiveJobSessionKey);
+                return;
+            }
+            lock (JobLock)
+            {
+                job.restoredAfterDomainReload = true;
+                job.restoredUtc = DateTime.UtcNow;
+                activeJobId = job.jobId;
+                Jobs[job.jobId] = job;
+            }
+        }
+
+        private static void TryCompletePendingReadback(ImportJob job)
+        {
+            if (!job.mutationStarted
+                || job.result != null
+                || job.expectedAssetPaths == null
+                || job.expectedAssetPaths.Count == 0
+                || EditorApplication.isCompiling
+                || EditorApplication.isUpdating)
+            {
+                return;
+            }
+            var now = DateTime.UtcNow;
+            var restoredReadbackReady = job.restoredAfterDomainReload
+                && job.restoredUtc.HasValue
+                && now - job.restoredUtc.Value >= TimeSpan.FromSeconds(2);
+            var pendingReadbackReady = string.Equals(job.status, "readback_pending", StringComparison.Ordinal)
+                && job.readbackAttemptedUtc.HasValue
+                && now - job.readbackAttemptedUtc.Value >= TimeSpan.FromMilliseconds(500);
+            if (!restoredReadbackReady && !pendingReadbackReady)
+            {
+                return;
+            }
+            try
+            {
+                var expectedAssets = ReadExpectedAssets(job.expectedAssetPaths);
+                CompleteJob(job, "completed", new JObject
+                {
+                    ["ok"] = true,
+                    ["pending"] = false,
+                    ["status"] = "completed",
+                    ["jobId"] = job.jobId,
+                    ["projectPath"] = job.projectPath,
+                    ["unityPackagePath"] = job.unityPackagePath,
+                    ["expectedSha256"] = job.expectedSha256,
+                    ["expectedSize"] = job.expectedSize,
+                    ["expectedAssetPaths"] = JArray.FromObject(job.expectedAssetPaths),
+                    ["expectedAssets"] = JArray.FromObject(expectedAssets),
+                    ["mutationStarted"] = true,
+                    ["committed"] = true,
+                    ["commitState"] = "complete",
+                    ["checkpointRecoveryRequired"] = false,
+                    ["completionSource"] = restoredReadbackReady
+                        ? "restored_expected_asset_readback"
+                        : "pending_expected_asset_readback",
+                });
+            }
+            catch (Exception exception)
+            {
+                RecordPendingReadbackFailure(
+                    job,
+                    restoredReadbackReady
+                        ? "unitypackage_restored_readback_pending"
+                        : "unitypackage_async_readback_pending",
+                    exception);
+            }
+        }
+
+        private static void RecordPendingReadbackFailure(ImportJob job, string code, Exception exception)
+        {
+            lock (JobLock)
+            {
+                job.status = "readback_pending";
+                job.readbackAttemptedUtc = DateTime.UtcNow;
+                job.readbackFailureCode = code ?? "unitypackage_readback_pending";
+                job.readbackFailureReason = exception?.Message ?? "UnityPackage asset readback is incomplete.";
+                var prefix = "Expected imported asset readback failed for '";
+                if (job.readbackFailureReason.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    var end = job.readbackFailureReason.IndexOf("':", prefix.Length, StringComparison.Ordinal);
+                    job.readbackFailurePath = end > prefix.Length
+                        ? job.readbackFailureReason.Substring(prefix.Length, end - prefix.Length)
+                        : "";
                 }
             }
             PersistJob(job);
@@ -397,6 +552,12 @@ namespace VRCForge.Editor
                 ["createdUtc"] = job.createdUtc.ToString("O"),
                 ["completedUtc"] = job.completedUtc?.ToString("O"),
                 ["result"] = job.result == null ? null : job.result.DeepClone(),
+                ["restoredAfterDomainReload"] = job.restoredAfterDomainReload,
+                ["restoredUtc"] = job.restoredUtc?.ToString("O"),
+                ["readbackFailurePath"] = job.readbackFailurePath,
+                ["readbackFailureCode"] = job.readbackFailureCode,
+                ["readbackFailureReason"] = job.readbackFailureReason,
+                ["readbackAttemptedUtc"] = job.readbackAttemptedUtc?.ToString("O"),
             };
             SessionState.SetString(JobSessionPrefix + job.jobId, payload.ToString(Newtonsoft.Json.Formatting.None));
         }
@@ -460,7 +621,10 @@ namespace VRCForge.Editor
                 var guid = (AssetDatabase.AssetPathToGUID(assetPath) ?? string.Empty).Trim().ToLowerInvariant();
                 if (assetType == null || guid.Length != 32 || !IsLowerHex(guid))
                 {
-                    throw new InvalidOperationException("Expected imported asset was not found after completion.");
+                    throw new InvalidOperationException(
+                        $"Expected imported asset readback failed for '{assetPath}': "
+                        + $"assetType={(assetType == null ? "missing" : assetType.FullName ?? assetType.Name)}, "
+                        + $"guidLength={guid.Length}.");
                 }
                 receipts.Add(new { assetPath, guid, assetType = assetType.FullName ?? assetType.Name });
             }
@@ -474,6 +638,11 @@ namespace VRCForge.Editor
     )]
     public static class AssetDatabaseRefreshTool
     {
+        private const double RefreshResponseGraceSeconds = 0.25d;
+        private static bool refreshScheduled;
+        private static double refreshNotBefore;
+        private static string scheduledRequestId = string.Empty;
+
         public class Parameters
         {
             [VRCForgeInput("Optional exact active Unity project root.", IsRequired = false)] public string projectPath { get; set; } = "";
@@ -492,7 +661,6 @@ namespace VRCForge.Editor
                     5,
                     Math.Min(@params?["packageResolveTimeoutSeconds"]?.Value<int?>() ?? 120, 300));
                 object packageResolve = new { requested = false };
-                AssetDatabase.SaveAssets();
                 if (resolvePackages)
                 {
                     var startedAt = DateTime.UtcNow;
@@ -507,14 +675,60 @@ namespace VRCForge.Editor
                         timeoutSeconds = packageResolveTimeoutSeconds
                     };
                 }
-                AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+
+                if (!refreshScheduled)
+                {
+                    refreshScheduled = true;
+                    refreshNotBefore = EditorApplication.timeSinceStartup + RefreshResponseGraceSeconds;
+                    scheduledRequestId = Guid.NewGuid().ToString("N");
+                    EditorApplication.update -= RunScheduledRefresh;
+                    EditorApplication.update += RunScheduledRefresh;
+                }
                 return VRCForgeToolResult.Completed(
-                    "Refreshed Unity AssetDatabase.",
-                    new { ok = true, projectPath = CheckpointPrepareTool.ProjectRoot(), packageResolve });
+                    "Scheduled a Unity AssetDatabase refresh after the tool response is released.",
+                    new
+                    {
+                        ok = true,
+                        status = "scheduled",
+                        requestId = scheduledRequestId,
+                        projectPath = CheckpointPrepareTool.ProjectRoot(),
+                        packageResolve,
+                        completionKnown = false,
+                        verificationTool = "vrc_get_compile_errors"
+                    });
             }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"AssetDatabase refresh failed: {ex.Message}");
+            }
+        }
+
+        private static void RunScheduledRefresh()
+        {
+            if (!refreshScheduled || EditorApplication.timeSinceStartup < refreshNotBefore)
+            {
+                return;
+            }
+
+            EditorApplication.update -= RunScheduledRefresh;
+            var requestId = scheduledRequestId;
+            refreshScheduled = false;
+            refreshNotBefore = 0d;
+            scheduledRequestId = string.Empty;
+            try
+            {
+                // A refresh may compile and domain-reload this same Core. It must
+                // therefore run only after the MCP response has been released;
+                // otherwise the caller and Unity can wait on each other forever.
+                AssetDatabase.SaveAssets();
+                AssetDatabase.Refresh();
+                UnityEngine.Debug.Log($"[VRCForge] Scheduled AssetDatabase refresh completed ({requestId}).");
+            }
+            catch (Exception ex)
+            {
+                UnityEngine.Debug.LogError(
+                    $"[VRCForge] Scheduled AssetDatabase refresh failed ({requestId}): "
+                    + $"{ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}");
             }
         }
     }

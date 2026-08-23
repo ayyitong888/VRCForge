@@ -293,8 +293,9 @@ Section "Install"
   CreateDirectory "$UserDataRoot\backups"
 
   CreateDirectory "$SMPROGRAMS\${START_MENU_GROUP}"
-  CreateShortCut "$DESKTOP\${DESKTOP_SHORTCUT}" "$INSTDIR\VRCForge.exe"
-  CreateShortCut "$SMPROGRAMS\${START_MENU_GROUP}\VRCForge.lnk" "$INSTDIR\VRCForge.exe"
+  SetOutPath "$INSTDIR"
+  CreateShortCut "$DESKTOP\${DESKTOP_SHORTCUT}" "$INSTDIR\VRCForge.exe" "" "$INSTDIR\VRCForge.ico" 0
+  CreateShortCut "$SMPROGRAMS\${START_MENU_GROUP}\VRCForge.lnk" "$INSTDIR\VRCForge.exe" "" "$INSTDIR\VRCForge.ico" 0
   CreateShortCut "$SMPROGRAMS\${START_MENU_GROUP}\$(UninstallShortcutName)" "$INSTDIR\Uninstall.exe"
 
   !ifndef VRCFORGE_SMOKE_BUILD

@@ -24,10 +24,10 @@ def load_validator():
     return module
 
 
-def test_catalog_covers_exact_64_tools_once_with_real_success_contracts() -> None:
+def test_catalog_covers_exact_78_tools_once_with_real_success_contracts() -> None:
     validator = load_validator()
     cases = validator.load_catalog()
-    assert len(cases) == 64
+    assert len(cases) == 78
     assert {case["tool"] for case in cases} == EXPECTED_TOOL_NAMES
     assert all(case["arguments"] is not None for case in cases)
     assert all(case["requiredFixtures"] for case in cases)
@@ -91,7 +91,7 @@ def test_live_schema_gate_rejects_empty_or_missing_catalog_parameters() -> None:
                 },
             }
         )
-    assert validator.validate_tool_schemas(cases, tools)["toolCount"] == 64
+    assert validator.validate_tool_schemas(cases, tools)["toolCount"] == 78
 
     broken = [dict(item) for item in tools]
     broken[0] = {
@@ -154,3 +154,32 @@ def test_avatar_primitive_crud_commands_expose_nonempty_schemas_covering_catalog
         assert re.search(r"VRCForgeInput\([^\n]+IsRequired = true\)\] public string action", schemas[tool][1])
     assert re.search(r"IsRequired = true\)\] public string clipPath", schemas["vrc_write_animation_curve"][1])
     assert re.search(r"IsRequired = true\)\] public string propertyName", schemas["vrc_write_animation_curve"][1])
+
+
+def test_animation_curve_atom_supports_lossless_guarded_binding_retarget() -> None:
+    source = AVATAR_PRIMITIVE_CRUD
+    assert 'action == "retarget_curve"' in source
+    assert "AnimationUtility.GetEditorCurve(existingClip" in source
+    assert "new AnimationCurve(sourceCurve.keys)" in source
+    assert "preWrapMode = sourceCurve.preWrapMode" in source
+    assert "postWrapMode = sourceCurve.postWrapMode" in source
+    assert "destinationCurve != null && !overwriteExisting" in source
+    assert "AnimationUtility.SetEditorCurve(clip, source, null)" in source
+    assert "BindingsEqual(source, binding)" in source
+
+
+def test_fx_animator_atom_deletes_only_unreferenced_parameters() -> None:
+    source = AVATAR_PRIMITIVE_CRUD
+    assert 'action == "delete_parameter"' in source
+    assert "HandleDeleteParameter(controller, @params, preview, plan)" in source
+    assert "ValidateUnusedParameterDeletion" in source
+    assert "CollectParameterReferences" in source
+    assert "CollectTransitionReferences" in source
+    assert "CollectMotionReferences" in source
+    assert "CollectBehaviourReferences" in source
+    assert "controller.RemoveParameter(parameterIndex)" in source
+    assert "is still referenced by:" in source
+    assert "FX animator parameter deletion persisted readback was not exact" in source
+    assert "RestoreAnimatorControllerPreState" in source
+    assert 'commitState = restored ? "rolled_back" : "unknown"' in source
+    assert "fx_animator_delete_parameter_rejected" in source

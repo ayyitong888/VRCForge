@@ -16,8 +16,10 @@ from optimization_service import (
     STABLE_OPTIMIZATION_APPLY_REQUEST_DEFINITIONS,
     STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES,
     build_dependency_doctor,
+    build_physbone_audit,
     build_optimization_report,
     build_optimization_tool_result,
+    build_texture_vram_audit,
 )
 from optimization_workflow_service import (
     OptimizationWorkflowService,
@@ -37,6 +39,76 @@ def make_unity_project(root: Path) -> None:
     (root / "ProjectSettings").mkdir()
     (root / "Packages" / "manifest.json").write_text('{"dependencies":{}}', encoding="utf-8")
     (root / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 2022.3.22f1", encoding="utf-8")
+
+
+def test_texture_vram_audit_reads_material_texture_dependency_metadata() -> None:
+    validation = {
+        "sources": {
+            "materials": {
+                "payload": {
+                    "materials": [
+                        {
+                            "material_name": "Face",
+                            "textures": [
+                                {
+                                    "propertyName": "_MainTex",
+                                    "textureName": "Face_Main",
+                                    "assetPath": "Assets/Avatar/Textures/Face_Main.png",
+                                    "width": 4096,
+                                    "height": 4096,
+                                    "bytes": 22369624,
+                                }
+                            ],
+                        }
+                    ]
+                }
+            }
+        }
+    }
+
+    result = build_texture_vram_audit(validation)
+
+    assert result["summary"]["knownTextureCount"] == 1
+    assert result["summary"]["largeTextureCount"] == 1
+    assert result["summary"]["scannerCoverage"] == "metadata"
+    assert result["textures"][0]["name"] == "Assets/Avatar/Textures/Face_Main.png"
+
+
+def test_physbone_audit_counts_physbones_and_colliders_separately() -> None:
+    validation = {
+        "sources": {
+            "performance_pc": {"ok": True, "payload": {}},
+            "avatar_items": {
+                "ok": True,
+                "payload": {
+                    "items": [
+                        {
+                            "object_path": "Avatar/Tail",
+                            "component_types": ["Transform", "VRCPhysBone"],
+                        },
+                        {
+                            "object_path": "Avatar/HeadCollider",
+                            "component_types": ["Transform", "VRCPhysBoneCollider"],
+                        },
+                        {
+                            "object_path": "Avatar/Breast",
+                            "component_types": ["Transform", "VRCPhysBone", "VRCPhysBoneCollider"],
+                        },
+                    ]
+                },
+            },
+        }
+    }
+
+    result = build_physbone_audit(validation)
+    metrics = {row["id"]: row for row in result["metrics"]}
+
+    assert result["summary"]["knownComponentCount"] == 2
+    assert result["summary"]["knownColliderCount"] == 2
+    assert result["summary"]["reportedComponentCount"] == 2
+    assert metrics["physbone_components"]["value"] == 2
+    assert metrics["physbone_colliders"]["value"] == 2
+    assert all(row["objectPath"] != "unknown" for row in result["components"])
 
 
 def set_gateway_approval_config(
@@ -446,6 +518,116 @@ def test_parameter_hard_gate_surfaces_are_read_only_and_conservative(tmp_path: P
     assert vrcfury_plan["result"]["applyBlocked"] is True
     assert "Parameter Compressor requests use the authoritative" in compatibility["applyPolicy"]
     assert "Direct Tree writes remain blocked" in compatibility["applyPolicy"]
+
+
+def test_parameter_compressibility_keeps_vrcft_names_out_of_unused_candidates() -> None:
+    validation = fake_validation()
+    parameters = validation["sources"]["parameters"]["payload"]["parameterNames"]
+    parameters.extend(
+        [
+            {"name": "FT/v2/MouthLowerDown1", "valueType": "Bool", "networkSynced": True},
+            {"name": "VisemesEnable", "valueType": "Bool", "networkSynced": True},
+            {"name": "FacialExpressionsDisabled", "valueType": "Bool", "networkSynced": True},
+        ]
+    )
+
+    result = build_optimization_tool_result(
+        "optimization.parameter.compressibility-plan",
+        {},
+        validation,
+    )["result"]
+
+    protected = {item["name"] for item in result["categories"]["danger_osc_or_face_tracking"]}
+    unused = {item["name"] for item in result["categories"]["unused_candidate"]}
+    assert {"FT/v2/MouthLowerDown1", "VisemesEnable", "FacialExpressionsDisabled"} <= protected
+    assert not ({"FT/v2/MouthLowerDown1", "VisemesEnable", "FacialExpressionsDisabled"} & unused)
+
+
+def test_parameter_budget_prefers_ndmf_merged_usage_over_source_descriptor() -> None:
+    validation = fake_validation()
+    source = validation["sources"]["parameters"]["payload"]
+    source["inspectionStage"] = "ndmf_parameter_introspection"
+    source["sourceDescriptorUsage"] = {
+        "totalParameters": 6,
+        "totalEstimatedCost": 280,
+    }
+    source["mergedParameterUsage"] = {
+        "available": True,
+        "inspectionStage": "ndmf_parameter_introspection",
+        "totalParameters": 3,
+        "totalBitUsage": 9,
+        "syncedParameterCount": 2,
+        "animatorOnlyParameterCount": 1,
+        "hiddenParameterCount": 0,
+        "parameterNames": [
+            {
+                "name": "FaceTrackingFloat",
+                "parameterType": "Float",
+                "bitUsage": 8,
+                "wantSynced": True,
+                "plugin": "Modular Avatar",
+                "sourcePath": "Avatar/FaceTracking",
+            },
+            {
+                "name": "OutfitToggleHat",
+                "parameterType": "Bool",
+                "bitUsage": 1,
+                "wantSynced": True,
+                "plugin": "VRChat Avatar Descriptor",
+                "sourcePath": "Avatar",
+            },
+            {
+                "name": "FaceTrackingLocal",
+                "parameterType": "Float",
+                "bitUsage": 0,
+                "wantSynced": False,
+                "animatorOnly": True,
+                "plugin": "Modular Avatar",
+                "sourcePath": "Avatar/FaceTracking",
+            },
+        ],
+        "pluginBreakdown": [
+            {
+                "plugin": "Modular Avatar",
+                "parameterCount": 2,
+                "syncedParameterCount": 1,
+                "bitUsage": 8,
+            },
+            {
+                "plugin": "VRChat Avatar Descriptor",
+                "parameterCount": 1,
+                "syncedParameterCount": 1,
+                "bitUsage": 1,
+            },
+        ],
+    }
+
+    inventory = build_optimization_tool_result(
+        "optimization.parameter.inventory",
+        {},
+        validation,
+    )["result"]
+    budget = build_optimization_tool_result(
+        "optimization.parameter-budget-audit",
+        {},
+        validation,
+    )["result"]
+
+    assert inventory["summary"]["totalCustomParameters"] == 3
+    assert inventory["summary"]["syncedBits"] == 9
+    assert inventory["summary"]["scannerCoverage"] == "ndmf_parameter_introspection"
+    assert inventory["mergedUsageAvailable"] is True
+    assert inventory["sourceDescriptorUsage"]["totalEstimatedCost"] == 280
+    assert inventory["pluginBreakdown"][0]["plugin"] == "Modular Avatar"
+    assert {item["name"] for item in inventory["parameters"]} == {
+        "FaceTrackingFloat",
+        "OutfitToggleHat",
+        "FaceTrackingLocal",
+    }
+    assert budget["summary"]["knownParameterCount"] == 3
+    assert budget["summary"]["syncedBits"] == 9
+    assert budget["summary"]["scannerCoverage"] == "ndmf_parameter_introspection"
+    assert budget["mergedUsageAvailable"] is True
 
 
 def test_advanced_optimization_0_9_surfaces_are_plan_only(tmp_path: Path) -> None:

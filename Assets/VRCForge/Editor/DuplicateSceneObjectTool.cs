@@ -106,9 +106,22 @@ namespace VRCForge.Editor
                 var sourceLocalPosition = source.transform.localPosition;
                 var sourceLocalRotation = source.transform.localRotation;
                 var sourceLocalScale = source.transform.localScale;
-                duplicate = UnityEngine.Object.Instantiate(source);
+                var sourceWorldPosition = source.transform.position;
+                var sourceWorldRotation = source.transform.rotation;
+                var sourceWorldScale = source.transform.lossyScale;
+
+                // Instantiate beneath the same parent first. Object.Instantiate(source)
+                // can place an inactive nested object at its local pose while making it
+                // a scene root, so a later SetParent(..., true) preserves the wrong
+                // world transform. Cloning as a sibling makes the initial world matrix
+                // identical to the source before the object is detached and moved.
+                duplicate = UnityEngine.Object.Instantiate(
+                    source,
+                    source.transform.parent,
+                    false);
                 mutationStarted = true;
                 duplicate.name = snapshot.Target.Name;
+                duplicate.transform.SetParent(null, true);
                 SceneManager.MoveGameObjectToScene(duplicate, snapshot.Target.Scene.Scene);
                 duplicate.transform.SetParent(
                     snapshot.Target.Parent.transform,
@@ -118,6 +131,15 @@ namespace VRCForge.Editor
                     duplicate.transform.localPosition = sourceLocalPosition;
                     duplicate.transform.localRotation = sourceLocalRotation;
                     duplicate.transform.localScale = sourceLocalScale;
+                }
+                else
+                {
+                    VerifyWorldTransform(
+                        duplicate.transform,
+                        sourceWorldPosition,
+                        sourceWorldRotation,
+                        sourceWorldScale,
+                        "in-memory duplicate");
                 }
                 Undo.RegisterCreatedObjectUndo(duplicate, "Duplicate VRCForge scene object");
 
@@ -144,6 +166,15 @@ namespace VRCForge.Editor
                     || readback.HierarchyDigest != hierarchyDigestBeforeSave)
                 {
                     throw new SceneObjectCopyException("The duplicate persisted readback was not exact.");
+                }
+                if (snapshot.PreserveWorldTransform)
+                {
+                    VerifyWorldTransform(
+                        readback.GameObject.transform,
+                        sourceWorldPosition,
+                        sourceWorldRotation,
+                        sourceWorldScale,
+                        "persisted duplicate");
                 }
                 if (readback.Scene.FileDigest == snapshot.Target.Scene.FileDigest)
                 {
@@ -210,6 +241,7 @@ namespace VRCForge.Editor
                         readbackExact = true
                     },
                     preserveWorldTransform = snapshot.PreserveWorldTransform,
+                    worldTransformPreserved = snapshot.PreserveWorldTransform,
                     previewDigest = snapshot.PreviewDigest,
                     cleanupRequired = false
                 });
@@ -224,6 +256,28 @@ namespace VRCForge.Editor
                 return SceneObjectCopyCore.BuildMutationFailure(
                     SceneObjectCopyCore.DuplicateOperation,
                     restored);
+            }
+        }
+
+        private static void VerifyWorldTransform(
+            Transform transform,
+            Vector3 expectedPosition,
+            Quaternion expectedRotation,
+            Vector3 expectedScale,
+            string label)
+        {
+            const float positionTolerance = 0.00001f;
+            const float rotationToleranceDegrees = 0.001f;
+            const float scaleTolerance = 0.00001f;
+            if ((transform.position - expectedPosition).sqrMagnitude
+                    > positionTolerance * positionTolerance
+                || Quaternion.Angle(transform.rotation, expectedRotation)
+                    > rotationToleranceDegrees
+                || (transform.lossyScale - expectedScale).sqrMagnitude
+                    > scaleTolerance * scaleTolerance)
+            {
+                throw new SceneObjectCopyException(
+                    $"The {label} did not preserve the source world transform.");
             }
         }
 

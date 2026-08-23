@@ -64,6 +64,32 @@ def test_tauri_manifest_selects_the_desktop_app_as_default_binary() -> None:
     assert manifest["package"]["default-run"] == "vrcforge-agentic-app"
 
 
+def test_release_payload_keeps_external_stdio_protocol_dependencies_and_smokes_imports() -> None:
+    source = _build_script()
+
+    assert (
+        'Copy-Item -LiteralPath .\\agent_mcp_2026.py -Destination '
+        '(Join-Path $payloadRoot "agent_mcp_2026.py") -Force'
+    ) in source
+    assert (
+        'Copy-Item -LiteralPath .\\agent_mcp_standard.py -Destination '
+        '(Join-Path $payloadRoot "agent_mcp_standard.py") -Force'
+    ) in source
+    assert (
+        'Copy-Item -LiteralPath .\\external_tool_result_contract.py -Destination '
+        '(Join-Path $payloadRoot "external_tool_result_contract.py") -Force'
+    ) in source
+    assert (
+        'Copy-Item -LiteralPath .\\avatar_composition_workflow_skills.py -Destination '
+        '(Join-Path $payloadRoot "avatar_composition_workflow_skills.py") -Force'
+    ) in source
+    assert (
+        '& $pythonExe (Join-Path $payloadRoot '
+        '"tools\\vrcforge_agent_mcp_stdio.py") --help | Out-Null'
+    ) in source
+    assert 'throw "Packaged external stdio bridge import smoke failed."' in source
+
+
 def test_vite_dev_watcher_excludes_generated_and_evidence_trees() -> None:
     config = (REPO_ROOT / "vite.config.ts").read_text(encoding="utf-8")
 
@@ -170,6 +196,57 @@ def _build_script() -> str:
     return (REPO_ROOT / "packaging" / "build_release.ps1").read_text(encoding="utf-8")
 
 
+def test_release_build_runs_unity_csharp_syntax_gate_before_building_payload() -> None:
+    source = _build_script()
+    gate = "VRCForge.CSharpSyntaxGate\\VRCForge.CSharpSyntaxGate.csproj"
+
+    assert gate in source
+    assert 'throw "Unity C# syntax gate failed. No release payload was built."' in source
+    assert source.index(gate) < source.index("Build-TauriDesktopApp -DestinationExe")
+
+
+def test_unity_csharp_syntax_gate_rejects_invalid_source(tmp_path: Path) -> None:
+    candidates = [shutil.which("dotnet")]
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        candidates.append(str(Path(local_app_data) / "Microsoft" / "dotnet" / "dotnet.exe"))
+    dotnet = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate
+            and Path(candidate).is_file()
+            and subprocess.run(
+                [candidate, "--list-sdks"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.strip()
+        ),
+        None,
+    )
+    if dotnet is None:
+        pytest.skip("A .NET SDK is required for the Unity C# syntax gate fixture.")
+
+    source_root = tmp_path / "Assets" / "VRCForge"
+    source_root.mkdir(parents=True)
+    (source_root / "Invalid.cs").write_text(
+        "internal static class Invalid { private static bool Check(bool value) { if (value)) return true; return false; } }\n",
+        encoding="utf-8",
+    )
+    project = REPO_ROOT / "packaging" / "VRCForge.CSharpSyntaxGate" / "VRCForge.CSharpSyntaxGate.csproj"
+    result = subprocess.run(
+        [dotnet, "run", "--project", str(project), "--configuration", "Release", "--", str(source_root)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Unity C# syntax gate failed" in result.stderr
+    assert "Invalid.cs" in result.stderr
+
+
 def test_smoke_flavor_is_compile_time_scoped_and_cannot_enter_release_build() -> None:
     release_build = _build_script()
     publish = (REPO_ROOT / "packaging" / "publish_release.ps1").read_text(encoding="utf-8")
@@ -235,6 +312,22 @@ def test_installer_smoke_documentation_uses_the_exact_isolated_identity() -> Non
     assert '--upgrade-installer "<downloaded official v1.6.0 offline installer>"' in source
     assert "Do not run `production-clean` on a normal workstation" in source
     assert "--upgrade-from-installer-sha256 853dfce74830e73098cc55240abf1e23162d66e579225d16f5b13d44089ca2d4" in source
+
+
+def test_installers_bind_shortcuts_to_the_installed_icon_and_working_directory() -> None:
+    expected_shortcuts = (
+        'CreateShortCut "$DESKTOP\\${DESKTOP_SHORTCUT}" "$INSTDIR\\VRCForge.exe" "" "$INSTDIR\\VRCForge.ico" 0',
+        'CreateShortCut "$SMPROGRAMS\\${START_MENU_GROUP}\\VRCForge.lnk" "$INSTDIR\\VRCForge.exe" "" "$INSTDIR\\VRCForge.ico" 0',
+    )
+    for name in ("VRCForge_Offline_Installer_x64.nsi", "VRCForge_Web_Installer_x64.nsi"):
+        source = (REPO_ROOT / "installer" / name).read_text(encoding="utf-8")
+        shortcuts_start = source.index('CreateDirectory "$SMPROGRAMS\\${START_MENU_GROUP}"')
+        shortcuts_end = source.index("!ifndef VRCFORGE_SMOKE_BUILD", shortcuts_start)
+        shortcut_block = source[shortcuts_start:shortcuts_end]
+
+        assert 'SetOutPath "$INSTDIR"' in shortcut_block
+        for expected in expected_shortcuts:
+            assert expected in shortcut_block
 
 
 def test_payload_helper_accepts_only_the_exact_compiled_scope_identity() -> None:
@@ -615,6 +708,20 @@ def test_release_payload_bundles_public_docs_and_requires_all_license_notices() 
         assert f'"{required_member}"' in payload_smoke
 
 
+def test_windows_desktop_binds_the_large_taskbar_icon_from_its_executable() -> None:
+    main_source = (REPO_ROOT / "src-tauri" / "src" / "main.rs").read_text(
+        encoding="utf-8"
+    )
+    notification_source = (
+        REPO_ROOT / "src-tauri" / "src" / "approval_notification_windows.rs"
+    ).read_text(encoding="utf-8")
+
+    assert "bind_main_window_taskbar_icon(&window)" in main_source
+    assert "ExtractIconExW" in notification_source
+    assert "WM_SETICON" in notification_source
+    assert "ICON_BIG" in notification_source
+
+
 def test_packaged_public_docs_track_current_release_identity() -> None:
     version = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -699,6 +806,14 @@ def test_release_pairs_unity_core_with_exact_desktop_and_backend_payloads() -> N
     assert "sha256 = $trustedDesktopSha256" in source
     assert "sha256 = $trustedBackendSha256" in source
     assert '-SourceAssetsPath "Assets\\VRCForge"' not in source
+
+
+def test_release_pairs_portable_core_root_meta_with_the_unitypackage() -> None:
+    source = _build_script()
+
+    assert '$portableCoreRootMeta = Join-Path $unityPluginRoot "Assets\\VRCForge.meta"' in source
+    assert "-RootMetaOutputPath $portableCoreRootMeta" in source
+    assert source.index("$portableCoreRootMeta =") < source.index("-RootMetaOutputPath $portableCoreRootMeta")
 
 
 def test_strict_evidence_outputs_reject_reparse_and_overwrite_paths() -> None:

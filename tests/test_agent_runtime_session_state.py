@@ -91,6 +91,24 @@ def test_restore_append_bootstrap_and_clear_preserve_session_contract() -> None:
     assert state.get_session("sess-1") is None
 
 
+def test_internal_tool_blocks_are_session_scoped_and_core_cannot_be_unloaded() -> None:
+    state, _lock = make_state()
+
+    assert state.internal_tool_blocks("session-a") == frozenset({"core"})
+    assert state.internal_tool_blocks("session-b") == frozenset({"core"})
+
+    assert state.load_internal_tool_block("session-a", "files") == frozenset(
+        {"core", "files"}
+    )
+    assert state.internal_tool_blocks("session-b") == frozenset({"core"})
+    assert state.unload_internal_tool_block("session-a", "core") == frozenset(
+        {"core", "files"}
+    )
+    assert state.unload_internal_tool_block("session-a", "files") == frozenset(
+        {"core"}
+    )
+
+
 def test_cancel_markers_preserve_turn_precedence_and_single_consumption() -> None:
     state, _lock = make_state()
 

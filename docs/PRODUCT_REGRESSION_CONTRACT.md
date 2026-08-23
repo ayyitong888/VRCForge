@@ -1049,6 +1049,25 @@ Each item ends with its version history in this exact form:
 - Contract: external Agents/connectors are authenticated requesters. VRCForge
   remains the only Unity/project write authority and owns the entire write
   transaction.
+- Contract: the external Agent owns planning, continuation, retry, and the
+  decision to ask its user about a high-risk action. Every exposed read,
+  preview, and write tool returns its handler success or failure object
+  unchanged under `result`, including the exact code, reason, details, and
+  lower-level Core result carried by an exception. Unity transport defaults to
+  preserving Core tool errors; lossy compression is permitted only through an
+  explicit internal `preserve_tool_error=False` call. The Gateway may append a
+  sibling request trace, `writeFailure`, bounded Console before/after snapshots,
+  exception chain, and a disclosed sensitive-field redaction policy, but must
+  not replace the lower-level code/reason, inject internal
+  `outcome`/`resultSummary`/`continueLoop`/`terminalPlan`/`task_continuation`
+  fields, retry, or restore a user checkpoint.
+- Contract: before any tool list or normal call, Core handshake compatibility
+  is based on a protocol range, not product-version or content-hash equality.
+  Read-only `server/core-info` remains callable before handshake and reports a
+  compile-time Core identity/version, instance id, path-derived `projectId`,
+  protocol range, tool contract/count, and compile snapshot. An upgrade is
+  ready only after the running assembly reports the target compile-time
+  identity and the Console snapshot has no new compile errors.
 - Beginner setup contract: Settings exposes one three-step Generic MCP client
   guide. It distinguishes recommended local STDIO from explicitly supported
   Streamable HTTP, says that VRCForge must stay running, identifies the exact
@@ -1059,10 +1078,19 @@ Each item ends with its version history in this exact form:
 - Forbidden regression: no direct connector write, broad Shell authority or
   removal of supported compatibility without packaged proof and approval; no
   unlabeled folder/path input, transport ambiguity, hidden HTTP prerequisite or
-  promise that automatic install supports non-JSON clients.
+  promise that automatic install supports non-JSON clients. No opaque
+  handshake rejection, product-version equality gate, content-derived project
+  identity, manifest-reported Core version, opt-in error preservation,
+  rewritten/lossy lower-level error, guessed commit state, or automatic restore
+  after a failed external call.
 - Acceptance: connector negatives, installer-preservation and beginner-layout
-  contracts, locale/TypeScript checks, interop matrix and package boundary scan.
-- [首次实现: 1.3.0] [强化/修复: 1.7.0] [最近验证: 1.7 source]
+  contracts, locale/TypeScript checks, interop matrix and package boundary
+  scan; pre-handshake Core-info and compile-failure fixtures; exact external
+  read-success, read-failure, read-exception, write-success, returned-write-
+  failure, and write-exception preservation; default-preserve/explicit-compress
+  Unity transport behavior; explicit pre-route no-write facts; unknown-outcome
+  honesty; and live post-import compile-time identity plus Console readback.
+- [首次实现: 1.3.0] [强化/修复: 1.7.8] [最近验证: 1.7.8 source]
 
 ### CMP-002 — DeepSeek Harness and host-side multi-MCP compatibility
 

@@ -77,3 +77,12 @@ def test_auth_rate_limit_transient_and_ambiguous_errors_do_not_fallback(status: 
     error = RuntimeError("provider request failed")
     error.response = SimpleNamespace(status_code=status)  # type: ignore[attr-defined]
     assert is_explicit_protocol_compatibility_error(error) is False
+
+
+def test_explicit_responses_not_enabled_error_allows_auto_protocol_fallback() -> None:
+    error = RuntimeError(
+        "Error code: 400 - {'error': {'message': 'this model is not enabled for the Responses API'}}"
+    )
+    error.status_code = 400  # type: ignore[attr-defined]
+
+    assert is_explicit_protocol_compatibility_error(error) is True

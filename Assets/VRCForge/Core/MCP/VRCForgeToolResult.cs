@@ -62,6 +62,34 @@ namespace VRCForge.Core.MCP
                 0.0);
         }
 
+        public static VRCForgeToolResult RejectedBeforeMutation(
+            string errorCode,
+            string message,
+            string failureLayer,
+            string failurePhase,
+            bool retryable = false,
+            object details = null)
+        {
+            var payload = new JObject
+            {
+                ["failureLayer"] = failureLayer ?? string.Empty,
+                ["failurePhase"] = failurePhase ?? string.Empty,
+                ["toolRoutingStarted"] = true,
+                ["mutationStarted"] = false,
+                ["committed"] = false,
+                ["commitState"] = "not_started",
+                ["commitStateKnown"] = true,
+                ["retryable"] = retryable,
+                ["checkpointRecoveryRequired"] = false,
+                ["temporaryCleanupRequired"] = false,
+            };
+            if (details != null)
+            {
+                payload["details"] = JToken.FromObject(details);
+            }
+            return FailedWithCode(errorCode, message, payload);
+        }
+
         public static VRCForgeToolResult Waiting(
             string message = "",
             double continuationDelaySeconds = 1.0,

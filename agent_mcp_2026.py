@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Sequence, TextIO
 from urllib.parse import urlsplit
 
+from external_tool_result_contract import build_external_tool_error
+from agent_tool_result_contract import normalize_agent_tool_result
+
 
 PROTOCOL_VERSION = "2026-07-28"
 SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo"
@@ -35,6 +38,7 @@ JsonObject = dict[str, Any]
 ToolListCallback = Callable[[Mapping[str, Any]], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
 ToolCallCallback = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
 BearerValidator = Callable[[str], bool | Awaitable[bool]]
+ToolListRevisionCallback = Callable[[], Any]
 
 
 @dataclass(frozen=True)
@@ -47,10 +51,38 @@ class Mcp2026Error(Exception):
     data: Mapping[str, Any] | None = None
 
 
-def _error(request_id: Any, code: int, message: str, data: Mapping[str, Any] | None = None) -> JsonObject:
+def _error(
+    request_id: Any,
+    code: int,
+    message: str,
+    data: Mapping[str, Any] | None = None,
+    *,
+    failure_phase: str = "protocol_request_validation",
+    tool_routing_started: bool | None = False,
+    mutation_started: bool | None = False,
+    committed: bool | None = False,
+    exception: BaseException | None = None,
+) -> JsonObject:
     body: JsonObject = {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
-    if data:
-        body["error"]["data"] = dict(data)
+    context = dict(data) if isinstance(data, Mapping) else {}
+    context.setdefault("protocolNamespace", PROTOCOL_VERSION_META_KEY)
+    context.setdefault("protocolVersion", PROTOCOL_VERSION)
+    error_object = build_external_tool_error(
+        error=message,
+        error_code=f"mcp_jsonrpc_{code}",
+        failure_layer="external_mcp_protocol",
+        failure_phase=failure_phase,
+        operation_kind="protocol",
+        tool_routing_started=tool_routing_started,
+        mutation_started=mutation_started,
+        committed=committed,
+        exception=exception,
+        retryable=False,
+        checkpoint_recovery_required=False,
+        temporary_cleanup_required=False,
+        details=context,
+    )
+    body["error"]["data"] = {**error_object, **context}
     return body
 
 
@@ -75,6 +107,47 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _tool_result_content_text(structured: Mapping[str, Any]) -> str:
+    """Keep discovery text compact; structuredContent remains lossless."""
+
+    if structured.get("schema") == "vrcforge.external_tool_blocks.v2":
+        tree = structured.get("tree") if isinstance(structured.get("tree"), Mapping) else {}
+        children = tree.get("children") if isinstance(tree.get("children"), Sequence) else []
+        blocks = []
+        for item in children:
+            if not isinstance(item, Mapping):
+                continue
+            tool_names = item.get("toolNames")
+            child_tools = item.get("children")
+            tool_count = (
+                len(tool_names)
+                if isinstance(tool_names, Sequence) and not isinstance(tool_names, (str, bytes))
+                else len(child_tools)
+                if isinstance(child_tools, Sequence) and not isinstance(child_tools, (str, bytes))
+                else 0
+            )
+            blocks.append(
+                {
+                    "index": item.get("index"),
+                    "name": item.get("name"),
+                    "loaded": item.get("loaded"),
+                    "whenToUse": item.get("whenToUse"),
+                    "whenNotToUse": item.get("whenNotToUse"),
+                    "toolCount": tool_count,
+                }
+            )
+        compact = {
+            "ok": structured.get("ok"),
+            "schema": structured.get("schema"),
+            "selectedBlock": structured.get("selectedBlock"),
+            "loadedBlocks": structured.get("loadedBlocks"),
+            "blocks": blocks,
+            "note": "Full tool-name index is in structuredContent; full descriptions and schemas load only for selected blocks.",
+        }
+        return json.dumps(compact, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return json.dumps(structured, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
 def _normalise_tool(tool: Mapping[str, Any]) -> JsonObject:
     name = tool.get("name")
     if not _is_nonempty_string(name):
@@ -84,12 +157,18 @@ def _normalise_tool(tool: Mapping[str, Any]) -> JsonObject:
         schema = {"type": "object", "additionalProperties": True}
     elif schema.get("type") != "object":
         raise Mcp2026Error(-32603, "Tool catalogue inputSchema must be an object schema", 500)
-    is_write = bool(tool.get("write") or tool.get("requiresApproval"))
+    supplied_meta = tool.get("_meta") if isinstance(tool.get("_meta"), Mapping) else {}
+    is_write = bool(
+        tool.get("write")
+        or tool.get("requiresApproval")
+        or str(supplied_meta.get("permission") or "").strip().casefold() == "write"
+    )
     summary = str(tool.get("description") or name).strip()
     if not all(section in summary for section in ("When to use:", "When NOT to use:", "Negative example:")):
         when_not = (
             "Do not use while planning, for hypothetical or quoted requests, or without an explicit "
-            "project change request and the VRCForge App approval lane."
+            "project change request. High-risk or destructive calls require an external user confirmation "
+            "round trip before the tool can mutate anything."
             if is_write
             else "Do not use for general questions, quoted examples, hypothetical requests, or when the user forbids inspection."
         )
@@ -115,10 +194,9 @@ def _normalise_tool(tool: Mapping[str, Any]) -> JsonObject:
         "destructiveHint": False,
         "openWorldHint": False,
     }
-    supplied_meta = tool.get("_meta") if isinstance(tool.get("_meta"), Mapping) else {}
     normalised["_meta"] = {
         **dict(supplied_meta),
-        "permission": "RequiresApproval" if is_write else "ReadOnly",
+        "permission": str(supplied_meta.get("permission") or ("Write" if is_write else "ReadOnly")),
     }
     return normalised
 
@@ -206,6 +284,14 @@ def _validate_request(message: Any) -> tuple[Any, str, JsonObject]:
         exposure_layer = params.get("exposureLayer")
         if not isinstance(exposure_layer, str) or exposure_layer not in {"planning", "execution"}:
             raise Mcp2026Error(-32602, "exposureLayer must be planning or execution")
+    if "toolBlocks" in params:
+        tool_blocks = params.get("toolBlocks")
+        if (
+            not isinstance(tool_blocks, Sequence)
+            or isinstance(tool_blocks, (str, bytes, bytearray))
+            or not all(_is_nonempty_string(item) for item in tool_blocks)
+        ):
+            raise Mcp2026Error(-32602, "toolBlocks must be an array of non-empty strings")
     return request_id, method, dict(params)
 
 
@@ -222,7 +308,8 @@ class Mcp2026Router:
         tool_call: ToolCallCallback,
         *,
         server_name: str = "VRCForge",
-        server_version: str = "1.7.7",
+        server_version: str = "1.7.8",
+        tool_list_revision: ToolListRevisionCallback | None = None,
     ) -> None:
         if not _is_nonempty_string(server_name) or not _is_nonempty_string(server_version):
             raise ValueError("server_name and server_version must be non-empty strings")
@@ -230,6 +317,13 @@ class Mcp2026Router:
         self._tool_call = tool_call
         self.server_name = server_name
         self.server_version = server_version
+        self._tool_list_revision = tool_list_revision
+        self._pending_notifications: list[JsonObject] = []
+
+    def drain_notifications(self) -> list[JsonObject]:
+        notifications = list(self._pending_notifications)
+        self._pending_notifications.clear()
+        return notifications
 
     async def handle_async(self, message: Any) -> tuple[JsonObject, int]:
         """Return a JSON-RPC response and its transport-appropriate status."""
@@ -241,10 +335,17 @@ class Mcp2026Router:
                     request_id,
                     {
                         "supportedVersions": [PROTOCOL_VERSION],
-                        "capabilities": {"tools": {}},
+                        "capabilities": {
+                            "tools": (
+                                {"listChanged": True}
+                                if self._tool_list_revision is not None
+                                else {}
+                            )
+                        },
                         "instructions": (
-                            "Use VRCForge tools for supervised avatar work. Writes are requests "
-                            "that remain subject to App approval and checkpoint policy."
+                            "Use VRCForge as a tool server for avatar work; the external client owns "
+                            "its Agent loop. Low/medium writes execute through checkpoint safety, while "
+                            "high-risk or destructive calls first return user_confirmation_required."
                         ),
                     },
                     server_name=self.server_name,
@@ -277,6 +378,11 @@ class Mcp2026Router:
                 # the callback still enforces auth, permissions and approval.
                 catalogue_params = dict(params)
                 catalogue_params.setdefault("exposureLayer", "execution")
+                # Block selection limits discovery/context only. Permission and
+                # approval remain enforced by the independent external
+                # catalogue, so a client that already knows an exact atomic
+                # tool may call it without replaying tools/list block hints.
+                catalogue_params.setdefault("toolBlocks", ["*"])
                 supplied_tools = await _resolve(self._tool_list(catalogue_params))
                 if not isinstance(supplied_tools, Sequence) or isinstance(supplied_tools, (str, bytes, bytearray)):
                     raise Mcp2026Error(-32603, "Tool catalogue must return a sequence", 500)
@@ -287,26 +393,55 @@ class Mcp2026Router:
                 }
                 if tool_name not in allowed_names:
                     raise Mcp2026Error(-32602, "Unknown or unavailable tool")
+                revision_before = (
+                    self._tool_list_revision()
+                    if self._tool_list_revision is not None
+                    else None
+                )
                 callback_result = await _resolve(self._tool_call(tool_name, dict(arguments)))
+                revision_after = (
+                    self._tool_list_revision()
+                    if self._tool_list_revision is not None
+                    else None
+                )
+                if self._tool_list_revision is not None and revision_after != revision_before:
+                    self._pending_notifications.append(
+                        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+                    )
                 raw_structured = dict(callback_result) if isinstance(callback_result, Mapping) else {"value": callback_result}
+                outcome = normalize_agent_tool_result(
+                    raw_structured,
+                    fallback_summary=f"{tool_name} completed.",
+                    write=bool(raw_structured.get("write")),
+                )
+                raw_structured.setdefault("outcome", outcome)
                 structured = _strict_json_clone(raw_structured)
                 result = {
                     "content": [
                         {
                             "type": "text",
-                            "text": json.dumps(structured, ensure_ascii=False, separators=(",", ":"), allow_nan=False),
+                            "text": _tool_result_content_text(structured),
                         }
                     ],
                     "structuredContent": structured,
-                    "isError": bool(structured.get("ok") is False),
+                    "isError": structured.get("outcome", {}).get("status") == "failed",
                 }
                 return _success(request_id, result, server_name=self.server_name, server_version=self.server_version), 200
             raise Mcp2026Error(-32601, "MCP method not found", 404)
         except Mcp2026Error as exc:
             return _error(request_id, exc.code, exc.message, exc.data), exc.http_status
-        except Exception:
-            # Do not expose callback details across the external protocol boundary.
-            return _error(request_id, -32603, "Internal MCP server error"), 500
+        except Exception as exc:
+            # Preserve a bounded exact cause chain; raw secrets remain redacted.
+            return _error(
+                request_id,
+                -32603,
+                "Internal MCP server error",
+                failure_phase="protocol_router_internal",
+                tool_routing_started=None,
+                mutation_started=None,
+                committed=None,
+                exception=exc,
+            ), 500
 
     def handle(self, message: Any) -> tuple[JsonObject, int]:
         """Synchronous helper for ordinary callback implementations and tests."""
@@ -529,6 +664,8 @@ def run_stdio_loop(
                 else:
                     response, _ = router.handle(message)
         sink.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
+        for notification in router.drain_notifications():
+            sink.write(json.dumps(notification, ensure_ascii=False, separators=(",", ":")) + "\n")
         sink.flush()
     return 0
 

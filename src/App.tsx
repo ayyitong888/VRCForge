@@ -43,6 +43,7 @@ import { CheckpointWorkspace } from "./components/checkpoints/checkpoint-workspa
 import { SettingsWorkspace } from "./components/settings/settings-workspace";
 import { SidebarMenus } from "./components/sidebar/sidebar-menus";
 import { TransientFailureToast } from "./components/ui/transient-failure-toast";
+import { TextEditContextMenu } from "./components/common/text-edit-context-menu";
 import { OnboardingOverlay } from "./components/onboarding/onboarding-overlay";
 import { OnboardingLanguageGate } from "./components/onboarding/onboarding-language-gate";
 import {
@@ -570,7 +571,7 @@ export default function App() {
     t,
   });
   const vrcForgeToolsCount = getHealthDetailNumber(healthComponents.vrcForgeUnityTools?.detail, "vrcForgeToolsCount");
-  const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount === 64;
+  const vrcForgeToolsReady = runtimeConnected && healthComponents.vrcForgeUnityTools?.status === "ok" && vrcForgeToolsCount === 68;
   const {
     optimizationReport,
     optimizationTargetProfile,
@@ -669,8 +670,8 @@ export default function App() {
     normalizeProjectPathKey(authoritativeSelectedProjectPath) === normalizeProjectPathKey(activeProjectPath)
   );
   const onboardingUnityToolsReady = onboardingSelectedProjectReady && onboardingProjectMatchesBackend && vrcForgeToolsReady;
-  const externalAgentConnected = Boolean(connectorStatus?.gateway?.enabled);
-  const chatAvailable = providerConfigured || externalAgentConnected;
+  const externalAgentGatewayEnabled = Boolean(connectorStatus?.gateway?.enabled);
+  const chatAvailable = providerConfigured || externalAgentGatewayEnabled;
   const chatDisabledReason = !runtimeConnected
     ? t("agent.modeLabel.notConnected")
     : !chatAvailable
@@ -1593,7 +1594,10 @@ export default function App() {
     (activeProjectPath ? shortPath(activeProjectPath) : "");
   const effectiveLeftPaneWidth = layoutPaneWidths.left;
   const effectiveRightPaneWidth = rightSidebarCollapsed ? 44 : layoutPaneWidths.right;
-  const workspaceGridColumns = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr) ${RESIZE_HANDLE_WIDTH}px ${effectiveRightPaneWidth}px`;
+  const rightSidebarVisible = sidebarsVisible && activeView === "chat";
+  const workspaceGridColumnsWithRightSidebar = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr) ${RESIZE_HANDLE_WIDTH}px ${effectiveRightPaneWidth}px`;
+  const workspaceGridColumnsWithoutRightSidebar = `${effectiveLeftPaneWidth}px ${RESIZE_HANDLE_WIDTH}px minmax(0,1fr)`;
+  const workspaceGridColumns = rightSidebarVisible ? workspaceGridColumnsWithRightSidebar : workspaceGridColumnsWithoutRightSidebar;
   const startLayoutResize = (side: "left" | "right", event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     const startX = event.clientX;
@@ -1659,6 +1663,7 @@ export default function App() {
   const unityBridgeComponent = healthComponents.unityMcpBridgeReachable;
   const unityInstanceComponent = healthComponents.unityMcpInstance;
   const unityToolsComponent = healthComponents.vrcForgeUnityTools;
+  const externalAgentComponent = healthComponents.externalAgentConnection;
   const localizeHealthMessage = useCallback(
     (message?: string) => localizeRuntimeHealthMessage(t, message),
     [t],
@@ -1728,13 +1733,13 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!sidebarsVisible || !leftSidebarMounted || (!rightSidebarCollapsed && !rightSidebarMounted)) {
+    if (!sidebarsVisible || !leftSidebarMounted || (rightSidebarVisible && !rightSidebarCollapsed && !rightSidebarMounted)) {
       return;
     }
     const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
     metrics.sidebarsMountedMs ??= Math.round(performance.now());
     document.documentElement.dataset.vrcforgeSidebars = "mounted";
-  }, [leftSidebarMounted, rightSidebarCollapsed, rightSidebarMounted, sidebarsVisible]);
+  }, [leftSidebarMounted, rightSidebarCollapsed, rightSidebarMounted, rightSidebarVisible, sidebarsVisible]);
 
   useEffect(() => {
     if (
@@ -1742,14 +1747,14 @@ export default function App() {
       || !projectPrefsReady
       || !sidebarsVisible
       || !leftSidebarMounted
-      || (!rightSidebarCollapsed && !rightSidebarMounted)
+      || (rightSidebarVisible && !rightSidebarCollapsed && !rightSidebarMounted)
     ) {
       return;
     }
     const metrics = ((window as any).__vrcforgeStartupMetrics ||= {});
     metrics.sidebarsHydratedMs ??= Math.round(performance.now());
     document.documentElement.dataset.vrcforgeSidebars = "ready";
-  }, [bootstrap, leftSidebarMounted, projectPrefsReady, rightSidebarCollapsed, rightSidebarMounted, sidebarsVisible]);
+  }, [bootstrap, leftSidebarMounted, projectPrefsReady, rightSidebarCollapsed, rightSidebarMounted, rightSidebarVisible, sidebarsVisible]);
 
   useLayoutEffect(() => {
     const isDark = theme === "dark";
@@ -1794,18 +1799,6 @@ export default function App() {
     window.addEventListener("resize", positionMenu);
     return () => window.removeEventListener("resize", positionMenu);
   }, [selectionMenu]);
-
-  useEffect(() => {
-    const handler = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (target && target.closest("input, textarea, [contenteditable='true']")) {
-        return;
-      }
-      event.preventDefault();
-    };
-    window.addEventListener("contextmenu", handler);
-    return () => window.removeEventListener("contextmenu", handler);
-  }, []);
 
   useEffect(() => {
     try {
@@ -4050,15 +4043,17 @@ export default function App() {
             </div>
           ) : null}
         </section>
-        <LayoutSplitter
-          side="right"
-          value={effectiveRightPaneWidth}
-          min={0}
-          max={MAX_RIGHT_PANE_WIDTH}
-          title={t("workspace.resizeRightPane")}
-          onPointerDown={(event) => startLayoutResize("right", event)}
-        />
-        {rightSidebarCollapsed ? (
+        {rightSidebarVisible ? (
+          <>
+            <LayoutSplitter
+              side="right"
+              value={effectiveRightPaneWidth}
+              min={0}
+              max={MAX_RIGHT_PANE_WIDTH}
+              title={t("workspace.resizeRightPane")}
+              onPointerDown={(event) => startLayoutResize("right", event)}
+            />
+            {rightSidebarCollapsed ? (
           <aside className="flex h-screen items-start justify-center border-l border-border/80 bg-sidebar pt-2">
             <button
               type="button"
@@ -4071,7 +4066,7 @@ export default function App() {
               <PanelRightOpen className="h-4 w-4" />
             </button>
           </aside>
-        ) : sidebarsVisible ? (
+            ) : (
           <Suspense fallback={<SidebarPlaceholder side="right" />}>
             <SidebarMountTracker side="right" onMounted={markRightSidebarMounted}>
               <AsyncRightRuntimeSidebar
@@ -4085,6 +4080,7 @@ export default function App() {
               unityBridgeComponent={unityBridgeComponent}
               unityInstanceComponent={unityInstanceComponent}
               unityToolsComponent={unityToolsComponent}
+              externalAgentComponent={externalAgentComponent}
               agentProgress={agentProgress}
               projectWorkspace={projectChatWorkspace}
               subAgentPanel={projectChatWorkspace ? subAgentActivityPanel : undefined}
@@ -4104,9 +4100,9 @@ export default function App() {
               />
             </SidebarMountTracker>
           </Suspense>
-        ) : (
-          <SidebarPlaceholder side="right" />
-        )}
+            )}
+          </>
+        ) : null}
       </div>
 
       <ComputerUseActivitySurface
@@ -4205,6 +4201,8 @@ export default function App() {
         onCancelDeleteChat={() => setDeleteTargetId("")}
         onConfirmDeleteChat={deleteChatPermanently}
       />
+
+      <TextEditContextMenu />
 
       {transientFailure ? (
         <TransientFailureToast

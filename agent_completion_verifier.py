@@ -10,6 +10,7 @@ from typing import Any
 CONSOLE_VERIFICATION_PROFILES = frozenset(
     {
         "persisted_scene_write_console",
+        "unity_asset_write_console",
     }
 )
 
@@ -49,9 +50,11 @@ class UnityConsoleCompletionVerifier:
             or not snapshot["captureComplete"]
             or not _identity_complete(snapshot)
         ):
-            raise AgentCompletionVerificationError(
+            error = AgentCompletionVerificationError(
                 "Unity compile diagnostics are not stable enough to start the approved write."
             )
+            error.details = {"failure": snapshot.get("readFailure")}
+            raise error
         if snapshot["truncated"]:
             raise AgentCompletionVerificationError(
                 "Unity compile diagnostics were truncated before the approved write."
@@ -62,6 +65,13 @@ class UnityConsoleCompletionVerifier:
             "unityProcessId": snapshot["unityProcessId"],
             "unityProcessStartedAtUtc": snapshot["unityProcessStartedAtUtc"],
             "unityExecutableDigest": snapshot["unityExecutableDigest"],
+            "errorCount": sum(
+                1 for item in snapshot["diagnostics"] if item["severity"] == "error"
+            ),
+            "warningCount": sum(
+                1 for item in snapshot["diagnostics"] if item["severity"] == "warning"
+            ),
+            "diagnostics": snapshot["diagnostics"],
             "diagnosticIds": snapshot["diagnosticIds"],
             "capturedAt": snapshot["capturedAt"],
         }
@@ -123,6 +133,10 @@ class UnityConsoleCompletionVerifier:
                 passed=False,
                 code="unity_console_unstable",
                 summary="Unity compilation did not reach a stable readable state after the write.",
+                failure=(stable_snapshot or {}).get("readFailure") or {
+                    "kind": "unstable_or_missing_snapshot",
+                    "message": "No stable diagnostics snapshot was captured.",
+                },
             )
         expected_project = str(baseline.get("projectPathDigest") or "")
         actual_project = str(stable_snapshot.get("projectPathDigest") or "")
@@ -195,15 +209,18 @@ class UnityConsoleCompletionVerifier:
             params["projectPath"] = project_path
         try:
             raw = self._read_diagnostics(params)
-        except Exception:
-            return _unreadable_snapshot()
+        except Exception as exc:
+            return _unreadable_snapshot(_bounded_failure("read_exception", exc))
         payload = _find_diagnostics_payload(raw)
         if payload is None:
-            return _unreadable_snapshot()
+            return _unreadable_snapshot({
+                "kind": "missing_payload",
+                "message": "Diagnostics response did not contain a recognizable payload.",
+            })
         try:
             diagnostics = _normalize_diagnostics(payload)
-        except (TypeError, ValueError, OverflowError):
-            return _unreadable_snapshot()
+        except (TypeError, ValueError, OverflowError) as exc:
+            return _unreadable_snapshot(_bounded_failure("normalization_failure", exc))
         return {
             "readable": bool(payload.get("ok") is True),
             "isCompiling": bool(payload.get("isCompiling")),
@@ -306,6 +323,7 @@ def _attach_console_verification(
     summary: str,
     new_errors: list[dict[str, Any]] | None = None,
     new_warnings: list[dict[str, Any]] | None = None,
+    failure: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     result["consoleVerified"] = bool(passed)
     result["consoleVerification"] = {
@@ -319,10 +337,21 @@ def _attach_console_verification(
         "newErrors": list(new_errors or [])[:20],
         "newWarnings": list(new_warnings or [])[:20],
     }
+    if failure:
+        result["consoleVerification"]["failure"] = dict(failure)
     return result
 
 
-def _unreadable_snapshot() -> dict[str, Any]:
+def _bounded_failure(kind: str, error: BaseException) -> dict[str, str]:
+    message = str(error).strip().replace("\r", " ").replace("\n", " ")[:240]
+    return {
+        "kind": kind[:64],
+        "exceptionType": type(error).__name__[:80],
+        "message": message or "Diagnostics operation failed.",
+    }
+
+
+def _unreadable_snapshot(failure: Mapping[str, Any] | None = None) -> dict[str, Any]:
     return {
         "readable": False,
         "isCompiling": False,
@@ -335,4 +364,5 @@ def _unreadable_snapshot() -> dict[str, Any]:
         "unityExecutableDigest": "",
         "diagnostics": [],
         "diagnosticIds": [],
+        "readFailure": dict(failure) if failure else None,
     }

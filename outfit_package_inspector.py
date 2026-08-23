@@ -163,6 +163,11 @@ def inspect_unitypackage(path: Path, max_entries: int) -> dict[str, Any]:
             "parsedPathnameCount": len(pathnames),
             "archiveMemberCount": member_count,
             "pathnames": pathnames[:200],
+            "pathnamesEvidence": pathnames,
+            "pathnamesEvidenceCount": len(pathnames),
+            "pathnamesEvidenceComplete": not truncated,
+            "pathnamesReturnedCount": min(len(pathnames), 200),
+            "pathnamesReturnedTruncated": len(pathnames) > 200,
         }
     ]
     result["summary"]["unityPackageCount"] = 1

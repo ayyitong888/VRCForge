@@ -143,6 +143,207 @@ def test_failed_verification_baseline_never_starts_handler_or_recovery(tmp_path:
     assert gateway.checkpoint_recovery._active_apply_recoveries() == []
 
 
+def test_confirmed_no_write_failure_is_retryable_and_carries_console_evidence(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    calls = 0
+    baseline = {
+        "schema": "vrcforge.unity_console_baseline.v1",
+        "diagnostics": [{"severity": "warning", "message": "existing warning"}],
+        "diagnosticIds": ["before-warning"],
+    }
+
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+
+    def handler(_arguments):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "ok": False,
+                "mutationStarted": False,
+                "committed": False,
+                "commitState": "not_started",
+                "checkpointRecoveryRequired": False,
+                "error": "Unity was busy before the write started.",
+            }
+        return {"ok": True, "persistedReadback": True, "sceneSaved": True}
+
+    def finalize(_arguments, observed_baseline, result):
+        assert observed_baseline == baseline
+        return {
+            **result,
+            "consoleVerified": result.get("ok") is True,
+            "consoleVerification": {
+                "status": "passed" if result.get("ok") is True else "failed",
+                "code": "unity_console_busy" if result.get("ok") is False else "",
+                "summary": "Unity Console remained readable.",
+                "newErrors": [],
+                "newWarnings": [],
+            },
+        }
+
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_retryable_no_write",
+        "Retryable no-write fixture.",
+        "high",
+        handler,
+        verification_profile="persisted_scene_write_console",
+        verification_prepare_handler=lambda _arguments: baseline,
+        verification_finalize_handler=finalize,
+    )
+
+    def apply_once() -> dict[str, object]:
+        request = gateway.approval_transactions.create_apply_request(
+            {
+                "target_tool": "vrcforge_retryable_no_write",
+                "arguments": {"projectRoot": str(project)},
+            }
+        )
+        approval_id = str(request["approval"]["id"])
+        gateway.approval_transactions.approve(approval_id)
+        return gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+
+    failed = apply_once()
+
+    assert failed["ok"] is False
+    assert failed["result"]["commitState"] == "not_started"
+    assert failed["writeFailure"]["failureLayer"] == "write_handler"
+    assert failed["writeFailure"]["mutationStarted"] is False
+    assert failed["writeFailure"]["committed"] is False
+    assert failed["writeFailure"]["commitState"] == "not_started"
+    assert failed["writeFailure"]["commitStateKnown"] is True
+    assert failed["writeFailure"]["checkpointRecoveryRequired"] is False
+    assert failed["writeFailure"]["console"] == {
+        "before": baseline,
+        "after": failed["result"]["consoleVerification"],
+    }
+    assert "retry" not in str(failed["writeFailure"]).casefold()
+    assert "continueTask" not in failed["writeFailure"]
+    assert "projectRollbackEligible" not in failed["writeFailure"]
+    assert gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["activeCount"] == 0
+
+    retried = apply_once()
+
+    assert retried["ok"] is True
+    assert calls == 2
+
+
+def test_atomic_cleanup_reports_rolled_back_as_known_commit_state(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+
+    result = approved_write(
+        gateway,
+        project,
+        handler=lambda _arguments: {
+            "ok": False,
+            "mutationStarted": True,
+            "committed": False,
+            "commitState": "rolled_back",
+            "checkpointRecoveryRequired": False,
+            "error": "Write failed after mutation; atomic cleanup restored the exact baseline.",
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["writeFailure"]["mutationStarted"] is True
+    assert result["writeFailure"]["committed"] is False
+    assert result["writeFailure"]["commitState"] == "rolled_back"
+    assert result["writeFailure"]["commitStateKnown"] is True
+    assert result["writeFailure"]["checkpointRecoveryRequired"] is False
+
+
+def test_completed_write_with_temporary_cleanup_failure_never_requests_project_rollback(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+
+    result = approved_write(
+        gateway,
+        project,
+        handler=lambda _arguments: {
+            "ok": False,
+            "mutationStarted": True,
+            "committed": True,
+            "commitState": "complete",
+            "checkpointRecoveryRequired": False,
+            "temporaryCleanupRequired": True,
+            "error": "Imported assets are complete; temporary package cleanup failed.",
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["writeFailure"]["failureLayer"] == "write_handler"
+    assert result["writeFailure"]["mutationStarted"] is True
+    assert result["writeFailure"]["committed"] is True
+    assert result["writeFailure"]["commitState"] == "complete"
+    assert result["writeFailure"]["commitStateKnown"] is True
+    assert result["writeFailure"]["checkpointRecoveryRequired"] is False
+    assert result["writeFailure"]["temporaryCleanupRequired"] is True
+    assert "retryDisposition" not in result["writeFailure"]
+    assert gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["activeCount"] == 0
+
+
+def test_committed_commit_state_alias_is_reported_as_complete(tmp_path: Path) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+
+    result = approved_write(
+        gateway,
+        project,
+        handler=lambda _arguments: {
+            "ok": False,
+            "mutationStarted": True,
+            "committed": True,
+            "commitState": "committed",
+            "checkpointRecoveryRequired": False,
+            "temporaryCleanupRequired": True,
+            "error": "The committed write completed; temporary cleanup failed.",
+        },
+    )
+
+    assert result["writeFailure"]["commitState"] == "complete"
+    assert result["writeFailure"]["commitStateKnown"] is True
+    assert result["writeFailure"]["checkpointRecoveryRequired"] is False
+    assert gateway.checkpoint_recovery.list_interrupted_apply_recoveries()["activeCount"] == 0
+
+
+def test_unknown_commit_failure_blocks_write_replay_but_keeps_task_continuable(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+
+    result = approved_write(
+        gateway,
+        project,
+        handler=lambda _arguments: {
+            "ok": False,
+            "mutationStarted": True,
+            "committed": True,
+            "commitState": "unknown",
+            "checkpointRecoveryRequired": True,
+            "error": "Unity domain reload interrupted the receipt readback.",
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["writeFailure"]["failureLayer"] == "write_handler"
+    assert result["writeFailure"]["mutationStarted"] is True
+    assert result["writeFailure"]["committed"] is True
+    assert result["writeFailure"]["commitState"] == "unknown"
+    assert result["writeFailure"]["commitStateKnown"] is False
+    assert result["writeFailure"]["checkpointRecoveryRequired"] is True
+    assert "nextActions" not in result["writeFailure"]
+    recoveries = gateway.checkpoint_recovery.list_interrupted_apply_recoveries()
+    assert recoveries["blockingWrites"] is True
+    assert recoveries["activeCount"] == 1
+
+
 def test_declared_completion_verifier_requires_both_handlers(tmp_path: Path) -> None:
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
     with pytest.raises(ValueError, match="requires prepare and finalize"):
@@ -589,6 +790,42 @@ def test_core_write_handler_must_consume_the_whole_frozen_plan(tmp_path: Path) -
     assert "not consumed exactly" in result["error"]
 
 
+def test_failed_core_write_result_preserves_recovery_error_when_plan_remains(
+    tmp_path: Path,
+) -> None:
+    project = create_project(tmp_path)
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    gateway.approval_transactions.checkpoint_prepare_handler = lambda _path: {"ok": True}
+    gateway.approval_transactions.register_write_handler(
+        "vrcforge_failed_planned_core_write",
+        "Failed planned Core write.",
+        "high",
+        lambda _arguments: {
+            "ok": False,
+            "checkpointRecoveryRequired": True,
+            "error": "unity_core_starting",
+        },
+        requires_approved_execution_context=True,
+        approved_execution_plan_builder=lambda _arguments: [
+            ("vrc_refresh_asset_database", {"projectPath": str(project)})
+        ],
+    )
+    request = gateway.approval_transactions.create_apply_request(
+        {
+            "target_tool": "vrcforge_failed_planned_core_write",
+            "arguments": {"projectRoot": str(project)},
+        }
+    )
+    approval_id = str(request["approval"]["id"])
+    gateway.approval_transactions.approve(approval_id)
+
+    result = gateway.approval_transactions.apply_approved({"approval_id": approval_id})
+
+    assert result["ok"] is False
+    assert result["error"] == "unity_core_starting"
+    assert "not consumed exactly" not in result["error"]
+
+
 def test_failed_handler_burns_leaked_execution_plan(tmp_path: Path) -> None:
     project = create_project(tmp_path)
     gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
@@ -683,6 +920,37 @@ def test_post_write_observer_failure_enters_checkpoint_recovery(tmp_path: Path) 
     assert recoveries["blockingWrites"] is True
     assert recoveries["activeCount"] == 1
     assert recoveries["recoveries"][0]["checkpointId"] == result["checkpoint"]["id"]
+
+
+def test_recovery_incident_kind_is_preserved_through_completion_and_manual_resolution(
+    tmp_path: Path,
+) -> None:
+    gateway = AgentGateway(tmp_path / "config" / "gateway.json", tmp_path / "audit")
+    recovery = {
+        "id": "recovery_incident_kind",
+        "incidentKind": "unity_timeout_or_hang",
+        "approvalId": "approval_incident_kind",
+        "targetTool": "vrcforge_test_write",
+        "projectRoot": str(tmp_path),
+        "checkpointId": "checkpoint_incident_kind",
+        "checkpoint": {"id": "checkpoint_incident_kind"},
+    }
+
+    completed = gateway.approval_transactions._finish_apply_recovery(  # noqa: SLF001
+        recovery,
+        status="needs_recovery",
+        resolution="write_failed_after_checkpoint",
+        error="write completed but cleanup timed out",
+    )
+    assert completed["incidentKind"] == "unity_timeout_or_hang"
+
+    resolved = gateway.approval_transactions._finish_apply_recovery(  # noqa: SLF001
+        completed,
+        status="resolved",
+        resolution="manual_confirmed",
+        note="User confirmed the project was handled manually.",
+    )
+    assert resolved["incidentKind"] == "unity_timeout_or_hang"
 
 
 def test_handler_starting_observer_failure_aborts_before_write(tmp_path: Path) -> None:

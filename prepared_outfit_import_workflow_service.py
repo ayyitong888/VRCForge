@@ -17,6 +17,84 @@ from prepared_unity_execution import (
 PreparedImportCall = tuple[str, dict[str, Any]]
 
 
+def classify_prepared_outfit_import_risk(arguments: dict[str, Any]) -> str:
+    """Upgrade only prepared imports with concrete high-risk effects."""
+
+    try:
+        evidence = prepared_evidence(arguments)
+    except (TypeError, ValueError):
+        return "high"
+    if not isinstance(evidence, dict):
+        return "high"
+    plan = evidence.get("plan")
+    if not isinstance(plan, dict) or str(evidence.get("kind") or "") != "unitypackage_import":
+        return "high"
+    facts = plan.get("riskFacts")
+    if not isinstance(facts, dict) or facts.get("schema") != "vrcforge.outfit_import_risk_facts.v1":
+        return "high"
+    try:
+        medium_contract = (
+            facts.get("pathnameEvidenceComplete") is True
+            and int(facts.get("unsafePathnameCount") or 0) == 0
+            and int(facts.get("projectSettingsPathCount") or 0) == 0
+            and int(facts.get("packagesPathCount") or 0) == 0
+            and int(facts.get("unsupportedProjectPathCount") or 0) == 0
+            and facts.get("targetAbsenceChecked") is True
+            and int(facts.get("existingTargetPathCount") or 0) == 0
+            and facts.get("deleteRequested") is False
+            and int(facts.get("importQueueCount") or 0) == 1
+            and facts.get("automaticCodeExecutionPlanned") is False
+            and facts.get("mediumEligible") is True
+            and facts.get("recommendedRiskLevel") == "medium"
+            and facts.get("reasonCodes") == []
+        )
+    except (TypeError, ValueError):
+        return "high"
+    return "medium" if medium_contract else "high"
+
+
+def prepared_outfit_import_manual_confirmation_reason(
+    arguments: dict[str, Any],
+    preview: Any,
+) -> str:
+    """Explain concrete high-risk import effects without treating read sources as writes."""
+
+    plan = preview.get("plan") if isinstance(preview, dict) else None
+    if not isinstance(plan, dict):
+        try:
+            evidence = prepared_evidence(arguments)
+        except (TypeError, ValueError):
+            evidence = None
+        plan = evidence.get("plan") if isinstance(evidence, dict) else None
+    facts = plan.get("riskFacts") if isinstance(plan, dict) else None
+    if not isinstance(facts, dict):
+        return "The UnityPackage import risk evidence is incomplete and requires user confirmation."
+
+    reasons: list[str] = []
+    existing_count = int(facts.get("existingTargetPathCount") or 0)
+    if existing_count:
+        reasons.append(f"overwrite {existing_count} existing Unity asset paths")
+    unsafe_count = int(facts.get("unsafePathnameCount") or 0)
+    if unsafe_count:
+        reasons.append(f"contains {unsafe_count} unsafe package paths")
+    project_settings_count = int(facts.get("projectSettingsPathCount") or 0)
+    if project_settings_count:
+        reasons.append(f"writes {project_settings_count} ProjectSettings paths")
+    packages_count = int(facts.get("packagesPathCount") or 0)
+    if packages_count:
+        reasons.append(f"writes {packages_count} Packages paths")
+    unsupported_count = int(facts.get("unsupportedProjectPathCount") or 0)
+    if unsupported_count:
+        reasons.append(f"writes {unsupported_count} unsupported project paths")
+    if facts.get("deleteRequested") is True:
+        reasons.append("requests deletion")
+    if facts.get("automaticCodeExecutionPlanned") is True:
+        reasons.append("plans automatic code execution")
+    if not reasons:
+        return ""
+    return "This UnityPackage import would " + "; ".join(reasons) + "."
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedOutfitImportPreparerPorts:
     plan_outfit_import: Callable[[dict[str, Any]], dict[str, Any]]
@@ -226,7 +304,22 @@ class PreparedOutfitImportPreparer:
             plan.get("plan"), "outfit import plan"
         )
         if not plan_payload.get("readyToApply"):
-            raise RuntimeError("Outfit import plan is not ready to apply.")
+            dependency = (
+                plan_payload.get("dependencyPreflight")
+                if isinstance(plan_payload.get("dependencyPreflight"), dict)
+                else {}
+            )
+            blocking_messages = [
+                str(entry.get("message") or "").strip()
+                for entry in dependency.get("entries") or []
+                if isinstance(entry, dict)
+                and entry.get("blockingBeforeImport")
+                and str(entry.get("status") or "") == "missing"
+                and str(entry.get("message") or "").strip()
+            ]
+            detail = "; ".join(blocking_messages)
+            suffix = f" Reason: {detail}" if detail else ""
+            raise RuntimeError(f"Outfit import plan is not ready to apply.{suffix}")
         kind = str(plan_payload.get("kind") or "")
         project_root = self._ports.resolve_project_root(arguments, plan_payload)
         project_identity = self._ports.capture_project_identity(project_root)
@@ -409,8 +502,8 @@ class PreparedOutfitImportApprovedWriteService:
                 "Unity Core import receipt project/path did not match the prepared call."
             ) from exc
         if (
-            str(payload.get("projectPath") or "")
-            != project_identity["projectPath"]
+            str(payload.get("projectPath") or "").replace("\\", "/")
+            != str(project_identity["projectPath"]).replace("\\", "/")
             or str(payload.get("unityPackagePath") or "").replace("\\", "/")
             != str(identity["path"]).replace("\\", "/")
             or str(payload.get("expectedSha256") or "").lower()
@@ -428,6 +521,41 @@ class PreparedOutfitImportApprovedWriteService:
                 "Unity Core import receipt asset paths did not match approval."
             )
         return job_id
+
+    @staticmethod
+    def _unity_job_state(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: payload.get(key)
+            for key in (
+                "jobId",
+                "status",
+                "mutationStarted",
+                "startedForThisJob",
+                "restoredAfterDomainReload",
+                "expectedAssetCount",
+                "readbackFailurePath",
+                "readbackFailureCode",
+                "readbackFailureReason",
+                "readbackAttemptedUtc",
+            )
+            if payload.get(key) is not None
+        }
+
+    @staticmethod
+    def _verify_medium_import_targets_remain_absent(
+        project_root: Path,
+        plan_payload: dict[str, Any],
+        expected_asset_paths: list[str],
+    ) -> None:
+        facts = plan_payload.get("riskFacts")
+        if not isinstance(facts, dict) or facts.get("mediumEligible") is not True:
+            return
+        for asset_path in expected_asset_paths:
+            target = project_root.joinpath(*asset_path.split("/"))
+            if os.path.lexists(target) or os.path.lexists(f"{target}.meta"):
+                raise RuntimeError(
+                    f"Prepared medium-risk import target now exists: {asset_path}"
+                )
 
     def _wait_for_job(
         self, settings: Any, initial_payload: dict[str, Any]
@@ -455,14 +583,44 @@ class PreparedOutfitImportApprovedWriteService:
             )
             if self._ports.monotonic() >= deadline:
                 break
-            payload = self._ports.poll_import(poll_settings, job_id)
+            try:
+                payload = self._ports.poll_import(poll_settings, job_id)
+            except self._ports.handled_errors as exc:
+                if (
+                    getattr(exc, "retryable", False) is True
+                    and str(getattr(exc, "cause_code", ""))
+                    == "unity_core_starting"
+                ):
+                    continue
+                return {
+                    "ok": False,
+                    "failureLayer": "unity_core_job_polling",
+                    "pending": False,
+                    "status": "transport_error",
+                    "jobId": job_id,
+                    "mutationStarted": True,
+                    "committed": True,
+                    "commitState": "unknown",
+                    "checkpointRecoveryRequired": True,
+                    "requestMayHaveCommitted": True,
+                    "safeToRetry": False,
+                    "errorCode": str(
+                        getattr(exc, "cause_code", "")
+                        or "unity_core_job_polling_transport_error"
+                    ),
+                    "retryable": bool(getattr(exc, "retryable", False)),
+                    "unityJobState": self._unity_job_state(payload),
+                    "error": str(exc),
+                }
             if str(payload.get("jobId") or "").strip().lower() != job_id:
                 raise RuntimeError(
                     "Unity Core import job identity drifted while polling."
                 )
         if payload.get("pending") is True:
+            unity_job_state = self._unity_job_state(payload)
             return {
                 "ok": False,
+                "failureLayer": "unity_core_job_polling",
                 "pending": False,
                 "status": "timeout",
                 "jobId": job_id,
@@ -470,6 +628,7 @@ class PreparedOutfitImportApprovedWriteService:
                 "committed": True,
                 "commitState": "unknown",
                 "checkpointRecoveryRequired": True,
+                "unityJobState": unity_job_state,
                 "error": (
                     "UnityPackage import did not reach a terminal state before timeout."
                 ),
@@ -480,6 +639,7 @@ class PreparedOutfitImportApprovedWriteService:
         imports: list[dict[str, Any]] = []
         write_started = False
         import_readback_pending = False
+        failure_layer = "prepared_evidence_validation"
         loose_copied: dict[str, Any] | None = None
         materialization_receipts: list[dict[str, Any]] = []
 
@@ -515,22 +675,27 @@ class PreparedOutfitImportApprovedWriteService:
                     raise RuntimeError(
                         "Prepared loose outfit project identity is invalid."
                     )
+                failure_layer = "project_identity_verification"
                 self._ports.verify_project_identity(project_identity)
                 loose_plan = evidence.get("loosePlan")
                 if not isinstance(loose_plan, dict):
                     raise RuntimeError("Prepared loose outfit plan is missing.")
                 try:
+                    failure_layer = "loose_asset_copy"
                     loose_copied = self._ports.execute_loose_import(loose_plan)
                     write_started = True
                 except RuntimeError as exc:
                     return {
                         "ok": False,
+                        "failureLayer": "loose_asset_copy",
+                        "mutationStarted": None,
                         "committed": True,
                         "commitState": "unknown",
                         "checkpointRecoveryRequired": True,
                         "kind": kind,
                         "error": str(exc),
                     }
+                failure_layer = "project_identity_verification"
                 self._ports.verify_project_identity(project_identity)
                 refresh_tool, refresh_arguments = prepared_call(arguments, 0)
                 expected_refresh = {
@@ -542,6 +707,7 @@ class PreparedOutfitImportApprovedWriteService:
                     raise RuntimeError(
                         "Prepared loose outfit refresh call is invalid."
                     )
+                failure_layer = "approved_call_validation"
                 self._ports.require_evidence(
                     expected_refresh, refresh_arguments, "refresh arguments"
                 )
@@ -549,10 +715,13 @@ class PreparedOutfitImportApprovedWriteService:
                 settings.unity_mcp_timeout_seconds = max(
                     int(settings.unity_mcp_timeout_seconds or 30), 150
                 )
+                failure_layer = "unity_asset_database_refresh"
                 refresh = self._ports.refresh_assets(settings, refresh_arguments)
                 if refresh.get("ok") is not True:
                     return {
                         "ok": False,
+                        "failureLayer": "unity_asset_database_refresh",
+                        "mutationStarted": True,
                         "committed": True,
                         "commitState": "partial",
                         "checkpointRecoveryRequired": True,
@@ -583,7 +752,13 @@ class PreparedOutfitImportApprovedWriteService:
                 or not queue
             ):
                 raise RuntimeError("Prepared outfit import evidence is incomplete.")
-            self._ports.verify_project_identity(project_identity)
+            failure_layer = "project_identity_verification"
+            project_root = self._ports.verify_project_identity(project_identity)
+            self._verify_medium_import_targets_remain_absent(
+                project_root,
+                plan_payload,
+                list(evidence.get("expectedAssetPaths") or []),
+            )
             materializations = evidence.get("materializations") or []
             if not isinstance(materializations, list):
                 raise RuntimeError(
@@ -594,6 +769,7 @@ class PreparedOutfitImportApprovedWriteService:
                     raise RuntimeError(
                         "Prepared outfit materialization item is invalid."
                     )
+                failure_layer = "temporary_materialization"
                 materialization_receipts.append(
                     self._ports.execute_zip_member(facts)
                 )
@@ -602,6 +778,7 @@ class PreparedOutfitImportApprovedWriteService:
                 int(settings.unity_mcp_timeout_seconds or 30), 300
             )
             for index, item in enumerate(queue):
+                failure_layer = "project_identity_verification"
                 self._ports.verify_project_identity(project_identity)
                 identity = item.get("identity") if isinstance(item, dict) else None
                 if not isinstance(identity, dict):
@@ -612,6 +789,7 @@ class PreparedOutfitImportApprovedWriteService:
                     item.get("materializationIndex") if isinstance(item, dict) else None
                 )
                 try:
+                    failure_layer = "prepared_source_verification"
                     if materialization_index is not None:
                         receipt = materialization_receipts[
                             int(materialization_index)
@@ -690,10 +868,12 @@ class PreparedOutfitImportApprovedWriteService:
                     raise RuntimeError(
                         "Prepared outfit import Core call is invalid."
                     )
+                failure_layer = "approved_call_validation"
                 self._ports.require_evidence(
                     expected, tool_arguments, "Core arguments"
                 )
                 write_started = True
+                failure_layer = "unity_core_transport"
                 payload = self._ports.start_import(settings, tool_arguments)
                 import_readback_pending = (
                     payload.get("mutationStarted") is True
@@ -703,19 +883,36 @@ class PreparedOutfitImportApprovedWriteService:
                     cleanup_error = cleanup_materializations()
                     return {
                         "ok": False,
+                        "failureLayer": "unity_core_transport",
+                        "mutationStarted": (
+                            payload.get("mutationStarted")
+                            if isinstance(payload.get("mutationStarted"), bool)
+                            else None
+                        ),
                         "committed": True,
                         "commitState": "unknown",
                         "checkpointRecoveryRequired": True,
                         "kind": kind,
                         "unityImports": imports,
+                        "unityJobState": payload.get("unityJobState")
+                        or self._unity_job_state(payload),
+                        "jobId": payload.get("jobId"),
+                        "status": payload.get("status"),
+                        "errorCode": payload.get("errorCode"),
+                        "requestMayHaveCommitted": payload.get(
+                            "requestMayHaveCommitted"
+                        ),
+                        "safeToRetry": payload.get("safeToRetry"),
                         "temporaryCleanupError": cleanup_error or None,
                         "error": payload.get("error")
                         or "UnityPackage import failed after Core invocation.",
                     }
+                failure_layer = "unity_core_receipt_validation"
                 job_id = self._job_receipt(
                     payload, project_identity, identity, expected_asset_paths
                 )
                 if payload.get("pending") is True:
+                    failure_layer = "unity_core_job_polling"
                     payload = self._wait_for_job(settings, payload)
                 if (
                     payload.get("ok") is not True
@@ -724,16 +921,30 @@ class PreparedOutfitImportApprovedWriteService:
                     cleanup_error = cleanup_materializations()
                     return {
                         "ok": False,
+                        "failureLayer": str(
+                            payload.get("failureLayer") or "unity_core_job_polling"
+                        ),
+                        "mutationStarted": True,
                         "committed": True,
                         "commitState": "unknown",
                         "checkpointRecoveryRequired": True,
                         "kind": kind,
                         "unityImports": imports,
+                        "unityJobState": payload.get("unityJobState")
+                        or self._unity_job_state(payload),
+                        "jobId": payload.get("jobId"),
+                        "status": payload.get("status"),
+                        "errorCode": payload.get("errorCode"),
+                        "requestMayHaveCommitted": payload.get(
+                            "requestMayHaveCommitted"
+                        ),
+                        "safeToRetry": payload.get("safeToRetry"),
                         "temporaryCleanupError": cleanup_error or None,
                         "error": payload.get("error")
                         or payload.get("reason")
                         or "UnityPackage import did not complete.",
                     }
+                failure_layer = "unity_core_receipt_validation"
                 if str(payload.get("jobId") or "").strip().lower() != job_id:
                     raise RuntimeError(
                         "Unity Core import terminal job identity drifted."
@@ -756,6 +967,7 @@ class PreparedOutfitImportApprovedWriteService:
                 )
                 import_readback_pending = False
                 write_started = False
+            failure_layer = "project_identity_verification"
             self._ports.verify_project_identity(project_identity)
             refresh_tool, refresh_arguments = prepared_call(arguments, len(queue))
             expected_refresh = {
@@ -767,15 +979,19 @@ class PreparedOutfitImportApprovedWriteService:
                 raise RuntimeError(
                     "Prepared outfit import refresh call is invalid."
                 )
+            failure_layer = "approved_call_validation"
             self._ports.require_evidence(
                 expected_refresh, refresh_arguments, "refresh arguments"
             )
             write_started = True
+            failure_layer = "unity_asset_database_refresh"
             refresh = self._ports.refresh_assets(settings, refresh_arguments)
             if refresh.get("ok") is not True:
                 cleanup_error = cleanup_materializations()
                 return {
                     "ok": False,
+                    "failureLayer": "unity_asset_database_refresh",
+                    "mutationStarted": True,
                     "committed": True,
                     "commitState": "partial",
                     "checkpointRecoveryRequired": True,
@@ -787,11 +1003,15 @@ class PreparedOutfitImportApprovedWriteService:
                     or "Asset refresh failed after UnityPackage import.",
                 }
             write_started = False
+            failure_layer = "project_identity_verification"
             self._ports.verify_project_identity(project_identity)
+            failure_layer = "temporary_cleanup"
             cleanup_error = cleanup_materializations()
             if cleanup_error:
                 return {
                     "ok": False,
+                    "failureLayer": "temporary_cleanup",
+                    "mutationStarted": True,
                     "committed": True,
                     "commitState": "complete",
                     "checkpointRecoveryRequired": False,
@@ -824,6 +1044,8 @@ class PreparedOutfitImportApprovedWriteService:
             if write_started or imports or loose_copied is not None:
                 return {
                     "ok": False,
+                    "failureLayer": failure_layer,
+                    "mutationStarted": True,
                     "committed": True,
                     "commitState": (
                         "unknown"
@@ -837,9 +1059,19 @@ class PreparedOutfitImportApprovedWriteService:
                     "temporaryCleanupError": cleanup_error or None,
                     "error": str(exc),
                 }
-            if cleanup_error:
-                mapped = RuntimeError(
+            return {
+                "ok": False,
+                "failureLayer": failure_layer,
+                "mutationStarted": False,
+                "committed": False,
+                "commitState": "not_started",
+                "checkpointRecoveryRequired": False,
+                "temporaryCleanupRequired": bool(cleanup_error),
+                "temporaryCleanupError": cleanup_error or None,
+                "kind": str(locals().get("kind") or ""),
+                "error": (
                     f"{exc}; temporary cleanup failed: {cleanup_error}"
-                )
-                raise self._ports.map_error(mapped) from exc
-            raise self._ports.map_error(exc) from exc
+                    if cleanup_error
+                    else str(exc)
+                ),
+            }

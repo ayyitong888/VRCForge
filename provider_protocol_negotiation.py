@@ -121,6 +121,7 @@ def is_explicit_protocol_compatibility_error(error: BaseException) -> bool:
             "unsupported protocol",
             "unknown endpoint",
             "responses api is not supported",
+            "not enabled for the responses api",
             "messages api is not supported",
             "generatecontent is not supported",
         )):

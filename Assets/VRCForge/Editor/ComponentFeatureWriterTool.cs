@@ -12,7 +12,7 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_create_component_feature",
-        Summary = "Preview or CreateNew one fixed-schema component feature through the supervised scene-write lane."
+        Summary = "When to use: preview or CreateNew one VRCFury Toggle or Armature Link through the installed public API and supervised scene-write lane. When NOT to use: do not use for Modular Avatar, arbitrary components, or editing existing VRCFury features. Negative example: do not use it to add a Modular Avatar Menu Installer."
     )]
     public static class ComponentFeatureWriterTool
     {

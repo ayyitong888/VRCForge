@@ -248,6 +248,11 @@ def test_health_failure_uninstalls_only_payload_created_by_smoke(tmp_path, monke
             return None
 
     monkeypatch.setattr(smoke, "start_installed_backend", lambda args, install_root, user_data_root: FakeProcess())
+    monkeypatch.setattr(
+        smoke,
+        "inspect_installed_shortcuts",
+        lambda install_root, smoke_id, phase, timeout: {"name": f"shortcuts.{phase}", "ok": True},
+    )
 
     def fake_run(cmd, **kwargs):
         if isinstance(cmd, str) and f'"{installer.resolve()}"' in cmd:
@@ -312,6 +317,11 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
             return None
 
     monkeypatch.setattr(smoke, "start_installed_backend", lambda args, install_root, user_data_root: FakeProcess())
+    monkeypatch.setattr(
+        smoke,
+        "inspect_installed_shortcuts",
+        lambda install_root, smoke_id, phase, timeout: {"name": f"shortcuts.{phase}", "ok": True},
+    )
 
     def fake_run(cmd, **kwargs):
         if isinstance(cmd, str) and any(f'"{path.resolve()}"' in cmd for path in (first_installer, upgrade_installer)):
@@ -357,6 +367,44 @@ def test_admin_upgrade_path_preserves_user_data_after_uninstall(tmp_path, monkey
     assert sentinel.is_file()
     assert sentinel.parent == local_app_data / "VRCForge" / "installer-smoke" / SMOKE_ID
     assert not install_dir.exists()
+
+
+def test_shortcut_contract_requires_installed_target_working_directory_and_icon(tmp_path):
+    smoke = load_installer_smoke()
+    install_dir = tmp_path / "Program Files" / "VRCForge"
+    expected_target = install_dir / "VRCForge.exe"
+    expected_icon = install_dir / "VRCForge.ico"
+    payload = [
+        {
+            "kind": kind,
+            "path": str(tmp_path / f"{kind}.lnk"),
+            "exists": True,
+            "targetPath": str(expected_target),
+            "workingDirectory": str(install_dir),
+            "iconLocation": f"{expected_icon}, 0",
+        }
+        for kind in ("desktop", "start-menu")
+    ]
+
+    passed = smoke.evaluate_shortcut_contract(payload, install_dir, phase="after_install")
+    assert passed["ok"] is True
+    assert all(entry["ok"] for entry in passed["entries"])
+
+    payload[1]["iconLocation"] = ""
+    failed = smoke.evaluate_shortcut_contract(payload, install_dir, phase="after_upgrade")
+    assert failed["ok"] is False
+    assert failed["entries"][1]["checks"]["iconPath"] is False
+    assert failed["entries"][1]["checks"]["iconIndex"] is False
+
+
+def test_production_start_menu_identity_uses_current_user_programs(tmp_path, monkeypatch):
+    smoke = load_installer_smoke()
+    app_data = tmp_path / "Roaming"
+    monkeypatch.setenv("APPDATA", str(app_data))
+
+    assert smoke.production_start_menu_dir() == (
+        app_data / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "VRCForge"
+    )
 
 
 def test_smoke_scope_rejects_missing_or_mismatched_identity(tmp_path, monkeypatch):

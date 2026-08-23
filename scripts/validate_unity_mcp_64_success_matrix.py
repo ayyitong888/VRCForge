@@ -1,4 +1,4 @@
-"""Validate the exact 64-command live Unity MCP acceptance catalog.
+"""Validate the exact 78-command live Unity MCP acceptance catalog.
 
 This helper validates acceptance inputs only. It never calls Unity, the App,
 or a provider, and it never treats a missing dependency as a successful tool
@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 from unity_mcp_tool_contract import EXPECTED_TOOL_NAMES
 
 
-SCHEMA = "vrcforge.unity_mcp_64_success_matrix.part.v1"
+SCHEMA = "vrcforge.unity_mcp_78_success_matrix.part.v1"
 DEFAULT_PARTS = tuple(
     sorted((ROOT / "tests" / "fixtures").glob("unity_mcp_64_success_matrix.part-*.json"))
 )
@@ -117,8 +117,8 @@ def load_catalog(paths: Iterable[Path] = DEFAULT_PARTS) -> list[dict[str, Any]]:
             )
     missing = sorted(EXPECTED_TOOL_NAMES - seen_tools)
     extra = sorted(seen_tools - EXPECTED_TOOL_NAMES)
-    if missing or extra or len(cases) != 64:
-        raise ValueError(f"catalog must cover exactly 64 tools; missing={missing}, extra={extra}")
+    if missing or extra or len(cases) != 78:
+        raise ValueError(f"catalog must cover exactly 78 tools; missing={missing}, extra={extra}")
     return sorted(cases, key=lambda item: item["tool"])
 
 
@@ -195,7 +195,7 @@ def validate_tool_schemas(
             raise ValueError(f"tools/list contains a duplicate or missing name: {name!r}")
         by_name[name] = tool
     if set(by_name) != EXPECTED_TOOL_NAMES:
-        raise ValueError("tools/list does not match the exact 64-command contract")
+        raise ValueError("tools/list does not match the exact 78-command contract")
 
     for case in cases:
         name = case["tool"]
@@ -245,7 +245,7 @@ def validate_tool_schemas(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate the exact 64-tool live acceptance catalog.")
+    parser = argparse.ArgumentParser(description="Validate the exact 78-tool live acceptance catalog.")
     parser.add_argument("--context-json", type=Path)
     parser.add_argument("--unity-project", type=Path)
     args = parser.parse_args()

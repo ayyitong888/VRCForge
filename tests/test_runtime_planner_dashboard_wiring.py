@@ -12,7 +12,9 @@ from provider_configuration_service import ProviderApiConfig
 from runtime_planner_service import (
     EXPOSURE_LAYER_EXECUTION,
     EXPOSURE_LAYER_PLANNING,
+    PlannerCatalogSnapshot,
     PlannerModelResult,
+    PlannerTool,
 )
 from profiled_tool_registry import CapabilityProfile
 from vrchat_blendshape_agent import LlmPlanResponse
@@ -26,6 +28,51 @@ def fixture_config() -> ProviderApiConfig:
         model="fixture-model",
         api_type="chat_completions",
         thinking_level="medium",
+    )
+
+
+def test_internal_tool_index_lists_only_tools_visible_in_the_requested_planner_layer() -> None:
+    visible = PlannerTool(
+        name="unity_status",
+        runtime_name="vrcforge_unity_status",
+        description="Inspect Unity status.",
+        category="read/debug",
+        block="unity/diagnostics",
+    )
+    snapshot = PlannerCatalogSnapshot(
+        visible_tools=(visible,),
+        routable_tools=(
+            visible,
+            PlannerTool(
+                name="unity_get_compile_errors",
+                runtime_name="vrcforge_get_compile_errors",
+                description="Unavailable in this layer.",
+                category="read/debug",
+                block="unity/diagnostics",
+            ),
+        ),
+    )
+
+    with patch.object(
+        dashboard_server._RuntimePlannerCatalog,
+        "read",
+        return_value=snapshot,
+    ) as read:
+        inventory = dashboard_server.build_internal_tool_block_inventory(
+            {
+                "sessionId": "index-layer-test",
+                "exposureLayer": EXPOSURE_LAYER_PLANNING,
+                "projectContextActive": False,
+            }
+        )
+
+    diagnostics = next(
+        block for block in inventory["blocks"] if block["name"] == "unity/diagnostics"
+    )
+    assert diagnostics["toolNames"] == ["unity_status"]
+    read.assert_called_once_with(
+        EXPOSURE_LAYER_PLANNING,
+        project_context_active=False,
     )
 
 
@@ -346,6 +393,49 @@ def test_no_project_catalog_exposes_only_general_agent_capabilities() -> None:
     assert all(not name.startswith("unity_") for name in planning_names | execution_names | routable_names)
     assert planning.skills == ()
     assert execution.skills == ()
+
+
+def test_internal_indexed_catalog_loads_per_session_without_leaking_to_external_mcp() -> None:
+    session_id = "internal-tree-regression"
+    root = dashboard_server.build_internal_tool_block_inventory(
+        {"sessionId": session_id, "projectContextActive": True}
+    )
+    assert root["loadedBlocks"] == ["core"]
+
+    branch = dashboard_server.build_internal_tool_block_inventory(
+        {"sessionId": session_id, "index": "8.6", "projectContextActive": True}
+    )
+    assert branch["tree"]["name"] == "unity/integrations"
+    assert [item["index"] for item in branch["tree"]["children"]] == [
+        "8.6.1",
+        "8.6.2",
+        "8.6.3",
+        "8.6.4",
+    ]
+
+    loaded = dashboard_server.load_internal_tool_block(
+        {"sessionId": session_id, "index": "8.6.2"}
+    )
+    assert loaded["loadedBlocks"] == ["core", "unity/integrations/vrcfury"]
+    integrations = dashboard_server.build_internal_tool_block_inventory(
+        {"sessionId": session_id, "block": "8.6.2", "projectContextActive": True}
+    )
+    assert any(
+        item["name"] == "unity_scan_vrcfury"
+        for item in integrations["tree"]["tools"]
+    )
+
+    external_names = {
+        item["name"]
+        for item in dashboard_server.AGENT_GATEWAY.build_external_mcp_tools(
+            "execution", tool_blocks=["*"]
+        )
+    }
+    assert {
+        "vrcforge_list_internal_tool_blocks",
+        "vrcforge_load_internal_tool_block",
+        "vrcforge_unload_internal_tool_block",
+    }.isdisjoint(external_names)
 
 
 def test_no_project_planner_prompt_is_general_and_omits_unity_tools() -> None:

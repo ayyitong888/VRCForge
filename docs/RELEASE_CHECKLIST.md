@@ -139,7 +139,7 @@ Before publishing a release package:
       `#if UNITY_EDITOR`, final-line `#endif`, and guarded `EditorUtility` /
       `GlobalObjectId` references. Reject any package that can reproduce
       `CS0103` in `Assembly-CSharp.dll` or break Player/VRChat `Build & Test`.
-* [ ] Confirm the package exposes exactly 64 tools and only protocol
+* [ ] Confirm the package exposes exactly 78 tools and only protocol
       `2026-07-28`; old protocol/transport/fallback strings must be absent.
 * [ ] Confirm the package-generated trusted desktop/backend SHA-256 values
       match the exact binaries in the paired Windows payload.
@@ -155,6 +155,35 @@ Before publishing a release package:
 * [ ] Confirm startup/refresh failure UI points to Startup Doctor and Retry,
       and does not mislabel a runtime-offline state as a Unity project failure.
 * [ ] Run external-agent preflight smoke: `npm run smoke:external-agent`.
+* [ ] For every Unity atom referenced by a built-in workflow, prove internal
+      Agent execution and external MCP execution resolve to the same canonical
+      input schema, handler, Core call, and result contract. Different display
+      names or lazy-load blocks are allowed; one-sided capability is not.
+* [ ] Before normal Core tool discovery, call pre-handshake
+      `server/core-info`; confirm compile-time Core identity/version, protocol
+      compatibility range, instance id, path-derived `projectId`, tool
+      contract/count, and compile snapshot are present even when handshake is
+      rejected.
+* [ ] After importing/upgrading the Unity Core, poll `server/core-info` until
+      the running assembly reports the target compile-time version. If it does
+      not change, inspect the returned compile snapshot and Unity Console;
+      never treat copied files or a disk manifest as proof of domain reload.
+* [ ] Prove external read success, returned read failure, read exception, write
+      success, returned write failure, and write exception preserve the exact
+      handler/Core `result`, error code, reason, details, and exception causes.
+      Gateway-added `writeFailure`, request trace, Console snapshots and the
+      disclosed sensitive-field redaction policy must be sibling context, not
+      replacements; internal Agent-loop `outcome`, result summaries,
+      continuation and terminal-plan fields must be absent.
+* [ ] Prove `invoke_unity_mcp` preserves a Core `isError` result when a new
+      handler omits the error-policy argument. Any lossy internal compression
+      must be an explicit `preserve_tool_error=False` call and must have its own
+      bounded regression; default-lossy/opt-in-preserve behavior fails release.
+* [ ] Prove route-before-write rejection and missing exact project binding both
+      report `mutationStarted=false`, `committed=false`, and
+      `commitState=not_started`; an injected post-dispatch transport failure
+      must remain `commitState=unknown`. No failure may trigger an automatic
+      retry or checkpoint restore.
 * [ ] Run external-agent live write/rollback smoke against a real Unity project:
       `npm run smoke:external-agent:live -- --project-root C:\path\to\UnityProject`.
 * [ ] Confirm external-agent smoke hides direct apply tools, creates a

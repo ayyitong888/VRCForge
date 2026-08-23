@@ -701,7 +701,7 @@ def test_avatar_encryption_public_repo_contains_no_unity_or_shader_implementatio
     assert not (dashboard_server.ROOT_DIR / "scripts" / "smoke_avatar_encryption_live.py").exists()
 
 
-def test_avatar_encryption_external_mcp_can_list_and_call_split_tools(
+def test_avatar_encryption_external_mcp_lists_reads_but_hides_internal_write_requests(
     force_gateway_approval_mode,
 ) -> None:
     config = dashboard_server.AGENT_GATEWAY.ensure_config()
@@ -748,7 +748,11 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools(
                 "jsonrpc": "2.0",
                 "id": 2,
                 "method": "tools/list",
-                "params": {"_meta": meta, "exposureLayer": "execution"},
+                "params": {
+                    "_meta": meta,
+                    "exposureLayer": "execution",
+                    "toolBlocks": ["encryption"],
+                },
             },
         )
         assert listed.status_code == 200
@@ -759,10 +763,12 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools(
             "vrcforge_avatar_encryption_plan",
             "vrcforge_avatar_encryption_preview",
             "vrcforge_avatar_encryption_addon_status",
+        } <= tool_names
+        assert {
             "vrcforge_avatar_encryption_liltoon_apply_request",
             "vrcforge_avatar_encryption_poiyomi_apply_request",
             "vrcforge_avatar_encryption_remove_request",
-        } <= tool_names
+        }.isdisjoint(tool_names)
         assert dashboard_server.AVATAR_ENCRYPTION_ADDON_APPLY_TOOL not in tool_names
         assert dashboard_server.AVATAR_ENCRYPTION_ADDON_REMOVE_TOOL not in tool_names
 
@@ -793,33 +799,3 @@ def test_avatar_encryption_external_mcp_can_list_and_call_split_tools(
         scan_payload = json.loads(scan.json()["result"]["content"][0]["text"])
         assert scan.json()["result"]["isError"] is True
         assert "MCP2 unitypackage installed and ready" in scan_payload["error"]
-
-        apply_request = client.post(
-            "/mcp",
-            headers={
-                **headers,
-                "Mcp-Method": "tools/call",
-                "Mcp-Name": "vrcforge_avatar_encryption_liltoon_apply_request",
-            },
-            json={
-                "jsonrpc": "2.0",
-                "id": 4,
-                "method": "tools/call",
-                "params": {
-                    "name": "vrcforge_avatar_encryption_liltoon_apply_request",
-                    "arguments": {
-                        "params": {
-                            "avatarPath": "Scene/HeroAvatar",
-                            "projectPath": "E:/unity/Hero",
-                            "inventory": make_encryption_inventory(),
-                            "confirmCreatorOwnedAssets": True,
-                        }
-                    },
-                    "_meta": meta,
-                },
-            },
-        )
-        assert apply_request.status_code == 200
-        request_payload = json.loads(apply_request.json()["result"]["content"][0]["text"])
-        assert apply_request.json()["result"]["isError"] is True
-        assert "MCP2 unitypackage installed and ready" in request_payload["error"]

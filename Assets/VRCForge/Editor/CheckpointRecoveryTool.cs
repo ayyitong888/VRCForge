@@ -100,6 +100,10 @@ namespace VRCForge.Editor
                 }
                 AssetDatabase.SaveAssets();
                 var scenes = loadedScenes.Select(scene => scene.path).ToList();
+                var activeScene = SceneManager.GetActiveScene();
+                var activeScenePath = loadedScenes.Any(scene => scene == activeScene)
+                    ? activeScene.path
+                    : string.Empty;
                 return VRCForgeToolResult.Completed(
                     "Saved open scenes and dirty assets before checkpointing.",
                     new
@@ -107,6 +111,7 @@ namespace VRCForge.Editor
                         ok = true,
                         projectPath = ProjectRoot(),
                         scenes,
+                        activeScenePath,
                         ignoredTransientScenes,
                         unityProcessId = identity?.ProcessId,
                         unityProcessStartedAtUtc = identity?.StartedAtUtc,
@@ -238,6 +243,16 @@ namespace VRCForge.Editor
                         return VRCForgeToolResult.Failed(
                             "Checkpoint restore cannot close scenes outside project Assets.",
                             new { phase, blocking = true, scenes = unsupported });
+                    }
+                    var dirty = loaded
+                        .Where(scene => scene.isDirty)
+                        .Select(scene => scene.path)
+                        .ToList();
+                    if (dirty.Count > 0)
+                    {
+                        return VRCForgeToolResult.Failed(
+                            "Checkpoint restore cannot discard dirty scenes.",
+                            new { phase, blocking = true, scenes = dirty });
                     }
                     var activeScene = SceneManager.GetActiveScene();
                     var prepareActiveScenePath = loaded.Any(scene => scene == activeScene)

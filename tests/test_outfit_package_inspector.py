@@ -42,6 +42,29 @@ def test_unitypackage_inspection_reads_pathnames_not_asset_payload(tmp_path: Pat
     assert "SECRET_TEXTURE_PAYLOAD_SHOULD_NOT_APPEAR" not in rendered
 
 
+def test_unitypackage_pathname_evidence_is_complete_beyond_agent_summary_limit(tmp_path: Path) -> None:
+    package = tmp_path / "large.unitypackage"
+    with tarfile.open(package, mode="w:gz") as archive:
+        for index in range(1251):
+            write_tar_member(
+                archive,
+                f"{index:04d}/pathname",
+                f"Assets/Outfits/Item{index:04d}.prefab".encode(),
+            )
+
+    result = inspect_outfit_package(package)
+    receipt = result["unityPackages"][0]
+
+    assert result["summary"]["entryCount"] == 1251
+    assert receipt["parsedPathnameCount"] == 1251
+    assert receipt["pathnamesReturnedCount"] == 200
+    assert receipt["pathnamesReturnedTruncated"] is True
+    assert receipt["pathnamesEvidenceCount"] == 1251
+    assert receipt["pathnamesEvidenceComplete"] is True
+    assert len(receipt["pathnamesEvidence"]) == 1251
+    assert receipt["pathnamesEvidence"][-1]["path"] == "Assets/Outfits/Item1250.prefab"
+
+
 def test_booth_zip_lists_nested_unitypackage_without_reading_payload(tmp_path: Path) -> None:
     package = tmp_path / "product.zip"
     with zipfile.ZipFile(package, mode="w") as archive:

@@ -191,6 +191,7 @@ namespace VRCForge.Editor
                     Undo.SetTransformParent(created.transform, parent.transform, $"Create {name} under parent");
                 }
                 EditorUtility.SetDirty(created);
+                Undo.FlushUndoRecordObjects();
                 EditorSceneManager.MarkSceneDirty(targetScene);
 
                 if (!EditorSceneManager.SaveScene(targetScene))
@@ -341,6 +342,7 @@ namespace VRCForge.Editor
                 target.name = newName;
                 mutationStarted = true;
                 EditorUtility.SetDirty(target);
+                Undo.FlushUndoRecordObjects();
                 EditorSceneManager.MarkSceneDirty(target.scene);
                 if (!EditorSceneManager.SaveScene(target.scene))
                 {
@@ -490,6 +492,29 @@ namespace VRCForge.Editor
                     }
                 }
 
+                var prefabInstanceRoot = PrefabUtility.GetNearestPrefabInstanceRoot(target);
+                if (prefabInstanceRoot != null && prefabInstanceRoot != target)
+                {
+                    return VRCForgeToolResult.FailedWithCode(
+                        "prefab_instance_child_reparent_not_supported",
+                        $"Cannot reparent '{oldPath}' because it is a child inside the prefab instance "
+                            + $"'{ComponentCrudCore.GetHierarchyPath(prefabInstanceRoot.transform)}'. "
+                            + "Duplicate the required hierarchy or explicitly unpack the prefab instance first.",
+                        new
+                        {
+                            action = "reparent_gameobject",
+                            gameObjectPath = oldPath,
+                            prefabInstanceRootPath = ComponentCrudCore.GetHierarchyPath(prefabInstanceRoot.transform),
+                            failureLayer = "unity_core_preflight",
+                            blockingConstraint = "prefab_instance_child_reparent",
+                            mutationStarted = false,
+                            committed = false,
+                            commitState = "not_started",
+                            requestMayHaveCommitted = false,
+                            checkpointRecoveryRequired = false
+                        });
+                }
+
                 var worldPositionStays = p.worldPositionStays ?? true;
                 var resolvedNewParentPath = newParent != null ? ComponentCrudCore.GetHierarchyPath(newParent.transform) : null;
 
@@ -523,6 +548,7 @@ namespace VRCForge.Editor
                     $"Reparent {target.name}");
                 mutationStarted = true;
                 EditorUtility.SetDirty(target);
+                Undo.FlushUndoRecordObjects();
                 EditorSceneManager.MarkSceneDirty(target.scene);
                 if (!EditorSceneManager.SaveScene(target.scene))
                 {
@@ -535,17 +561,46 @@ namespace VRCForge.Editor
                 var readbackParentPath = readback.transform.parent != null
                     ? ComponentCrudCore.GetHierarchyPath(readback.transform.parent)
                     : null;
-                if (!ReferenceEquals(readback, target)
-                    || !string.Equals(readbackParentPath, resolvedNewParentPath, StringComparison.Ordinal)
-                    || readback.transform.GetSiblingIndex() != target.transform.GetSiblingIndex()
-                    || afterScene.Guid != beforeScene.Guid
-                    || afterScene.Handle != beforeScene.Handle
-                    || (!string.Equals(oldPath, newPath, StringComparison.Ordinal)
-                        && afterScene.FileDigest == beforeScene.FileDigest)
-                    || afterScene.MetaDigest != beforeScene.MetaDigest
-                    || afterScene.MetaIdentity != beforeScene.MetaIdentity)
+                var readbackMismatches = new List<string>();
+                if (!ReferenceEquals(readback, target))
                 {
-                    throw new InvalidOperationException("The reparented GameObject persisted readback was not exact.");
+                    readbackMismatches.Add("object_reference_changed");
+                }
+                if (!string.Equals(readbackParentPath, resolvedNewParentPath, StringComparison.Ordinal))
+                {
+                    readbackMismatches.Add("parent_path_mismatch");
+                }
+                if (readback.transform.GetSiblingIndex() != target.transform.GetSiblingIndex())
+                {
+                    readbackMismatches.Add("sibling_index_mismatch");
+                }
+                if (afterScene.Guid != beforeScene.Guid)
+                {
+                    readbackMismatches.Add("scene_guid_changed");
+                }
+                if (afterScene.Handle != beforeScene.Handle)
+                {
+                    readbackMismatches.Add("scene_handle_changed");
+                }
+                if (!string.Equals(oldPath, newPath, StringComparison.Ordinal)
+                    && afterScene.FileDigest == beforeScene.FileDigest)
+                {
+                    readbackMismatches.Add("scene_file_unchanged");
+                }
+                if (afterScene.MetaDigest != beforeScene.MetaDigest)
+                {
+                    readbackMismatches.Add("scene_meta_digest_changed");
+                }
+                if (afterScene.MetaIdentity != beforeScene.MetaIdentity)
+                {
+                    readbackMismatches.Add("scene_meta_identity_changed");
+                }
+                if (readbackMismatches.Count > 0)
+                {
+                    throw new InvalidOperationException(
+                        "The reparented GameObject persisted readback was not exact. Mismatches: "
+                        + string.Join(", ", readbackMismatches)
+                        + ".");
                 }
                 var payload = new
                 {
@@ -603,15 +658,25 @@ namespace VRCForge.Editor
                 {
                     restored = false;
                 }
-                return VRCForgeToolResult.Failed($"Reparent GameObject failed: {ex.Message}", new
-                {
-                    mutationStarted,
-                    restored,
-                    cleanupVerified = restored,
-                    cleanupRequired = !restored,
-                    checkpointRecoveryRequired = !restored,
-                    operationState = restored ? "restored" : "checkpoint_restore_required"
-                });
+                var readbackFailure = ex.Message.IndexOf(
+                    "persisted readback was not exact",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                return VRCForgeToolResult.FailedWithCode(
+                    readbackFailure ? "reparent_persisted_readback_mismatch" : "reparent_gameobject_failed",
+                    $"Reparent GameObject failed: {ex.Message}",
+                    new
+                    {
+                        mutationStarted,
+                        restored,
+                        cleanupVerified = restored,
+                        cleanupRequired = !restored,
+                        committed = restored ? (bool?)false : null,
+                        commitState = restored ? "rolled_back" : "unknown",
+                        requestMayHaveCommitted = !restored,
+                        checkpointRecoveryRequired = !restored,
+                        failureLayer = readbackFailure ? "unity_core_persisted_readback" : "unity_core_mutation",
+                        operationState = restored ? "restored" : "checkpoint_restore_required"
+                    });
             }
         }
     }
@@ -626,8 +691,11 @@ namespace VRCForge.Editor
 
         public class DeleteGameObjectParameters
         {
-            [VRCForgeInput("Full hierarchy path or unique name of the GameObject to delete.", IsRequired = true)]
+            [VRCForgeInput("Full hierarchy path or unique name of the GameObject to delete when globalObjectId is omitted.", IsRequired = false)]
             public string gameObjectPath { get; set; } = "";
+
+            [VRCForgeInput("Exact GlobalObjectId of the GameObject to delete; use this for duplicate hierarchy names.", IsRequired = false)]
+            public string globalObjectId { get; set; } = "";
 
             [VRCForgeInput("If true, only report what would happen without mutating the scene (default false).", IsRequired = false)]
             public bool? preview { get; set; } = false;
@@ -641,11 +709,29 @@ namespace VRCForge.Editor
             SavedSceneSnapshot beforeScene = null;
             GameObject target = null;
             var canonicalPath = string.Empty;
+            var targetGlobalObjectId = string.Empty;
             try
             {
-                target = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
+                var requestedGlobalObjectId = (p.globalObjectId ?? string.Empty).Trim();
+                if (!string.IsNullOrEmpty(requestedGlobalObjectId))
+                {
+                    if (!GlobalObjectId.TryParse(requestedGlobalObjectId, out var parsedGlobalObjectId))
+                    {
+                        return VRCForgeToolResult.Failed("globalObjectId is not a valid Unity GlobalObjectId.");
+                    }
+                    target = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(parsedGlobalObjectId) as GameObject;
+                    if (target == null)
+                    {
+                        return VRCForgeToolResult.Failed("No loaded scene GameObject matches globalObjectId.");
+                    }
+                }
+                else
+                {
+                    target = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
+                }
                 canonicalPath = ComponentCrudCore.GetHierarchyPath(target.transform);
                 var goPath = canonicalPath;
+                targetGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(target).ToString();
                 var childCount = target.transform.childCount;
                 var componentCount = target.GetComponents<Component>().Count(c => c != null);
 
@@ -656,6 +742,7 @@ namespace VRCForge.Editor
                         action = "delete_gameobject",
                         preview = true,
                         gameObjectPath = goPath,
+                        globalObjectId = targetGlobalObjectId,
                         childCount,
                         componentCount
                     };
@@ -674,13 +761,18 @@ namespace VRCForge.Editor
                 Undo.SetCurrentGroupName($"Delete {target.name}");
                 Undo.DestroyObjectImmediate(target);
                 mutationStarted = true;
+                Undo.FlushUndoRecordObjects();
                 EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
                 if (!EditorSceneManager.SaveScene(beforeScene.Scene))
                 {
                     throw new InvalidOperationException("The target scene could not be saved.");
                 }
                 var afterScene = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "saved target scene");
-                var deletedStillExists = AssetPrefabCore.CountHierarchyPath(goPath, afterScene.Handle) != 0;
+                if (!GlobalObjectId.TryParse(targetGlobalObjectId, out var persistedGlobalObjectId))
+                {
+                    throw new InvalidOperationException("The deleted GameObject GlobalObjectId could not be parsed for persisted readback.");
+                }
+                var deletedStillExists = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(persistedGlobalObjectId) != null;
                 if (deletedStillExists
                     || afterScene.Guid != beforeScene.Guid
                     || afterScene.Handle != beforeScene.Handle
@@ -696,6 +788,7 @@ namespace VRCForge.Editor
                     action = "delete_gameobject",
                     preview = false,
                     gameObjectPath = goPath,
+                    globalObjectId = targetGlobalObjectId,
                     childCount,
                     componentCount,
                     scenePath = afterScene.Path,
@@ -718,10 +811,11 @@ namespace VRCForge.Editor
                         if (EditorSceneManager.SaveScene(beforeScene.Scene))
                         {
                             var cleanup = SceneObjectCopyCore.ResolveSavedScene(beforeScene.Path, "restored target scene");
-                            var restoredObject = SceneObjectCopyCore.ResolveUniqueGameObject(
-                                cleanup.Scene,
-                                canonicalPath,
-                                "restored object");
+                            GameObject restoredObject = null;
+                            if (GlobalObjectId.TryParse(targetGlobalObjectId, out var restoredGlobalObjectId))
+                            {
+                                restoredObject = GlobalObjectId.GlobalObjectIdentifierToObjectSlow(restoredGlobalObjectId) as GameObject;
+                            }
                             restored = restoredObject != null
                                 && cleanup.Guid == beforeScene.Guid
                                 && cleanup.Handle == beforeScene.Handle
@@ -816,6 +910,7 @@ namespace VRCForge.Editor
                 target.SetActive(active);
                 mutationStarted = true;
                 EditorUtility.SetDirty(target);
+                Undo.FlushUndoRecordObjects();
                 EditorSceneManager.MarkSceneDirty(targetScene);
                 if (!EditorSceneManager.SaveScene(targetScene))
                 {

@@ -61,7 +61,10 @@ def test_invoke_routes_to_project_bound_core_when_descriptor_exists(tmp_path: Pa
     }
 
 
-def test_core_tool_error_never_falls_back_to_legacy_transport(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_core_tool_error_is_preserved_by_default_without_legacy_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     descriptor = tmp_path / "Library" / "VRCForge" / "mcp-core.json"
     descriptor.parent.mkdir(parents=True)
     descriptor.write_text("{}", encoding="utf-8")
@@ -81,10 +84,51 @@ def test_core_tool_error_never_falls_back_to_legacy_transport(tmp_path: Path, mo
     sleep_calls: list[float] = []
     monkeypatch.setattr(agent.time, "sleep", sleep_calls.append)
 
-    with pytest.raises(agent.UnityMcpError, match="rejected the tool execution"):
-        agent.invoke_unity_mcp(settings, "vrc_write", {"projectPath": str(tmp_path)})
+    result = agent.invoke_unity_mcp(
+        settings,
+        "vrc_write",
+        {"projectPath": str(tmp_path)},
+    )
 
+    assert result.exit_code == 1
+    assert result.payload == {
+        "content": [{"type": "text", "text": "rejected"}],
+        "isError": True,
+    }
     assert sleep_calls == []
+
+
+def test_core_tool_error_compression_requires_explicit_opt_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    descriptor = tmp_path / "Library" / "VRCForge" / "mcp-core.json"
+    descriptor.parent.mkdir(parents=True)
+    descriptor.write_text("{}", encoding="utf-8")
+    raw = {
+        "content": [{"type": "text", "text": "exact rejection"}],
+        "structuredContent": {"ok": False, "code": "exact_rejection"},
+        "isError": True,
+    }
+
+    class FakeCoreClient:
+        def __init__(self, _project_root: str, *, timeout_seconds: int) -> None:
+            assert timeout_seconds == 45
+
+        def call_tool(self, _name: str, _arguments: dict) -> dict:
+            return raw
+
+    monkeypatch.setattr(agent, "UnityMcpCoreClient", FakeCoreClient)
+
+    with pytest.raises(agent.UnityMcpError, match="rejected the tool execution") as raised:
+        agent.invoke_unity_mcp(
+            _settings(tmp_path),
+            "vrc_write",
+            {"projectPath": str(tmp_path)},
+            preserve_tool_error=False,
+        )
+
+    assert raised.value.raw_result == raw
 
 
 def test_core_installed_without_descriptor_never_falls_back_to_legacy_write(

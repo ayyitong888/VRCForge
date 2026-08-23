@@ -32,13 +32,9 @@ public static class ComponentFeatureFixtureProbe
             BaselineSceneBytes = File.ReadAllBytes(AbsoluteAssetPath(ScenePath));
 
             VerifyMissingPackageFailsClosed();
-            VerifyTamperedPackageFailsClosed();
+            VerifyCompatiblePackageTreeDriftAccepted();
             VerifyMethodSignatureDriftFailsClosed();
-            var compatibility = ComponentFeatureWriteCore.ValidateCompatibility();
-            Require(
-                compatibility.PackageTreeDigest == ComponentFeatureWriteCore.ExpectedPackageTreeDigest,
-                "restored package tree"
-            );
+            ComponentFeatureWriteCore.ValidateCompatibility();
             VerifyUnknownFieldFailsClosed(baselineDigest, baselineMetaDigest);
             VerifyPreviewZeroWrite(baselineDigest, baselineMetaDigest);
             VerifyStaleExpectedBeforeFailsClosed(baselineDigest, baselineMetaDigest);
@@ -121,7 +117,7 @@ public static class ComponentFeatureFixtureProbe
         Require(File.Exists(packageJson) && !File.Exists(backup), "package manifest restore");
     }
 
-    private static void VerifyTamperedPackageFailsClosed()
+    private static void VerifyCompatiblePackageTreeDriftAccepted()
     {
         var publicApiSource = Path.Combine(PackageRoot(), "PublicApi", "FuryComponents.cs");
         Require(File.Exists(publicApiSource), "package source precondition");
@@ -130,7 +126,8 @@ public static class ComponentFeatureFixtureProbe
         try
         {
             File.WriteAllBytes(publicApiSource, before.Concat(new byte[] { 0x20 }).ToArray());
-            ExpectCompatibilityFailure("tampered package accepted");
+            var drifted = ComponentFeatureWriteCore.ValidateCompatibility();
+            Require(drifted.PackageTreeDigest != string.Empty, "package tree drift evidence");
         }
         finally
         {

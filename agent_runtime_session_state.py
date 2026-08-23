@@ -82,6 +82,41 @@ class AgentRuntimeSessionState:
                 "restoredFromTranscript": bool(session.get("restoredFromTranscript")),
             }
 
+    def internal_tool_blocks(self, session_id: str) -> frozenset[str]:
+        with self._ports.shared_state_lock:
+            session = self._sessions.get(str(session_id or "").strip())
+            blocks = session.get("internalToolBlocks", []) if session else []
+            return frozenset({"core", *(str(item) for item in blocks if str(item))})
+
+    def load_internal_tool_block(self, session_id: str, block: str) -> frozenset[str]:
+        session_id = str(session_id or "").strip()
+        block = str(block or "").strip()
+        if not session_id or not block:
+            return frozenset({"core"})
+        with self._ports.shared_state_lock:
+            session = self._sessions.setdefault(
+                session_id,
+                {"id": session_id, "createdAt": "", "updatedAt": "", "turns": []},
+            )
+            blocks = {"core", *(str(item) for item in session.get("internalToolBlocks", []))}
+            blocks.add(block)
+            session["internalToolBlocks"] = sorted(blocks)
+            return frozenset(blocks)
+
+    def unload_internal_tool_block(self, session_id: str, block: str) -> frozenset[str]:
+        session_id = str(session_id or "").strip()
+        block = str(block or "").strip()
+        if not session_id:
+            return frozenset({"core"})
+        with self._ports.shared_state_lock:
+            session = self._sessions.get(session_id)
+            blocks = {"core", *(str(item) for item in (session or {}).get("internalToolBlocks", []))}
+            if block != "core":
+                blocks.discard(block)
+            if session is not None:
+                session["internalToolBlocks"] = sorted(blocks)
+            return frozenset(blocks)
+
     def append_turn(self, session_id: str, *, now: str, updated_at: str, turn: dict[str, Any]) -> None:
         with self._ports.shared_state_lock:
             session = self._sessions.setdefault(

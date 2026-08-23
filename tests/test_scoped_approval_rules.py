@@ -191,8 +191,11 @@ def test_future_category_option_requires_an_exact_project_root(tmp_path: Path) -
     assert "allowFutureEligible" not in pending["approval"]
 
 
-def test_external_mcp_pending_request_invokes_refresh_callback(tmp_path: Path) -> None:
+def test_external_mcp_direct_write_never_uses_internal_pending_refresh_callback(tmp_path: Path) -> None:
     gateway = _gateway(tmp_path)
+    project = tmp_path / "Project"
+    for marker in ("Assets", "Packages", "ProjectSettings"):
+        (project / marker).mkdir(parents=True, exist_ok=True)
     gateway.approval_transactions.register_write_handler(
         "vrcforge_create_gameobject",
         "Create a scene object.",
@@ -200,13 +203,6 @@ def test_external_mcp_pending_request_invokes_refresh_callback(tmp_path: Path) -
         lambda _arguments: {"ok": True},
         approval_category="scene-object-create",
         allow_future_category=True,
-    )
-    gateway.register_tool(
-        "vrcforge_request_apply",
-        "Request user approval for a write operation.",
-        "supervised-write",
-        gateway.approval_transactions.create_apply_request,
-        write=True,
     )
     config = gateway.ensure_config()
     config.enabled = True
@@ -224,10 +220,10 @@ def test_external_mcp_pending_request_invokes_refresh_callback(tmp_path: Path) -
                 "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
                 "io.modelcontextprotocol/clientCapabilities": {},
             },
-            "name": "vrcforge_request_apply",
+            "name": "vrcforge_create_gameobject",
             "arguments": {
-                "target_tool": "vrcforge_create_gameobject",
-                "arguments": {"projectRoot": str(tmp_path / "Project"), "name": "One"},
+                "projectRoot": str(project),
+                "name": "One",
             },
         },
     }
@@ -238,7 +234,7 @@ def test_external_mcp_pending_request_invokes_refresh_callback(tmp_path: Path) -
         "origin": "http://127.0.0.1:8757",
         "mcp-protocol-version": PROTOCOL_VERSION,
         "mcp-method": "tools/call",
-        "mcp-name": "vrcforge_request_apply",
+        "mcp-name": "vrcforge_create_gameobject",
     }
 
     async def call() -> httpx.Response:
@@ -249,6 +245,9 @@ def test_external_mcp_pending_request_invokes_refresh_callback(tmp_path: Path) -
     response = asyncio.run(call())
 
     assert response.status_code == 200
-    assert len(observed) == 1
-    assert observed[0]["status"] == "pending"
-    assert observed[0]["allowFutureEligible"] is True
+    response_text = response.text
+    assert "taskContinuation" not in response_text
+    assert "plannerObservation" not in response_text
+    assert "terminalPlan" not in response_text
+    assert response.json()["result"]["structuredContent"]["status"] == "executed"
+    assert observed == []

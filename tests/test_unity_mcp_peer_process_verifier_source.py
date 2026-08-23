@@ -17,23 +17,13 @@ def test_peer_verifier_is_windows_owner_pid_fail_closed_contract() -> None:
     assert "IPAddress.Loopback" in source
     assert 'ReadExpectedProcessPath(processId, "vrcforge_backend", out processStartTimeUtcTicks)' in source
     assert 'ReadExpectedProcessPath(parentProcessId, "VRCForge", out parentProcessStartTimeUtcTicks)' in source
-    assert "VerifyPairedReleasePayload(processPath, parentProcessPath)" in source
+    assert "VerifyManagedProcessLayout(processPath, parentProcessPath)" in source
     assert 'Path.Combine(root, "backend", "vrcforge_backend.exe")' in source
-    assert 'Path.Combine(root, "payload-integrity.json")' in source
-    assert '"vrcforge.payload-integrity.v1"' in source
-    assert "VRCForgeMcpTrustedRelease.AssetPath" in source
-    assert 'manifest["desktopSha256"]' in source
-    assert 'manifest["backendSha256"]' in source
-    assert "manifest.Count" not in source
-    assert "foreach (var property in manifest.Properties())" in source
-    assert "propertyCount != 3" in source
-    assert "Properties().Count()" not in source
-    assert 'VerifyIntegrityEntry(files, "desktop", "VRCForge.exe", expectedParent, expectedDesktopDigest)' in source
-    assert 'VerifyIntegrityEntry(files, "backend", "backend/vrcforge_backend.exe", expectedBackend, expectedBackendDigest)' in source
-    assert "ConstantTimeTextEquals(manifestDigest, releaseDigest)" in source
-    assert "ConstantTimeTextEquals(releaseDigest, ComputeSha256(actualPath))" in source
-    assert "SHA256.Create()" in source
-    assert "ConstantTimeTextEquals" in source
+    assert 'Path.Combine(root, "payload-integrity.json")' not in source
+    assert "VRCForgeMcpTrustedRelease.AssetPath" not in source
+    assert 'manifest["desktopSha256"]' not in source
+    assert 'manifest["backendSha256"]' not in source
+    assert "SHA256.Create()" not in source
     assert "CreateToolhelp32Snapshot" in source
     assert "ProcessStartTimeUtcTicks" in source
     assert "ParentProcessStartTimeUtcTicks" in source
@@ -52,7 +42,7 @@ def test_peer_verifier_never_uses_caller_claims_or_development_fallbacks() -> No
     assert "localhost" not in source
 
 
-def test_source_tree_keeps_managed_peer_lane_unbound_until_release_pairing() -> None:
+def test_source_tree_keeps_release_integrity_metadata_for_install_time_only() -> None:
     trusted_release = (SOURCE.parent / "VRCForgeMcpTrustedRelease.cs").read_text(encoding="utf-8")
     trusted_release_data = (SOURCE.parent / "VRCForgeMcpTrustedRelease.json").read_text(encoding="utf-8")
 
@@ -64,12 +54,12 @@ def test_source_tree_keeps_managed_peer_lane_unbound_until_release_pairing() -> 
     assert '"backendSha256": ""' in trusted_release_data
 
 
-def test_peer_verifier_reads_release_pairing_from_runtime_asset_not_compiled_constants() -> None:
+def test_peer_verifier_does_not_use_release_pairing_as_runtime_authorization() -> None:
     source = SOURCE.read_text(encoding="utf-8")
 
-    assert "VRCForgeMcpTrustedRelease.AssetPath" in source
-    assert '"vrcforge.trusted-release.v1"' in source
-    assert 'manifest["desktopSha256"]' in source
-    assert 'manifest["backendSha256"]' in source
+    assert "VRCForgeMcpTrustedRelease.AssetPath" not in source
+    assert '"vrcforge.trusted-release.v1"' not in source
+    assert 'manifest["desktopSha256"]' not in source
+    assert 'manifest["backendSha256"]' not in source
     assert "VRCForgeMcpTrustedRelease.DesktopSha256" not in source
     assert "VRCForgeMcpTrustedRelease.BackendSha256" not in source

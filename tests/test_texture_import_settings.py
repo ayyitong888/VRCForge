@@ -294,6 +294,10 @@ def test_csharp_domain_module_keeps_preview_zero_write_and_apply_exact() -> None
     source = Path("Assets/VRCForge/Editor/TextureImportSettingsTool.cs").read_text(encoding="utf-8-sig")
 
     assert 'toolId: "vrc_set_texture_import_settings"' in source
+    assert '"texture_import_settings_rejected"' in source
+    assert "RejectedBeforeMutation" in source
+    assert "exception.Message" in source
+    assert '"pre_mutation_validation"' in source
     assert "TextureImporter.GetAtPath" in source
     assert "TextureImporter.IsDefaultPlatformTextureFormatValid" in source
     assert "TextureImporter.IsPlatformTextureFormatValid" in source

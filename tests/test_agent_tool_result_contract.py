@@ -34,6 +34,39 @@ def test_nested_tool_failure_cannot_be_wrapped_as_success() -> None:
     assert outcome["verification"] == {"state": "not_required", "checks": []}
 
 
+def test_internal_outcome_preserves_canonical_failure_facts_for_planner_diagnostics() -> None:
+    source_error = {
+        "schema": "vrcforge.external_tool_error.v1",
+        "errorCode": "unity_core_contract_invalid",
+        "error": "Core descriptor is invalid.",
+        "failureLayer": "unity_core_pre_route",
+        "failurePhase": "core_handshake",
+        "toolRoutingStarted": False,
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+        "retryable": False,
+        "checkpointRecoveryRequired": False,
+        "temporaryCleanupRequired": False,
+        "rawResult": {"causeCode": "unity_core_contract_invalid", "private": "bounded-not-promoted-to-summary"},
+    }
+
+    outcome = normalize_agent_tool_result(
+        {"ok": False, "status": "failed", "errorDetails": source_error},
+        fallback_summary="Read Unity state.",
+        write=False,
+    )
+
+    assert outcome["status"] == "failed"
+    assert outcome["summary"] == "Core descriptor is invalid."
+    assert outcome["error"]["code"] == "unity_core_contract_invalid"
+    assert outcome["diagnostics"]["schema"] == "vrcforge.internal_tool_diagnostics.v1"
+    assert outcome["diagnostics"]["sourceError"]["failureLayer"] == "unity_core_pre_route"
+    assert outcome["diagnostics"]["sourceError"]["mutationStarted"] is False
+    assert outcome["diagnostics"]["sourceError"]["commitState"] == "not_started"
+    assert outcome["diagnostics"]["sourceError"]["rawResult"]["causeCode"] == "unity_core_contract_invalid"
+
+
 def test_structured_tool_error_preserves_only_bounded_correction_fields() -> None:
     outcome = normalize_agent_tool_result(
         {

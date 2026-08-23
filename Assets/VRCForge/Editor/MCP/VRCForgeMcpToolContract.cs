@@ -12,7 +12,11 @@ namespace VRCForge.Editor
     /// </summary>
     internal static class VRCForgeMcpToolContract
     {
-        internal const int ToolCount = 64;
+        internal const string CoreIdentity = "vrcforge.unity-core";
+        internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
+        internal const string ProductVersion = "1.7.8";
+        internal const string ToolContractVersion = "78";
+        internal const int ToolCount = 78;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -25,14 +29,19 @@ namespace VRCForge.Editor
                 { "vrc_apply_clothing_fx", "VRCForge.Editor.ClothingFxAuthor" },
                 { "vrc_apply_material_tuning", "VRCForge.Editor.MaterialTuningApplier" },
                 { "vrc_apply_parameter_optimization", "VRCForge.Editor.AvatarParameterOptimizationApplier" },
+                { "vrc_avatar_upload_readiness", "VRCForge.Editor.VrchatAvatarUploadReadinessTool" },
                 { "vrc_atomic_reference_rename", "VRCForge.Editor.AtomicReferenceRenameTool" },
                 { "vrc_build_parameter_bit_packed_clone", "VRCForge.Editor.ParameterBitPackingTool" },
+                { "vrc_build_and_upload_avatar", "VRCForge.Editor.VrchatAvatarUploadTool" },
+                { "vrc_build_test_avatar", "VRCForge.Editor.VrchatBuildTestTool" },
                 { "vrc_capture_scene_view", "VRCForge.Editor.SceneViewCaptureTool" },
                 { "vrc_create_component_feature", "VRCForge.Editor.ComponentFeatureWriterTool" },
                 { "vrc_create_gameobject", "VRCForge.Editor.CreateGameObjectTool" },
                 { "vrc_create_safe_backup", "VRCForge.Editor.ConsoleTools" },
+                { "vrc_convert_unity_constraint", "VRCForge.Editor.VrchatConstraintConversionTool" },
                 { "vrc_delete_gameobject", "VRCForge.Editor.DeleteGameObjectTool" },
                 { "vrc_duplicate_scene_object", "VRCForge.Editor.DuplicateSceneObjectTool" },
+                { "vrc_duplicate_project_asset", "VRCForge.Editor.DuplicateProjectAssetTool" },
                 { "vrc_ensure_animator_state", "VRCForge.Editor.EnsureAnimatorStateTool" },
                 { "vrc_ensure_expression_menu_control", "VRCForge.Editor.EnsureExpressionMenuControlTool" },
                 { "vrc_ensure_expression_parameter", "VRCForge.Editor.EnsureExpressionParameterTool" },
@@ -43,7 +52,10 @@ namespace VRCForge.Editor
                 { "vrc_get_compile_errors", "VRCForge.Editor.CompileErrorReader" },
                 { "vrc_get_gameobject", "VRCForge.Editor.GetGameObjectTool" },
                 { "vrc_get_property", "VRCForge.Editor.GetPropertyTool" },
+                { "vrc_gesture_manager_enter_play_mode", "VRCForge.Editor.GestureManagerEnterPlayModeTool" },
+                { "vrc_gesture_manager_set_parameter", "VRCForge.Editor.GestureManagerRuntimeParameterTool" },
                 { "vrc_import_unitypackage", "VRCForge.Editor.UnityPackageImporterTool" },
+                { "vrc_inspect_skinned_mesh_bone_usage", "VRCForge.Editor.InspectSkinnedMeshBoneUsageTool" },
                 { "vrc_inspect_modular_avatar_component", "VRCForge.Editor.MAComponentInspector" },
                 { "vrc_inspect_primitive_basis_fixture", "VRCForge.Editor.PrimitiveBasisFixtureInspector" },
                 { "vrc_instantiate_prefab", "VRCForge.Editor.InstantiatePrefabTool" },
@@ -53,6 +65,7 @@ namespace VRCForge.Editor
                 { "vrc_manage_wardrobe", "VRCForge.Editor.WardrobeManagerWriter" },
                 { "vrc_prepare_checkpoint", "VRCForge.Editor.CheckpointPrepareTool" },
                 { "vrc_read_avatar_descriptor", "VRCForge.Editor.ReadAvatarDescriptorTool" },
+                { "vrc_read_vrchat_sdk_builder_alerts", "VRCForge.Editor.VrchatSdkBuilderAlertsTool" },
                 { "vrc_refresh_asset_database", "VRCForge.Editor.AssetDatabaseRefreshTool" },
                 { "vrc_reload_after_checkpoint_restore", "VRCForge.Editor.CheckpointReloadTool" },
                 { "vrc_reload_primitive_basis_fixture", "VRCForge.Editor.PrimitiveBasisFixtureReloader" },
@@ -62,6 +75,9 @@ namespace VRCForge.Editor
                 { "vrc_restore_safe_backup", "VRCForge.Editor.PrefabTools" },
                 { "vrc_rollback_avatar_parameters", "VRCForge.Editor.AvatarParameterRollbackTool" },
                 { "vrc_save_scene_object_as_prefab", "VRCForge.Editor.SaveSceneObjectAsPrefabTool" },
+                { "vrc_save_current_scene", "VRCForge.Editor.SaveCurrentSceneTool" },
+                { "vrc_save_new_scene", "VRCForge.Editor.SaveNewSceneTool" },
+                { "vrc_select_scene_object", "VRCForge.Editor.SelectSceneObjectTool" },
                 { "vrc_scan_animation_bindings", "VRCForge.Editor.AssetTools" },
                 { "vrc_scan_avatar_controls", "VRCForge.Editor.AvatarControlScanner" },
                 { "vrc_scan_avatar_items", "VRCForge.Editor.GameObjectTools" },
@@ -69,11 +85,13 @@ namespace VRCForge.Editor
                 { "vrc_scan_avatar_parameters", "VRCForge.Editor.AvatarParameterScanner" },
                 { "vrc_scan_avatar_performance", "VRCForge.Editor.AvatarPerformanceTool" },
                 { "vrc_scan_fx_animator", "VRCForge.Editor.ComponentTools" },
+                { "vrc_scan_inbound_reference_closure", "VRCForge.Editor.InboundReferenceClosureTool" },
                 { "vrc_scan_thry_avatar_performance", "VRCForge.Editor.ThryAvatarPerformanceTool" },
                 { "vrc_scan_wardrobe", "VRCForge.Editor.WardrobeScanner" },
                 { "vrc_set_constraint_sources", "VRCForge.Editor.ConstraintSourceTool" },
                 { "vrc_set_gameobject_active", "VRCForge.Editor.SetGameObjectActiveTool" },
                 { "vrc_set_material_shader", "VRCForge.Editor.MaterialShaderTool" },
+                { "vrc_set_play_mode", "VRCForge.Editor.SetPlayModeTool" },
                 { "vrc_set_property", "VRCForge.Editor.SetPropertyTool" },
                 { "vrc_set_texture_import_settings", "VRCForge.Editor.TextureImportSettingsTool" },
                 { "vrc_setup_outfit", "VRCForge.Editor.SetupOutfitTool" },
@@ -91,9 +109,13 @@ namespace VRCForge.Editor
                 "vrc_get_compile_errors",
                 "vrc_get_gameobject",
                 "vrc_get_property",
+                "vrc_inspect_skinned_mesh_bone_usage",
                 "vrc_inspect_modular_avatar_component",
                 "vrc_inspect_primitive_basis_fixture",
                 "vrc_read_avatar_descriptor",
+                "vrc_read_vrchat_sdk_builder_alerts",
+                "vrc_avatar_upload_readiness",
+                "vrc_scan_inbound_reference_closure",
             };
 
         // Planning exposes direct reads plus tools that Core can execute through
@@ -110,6 +132,7 @@ namespace VRCForge.Editor
                 "vrc_scan_avatar_parameters",
                 "vrc_scan_avatar_performance",
                 "vrc_scan_fx_animator",
+                "vrc_scan_inbound_reference_closure",
                 "vrc_scan_thry_avatar_performance",
                 "vrc_scan_wardrobe",
             };

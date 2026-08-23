@@ -13,15 +13,15 @@ def test_onboarding_requires_exact_selected_project_and_all_64_tools() -> None:
         ROOT / "src" / "components" / "onboarding" / "onboarding-overlay.tsx"
     ).read_text(encoding="utf-8")
 
-    assert "vrcForgeToolsCount === 64" in app_source
+    assert "vrcForgeToolsCount === 68" in app_source
     assert "normalizeProjectPathKey(projectKey(project)) === normalizeProjectPathKey(activeProjectPath)" in app_source
     assert "onboardingProjectMatchesBackend" in app_source
     assert "onboardingSelectedProjectReady && onboardingProjectMatchesBackend && vrcForgeToolsReady" in app_source
     assert "projectItems.length" not in app_source[app_source.index("const onboardingSelectedProjectReady") : app_source.index("const onboardingUnityToolsReady")]
     assert 't("onboarding.importAndSelectProject")' in overlay_source
-    assert 't("onboarding.keepUnityOpen", { count: unityToolsCount, total: 64 })' in overlay_source
+    assert 't("onboarding.keepUnityOpen", { count: unityToolsCount, total: 68 })' in overlay_source
     assert 't("onboarding.retryConnection")' in overlay_source
-    assert 't("onboarding.toolsConnected", { count: unityToolsCount, total: 64 })' in overlay_source
+    assert 't("onboarding.toolsConnected", { count: unityToolsCount, total: 68 })' in overlay_source
 
 
 def test_all_onboarding_locales_include_inline_import_connection_guidance() -> None:

@@ -8,10 +8,12 @@ failure or an unverified write into a successful completion claim.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import math
 from typing import Any
 
 
 TOOL_RESULT_SCHEMA = "vrcforge.tool_result.v1"
+INTERNAL_TOOL_DIAGNOSTICS_SCHEMA = "vrcforge.internal_tool_diagnostics.v1"
 
 _FAILED_STATUSES = frozenset(
     {"error", "failed", "failure", "timed_out", "timeout", "unavailable"}
@@ -38,6 +40,7 @@ _KNOWN_NESTED_KEYS = (
     "result",
     "entrypoint",
     "toolResult",
+    "errorDetails",
 )
 
 
@@ -244,21 +247,109 @@ def _evidence_refs(views: list[Mapping[str, Any]]) -> list[dict[str, str]]:
     return refs
 
 
-def _bounded_value(value: Any, *, depth: int = 0) -> Any:
-    if value is None or isinstance(value, (bool, int, float)):
+def _bounded_value(value: Any, *, depth: int = 0, seen: set[int] | None = None) -> Any:
+    if value is None or isinstance(value, (bool, int)):
         return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, str):
         return value[:600]
     if depth >= 3:
         return "[bounded]"
+    active = seen if seen is not None else set()
+    marker = id(value)
+    if marker in active:
+        return "[cycle]"
+    active.add(marker)
     if isinstance(value, Mapping):
         bounded: dict[str, Any] = {}
         for key, item in list(value.items())[:24]:
-            bounded[str(key)[:120]] = _bounded_value(item, depth=depth + 1)
+            bounded[str(key)[:120]] = _bounded_value(item, depth=depth + 1, seen=active)
+        active.discard(marker)
         return bounded
     if isinstance(value, (list, tuple)):
-        return [_bounded_value(item, depth=depth + 1) for item in value[:24]]
+        bounded_list = [_bounded_value(item, depth=depth + 1, seen=active) for item in value[:24]]
+        active.discard(marker)
+        return bounded_list
+    active.discard(marker)
     return str(value)[:600]
+
+
+def _canonical_cause(views: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """Project the exact bounded failure cause shared by every transport."""
+    source: Mapping[str, Any] | None = None
+    for view in views:
+        for key in ("cause", "errorDetails", "exception", "error"):
+            candidate = view.get(key)
+            if isinstance(candidate, Mapping):
+                source = candidate
+                break
+        if source is not None:
+            break
+    if source is None:
+        source = next(
+            (
+                view
+                for view in views
+                if any(
+                    view.get(key) not in (None, "")
+                    for key in (
+                        "failureLayer",
+                        "failurePhase",
+                        "category",
+                        "code",
+                        "causeCode",
+                        "errorCode",
+                        "error",
+                        "reason",
+                    )
+                )
+            ),
+            None,
+        )
+    if source is None:
+        return None
+    nested_details = source.get("details")
+    nested_details = nested_details if isinstance(nested_details, Mapping) else {}
+    fields = {
+        "layer": source.get("failureLayer") or source.get("layer") or nested_details.get("failureLayer") or nested_details.get("layer"),
+        "phase": source.get("failurePhase") or source.get("phase") or nested_details.get("failurePhase") or nested_details.get("phase"),
+        "category": source.get("category") or source.get("type") or nested_details.get("category") or nested_details.get("type"),
+        "code": source.get("errorCode") or source.get("causeCode") or source.get("code") or nested_details.get("errorCode") or nested_details.get("causeCode") or nested_details.get("code"),
+        "message": source.get("message") or source.get("error") or source.get("reason") or nested_details.get("message") or nested_details.get("error") or nested_details.get("reason"),
+    }
+    cause = {
+        key: str(value).strip()[:600]
+        for key, value in fields.items()
+        if value not in (None, "")
+    }
+    for key in ("mutationStarted", "committed", "commitState"):
+        value = source.get(key)
+        if isinstance(value, (bool, str)):
+            cause[key] = str(value).strip()[:80] if isinstance(value, str) else value
+    nested = source.get("causes")
+    if isinstance(nested, (list, tuple)):
+        cause["causes"] = _bounded_value(nested)[:6]
+    return cause or None
+
+
+def _internal_failure_diagnostics(views: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    source: Mapping[str, Any] | None = None
+    for view in views:
+        candidate = view.get("errorDetails")
+        if isinstance(candidate, Mapping) and str(candidate.get("schema") or "") == "vrcforge.external_tool_error.v1":
+            source = candidate
+            break
+        if str(view.get("schema") or "") == "vrcforge.external_tool_error.v1":
+            source = view
+            break
+    if source is None:
+        return None
+    bounded = _bounded_value(source)
+    return {
+        "schema": INTERNAL_TOOL_DIAGNOSTICS_SCHEMA,
+        "sourceError": bounded if isinstance(bounded, dict) else {},
+    }
 
 
 def normalize_agent_tool_result(
@@ -282,6 +373,9 @@ def normalize_agent_tool_result(
         and _status(views[0].get("status")) in _TOP_LEVEL_PENDING_STATUSES
     )
     for view in views:
+        if view.get("isError") is True:
+            failed_view = view
+            break
         execution_status = _status(view.get("toolExecutionStatus"))
         if execution_status in _FAILED_STATUSES:
             failed_view = view
@@ -306,6 +400,13 @@ def normalize_agent_tool_result(
         status = "failed"
         projected_error = _structured_error([failed_view, *views])
         summary = _first_text([failed_view, *views], ("error", "reason", "message", "summary"))
+        if failed_view.get("isError") is True and not summary:
+            content = failed_view.get("content")
+            if isinstance(content, (list, tuple)):
+                for item in content[:6]:
+                    if isinstance(item, Mapping) and isinstance(item.get("text"), str) and item["text"].strip():
+                        summary = item["text"].strip()[:600]
+                        break
         summary = summary or projected_error["summary"]
         summary = summary or str(fallback_summary or "Tool execution failed.").strip()
         code = projected_error["code"] or _first_text(
@@ -371,7 +472,7 @@ def normalize_agent_tool_result(
             data = bounded if isinstance(bounded, dict) else {}
             break
 
-    return {
+    result = {
         "schema": TOOL_RESULT_SCHEMA,
         "status": status,
         "summary": summary[:600],
@@ -380,6 +481,13 @@ def normalize_agent_tool_result(
         "evidence": _evidence_refs(views),
         "verification": verification,
     }
+    cause = _canonical_cause(views) if status == "failed" else None
+    if cause is not None:
+        result["cause"] = cause
+    diagnostics = _internal_failure_diagnostics(views) if status == "failed" else None
+    if diagnostics is not None:
+        result["diagnostics"] = diagnostics
+    return result
 
 
 def completion_gate_plan(

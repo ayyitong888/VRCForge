@@ -509,6 +509,97 @@ def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
     assert dashboard_server.VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST.issubset(
         dashboard_server.REQUIRED_VRCFORGE_UNITY_TOOLS
     )
+
+
+def test_duplicate_scene_object_external_failure_reports_unknown_commit_state() -> None:
+    params = {
+        "toolName": "vrc_duplicate_scene_object",
+        "arguments": {"sourceScenePath": "Assets/A.unity", "sourceObjectPath": "Avatar/Body"},
+    }
+    failed = dashboard_server.McpResult(exit_code=1, stdout="", stderr="Unity disconnected", payload=None)
+    with (
+        patch("dashboard_server.load_dashboard_settings"),
+        patch("dashboard_server.invoke_unity_mcp", return_value=failed),
+    ):
+        result = dashboard_server.duplicate_scene_object_sync(params)
+
+    assert result["ok"] is False
+    assert result["failureLayer"] == "unity_mcp_transport"
+    assert result["mutationStarted"] is None
+    assert result["committed"] is None
+    assert result["commitState"] == "unknown"
+    assert result["requestMayHaveCommitted"] is True
+    assert result["checkpointRecoveryRequired"] is True
+
+
+def test_duplicate_scene_object_plan_claim_rejection_is_confirmed_no_write() -> None:
+    params = {
+        "toolName": "vrc_duplicate_scene_object",
+        "arguments": {"sourceScenePath": "Assets/A.unity", "sourceObjectPath": "Avatar/Body"},
+    }
+    failure = dashboard_server.UnityMcpError(
+        "Approved Unity execution arguments do not match the frozen plan.",
+        cause_code="approved_execution_claim_rejected",
+        core_tool="vrc_duplicate_scene_object",
+    )
+    with (
+        patch("dashboard_server.load_dashboard_settings"),
+        patch("dashboard_server.invoke_unity_mcp", side_effect=failure),
+    ):
+        result = dashboard_server.duplicate_scene_object_sync(params)
+
+    assert result["ok"] is False
+    assert result["failureLayer"] == "gateway_execution_plan"
+    assert result["errorCode"] == "approved_execution_claim_rejected"
+    assert result["mutationStarted"] is False
+    assert result["committed"] is False
+    assert result["commitState"] == "not_started"
+    assert result["requestMayHaveCommitted"] is False
+    assert result["checkpointRecoveryRequired"] is False
+
+
+def test_duplicate_preview_preserves_managed_peer_error_state(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    (project / "Assets").mkdir(parents=True)
+    params = {
+        "projectPath": str(project),
+        "sourceScenePath": "Assets/A.unity",
+        "sourceObjectPath": "Avatar/Body",
+        "targetParentScenePath": "Assets/A.unity",
+        "targetParentPath": "Avatar",
+        "targetName": "BodyCopy",
+    }
+    with patch(
+        "dashboard_server.invoke_unity_mcp",
+        return_value=dashboard_server.McpResult(
+            exit_code=1,
+            stdout="",
+            stderr="",
+            payload={
+                "isError": True,
+                "structuredContent": {
+                    "code": "managed_peer_ineligible",
+                    "message": "The selected Unity peer is not eligible for managed writes.",
+                    "data": {
+                        "mutationStarted": False,
+                        "committed": False,
+                        "commitState": "not_started",
+                    },
+                },
+            },
+        ),
+    ):
+        result = dashboard_server.preview_scene_object_copy_sync(params, DUPLICATE_TOOL_NAME)
+
+    assert result["ok"] is False
+    assert result["failureLayer"] == "unity_core_preview"
+    assert result["errorCode"] == "managed_peer_ineligible"
+    assert result["mutationStarted"] is False
+    assert result["committed"] is False
+    assert result["commitState"] == "not_started"
+    assert result["requestMayHaveCommitted"] is False
+    assert result["checkpointRecoveryRequired"] is False
+    assert "managed writes" in result["error"]
     for tool_name in (
         DUPLICATE_TOOL_NAME,
         PREFAB_TOOL_NAME,
@@ -530,6 +621,41 @@ def test_new_write_protocols_are_required_allowlisted_and_registered() -> None:
         "vrcforge_preview_atomic_reference_rename",
     ):
         assert plan_tool in dashboard_server.AGENT_GATEWAY._tools
+
+    texture_handler = dashboard_server.AGENT_GATEWAY._write_handlers[
+        "vrcforge_set_texture_import_settings"
+    ]
+    assert texture_handler.risk_level == "medium"
+    assert (
+        texture_handler.request_preparer
+        is dashboard_server.prepare_texture_import_settings_request
+    )
+    assert texture_handler.handler is dashboard_server.unity_mcp_write_sync
+    assert texture_handler.requires_approved_execution_context is True
+    assert (
+        texture_handler.approved_execution_plan_builder
+        is dashboard_server.build_unity_mcp_write_execution_plan
+    )
+
+    component_handler = dashboard_server.AGENT_GATEWAY._write_handlers[
+        "vrcforge_create_component_feature"
+    ]
+    assert component_handler.risk_level == "medium"
+    assert (
+        component_handler.request_preparer
+        is dashboard_server.prepare_component_feature_request
+    )
+    assert component_handler.handler is dashboard_server.unity_mcp_write_sync
+    assert component_handler.requires_approved_execution_context is True
+    assert (
+        component_handler.approved_execution_plan_builder
+        is dashboard_server.build_unity_mcp_write_execution_plan
+    )
+    description = component_handler.description.lower()
+    assert "vrcfury" in description
+    assert "when to use" in description
+    assert "when not to use" in description
+    assert "negative example" in description
 
     write_handler = dashboard_server.AGENT_GATEWAY._write_handlers["vrcforge_unity_mcp_write"]
     assert write_handler.manual_approval_resolver is dashboard_server.unity_mcp_manual_approval_reason
@@ -686,11 +812,12 @@ def test_strict_apply_transport_failure_does_not_expose_raw_output() -> None:
             }
         )
 
-    assert result == {
-        "ok": False,
-        "toolName": PARAMETER_BIT_PACKING_TOOL_NAME,
-        "error": "The authoritative Unity write transport failed.",
-    }
+    assert result["ok"] is False
+    assert result["toolName"] == PARAMETER_BIT_PACKING_TOOL_NAME
+    assert result["error"] == "The authoritative Unity write transport failed."
+    assert result["failureCause"]["kind"] == "transport_failure"
+    assert result["commitState"] == "unknown"
+    assert "secret" not in repr(result)
     validate.assert_not_called()
 
 

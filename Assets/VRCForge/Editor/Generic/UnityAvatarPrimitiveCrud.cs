@@ -386,38 +386,135 @@ namespace VRCForge.Editor
             [VRCForgeInput("Optional expressions-menu asset path.", IsRequired = false)] public string expressionsMenuPath { get; set; } = "";
             [VRCForgeInput("Optional base playable-layer update array.", IsRequired = false)] public object[] baseAnimationLayers { get; set; }
             [VRCForgeInput("Optional special playable-layer update array.", IsRequired = false)] public object[] specialAnimationLayers { get; set; }
+            [VRCForgeInput("Optional source avatar hierarchy path whose complete Eye Look settings and scene references will be copied.", IsRequired = false)] public string eyeLookSettingsSourceAvatarPath { get; set; } = "";
             [VRCForgeInput("Optional eye-look enabled flag.", IsRequired = false)] public bool? eyeLookEnabled { get; set; }
         }
 
         public static object HandleCommand(JObject @params)
         {
+            SavedSceneSnapshot beforeScene = null;
+            var undoGroup = -1;
+            var mutationStarted = false;
+            var avatarPath = string.Empty;
+            var descriptorGlobalObjectId = string.Empty;
+            var beforeJson = string.Empty;
+            var failureStage = "validation";
+            bool? mutationApplied = null;
             try
             {
                 @params = @params ?? new JObject();
                 var descriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(@params["avatarPath"]?.ToString() ?? "");
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
+                avatarPath = AvatarPrimitiveCrudCore.GetTransformPath(descriptor.transform);
+                beforeScene = ComponentCrudCore.ResolveSavedSceneFor(descriptor.gameObject);
+                descriptorGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(descriptor).ToString();
+                beforeJson = EditorJsonUtility.ToJson(descriptor);
                 var plan = BuildPlan(descriptor, @params);
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed("Preview: would write avatar descriptor fields.", new { ok = true, preview = true, plan });
                 }
 
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName("Write VRCForge avatar descriptor");
                 Undo.RegisterCompleteObjectUndo(descriptor, "Write avatar descriptor");
+                mutationStarted = true;
+                failureStage = "unity_mutation";
                 Apply(descriptor, @params);
+                mutationApplied = true;
+                var expectedJson = EditorJsonUtility.ToJson(descriptor);
+
+                if (string.Equals(expectedJson, beforeJson, StringComparison.Ordinal))
+                {
+                    Undo.RevertAllDownToGroup(undoGroup);
+                    mutationStarted = false;
+                    return VRCForgeToolResult.Completed("Avatar descriptor already has the requested values.", new
+                    {
+                        ok = true,
+                        preview = false,
+                        changed = false,
+                        action = "write_avatar_descriptor",
+                        avatarPath,
+                        changedFields = plan.changedFields,
+                        scenePath = beforeScene.Path,
+                        sceneSaved = true,
+                        persistedReadback = true,
+                        mutationStarted = false,
+                        committed = true,
+                        commitState = "committed",
+                        checkpointRecoveryRequired = false
+                    });
+                }
+
                 EditorUtility.SetDirty(descriptor);
-                AssetDatabase.SaveAssets();
-                AssetDatabase.Refresh();
+                EditorUtility.SetDirty(descriptor.gameObject);
+                failureStage = "scene_save";
+                var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
+                failureStage = "persisted_readback";
+                var readbackObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    afterScene.Scene,
+                    avatarPath,
+                    "avatar descriptor target");
+                var readbackDescriptor = readbackObject.GetComponent<VRCAvatarDescriptor>();
+                if (readbackDescriptor == null
+                    || !string.Equals(
+                        GlobalObjectId.GetGlobalObjectIdSlow(readbackDescriptor).ToString(),
+                        descriptorGlobalObjectId,
+                        StringComparison.Ordinal)
+                    || !string.Equals(EditorJsonUtility.ToJson(readbackDescriptor), expectedJson, StringComparison.Ordinal)
+                    || afterScene.FileDigest == beforeScene.FileDigest)
+                {
+                    throw new InvalidOperationException("The avatar descriptor persisted readback was not exact.");
+                }
+                Undo.CollapseUndoOperations(undoGroup);
                 return VRCForgeToolResult.Completed("Avatar descriptor updated.", new
                 {
                     ok = true,
                     preview = false,
+                    changed = true,
                     action = "write_avatar_descriptor",
-                    avatarPath = AvatarPrimitiveCrudCore.GetTransformPath(descriptor.transform),
-                    changedFields = plan.changedFields
+                    avatarPath,
+                    changedFields = plan.changedFields,
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    mutationStarted = true,
+                    committed = true,
+                    commitState = "committed",
+                    checkpointRecoveryRequired = false
                 });
             }
             catch (Exception ex)
             {
+                if (mutationStarted && beforeScene != null && undoGroup >= 0)
+                {
+                    var cleanup = ComponentCrudCore.RestoreFailedMutation(
+                        undoGroup,
+                        beforeScene,
+                        avatarPath,
+                        restoredObject =>
+                        {
+                            var restoredDescriptor = restoredObject.GetComponent<VRCAvatarDescriptor>();
+                            return restoredDescriptor != null
+                                && string.Equals(
+                                    GlobalObjectId.GetGlobalObjectIdSlow(restoredDescriptor).ToString(),
+                                    descriptorGlobalObjectId,
+                                    StringComparison.Ordinal)
+                                && string.Equals(
+                                    EditorJsonUtility.ToJson(restoredDescriptor),
+                                    beforeJson,
+                                    StringComparison.Ordinal);
+                        });
+                    return ComponentCrudCore.FailedMutationResult(
+                        "avatar_descriptor_failed_after_mutation",
+                        "write_avatar_descriptor",
+                        failureStage,
+                        ex,
+                        beforeScene,
+                        cleanup,
+                        mutationApplied);
+                }
                 return VRCForgeToolResult.Failed($"Write avatar descriptor failed: {ex.Message}\n{ex.StackTrace}");
             }
         }
@@ -425,18 +522,26 @@ namespace VRCForge.Editor
         private static DescriptorPlan BuildPlan(VRCAvatarDescriptor descriptor, JObject @params)
         {
             var changed = new List<string>();
-            foreach (var key in new[] { "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookEnabled" })
+            foreach (var key in new[] { "viewPosition", "lipSync", "visemeSkinnedMeshPath", "visemeBlendShapes", "expressionParametersPath", "expressionsMenuPath", "baseAnimationLayers", "specialAnimationLayers", "eyeLookSettingsSourceAvatarPath", "eyeLookEnabled" })
             {
                 if (@params[key] != null)
                 {
                     changed.Add(key);
                 }
             }
+            var eyeLookSourcePath = string.Empty;
+            if (@params["eyeLookSettingsSourceAvatarPath"] != null)
+            {
+                var sourceDescriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(
+                    @params["eyeLookSettingsSourceAvatarPath"]?.ToString() ?? string.Empty);
+                eyeLookSourcePath = AvatarPrimitiveCrudCore.GetTransformPath(sourceDescriptor.transform);
+            }
             return new DescriptorPlan
             {
                 avatarPath = AvatarPrimitiveCrudCore.GetTransformPath(descriptor.transform),
                 avatarName = descriptor.name,
-                changedFields = changed
+                changedFields = changed,
+                eyeLookSettingsSourceAvatarPath = eyeLookSourcePath
             };
         }
 
@@ -474,13 +579,16 @@ namespace VRCForge.Editor
             {
                 descriptor.specialAnimationLayers = ApplyLayers(descriptor.specialAnimationLayers, specialLayers);
             }
-            object currentEyeLookSettings = descriptor.customEyeLookSettings;
-            if (@params["eyeLookEnabled"] != null && currentEyeLookSettings != null)
+            if (@params["eyeLookSettingsSourceAvatarPath"] != null)
             {
-                var eyeSettings = descriptor.customEyeLookSettings;
-                object boxedEyeSettings = eyeSettings;
-                SetMemberIfExists(boxedEyeSettings, "enableEyeLook", @params["eyeLookEnabled"].Value<bool>());
-                descriptor.customEyeLookSettings = (VRCAvatarDescriptor.CustomEyeLookSettings)boxedEyeSettings;
+                var sourceDescriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(
+                    @params["eyeLookSettingsSourceAvatarPath"]?.ToString() ?? string.Empty);
+                descriptor.customEyeLookSettings = sourceDescriptor.customEyeLookSettings;
+                descriptor.enableEyeLook = sourceDescriptor.enableEyeLook;
+            }
+            if (@params["eyeLookEnabled"] != null)
+            {
+                descriptor.enableEyeLook = @params["eyeLookEnabled"].Value<bool>();
             }
         }
 
@@ -559,45 +667,35 @@ namespace VRCForge.Editor
             throw new InvalidOperationException($"Scene component not found: {path}");
         }
 
-        private static void SetMemberIfExists(object target, string name, object value)
-        {
-            var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            var field = target.GetType().GetField(name, flags);
-            if (field != null)
-            {
-                field.SetValue(target, value);
-                return;
-            }
-            var property = target.GetType().GetProperty(name, flags);
-            if (property != null && property.CanWrite)
-            {
-                property.SetValue(target, value);
-            }
-        }
-
         private class DescriptorPlan
         {
             public string avatarPath;
             public string avatarName;
             public List<string> changedFields;
+            public string eyeLookSettingsSourceAvatarPath;
         }
     }
 
     [VRCForgeCommand(
         toolId: "vrc_write_animation_curve",
-        Summary = "Create, replace, or delete a single AnimationClip editor curve binding. Supports preview."
+        Summary = "Create, replace, delete, or retarget one AnimationClip curve binding. When to use: one exact curve edit or a lossless binding-name migration. When NOT to use: bulk workflow planning or silent destination overwrite. Supports preview."
     )]
     public static class WriteAnimationCurveTool
     {
         public class Parameters
         {
-            [VRCForgeInput("Curve action: set_curve or delete_curve.", IsRequired = false)] public string action { get; set; } = "set_curve";
+            [VRCForgeInput("Curve action: set_curve, delete_curve, or retarget_curve.", IsRequired = false)] public string action { get; set; } = "set_curve";
             [VRCForgeInput("AnimationClip asset path.", IsRequired = true)] public string clipPath { get; set; } = "";
             [VRCForgeInput("Return the curve change plan without writing.", IsRequired = false)] public bool? preview { get; set; } = false;
             [VRCForgeInput("Optional relative binding path.", IsRequired = false)] public string bindingPath { get; set; } = "";
             [VRCForgeInput("Optional compatibility alias for bindingPath.", IsRequired = false)] public string objectPath { get; set; } = "";
             [VRCForgeInput("Binding component type.", IsRequired = false)] public string componentType { get; set; } = "GameObject";
             [VRCForgeInput("Serialized animation property name.", IsRequired = true)] public string propertyName { get; set; } = "";
+            [VRCForgeInput("Retarget source binding path; defaults to bindingPath.", IsRequired = false)] public string sourceBindingPath { get; set; } = "";
+            [VRCForgeInput("Retarget source component type; defaults to componentType.", IsRequired = false)] public string sourceComponentType { get; set; } = "";
+            [VRCForgeInput("Retarget source serialized property name.", IsRequired = false)] public string sourcePropertyName { get; set; } = "";
+            [VRCForgeInput("Delete the source binding after retargeting; false copies it.", IsRequired = false)] public bool? deleteSource { get; set; } = true;
+            [VRCForgeInput("Allow replacing an existing destination binding. Defaults false.", IsRequired = false)] public bool? overwriteExisting { get; set; } = false;
             [VRCForgeInput("Optional animation keyframe array.", IsRequired = false)] public object[] keys { get; set; }
             [VRCForgeInput("Optional constant curve value.", IsRequired = false)] public float? constantFloat { get; set; }
         }
@@ -623,36 +721,121 @@ namespace VRCForge.Editor
                 }
                 var type = AvatarPrimitiveCrudCore.FindType(componentTypeText)
                     ?? throw new InvalidOperationException($"Binding component type not found: {componentTypeText}");
-                var plan = new
+                var binding = new EditorCurveBinding { path = bindingPath, type = type, propertyName = propertyName };
+                var existingClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath);
+                EditorCurveBinding? sourceBinding = null;
+                var deleteSource = @params["deleteSource"]?.Value<bool?>() ?? true;
+                var overwriteExisting = @params["overwriteExisting"]?.Value<bool?>() ?? false;
+                object plan;
+                if (action == "retarget_curve")
                 {
-                    action,
-                    clipPath,
-                    bindingPath,
-                    componentType = type.FullName,
-                    propertyName,
-                    willCreateClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath) == null && action != "delete_curve",
-                    keyCount = (@params["keys"] as JArray)?.Count ?? 0,
-                    constantFloat = @params["constantFloat"]?.Value<float?>()
-                };
+                    var sourceBindingPathText = @params["sourceBindingPath"]?.ToString();
+                    if (string.IsNullOrWhiteSpace(sourceBindingPathText)) sourceBindingPathText = bindingPath;
+                    var sourceBindingPath = AvatarPrimitiveCrudCore.NormalizePath(sourceBindingPathText);
+                    var sourceComponentTypeText = @params["sourceComponentType"]?.ToString();
+                    if (string.IsNullOrWhiteSpace(sourceComponentTypeText)) sourceComponentTypeText = componentTypeText;
+                    var sourceType = AvatarPrimitiveCrudCore.FindType(sourceComponentTypeText)
+                        ?? throw new InvalidOperationException($"Source binding component type not found: {sourceComponentTypeText}");
+                    var sourcePropertyName = (@params["sourcePropertyName"]?.ToString() ?? "").Trim();
+                    if (string.IsNullOrWhiteSpace(sourcePropertyName))
+                    {
+                        return VRCForgeToolResult.Failed("sourcePropertyName is required for retarget_curve.");
+                    }
+                    sourceBinding = new EditorCurveBinding
+                    {
+                        path = sourceBindingPath,
+                        type = sourceType,
+                        propertyName = sourcePropertyName
+                    };
+                    var sourceCurve = existingClip == null
+                        ? null
+                        : AnimationUtility.GetEditorCurve(existingClip, sourceBinding.Value);
+                    var destinationCurve = existingClip == null
+                        ? null
+                        : AnimationUtility.GetEditorCurve(existingClip, binding);
+                    plan = new
+                    {
+                        action,
+                        clipPath,
+                        sourceBindingPath,
+                        sourceComponentType = sourceType.FullName,
+                        sourcePropertyName,
+                        bindingPath,
+                        componentType = type.FullName,
+                        propertyName,
+                        sourceExists = sourceCurve != null,
+                        destinationExists = destinationCurve != null,
+                        deleteSource,
+                        overwriteExisting,
+                        willCreateClip = false
+                    };
+                }
+                else
+                {
+                    plan = new
+                    {
+                        action,
+                        clipPath,
+                        bindingPath,
+                        componentType = type.FullName,
+                        propertyName,
+                        willCreateClip = existingClip == null && action == "set_curve",
+                        keyCount = (@params["keys"] as JArray)?.Count ?? 0,
+                        constantFloat = @params["constantFloat"]?.Value<float?>()
+                    };
+                }
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would {action} on AnimationClip '{clipPath}'.", new { ok = true, preview = true, plan });
                 }
 
-                var clip = LoadOrCreateClip(clipPath, action != "delete_curve");
+                var clip = LoadOrCreateClip(clipPath, action == "set_curve");
                 if (clip == null)
                 {
-                    return VRCForgeToolResult.Failed($"AnimationClip not found for delete: {clipPath}");
+                    return VRCForgeToolResult.Failed($"AnimationClip not found for action '{action}': {clipPath}");
                 }
-                Undo.RegisterCompleteObjectUndo(clip, "Write animation curve");
-                var binding = new EditorCurveBinding { path = bindingPath, type = type, propertyName = propertyName };
-                if (action == "delete_curve")
+                if (action == "retarget_curve")
                 {
-                    AnimationUtility.SetEditorCurve(clip, binding, null);
+                    var source = sourceBinding.Value;
+                    if (BindingsEqual(source, binding))
+                    {
+                        return VRCForgeToolResult.Failed("Retarget source and destination bindings are identical; no write was performed.");
+                    }
+                    var sourceCurve = AnimationUtility.GetEditorCurve(clip, source);
+                    if (sourceCurve == null)
+                    {
+                        return VRCForgeToolResult.Failed(
+                            $"Retarget source curve was not found: path='{source.path}', type='{source.type.FullName}', property='{source.propertyName}'.");
+                    }
+                    var destinationCurve = AnimationUtility.GetEditorCurve(clip, binding);
+                    if (destinationCurve != null && !overwriteExisting)
+                    {
+                        return VRCForgeToolResult.Failed(
+                            $"Retarget destination already has a curve and overwriteExisting is false: path='{binding.path}', type='{binding.type.FullName}', property='{binding.propertyName}'.");
+                    }
+                    var copiedCurve = new AnimationCurve(sourceCurve.keys)
+                    {
+                        preWrapMode = sourceCurve.preWrapMode,
+                        postWrapMode = sourceCurve.postWrapMode
+                    };
+                    Undo.RegisterCompleteObjectUndo(clip, "Retarget animation curve binding");
+                    AnimationUtility.SetEditorCurve(clip, binding, copiedCurve);
+                    if (deleteSource)
+                    {
+                        AnimationUtility.SetEditorCurve(clip, source, null);
+                    }
                 }
                 else
                 {
-                    AnimationUtility.SetEditorCurve(clip, binding, BuildCurve(@params));
+                    Undo.RegisterCompleteObjectUndo(clip, "Write animation curve");
+                    if (action == "delete_curve")
+                    {
+                        AnimationUtility.SetEditorCurve(clip, binding, null);
+                    }
+                    else
+                    {
+                        AnimationUtility.SetEditorCurve(clip, binding, BuildCurve(@params));
+                    }
                 }
                 EditorUtility.SetDirty(clip);
                 AssetDatabase.SaveAssets();
@@ -665,7 +848,12 @@ namespace VRCForge.Editor
                     clipPath = AssetDatabase.GetAssetPath(clip),
                     bindingPath,
                     componentType = type.FullName,
-                    propertyName
+                    propertyName,
+                    sourceBindingPath = sourceBinding?.path,
+                    sourceComponentType = sourceBinding?.type?.FullName,
+                    sourcePropertyName = sourceBinding?.propertyName,
+                    deleteSource = action == "retarget_curve" ? (bool?)deleteSource : null,
+                    overwriteExisting = action == "retarget_curve" ? (bool?)overwriteExisting : null
                 });
             }
             catch (Exception ex)
@@ -681,7 +869,26 @@ namespace VRCForge.Editor
             {
                 return "delete_curve";
             }
-            return "set_curve";
+            if (action == "retarget" || action == "move_binding" || action == "copy_curve")
+            {
+                return "retarget_curve";
+            }
+            if (action == "set" || action == "create" || action == "replace")
+            {
+                return "set_curve";
+            }
+            if (action == "set_curve" || action == "delete_curve" || action == "retarget_curve")
+            {
+                return action;
+            }
+            throw new InvalidOperationException($"Unsupported animation curve action: {value}");
+        }
+
+        private static bool BindingsEqual(EditorCurveBinding left, EditorCurveBinding right)
+        {
+            return string.Equals(left.path, right.path, StringComparison.Ordinal)
+                && left.type == right.type
+                && string.Equals(left.propertyName, right.propertyName, StringComparison.Ordinal);
         }
 
         private static AnimationClip LoadOrCreateClip(string clipPath, bool create)
@@ -1171,10 +1378,12 @@ namespace VRCForge.Editor
 
     [VRCForgeCommand(
         toolId: "vrc_manage_fx_animator",
-        Summary = "Manage FX AnimatorController layers, states, Any-State transitions, conditions, motions, and deletion. Supports preview."
+        Summary = "Manage one FX AnimatorController mutation. When to use: an exact layer, state, transition, motion, condition, or unused-parameter edit. When NOT to use: deleting a referenced parameter or batching unrelated controller edits. Supports preview."
     )]
     public static class ManageFxAnimatorTool
     {
+        private const int MaxAnimatorControllerBackupBytes = 32 * 1024 * 1024;
+
         public class Parameters
         {
             [VRCForgeInput("FX animator action.", IsRequired = true)] public string action { get; set; } = "";
@@ -1210,7 +1419,7 @@ namespace VRCForge.Editor
                 var preview = @params["preview"]?.Value<bool?>() ?? false;
                 var descriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(@params["avatarPath"]?.ToString() ?? "");
                 var assetDir = AvatarPrimitiveCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString() ?? "");
-                var controller = preview
+                var controller = preview || action == "delete_parameter"
                     ? ResolveAnimatorControllerForPreview(descriptor, @params)
                     : AvatarPrimitiveCrudCore.ResolveAnimatorController(descriptor, @params, assetDir);
                 var plan = new
@@ -1221,8 +1430,13 @@ namespace VRCForge.Editor
                     controllerPath = AssetDatabase.GetAssetPath(controller),
                     layerName = @params["layerName"]?.ToString() ?? "",
                     stateName = @params["stateName"]?.ToString() ?? "",
-                    destinationStateName = @params["destinationStateName"]?.ToString() ?? ""
+                    destinationStateName = @params["destinationStateName"]?.ToString() ?? "",
+                    parameterName = @params["parameterName"]?.ToString() ?? ""
                 };
+                if (action == "delete_parameter")
+                {
+                    return HandleDeleteParameter(controller, @params, preview, plan);
+                }
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would manage FX animator ({action}).", new { ok = true, preview = true, plan });
@@ -1244,7 +1458,253 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Manage FX animator failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.RejectedBeforeMutation(
+                    "fx_animator_rejected",
+                    ex.Message,
+                    "unity_core_tool",
+                    "pre_mutation_validation",
+                    false,
+                    new { action = @params?["action"]?.ToString() ?? string.Empty, exceptionType = ex.GetType().FullName });
+            }
+        }
+
+        private static object HandleDeleteParameter(
+            AnimatorController controller,
+            JObject @params,
+            bool preview,
+            object plan)
+        {
+            var parameterName = string.Empty;
+            var controllerPath = string.Empty;
+            var absolutePath = string.Empty;
+            byte[] beforeBytes = null;
+            StableAssetEvidence beforeEvidence = null;
+            var undoGroup = -1;
+            var mutationStarted = false;
+            var mutationApplied = false;
+            var failurePhase = "pre_mutation_validation";
+            try
+            {
+                parameterName = Required(@params, "parameterName");
+                var parameterIndex = ValidateUnusedParameterDeletion(controller, parameterName);
+                var beforeParameterCount = (controller.parameters ?? Array.Empty<AnimatorControllerParameter>()).Length;
+                if (preview)
+                {
+                    return VRCForgeToolResult.Completed(
+                        "Preview: would delete one unused FX animator parameter.",
+                        new
+                        {
+                            ok = true,
+                            preview = true,
+                            plan,
+                            parameterName,
+                            parameterIndex,
+                            beforeParameterCount,
+                            mutationStarted = false,
+                            committed = false,
+                            commitState = "not_started"
+                        });
+                }
+
+                controllerPath = AvatarPrimitiveCrudCore.NormalizeAssetPath(AssetDatabase.GetAssetPath(controller));
+                if (string.IsNullOrWhiteSpace(controllerPath) || !controllerPath.StartsWith("Assets/", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("FX AnimatorController must be a persistent Assets asset.");
+                }
+                beforeEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(
+                    controllerPath,
+                    "FX animator parameter deletion pre-state");
+                absolutePath = SceneObjectCopyCore.ToAbsoluteAssetPath(controllerPath);
+                var fileInfo = new FileInfo(absolutePath);
+                if (!fileInfo.Exists || fileInfo.Length <= 0 || fileInfo.Length > MaxAnimatorControllerBackupBytes)
+                {
+                    throw new InvalidOperationException("FX AnimatorController exceeds the bounded rollback size.");
+                }
+                beforeBytes = File.ReadAllBytes(absolutePath);
+
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName("Delete unused FX animator parameter");
+                Undo.RegisterCompleteObjectUndo(controller, "Delete unused FX animator parameter");
+                mutationStarted = true;
+                failurePhase = "unity_mutation";
+                controller.RemoveParameter(parameterIndex);
+                mutationApplied = true;
+                EditorUtility.SetDirty(controller);
+
+                failurePhase = "asset_save";
+                AssetDatabase.SaveAssetIfDirty(controller);
+                if (EditorUtility.IsDirty(controller))
+                {
+                    throw new InvalidOperationException("FX AnimatorController remained dirty after save.");
+                }
+
+                failurePhase = "persisted_readback";
+                var afterEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(
+                    controllerPath,
+                    "FX animator parameter deletion readback");
+                var readback = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
+                var afterParameters = readback != null
+                    ? readback.parameters ?? Array.Empty<AnimatorControllerParameter>()
+                    : Array.Empty<AnimatorControllerParameter>();
+                if (readback == null
+                    || afterParameters.Any(item => item != null && item.name == parameterName)
+                    || afterParameters.Length != beforeParameterCount - 1
+                    || string.Equals(afterEvidence.File.Digest, beforeEvidence.File.Digest, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("FX animator parameter deletion persisted readback was not exact.");
+                }
+                Undo.CollapseUndoOperations(undoGroup);
+                return VRCForgeToolResult.Completed(
+                    "Unused FX animator parameter deleted and verified.",
+                    new
+                    {
+                        ok = true,
+                        preview = false,
+                        action = "delete_parameter",
+                        controllerPath,
+                        parameterName,
+                        beforeParameterCount,
+                        afterParameterCount = afterParameters.Length,
+                        fileDigestBefore = beforeEvidence.File.Digest,
+                        fileDigestAfter = afterEvidence.File.Digest,
+                        mutationStarted = true,
+                        committed = true,
+                        commitState = "committed",
+                        checkpointRecoveryRequired = false,
+                        temporaryCleanupRequired = false
+                    });
+            }
+            catch (Exception ex)
+            {
+                if (!mutationStarted)
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation(
+                        "fx_animator_delete_parameter_rejected",
+                        ex.Message,
+                        "unity_core_tool",
+                        failurePhase,
+                        false,
+                        new { action = "delete_parameter", controllerPath, parameterName, exceptionType = ex.GetType().FullName });
+                }
+
+                var restored = RestoreAnimatorControllerPreState(
+                    controllerPath,
+                    absolutePath,
+                    beforeBytes,
+                    beforeEvidence,
+                    parameterName,
+                    undoGroup);
+                return VRCForgeToolResult.FailedWithCode(
+                    "fx_animator_delete_parameter_failed_after_mutation",
+                    ex.Message,
+                    new
+                    {
+                        failureLayer = "unity_core_tool",
+                        failurePhase,
+                        toolRoutingStarted = true,
+                        mutationStarted = true,
+                        mutationApplied,
+                        committed = false,
+                        commitState = restored ? "rolled_back" : "unknown",
+                        commitStateKnown = restored,
+                        retryable = false,
+                        checkpointRecoveryRequired = !restored,
+                        temporaryCleanupRequired = false,
+                        restored,
+                        action = "delete_parameter",
+                        controllerPath,
+                        parameterName,
+                        exceptionType = ex.GetType().FullName
+                    });
+            }
+        }
+
+        private static int ValidateUnusedParameterDeletion(
+            AnimatorController controller,
+            string parameterName)
+        {
+            var parameters = controller.parameters ?? Array.Empty<AnimatorControllerParameter>();
+            var parameterIndex = Array.FindIndex(parameters, item => item != null && item.name == parameterName);
+            if (parameterIndex < 0)
+            {
+                throw new InvalidOperationException($"Animator parameter not found: {parameterName}");
+            }
+            var references = new List<string>();
+            foreach (var layer in controller.layers ?? Array.Empty<AnimatorControllerLayer>())
+            {
+                CollectParameterReferences(layer.stateMachine, layer.name, parameterName, references);
+            }
+            if (references.Count > 0)
+            {
+                throw new InvalidOperationException(
+                    $"Animator parameter '{parameterName}' is still referenced by: {string.Join(", ", references.Distinct())}");
+            }
+            return parameterIndex;
+        }
+
+        private static bool RestoreAnimatorControllerPreState(
+            string controllerPath,
+            string absolutePath,
+            byte[] beforeBytes,
+            StableAssetEvidence beforeEvidence,
+            string parameterName,
+            int undoGroup)
+        {
+            try
+            {
+                Undo.RevertAllDownToGroup(undoGroup);
+            }
+            catch
+            {
+                // Exact file restoration below is authoritative.
+            }
+            if (string.IsNullOrWhiteSpace(controllerPath)
+                || string.IsNullOrWhiteSpace(absolutePath)
+                || beforeBytes == null
+                || beforeEvidence == null)
+            {
+                return false;
+            }
+
+            var tempPath = absolutePath + ".vrcforge-restore-" + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllBytes(tempPath, beforeBytes);
+                File.Replace(tempPath, absolutePath, null);
+                AssetDatabase.ImportAsset(
+                    controllerPath,
+                    ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var restoredEvidence = SceneObjectCopyCore.ReadStableAssetEvidence(
+                    controllerPath,
+                    "FX animator parameter deletion compensation");
+                var restored = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
+                return restored != null
+                    && (restored.parameters ?? Array.Empty<AnimatorControllerParameter>())
+                        .Any(item => item != null && item.name == parameterName)
+                    && string.Equals(
+                        restoredEvidence.File.Digest,
+                        beforeEvidence.File.Digest,
+                        StringComparison.OrdinalIgnoreCase)
+                    && File.ReadAllBytes(absolutePath).SequenceEqual(beforeBytes);
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(tempPath))
+                    {
+                        File.Delete(tempPath);
+                    }
+                }
+                catch
+                {
+                    // Cleanup status remains unknown through the returned failure object.
+                }
             }
         }
 
@@ -1258,9 +1718,10 @@ namespace VRCForge.Editor
             if (action == "remove_layer") return "delete_layer";
             if (action == "remove_state") return "delete_state";
             if (action == "remove_transition") return "delete_transition";
-            if (!new[] { "ensure_layer", "delete_layer", "ensure_state", "update_state", "delete_state", "ensure_transition", "delete_transition" }.Contains(action))
+            if (action == "remove_parameter") return "delete_parameter";
+            if (!new[] { "ensure_layer", "delete_layer", "ensure_state", "update_state", "delete_state", "ensure_transition", "delete_transition", "delete_parameter" }.Contains(action))
             {
-                throw new InvalidOperationException("action must be one of: ensure_layer, delete_layer, ensure_state, update_state, delete_state, ensure_transition, delete_transition.");
+                throw new InvalidOperationException("action must be one of: ensure_layer, delete_layer, ensure_state, update_state, delete_state, ensure_transition, delete_transition, delete_parameter.");
             }
             return action;
         }
@@ -1317,6 +1778,131 @@ namespace VRCForge.Editor
             else if (action == "delete_transition")
             {
                 DeleteTransition(controller, @params);
+            }
+            else if (action == "delete_parameter")
+            {
+                DeleteUnusedParameter(controller, Required(@params, "parameterName"));
+            }
+        }
+
+        private static void DeleteUnusedParameter(AnimatorController controller, string parameterName)
+        {
+            var parameterIndex = ValidateUnusedParameterDeletion(controller, parameterName);
+            controller.RemoveParameter(parameterIndex);
+        }
+
+        private static void CollectParameterReferences(
+            AnimatorStateMachine machine,
+            string scope,
+            string parameterName,
+            List<string> references
+        )
+        {
+            if (machine == null)
+            {
+                return;
+            }
+            CollectTransitionReferences(machine.anyStateTransitions, scope + "/AnyState", parameterName, references);
+            CollectTransitionReferences(machine.entryTransitions, scope + "/Entry", parameterName, references);
+            CollectBehaviourReferences(machine.behaviours, scope + "/StateMachine", parameterName, references);
+
+            foreach (var child in machine.states)
+            {
+                var state = child.state;
+                if (state == null)
+                {
+                    continue;
+                }
+                var stateScope = scope + "/" + state.name;
+                CollectTransitionReferences(state.transitions, stateScope, parameterName, references);
+                CollectBehaviourReferences(state.behaviours, stateScope, parameterName, references);
+                if ((state.speedParameterActive && state.speedParameter == parameterName)
+                    || (state.mirrorParameterActive && state.mirrorParameter == parameterName)
+                    || (state.cycleOffsetParameterActive && state.cycleOffsetParameter == parameterName)
+                    || (state.timeParameterActive && state.timeParameter == parameterName))
+                {
+                    references.Add(stateScope + "/StateParameter");
+                }
+                CollectMotionReferences(state.motion, stateScope, parameterName, references);
+            }
+
+            foreach (var child in machine.stateMachines)
+            {
+                if (child.stateMachine != null)
+                {
+                    CollectParameterReferences(child.stateMachine, scope + "/" + child.stateMachine.name, parameterName, references);
+                }
+            }
+        }
+
+        private static void CollectTransitionReferences(
+            IEnumerable<AnimatorTransitionBase> transitions,
+            string scope,
+            string parameterName,
+            List<string> references
+        )
+        {
+            foreach (var transition in transitions ?? Enumerable.Empty<AnimatorTransitionBase>())
+            {
+                if (transition != null && transition.conditions.Any(item => item.parameter == parameterName))
+                {
+                    references.Add(scope + "/Transition");
+                }
+            }
+        }
+
+        private static void CollectMotionReferences(
+            Motion motion,
+            string scope,
+            string parameterName,
+            List<string> references
+        )
+        {
+            var blendTree = motion as BlendTree;
+            if (blendTree == null)
+            {
+                return;
+            }
+            if (blendTree.blendParameter == parameterName || blendTree.blendParameterY == parameterName)
+            {
+                references.Add(scope + "/BlendTree");
+            }
+            foreach (var child in blendTree.children)
+            {
+                if (child.directBlendParameter == parameterName)
+                {
+                    references.Add(scope + "/BlendTreeDirect");
+                }
+                CollectMotionReferences(child.motion, scope + "/BlendTreeChild", parameterName, references);
+            }
+        }
+
+        private static void CollectBehaviourReferences(
+            IEnumerable<StateMachineBehaviour> behaviours,
+            string scope,
+            string parameterName,
+            List<string> references
+        )
+        {
+            foreach (var behaviour in behaviours ?? Enumerable.Empty<StateMachineBehaviour>())
+            {
+                if (behaviour == null)
+                {
+                    continue;
+                }
+                var serialized = new SerializedObject(behaviour);
+                var property = serialized.GetIterator();
+                var enterChildren = true;
+                while (property.NextVisible(enterChildren))
+                {
+                    enterChildren = false;
+                    if (property.propertyType == SerializedPropertyType.String
+                        && property.propertyPath != "m_Name"
+                        && property.stringValue == parameterName)
+                    {
+                        references.Add(scope + "/" + behaviour.GetType().Name + ":" + property.propertyPath);
+                    }
+                }
             }
         }
 

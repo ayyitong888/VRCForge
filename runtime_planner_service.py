@@ -31,18 +31,24 @@ RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_FIELDS = 8
 # ceiling; individual fields use the same ceiling so one oversized summary
 # cannot consume the entire prompt budget before the final join/truncation.
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS = 600
+RUNTIME_PLANNER_TOOL_INDEX_OBSERVATION_MAX_CHARS = 8_000
 RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS = 600
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH = 2
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS = 12
 RUNTIME_VISION_ANALYSIS_MAX_CHARS = 4_000
 _PLANNER_TOOL_SCHEMA_MAX_PROPERTIES = 24
 _PLANNER_TOOL_SCHEMA_MAX_ENUM_ITEMS = 16
+_PLANNER_TOOL_SCHEMA_MAX_BRANCHES = 8
+_PLANNER_TOOL_SCHEMA_MAX_DEPTH = 3
 _PLANNER_TOOL_SCHEMA_MAX_ISSUES = 8
 _PLANNER_TOOL_SCHEMA_TYPES = frozenset(
     {"string", "integer", "number", "boolean", "object", "array"}
 )
 
 _HIGH_CONFUSION_TOOL_INPUT_CONTRACTS: dict[str, tuple[str, ...]] = {
+    "vrcforge_list_internal_tool_blocks": ("block?:string",),
+    "vrcforge_load_internal_tool_block": ("block:string",),
+    "vrcforge_unload_internal_tool_block": ("block:string",),
     "vrcforge_list_directory": ("path:string", "maxDepth?:integer", "maxCount?:integer"),
     "vrcforge_read_text_file": ("path:string", "maxBytes?:integer", "maxOutputChars?:integer"),
     "vrcforge_find_files": ("path:string", "pattern?:string", "maxDepth?:integer", "maxCount?:integer"),
@@ -121,48 +127,107 @@ def _contract_shallow_schema(input_contract: tuple[str, ...]) -> dict[str, objec
     }
 
 
-def bounded_planner_tool_schema(value: object) -> dict[str, object]:
-    """Project the supported shallow JSON-schema subset without becoming a DSL."""
+def _bounded_planner_schema_node(value: object, *, depth: int) -> dict[str, object]:
+    if not isinstance(value, Mapping) or depth > _PLANNER_TOOL_SCHEMA_MAX_DEPTH:
+        return {}
+    raw_type = str(value.get("type") or "").strip().casefold()
+    if not raw_type and any(key in value for key in ("properties", "required", "additionalProperties")):
+        raw_type = "object"
+    if not raw_type and "const" in value:
+        constant = value.get("const")
+        raw_type = (
+            "boolean" if isinstance(constant, bool)
+            else "integer" if isinstance(constant, int)
+            else "number" if isinstance(constant, float)
+            else "string" if isinstance(constant, str)
+            else ""
+        )
+    if raw_type not in _PLANNER_TOOL_SCHEMA_TYPES:
+        return {}
+    result: dict[str, object] = {"type": raw_type}
 
-    if not isinstance(value, Mapping) or str(value.get("type") or "object") != "object":
-        return {}
-    raw_properties = value.get("properties")
-    properties: dict[str, dict[str, object]] = {}
-    if isinstance(raw_properties, Mapping):
-        for raw_name, raw_spec in list(raw_properties.items())[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
-            name = str(raw_name or "").strip()[:120]
-            if not name or not isinstance(raw_spec, Mapping):
+    raw_enum = value.get("enum")
+    if isinstance(raw_enum, (list, tuple)):
+        enum_values: list[object] = []
+        for item in raw_enum[:_PLANNER_TOOL_SCHEMA_MAX_ENUM_ITEMS]:
+            if item is None or isinstance(item, (bool, int, float, str)):
+                bounded = item[:160] if isinstance(item, str) else item
+                if bounded not in enum_values:
+                    enum_values.append(bounded)
+        if enum_values:
+            result["enum"] = enum_values
+    if "const" in value and (
+        value.get("const") is None or isinstance(value.get("const"), (bool, int, float, str))
+    ):
+        constant = value.get("const")
+        result["const"] = constant[:160] if isinstance(constant, str) else constant
+    for keyword in ("minimum", "maximum", "minItems", "maxItems", "minLength", "maxLength"):
+        bound = value.get(keyword)
+        if isinstance(bound, (int, float)) and not isinstance(bound, bool) and math.isfinite(float(bound)):
+            result[keyword] = bound
+    raw_pattern = value.get("pattern")
+    if isinstance(raw_pattern, str) and 0 < len(raw_pattern) <= 256:
+        try:
+            re.compile(raw_pattern)
+        except re.error:
+            pass
+        else:
+            result["pattern"] = raw_pattern
+
+    if raw_type == "object":
+        raw_properties = value.get("properties")
+        properties: dict[str, dict[str, object]] = {}
+        if isinstance(raw_properties, Mapping):
+            for raw_name, raw_spec in list(raw_properties.items())[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
+                name = str(raw_name or "").strip()[:120]
+                spec = _bounded_planner_schema_node(raw_spec, depth=depth + 1)
+                if name and spec:
+                    properties[name] = spec
+        if isinstance(raw_properties, Mapping):
+            # Preserve an explicitly open object schema even when it has no
+            # named properties. Internal and external Agent projections must
+            # not silently diverge merely because one side serializes the
+            # canonical open-object fallback.
+            result["properties"] = properties
+        raw_required = value.get("required")
+        required: list[str] = []
+        if isinstance(raw_required, (list, tuple)):
+            for item in raw_required[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
+                name = str(item or "").strip()[:120]
+                if name and name not in required:
+                    required.append(name)
+        if required:
+            result["required"] = required
+        else:
+            result["required"] = []
+        result["additionalProperties"] = value.get("additionalProperties") is not False
+    elif raw_type == "array":
+        items = _bounded_planner_schema_node(value.get("items"), depth=depth + 1)
+        if items:
+            result["items"] = items
+
+    if depth < _PLANNER_TOOL_SCHEMA_MAX_DEPTH:
+        for branch_keyword in ("oneOf", "anyOf"):
+            raw_branches = value.get(branch_keyword)
+            if not isinstance(raw_branches, (list, tuple)):
                 continue
-            value_type = str(raw_spec.get("type") or "").strip().casefold()
-            if value_type not in _PLANNER_TOOL_SCHEMA_TYPES:
-                continue
-            spec: dict[str, object] = {"type": value_type}
-            raw_enum = raw_spec.get("enum")
-            if isinstance(raw_enum, (list, tuple)):
-                enum_values: list[object] = []
-                for item in raw_enum[:_PLANNER_TOOL_SCHEMA_MAX_ENUM_ITEMS]:
-                    if item is None or isinstance(item, (bool, int, float, str)):
-                        bounded = item[:160] if isinstance(item, str) else item
-                        if bounded not in enum_values:
-                            enum_values.append(bounded)
-                if enum_values:
-                    spec["enum"] = enum_values
-            properties[name] = spec
-    if not properties:
+            branches = [
+                branch
+                for raw_branch in raw_branches[:_PLANNER_TOOL_SCHEMA_MAX_BRANCHES]
+                if (branch := _bounded_planner_schema_node(raw_branch, depth=depth + 1))
+            ]
+            if branches:
+                result[branch_keyword] = branches
+    return result
+
+
+def bounded_planner_tool_schema(value: object) -> dict[str, object]:
+    """Project a bounded semantic JSON-schema subset for model-facing tools."""
+
+    result = _bounded_planner_schema_node(value, depth=0)
+    if result.get("type") != "object" or not isinstance(result.get("properties"), Mapping):
         return {}
-    raw_required = value.get("required")
-    required = []
-    if isinstance(raw_required, (list, tuple)):
-        for item in raw_required[:_PLANNER_TOOL_SCHEMA_MAX_PROPERTIES]:
-            name = str(item or "").strip()
-            if name in properties and name not in required:
-                required.append(name)
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": value.get("additionalProperties") is not False,
-    }
+    return result
 
 
 def planner_tool_input_schema(name: str) -> dict[str, object]:
@@ -195,7 +260,7 @@ def validate_planner_tool_arguments(
     schema: object,
     arguments: object,
 ) -> dict[str, object]:
-    """Validate only required/type/enum/closed-extra constraints, deterministically."""
+    """Validate the bounded model-facing schema deterministically."""
 
     bounded_schema = bounded_planner_tool_schema(schema)
     if not bounded_schema:
@@ -209,44 +274,7 @@ def validate_planner_tool_arguments(
         }
 
     issues: list[dict[str, str]] = []
-    properties = bounded_schema.get("properties")
-    property_map = properties if isinstance(properties, Mapping) else {}
-    required = bounded_schema.get("required")
-    for name in required if isinstance(required, list) else []:
-        if name not in arguments:
-            issues.append(
-                {"path": str(name), "code": "missing_required", "expected": "present"}
-            )
-            if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
-                break
-    if len(issues) < _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
-        for raw_name, raw_value in arguments.items():
-            name = str(raw_name)
-            raw_spec = property_map.get(name)
-            if not isinstance(raw_spec, Mapping):
-                if bounded_schema.get("additionalProperties") is False:
-                    issues.append(
-                        {"path": name[:120], "code": "unknown_property", "expected": "declared property"}
-                    )
-                if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
-                    break
-                continue
-            if raw_value is None and name not in required:
-                # Request models commonly project omitted optional fields as
-                # explicit nulls before deterministic routing. Preserve that
-                # established behavior while keeping required fields strict.
-                continue
-            value_type = str(raw_spec.get("type") or "")
-            if not _matches_planner_schema_type(raw_value, value_type):
-                issues.append(
-                    {"path": name[:120], "code": "wrong_type", "expected": value_type}
-                )
-            elif isinstance(raw_spec.get("enum"), list) and raw_value not in raw_spec["enum"]:
-                issues.append(
-                    {"path": name[:120], "code": "enum", "expected": "one of the declared values"}
-                )
-            if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
-                break
+    _validate_planner_schema_node(bounded_schema, arguments, "", issues)
     if not issues:
         return {"ok": True, "code": "", "summary": "", "issues": []}
     return {
@@ -255,6 +283,115 @@ def validate_planner_tool_arguments(
         "summary": "Tool arguments do not match the registered shallow schema.",
         "issues": issues,
     }
+
+
+def _planner_child_path(parent: str, child: str) -> str:
+    return f"{parent}.{child}" if parent else child
+
+
+def _append_planner_schema_issue(
+    issues: list[dict[str, str]], path: str, code: str, expected: str
+) -> None:
+    if len(issues) < _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
+        issues.append({"path": path or "$", "code": code, "expected": expected})
+
+
+def _validate_planner_schema_node(
+    schema: Mapping[str, object],
+    value: object,
+    path: str,
+    issues: list[dict[str, str]],
+) -> None:
+    if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
+        return
+    value_type = str(schema.get("type") or "")
+    if not _matches_planner_schema_type(value, value_type):
+        _append_planner_schema_issue(issues, path, "wrong_type", value_type)
+        return
+    if isinstance(schema.get("enum"), list) and value not in schema["enum"]:
+        _append_planner_schema_issue(issues, path, "enum", "one of the declared values")
+        return
+    if "const" in schema and value != schema.get("const"):
+        _append_planner_schema_issue(issues, path, "const", str(schema.get("const"))[:120])
+        return
+
+    if value_type in {"integer", "number"}:
+        number = float(value)  # type already checked above.
+        minimum = schema.get("minimum")
+        maximum = schema.get("maximum")
+        if isinstance(minimum, (int, float)) and number < float(minimum):
+            _append_planner_schema_issue(issues, path, "minimum", str(minimum))
+        if isinstance(maximum, (int, float)) and number > float(maximum):
+            _append_planner_schema_issue(issues, path, "maximum", str(maximum))
+    elif value_type == "string":
+        minimum = schema.get("minLength")
+        maximum = schema.get("maxLength")
+        if isinstance(minimum, (int, float)) and len(value) < int(minimum):
+            _append_planner_schema_issue(issues, path, "min_length", str(int(minimum)))
+        if isinstance(maximum, (int, float)) and len(value) > int(maximum):
+            _append_planner_schema_issue(issues, path, "max_length", str(int(maximum)))
+        pattern = schema.get("pattern")
+        if isinstance(pattern, str) and re.search(pattern, value) is None:
+            _append_planner_schema_issue(issues, path, "pattern", pattern[:120])
+    elif value_type == "array":
+        minimum = schema.get("minItems")
+        maximum = schema.get("maxItems")
+        if isinstance(minimum, (int, float)) and len(value) < int(minimum):
+            _append_planner_schema_issue(issues, path, "min_items", str(int(minimum)))
+        if isinstance(maximum, (int, float)) and len(value) > int(maximum):
+            _append_planner_schema_issue(issues, path, "max_items", str(int(maximum)))
+        item_schema = schema.get("items")
+        if isinstance(item_schema, Mapping):
+            for index, item in enumerate(value):
+                _validate_planner_schema_node(item_schema, item, f"{path}[{index}]", issues)
+                if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
+                    break
+    elif value_type == "object":
+        properties = schema.get("properties")
+        property_map = properties if isinstance(properties, Mapping) else {}
+        required = schema.get("required")
+        required_names = required if isinstance(required, list) else []
+        for name in required_names:
+            if name not in value:
+                _append_planner_schema_issue(
+                    issues, _planner_child_path(path, str(name)), "missing_required", "present"
+                )
+        for raw_name, raw_value in value.items():
+            name = str(raw_name)
+            raw_spec = property_map.get(name)
+            child_path = _planner_child_path(path, name[:120])
+            if not isinstance(raw_spec, Mapping):
+                if schema.get("additionalProperties") is False:
+                    _append_planner_schema_issue(
+                        issues, child_path, "unknown_property", "declared property"
+                    )
+                continue
+            if raw_value is None and name not in required_names:
+                continue
+            _validate_planner_schema_node(raw_spec, raw_value, child_path, issues)
+            if len(issues) >= _PLANNER_TOOL_SCHEMA_MAX_ISSUES:
+                break
+
+    for branch_keyword in ("oneOf", "anyOf"):
+        raw_branches = schema.get(branch_keyword)
+        if not isinstance(raw_branches, list):
+            continue
+        matches = 0
+        for branch in raw_branches:
+            if not isinstance(branch, Mapping):
+                continue
+            branch_issues: list[dict[str, str]] = []
+            _validate_planner_schema_node(branch, value, path, branch_issues)
+            if not branch_issues:
+                matches += 1
+        valid = matches == 1 if branch_keyword == "oneOf" else matches >= 1
+        if not valid:
+            _append_planner_schema_issue(
+                issues,
+                path,
+                "branch_mismatch",
+                "exactly one declared branch" if branch_keyword == "oneOf" else "at least one declared branch",
+            )
 
 
 def planner_argument_validation_id(
@@ -285,12 +422,47 @@ def planner_tool_schema_prompt(schema: object) -> str:
     for name, raw_spec in properties.items():
         if not isinstance(raw_spec, Mapping):
             continue
-        declaration = f"{name}{'' if name in required else '?'}:{raw_spec.get('type')}"
+        value_type = str(raw_spec.get("type") or "")
+        declaration = f"{name}{'' if name in required else '?'}:{value_type}"
         enum_values = raw_spec.get("enum")
         if isinstance(enum_values, list) and enum_values:
             declaration += "[enum=" + "|".join(str(item) for item in enum_values) + "]"
+        item_schema = raw_spec.get("items")
+        item_properties = item_schema.get("properties") if isinstance(item_schema, Mapping) else None
+        if value_type == "array" and isinstance(item_properties, Mapping):
+            item_required = set(item_schema.get("required") or [])
+            item_fields = [
+                f"{item_name}{'' if item_name in item_required else '?'}:{item_spec.get('type')}"
+                for item_name, item_spec in list(item_properties.items())[:8]
+                if isinstance(item_spec, Mapping)
+            ]
+            if item_fields:
+                declaration += "<{" + ",".join(item_fields) + "}>"
         declarations.append(declaration)
     suffix = " additionalProperties=false" if bounded_schema.get("additionalProperties") is False else ""
+    branch_hints: list[str] = []
+    for branch_keyword in ("oneOf", "anyOf"):
+        branches = bounded_schema.get(branch_keyword)
+        if not isinstance(branches, list):
+            continue
+        for branch in branches:
+            if not isinstance(branch, Mapping):
+                continue
+            branch_properties = branch.get("properties")
+            constants = []
+            if isinstance(branch_properties, Mapping):
+                constants = [
+                    f"{key}={spec.get('const')}"
+                    for key, spec in branch_properties.items()
+                    if isinstance(spec, Mapping) and "const" in spec
+                ]
+            branch_required = [str(item) for item in branch.get("required") or []]
+            branch_hints.append(
+                ("&".join(constants) + "=>" if constants else "") + "+".join(branch_required)
+            )
+        if branch_hints:
+            suffix += f" {branch_keyword}=" + "|".join(branch_hints)
+            break
     return (" inputs={" + ", ".join(declarations) + "}" + suffix) if declarations else ""
 
 
@@ -304,6 +476,7 @@ class PlannerTool:
     write: bool = False
     advanced: bool = False
     requires_user_activation: bool = False
+    block: str = "core"
     input_contract: tuple[str, ...] = ()
     input_schema: Mapping[str, object] = field(default_factory=dict)
 
@@ -319,6 +492,7 @@ class PlannerTool:
             self.input_schema or _contract_shallow_schema(contract)
         )
         object.__setattr__(self, "runtime_name", runtime_name)
+        object.__setattr__(self, "block", str(self.block or "core").strip() or "core")
         object.__setattr__(self, "capabilities", capabilities)
         object.__setattr__(self, "input_contract", contract)
         object.__setattr__(self, "input_schema", MappingProxyType(schema))
@@ -494,14 +668,98 @@ _PLANNER_TOOL_OBSERVATION_WINDOWS_PATH_PATTERN = re.compile(r"(?<![\w])(?:[a-z]:
 
 _PLANNER_TOOL_OBSERVATION_UNIX_PATH_PATTERN = re.compile(r"(?<![\w:])/(?:[^\s,;]+)")
 
+
+_PLANNER_NATIVE_TOOL_CALL_PATTERN = re.compile(
+    r"\A\s*<tool_call>\s*<function=(?P<function>[A-Za-z0-9_.:-]{1,160})>"
+    r"(?P<body>.*?)</function>\s*</tool_call>\s*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
+_PLANNER_NATIVE_TOOL_PARAMETER_PATTERN = re.compile(
+    r"<parameter=(?P<name>[A-Za-z_][A-Za-z0-9_]{0,63})>"
+    r"(?P<value>.*?)</parameter>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def parse_native_planner_tool_call(raw_response: str) -> dict[str, object] | None:
+    """Decode one strict provider-native tool call into the normal planner envelope."""
+
+    stripped = str(raw_response or "").strip()
+    lowered = stripped.lower()
+    if not stripped or len(stripped) > 12_000 or lowered.count("<tool_call>") != 1:
+        return None
+    start = lowered.find("<tool_call>")
+    closing = "</tool_call>"
+    end = lowered.find(closing, start)
+    if end < 0 or lowered.find(closing, end + len(closing)) >= 0:
+        return None
+    end += len(closing)
+    outside = stripped[:start] + stripped[end:]
+    if "<" in outside or ">" in outside:
+        return None
+    match = _PLANNER_NATIVE_TOOL_CALL_PATTERN.fullmatch(stripped[start:end])
+    if match is None:
+        return None
+    body = match.group("body")
+    parameters: dict[str, object] = {}
+    spans: list[tuple[int, int]] = []
+    for parameter_match in _PLANNER_NATIVE_TOOL_PARAMETER_PATTERN.finditer(body):
+        if len(parameters) >= _PLANNER_TOOL_SCHEMA_MAX_PROPERTIES:
+            return None
+        name = parameter_match.group("name")
+        if name in parameters:
+            return None
+        raw_value = parameter_match.group("value").strip()
+        if len(raw_value) > 4_000 or "<" in raw_value or ">" in raw_value:
+            return None
+        try:
+            value = json.loads(raw_value)
+        except (TypeError, ValueError):
+            value = raw_value
+        parameters[name] = value
+        spans.append(parameter_match.span())
+    remainder = body
+    for start, end in reversed(spans):
+        remainder = remainder[:start] + remainder[end:]
+    if remainder.strip():
+        return None
+    function_name = match.group("function")
+    if function_name == "skill_tool_selector":
+        allowed = {"skill_tool", "skill_params", "summary", "reply", "correction_for_action_id"}
+        if set(parameters) - allowed:
+            return None
+        skill_tool = parameters.get("skill_tool")
+        skill_params = parameters.get("skill_params", {})
+        if not isinstance(skill_tool, str) or not skill_tool.strip() or not isinstance(skill_params, dict):
+            return None
+        return {
+            "action": "skill",
+            "skill_tool": skill_tool.strip(),
+            "skill_params": skill_params,
+            "summary": str(parameters.get("summary") or "").strip(),
+            "reply": str(parameters.get("reply") or "").strip(),
+            "correction_for_action_id": str(
+                parameters.get("correction_for_action_id") or ""
+            ).strip(),
+        }
+    return {
+        "action": "skill",
+        "skill_tool": function_name,
+        "skill_params": parameters,
+    }
+
+
 def parse_llm_plan_response(raw_response: str) -> dict[str, object] | None:
-    """Extract the first JSON object from an LLM response (tolerates Markdown fences)."""
+    """Extract JSON or one strict provider-native tool call from a planner response."""
     stripped = str(raw_response or "").strip()
     if not stripped:
         return None
     if stripped.startswith("```"):
         stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
         stripped = re.sub(r"\s*```$", "", stripped).strip()
+    native_tool_call = parse_native_planner_tool_call(stripped)
+    if native_tool_call is not None:
+        return native_tool_call
     start = stripped.find("{")
     if start < 0:
         return None
@@ -1044,6 +1302,7 @@ class RuntimePlannerService:
                 exposure_layer=exposure_layer,
                 planner_label=planner_label,
                 project_context_active=params.get("_projectContextActive") is not False,
+                internal_tool_blocks=params.get("_internalToolBlocks"),
                 global_instructions=self._read_global_instructions(),
                 project_instructions=instruction_snapshot.content,
             )
@@ -1062,6 +1321,9 @@ class RuntimePlannerService:
             phase: str,
             planner_label: str,
             transport_phase: str = "",
+            provider_error: Exception | None = None,
+            invalid_response_preview: str = "",
+            invalid_response_stage: str = "",
         ) -> dict[str, object]:
             post_tool = phase == "post_tool"
             invalid_response = cause_code == "planner_invalid_response"
@@ -1091,17 +1353,33 @@ class RuntimePlannerService:
                     "本轮模型规划请求失败，因此没有继续执行工具。"
                     "请重试；如果仍然失败，再检查 Provider 连接、账户或模型可用性。"
                 )
+            planner_failure: dict[str, object] = {
+                "code": cause_code,
+                "phase": phase,
+                "retryable": cause_code != "provider_not_configured",
+            }
+            provider_error_details = (
+                self._planner_provider_error_details(provider_error)
+                if cause_code != "provider_not_configured"
+                else {}
+            )
+            if provider_error_details:
+                planner_failure["providerError"] = provider_error_details
+            if cause_code == "planner_invalid_response" and invalid_response_preview:
+                planner_failure["invalidResponse"] = {
+                    "stage": str(invalid_response_stage or "response_validation")[:80],
+                    "preview": sanitize_planner_observation_text(
+                        invalid_response_preview,
+                        1_200,
+                    ),
+                }
             plan: dict[str, object] = {
                 "summary": "The model planner failed before producing a valid next action.",
                 "reply": reply,
                 "planner": "llm",
                 "plannerLabel": planner_label,
                 "plannerFailed": True,
-                "plannerFailure": {
-                    "code": cause_code,
-                    "phase": phase,
-                    "retryable": cause_code != "provider_not_configured",
-                },
+                "plannerFailure": planner_failure,
                 "shellNeeded": False,
                 "shellCommand": "",
                 "skillNeeded": False,
@@ -1183,6 +1461,37 @@ class RuntimePlannerService:
             return "provider_request_failed"
 
     @staticmethod
+    def _planner_provider_error_details(exc: Exception | None) -> dict[str, object]:
+            if exc is None:
+                return {}
+            message = re.sub(
+                r"(?i)\b(api[_-]?key|authorization|bearer|token|secret|password)\b(\s*[:=]\s*)([^\s,;}]+)",
+                r"\1\2<redacted>",
+                str(exc)[:2_000],
+            )
+            details: dict[str, object] = {
+                "type": type(exc).__name__,
+                "message": message,
+            }
+            exception_fields = exc.__dict__
+            response = exception_fields.get("response")
+            try:
+                response_fields = vars(response) if response is not None else {}
+            except TypeError:
+                response_fields = {}
+            for candidate in (
+                exception_fields.get("status_code"),
+                response_fields.get("status_code"),
+            ):
+                if isinstance(candidate, int) and not isinstance(candidate, bool):
+                    details["statusCode"] = candidate
+                    break
+            body = exception_fields.get("body")
+            if isinstance(body, Mapping):
+                details["body"] = redact_sensitive(dict(body))
+            return details
+
+    @staticmethod
     def _planner_transport_phase(exc: Exception) -> str:
             phase = str(exc.__dict__.get("phase") or "").strip().lower()
             return phase if phase in {"first_byte", "idle", "overall"} else ""
@@ -1226,6 +1535,7 @@ class RuntimePlannerService:
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
             planner_label: str = "",
             project_context_active: bool = True,
+            internal_tool_blocks: object = None,
             global_instructions: str = "",
             project_instructions: str = "",
         ) -> dict[str, object] | None:
@@ -1248,6 +1558,7 @@ class RuntimePlannerService:
                     observe=observe,
                     exposure_layer=exposure_layer,
                     project_context_active=project_context_active,
+                    internal_tool_blocks=internal_tool_blocks,
                     global_instructions=global_instructions,
                     project_instructions=project_instructions,
                 )
@@ -1268,12 +1579,15 @@ class RuntimePlannerService:
                     phase=phase,
                     planner_label=str(planner_label or "").strip(),
                     transport_phase=self._planner_transport_phase(exc),
+                    provider_error=exc,
                 )
             if not isinstance(payload, dict):
                 return self._planner_failure_plan(
                     cause_code="planner_invalid_response",
                     phase=phase,
                     planner_label=planner_label,
+                    invalid_response_preview=response_text,
+                    invalid_response_stage="json_object_parse",
                 )
 
             action = str(payload.get("action") or "").strip().lower()
@@ -1302,6 +1616,8 @@ class RuntimePlannerService:
                     cause_code="planner_invalid_response",
                     phase=phase,
                     planner_label=planner_label,
+                    invalid_response_preview=response_text,
+                    invalid_response_stage="parameter_object_validation",
                 )
             correction_for_action_id = str(
                 payload.get("correction_for_action_id")
@@ -1618,10 +1934,68 @@ class RuntimePlannerService:
                         "completionClaim": completion_claim,
                         "nextStep": "done",
                     }
+            requested_tool_hint = skill_tool or write_tool or action
+            if requested_tool_hint:
+                correction_catalog = self._catalog.read(
+                    exposure_layer,
+                    project_context_active=project_context_active,
+                )
+                normalized_hint = normalize_skill_id(requested_tool_hint)
+                suffix_matches = [
+                    tool
+                    for tool in correction_catalog.visible_tools
+                    if normalize_skill_id(tool.name).endswith(normalized_hint)
+                ]
+                if len(suffix_matches) == 1:
+                    corrected_tool = suffix_matches[0]
+                    corrected_action = "write" if corrected_tool.write else "skill"
+                    corrected_params = write_params if corrected_tool.write else skill_params
+                    issues: list[dict[str, str]] = [
+                        {
+                            "path": "action",
+                            "code": "enum",
+                            "expected": corrected_action,
+                        }
+                    ]
+                    if requested_tool_hint != corrected_tool.name:
+                        issues.append(
+                            {
+                                "path": f"{corrected_action}_tool",
+                                "code": "exact_tool_name",
+                                "expected": corrected_tool.name,
+                            }
+                        )
+                    argument_validation = validate_planner_tool_arguments(
+                        corrected_tool.input_schema,
+                        corrected_params,
+                    )
+                    issues.extend(
+                        issue
+                        for issue in ensure_list(argument_validation.get("issues"))
+                        if isinstance(issue, dict)
+                    )
+                    return self._planner_argument_error_plan(
+                        base=base,
+                        action_kind=corrected_action,
+                        tool_name=corrected_tool.name,
+                        arguments=payload,
+                        validation={
+                            "ok": False,
+                            "summary": (
+                                "The planner used a tool name as the action. Correct the envelope to "
+                                f"action={corrected_action}, use the exact tool name "
+                                f"{corrected_tool.name}, and satisfy its registered argument schema."
+                            ),
+                            "issues": issues[:_PLANNER_TOOL_SCHEMA_MAX_ISSUES],
+                        },
+                        phase=phase,
+                    )
             return self._planner_failure_plan(
                 cause_code="planner_invalid_response",
                 phase=phase,
                 planner_label=planner_label,
+                invalid_response_preview=response_text,
+                invalid_response_stage="action_validation",
             )
 
     def record_context_usage(
@@ -1760,6 +2134,7 @@ class RuntimePlannerService:
                 observe=observe,
                 exposure_layer=runtime_exposure_layer,
                 project_context_active=params.get("_projectContextActive") is not False,
+                internal_tool_blocks=params.get("_internalToolBlocks"),
                 global_instructions=global_instructions,
                 project_instructions=project_instructions,
             )
@@ -1816,6 +2191,7 @@ class RuntimePlannerService:
                     observe=observe,
                     exposure_layer=runtime_exposure_layer,
                     project_context_active=params.get("_projectContextActive") is not False,
+                    internal_tool_blocks=params.get("_internalToolBlocks"),
                     global_instructions=global_instructions,
                     project_instructions=project_instructions,
                 )
@@ -1986,6 +2362,71 @@ class RuntimePlannerService:
             action_id = str(step.get("actionId") or "").strip()
             if action_id:
                 fields.append("actionId=" + sanitize_planner_observation_text(action_id, 80))
+            tool_name = str(step.get("tool") or "").strip()
+            if tool_name == "vrcforge_list_internal_tool_blocks" and isinstance(result, dict):
+                loaded_blocks = result.get("loadedBlocks")
+                if isinstance(loaded_blocks, list) and loaded_blocks:
+                    fields.append(
+                        "loadedBlocks="
+                        + sanitize_planner_observation_text(
+                            " | ".join(map(str, loaded_blocks[:12])),
+                            240,
+                        )
+                    )
+                tree = ensure_dict(result.get("tree"))
+                children = tree.get("children")
+                tools = tree.get("tools")
+                nodes = children if isinstance(children, list) else tools if isinstance(tools, list) else []
+                if nodes:
+                    node_labels = []
+                    for node in nodes[:20]:
+                        if not isinstance(node, dict):
+                            continue
+                        label = f"{node.get('index')}:{node.get('name')}"
+                        if node.get("expandable") is True:
+                            label += "(expand)"
+                        elif node.get("loaded") is True:
+                            label += "(loaded)"
+                        node_labels.append(label)
+                    if node_labels:
+                        fields.append(
+                            "toolBlockTree="
+                            + sanitize_planner_observation_text(
+                                " | ".join(node_labels),
+                                420,
+                            )
+                        )
+                blocks = result.get("blocks")
+                if isinstance(blocks, list) and blocks:
+                    directory_labels = []
+                    for block in blocks[:20]:
+                        if not isinstance(block, dict):
+                            continue
+                        block_name = str(block.get("name") or "").strip()
+                        block_index = str(block.get("index") or "").strip()
+                        tool_names = block.get("toolNames")
+                        names = (
+                            [str(item).strip() for item in tool_names if str(item).strip()]
+                            if isinstance(tool_names, list)
+                            else []
+                        )
+                        label = f"{block_index}:{block_name}"
+                        if names:
+                            label += "[" + ",".join(names[:80]) + "]"
+                        directory_labels.append(label)
+                    if directory_labels:
+                        fields.append(
+                            "toolBlockDirectory="
+                            + sanitize_planner_observation_text(
+                                " | ".join(directory_labels),
+                                RUNTIME_PLANNER_TOOL_INDEX_OBSERVATION_MAX_CHARS - 200,
+                            )
+                        )
+                        fields.append(
+                            "toolBlockLoadSyntax=action=skill;"
+                            "skill_tool=load_internal_tool_block;"
+                            "skill_params={\"block\":\"<exact block name>\"}"
+                        )
             outcome = ensure_dict(step.get("outcome"))
             if outcome:
                 fields.append(
@@ -2024,6 +2465,24 @@ class RuntimePlannerService:
                             fields.append(
                                 f"{label}="
                                 + sanitize_planner_observation_text(" | ".join(map(str, values[:6])), 480)
+                            )
+                diagnostics = ensure_dict(outcome.get("diagnostics"))
+                source_error = ensure_dict(diagnostics.get("sourceError"))
+                if source_error:
+                    for key, label in (
+                        ("failureLayer", "failureLayer"),
+                        ("failurePhase", "failurePhase"),
+                        ("toolRoutingStarted", "toolRoutingStarted"),
+                        ("mutationStarted", "mutationStarted"),
+                        ("committed", "committed"),
+                        ("commitState", "commitState"),
+                        ("checkpointRecoveryRequired", "checkpointRecoveryRequired"),
+                        ("temporaryCleanupRequired", "temporaryCleanupRequired"),
+                    ):
+                        if source_error.get(key) not in (None, ""):
+                            fields.append(
+                                f"{label}="
+                                + sanitize_planner_observation_text(source_error.get(key), 120)
                             )
             skill_context = ensure_dict(step.get("skillContext"))
             if skill_context:
@@ -2152,7 +2611,12 @@ class RuntimePlannerService:
                     fields.append(f"{key}={format_planner_tool_observation(value, 130)}")
             elif result is not None:
                 fields.append("result=available")
-            return summarize_text("; ".join(fields), RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS)
+            observation_limit = (
+                RUNTIME_PLANNER_TOOL_INDEX_OBSERVATION_MAX_CHARS
+                if tool_name == "vrcforge_list_internal_tool_blocks"
+                else RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS
+            )
+            return summarize_text("; ".join(fields), observation_limit)
 
     def _build_llm_plan_prompt(
             self,
@@ -2162,6 +2626,7 @@ class RuntimePlannerService:
             observe: dict[str, object] | None = None,
             exposure_layer: str = EXPOSURE_LAYER_PLANNING,
             project_context_active: bool = True,
+            internal_tool_blocks: object = None,
             global_instructions: str = "",
             project_instructions: str = "",
         ) -> str:
@@ -2172,7 +2637,24 @@ class RuntimePlannerService:
                 exposure_layer,
                 project_context_active=project_context_active,
             )
+            selected_blocks = None
+            if internal_tool_blocks is not None:
+                raw_blocks = (
+                    [internal_tool_blocks]
+                    if isinstance(internal_tool_blocks, str)
+                    else list(internal_tool_blocks)
+                    if isinstance(internal_tool_blocks, (list, tuple, set, frozenset))
+                    else []
+                )
+                selected_blocks = {
+                    str(item or "").strip()
+                    for item in raw_blocks
+                    if str(item or "").strip()
+                }
+                selected_blocks.add("core")
             for tool in catalog.visible_tools:
+                if selected_blocks is not None and tool.block not in selected_blocks:
+                    continue
                 if tool.requires_user_activation and not catalog.computer_use_model_invocable:
                     continue
                 flags = []
@@ -2234,6 +2716,16 @@ class RuntimePlannerService:
             )
             prompt = (
                 f"{runtime_scope_instruction}\n"
+                + (
+                    "loaded internal tool blocks: "
+                    + ", ".join(sorted(selected_blocks))
+                    + ". To inspect or change this session-scoped catalogue, choose the corresponding "
+                    "block-management tool from the available-tool list and call it with action=skill; "
+                    "put its exact listed name in skill_tool, never in action.\n"
+                    if selected_blocks is not None
+                    else ""
+                )
+                +
                 "你是 VRCForge 桌面智能体的规划器，负责把用户的请求转换成下一步动作。\n"
                 "这是一个多步循环：你每次只产出一个动作；工具执行后结果会回灌给你，由你决定下一步，"
                 "直到信息足够后再用 reply 收尾。\n"
@@ -2242,7 +2734,7 @@ class RuntimePlannerService:
                 '2. 执行普通 Shell 命令（系统级问题，如看日志/查工程外文件/git）：{"action": "shell", "shell_command": "<命令>", "shell_params": {"cwd": "<可选目录>"}, "summary": "<一句话说明>", "reply": "<对用户说的话>"}。普通 Shell 不得把已注册 Unity 工程作为 cwd，也不得直接引用其路径；Unity Project Mode 中需要操作当前工程时，改用 write 动作调用 unity_shell。background/pty/yieldMs/timeout/env 只在确实需要主机后台或交互进程时按需添加。\n'
                 '3. 直接回答（闲聊、解释、当前信息已足够、或要收尾）：未执行工具时用 {"action": "reply", "reply": "<回答>"}；执行过工具后必须用 {"action": "reply", "reply": "<回答>", "completion_claim":{"satisfied":true,"evidence_action_ids":["<每个已完成步骤的精确 actionId>"]}}\n'
                 '4. 进入执行模式（仅当用户明确要求项目写入或控制已启动的主机进程）：{"action": "enter_execution", "summary": "<为什么需要执行>"}\n'
-                "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；工具名必须严格来自下面的列表；"
+                "规则：只返回一个 JSON 对象，不要 Markdown 代码块外的文字；action 只能是 skill、shell、reply 或 enter_execution，绝不能把工具名写进 action；工具名必须严格来自下面的列表并写进 skill_tool；"
                 f"当前工具曝光层是 {exposure_layer}；planning 层只能使用读/检查工具，执行类工具必须先进入 execution 层；Unity 项目写入按当前权限模式走审批或全权限自动执行；"
                 "如果『已执行步骤』里某个工具刚刚已经给出了你需要的结果，不要重复调用同一个工具——改为基于结果继续下一步或 reply 收尾；"
                 "If the user asks what to do about a VRCForge, Unity, MCP, bridge, editor plugin, or Provider connection problem (for example cannot connect, not connected, disconnected, or connection failed), choose know_yourself before filesystem, Shell, or repair tools. After its successful report, answer from that report. This rule does not apply to ordinary Internet, GitHub, or unrelated network troubleshooting;"

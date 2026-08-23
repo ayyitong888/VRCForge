@@ -196,6 +196,17 @@ def run_smoke(args: argparse.Namespace) -> dict[str, Any]:
         if missing:
             raise RuntimeError("Installed payload is incomplete.")
 
+        shortcut_phase = "after_upgrade" if upgrade_installer is not None else "after_install"
+        shortcut_step = inspect_installed_shortcuts(
+            install_dir,
+            smoke_id=str(getattr(args, "smoke_id", "") or "").strip(),
+            phase=shortcut_phase,
+            timeout=args.timeout,
+        )
+        steps.append(shortcut_step)
+        if not shortcut_step["ok"]:
+            raise RuntimeError("Installed shortcuts did not match the installed target, working directory, and icon.")
+
         if port_is_open(args.backend_port):
             raise RuntimeError(f"Backend smoke port {args.backend_port} is already in use.")
         expected_version = (install_dir / "VERSION").read_text(encoding="utf-8").strip()
@@ -347,6 +358,130 @@ def nsis_install_command(installer: Path, install_dir: Path) -> str:
     # NSIS requires /D to be the final raw command-line segment and not quoted,
     # even when the target path contains spaces.
     return f'"{installer}" /S /D={install_dir}'
+
+
+def inspect_installed_shortcuts(
+    install_dir: Path,
+    *,
+    smoke_id: str,
+    phase: str,
+    timeout: float,
+) -> dict[str, Any]:
+    shortcut_name = f"VRCForge Smoke {smoke_id}.lnk" if smoke_id else "VRCForge.lnk"
+    start_menu_group = f"VRCForge Smoke {smoke_id}" if smoke_id else "VRCForge"
+    env = os.environ.copy()
+    env.update(
+        {
+            "VRCFORGE_SHORTCUT_DESKTOP_NAME": shortcut_name,
+            "VRCFORGE_SHORTCUT_START_GROUP": start_menu_group,
+        }
+    )
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    powershell = Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    command = (
+        "$ErrorActionPreference='Stop';"
+        "$shell=New-Object -ComObject WScript.Shell;"
+        "$items=@("
+        "[pscustomobject]@{kind='desktop';path=(Join-Path $shell.SpecialFolders.Item('Desktop') $env:VRCFORGE_SHORTCUT_DESKTOP_NAME)},"
+        "[pscustomobject]@{kind='start-menu';path=(Join-Path (Join-Path $shell.SpecialFolders.Item('Programs') $env:VRCFORGE_SHORTCUT_START_GROUP) 'VRCForge.lnk')}"
+        ");"
+        "$rows=@();"
+        "foreach($item in $items){"
+        "$exists=Test-Path -LiteralPath $item.path -PathType Leaf;"
+        "if($exists){$link=$shell.CreateShortcut($item.path);"
+        "$rows+=[pscustomobject]@{kind=$item.kind;path=$item.path;exists=$true;targetPath=$link.TargetPath;workingDirectory=$link.WorkingDirectory;iconLocation=$link.IconLocation}}"
+        "else{$rows+=[pscustomobject]@{kind=$item.kind;path=$item.path;exists=$false;targetPath='';workingDirectory='';iconLocation=''}}"
+        "};"
+        "ConvertTo-Json -InputObject @($rows) -Compress"
+    )
+    result = subprocess.run(
+        [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=str(install_dir),
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {
+            "name": f"shortcuts.{phase}",
+            "ok": False,
+            "entries": [],
+            "error": (result.stderr or result.stdout or "Shortcut inspection failed.").strip()[-2000:],
+        }
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "name": f"shortcuts.{phase}",
+            "ok": False,
+            "entries": [],
+            "error": f"Shortcut inspection returned invalid JSON: {exc}",
+        }
+    return evaluate_shortcut_contract(payload, install_dir, phase=phase)
+
+
+def evaluate_shortcut_contract(payload: Any, install_dir: Path, *, phase: str) -> dict[str, Any]:
+    entries = payload if isinstance(payload, list) else []
+    expected_target = install_dir / "VRCForge.exe"
+    expected_working_directory = install_dir
+    expected_icon = install_dir / "VRCForge.ico"
+    results: list[dict[str, Any]] = []
+    for kind in ("desktop", "start-menu"):
+        source = next((item for item in entries if isinstance(item, dict) and item.get("kind") == kind), {})
+        icon_path, icon_index = split_icon_location(str(source.get("iconLocation") or ""))
+        checks = {
+            "exists": source.get("exists") is True,
+            "targetPath": windows_path_equal(str(source.get("targetPath") or ""), expected_target),
+            "workingDirectory": windows_path_equal(
+                str(source.get("workingDirectory") or ""), expected_working_directory
+            ),
+            "iconPath": windows_path_equal(icon_path, expected_icon),
+            "iconIndex": icon_index == 0,
+        }
+        results.append(
+            {
+                "kind": kind,
+                "path": str(source.get("path") or ""),
+                "targetPath": str(source.get("targetPath") or ""),
+                "workingDirectory": str(source.get("workingDirectory") or ""),
+                "iconLocation": str(source.get("iconLocation") or ""),
+                "checks": checks,
+                "ok": all(checks.values()),
+            }
+        )
+    return {
+        "name": f"shortcuts.{phase}",
+        "ok": len(entries) == 2 and all(item["ok"] for item in results),
+        "expected": {
+            "targetPath": str(expected_target),
+            "workingDirectory": str(expected_working_directory),
+            "iconPath": str(expected_icon),
+            "iconIndex": 0,
+        },
+        "entries": results,
+    }
+
+
+def split_icon_location(value: str) -> tuple[str, int | None]:
+    path, separator, index = value.strip().rpartition(",")
+    if not separator:
+        return value.strip().strip('"'), None
+    try:
+        parsed_index = int(index.strip())
+    except ValueError:
+        parsed_index = None
+    return path.strip().strip('"'), parsed_index
+
+
+def windows_path_equal(actual: str, expected: Path) -> bool:
+    if not actual.strip():
+        return False
+    actual_normalized = os.path.normcase(os.path.normpath(actual.strip().strip('"')))
+    expected_normalized = os.path.normcase(os.path.normpath(str(expected)))
+    return actual_normalized == expected_normalized
 
 
 def start_installed_backend(args: argparse.Namespace, install_dir: Path, user_data_root: Path) -> subprocess.Popen[str]:
@@ -591,7 +726,7 @@ def production_identity_presence(install_dir: Path, user_data_root: Path) -> lis
     for label, path in (
         ("install-dir", install_dir),
         ("user-data-root", user_data_root),
-        ("start-menu", production_start_menu_dir()),
+        ("user-start-menu", production_start_menu_dir()),
         ("public-desktop-shortcut", production_public_desktop_shortcut()),
         ("user-desktop-shortcut", production_user_desktop_shortcut()),
     ):
@@ -602,8 +737,8 @@ def production_identity_presence(install_dir: Path, user_data_root: Path) -> lis
 
 
 def production_start_menu_dir() -> Path:
-    program_data = os.environ.get("ProgramData", "").strip()
-    base = Path(program_data).expanduser() if program_data else default_install_dir().anchor + "ProgramData"
+    app_data = os.environ.get("APPDATA", "").strip()
+    base = Path(app_data).expanduser() if app_data else Path.home() / "AppData" / "Roaming"
     return Path(base) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "VRCForge"
 
 

@@ -28,12 +28,24 @@ public static class SceneObjectCopyFixtureProbe
             source.AddComponent<BoxCollider>();
             var avatarB = new GameObject("AvatarB");
             avatarB.transform.localPosition = new Vector3(1f, 2f, 3f);
+            var worldSourceParent = new GameObject("WorldSourceParent");
+            worldSourceParent.transform.position = new Vector3(-2f, 1.25f, 0.5f);
+            worldSourceParent.transform.rotation = Quaternion.Euler(12f, 31f, -7f);
+            var worldSource = new GameObject("WorldAccessory");
+            worldSource.transform.SetParent(worldSourceParent.transform, false);
+            worldSource.transform.localPosition = new Vector3(0.2f, 0.35f, -0.15f);
+            worldSource.transform.localRotation = Quaternion.Euler(-9f, 18f, 4f);
+            worldSource.transform.localScale = new Vector3(0.8f, 0.8f, 0.8f);
+            var worldTargetParent = new GameObject("WorldTargetParent");
+            worldTargetParent.transform.position = new Vector3(3f, -0.5f, 1.75f);
+            worldTargetParent.transform.rotation = Quaternion.Euler(-5f, -24f, 11f);
             Require(EditorSceneManager.SaveScene(scene, ScenePath), "fixture scene save failed");
 
             var baseline = SceneObjectCopyCore.BuildSourceSnapshot(ScenePath, "AvatarA/Accessory");
             var baselineSceneDigest = baseline.Scene.FileDigest;
             RunMetaHardlinkRejection();
             RunDuplicateLifecycle(baselineSceneDigest);
+            RunDuplicatePreserveWorldLifecycle(baselineSceneDigest);
             RunPrefabLifecycle(baselineSceneDigest);
 
             Require(
@@ -316,6 +328,90 @@ public static class SceneObjectCopyFixtureProbe
             SceneObjectCopyCore.ResolveSavedScene(ScenePath, "duplicate cleanup scene").FileDigest
                 == baselineSceneDigest,
             "duplicate cleanup did not restore the scene file");
+    }
+
+    private static void RunDuplicatePreserveWorldLifecycle(string baselineSceneDigest)
+    {
+        var sourceObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+            SceneManager.GetActiveScene(),
+            "WorldSourceParent/WorldAccessory",
+            "world-preserve source");
+        var expectedPosition = sourceObject.transform.position;
+        var expectedRotation = sourceObject.transform.rotation;
+        var expectedScale = sourceObject.transform.lossyScale;
+        var preview = RequireSuccess(DuplicateSceneObjectTool.HandleCommand(new JObject
+        {
+            ["sourceScenePath"] = ScenePath,
+            ["sourceObjectPath"] = "WorldSourceParent/WorldAccessory",
+            ["targetParentScenePath"] = ScenePath,
+            ["targetParentPath"] = "WorldTargetParent",
+            ["targetName"] = "WorldAccessoryCopy",
+            ["preserveWorldTransform"] = true,
+            ["preview"] = true,
+            ["saveScene"] = false,
+            ["overwrite"] = false
+        }));
+        var source = (JObject)preview["source"];
+        var target = (JObject)preview["target"];
+        var apply = RequireSuccess(DuplicateSceneObjectTool.HandleCommand(new JObject
+        {
+            ["sourceScenePath"] = source.Value<string>("scenePath"),
+            ["sourceObjectPath"] = source.Value<string>("objectPath"),
+            ["targetParentScenePath"] = target.Value<string>("scenePath"),
+            ["targetParentPath"] = target.Value<string>("parentPath"),
+            ["targetName"] = target.Value<string>("name"),
+            ["preserveWorldTransform"] = true,
+            ["preview"] = false,
+            ["saveScene"] = true,
+            ["overwrite"] = false,
+            ["expectedProjectPath"] = ProjectRoot(),
+            ["expectedSourceSceneGuid"] = source.Value<string>("sceneGuid"),
+            ["expectedSourceSceneHandle"] = source.Value<int>("sceneHandle"),
+            ["expectedSourceObjectId"] = source.Value<string>("objectId"),
+            ["expectedSourceHierarchyDigest"] = source.Value<string>("hierarchyDigest"),
+            ["expectedSourceSceneFileDigest"] = source.Value<string>("sceneFileDigest"),
+            ["expectedSourceSceneFileIdentity"] = source.Value<string>("sceneFileIdentity"),
+            ["expectedSourceSceneMetaDigest"] = source.Value<string>("sceneMetaDigest"),
+            ["expectedSourceSceneMetaIdentity"] = source.Value<string>("sceneMetaIdentity"),
+            ["expectedTargetSceneGuid"] = target.Value<string>("sceneGuid"),
+            ["expectedTargetSceneHandle"] = target.Value<int>("sceneHandle"),
+            ["expectedTargetParentObjectId"] = target.Value<string>("parentObjectId"),
+            ["expectedTargetParentHierarchyDigest"] = target.Value<string>("parentHierarchyDigest"),
+            ["expectedTargetSceneFileDigest"] = target.Value<string>("sceneFileDigest"),
+            ["expectedTargetSceneFileIdentity"] = target.Value<string>("sceneFileIdentity"),
+            ["expectedTargetSceneMetaDigest"] = target.Value<string>("sceneMetaDigest"),
+            ["expectedTargetSceneMetaIdentity"] = target.Value<string>("sceneMetaIdentity"),
+            ["expectedDestinationPath"] = target.Value<string>("objectPath"),
+            ["expectedPreviewDigest"] = preview.Value<string>("previewDigest")
+        }));
+        Require(apply.Value<bool>("worldTransformPreserved"), "world-preserve proof missing");
+        var duplicate = SceneObjectCopyCore.ResolveUniqueGameObject(
+            SceneManager.GetActiveScene(),
+            "WorldTargetParent/WorldAccessoryCopy",
+            "world-preserve duplicate");
+        RequireWorldTransform(duplicate.transform, expectedPosition, expectedRotation, expectedScale);
+
+        UnityEngine.Object.DestroyImmediate(duplicate);
+        EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
+        Require(EditorSceneManager.SaveScene(SceneManager.GetActiveScene()), "world-preserve cleanup save failed");
+        Require(
+            SceneObjectCopyCore.ResolveSavedScene(ScenePath, "world-preserve cleanup scene").FileDigest
+                == baselineSceneDigest,
+            "world-preserve cleanup did not restore the scene file");
+    }
+
+    private static void RequireWorldTransform(
+        Transform actual,
+        Vector3 expectedPosition,
+        Quaternion expectedRotation,
+        Vector3 expectedScale)
+    {
+        Require((actual.position - expectedPosition).sqrMagnitude <= 0.0000000001f,
+            "preserveWorldTransform changed world position");
+        Require(Quaternion.Angle(actual.rotation, expectedRotation) <= 0.001f,
+            "preserveWorldTransform changed world rotation");
+        Require((actual.lossyScale - expectedScale).sqrMagnitude <= 0.0000000001f,
+            "preserveWorldTransform changed world scale");
     }
 
     private static void RunPrefabLifecycle(string baselineSceneDigest)

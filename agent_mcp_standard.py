@@ -18,7 +18,10 @@ from agent_mcp_2026 import (
     _normalise_tool,
     _strict_json_clone,
     _strict_json_loads,
+    _tool_result_content_text,
 )
+from external_tool_result_contract import build_external_tool_error
+from agent_tool_result_contract import normalize_agent_tool_result
 
 
 LATEST_PROTOCOL_VERSION = "2025-11-25"
@@ -34,6 +37,7 @@ DEFAULT_MAX_STDIO_LINE_BYTES = 1_048_576
 JsonObject = dict[str, Any]
 ToolListCallback = Callable[[], Sequence[Mapping[str, Any]] | Awaitable[Sequence[Mapping[str, Any]]]]
 ToolCallCallback = Callable[[str, Mapping[str, Any]], Any | Awaitable[Any]]
+ToolListRevisionCallback = Callable[[], Any]
 
 
 class McpStandardError(Exception):
@@ -48,10 +52,40 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _error(request_id: Any, code: int, message: str, data: Mapping[str, Any] | None = None) -> JsonObject:
+def _error(
+    request_id: Any,
+    code: int,
+    message: str,
+    data: Mapping[str, Any] | None = None,
+    *,
+    failure_phase: str = "protocol_request_validation",
+    tool_routing_started: bool | None = False,
+    mutation_started: bool | None = False,
+    committed: bool | None = False,
+    exception: BaseException | None = None,
+) -> JsonObject:
     error: JsonObject = {"code": code, "message": message}
-    if data:
-        error["data"] = dict(data)
+    context = dict(data) if isinstance(data, Mapping) else {}
+    context.setdefault("protocolNamespace", "initialize.params.protocolVersion")
+    context.setdefault("protocolProfile", "mcp-1x")
+    error_object = build_external_tool_error(
+        error=message,
+        error_code=f"mcp_jsonrpc_{code}",
+        failure_layer="external_mcp_protocol",
+        failure_phase=failure_phase,
+        operation_kind="protocol",
+        tool_routing_started=tool_routing_started,
+        mutation_started=mutation_started,
+        committed=committed,
+        exception=exception,
+        retryable=False,
+        checkpoint_recovery_required=False,
+        temporary_cleanup_required=False,
+        details=context,
+    )
+    # Preserve protocol-specific facts at their original data keys while the
+    # same object also carries the canonical VRCForge rejection contract.
+    error["data"] = {**error_object, **context}
     return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
 
@@ -73,6 +107,7 @@ class McpStandardRouter:
         *,
         server_name: str = "VRCForge",
         server_version: str = "1.5.1",
+        tool_list_revision: ToolListRevisionCallback | None = None,
     ) -> None:
         if not _is_nonempty_string(server_name) or not _is_nonempty_string(server_version):
             raise ValueError("server_name and server_version must be non-empty strings")
@@ -80,7 +115,14 @@ class McpStandardRouter:
         self._tool_call = tool_call
         self.server_name = server_name
         self.server_version = server_version
+        self._tool_list_revision = tool_list_revision
+        self._pending_notifications: list[JsonObject] = []
         self._initialized = False
+
+    def drain_notifications(self) -> list[JsonObject]:
+        notifications = list(self._pending_notifications)
+        self._pending_notifications.clear()
+        return notifications
 
     def _request(self, message: Any) -> tuple[Any, str, JsonObject, bool]:
         if not isinstance(message, Mapping) or message.get("jsonrpc") != "2.0":
@@ -121,7 +163,13 @@ class McpStandardRouter:
                     request_id,
                     {
                         "protocolVersion": protocol_version,
-                        "capabilities": {"tools": {}},
+                        "capabilities": {
+                            "tools": (
+                                {"listChanged": True}
+                                if self._tool_list_revision is not None
+                                else {}
+                            )
+                        },
                         "serverInfo": {"name": self.server_name, "version": self.server_version},
                         "instructions": (
                             "Use VRCForge tools for supervised avatar work. Project writes remain "
@@ -161,23 +209,52 @@ class McpStandardRouter:
                 allowed = {str(tool.get("name")) for tool in supplied if isinstance(tool, Mapping) and _is_nonempty_string(tool.get("name"))}
                 if name not in allowed:
                     raise McpStandardError(-32602, "Tool is not exposed by this MCP server")
+                revision_before = (
+                    self._tool_list_revision()
+                    if self._tool_list_revision is not None
+                    else None
+                )
                 result = _strict_json_clone(await _resolve(self._tool_call(str(name), dict(arguments))))
+                revision_after = (
+                    self._tool_list_revision()
+                    if self._tool_list_revision is not None
+                    else None
+                )
+                if self._tool_list_revision is not None and revision_after != revision_before:
+                    self._pending_notifications.append(
+                        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+                    )
                 if not isinstance(result, Mapping):
                     result = {"ok": True, "value": result}
                 structured = dict(result)
+                outcome = normalize_agent_tool_result(
+                    structured,
+                    fallback_summary=f"{name} completed.",
+                    write=bool(structured.get("write")),
+                )
+                structured["outcome"] = outcome
                 return _success(
                     request_id,
                     {
-                        "content": [{"type": "text", "text": json.dumps(structured, ensure_ascii=False, sort_keys=True)}],
+                        "content": [{"type": "text", "text": _tool_result_content_text(structured)}],
                         "structuredContent": structured,
-                        "isError": structured.get("ok") is False,
+                        "isError": outcome.get("status") == "failed",
                     },
                 )
             raise McpStandardError(-32601, "Method not found")
         except McpStandardError as exc:
             return _error(request_id, exc.code, exc.message, exc.data)
-        except Exception:
-            return _error(request_id, -32603, "Internal MCP server error")
+        except Exception as exc:
+            return _error(
+                request_id,
+                -32603,
+                "Internal MCP server error",
+                failure_phase="protocol_router_internal",
+                tool_routing_started=None,
+                mutation_started=None,
+                committed=None,
+                exception=exc,
+            )
 
     def handle(self, message: Any) -> JsonObject | None:
         import asyncio
@@ -208,6 +285,11 @@ def run_standard_stdio_loop(
         if response is None:
             continue
         sink.write(json.dumps(response, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
+        for notification in router.drain_notifications():
+            sink.write(
+                json.dumps(notification, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                + "\n"
+            )
         sink.flush()
     return 0
 
@@ -253,7 +335,21 @@ def run_negotiated_stdio_loop(
                             request_id,
                             -32022,
                             "MCP protocol profile could not be negotiated",
-                            {"preferred": "vrcforge-2026", "fallback": "mcp-1x"},
+                            {
+                                "preferred": "vrcforge-2026",
+                                "fallback": "mcp-1x",
+                                "protocolProfile": "unnegotiated",
+                                "protocolNamespace": "io.modelcontextprotocol/protocolVersion",
+                                "protocolMetadataLocation": "params._meta",
+                                "protocolVersion": VRCFORGE_2026_PROTOCOL_VERSION,
+                                "fallbackProtocolNamespace": "initialize.params.protocolVersion",
+                                "receivedMethod": method,
+                                "receivedProtocolVersion": (
+                                    meta.get("io.modelcontextprotocol/protocolVersion")
+                                    if isinstance(meta, Mapping)
+                                    else None
+                                ),
+                            },
                         )
                         sink.write(json.dumps(response, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
                         sink.flush()
@@ -280,6 +376,12 @@ def run_negotiated_stdio_loop(
         if response is None:
             continue
         sink.write(json.dumps(response, ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n")
+        active_router = router_2026 if selected_profile == "vrcforge-2026" else router_standard
+        for notification in active_router.drain_notifications():
+            sink.write(
+                json.dumps(notification, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+                + "\n"
+            )
         sink.flush()
     return 0
 

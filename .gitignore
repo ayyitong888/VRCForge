@@ -12,6 +12,7 @@ pycache/
 artifacts/
 build/
 dist/
+LocalBuilds/
 node_modules/
 src-tauri/target/
 src-tauri/gen/
@@ -42,5 +43,7 @@ Assets/VRCForge/*.log
 
 launcher/**/bin/
 launcher/**/obj/
+packaging/VRCForge.CSharpSyntaxGate/bin/
+packaging/VRCForge.CSharpSyntaxGate/obj/
 installer/out/
 tools/uv/

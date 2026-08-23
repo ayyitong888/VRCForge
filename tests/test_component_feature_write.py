@@ -292,13 +292,11 @@ def test_authoritative_preview_binds_scene_component_and_compatibility(arguments
 @pytest.mark.parametrize(
     ("key", "value"),
     [
-        ("packageVersion", "1.1335.0"),
-        ("packageTreeDigest", "0" * 64),
         ("apiAssemblySignatureState", "signed"),
         ("apiSignatureDigest", "0" * 64),
     ],
 )
-def test_package_assembly_or_method_signature_drift_fails_closed(key: str, value: object) -> None:
+def test_assembly_or_method_signature_drift_fails_closed(key: str, value: object) -> None:
     request = toggle_request()
     payload = preview_payload(request)
     payload["compatibility"][key] = value
@@ -307,6 +305,33 @@ def test_package_assembly_or_method_signature_drift_fails_closed(key: str, value
 
     with pytest.raises(ComponentFeatureWriteError, match="unsupported"):
         bind_authoritative_preview(wrapper(request), payload)
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("packageVersion", "1.2000.0"),
+        ("packageFileCount", 1300),
+        ("packageTotalBytes", 2_100_000),
+        ("packageTreeDigest", "0" * 64),
+    ],
+)
+def test_package_release_evidence_is_committed_but_not_version_pinned(
+    key: str,
+    value: object,
+) -> None:
+    request = toggle_request()
+    payload = preview_payload(request)
+    payload["compatibility"][key] = value
+    payload["compatibilityDigest"] = compute_compatibility_digest(
+        payload["compatibility"]
+    )
+    payload["previewDigest"] = compute_preview_digest(payload)
+
+    canonical, approval = bind_authoritative_preview(wrapper(request), payload)
+
+    assert canonical["arguments"]["expectedCompatibilityDigest"] == payload["compatibilityDigest"]
+    assert approval["target"]["compatibility"][key] == value
 
 
 @pytest.mark.parametrize("key", ["apiAssemblyDigest", "runtimeAssemblyDigest"])
@@ -442,6 +467,9 @@ def test_csharp_domain_is_fixed_schema_public_api_only() -> None:
 
     assert "NormalizeScenePath(scene.path)" not in source
     assert "(scene.path ?? string.Empty).Replace('\\\\', '/')" in source
+    assert "package.version != ExpectedPackageVersion" not in source
+    assert "packageEvidence.Digest != ExpectedPackageTreeDigest" not in source
+    assert "ValidatePublicApiSurface" in source
 
 
 def test_disposable_fixture_declares_all_negative_and_restore_controls() -> None:
@@ -453,7 +481,7 @@ def test_disposable_fixture_declares_all_negative_and_restore_controls() -> None
     source = path.read_text(encoding="utf-8")
     for fragment in (
         "VerifyMissingPackageFailsClosed",
-        "VerifyTamperedPackageFailsClosed",
+        "VerifyCompatiblePackageTreeDriftAccepted",
         "VerifyMethodSignatureDriftFailsClosed",
         "VerifyDuplicateFeatureFailsClosed",
         "VerifyStaleExpectedBeforeFailsClosed",

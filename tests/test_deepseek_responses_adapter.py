@@ -23,6 +23,7 @@ from provider_model_catalog_service import (
 from provider_runtime_adapters import DeepSeekResponsesAdapter, ProviderRuntimeRequest
 from vrchat_blendshape_agent import (
     Settings,
+    _responses_reasoning_effort,
     build_openai_compatible_request_payload,
     provider_display_name,
     provider_requires_api_key,
@@ -497,6 +498,14 @@ def test_runtime_auto_dispatches_responses_without_chat(monkeypatch) -> None:
     monkeypatch.setattr("vrchat_blendshape_agent.request_openai_compatible_plan_with_metadata", no_chat)
     response = request_llm_plan_with_metadata(settings(api_type="auto"), "p")
     assert response.text == '{"reply":"ok"}'
+
+
+def test_custom_responses_transport_does_not_apply_deepseek_reasoning_policy() -> None:
+    configured = settings(api_type="responses")
+    configured.llm_provider = "custom"
+    configured.llm_model = "step-3.5-flash"
+
+    assert _responses_reasoning_effort(configured) == ""
 
 
 def test_runtime_missing_api_type_migrates_flash_to_responses_without_chat(monkeypatch) -> None:

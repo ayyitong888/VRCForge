@@ -13,6 +13,15 @@ from outfit_package_inspector import inspect_outfit_package
 IMPORT_PLAN_SCHEMA = "vrcforge.outfit_import_plan.v1"
 DEFAULT_TARGET_ROOT = "Assets/VRCForge/ImportedOutfits"
 IMPORTABLE_COMPANION_EXTENSIONS = {".unitypackage", ".zip"}
+UNITY_IMPORT_CODE_PAYLOAD_SUFFIXES = {
+    ".boo",
+    ".bundle",
+    ".cs",
+    ".dll",
+    ".dylib",
+    ".js",
+    ".so",
+}
 SUPPORT_PACKAGE_PATTERNS = [
     r"material(?:s)?",
     r"mat(?:erial)?[_ -]?pack",
@@ -202,6 +211,7 @@ def build_outfit_import_plan(
     target_root = normalize_asset_folder(target_folder or default_target_folder(source_path))
     warnings = list(inspection.get("warnings") or [])
     explicit_selected_package = bool((selected_unitypackage or "").strip())
+    explicit_selected_prefab = bool((selected_prefab or "").strip())
     selected_package = select_entry(inspection.get("unityPackages"), selected_unitypackage)
     selected_prefab_entry = select_entry(inspection.get("prefabCandidates"), selected_prefab)
     source_type = str(source.get("type") or "")
@@ -232,6 +242,11 @@ def build_outfit_import_plan(
         source_path,
         package_order_preflight=package_order_preflight,
         compatibility_preflight=compatibility_preflight,
+        selected_prefab_path=(
+            str((selected_prefab_entry or {}).get("path") or "")
+            if explicit_selected_prefab
+            else ""
+        ),
     )
     warnings.extend(dependency_preflight.get("warnings") or [])
 
@@ -246,6 +261,7 @@ def build_outfit_import_plan(
             inspection=inspection,
             warnings=warnings,
             dependency_preflight=dependency_preflight,
+            selected_prefab_path=str((selected_prefab_entry or {}).get("path") or ""),
         )
     elif selected_prefab_entry:
         plan = build_loose_prefab_plan(
@@ -291,6 +307,7 @@ def build_unitypackage_plan(
     inspection: dict[str, Any],
     warnings: list[str],
     dependency_preflight: dict[str, Any],
+    selected_prefab_path: str = "",
 ) -> dict[str, Any]:
     package_entry_path = str(selected_package.get("path") or "").replace("\\", "/").strip("/")
     actual_package_path = resolve_selected_unitypackage_path(source_path, source_type, package_entry_path)
@@ -298,16 +315,35 @@ def build_unitypackage_plan(
     import_queue = package_order.get("importQueue") if isinstance(package_order.get("importQueue"), list) else []
     queue_can_apply = bool(import_queue) and not bool(package_order.get("requiresManualExtract"))
     needs_extract = actual_package_path is None and not queue_can_apply
-    ready = not needs_extract and bool(dependency_preflight.get("readyForImport"))
+    expected_assets_complete = not bool(inspection.get("summary", {}).get("truncated"))
+    ready = (
+        not needs_extract
+        and expected_assets_complete
+        and bool(dependency_preflight.get("readyForImport"))
+    )
     plan_warnings = list(warnings)
+    if not expected_assets_complete:
+        plan_warnings.append(
+            "Package inspection evidence was truncated; increase max_entries and inspect the complete package before apply."
+        )
     expected_assets = expected_asset_paths_from_inspection(inspection)
-    return {
-        "id": f"outfit_import_{stable_slug(source_path.stem)}_{timestamp_compact()}",
-        "kind": "unitypackage_container_manual_extract"
+    plan_kind = (
+        "unitypackage_container_manual_extract"
         if needs_extract
         else "unitypackage_import_sequence"
         if len(import_queue) > 1 or source_type == "zip"
-        else "unitypackage_import",
+        else "unitypackage_import"
+    )
+    risk_facts = build_unitypackage_import_risk_facts(
+        inspection,
+        project_root=project_root,
+        expected_asset_paths=expected_assets,
+        plan_kind=plan_kind,
+        import_queue_count=len(import_queue),
+    )
+    return {
+        "id": f"outfit_import_{stable_slug(source_path.stem)}_{timestamp_compact()}",
+        "kind": plan_kind,
         "ok": True,
         "readyToApply": ready,
         "requiresApproval": True,
@@ -324,8 +360,11 @@ def build_unitypackage_plan(
             "actualPackagePath": str(actual_package_path) if actual_package_path else "",
             "importQueue": import_queue,
         },
-        "selectedPrefab": first_prefab_path(inspection),
-        "expectedAssetPaths": expected_assets[:500],
+        "selectedPrefab": selected_prefab_path or first_prefab_path(inspection),
+        "expectedAssetPaths": expected_assets,
+        "expectedAssetPathCount": len(expected_assets),
+        "expectedAssetPathsComplete": expected_assets_complete,
+        "riskFacts": risk_facts,
         "dependencyPreflight": dependency_preflight,
         "writeTarget": "vrcforge_import_outfit_package" if ready else "",
         "steps": [
@@ -351,6 +390,104 @@ def build_unitypackage_plan(
     }
 
 
+def build_unitypackage_import_risk_facts(
+    inspection: dict[str, Any],
+    *,
+    project_root: Path | None,
+    expected_asset_paths: list[str],
+    plan_kind: str,
+    import_queue_count: int,
+) -> dict[str, Any]:
+    """Classify only effects that the prepared Unity import will trigger automatically."""
+
+    packages = [
+        package
+        for package in inspection.get("unityPackages") or []
+        if isinstance(package, dict)
+    ]
+    pathname_items = [
+        item
+        for package in packages
+        for item in package_pathname_evidence(package)
+        if isinstance(item, dict)
+    ]
+    pathnames = [
+        str(item.get("path") or "").replace("\\", "/").strip("/")
+        for item in pathname_items
+        if str(item.get("path") or "").strip()
+    ]
+    evidence_complete = bool(packages) and all(
+        package.get("pathnamesEvidenceComplete") is True for package in packages
+    )
+    summary = inspection.get("summary") if isinstance(inspection.get("summary"), dict) else {}
+    unsafe_pathname_count = int(summary.get("unsafePathnameCount") or 0)
+    code_payload_paths = [
+        path
+        for path in pathnames
+        if Path(path).suffix.casefold() in UNITY_IMPORT_CODE_PAYLOAD_SUFFIXES
+    ]
+    project_settings_paths = [
+        path for path in pathnames if path.casefold().startswith("projectsettings/")
+    ]
+    packages_paths = [
+        path for path in pathnames if path.casefold().startswith("packages/")
+    ]
+    unsupported_paths = [
+        path
+        for path in pathnames
+        if not path.casefold().startswith("assets/")
+        and path not in project_settings_paths
+        and path not in packages_paths
+    ]
+
+    existing_target_paths: list[str] = []
+    if project_root is not None:
+        for asset_path in expected_asset_paths:
+            target = project_root.joinpath(*asset_path.split("/"))
+            if os.path.lexists(target) or os.path.lexists(f"{target}.meta"):
+                existing_target_paths.append(asset_path)
+
+    reason_codes: list[str] = []
+    if not evidence_complete:
+        reason_codes.append("pathname_evidence_incomplete")
+    if unsafe_pathname_count:
+        reason_codes.append("unsafe_pathname")
+    if project_settings_paths:
+        reason_codes.append("project_settings_write")
+    if packages_paths:
+        reason_codes.append("packages_write")
+    if unsupported_paths:
+        reason_codes.append("unsupported_project_path")
+    if existing_target_paths:
+        reason_codes.append("existing_asset_overwrite")
+    if project_root is None:
+        reason_codes.append("target_absence_unverified")
+    if plan_kind != "unitypackage_import" or import_queue_count != 1:
+        reason_codes.append("multi_or_materialized_import")
+
+    medium_eligible = not reason_codes
+    return {
+        "schema": "vrcforge.outfit_import_risk_facts.v1",
+        "pathnameEvidenceComplete": evidence_complete,
+        "pathnameCount": len(pathnames),
+        "unsafePathnameCount": unsafe_pathname_count,
+        "codePayloadCount": len(code_payload_paths),
+        "codePayloadPaths": code_payload_paths[:32],
+        "automaticCodeExecutionPlanned": False,
+        "projectSettingsPathCount": len(project_settings_paths),
+        "packagesPathCount": len(packages_paths),
+        "unsupportedProjectPathCount": len(unsupported_paths),
+        "targetAbsenceChecked": project_root is not None,
+        "existingTargetPathCount": len(existing_target_paths),
+        "existingTargetPaths": existing_target_paths[:32],
+        "deleteRequested": False,
+        "importQueueCount": import_queue_count,
+        "mediumEligible": medium_eligible,
+        "recommendedRiskLevel": "medium" if medium_eligible else "high",
+        "reasonCodes": reason_codes,
+    }
+
+
 def build_loose_prefab_plan(
     source_path: Path,
     selected_prefab: dict[str, Any],
@@ -361,8 +498,17 @@ def build_loose_prefab_plan(
     warnings: list[str],
     dependency_preflight: dict[str, Any],
 ) -> dict[str, Any]:
-    ready = source_path.is_dir() and bool(dependency_preflight.get("readyForImport"))
+    expected_assets_complete = not bool(inspection.get("summary", {}).get("truncated"))
+    ready = (
+        source_path.is_dir()
+        and expected_assets_complete
+        and bool(dependency_preflight.get("readyForImport"))
+    )
     plan_warnings = list(warnings)
+    if not expected_assets_complete:
+        plan_warnings.append(
+            "Package inspection evidence was truncated; increase max_entries and inspect the complete package before apply."
+        )
     if not ready:
         plan_warnings.append("Single loose asset inputs need a folder context before VRCForge can safely copy related textures/materials.")
     expected_assets = loose_asset_paths_from_inspection(inspection)
@@ -384,7 +530,9 @@ def build_loose_prefab_plan(
             "selectedPrefab": str(selected_prefab.get("path") or ""),
         },
         "selectedPrefab": str(selected_prefab.get("path") or ""),
-        "expectedAssetPaths": [f"{target_root}/{path}" for path in expected_assets[:500]],
+        "expectedAssetPaths": [f"{target_root}/{path}" for path in expected_assets],
+        "expectedAssetPathCount": len(expected_assets),
+        "expectedAssetPathsComplete": expected_assets_complete,
         "dependencyPreflight": dependency_preflight,
         "writeTarget": "vrcforge_import_outfit_package" if ready else "",
         "steps": [
@@ -451,12 +599,22 @@ def build_dependency_preflight(
     source_path: Path,
     package_order_preflight: dict[str, Any] | None = None,
     compatibility_preflight: dict[str, Any] | None = None,
+    selected_prefab_path: str = "",
 ) -> dict[str, Any]:
     package_paths = dependency_scan_paths(inspection)
     source_tokens = [source_path.name, str((inspection.get("source") or {}).get("name") or "")]
     manifest_dependencies = read_project_manifest_dependencies(project_root)
     entries: list[dict[str, Any]] = []
     warnings: list[str] = []
+    selected_shader_rule_ids = {
+        str(rule["id"])
+        for rule in DEPENDENCY_RULES
+        if str(rule.get("kind") or "") == "shader"
+        and matching_evidence(
+            [selected_prefab_path],
+            [str(item) for item in rule.get("hintPatterns") or []],
+        )
+    }
 
     for rule in DEPENDENCY_RULES:
         label = str(rule["label"])
@@ -466,6 +624,7 @@ def build_dependency_preflight(
         project_evidence = project_dependency_evidence(project_root, manifest_dependencies, rule)
 
         detected = bool(bundled_evidence or hint_evidence or project_evidence)
+        selected_shader_variant = False
         if not detected:
             status = "not_detected"
             message = f"{label} was not detected from package pathnames."
@@ -480,9 +639,24 @@ def build_dependency_preflight(
             blocking = False
         else:
             status = "missing"
-            message = f"{label} is referenced by package pathnames but was not detected in the Unity project."
-            blocking = str(rule.get("stage") or "") == "before_import"
-            warnings.append(f"Install {label} before importing this outfit package.")
+            selected_shader_variant = (
+                str(rule.get("kind") or "") == "shader"
+                and bool(selected_shader_rule_ids)
+                and str(rule["id"]) not in selected_shader_rule_ids
+            )
+            if selected_shader_variant:
+                message = (
+                    f"{label} is referenced only by an unselected prefab variant; "
+                    "the selected prefab does not require it."
+                )
+                blocking = False
+                warnings.append(
+                    f"{label} is not installed; assets for the unselected {label} prefab variant may render incorrectly."
+                )
+            else:
+                message = f"{label} is referenced by package pathnames but was not detected in the Unity project."
+                blocking = str(rule.get("stage") or "") == "before_import"
+                warnings.append(f"Install {label} before importing this outfit package.")
 
         entries.append(
             {
@@ -546,7 +720,7 @@ def dependency_scan_paths(inspection: dict[str, Any]) -> list[str]:
             path = str(package.get("path") or "").replace("\\", "/").strip("/")
             if path:
                 paths.append(path)
-            for item in package.get("pathnames") or []:
+            for item in package_pathname_evidence(package):
                 if isinstance(item, dict):
                     nested = str(item.get("path") or "").replace("\\", "/").strip("/")
                     if nested:
@@ -1089,7 +1263,7 @@ def expected_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str
     for package in inspection.get("unityPackages") or []:
         if not isinstance(package, dict):
             continue
-        for item in package.get("pathnames") or []:
+        for item in package_pathname_evidence(package):
             if isinstance(item, dict):
                 path = str(item.get("path") or "").replace("\\", "/").strip("/")
                 if path.startswith("Assets/"):
@@ -1097,6 +1271,15 @@ def expected_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str
     if paths:
         return sorted(dict.fromkeys(paths), key=str.lower)
     return loose_asset_paths_from_inspection(inspection)
+
+
+def package_pathname_evidence(package: dict[str, Any]) -> list[Any]:
+    """Return complete pathname evidence, with a legacy receipt fallback."""
+    evidence = package.get("pathnamesEvidence")
+    if isinstance(evidence, list):
+        return evidence
+    legacy = package.get("pathnames")
+    return legacy if isinstance(legacy, list) else []
 
 
 def loose_asset_paths_from_inspection(inspection: dict[str, Any]) -> list[str]:

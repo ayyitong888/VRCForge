@@ -10,6 +10,8 @@
 use serde::{Deserialize, Serialize};
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::sync::OnceLock;
 use tauri::{AppHandle, Emitter, Manager};
 #[cfg(windows)]
 use windows_sys::Win32::{
@@ -18,7 +20,10 @@ use windows_sys::Win32::{
         RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_SET_VALUE,
         REG_OPTION_NON_VOLATILE, REG_SZ,
     },
-    UI::Shell::SetCurrentProcessExplicitAppUserModelID,
+    UI::{
+        Shell::{ExtractIconExW, SetCurrentProcessExplicitAppUserModelID},
+        WindowsAndMessaging::{SendMessageW, HICON, ICON_BIG, WM_SETICON},
+    },
 };
 
 const APPROVAL_NOTIFICATION_APP_ID: &str = "app.vrcforge.agentic";
@@ -31,6 +36,8 @@ const MAX_NOTIFICATION_ID_LENGTH: usize = 128;
 const MAX_TITLE_LENGTH: usize = 120;
 const MAX_BODY_LENGTH: usize = 512;
 const MAX_ACTION_LABEL_LENGTH: usize = 32;
+#[cfg(windows)]
+static MAIN_WINDOW_TASKBAR_ICON: OnceLock<usize> = OnceLock::new();
 const SUB_AGENT_REVIEW_NOTIFICATION_ACTION_EVENT: &str =
     "vrcforge-sub-agent-review-notification-action";
 const SUB_AGENT_REVIEW_NOTIFICATION_OPEN_ACTION: &str = "open";
@@ -42,6 +49,35 @@ pub(crate) fn bind_approval_notification_identity() -> bool {
     }
     let app_id = wide_null(APPROVAL_NOTIFICATION_APP_ID);
     unsafe { SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr()) == 0 }
+}
+
+#[cfg(windows)]
+pub(crate) fn bind_main_window_taskbar_icon(window: &tauri::WebviewWindow) -> bool {
+    let Ok(hwnd) = window.hwnd() else {
+        return false;
+    };
+    let icon = if let Some(icon) = MAIN_WINDOW_TASKBAR_ICON.get() {
+        *icon as HICON
+    } else {
+        let Ok(executable) = std::env::current_exe() else {
+            return false;
+        };
+        let executable = wide_null(executable.to_string_lossy().as_ref());
+        let mut icon: HICON = std::ptr::null_mut();
+        let extracted =
+            unsafe { ExtractIconExW(executable.as_ptr(), 0, &mut icon, std::ptr::null_mut(), 1) };
+        if extracted == 0 || icon.is_null() {
+            return false;
+        }
+        // WM_SETICON retains the handle instead of copying it. Keep this one
+        // process-owned icon alive until Windows reclaims the process resources.
+        let _ = MAIN_WINDOW_TASKBAR_ICON.set(icon as usize);
+        icon
+    };
+    unsafe {
+        SendMessageW(hwnd.0 as _, WM_SETICON, ICON_BIG as usize, icon as isize);
+    }
+    true
 }
 
 #[derive(Deserialize)]

@@ -372,10 +372,9 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed("Prefab result path differs from the approved expectation.");
                 }
-                if (!string.IsNullOrWhiteSpace(p.expectedResultPath)
-                    && AssetPrefabCore.CountHierarchyPath(expectedResultPath, scene.handle) != 0)
+                if (AssetPrefabCore.CountHierarchyPath(expectedResultPath, scene.handle) != 0)
                 {
-                    return VRCForgeToolResult.Failed("Approval-bound prefab result path is no longer absent.");
+                    return VRCForgeToolResult.Failed($"Prefab result path '{expectedResultPath}' already exists; refusing to create an ambiguous duplicate.");
                 }
                 var worldPositionStays = p.worldPositionStays ?? true;
 

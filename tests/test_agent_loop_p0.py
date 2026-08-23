@@ -2151,6 +2151,12 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_unrelated_success_cannot_clear_an_unresolved_tool_failure(self) -> None:
         gateway = self.gateway
+        gateway.runtime_sessions.load_internal_tool_block(
+            "unrelated-success-session", "unity/materials"
+        )
+        gateway.runtime_sessions.load_internal_tool_block(
+            "unrelated-success-session", "diagnostics"
+        )
         llm_results = iter(
             [
                 SimpleNamespace(
@@ -2159,7 +2165,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     reasoning={},
                 ),
                 SimpleNamespace(
-                    text='{"action":"skill","skill_tool":"unity_health","skill_params":{}}',
+                    text='{"action":"skill","skill_tool":"health","skill_params":{}}',
                     usage={},
                     reasoning={},
                 ),
@@ -2505,6 +2511,9 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_supervised_write_misclassified_as_skill_is_refed_then_requests_approval(self) -> None:
         gateway = self.gateway
+        gateway.runtime_sessions.load_internal_tool_block(
+            "write-kind-correction-session", "attachments"
+        )
         prompts: list[str] = []
         angles = ["front", "side_left", "side_right", "back"]
         responses = iter(
@@ -2523,7 +2532,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     text=json.dumps(
                         {
                             "action": "skill",
-                            "skill_tool": "unity_capture_multi_screenshot",
+                            "skill_tool": "capture_multi_screenshot",
                             "skill_params": {"angles": angles},
                         }
                     ),
@@ -2534,7 +2543,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                     text=json.dumps(
                         {
                             "action": "write",
-                            "write_tool": "unity_capture_multi_screenshot",
+                            "write_tool": "capture_multi_screenshot",
                             "write_params": {"angles": angles},
                         }
                     ),
@@ -2631,6 +2640,9 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_approved_multi_capture_runs_bound_visual_audit_without_replaying_write(self) -> None:
         gateway = self.gateway
+        gateway.runtime_sessions.load_internal_tool_block(
+            "managed-visual-chain-session", "attachments"
+        )
         project = self._unity_project()
         message = "Capture front and back views, then run a visual audit."
         capture_arguments: dict[str, object] = {}
@@ -2657,7 +2669,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             elif len(planner_prompts) == 2:
                 payload = {
                     "action": "write",
-                    "write_tool": "unity_capture_multi_screenshot",
+                    "write_tool": "capture_multi_screenshot",
                     "write_params": capture_arguments,
                     "summary": "Capture the approved fixed-angle views.",
                 }
@@ -2876,6 +2888,9 @@ class AgentLoopP0Tests(unittest.TestCase):
 
     def test_permanent_visual_provider_rejection_refeeds_route_and_discards_images(self) -> None:
         gateway = self.gateway
+        gateway.runtime_sessions.load_internal_tool_block(
+            "managed-visual-rejection-session", "attachments"
+        )
         project = self._unity_project()
         message = "Capture front and back views, then run a visual audit."
         planner_prompts: list[str] = []
@@ -2890,7 +2905,7 @@ class AgentLoopP0Tests(unittest.TestCase):
             elif len(planner_prompts) == 2:
                 payload = {
                     "action": "write",
-                    "write_tool": "unity_capture_multi_screenshot",
+                    "write_tool": "capture_multi_screenshot",
                     "write_params": {},
                     "summary": "Capture the approved fixed-angle views.",
                 }

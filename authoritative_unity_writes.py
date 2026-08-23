@@ -50,6 +50,27 @@ from texture_import_settings import (
     bind_authoritative_preview as bind_texture_import_settings_preview,
     build_preview_arguments as build_texture_import_settings_preview_arguments,
 )
+from scene_asset_save import (
+    TOOL_NAME as SAVE_NEW_SCENE_TOOL,
+    SceneAssetSaveError,
+    bind_authoritative_preview as bind_scene_asset_save_preview,
+    build_preview_arguments as build_scene_asset_save_preview_arguments,
+    validate_apply_result as validate_scene_asset_save_apply_result,
+)
+from scene_asset_save_current import (
+    TOOL_NAME as SAVE_CURRENT_SCENE_TOOL,
+    CurrentSceneSaveError,
+    bind_authoritative_preview as bind_current_scene_save_preview,
+    build_preview_arguments as build_current_scene_save_preview_arguments,
+    validate_apply_result as validate_current_scene_save_apply_result,
+)
+from project_asset_copy import (
+    TOOL_NAME as PROJECT_ASSET_COPY_TOOL,
+    ProjectAssetCopyError,
+    bind_authoritative_preview as bind_project_asset_copy_preview,
+    build_preview_arguments as build_project_asset_copy_preview_arguments,
+    validate_apply_result as validate_project_asset_copy_apply_result,
+)
 
 
 PreviewInvoker = Callable[[str, dict[str, Any]], Any]
@@ -73,9 +94,18 @@ class AuthoritativeUnityWriteSpec:
 
 
 class AuthoritativeUnityWriteError(ValueError):
-    def __init__(self, message: str, *, status_code: int) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        details: dict[str, Any] | None = None,
+        raw_result: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.details = dict(details or {})
+        self.raw_result = dict(raw_result or {})
 
 
 def _scene_preview_builder(tool_name: str) -> PreviewBuilder:
@@ -165,6 +195,42 @@ _SPECS = {
         validate_apply=validate_atomic_reference_rename_apply_result,
         result_error="Atomic reference rename apply returned an invalid verification receipt.",
     ),
+    SAVE_NEW_SCENE_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=SAVE_NEW_SCENE_TOOL,
+        request_error="New scene arguments are required.",
+        bridge_error="New scene preview could not be verified against the current project.",
+        receipt_error="New scene preview returned an invalid verification receipt.",
+        domain_error=SceneAssetSaveError,
+        build_preview=build_scene_asset_save_preview_arguments,
+        bind_preview=bind_scene_asset_save_preview,
+        include_project_path_in_preview=True,
+        validate_apply=validate_scene_asset_save_apply_result,
+        result_error="New scene apply returned an invalid verification receipt.",
+    ),
+    SAVE_CURRENT_SCENE_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=SAVE_CURRENT_SCENE_TOOL,
+        request_error="Current scene arguments are required.",
+        bridge_error="Current scene preview could not be verified against the current project.",
+        receipt_error="Current scene preview returned an invalid verification receipt.",
+        domain_error=CurrentSceneSaveError,
+        build_preview=build_current_scene_save_preview_arguments,
+        bind_preview=bind_current_scene_save_preview,
+        include_project_path_in_preview=True,
+        validate_apply=validate_current_scene_save_apply_result,
+        result_error="Current scene apply returned an invalid verification receipt.",
+    ),
+    PROJECT_ASSET_COPY_TOOL: AuthoritativeUnityWriteSpec(
+        tool_name=PROJECT_ASSET_COPY_TOOL,
+        request_error="Project asset copy arguments are required.",
+        bridge_error="Project asset copy preview could not be verified against the current project.",
+        receipt_error="Project asset copy preview returned an invalid verification receipt.",
+        domain_error=ProjectAssetCopyError,
+        build_preview=build_project_asset_copy_preview_arguments,
+        bind_preview=bind_project_asset_copy_preview,
+        include_project_path_in_preview=True,
+        validate_apply=validate_project_asset_copy_apply_result,
+        result_error="Project asset copy apply returned an invalid verification receipt.",
+    ),
 }
 
 
@@ -202,10 +268,46 @@ def prepare_authoritative_unity_write(
     except Exception as exc:  # noqa: BLE001 - transport details must not cross this boundary.
         raise AuthoritativeUnityWriteError(spec.bridge_error, status_code=409) from exc
 
+    if isinstance(payload, dict):
+        structured = payload.get("structuredContent") if isinstance(payload.get("structuredContent"), dict) else payload
+        if payload.get("isError") is True or structured.get("ok") is False or (
+            "code" in structured and "schema" not in structured
+        ):
+            code = str(structured.get("code") or structured.get("errorCode") or "preview_failed").strip()
+            reason = str(structured.get("message") or structured.get("error") or spec.bridge_error).strip()
+            raw_failure = dict(structured)
+            raw_failure.setdefault("failureLayer", "unity_core_preview")
+            raw_failure.setdefault("failurePhase", "preview_rejected")
+            raw_failure.setdefault("toolRoutingStarted", False)
+            raw_failure.setdefault("mutationStarted", False)
+            raw_failure.setdefault("committed", False)
+            raw_failure.setdefault("commitState", "not_started")
+            raw_failure.setdefault("requestMayHaveCommitted", False)
+            raw_failure.setdefault("checkpointRecoveryRequired", False)
+            raise AuthoritativeUnityWriteError(
+                reason,
+                status_code=409,
+                details={
+                    "failureLayer": "unity_core_preview",
+                    "failurePhase": "preview_rejected",
+                    "errorCode": code,
+                    "error": reason,
+                    "mutationStarted": False,
+                    "committed": False,
+                    "commitState": "not_started",
+                    "requestMayHaveCommitted": False,
+                    "checkpointRecoveryRequired": False,
+                },
+                raw_result=raw_failure,
+            )
+
     try:
         return spec.bind_preview(canonical_request, payload)
     except spec.domain_error as exc:
-        raise AuthoritativeUnityWriteError(spec.receipt_error, status_code=409) from exc
+        raise AuthoritativeUnityWriteError(
+            f"{spec.receipt_error} Reason: {exc}",
+            status_code=409,
+        ) from exc
     except Exception as exc:  # noqa: BLE001 - receipt parser details must not cross this boundary.
         raise AuthoritativeUnityWriteError(spec.receipt_error, status_code=409) from exc
 

@@ -49,9 +49,35 @@ def test_discover_list_and_call_are_strict_2026(router):
 
     called, status = router.handle(_request("tools/call", {"name": "echo", "arguments": {"value": "ok"}}))
     assert status == 200
-    assert called["result"]["structuredContent"] == {"ok": True, "echo": "echo:ok"}
+    structured = called["result"]["structuredContent"]
+    assert {key: structured[key] for key in ("ok", "echo")} == {
+        "ok": True,
+        "echo": "echo:ok",
+    }
+    assert structured["outcome"]["status"] == "ok"
     assert json.loads(called["result"]["content"][0]["text"]) == called["result"]["structuredContent"]
     assert called["result"]["isError"] is False
+
+
+def test_nested_mcp_catalogue_preserves_write_permission_annotation() -> None:
+    routed = Mcp2026Router(
+        lambda _params: [
+            {
+                "name": "write_from_upstream_mcp",
+                "description": "Write one approved object.",
+                "inputSchema": {"type": "object"},
+                "_meta": {"permission": "Write", "toolBlock": "avatar"},
+            }
+        ],
+        lambda _name, _arguments: {"ok": True},
+    )
+
+    listed, status = routed.handle(_request("tools/list"))
+
+    assert status == 200
+    tool = listed["result"]["tools"][0]
+    assert tool["annotations"]["readOnlyHint"] is False
+    assert tool["_meta"]["permission"] == "Write"
 
 
 def test_call_uses_execution_catalogue_when_client_does_not_repeat_layer() -> None:
@@ -80,6 +106,37 @@ def test_call_uses_execution_catalogue_when_client_does_not_repeat_layer() -> No
     assert observed_layers == ["planning", "execution"]
 
 
+def test_2026_stdio_notifies_client_when_tool_blocks_change() -> None:
+    revision = {"value": 0}
+
+    def call_tool(name, _arguments):
+        assert name == "load_block"
+        revision["value"] += 1
+        return {"ok": True, "toolListChanged": True}
+
+    routed = Mcp2026Router(
+        lambda _params: [{"name": "load_block"}],
+        call_tool,
+        tool_list_revision=lambda: revision["value"],
+    )
+    source = io.StringIO(
+        "\n".join(
+            [
+                json.dumps(_request("server/discover", request_id=1)),
+                json.dumps(_request("tools/call", {"name": "load_block", "arguments": {}}, request_id=2)),
+                "",
+            ]
+        )
+    )
+    sink = io.StringIO()
+
+    assert run_stdio_loop(routed, input_stream=source, output_stream=sink) == 0
+    output = [json.loads(line) for line in sink.getvalue().splitlines()]
+    assert output[0]["result"]["capabilities"] == {"tools": {"listChanged": True}}
+    assert output[1]["result"]["structuredContent"]["toolListChanged"] is True
+    assert output[2] == {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+
+
 @pytest.mark.parametrize(
     "message, code",
     [
@@ -98,6 +155,12 @@ def test_call_uses_execution_catalogue_when_client_does_not_repeat_layer() -> No
 def test_router_rejects_legacy_and_bad_shapes(router, message, code):
     response, status = router.handle(message)
     assert response["error"]["code"] == code
+    assert response["error"]["data"]["schema"] == "vrcforge.external_tool_error.v1"
+    assert response["error"]["data"]["protocolNamespace"] == (
+        "io.modelcontextprotocol/protocolVersion"
+    )
+    assert response["error"]["data"]["protocolVersion"] == "2026-07-28"
+    assert response["error"]["data"]["mutationStarted"] is False
     assert status == (404 if code == -32601 else 400)
 
 
@@ -224,7 +287,8 @@ def test_tool_result_cycle_is_shaped_and_stdio_survives():
     assert run_stdio_loop(invalid_router, input_stream=source, output_stream=sink) == 0
     output = [json.loads(line) for line in sink.getvalue().splitlines()]
     assert output[0]["error"]["code"] == -32603
-    assert output[1]["result"]["structuredContent"] == {"ok": True}
+    assert output[1]["result"]["structuredContent"]["ok"] is True
+    assert output[1]["result"]["structuredContent"]["outcome"]["status"] == "ok"
 
 
 def test_async_callbacks_work(router):

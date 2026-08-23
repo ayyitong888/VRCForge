@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEngine;
@@ -10,7 +11,7 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_capture_scene_view",
-        Summary = "Capture Unity Scene View outside Play Mode, or the current Game View during Play Mode, to a PNG via a predefined VRCForge tool."
+        Summary = "Capture Unity Scene View or Game View to a PNG via a predefined VRCForge tool; scene_view remains available while Gesture Manager is running in Play Mode."
     )]
     public static class SceneViewCaptureTool
     {
@@ -24,6 +25,7 @@ namespace VRCForge.Editor
         {
             [VRCForgeInput("Return capture readiness without writing an image.", IsRequired = false)] public bool? statusOnly { get; set; } = false;
             [VRCForgeInput("Require Play Mode before capture.", IsRequired = false)] public bool? requirePlayMode { get; set; } = false;
+            [VRCForgeInput("Capture mode: auto, scene_view, or game_view.", IsRequired = false)] public string captureMode { get; set; } = "auto";
             [VRCForgeInput("Approved image output path.", IsRequired = false)] public string outputPath { get; set; } = "";
             [VRCForgeInput("Capture width, from 256 through 2048 pixels.", IsRequired = false)] public int? width { get; set; } = 960;
             [VRCForgeInput("Capture height, from 256 through 2048 pixels.", IsRequired = false)] public int? height { get; set; } = 960;
@@ -34,6 +36,9 @@ namespace VRCForge.Editor
             [VRCForgeInput("Scene view roll in degrees.", IsRequired = false)] public float? roll { get; set; } = 0f;
             [VRCForgeInput("Optional avatar hierarchy path used for avatar-scoped capture.", IsRequired = false)] public string avatarPath { get; set; } = "";
             [VRCForgeInput("Capture scope: avatar or scene.", IsRequired = false)] public string captureScope { get; set; } = "avatar";
+            [VRCForgeInput("Include all Gesture Manager runtime parameters in capture status.", IsRequired = false)] public bool? includeGestureManagerParameters { get; set; } = false;
+            [VRCForgeInput("Exact Gesture Manager parameter names to include without returning the full parameter list.", IsRequired = false)] public string[] gestureManagerParameterNames { get; set; } = Array.Empty<string>();
+            [VRCForgeInput("Gesture Manager parameter-name prefix to include without returning the full parameter list.", IsRequired = false)] public string gestureManagerParameterPrefix { get; set; } = "";
         }
 
         public static object HandleCommand(JObject @params)
@@ -57,12 +62,40 @@ namespace VRCForge.Editor
                 var roll = @params?["roll"]?.Value<float?>() ?? 0f;
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
                 var captureScope = (@params?["captureScope"]?.ToString() ?? "avatar").Trim().ToLowerInvariant();
+                var includeGestureManagerParameters = @params?["includeGestureManagerParameters"]?.Value<bool?>() ?? false;
+                var gestureManagerParameterNames = (@params?["gestureManagerParameterNames"] as JArray)?
+                    .Values<string>()
+                    .Where(item => !string.IsNullOrWhiteSpace(item))
+                    .Select(item => item.Trim())
+                    .Distinct(StringComparer.Ordinal)
+                    .Take(128)
+                    .ToArray() ?? Array.Empty<string>();
+                var gestureManagerParameterPrefix = (@params?["gestureManagerParameterPrefix"]?.ToString() ?? string.Empty).Trim();
+                var requestedCaptureMode = (@params?["captureMode"]?.ToString() ?? "auto").Trim().ToLowerInvariant();
+                if (requestedCaptureMode != "auto"
+                    && requestedCaptureMode != "scene_view"
+                    && requestedCaptureMode != "game_view")
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation(
+                        "capture_mode_invalid",
+                        "captureMode must be auto, scene_view, or game_view.",
+                        "unity_capture",
+                        "argument_validation");
+                }
 
                 var isPlayMode = EditorApplication.isPlaying;
-                var captureMode = isPlayMode ? "game_view" : "scene_view";
+                var captureMode = requestedCaptureMode == "auto"
+                    ? (isPlayMode ? "game_view" : "scene_view")
+                    : requestedCaptureMode;
+                var playModeNeeded = requirePlayMode || captureMode == "game_view";
                 var warnings = new List<string>();
-                var gestureManagerDetected = isPlayMode && IsGestureManagerRunning();
-                var activeGameCamera = isPlayMode ? ResolveActiveGameCamera() : null;
+                var gestureManagerStatus = GestureManagerRuntimeBridge.ReadStatus(
+                    avatarPath,
+                    includeGestureManagerParameters,
+                    gestureManagerParameterNames,
+                    gestureManagerParameterPrefix);
+                var gestureManagerDetected = isPlayMode && gestureManagerStatus.detected;
+                var activeGameCamera = isPlayMode && captureMode == "game_view" ? ResolveActiveGameCamera() : null;
                 var gameViewCaptureMethod = string.Empty;
 
                 if (!isPlayMode)
@@ -82,20 +115,26 @@ namespace VRCForge.Editor
                         new
                         {
                             isPlayMode,
+                            requestedCaptureMode,
                             captureMode,
                             requirePlayMode,
-                            canCapture = !requirePlayMode || isPlayMode,
+                            canCapture = !playModeNeeded || isPlayMode,
                             gestureManagerDetected,
+                            gestureManager = gestureManagerStatus,
                             activeGameCameraDetected = activeGameCamera != null,
                             activeGameCameraName = activeGameCamera != null ? activeGameCamera.name : string.Empty,
                             warnings = warnings.ToArray(),
-                            error = requirePlayMode && !isPlayMode ? PlayModeRequiredMessage : string.Empty
+                            error = playModeNeeded && !isPlayMode ? PlayModeRequiredMessage : string.Empty
                         });
                 }
 
-                if (requirePlayMode && !isPlayMode)
+                if (playModeNeeded && !isPlayMode)
                 {
-                    return VRCForgeToolResult.Failed(PlayModeRequiredMessage);
+                    return VRCForgeToolResult.RejectedBeforeMutation(
+                        "capture_play_mode_required",
+                        PlayModeRequiredMessage,
+                        "unity_capture",
+                        "capture_precondition");
                 }
 
                 var absolutePath = ResolveToAbsolutePath(outputPath);
@@ -107,15 +146,49 @@ namespace VRCForge.Editor
 
                 Directory.CreateDirectory(directory);
 
-                if (isPlayMode)
+                if (captureMode == "game_view")
                 {
-                    if (setRotation)
-                    {
-                        warnings.Add("Play Mode capture uses the current Game View camera. Scene View rotation parameters are ignored; adjust the Game View/Gesture Manager view before capture.");
-                    }
+                    var playUsedOrbitCamera = false;
+                    var playResolvedAvatarPath = string.Empty;
+                    var playTargetCenter = Vector3.zero;
+                    var playCameraPosition = Vector3.zero;
+                    var playOrthographicSize = 0f;
 
                     TryShowGameView();
-                    gameViewCaptureMethod = CaptureGameViewToPng(absolutePath, width, height, warnings);
+                    if (setRotation
+                        && activeGameCamera != null
+                        && TryResolveCaptureTarget(
+                            avatarPath,
+                            captureScope,
+                            out var playBounds,
+                            out var playBaseRotation,
+                            out playResolvedAvatarPath))
+                    {
+                        CaptureOrbitCamera(
+                            sceneCamera: activeGameCamera,
+                            absolutePath: absolutePath,
+                            width: width,
+                            height: height,
+                            pitch: pitch,
+                            yaw: yaw,
+                            roll: roll,
+                            bounds: playBounds,
+                            baseRotation: playBaseRotation,
+                            out playTargetCenter,
+                            out playCameraPosition,
+                            out playOrthographicSize);
+                        playUsedOrbitCamera = true;
+                        gameViewCaptureMethod = "play_mode_orbit_camera";
+                        warnings.Add("Play Mode avatar capture used a temporary orbit camera; the active Game camera and scene were not modified.");
+                    }
+                    else
+                    {
+                        if (setRotation)
+                        {
+                            warnings.Add("Play Mode avatar target could not be resolved for temporary framing; falling back to the active Game camera without modifying it.");
+                        }
+                        gameViewCaptureMethod = CaptureGameViewToPng(absolutePath, width, height, warnings);
+                    }
                     return VRCForgeToolResult.Completed(
                         $"Captured Game View screenshot: {absolutePath}",
                         new
@@ -129,18 +202,20 @@ namespace VRCForge.Editor
                             captureScope,
                             setRotation,
                             avatarPath,
-                            resolvedAvatarPath = string.Empty,
-                            usedOrbitCamera = false,
+                            requestedCaptureMode,
+                            resolvedAvatarPath = playResolvedAvatarPath,
+                            usedOrbitCamera = playUsedOrbitCamera,
                             captureMode,
                             isPlayMode,
                             gestureManagerDetected,
+                            gestureManager = gestureManagerStatus,
                             activeGameCameraDetected = activeGameCamera != null,
                             activeGameCameraName = activeGameCamera != null ? activeGameCamera.name : string.Empty,
                             gameViewCaptureMethod,
                             warnings = warnings.ToArray(),
-                            targetCenter = new { x = 0f, y = 0f, z = 0f },
-                            cameraPosition = new { x = 0f, y = 0f, z = 0f },
-                            orthographicSize = 0f
+                            targetCenter = new { x = playTargetCenter.x, y = playTargetCenter.y, z = playTargetCenter.z },
+                            cameraPosition = new { x = playCameraPosition.x, y = playCameraPosition.y, z = playCameraPosition.z },
+                            orthographicSize = playOrthographicSize
                         });
                 }
 
@@ -217,6 +292,7 @@ namespace VRCForge.Editor
                         captureScope,
                         setRotation,
                         avatarPath,
+                        requestedCaptureMode,
                         resolvedAvatarPath,
                         usedOrbitCamera,
                         captureMode,
@@ -414,6 +490,10 @@ namespace VRCForge.Editor
 
         private static bool IsGestureManagerRunning()
         {
+            if (GestureManagerRuntimeBridge.IsRunning())
+            {
+                return true;
+            }
             foreach (var behaviour in Resources.FindObjectsOfTypeAll<MonoBehaviour>())
             {
                 if (behaviour == null || behaviour.gameObject == null || !IsSceneObject(behaviour.gameObject))

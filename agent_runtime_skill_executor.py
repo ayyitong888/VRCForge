@@ -111,7 +111,7 @@ class AgentRuntimeSkillExecutor:
                 )
             if snapshot:
                 return self._execute_skill_package(snapshot, params, agent_name, config, owner_id)
-            return {
+            payload = {
                 "ok": False,
                 "status": "blocked",
                 "tool": tool_name,
@@ -213,6 +213,22 @@ class AgentRuntimeSkillExecutor:
                 "paramsSummary": params_summary,
                 "error": str(exc),
             }
+            payload["cause"] = {
+                "layer": "runtime_skill_executor",
+                "phase": "tool_invocation",
+                "category": type(exc).__name__,
+                "code": str(getattr(exc, "cause_code", "") or "runtime_tool_error"),
+                "message": str(exc)[:600],
+                "mutationStarted": None if tool.write else False,
+                "committed": None if tool.write else False,
+                "commitState": "unknown" if tool.write else "not_started",
+            }
+            payload["outcome"] = normalize_agent_tool_result(
+                payload,
+                fallback_summary=str(exc),
+                write=tool.write,
+            )
+            return payload
 
     def _execute_skill_package(
         self,

@@ -1,5 +1,5 @@
 {
-  "schema": "vrcforge.unity_mcp_64_success_matrix.part.v1",
+  "schema": "vrcforge.unity_mcp_78_success_matrix.part.v1",
   "part": "b",
   "cases": [
     {
@@ -45,6 +45,33 @@
       "minimalArguments": { "gameObjectPath": "${TARGET_GAMEOBJECT_PATH}", "componentType": "UnityEngine.Transform", "propertyPath": "position" },
       "requiredFixtures": ["${TARGET_GAMEOBJECT_PATH} has a Transform component and readable position property."],
       "successFields": ["gameObjectPath", "componentType", "componentIndex", "propertyPath", "valueType", "propertyValue"],
+      "cleanup": ["none"]
+    },
+    {
+      "id": "gesture-manager-enter-play-mode",
+      "tool": "vrc_gesture_manager_enter_play_mode",
+      "mode": "approved_apply",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}" },
+      "requiredFixtures": ["Gesture Manager 3.9.9 package", "exactly one active scene Gesture Manager", "one active compatible avatar at ${AVATAR_PATH}", "Unity is in Edit Mode"],
+      "successFields": ["managerPath", "avatarPath", "packageVersion", "editorEntryPoint", "enterPlayModePending", "committed", "commitState"],
+      "cleanup": ["Exit disposable Play Mode after the connected module identity has been read back."]
+    },
+    {
+      "id": "gesture-manager-set-parameter",
+      "tool": "vrc_gesture_manager_set_parameter",
+      "mode": "approved_apply",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "parameterName": "${GESTURE_MANAGER_PARAMETER}", "value": 1.0 },
+      "requiredFixtures": ["Gesture Manager 3.9 package", "active Play Mode Gesture Manager connected to ${AVATAR_PATH}", "existing runtime parameter ${GESTURE_MANAGER_PARAMETER}"],
+      "successFields": ["managerPath", "avatarPath", "parameterName", "beforeValue", "afterValue", "persistent", "sceneDirty", "committed", "commitState"],
+      "cleanup": ["Exit disposable Play Mode so runtime-only parameter state is discarded."]
+    },
+    {
+      "id": "inspect-skinned-mesh-bone-usage",
+      "tool": "vrc_inspect_skinned_mesh_bone_usage",
+      "mode": "read_only",
+      "minimalArguments": { "gameObjectPath": "${SKINNED_RENDERER_PATH}", "componentIndex": 0, "minimumWeight": 0.000001 },
+      "requiredFixtures": ["${SKINNED_RENDERER_PATH} has a readable SkinnedMeshRenderer mesh with at least one non-zero bone weight."],
+      "successFields": ["gameObjectPath", "meshName", "vertexCount", "rendererBoneCount", "usedBoneCount", "usedBones[0].index"],
       "cleanup": ["none"]
     },
     {

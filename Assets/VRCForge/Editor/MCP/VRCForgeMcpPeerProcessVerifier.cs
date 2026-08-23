@@ -4,9 +4,6 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
-using Newtonsoft.Json.Linq;
-using UnityEngine;
 
 namespace VRCForge.Editor
 {
@@ -15,9 +12,11 @@ namespace VRCForge.Editor
     // instead of any caller-supplied PID. The Core owns its call lifetime: call
     // it immediately before App preview/safety/approved-write operations and
     // discard the evidence when the TcpClient is closed. The bearer proves local
-    // capability possession; the release-paired hashes screen the expected managed
-    // payload. This does not claim publisher identity or defend against a caller
-    // that can modify the imported Core, inspect its memory, or inject processes.
+    // capability possession; the OS-owned loopback peer and direct desktop-child
+    // lifetime screen the managed process layout. Release hashes are install-time
+    // integrity evidence and are intentionally not a runtime authorization gate.
+    // This does not defend against a caller that can modify the imported Core,
+    // inspect its memory, or inject processes.
     internal sealed class VRCForgeMcpPeerProcessEvidence
     {
         internal int ProcessId { get; private set; }
@@ -149,7 +148,7 @@ namespace VRCForge.Editor
                 {
                     return false;
                 }
-                if (!VerifyPairedReleasePayload(processPath, parentProcessPath))
+                if (!VerifyManagedProcessLayout(processPath, parentProcessPath))
                 {
                     return false;
                 }
@@ -275,11 +274,12 @@ namespace VRCForge.Editor
             }
         }
 
-        private static bool VerifyPairedReleasePayload(string backendPath, string parentPath)
+        private static bool VerifyManagedProcessLayout(string backendPath, string parentPath)
         {
-            // The accepted process lifetime is the concrete packaged desktop
-            // process and its direct packaged backend child. Do not accept a
-            // look-alike executable tree or caller-supplied location.
+            // Runtime authorization is bound to the OS-owned loopback connection,
+            // the bearer capability, and this concrete packaged process layout.
+            // Package hashes are validated by installers/build verification, not
+            // by every Unity write request.
             var root = Path.GetDirectoryName(Path.GetFullPath(parentPath));
             if (string.IsNullOrEmpty(root))
             {
@@ -287,130 +287,12 @@ namespace VRCForge.Editor
             }
             var expectedParent = Path.GetFullPath(Path.Combine(root, "VRCForge.exe"));
             var expectedBackend = Path.GetFullPath(Path.Combine(root, "backend", "vrcforge_backend.exe"));
-            if (!string.Equals(Path.GetFullPath(parentPath), expectedParent, StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(Path.GetFullPath(backendPath), expectedBackend, StringComparison.OrdinalIgnoreCase)
-                || !IsDirectoryWithoutReparse(root)
-                || !IsDirectoryWithoutReparse(Path.GetDirectoryName(expectedBackend))
-                || !IsRegularFileWithoutReparse(expectedParent)
-                || !IsRegularFileWithoutReparse(expectedBackend))
-            {
-                return false;
-            }
-
-            string expectedDesktopDigest;
-            string expectedBackendDigest;
-            if (!TryReadTrustedReleaseDigests(out expectedDesktopDigest, out expectedBackendDigest))
-            {
-                return false;
-            }
-
-            var manifestPath = Path.Combine(root, "payload-integrity.json");
-            if (!IsRegularFileWithoutReparse(manifestPath))
-            {
-                return false;
-            }
-            var manifest = JObject.Parse(File.ReadAllText(manifestPath));
-            if (!string.Equals((string)manifest["schema"], "vrcforge.payload-integrity.v1", StringComparison.Ordinal))
-            {
-                return false;
-            }
-            var files = manifest["files"] as JObject;
-            return VerifyIntegrityEntry(files, "desktop", "VRCForge.exe", expectedParent, expectedDesktopDigest)
-                && VerifyIntegrityEntry(files, "backend", "backend/vrcforge_backend.exe", expectedBackend, expectedBackendDigest);
-        }
-
-        private static bool TryReadTrustedReleaseDigests(
-            out string expectedDesktopDigest,
-            out string expectedBackendDigest)
-        {
-            expectedDesktopDigest = null;
-            expectedBackendDigest = null;
-            try
-            {
-                var projectRoot = Path.GetDirectoryName(Path.GetFullPath(Application.dataPath));
-                if (string.IsNullOrEmpty(projectRoot))
-                {
-                    return false;
-                }
-                var manifestPath = Path.GetFullPath(Path.Combine(
-                    projectRoot,
-                    VRCForgeMcpTrustedRelease.AssetPath.Replace('/', Path.DirectorySeparatorChar)));
-                if (!IsRegularFileWithoutReparse(manifestPath))
-                {
-                    return false;
-                }
-                var manifest = JObject.Parse(File.ReadAllText(manifestPath));
-                var propertyCount = 0;
-                foreach (var property in manifest.Properties())
-                {
-                    propertyCount++;
-                }
-                if (propertyCount != 3
-                    || !string.Equals((string)manifest["schema"], "vrcforge.trusted-release.v1", StringComparison.Ordinal))
-                {
-                    return false;
-                }
-                expectedDesktopDigest = (string)manifest["desktopSha256"];
-                expectedBackendDigest = (string)manifest["backendSha256"];
-                return IsLowerSha256(expectedDesktopDigest) && IsLowerSha256(expectedBackendDigest);
-            }
-            catch (Exception)
-            {
-                expectedDesktopDigest = null;
-                expectedBackendDigest = null;
-                return false;
-            }
-        }
-
-        private static bool VerifyIntegrityEntry(
-            JObject files,
-            string key,
-            string relativePath,
-            string actualPath,
-            string releaseDigest)
-        {
-            var entry = files == null ? null : files[key] as JObject;
-            var manifestDigest = entry == null ? null : (string)entry["sha256"];
-            if (entry == null
-                || !string.Equals((string)entry["relativePath"], relativePath, StringComparison.Ordinal)
-                || !IsLowerSha256(manifestDigest)
-                || !ConstantTimeTextEquals(manifestDigest, releaseDigest))
-            {
-                return false;
-            }
-            return ConstantTimeTextEquals(releaseDigest, ComputeSha256(actualPath));
-        }
-
-        private static bool IsLowerSha256(string digest)
-        {
-            if (string.IsNullOrEmpty(digest) || digest.Length != 64)
-            {
-                return false;
-            }
-            for (var index = 0; index < digest.Length; index++)
-            {
-                var value = digest[index];
-                if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f')))
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        private static string ComputeSha256(string path)
-        {
-            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-            using (var sha256 = SHA256.Create())
-            {
-                var digest = sha256.ComputeHash(stream);
-                var builder = new System.Text.StringBuilder(digest.Length * 2);
-                foreach (var value in digest)
-                {
-                    builder.Append(value.ToString("x2"));
-                }
-                return builder.ToString();
-            }
+            return string.Equals(Path.GetFullPath(parentPath), expectedParent, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(Path.GetFullPath(backendPath), expectedBackend, StringComparison.OrdinalIgnoreCase)
+                && IsDirectoryWithoutReparse(root)
+                && IsDirectoryWithoutReparse(Path.GetDirectoryName(expectedBackend))
+                && IsRegularFileWithoutReparse(expectedParent)
+                && IsRegularFileWithoutReparse(expectedBackend);
         }
 
         private static bool IsDirectoryWithoutReparse(string path)
@@ -435,23 +317,6 @@ namespace VRCForge.Editor
             return file.Exists
                 && (file.Attributes & FileAttributes.Directory) == 0
                 && (file.Attributes & FileAttributes.ReparsePoint) == 0;
-        }
-
-        private static bool ConstantTimeTextEquals(string left, string right)
-        {
-            if (left == null || right == null)
-            {
-                return false;
-            }
-            var difference = left.Length ^ right.Length;
-            var length = Math.Max(left.Length, right.Length);
-            for (var index = 0; index < length; index++)
-            {
-                var leftValue = index < left.Length ? left[index] : '\0';
-                var rightValue = index < right.Length ? right[index] : '\0';
-                difference |= leftValue ^ rightValue;
-            }
-            return difference == 0;
         }
 
         private static int ReadParentProcessId(int processId)

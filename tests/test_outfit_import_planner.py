@@ -37,6 +37,18 @@ def make_liltoon_hint_unitypackage(path: Path) -> None:
         write_tar_member(archive, "0002/asset", b"SECRET_MATERIAL_PAYLOAD")
 
 
+def make_dual_shader_variant_unitypackage(path: Path) -> None:
+    with tarfile.open(path, mode="w:gz") as archive:
+        write_tar_member(archive, "0001/pathname", b"Assets/MANUKA/Prefab/MANUKA_lilToon.prefab")
+        write_tar_member(archive, "0001/asset", b"SECRET_LILTOON_PREFAB")
+        write_tar_member(archive, "0002/pathname", b"Assets/MANUKA/Prefab/MANUKA_Poiyomi.prefab")
+        write_tar_member(archive, "0002/asset", b"SECRET_POIYOMI_PREFAB")
+        write_tar_member(archive, "0003/pathname", b"Assets/MANUKA/Materials/lilToon/Body.mat")
+        write_tar_member(archive, "0003/asset", b"SECRET_LILTOON_MATERIAL")
+        write_tar_member(archive, "0004/pathname", b"Assets/MANUKA/Materials/Poiyomi/Body.mat")
+        write_tar_member(archive, "0004/asset", b"SECRET_POIYOMI_MATERIAL")
+
+
 def make_zip_with_unitypackages(path: Path) -> None:
     with zipfile.ZipFile(path, mode="w") as archive:
         archive.writestr("Product/MaterialPack.unitypackage", b"SECRET_MATERIAL_PACKAGE")
@@ -71,8 +83,108 @@ def test_direct_unitypackage_plan_is_supervised_and_payload_safe(tmp_path: Path)
     assert plan["rollbackProofRequired"] is True
     assert plan["writeTarget"] == "vrcforge_import_outfit_package"
     assert "Assets/Outfits/Dress.prefab" in plan["expectedAssetPaths"]
+    assert plan["riskFacts"]["recommendedRiskLevel"] == "medium"
+    assert plan["riskFacts"]["mediumEligible"] is True
     assert "SECRET_PREFAB_PAYLOAD" not in rendered
     assert "SECRET_TEXTURE_PAYLOAD" not in rendered
+
+
+def test_script_payload_is_reported_but_does_not_imply_execution(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    package = tmp_path / "Scripted.unitypackage"
+    with tarfile.open(package, mode="w:gz") as archive:
+        write_tar_member(archive, "0001/pathname", b"Assets/Outfits/Dress.prefab")
+        write_tar_member(archive, "0002/pathname", b"Assets/Outfits/Editor/Setup.cs")
+
+    facts = build_outfit_import_plan(package, project_path=project)["plan"]["riskFacts"]
+
+    assert facts["codePayloadCount"] == 1
+    assert facts["automaticCodeExecutionPlanned"] is False
+    assert facts["mediumEligible"] is True
+    assert facts["recommendedRiskLevel"] == "medium"
+    assert "unity_import_auto_execution" not in facts["reasonCodes"]
+
+
+def test_existing_import_target_is_concrete_high_risk_overwrite(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    existing = project / "Assets" / "Outfits" / "Dress.prefab"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("user asset", encoding="utf-8")
+    package = tmp_path / "Dress.unitypackage"
+    make_unitypackage(package)
+
+    facts = build_outfit_import_plan(package, project_path=project)["plan"]["riskFacts"]
+
+    assert facts["existingTargetPathCount"] == 1
+    assert facts["existingTargetPaths"] == ["Assets/Outfits/Dress.prefab"]
+    assert facts["mediumEligible"] is False
+    assert facts["recommendedRiskLevel"] == "high"
+    assert "existing_asset_overwrite" in facts["reasonCodes"]
+
+
+def test_unitypackage_plan_keeps_complete_expected_asset_receipt(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    package = tmp_path / "Large.unitypackage"
+    with tarfile.open(package, mode="w:gz") as archive:
+        for index in range(1251):
+            write_tar_member(
+                archive,
+                f"{index:04d}/pathname",
+                f"Assets/Outfits/Item{index:04d}.prefab".encode(),
+            )
+
+    result = build_outfit_import_plan(package, project_path=project, base_avatar_name="Manuka")
+    plan = result["plan"]
+
+    assert len(plan["expectedAssetPaths"]) == 1251
+    assert plan["expectedAssetPathCount"] == 1251
+    assert plan["expectedAssetPathsComplete"] is True
+    assert plan["expectedAssetPaths"][-1] == "Assets/Outfits/Item1250.prefab"
+
+
+def test_unitypackage_plan_blocks_apply_when_expected_asset_evidence_is_truncated(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    package = tmp_path / "Truncated.unitypackage"
+    make_unitypackage(package)
+
+    result = build_outfit_import_plan(
+        package,
+        project_path=project,
+        base_avatar_name="Manuka",
+        max_entries=1,
+    )
+    plan = result["plan"]
+
+    assert plan["expectedAssetPathsComplete"] is False
+    assert plan["readyToApply"] is False
+    assert plan["writeTarget"] == ""
+    assert any("evidence was truncated" in warning for warning in plan["warnings"])
+
+
+def test_loose_prefab_plan_blocks_copy_when_inspection_is_truncated(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project)
+    outfit = tmp_path / "LooseOutfit"
+    outfit.mkdir()
+    (outfit / "A_Dress.prefab").write_text("prefab", encoding="utf-8")
+    (outfit / "Z_Body.mat").write_text("material", encoding="utf-8")
+
+    result = build_outfit_import_plan(
+        outfit,
+        project_path=project,
+        base_avatar_name="Manuka",
+        max_entries=1,
+    )
+    plan = result["plan"]
+
+    assert plan["expectedAssetPathsComplete"] is False
+    assert plan["readyToApply"] is False
+    assert plan["writeTarget"] == ""
+    assert any("evidence was truncated" in warning for warning in plan["warnings"])
 
 
 def test_dependency_preflight_blocks_missing_shader_before_import(tmp_path: Path) -> None:
@@ -111,6 +223,53 @@ def test_dependency_preflight_allows_installed_shader_before_import(tmp_path: Pa
     assert result["plan"]["writeTarget"] == "vrcforge_import_outfit_package"
     assert preflight["readyForImport"] is True
     assert liltoon["status"] == "installed"
+
+
+def test_selected_shader_prefab_does_not_require_unselected_shader_variant(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project, dependencies={"jp.lilxyzw.liltoon": "1.8.0"})
+    package = tmp_path / "MANUKA.unitypackage"
+    make_dual_shader_variant_unitypackage(package)
+
+    result = build_outfit_import_plan(
+        package,
+        project_path=project,
+        selected_prefab="Assets/MANUKA/Prefab/MANUKA_lilToon.prefab",
+        base_avatar_name="MANUKA",
+    )
+    preflight = result["dependencyPreflight"]
+    poiyomi = next(entry for entry in preflight["entries"] if entry["id"] == "poiyomi")
+
+    assert result["plan"]["selectedPrefab"] == "Assets/MANUKA/Prefab/MANUKA_lilToon.prefab"
+    assert result["plan"]["readyToApply"] is True
+    assert result["plan"]["writeTarget"] == "vrcforge_import_outfit_package"
+    assert preflight["readyForImport"] is True
+    assert preflight["blockingMissingCount"] == 0
+    assert poiyomi["status"] == "missing"
+    assert poiyomi["blockingBeforeImport"] is False
+    assert "unselected prefab variant" in poiyomi["message"]
+
+    conservative = build_outfit_import_plan(package, project_path=project, base_avatar_name="MANUKA")
+    assert conservative["plan"]["readyToApply"] is False
+
+
+def test_explicit_poiyomi_prefab_still_requires_poiyomi(tmp_path: Path) -> None:
+    project = tmp_path / "Project"
+    make_project(project, dependencies={"jp.lilxyzw.liltoon": "1.8.0"})
+    package = tmp_path / "MANUKA.unitypackage"
+    make_dual_shader_variant_unitypackage(package)
+
+    result = build_outfit_import_plan(
+        package,
+        project_path=project,
+        selected_prefab="Assets/MANUKA/Prefab/MANUKA_Poiyomi.prefab",
+        base_avatar_name="MANUKA",
+    )
+    poiyomi = next(entry for entry in result["dependencyPreflight"]["entries"] if entry["id"] == "poiyomi")
+
+    assert result["plan"]["selectedPrefab"] == "Assets/MANUKA/Prefab/MANUKA_Poiyomi.prefab"
+    assert result["plan"]["readyToApply"] is False
+    assert poiyomi["blockingBeforeImport"] is True
 
 
 def test_zip_container_builds_ordered_import_queue_without_manual_extract(tmp_path: Path) -> None:

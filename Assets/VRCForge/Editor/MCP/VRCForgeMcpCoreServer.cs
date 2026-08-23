@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -19,13 +20,16 @@ namespace VRCForge.Editor
     /// <summary>
     /// Project-scoped, loopback-only MCP service. Direct calls may execute only
     /// explicitly read-only tools. Preview, checkpoint-control, and write calls
-    /// require the release-paired managed VRCForge App lane; writes additionally
-    /// require a one-use approval/checkpoint execution context.
+    /// require the protocol-negotiated managed VRCForge App lane; writes additionally
+    /// require a one-use exact execution context. Internal Agent writes bind an
+    /// approval/checkpoint; external MCP writes bind only their operation.
     /// </summary>
     public static class VRCForgeMcpCoreServer
     {
         private const string TransportSchema = "vrcforge.mcp.transport.v2";
         private const string ModernProtocolVersion = "2026-07-28";
+        private const string MinimumProtocolVersion = "2026-07-28";
+        private const string MaximumProtocolVersion = "2026-07-28";
         private const string ApprovedExecutionMetaKey = "io.vrcforge/approvedExecution";
         private const int MaxFrameBytes = 1024 * 1024;
         private const int MaxClients = 4;
@@ -48,7 +52,10 @@ namespace VRCForge.Editor
         {
             "vrc_set_material_shader",
             "vrc_duplicate_scene_object",
+            "vrc_duplicate_project_asset",
             "vrc_save_scene_object_as_prefab",
+            "vrc_save_current_scene",
+            "vrc_save_new_scene",
             "vrc_set_texture_import_settings",
             "vrc_set_constraint_sources",
             "vrc_create_component_feature",
@@ -63,6 +70,7 @@ namespace VRCForge.Editor
             "vrc_manage_expression_parameters",
             "vrc_manage_expression_menu",
             "vrc_manage_fx_animator",
+            "vrc_convert_unity_constraint",
             "vrc_add_wardrobe_outfit",
             "vrc_add_outfit_part",
             "vrc_add_modular_avatar_component",
@@ -74,7 +82,7 @@ namespace VRCForge.Editor
             "vrc_reload_after_checkpoint_restore",
         };
         // This must use Core tool names, never AgentGateway handler names. It
-        // is derived only from the startup-verified immutable 64-tool snapshot.
+        // is derived only from the startup-verified immutable 76-tool snapshot.
         private static ISet<string> ApprovedAppCoreTools = new HashSet<string>(StringComparer.Ordinal);
 
         private enum InvocationLane
@@ -85,6 +93,9 @@ namespace VRCForge.Editor
             AppSetupOutfitPoll = 3,
             AppUnityPackageImportPoll = 4,
             ApprovedWrite = 5,
+            ExternalMcpWrite = 6,
+            AppBuildTestPoll = 7,
+            AppAvatarUploadPoll = 8,
         }
 
         private sealed class VRCForgeMcpProtocolException : Exception { }
@@ -94,6 +105,12 @@ namespace VRCForge.Editor
             internal int Code;
             internal string Message;
             internal JObject Data;
+        }
+
+        private sealed class VRCForgeMcpConnectionSession
+        {
+            internal bool HandshakeComplete;
+            internal string ProtocolVersion;
         }
 
         private sealed class PendingInvocation
@@ -123,6 +140,16 @@ namespace VRCForge.Editor
         private static void RegisterEditorDomainInvocationPump()
         {
             EnsureInvocationPumpRegistered();
+            EditorApplication.playModeStateChanged -= HandlePlayModeStateChanged;
+            EditorApplication.playModeStateChanged += HandlePlayModeStateChanged;
+        }
+
+        private static void HandlePlayModeStateChanged(PlayModeStateChange state)
+        {
+            // Enter/exit Play Mode can replace Editor callbacks without a C#
+            // domain reload. Rebind the Core pump on the next editor turn so
+            // the listener cannot remain alive while Unity calls stop draining.
+            ScheduleInvocationPumpRegistration();
         }
 
         internal static void EnsureInvocationPumpRegistered()
@@ -165,6 +192,11 @@ namespace VRCForge.Editor
 
         public static void Start()
         {
+            // Startup may be entered from another EditorApplication.update
+            // callback before InitializeOnLoadMethod ordering has rebound the
+            // invocation pump. Queue a next-turn registration on every start,
+            // including an idempotent Start against an existing listener.
+            ScheduleInvocationPumpRegistration();
             lock (LifecycleGate)
             {
                 StartExclusive();
@@ -189,6 +221,7 @@ namespace VRCForge.Editor
             string priorDescriptorPath = null;
             string priorDescriptorInstanceId = null;
             var failed = false;
+            Exception startupFailure = null;
             lock (Gate)
             {
                 if (listener != null)
@@ -214,10 +247,11 @@ namespace VRCForge.Editor
                     acceptThread.Start();
                     Debug.Log("[VRCForge MCP] Core Ready (loopback project service).");
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
                     StopLocked(out priorAcceptThread, out priorWorkers, out priorDescriptorPath,
                         out priorDescriptorInstanceId);
+                    startupFailure = exception;
                     failed = true;
                 }
             }
@@ -225,7 +259,8 @@ namespace VRCForge.Editor
             {
                 JoinThreads(priorAcceptThread, priorWorkers);
                 DeleteOwnedDescriptor(priorDescriptorPath, priorDescriptorInstanceId);
-                Debug.LogWarning("[VRCForge MCP] Core failed to start.");
+                Debug.LogWarning("[VRCForge MCP] Core failed to start: "
+                    + startupFailure.GetType().Name + ": " + startupFailure.Message);
             }
         }
 
@@ -360,21 +395,46 @@ namespace VRCForge.Editor
             }
             var preview = new HashSet<string>(PreviewTools, StringComparer.Ordinal);
             var safety = new HashSet<string>(SafetyControlTools, StringComparer.Ordinal);
-            if (all.Count != VRCForgeMcpToolContract.ToolCount
-                || readOnly.Count != 8 || preview.Count != 21 || safety.Count != 2
-                || !all.SetEquals(VRCForgeMcpToolContract.ExpectedToolNames)
-                || !readOnly.SetEquals(VRCForgeMcpToolContract.ExpectedReadOnlyToolNames)
-                || !all.IsSupersetOf(preview) || !all.IsSupersetOf(safety)
-                || readOnly.Overlaps(preview) || readOnly.Overlaps(safety) || preview.Overlaps(safety))
+            var expectedAll = VRCForgeMcpToolContract.ExpectedToolNames;
+            var expectedReadOnly = VRCForgeMcpToolContract.ExpectedReadOnlyToolNames;
+            var laneProblems = new List<string>();
+            if (!all.SetEquals(expectedAll))
             {
-                throw new InvalidOperationException("The VRCForge MCP tool lanes do not match the packaged contract.");
+                laneProblems.Add("tool registry missing=[" + string.Join(",", expectedAll.Except(all).OrderBy(name => name, StringComparer.Ordinal).ToArray())
+                    + "] unexpected=[" + string.Join(",", all.Except(expectedAll).OrderBy(name => name, StringComparer.Ordinal).ToArray()) + "]");
+            }
+            if (!readOnly.SetEquals(expectedReadOnly))
+            {
+                laneProblems.Add("read-only missing=[" + string.Join(",", expectedReadOnly.Except(readOnly).OrderBy(name => name, StringComparer.Ordinal).ToArray())
+                    + "] unexpected=[" + string.Join(",", readOnly.Except(expectedReadOnly).OrderBy(name => name, StringComparer.Ordinal).ToArray()) + "]");
+            }
+            if (!all.IsSupersetOf(preview))
+            {
+                laneProblems.Add("preview tools absent from registry=[" + string.Join(",", preview.Except(all).OrderBy(name => name, StringComparer.Ordinal).ToArray()) + "]");
+            }
+            if (!all.IsSupersetOf(safety))
+            {
+                laneProblems.Add("safety tools absent from registry=[" + string.Join(",", safety.Except(all).OrderBy(name => name, StringComparer.Ordinal).ToArray()) + "]");
+            }
+            if (readOnly.Overlaps(preview) || readOnly.Overlaps(safety) || preview.Overlaps(safety))
+            {
+                laneProblems.Add("read-only, preview, and safety lanes overlap");
+            }
+            if (laneProblems.Count != 0)
+            {
+                throw new InvalidOperationException(
+                    "The VRCForge MCP tool lanes do not match the packaged contract: "
+                    + string.Join("; ", laneProblems.ToArray()));
             }
             var approved = new HashSet<string>(all, StringComparer.Ordinal);
             approved.ExceptWith(readOnly);
             approved.ExceptWith(safety);
-            if (approved.Count != 54 || !approved.IsSupersetOf(preview))
+            var missingApprovedPreview = preview.Except(approved).OrderBy(name => name, StringComparer.Ordinal).ToArray();
+            if (missingApprovedPreview.Length != 0)
             {
-                throw new InvalidOperationException("The VRCForge approved-write tool contract is invalid.");
+                throw new InvalidOperationException(
+                    "The VRCForge approved-write tool contract is invalid: preview tools missing from approved-write lane=["
+                    + string.Join(",", missingApprovedPreview) + "].");
             }
             return approved;
         }
@@ -483,12 +543,25 @@ namespace VRCForge.Editor
                 using (client)
                 using (var stream = client.GetStream())
                 {
+                    var session = new VRCForgeMcpConnectionSession();
                     while (!stopping)
                     {
                         var envelope = ReadEnvelope(stream);
                         var message = envelope["message"] as JObject;
                         AuthenticateEnvelope(envelope, true);
-                        var response = HandleMessage(message, client);
+                        JObject response;
+                        try
+                        {
+                            response = HandleMessage(message, client, session);
+                        }
+                        catch (VRCForgeMcpProtocolException)
+                        {
+                            throw;
+                        }
+                        catch (Exception exception)
+                        {
+                            response = BuildUnhandledMessageResponse(message, session, exception);
+                        }
                         if (response != null)
                         {
                             WriteEnvelope(stream, response);
@@ -509,6 +582,59 @@ namespace VRCForge.Editor
                     ActiveWorkers.Remove(Thread.CurrentThread);
                 }
             }
+        }
+
+        private static JObject BuildUnhandledMessageResponse(
+            JObject message,
+            VRCForgeMcpConnectionSession session,
+            Exception exception)
+        {
+            var method = message == null ? string.Empty : (string)message["method"] ?? string.Empty;
+            var parameters = message == null ? null : message["params"] as JObject;
+            var toolName = parameters == null ? string.Empty : (string)parameters["name"] ?? string.Empty;
+            var id = message == null ? null : message["id"];
+            var exceptionType = exception == null ? "Exception" : exception.GetType().FullName;
+            var exceptionMessage = exception == null ? "Unknown Unity Core exception." : exception.Message;
+            var exceptionStack = exception == null ? string.Empty : exception.StackTrace ?? string.Empty;
+            var humanMessage = $"Unity Core request dispatch failed: {exceptionType}: {exceptionMessage}";
+            Debug.LogError($"[VRCForge MCP] {humanMessage}\n{exceptionStack}");
+
+            var details = new JObject
+            {
+                ["method"] = method,
+                ["toolName"] = toolName,
+                ["exceptionType"] = exceptionType,
+                ["exceptionMessage"] = exceptionMessage,
+                ["exceptionStack"] = exceptionStack,
+            };
+            if (string.Equals(method, "tools/call", StringComparison.Ordinal) && id != null)
+            {
+                var toolError = ToolError("unity_core_unhandled_exception", humanMessage, true);
+                var structured = toolError["structuredContent"] as JObject;
+                if (structured != null)
+                {
+                    structured["failureLayer"] = "unity_core_dispatch";
+                    structured["failurePhase"] = "request_dispatch_exception";
+                    structured["toolRoutingStarted"] = JValue.CreateNull();
+                    structured["details"] = details;
+                }
+                return Result(id, toolError, true);
+            }
+
+            return id == null
+                ? null
+                : Error(id, -32603, humanMessage, new JObject
+                {
+                    ["schema"] = "vrcforge.unity_core_error.v1",
+                    ["errorCode"] = "unity_core_unhandled_exception",
+                    ["failureLayer"] = "unity_core_dispatch",
+                    ["failurePhase"] = "request_dispatch_exception",
+                    ["toolRoutingStarted"] = JValue.CreateNull(),
+                    ["mutationStarted"] = JValue.CreateNull(),
+                    ["committed"] = JValue.CreateNull(),
+                    ["commitState"] = "unknown",
+                    ["details"] = details,
+                });
         }
 
         private static JObject ReadEnvelope(NetworkStream stream)
@@ -623,7 +749,10 @@ namespace VRCForge.Editor
             return difference == 0;
         }
 
-        private static JObject HandleMessage(JObject message, TcpClient client)
+        private static JObject HandleMessage(
+            JObject message,
+            TcpClient client,
+            VRCForgeMcpConnectionSession session)
         {
             if (!string.Equals((string)message["jsonrpc"], "2.0", StringComparison.Ordinal)
                 || message["method"] == null || message["method"].Type != JTokenType.String)
@@ -643,14 +772,39 @@ namespace VRCForge.Editor
                 throw new VRCForgeMcpProtocolException();
             }
             var parameters = message["params"] as JObject;
+            if (string.Equals(method, "server/core-info", StringComparison.Ordinal))
+            {
+                return hasId ? Result(id, CoreInfoResult(), true) : null;
+            }
             var metadataError = ValidateModernMetadata(parameters);
             if (metadataError != null)
             {
+                var data = metadataError.Data as JObject ?? new JObject();
+                data["coreInfo"] = CoreInfoResult();
+                metadataError.Data = data;
                 return hasId ? Error(id, metadataError.Code, metadataError.Message, metadataError.Data) : null;
             }
             if (string.Equals(method, "server/discover", StringComparison.Ordinal))
             {
+                session.HandshakeComplete = true;
+                session.ProtocolVersion = (string)((parameters["_meta"] as JObject)["io.modelcontextprotocol/protocolVersion"]);
                 return hasId ? Result(id, DiscoverResult(), true) : null;
+            }
+            if (!session.HandshakeComplete
+                || !IsProtocolVersion(session.ProtocolVersion))
+            {
+                return hasId
+                    ? Error(
+                        id,
+                        -32023,
+                        "MCP handshake is required before using Core methods.",
+                        new JObject
+                        {
+                            ["requiredMethod"] = "server/discover",
+                            ["protocolRange"] = ProtocolRangeResult(),
+                            ["coreInfo"] = CoreInfoResult(),
+                        })
+                    : null;
             }
 
             if (string.Equals(method, "tools/list", StringComparison.Ordinal))
@@ -694,9 +848,42 @@ namespace VRCForge.Editor
         {
             var token = metadata["io.modelcontextprotocol/protocolVersion"];
             var requested = token != null && token.Type == JTokenType.String ? (string)token : string.Empty;
-            if (string.Equals(requested, ModernProtocolVersion, StringComparison.Ordinal)) return null;
-            var message = string.CompareOrdinal(requested, ModernProtocolVersion) < 0 ? "MCP client protocol is outdated. Update the client to protocol version 2026-07-28." : "Unsupported protocol version.";
-            return new VRCForgeMcpMetadataError { Code = -32022, Message = message, Data = new JObject { ["supported"] = new JArray(ModernProtocolVersion), ["requested"] = requested } };
+            var clientRange = metadata["io.vrcforge/protocolRange"] as JObject;
+            var clientMinimum = clientRange == null ? string.Empty : (string)clientRange["minimum"] ?? string.Empty;
+            var clientMaximum = clientRange == null ? string.Empty : (string)clientRange["maximum"] ?? string.Empty;
+            if (IsProtocolVersion(requested)
+                && IsProtocolVersion(clientMinimum)
+                && IsProtocolVersion(clientMaximum)
+                && string.CompareOrdinal(clientMinimum, requested) <= 0
+                && string.CompareOrdinal(requested, clientMaximum) <= 0
+                && string.CompareOrdinal(MinimumProtocolVersion, requested) <= 0
+                && string.CompareOrdinal(requested, MaximumProtocolVersion) <= 0)
+            {
+                return null;
+            }
+            return new VRCForgeMcpMetadataError
+            {
+                Code = -32022,
+                Message = "No compatible MCP protocol version was negotiated.",
+                Data = new JObject
+                {
+                    ["requested"] = requested,
+                    ["clientRange"] = clientRange == null ? JValue.CreateNull() : clientRange.DeepClone(),
+                    ["coreRange"] = ProtocolRangeResult(),
+                },
+            };
+        }
+
+        private static bool IsProtocolVersion(string value)
+        {
+            DateTime parsed;
+            return !string.IsNullOrEmpty(value)
+                && DateTime.TryParseExact(
+                    value,
+                    "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out parsed);
         }
 
         private static VRCForgeMcpMetadataError ValidateModernMetadata(JObject parameters)
@@ -724,11 +911,31 @@ namespace VRCForge.Editor
             }
             var clientInfoToken = metadata["io.modelcontextprotocol/clientInfo"];
             var clientInfo = clientInfoToken as JObject;
-            if (clientInfoToken != null && (clientInfo == null
+            if (clientInfo == null
                 || clientInfo["name"] == null || clientInfo["name"].Type != JTokenType.String
-                || clientInfo["version"] == null || clientInfo["version"].Type != JTokenType.String))
+                || clientInfo["version"] == null || clientInfo["version"].Type != JTokenType.String)
             {
                 return new VRCForgeMcpMetadataError { Code = -32602, Message = "Client identity is invalid." };
+            }
+            if (!string.Equals((string)clientInfo["name"], "VRCForge FastAPI", StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace((string)clientInfo["version"]))
+            {
+                return new VRCForgeMcpMetadataError
+                {
+                    Code = -32602,
+                    Message = "Client identity is invalid.",
+                };
+            }
+            var projectBinding = metadata["io.vrcforge/projectBinding"] as JObject;
+            if (projectBinding == null
+                || !string.Equals((string)projectBinding["projectId"], ComputeProjectId(GetProjectRoot()), StringComparison.Ordinal)
+                || !string.Equals((string)projectBinding["instanceId"], descriptorInstanceId, StringComparison.Ordinal))
+            {
+                return new VRCForgeMcpMetadataError
+                {
+                    Code = -32025,
+                    Message = "Unity project instance handshake failed.",
+                };
             }
             return null;
         }
@@ -749,7 +956,7 @@ namespace VRCForge.Editor
             }
             catch (KeyNotFoundException)
             {
-                return ToolError("unknown_tool", "Unknown VRCForge tool.", modern);
+                return ToolError("unknown_tool", "Unknown VRCForge tool.", modern, true);
             }
 
             if (descriptor.Permission == VRCForgeCommandAccess.ReadOnly
@@ -762,12 +969,12 @@ namespace VRCForge.Editor
             var executionContext = metadata == null ? null : metadata[ApprovedExecutionMetaKey] as JObject;
             if (executionContext == null)
             {
-                return ToolError("approval_required", "This tool requires the VRCForge App approval and checkpoint lane.", modern);
+                return ToolError("managed_write_required", "This tool requires a one-use managed write authorization.", modern, true);
             }
             VRCForgeMcpPeerProcessEvidence peerEvidence;
             if (!VRCForgeMcpPeerProcessVerifier.TryScreenManagedBackendPeer(client, out peerEvidence))
             {
-                return ToolError("managed_peer_ineligible", "The VRCForge managed peer eligibility check failed.", modern);
+                return ToolError("managed_peer_ineligible", "The authenticated loopback backend peer was rejected by the running Core before the requested Unity tool was routed.", modern, true);
             }
             int claimedProcessId;
             try
@@ -783,7 +990,7 @@ namespace VRCForge.Editor
             }
             if (claimedProcessId != peerEvidence.ProcessId)
             {
-                return ToolError("app_process_binding_invalid", "The VRCForge App process binding is invalid.", modern);
+                return ToolError("app_process_binding_invalid", "The VRCForge App process binding is invalid.", modern, true);
             }
 
             var laneName = (string)executionContext["lane"];
@@ -793,7 +1000,7 @@ namespace VRCForge.Editor
                 lane = InvocationLane.AppPreview;
                 if (!HasAllowedPreviewRequest(toolName, arguments))
                 {
-                    return ToolError("preview_not_allowed", "The App preview request is not allowed.", modern);
+                    return ToolError("preview_not_allowed", "The App preview request is not allowed.", modern, true);
                 }
             }
             else if (string.Equals(laneName, "app_safety_control", StringComparison.Ordinal))
@@ -801,7 +1008,7 @@ namespace VRCForge.Editor
                 lane = InvocationLane.AppSafetyControl;
                 if (!IsStrictSafetyControlRequest(toolName, arguments))
                 {
-                    return ToolError("safety_control_not_allowed", "The App safety-control tool is not allowed.", modern);
+                    return ToolError("safety_control_not_allowed", "The App safety-control tool is not allowed.", modern, true);
                 }
             }
             else if (string.Equals(laneName, "app_setup_outfit_poll", StringComparison.Ordinal))
@@ -810,7 +1017,7 @@ namespace VRCForge.Editor
                 if (!IsStrictSetupOutfitJobPoll(toolName, arguments)
                     || !ValidateManagedAppInstanceContext(executionContext))
                 {
-                    return ToolError("setup_outfit_poll_not_allowed", "The App Setup Outfit job poll is not allowed.", modern);
+                    return ToolError("setup_outfit_poll_not_allowed", "The App Setup Outfit job poll is not allowed.", modern, true);
                 }
             }
             else if (string.Equals(laneName, "app_unitypackage_import_poll", StringComparison.Ordinal))
@@ -819,7 +1026,25 @@ namespace VRCForge.Editor
                 if (!IsStrictUnityPackageImportJobPoll(toolName, arguments)
                     || !ValidateManagedAppInstanceContext(executionContext))
                 {
-                    return ToolError("unitypackage_import_poll_not_allowed", "The App UnityPackage import job poll is not allowed.", modern);
+                    return ToolError("unitypackage_import_poll_not_allowed", "The App UnityPackage import job poll is not allowed.", modern, true);
+                }
+            }
+            else if (string.Equals(laneName, "app_build_test_poll", StringComparison.Ordinal))
+            {
+                lane = InvocationLane.AppBuildTestPoll;
+                if (!IsStrictBuildTestJobPoll(toolName, arguments)
+                    || !ValidateManagedAppInstanceContext(executionContext))
+                {
+                    return ToolError("build_test_poll_not_allowed", "The App VRChat Build & Test job poll is not allowed.", modern, true);
+                }
+            }
+            else if (string.Equals(laneName, "app_avatar_upload_poll", StringComparison.Ordinal))
+            {
+                lane = InvocationLane.AppAvatarUploadPoll;
+                if (!IsStrictAvatarUploadJobPoll(toolName, arguments)
+                    || !ValidateManagedAppInstanceContext(executionContext))
+                {
+                    return ToolError("avatar_upload_poll_not_allowed", "The App VRChat avatar upload job poll is not allowed.", modern, true);
                 }
             }
             else if (string.Equals(laneName, "approved_write", StringComparison.Ordinal))
@@ -827,12 +1052,29 @@ namespace VRCForge.Editor
                 lane = InvocationLane.ApprovedWrite;
                 if (!ValidateApprovedExecutionContext(executionContext, toolName, arguments))
                 {
-                    return ToolError("approved_execution_invalid", "The approved execution context is invalid or expired.", modern);
+                    return ToolError("approved_execution_invalid", "The approved execution context is invalid or expired.", modern, true);
+                }
+            }
+            else if (string.Equals(laneName, "external_mcp_write", StringComparison.Ordinal))
+            {
+                lane = InvocationLane.ExternalMcpWrite;
+                string externalExecutionFailure;
+                if (!ValidateExternalMcpExecutionContext(
+                    executionContext,
+                    toolName,
+                    arguments,
+                    out externalExecutionFailure))
+                {
+                    return ToolError(
+                        "external_mcp_execution_" + externalExecutionFailure,
+                        "The external MCP execution context was rejected before the Unity tool started.",
+                        modern,
+                        true);
                 }
             }
             else
             {
-                return ToolError("app_lane_invalid", "The VRCForge App execution lane is invalid.", modern);
+                return ToolError("app_lane_invalid", "The VRCForge App execution lane is invalid.", modern, true);
             }
 
             return QueueInvocation(toolName, arguments, executionContext, lane, client, peerEvidence, modern);
@@ -880,10 +1122,11 @@ namespace VRCForge.Editor
             }
             if (string.Equals(toolName, "vrc_scan_animation_bindings", StringComparison.Ordinal))
             {
-                return HasExactKeys(arguments, "avatarPath", "outputPath", "controllerPath", "clipPaths", "includeAllProjectClips", "maxClips", "refreshAssets")
+                return HasExactKeys(arguments, "avatarPath", "outputPath", "controllerPath", "clipPaths", "includeAllProjectClips", "includeBindingDetails", "maxClips", "refreshAssets")
                     && HasString(arguments, "avatarPath") && HasEmptyOutputPath(arguments)
                     && HasString(arguments, "controllerPath") && HasStringArray(arguments, "clipPaths")
                     && HasBoolean(arguments, "includeAllProjectClips")
+                    && HasBoolean(arguments, "includeBindingDetails")
                     && HasBoundedInteger(arguments, "maxClips", 1, 2000)
                     && HasFalseBoolean(arguments, "refreshAssets");
             }
@@ -894,8 +1137,25 @@ namespace VRCForge.Editor
                     && HasBoolean(arguments, "isMobile");
             }
             return string.Equals(toolName, "vrc_capture_scene_view", StringComparison.Ordinal)
-                && HasExactKeys(arguments, "statusOnly", "requirePlayMode")
-                && HasTrueBoolean(arguments, "statusOnly") && HasBoolean(arguments, "requirePlayMode");
+                && HasTrueBoolean(arguments, "statusOnly")
+                && HasBoolean(arguments, "requirePlayMode")
+                && (HasExactKeys(arguments, "statusOnly", "requirePlayMode")
+                    || (HasExactKeys(arguments, "statusOnly", "requirePlayMode", "captureMode")
+                        && HasCaptureMode(arguments))
+                    || (HasExactKeys(
+                            arguments,
+                            "statusOnly",
+                            "requirePlayMode",
+                            "avatarPath",
+                            "includeGestureManagerParameters",
+                            "gestureManagerParameterNames",
+                            "gestureManagerParameterPrefix")
+                        && HasString(arguments, "avatarPath")
+                        && HasBoolean(arguments, "includeGestureManagerParameters")
+                        && HasStringArray(arguments, "gestureManagerParameterNames")
+                        && ((JArray)arguments["gestureManagerParameterNames"]).Count <= 128
+                        && HasString(arguments, "gestureManagerParameterPrefix")
+                        && ((string)arguments["gestureManagerParameterPrefix"] ?? string.Empty).Length <= 256));
         }
 
         private static bool HasExactKeys(JObject arguments, params string[] names)
@@ -907,6 +1167,16 @@ namespace VRCForge.Editor
         private static bool HasString(JObject arguments, string name)
         {
             return arguments[name].Type == JTokenType.String;
+        }
+
+        private static bool HasCaptureMode(JObject arguments)
+        {
+            if (!HasString(arguments, "captureMode"))
+            {
+                return false;
+            }
+            var value = ((string)arguments["captureMode"] ?? string.Empty).Trim().ToLowerInvariant();
+            return value == "auto" || value == "scene_view" || value == "game_view";
         }
 
         private static bool HasNonEmptyString(JObject arguments, string name)
@@ -921,7 +1191,8 @@ namespace VRCForge.Editor
 
         private static bool HasBoolean(JObject arguments, string name)
         {
-            return arguments[name].Type == JTokenType.Boolean;
+            var value = arguments == null ? null : arguments[name];
+            return value != null && value.Type == JTokenType.Boolean;
         }
 
         private static bool HasTrueBoolean(JObject arguments, string name)
@@ -1140,7 +1411,8 @@ namespace VRCForge.Editor
                     pending.Response = ToolError(
                         "invocation_revalidation_failed",
                         "VRCForge tool authorization changed before execution.",
-                        pending.Modern);
+                        pending.Modern,
+                        true);
                     return;
                 }
                 var result = descriptor.Handler.Invoke(null, new object[] { pending.Arguments });
@@ -1196,11 +1468,27 @@ namespace VRCForge.Editor
                 return IsStrictUnityPackageImportJobPoll(pending.ToolName, pending.Arguments)
                     && ValidateManagedAppInstanceContext(pending.ExecutionContext);
             }
-            return pending.Lane == InvocationLane.ApprovedWrite
-                && ValidateApprovedExecutionContext(
+            if (pending.Lane == InvocationLane.AppBuildTestPoll)
+            {
+                return IsStrictBuildTestJobPoll(pending.ToolName, pending.Arguments)
+                    && ValidateManagedAppInstanceContext(pending.ExecutionContext);
+            }
+            if (pending.Lane == InvocationLane.AppAvatarUploadPoll)
+            {
+                return IsStrictAvatarUploadJobPoll(pending.ToolName, pending.Arguments)
+                    && ValidateManagedAppInstanceContext(pending.ExecutionContext);
+            }
+            var validManagedWrite = pending.Lane == InvocationLane.ApprovedWrite
+                ? ValidateApprovedExecutionContext(
                     pending.ExecutionContext,
                     pending.ToolName,
                     pending.Arguments)
+                : pending.Lane == InvocationLane.ExternalMcpWrite
+                    && ValidateExternalMcpExecutionContext(
+                        pending.ExecutionContext,
+                        pending.ToolName,
+                        pending.Arguments);
+            return validManagedWrite
                 && ConsumeApprovedExecutionId(
                     (string)pending.ExecutionContext["executionId"],
                     pending.ExecutionContext["expiresAtUnixMs"].Value<long>());
@@ -1236,6 +1524,36 @@ namespace VRCForge.Editor
                 && Guid.TryParseExact((string)jobId, "N", out parsed);
         }
 
+        private static bool IsStrictBuildTestJobPoll(string toolName, JObject arguments)
+        {
+            if (!string.Equals(toolName, "vrc_build_test_avatar", StringComparison.Ordinal)
+                || arguments == null
+                || arguments.Properties().Count() != 1)
+            {
+                return false;
+            }
+            var jobId = arguments["jobId"];
+            Guid parsed;
+            return jobId != null
+                && jobId.Type == JTokenType.String
+                && Guid.TryParseExact((string)jobId, "N", out parsed);
+        }
+
+        private static bool IsStrictAvatarUploadJobPoll(string toolName, JObject arguments)
+        {
+            if (!string.Equals(toolName, "vrc_build_and_upload_avatar", StringComparison.Ordinal)
+                || arguments == null
+                || arguments.Properties().Count() != 1)
+            {
+                return false;
+            }
+            var jobId = arguments["jobId"];
+            Guid parsed;
+            return jobId != null
+                && jobId.Type == JTokenType.String
+                && Guid.TryParseExact((string)jobId, "N", out parsed);
+        }
+
         private static bool ValidateManagedAppInstanceContext(JObject context)
         {
             if (context == null)
@@ -1244,10 +1562,10 @@ namespace VRCForge.Editor
             }
             try
             {
-                var projectHash = RequiredBoundedString(context, "projectHash", 64);
+                var projectId = RequiredBoundedString(context, "projectId", 64);
                 var instanceId = RequiredBoundedString(context, "instanceId", 128);
-                return IsLowerHex(projectHash, 64)
-                    && string.Equals(projectHash, ComputeProjectHash(GetProjectRoot()), StringComparison.Ordinal)
+                return IsLowerHex(projectId, 64)
+                    && string.Equals(projectId, ComputeProjectId(GetProjectRoot()), StringComparison.Ordinal)
                     && string.Equals(instanceId, descriptorInstanceId, StringComparison.Ordinal);
             }
             catch (Exception)
@@ -1282,48 +1600,151 @@ namespace VRCForge.Editor
             string toolName,
             JObject arguments)
         {
+            string ignoredFailureCode;
+            return ValidateManagedWriteExecutionContext(
+                context,
+                toolName,
+                arguments,
+                externalMcp: false,
+                failureCode: out ignoredFailureCode);
+        }
+
+        private static bool ValidateExternalMcpExecutionContext(
+            JObject context,
+            string toolName,
+            JObject arguments)
+        {
+            string ignoredFailureCode;
+            return ValidateManagedWriteExecutionContext(
+                context,
+                toolName,
+                arguments,
+                externalMcp: true,
+                failureCode: out ignoredFailureCode);
+        }
+
+        private static bool ValidateExternalMcpExecutionContext(
+            JObject context,
+            string toolName,
+            JObject arguments,
+            out string failureCode)
+        {
+            return ValidateManagedWriteExecutionContext(
+                context,
+                toolName,
+                arguments,
+                externalMcp: true,
+                failureCode: out failureCode);
+        }
+
+        private static bool ValidateManagedWriteExecutionContext(
+            JObject context,
+            string toolName,
+            JObject arguments,
+            bool externalMcp,
+            out string failureCode)
+        {
+            failureCode = "context_invalid";
             if (context == null || arguments == null)
             {
+                failureCode = "context_missing";
                 return false;
             }
             try
             {
                 var executionId = RequiredBoundedString(context, "executionId", 128);
-                var approvalId = RequiredBoundedString(context, "approvalId", 256);
-                var checkpointId = RequiredBoundedString(context, "checkpointId", 256);
+                var operationId = externalMcp
+                    ? RequiredBoundedString(context, "operationId", 256)
+                    : null;
+                var approvalId = externalMcp
+                    ? null
+                    : RequiredBoundedString(context, "approvalId", 256);
+                var checkpointId = externalMcp
+                    ? null
+                    : RequiredBoundedString(context, "checkpointId", 256);
                 var targetTool = RequiredBoundedString(context, "targetTool", 128);
                 var boundUnityTool = RequiredBoundedString(context, "unityToolName", 128);
                 var argumentsSha256 = RequiredBoundedString(context, "argumentsSha256", 64);
-                var projectHash = RequiredBoundedString(context, "projectHash", 64);
+                var projectId = RequiredBoundedString(context, "projectId", 64);
                 var instanceId = RequiredBoundedString(context, "instanceId", 128);
                 var issuedAt = context["issuedAtUnixMs"].Value<long>();
                 var expiresAt = context["expiresAtUnixMs"].Value<long>();
                 var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                 if (string.IsNullOrEmpty(executionId)
-                    || string.IsNullOrEmpty(approvalId)
-                    || string.IsNullOrEmpty(checkpointId)
-                    || !ApprovedAppCoreTools.Contains(targetTool)
-                    || !string.Equals(targetTool, toolName, StringComparison.Ordinal)
-                    || !string.Equals(boundUnityTool, toolName, StringComparison.Ordinal)
-                    || !IsLowerHex(argumentsSha256, 64)
-                    || !string.Equals(argumentsSha256, ComputeCanonicalJsonHash(arguments), StringComparison.Ordinal)
-                    || !string.Equals(projectHash, ComputeProjectHash(GetProjectRoot()), StringComparison.Ordinal)
-                    || !string.Equals(instanceId, descriptorInstanceId, StringComparison.Ordinal)
-                    || expiresAt <= issuedAt
-                    || expiresAt - issuedAt > ApprovedExecutionMaxLifetimeMilliseconds
-                    || now < issuedAt - ApprovedExecutionClockSkewMilliseconds
-                    || now >= expiresAt)
+                    || (externalMcp && string.IsNullOrEmpty(operationId))
+                    || (!externalMcp && string.IsNullOrEmpty(approvalId))
+                    || (!externalMcp && string.IsNullOrEmpty(checkpointId)))
                 {
+                    failureCode = "identity_invalid";
+                    return false;
+                }
+                if (externalMcp && (context["approvalId"] != null || context["checkpointId"] != null))
+                {
+                    failureCode = "internal_fields_present";
+                    return false;
+                }
+                if (!ApprovedAppCoreTools.Contains(targetTool))
+                {
+                    failureCode = "tool_not_approved";
+                    return false;
+                }
+                if (!string.Equals(targetTool, toolName, StringComparison.Ordinal)
+                    || !string.Equals(boundUnityTool, toolName, StringComparison.Ordinal))
+                {
+                    failureCode = "tool_mismatch";
+                    return false;
+                }
+                if (!IsLowerHex(argumentsSha256, 64))
+                {
+                    failureCode = "arguments_hash_invalid";
+                    return false;
+                }
+                if (!string.Equals(argumentsSha256, ComputeCanonicalJsonHash(arguments), StringComparison.Ordinal))
+                {
+                    failureCode = "arguments_mismatch";
+                    return false;
+                }
+                if (!string.Equals(projectId, ComputeProjectId(GetProjectRoot()), StringComparison.Ordinal))
+                {
+                    failureCode = "project_mismatch";
+                    return false;
+                }
+                if (!string.Equals(instanceId, descriptorInstanceId, StringComparison.Ordinal))
+                {
+                    failureCode = "instance_mismatch";
+                    return false;
+                }
+                if (expiresAt <= issuedAt
+                    || expiresAt - issuedAt > ApprovedExecutionMaxLifetimeMilliseconds)
+                {
+                    failureCode = "lifetime_invalid";
+                    return false;
+                }
+                if (now < issuedAt - ApprovedExecutionClockSkewMilliseconds)
+                {
+                    failureCode = "not_yet_valid";
+                    return false;
+                }
+                if (now >= expiresAt)
+                {
+                    failureCode = "expired";
                     return false;
                 }
                 lock (Gate)
                 {
                     PurgeExpiredExecutionIds(now);
-                    return !ConsumedExecutionExpirations.ContainsKey(executionId);
+                    if (ConsumedExecutionExpirations.ContainsKey(executionId))
+                    {
+                        failureCode = "replayed";
+                        return false;
+                    }
                 }
+                failureCode = string.Empty;
+                return true;
             }
             catch (Exception)
             {
+                failureCode = "context_invalid";
                 return false;
             }
         }
@@ -1394,10 +1815,11 @@ namespace VRCForge.Editor
 
         private static string ComputeCanonicalJsonHash(JToken value)
         {
-            var canonical = CanonicalizeJson(value).ToString(Formatting.None);
+            var canonical = new StringBuilder();
+            AppendCanonicalArgumentToken(canonical, value);
             using (var sha = SHA256.Create())
             {
-                var digest = sha.ComputeHash(new UTF8Encoding(false, true).GetBytes(canonical));
+                var digest = sha.ComputeHash(new UTF8Encoding(false, true).GetBytes(canonical.ToString()));
                 var builder = new StringBuilder(digest.Length * 2);
                 foreach (var item in digest)
                 {
@@ -1407,31 +1829,73 @@ namespace VRCForge.Editor
             }
         }
 
-        private static JToken CanonicalizeJson(JToken value)
+        private static void AppendCanonicalArgumentToken(StringBuilder builder, JToken value)
         {
-            var objectValue = value as JObject;
-            if (objectValue != null)
+            if (value == null || value.Type == JTokenType.Null)
             {
-                var result = new JObject();
-                var properties = new List<JProperty>(objectValue.Properties());
-                properties.Sort((left, right) => string.CompareOrdinal(left.Name, right.Name));
-                foreach (var property in properties)
+                builder.Append("n;");
+                return;
+            }
+            if (value.Type == JTokenType.Boolean)
+            {
+                builder.Append(value.Value<bool>() ? "b1;" : "b0;");
+                return;
+            }
+            if (value.Type == JTokenType.Integer)
+            {
+                builder.Append('i');
+                builder.Append(Convert.ToString(((JValue)value).Value, CultureInfo.InvariantCulture));
+                builder.Append(';');
+                return;
+            }
+            if (value.Type == JTokenType.Float)
+            {
+                var number = value.Value<double>();
+                if (double.IsNaN(number) || double.IsInfinity(number))
                 {
-                    result[property.Name] = CanonicalizeJson(property.Value);
+                    throw new InvalidOperationException("Managed execution arguments contain a non-finite number.");
                 }
-                return result;
+                var bits = unchecked((ulong)BitConverter.DoubleToInt64Bits(number));
+                builder.Append('f');
+                builder.Append(bits.ToString("x16", CultureInfo.InvariantCulture));
+                builder.Append(';');
+                return;
+            }
+            if (value.Type == JTokenType.String)
+            {
+                builder.Append('s');
+                builder.Append(Convert.ToBase64String(new UTF8Encoding(false, true).GetBytes(value.Value<string>())));
+                builder.Append(';');
+                return;
             }
             var arrayValue = value as JArray;
             if (arrayValue != null)
             {
-                var result = new JArray();
+                builder.Append("a[");
                 foreach (var item in arrayValue)
                 {
-                    result.Add(CanonicalizeJson(item));
+                    AppendCanonicalArgumentToken(builder, item);
                 }
-                return result;
+                builder.Append("];");
+                return;
             }
-            return value == null ? JValue.CreateNull() : value.DeepClone();
+            var objectValue = value as JObject;
+            if (objectValue != null)
+            {
+                builder.Append("o{");
+                var properties = new List<JProperty>(objectValue.Properties());
+                properties.Sort((left, right) => string.CompareOrdinal(
+                    Convert.ToBase64String(new UTF8Encoding(false, true).GetBytes(left.Name)),
+                    Convert.ToBase64String(new UTF8Encoding(false, true).GetBytes(right.Name))));
+                foreach (var property in properties)
+                {
+                    AppendCanonicalArgumentToken(builder, new JValue(property.Name));
+                    AppendCanonicalArgumentToken(builder, property.Value);
+                }
+                builder.Append("};");
+                return;
+            }
+            throw new InvalidOperationException("Managed execution arguments contain an unsupported JSON token.");
         }
 
         private static void CancelPendingInvocations()
@@ -1472,19 +1936,35 @@ namespace VRCForge.Editor
             return result;
         }
 
-        private static JObject ToolError(string code, string message, bool modern)
+        private static JObject ToolError(
+            string code,
+            string message,
+            bool modern,
+            bool noWriteProven = false)
         {
+            var structured = new JObject
+            {
+                ["success"] = false,
+                ["code"] = code,
+                ["errorCode"] = code,
+                ["error"] = message,
+                ["failureLayer"] = noWriteProven ? "unity_core_pre_route" : "unity_tool_handler",
+                ["failurePhase"] = noWriteProven ? "before_tool_routing" : "tool_handler_exception",
+                ["toolRoutingStarted"] = !noWriteProven,
+                ["mutationStarted"] = noWriteProven ? new JValue(false) : JValue.CreateNull(),
+                ["committed"] = noWriteProven ? new JValue(false) : JValue.CreateNull(),
+                ["commitState"] = noWriteProven ? "not_started" : "unknown",
+                ["requestMayHaveCommitted"] = !noWriteProven,
+                ["checkpointRecoveryRequired"] = false,
+                ["temporaryCleanupRequired"] = false,
+            };
             var result = new JObject
             {
                 ["content"] = new JArray
                 {
                     new JObject { ["type"] = "text", ["text"] = message },
                 },
-                ["structuredContent"] = new JObject
-                {
-                    ["success"] = false,
-                    ["code"] = code,
-                },
+                ["structuredContent"] = structured,
                 ["isError"] = true,
             };
             if (modern)
@@ -1499,15 +1979,49 @@ namespace VRCForge.Editor
             return new JObject
             {
                 ["supportedVersions"] = new JArray(ModernProtocolVersion),
+                ["protocolRange"] = ProtocolRangeResult(),
+                ["coreIdentity"] = VRCForgeMcpToolContract.CoreIdentity,
+                ["handshakeProtocol"] = VRCForgeMcpToolContract.HandshakeProtocol,
+                ["productVersion"] = VRCForgeMcpToolContract.ProductVersion,
+                ["toolContractVersion"] = VRCForgeMcpToolContract.ToolContractVersion,
+                ["instanceId"] = descriptorInstanceId,
+                ["projectId"] = ComputeProjectId(GetProjectRoot()),
                 ["capabilities"] = new JObject
                 {
                     ["tools"] = new JObject { ["listChanged"] = false },
                     ["resources"] = new JObject { ["listChanged"] = false },
                     ["prompts"] = new JObject { ["listChanged"] = false },
                 },
-                ["instructions"] = "Read tools are direct. Other tools require the release-paired managed VRCForge App lane.",
+                ["instructions"] = "Read tools are direct. Other tools require a version-negotiated managed VRCForge App lane.",
                 ["ttlMs"] = 3000,
                 ["cacheScope"] = "private",
+            };
+        }
+
+        private static JObject ProtocolRangeResult()
+        {
+            return new JObject
+            {
+                ["minimum"] = MinimumProtocolVersion,
+                ["maximum"] = MaximumProtocolVersion,
+            };
+        }
+
+        private static JObject CoreInfoResult()
+        {
+            return new JObject
+            {
+                ["schema"] = "vrcforge.core_info.v1",
+                ["coreIdentity"] = VRCForgeMcpToolContract.CoreIdentity,
+                ["coreVersion"] = VRCForgeMcpToolContract.ProductVersion,
+                ["versionSource"] = "compiled_constant",
+                ["protocolRange"] = ProtocolRangeResult(),
+                ["toolContractVersion"] = VRCForgeMcpToolContract.ToolContractVersion,
+                ["toolCount"] = VRCForgeMcpToolContract.ToolCount,
+                ["instanceId"] = descriptorInstanceId,
+                ["projectId"] = ComputeProjectId(GetProjectRoot()),
+                ["projectIdSource"] = "normalized_project_path_sha256",
+                ["compileSnapshot"] = CompileErrorMonitor.ReadCoreInfoSnapshot(30),
             };
         }
 
@@ -1536,9 +2050,9 @@ namespace VRCForge.Editor
                 var planningCapable = VRCForgeMcpToolContract.ExpectedPlanningToolNames.Contains(descriptor.Name);
                 var whenToUse = descriptor.Description;
                 var whenNotToUse = writeTool && planningCapable
-                    ? "During planning, do not request an output path or any project mutation; output-producing variants require execution mode and the VRCForge App approval lane."
+                    ? "During planning, do not request an output path or any project mutation; output-producing variants require a managed execution lane."
                     : writeTool
-                    ? "Do not use while planning, for hypothetical or quoted requests, or without an explicit project change request and the VRCForge App approval lane."
+                    ? "Do not use while planning, for hypothetical or quoted requests, or without an explicit project change request and a managed execution lane."
                     : "Do not use for general questions, quoted examples, hypothetical requests, or when the user explicitly forbids project inspection.";
                 var negativeExample = writeTool && planningCapable
                     ? "Negative example: Run " + descriptor.Name + " during planning and save its report into Assets."
@@ -1594,7 +2108,7 @@ namespace VRCForge.Editor
                 metadata["io.modelcontextprotocol/serverInfo"] = new JObject
                 {
                     ["name"] = "VRCForge MCP Core",
-                    ["version"] = "2",
+                    ["version"] = VRCForgeMcpToolContract.ProductVersion,
                 };
                 responseObject["_meta"] = metadata;
             }
@@ -1651,6 +2165,12 @@ namespace VRCForge.Editor
                 ["transport"] = "tcp-newline-jsonrpc",
                 ["protocolVersion"] = ModernProtocolVersion,
                 ["supportedProtocolVersions"] = new JArray(ModernProtocolVersion),
+                ["minimumProtocolVersion"] = MinimumProtocolVersion,
+                ["maximumProtocolVersion"] = MaximumProtocolVersion,
+                ["coreIdentity"] = VRCForgeMcpToolContract.CoreIdentity,
+                ["handshakeProtocol"] = VRCForgeMcpToolContract.HandshakeProtocol,
+                ["productVersion"] = VRCForgeMcpToolContract.ProductVersion,
+                ["toolContractVersion"] = VRCForgeMcpToolContract.ToolContractVersion,
                 ["host"] = IPAddress.Loopback.ToString(),
                 ["port"] = endpoint.Port,
                 ["authMode"] = "bearer-per-request",
@@ -1658,7 +2178,8 @@ namespace VRCForge.Editor
                 ["instanceId"] = descriptorInstanceId,
                 ["processId"] = System.Diagnostics.Process.GetCurrentProcess().Id,
                 ["projectPath"] = root,
-                ["projectHash"] = ComputeProjectHash(root),
+                ["projectId"] = ComputeProjectId(root),
+                ["projectIdSource"] = "normalized_project_path_sha256",
                 ["startedAt"] = DateTime.UtcNow.ToString("o"),
                 ["toolCount"] = tools.Length,
                 ["lifecycle"] = "unity-editor-domain",
@@ -1693,7 +2214,7 @@ namespace VRCForge.Editor
             }
         }
 
-        private static string ComputeProjectHash(string root)
+        private static string ComputeProjectId(string root)
         {
             using (var sha = SHA256.Create())
             {

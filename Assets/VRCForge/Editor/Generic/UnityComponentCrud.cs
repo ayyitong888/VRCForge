@@ -6,7 +6,9 @@ using System.Linq;
 using System.Reflection;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
+using UnityEditor.SceneManagement;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 using VRCForge.Core.MCP;
 
 namespace VRCForge.Editor
@@ -14,9 +16,10 @@ namespace VRCForge.Editor
     // ------------------------------------------------------------------
     // Generic Unity component CRUD layer (v0.5 "first cut").
     //
-    // Four MCP tools, all reflection-based so VRCForge never hard-references
+    // Five MCP tools, all reflection-based so VRCForge never hard-references
     // Modular Avatar / VRChat SDK assemblies:
     //   vrc_get_property    (read)
+    //   vrc_inspect_skinned_mesh_bone_usage (read)
     //   vrc_add_component   (write, Undo-registered)
     //   vrc_remove_component(write, Undo-registered)
     //   vrc_set_property    (write, Undo-registered)
@@ -393,6 +396,16 @@ namespace VRCForge.Editor
                 throw new InvalidOperationException($"Cannot determine list element type for '{targetType.FullName}'.");
             }
 
+            if (targetType.IsArray)
+            {
+                var convertedArray = Array.CreateInstance(elementType, array.Count);
+                for (var i = 0; i < array.Count; i++)
+                {
+                    convertedArray.SetValue(ConvertValue(array[i], elementType), i);
+                }
+                return convertedArray;
+            }
+
             IList list;
             if (targetType.IsInterface || targetType.IsAbstract)
             {
@@ -481,6 +494,52 @@ namespace VRCForge.Editor
             return value.ToString();
         }
 
+        internal static object DescribeValue(
+            object value,
+            int maxItems,
+            out int returnedItemCount,
+            out int valueItemCount,
+            out bool valueTruncated)
+        {
+            returnedItemCount = -1;
+            valueItemCount = -1;
+            valueTruncated = false;
+            // UnityEngine.Object references such as Transform also implement
+            // IEnumerable.  They are scalar object references for MCP
+            // property reads and must not be expanded into child transforms.
+            if (value is UnityEngine.Object || !(value is IEnumerable enumerable) || value is string)
+            {
+                return DescribeValue(value);
+            }
+
+            var items = new List<object>();
+            var collection = value as ICollection;
+            var totalKnown = collection != null;
+            if (collection != null)
+            {
+                valueItemCount = collection.Count;
+            }
+            foreach (var item in enumerable)
+            {
+                if (items.Count >= maxItems)
+                {
+                    valueTruncated = true;
+                    break;
+                }
+                items.Add(DescribeValue(item));
+            }
+            returnedItemCount = items.Count;
+            if (!totalKnown && !valueTruncated)
+            {
+                valueItemCount = returnedItemCount;
+            }
+            else if (totalKnown)
+            {
+                valueTruncated = valueItemCount > returnedItemCount;
+            }
+            return items;
+        }
+
         internal static Type FindType(string fullName)
         {
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
@@ -517,6 +576,312 @@ namespace VRCForge.Editor
         {
             return (value ?? string.Empty).Replace("\\", "/").Trim().Trim('/');
         }
+
+        internal static SavedSceneSnapshot ResolveSavedSceneFor(GameObject gameObject)
+        {
+            if (gameObject == null
+                || !gameObject.scene.IsValid()
+                || !gameObject.scene.isLoaded
+                || string.IsNullOrWhiteSpace(gameObject.scene.path))
+            {
+                throw new InvalidOperationException("Component writes require one loaded saved scene object.");
+            }
+            return SceneObjectCopyCore.ResolveSavedScene(gameObject.scene.path, "component target scene");
+        }
+
+        internal static SavedSceneSnapshot SaveAndResolveScene(SavedSceneSnapshot beforeScene)
+        {
+            // Undo.RecordObject normally finalizes its diff at the end of the
+            // editor frame. These commands save in the same frame, so flush
+            // first or Unity can mark the scene dirty again after success.
+            Undo.FlushUndoRecordObjects();
+            EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
+            if (!EditorSceneManager.SaveScene(beforeScene.Scene))
+            {
+                throw new InvalidOperationException("The component target scene could not be saved.");
+            }
+            var afterScene = SceneObjectCopyCore.ResolveSavedScene(
+                beforeScene.Path,
+                "component target scene readback");
+            if (afterScene.Guid != beforeScene.Guid
+                || afterScene.Handle != beforeScene.Handle
+                || afterScene.MetaDigest != beforeScene.MetaDigest
+                || afterScene.MetaIdentity != beforeScene.MetaIdentity)
+            {
+                throw new InvalidOperationException("The component target scene identity changed during the write.");
+            }
+            return afterScene;
+        }
+
+        internal static bool ValuesEqual(object left, object right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+            if (left == null || right == null)
+            {
+                return false;
+            }
+            if (left is UnityEngine.Object leftObject && right is UnityEngine.Object rightObject)
+            {
+                return leftObject == rightObject;
+            }
+            if (left is float leftFloat && right is float rightFloat)
+            {
+                return FloatApproximately(leftFloat, rightFloat);
+            }
+            if (left is double leftDouble && right is double rightDouble)
+            {
+                var scale = Math.Max(1d, Math.Max(Math.Abs(leftDouble), Math.Abs(rightDouble)));
+                return Math.Abs(leftDouble - rightDouble) <= 1e-9d * scale;
+            }
+            if (left is Vector2 leftVector2 && right is Vector2 rightVector2)
+            {
+                return FloatApproximately(leftVector2.x, rightVector2.x)
+                    && FloatApproximately(leftVector2.y, rightVector2.y);
+            }
+            if (left is Vector3 leftVector3 && right is Vector3 rightVector3)
+            {
+                return FloatApproximately(leftVector3.x, rightVector3.x)
+                    && FloatApproximately(leftVector3.y, rightVector3.y)
+                    && FloatApproximately(leftVector3.z, rightVector3.z);
+            }
+            if (left is Vector4 leftVector4 && right is Vector4 rightVector4)
+            {
+                return FloatApproximately(leftVector4.x, rightVector4.x)
+                    && FloatApproximately(leftVector4.y, rightVector4.y)
+                    && FloatApproximately(leftVector4.z, rightVector4.z)
+                    && FloatApproximately(leftVector4.w, rightVector4.w);
+            }
+            if (left is Quaternion leftQuaternion && right is Quaternion rightQuaternion)
+            {
+                return QuaternionComponentsEqual(leftQuaternion, rightQuaternion)
+                    || QuaternionComponentsEqual(
+                        leftQuaternion,
+                        new Quaternion(
+                            -rightQuaternion.x,
+                            -rightQuaternion.y,
+                            -rightQuaternion.z,
+                            -rightQuaternion.w));
+            }
+            if (left is Color leftColor && right is Color rightColor)
+            {
+                return FloatApproximately(leftColor.r, rightColor.r)
+                    && FloatApproximately(leftColor.g, rightColor.g)
+                    && FloatApproximately(leftColor.b, rightColor.b)
+                    && FloatApproximately(leftColor.a, rightColor.a);
+            }
+            if (left is IList leftList && right is IList rightList)
+            {
+                if (leftList.Count != rightList.Count)
+                {
+                    return false;
+                }
+                for (var index = 0; index < leftList.Count; index++)
+                {
+                    if (!ValuesEqual(leftList[index], rightList[index]))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            var describedLeft = DescribeValue(left);
+            var describedRight = DescribeValue(right);
+            return JToken.DeepEquals(
+                describedLeft == null ? JValue.CreateNull() : JToken.FromObject(describedLeft),
+                describedRight == null ? JValue.CreateNull() : JToken.FromObject(describedRight));
+        }
+
+        internal static bool ValuesExactlyEqual(object left, object right)
+        {
+            if (ReferenceEquals(left, right))
+            {
+                return true;
+            }
+            if (left == null || right == null)
+            {
+                return false;
+            }
+            if (left is UnityEngine.Object leftObject && right is UnityEngine.Object rightObject)
+            {
+                return leftObject == rightObject;
+            }
+            if (left is IList leftList && right is IList rightList)
+            {
+                if (leftList.Count != rightList.Count)
+                {
+                    return false;
+                }
+                for (var index = 0; index < leftList.Count; index++)
+                {
+                    if (!ValuesExactlyEqual(leftList[index], rightList[index]))
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            var describedLeft = DescribeValue(left);
+            var describedRight = DescribeValue(right);
+            return JToken.DeepEquals(
+                describedLeft == null ? JValue.CreateNull() : JToken.FromObject(describedLeft),
+                describedRight == null ? JValue.CreateNull() : JToken.FromObject(describedRight));
+        }
+
+        private static bool QuaternionComponentsEqual(Quaternion left, Quaternion right)
+        {
+            return FloatApproximately(left.x, right.x)
+                && FloatApproximately(left.y, right.y)
+                && FloatApproximately(left.z, right.z)
+                && FloatApproximately(left.w, right.w);
+        }
+
+        private static bool FloatApproximately(float left, float right)
+        {
+            // Parent-space/world-space conversion commonly introduces tiny
+            // absolute drift around zero where Mathf.Approximately is purely
+            // relative and therefore too strict for persisted Transform reads.
+            return Mathf.Approximately(left, right) || Mathf.Abs(left - right) <= 0.000001f;
+        }
+
+        internal sealed class MutationCleanupResult
+        {
+            private MutationCleanupResult(bool restored, string stage, string detail)
+            {
+                Restored = restored;
+                Stage = stage ?? string.Empty;
+                Detail = detail ?? string.Empty;
+            }
+
+            internal bool Restored { get; private set; }
+            internal string Stage { get; private set; }
+            internal string Detail { get; private set; }
+
+            internal static MutationCleanupResult Completed()
+            {
+                return new MutationCleanupResult(true, "verified", "The pre-state was restored and verified.");
+            }
+
+            internal static MutationCleanupResult Failed(string stage, string detail)
+            {
+                return new MutationCleanupResult(false, stage, detail);
+            }
+        }
+
+        internal static MutationCleanupResult RestoreFailedMutation(
+            int undoGroup,
+            SavedSceneSnapshot beforeScene,
+            string gameObjectPath,
+            Func<GameObject, bool> verifyObject)
+        {
+            var cleanupStage = "undo_flush";
+            try
+            {
+                Undo.FlushUndoRecordObjects();
+                cleanupStage = "undo_revert";
+                Undo.RevertAllDownToGroup(undoGroup);
+                cleanupStage = "scene_save";
+                EditorSceneManager.MarkSceneDirty(beforeScene.Scene);
+                if (!EditorSceneManager.SaveScene(beforeScene.Scene))
+                {
+                    return MutationCleanupResult.Failed("scene_save", "Unity did not save the restored scene.");
+                }
+                cleanupStage = "scene_readback";
+                var cleanup = SceneObjectCopyCore.ResolveSavedScene(
+                    beforeScene.Path,
+                    "component mutation cleanup");
+                if (cleanup.Guid != beforeScene.Guid
+                    || cleanup.Handle != beforeScene.Handle)
+                {
+                    return MutationCleanupResult.Failed("scene_identity", "The restored scene identity did not match the pre-state.");
+                }
+                if (cleanup.FileDigest != beforeScene.FileDigest
+                    || cleanup.FileIdentity != beforeScene.FileIdentity
+                    || cleanup.MetaDigest != beforeScene.MetaDigest
+                    || cleanup.MetaIdentity != beforeScene.MetaIdentity)
+                {
+                    return MutationCleanupResult.Failed("scene_content", "The restored scene or metadata did not match the pre-state bytes.");
+                }
+                cleanupStage = "object_readback";
+                var restoredObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    cleanup.Scene,
+                    gameObjectPath,
+                    "component target cleanup");
+                cleanupStage = "pre_state_verification";
+                if (verifyObject != null && !verifyObject(restoredObject))
+                {
+                    return MutationCleanupResult.Failed("pre_state_verification", "The restored object did not match the captured pre-state value.");
+                }
+                return MutationCleanupResult.Completed();
+            }
+            catch (Exception cleanupException)
+            {
+                return MutationCleanupResult.Failed(cleanupStage, SafeExceptionMessage(cleanupException));
+            }
+        }
+
+        internal static VRCForgeToolResult FailedMutationResult(
+            string errorCode,
+            string action,
+            string failureStage,
+            Exception failure,
+            SavedSceneSnapshot beforeScene,
+            MutationCleanupResult cleanup,
+            bool? mutationApplied)
+        {
+            var restored = cleanup != null && cleanup.Restored;
+            var failureDetail = SafeExceptionMessage(failure);
+            var rootFailure = UnwrapException(failure);
+            var message = restored
+                ? $"{action} failed at {failureStage}: {failureDetail} The verified pre-state was restored."
+                : $"{action} failed at {failureStage}: {failureDetail} Atomic cleanup could not be verified; checkpoint recovery requires user approval.";
+            return VRCForgeToolResult.FailedWithCode(
+                errorCode,
+                message,
+                new
+                {
+                    action,
+                    failureLayer = "unity_editor_tool",
+                    failureStage,
+                    failureType = rootFailure == null ? string.Empty : rootFailure.GetType().FullName,
+                    failureDetail,
+                    scenePath = beforeScene == null ? string.Empty : beforeScene.Path,
+                    mutationStarted = true,
+                    mutationApplied,
+                    writeState = mutationApplied == true
+                        ? "applied_in_memory_before_failure"
+                        : "application_unknown_before_failure",
+                    restored,
+                    cleanupVerified = restored,
+                    cleanupStage = cleanup == null ? "not_run" : cleanup.Stage,
+                    cleanupDetail = cleanup == null ? "Atomic cleanup did not return a result." : cleanup.Detail,
+                    committed = restored ? (bool?)false : null,
+                    commitState = restored ? "rolled_back" : "unknown",
+                    requestMayHaveCommitted = !restored,
+                    checkpointRecoveryRequired = !restored
+                });
+        }
+
+        internal static string SafeExceptionMessage(Exception exception)
+        {
+            var root = UnwrapException(exception);
+            var message = root == null || string.IsNullOrWhiteSpace(root.Message)
+                ? "Unity component operation failed without an exception message."
+                : root.Message.Trim();
+            return message.Length <= 1024 ? message : message.Substring(0, 1024);
+        }
+
+        private static Exception UnwrapException(Exception exception)
+        {
+            var current = exception;
+            while (current is TargetInvocationException invocation && invocation.InnerException != null)
+            {
+                current = invocation.InnerException;
+            }
+            return current;
+        }
     }
 
     [VRCForgeCommand(
@@ -541,6 +906,9 @@ namespace VRCForge.Editor
 
             [VRCForgeInput("Which component instance to read when several of the same type exist (default 0).", IsRequired = false)]
             public int? componentIndex { get; set; } = 0;
+
+            [VRCForgeInput("Maximum collection items to return (1-2000, default 50). The result reports total/returned counts and truncation.", IsRequired = false)]
+            public int? maxItems { get; set; } = 50;
         }
 
         public static object HandleCommand(JObject @params)
@@ -553,6 +921,17 @@ namespace VRCForge.Editor
                 var component = ComponentCrudCore.ResolveComponent(go, type, p.componentIndex ?? 0);
                 var member = ComponentCrudCore.ResolveMember(component.GetType(), p.propertyPath);
                 var value = ComponentCrudCore.GetMemberValue(component, member);
+                var maxItems = p.maxItems ?? 50;
+                if (maxItems < 1 || maxItems > 2000)
+                {
+                    return VRCForgeToolResult.Failed("maxItems must be between 1 and 2000.");
+                }
+                var propertyValue = ComponentCrudCore.DescribeValue(
+                    value,
+                    maxItems,
+                    out var returnedItemCount,
+                    out var valueItemCount,
+                    out var valueTruncated);
 
                 var payload = new
                 {
@@ -561,7 +940,10 @@ namespace VRCForge.Editor
                     componentIndex = p.componentIndex ?? 0,
                     propertyPath = p.propertyPath,
                     valueType = ComponentCrudCore.GetMemberType(member).FullName,
-                    propertyValue = ComponentCrudCore.DescribeValue(value)
+                    propertyValue,
+                    returnedItemCount = returnedItemCount >= 0 ? (int?)returnedItemCount : null,
+                    valueItemCount = valueItemCount >= 0 ? (int?)valueItemCount : null,
+                    valueTruncated
                 };
 
                 return VRCForgeToolResult.Completed(
@@ -571,6 +953,170 @@ namespace VRCForge.Editor
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Get property failed: {ex.Message}");
+            }
+        }
+    }
+
+    [VRCForgeCommand(
+        toolId: "vrc_inspect_skinned_mesh_bone_usage",
+        Summary = "Inspect which SkinnedMeshRenderer bone-array indices are referenced by non-zero mesh weights (read-only).",
+        Access = VRCForgeCommandAccess.ReadOnly
+    )]
+    public static class InspectSkinnedMeshBoneUsageTool
+    {
+        public const string ToolName = "vrc_inspect_skinned_mesh_bone_usage";
+
+        public class InspectSkinnedMeshBoneUsageParameters
+        {
+            [VRCForgeInput("Full hierarchy path or unique name of the GameObject with a SkinnedMeshRenderer.", IsRequired = true)]
+            public string gameObjectPath { get; set; } = "";
+
+            [VRCForgeInput("Which SkinnedMeshRenderer instance to inspect when several exist (default 0).", IsRequired = false)]
+            public int? componentIndex { get; set; } = 0;
+
+            [VRCForgeInput("Minimum positive bone weight to count as used (0 to 1, default 0.000001).", IsRequired = false)]
+            public float? minimumWeight { get; set; } = 0.000001f;
+        }
+
+        private sealed class BoneUsageAccumulator
+        {
+            public int InfluenceCount;
+            public double TotalWeight;
+            public float MaxWeight;
+        }
+
+        public static object HandleCommand(JObject @params)
+        {
+            var p = (@params ?? new JObject()).ToObject<InspectSkinnedMeshBoneUsageParameters>()
+                ?? new InspectSkinnedMeshBoneUsageParameters();
+            try
+            {
+                var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
+                var componentIndex = p.componentIndex ?? 0;
+                var renderer = ComponentCrudCore.ResolveComponent(
+                    go,
+                    typeof(SkinnedMeshRenderer),
+                    componentIndex) as SkinnedMeshRenderer;
+                if (renderer == null)
+                {
+                    throw new InvalidOperationException("The requested component is not a SkinnedMeshRenderer.");
+                }
+                var mesh = renderer.sharedMesh;
+                if (mesh == null)
+                {
+                    throw new InvalidOperationException("The SkinnedMeshRenderer has no shared mesh.");
+                }
+                var minimumWeight = p.minimumWeight ?? 0.000001f;
+                if (float.IsNaN(minimumWeight)
+                    || float.IsInfinity(minimumWeight)
+                    || minimumWeight < 0.0f
+                    || minimumWeight > 1.0f)
+                {
+                    throw new InvalidOperationException("minimumWeight must be between 0 and 1.");
+                }
+
+                var rendererBones = renderer.bones ?? new Transform[0];
+                var usage = new Dictionary<int, BoneUsageAccumulator>();
+                var outOfRangeWeightCount = 0;
+                var bonesPerVertex = mesh.GetBonesPerVertex();
+                var allWeights = mesh.GetAllBoneWeights();
+                try
+                {
+                    var weightIndex = 0;
+                    for (var vertexIndex = 0; vertexIndex < bonesPerVertex.Length; vertexIndex++)
+                    {
+                        var influenceCount = bonesPerVertex[vertexIndex];
+                        for (var influenceIndex = 0; influenceIndex < influenceCount; influenceIndex++)
+                        {
+                            var weight = allWeights[weightIndex++];
+                            if (weight.weight <= minimumWeight)
+                            {
+                                continue;
+                            }
+                            if (weight.boneIndex < 0 || weight.boneIndex >= rendererBones.Length)
+                            {
+                                outOfRangeWeightCount++;
+                                continue;
+                            }
+                            BoneUsageAccumulator accumulator;
+                            if (!usage.TryGetValue(weight.boneIndex, out accumulator))
+                            {
+                                accumulator = new BoneUsageAccumulator();
+                                usage.Add(weight.boneIndex, accumulator);
+                            }
+                            accumulator.InfluenceCount++;
+                            accumulator.TotalWeight += weight.weight;
+                            accumulator.MaxWeight = Mathf.Max(accumulator.MaxWeight, weight.weight);
+                        }
+                    }
+                    if (weightIndex != allWeights.Length)
+                    {
+                        throw new InvalidOperationException(
+                            $"Mesh bone-weight traversal consumed {weightIndex} of {allWeights.Length} entries.");
+                    }
+                }
+                finally
+                {
+                    if (bonesPerVertex.IsCreated)
+                    {
+                        bonesPerVertex.Dispose();
+                    }
+                    if (allWeights.IsCreated)
+                    {
+                        allWeights.Dispose();
+                    }
+                }
+
+                var usedBones = usage
+                    .OrderBy(item => item.Key)
+                    .Select(item =>
+                    {
+                        var bone = rendererBones[item.Key];
+                        return new
+                        {
+                            index = item.Key,
+                            name = bone != null ? bone.name : null,
+                            gameObjectPath = bone != null ? ComponentCrudCore.GetHierarchyPath(bone) : null,
+                            instanceId = bone != null ? bone.GetInstanceID() : 0,
+                            missingTransform = bone == null,
+                            influenceCount = item.Value.InfluenceCount,
+                            totalWeight = item.Value.TotalWeight,
+                            maxWeight = item.Value.MaxWeight
+                        };
+                    })
+                    .ToArray();
+                var usedIndices = new HashSet<int>(usage.Keys);
+                var unusedBoundBoneCount = rendererBones
+                    .Select((bone, index) => new { bone, index })
+                    .Count(item => item.bone != null && !usedIndices.Contains(item.index));
+                var nullBoneCount = rendererBones.Count(bone => bone == null);
+                var rootBone = renderer.rootBone;
+                var payload = new
+                {
+                    action = "inspect_skinned_mesh_bone_usage",
+                    gameObjectPath = ComponentCrudCore.GetHierarchyPath(go.transform),
+                    componentIndex,
+                    meshName = mesh.name,
+                    vertexCount = mesh.vertexCount,
+                    rendererBoneCount = rendererBones.Length,
+                    bindposeCount = mesh.bindposes != null ? mesh.bindposes.Length : 0,
+                    usedBoneCount = usedBones.Length,
+                    unusedBoundBoneCount,
+                    nullBoneCount,
+                    outOfRangeWeightCount,
+                    minimumWeight,
+                    rootBonePath = rootBone != null ? ComponentCrudCore.GetHierarchyPath(rootBone) : null,
+                    usedBones
+                };
+                return VRCForgeToolResult.Completed(
+                    $"Skinned mesh '{mesh.name}' uses {usedBones.Length} of {rendererBones.Length} renderer bone slots.",
+                    payload);
+            }
+            catch (Exception ex)
+            {
+                return VRCForgeToolResult.FailedWithCode(
+                    "skinned_mesh_bone_usage_inspection_failed",
+                    $"Inspect skinned mesh bone usage failed: {ex.Message}");
             }
         }
     }
@@ -598,12 +1144,22 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<AddComponentParameters>() ?? new AddComponentParameters();
+            SavedSceneSnapshot beforeScene = null;
+            var undoGroup = -1;
+            var mutationStarted = false;
+            var goPath = string.Empty;
+            Type type = null;
+            var existing = 0;
+            var failureStage = "validation";
+            bool? mutationApplied = null;
             try
             {
                 var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
-                var type = ComponentCrudCore.ResolveComponentType(p.componentType);
-                var goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
-                var existing = go.GetComponents(type).Length;
+                type = ComponentCrudCore.ResolveComponentType(p.componentType);
+                goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
+                existing = go.GetComponents(type).Length;
+                beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
+                var objectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
 
                 if (p.preview ?? false)
                 {
@@ -620,13 +1176,35 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName("Add VRCForge component");
+                mutationStarted = true;
+                failureStage = "unity_mutation";
                 var added = Undo.AddComponent(go, type);
                 if (added == null)
                 {
-                    return VRCForgeToolResult.Failed(
-                        $"Unity refused to add '{type.Name}' to '{goPath}' (missing dependency or disallowed type).");
+                    throw new InvalidOperationException(
+                        $"Unity refused to add '{type.Name}' (missing dependency or disallowed type).");
                 }
+                mutationApplied = true;
                 EditorUtility.SetDirty(go);
+                EditorUtility.SetDirty(added);
+                failureStage = "scene_save";
+                var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
+                failureStage = "persisted_readback";
+                var readback = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    afterScene.Scene,
+                    goPath,
+                    "added component target");
+                var readbackComponents = readback.GetComponents(type);
+                if (GlobalObjectId.GetGlobalObjectIdSlow(readback).ToString() != objectId
+                    || readbackComponents.Length != existing + 1
+                    || afterScene.FileDigest == beforeScene.FileDigest)
+                {
+                    throw new InvalidOperationException("The added component persisted readback was not exact.");
+                }
+                Undo.CollapseUndoOperations(undoGroup);
 
                 var payload = new
                 {
@@ -634,13 +1212,36 @@ namespace VRCForge.Editor
                     preview = false,
                     gameObjectPath = goPath,
                     componentType = type.FullName,
-                    componentIndex = go.GetComponents(type).Length - 1,
-                    instanceId = added.GetInstanceID()
+                    componentIndex = readbackComponents.Length - 1,
+                    instanceId = added.GetInstanceID(),
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    mutationStarted = true,
+                    committed = true,
+                    commitState = "committed",
+                    checkpointRecoveryRequired = false
                 };
                 return VRCForgeToolResult.Completed($"Added '{type.Name}' to '{goPath}'.", payload);
             }
             catch (Exception ex)
             {
+                if (mutationStarted && beforeScene != null && undoGroup >= 0)
+                {
+                    var cleanup = ComponentCrudCore.RestoreFailedMutation(
+                        undoGroup,
+                        beforeScene,
+                        goPath,
+                        restoredObject => restoredObject.GetComponents(type).Length == existing);
+                    return ComponentCrudCore.FailedMutationResult(
+                        "component_add_failed_after_mutation",
+                        "add_component",
+                        failureStage,
+                        ex,
+                        beforeScene,
+                        cleanup,
+                        mutationApplied);
+                }
                 return VRCForgeToolResult.Failed($"Add component failed: {ex.Message}");
             }
         }
@@ -672,13 +1273,24 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<RemoveComponentParameters>() ?? new RemoveComponentParameters();
+            SavedSceneSnapshot beforeScene = null;
+            var undoGroup = -1;
+            var mutationStarted = false;
+            var goPath = string.Empty;
+            Type type = null;
+            var existing = 0;
+            var failureStage = "validation";
+            bool? mutationApplied = null;
             try
             {
                 var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
-                var type = ComponentCrudCore.ResolveComponentType(p.componentType);
-                var goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
+                type = ComponentCrudCore.ResolveComponentType(p.componentType);
+                goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
                 var index = p.componentIndex ?? 0;
                 var component = ComponentCrudCore.ResolveComponent(go, type, index);
+                existing = go.GetComponents(type).Length;
+                beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
+                var objectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
 
                 if (component is Transform)
                 {
@@ -700,9 +1312,29 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName("Remove VRCForge component");
                 var removedType = component.GetType().FullName;
+                mutationStarted = true;
+                failureStage = "unity_mutation";
                 Undo.DestroyObjectImmediate(component);
+                mutationApplied = true;
                 EditorUtility.SetDirty(go);
+                failureStage = "scene_save";
+                var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
+                failureStage = "persisted_readback";
+                var readback = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    afterScene.Scene,
+                    goPath,
+                    "removed component target");
+                if (GlobalObjectId.GetGlobalObjectIdSlow(readback).ToString() != objectId
+                    || readback.GetComponents(type).Length != existing - 1
+                    || afterScene.FileDigest == beforeScene.FileDigest)
+                {
+                    throw new InvalidOperationException("The removed component persisted readback was not exact.");
+                }
+                Undo.CollapseUndoOperations(undoGroup);
 
                 var payload = new
                 {
@@ -710,12 +1342,35 @@ namespace VRCForge.Editor
                     preview = false,
                     gameObjectPath = goPath,
                     componentType = removedType,
-                    componentIndex = index
+                    componentIndex = index,
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    mutationStarted = true,
+                    committed = true,
+                    commitState = "committed",
+                    checkpointRecoveryRequired = false
                 };
                 return VRCForgeToolResult.Completed($"Removed '{type.Name}' (index {index}) from '{goPath}'.", payload);
             }
             catch (Exception ex)
             {
+                if (mutationStarted && beforeScene != null && undoGroup >= 0)
+                {
+                    var cleanup = ComponentCrudCore.RestoreFailedMutation(
+                        undoGroup,
+                        beforeScene,
+                        goPath,
+                        restoredObject => restoredObject.GetComponents(type).Length == existing);
+                    return ComponentCrudCore.FailedMutationResult(
+                        "component_remove_failed_after_mutation",
+                        "remove_component",
+                        failureStage,
+                        ex,
+                        beforeScene,
+                        cleanup,
+                        mutationApplied);
+                }
                 return VRCForgeToolResult.Failed($"Remove component failed: {ex.Message}");
             }
         }
@@ -753,23 +1408,44 @@ namespace VRCForge.Editor
         public static object HandleCommand(JObject @params)
         {
             var p = (@params ?? new JObject()).ToObject<SetPropertyParameters>() ?? new SetPropertyParameters();
+            SavedSceneSnapshot beforeScene = null;
+            var undoGroup = -1;
+            var mutationStarted = false;
+            var goPath = string.Empty;
+            Type type = null;
+            MemberInfo member = null;
+            object oldValue = null;
+            var componentIndex = p.componentIndex ?? 0;
+            var failureStage = "validation";
+            bool? mutationApplied = null;
             try
             {
                 var rawParams = @params ?? new JObject();
                 if (rawParams["value"] == null)
                 {
-                    return VRCForgeToolResult.Failed("Set property requires a 'value' argument.");
+                    return VRCForgeToolResult.RejectedBeforeMutation(
+                        "component_property_value_missing",
+                        "Set property requires a 'value' argument.",
+                        "unity_editor_tool",
+                        "validation",
+                        details: new
+                        {
+                            action = "set_property",
+                            requiredArgument = "value"
+                        });
                 }
                 var valueToken = rawParams["value"];
 
                 var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
-                var type = ComponentCrudCore.ResolveComponentType(p.componentType);
-                var component = ComponentCrudCore.ResolveComponent(go, type, p.componentIndex ?? 0);
-                var member = ComponentCrudCore.ResolveMember(component.GetType(), p.propertyPath);
+                type = ComponentCrudCore.ResolveComponentType(p.componentType);
+                var component = ComponentCrudCore.ResolveComponent(go, type, componentIndex);
+                member = ComponentCrudCore.ResolveMember(component.GetType(), p.propertyPath);
                 var memberType = ComponentCrudCore.GetMemberType(member);
-                var goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
+                goPath = ComponentCrudCore.GetHierarchyPath(go.transform);
+                beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
+                var objectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
 
-                var oldValue = ComponentCrudCore.GetMemberValue(component, member);
+                oldValue = ComponentCrudCore.GetMemberValue(component, member);
                 var newValue = ComponentCrudCore.ConvertValue(valueToken, memberType);
 
                 if (p.preview ?? false)
@@ -791,21 +1467,84 @@ namespace VRCForge.Editor
                         previewPayload);
                 }
 
+                if (ComponentCrudCore.ValuesExactlyEqual(oldValue, newValue))
+                {
+                    return VRCForgeToolResult.Completed(
+                        $"{component.GetType().Name}.{p.propertyPath} already has the requested value on '{goPath}'.",
+                        new
+                        {
+                            action = "set_property",
+                            preview = false,
+                            changed = false,
+                            gameObjectPath = goPath,
+                            componentType = component.GetType().FullName,
+                            componentIndex,
+                            propertyPath = p.propertyPath,
+                            valueType = memberType.FullName,
+                            oldValue = ComponentCrudCore.DescribeValue(oldValue),
+                            newValue = ComponentCrudCore.DescribeValue(oldValue),
+                            scenePath = beforeScene.Path,
+                            sceneSaved = true,
+                            persistedReadback = true,
+                            mutationStarted = false,
+                            committed = true,
+                            commitState = "committed",
+                            checkpointRecoveryRequired = false
+                        });
+                }
+
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName("Set VRCForge component property");
                 Undo.RecordObject(component, $"Set {component.GetType().Name}.{p.propertyPath}");
+                mutationStarted = true;
+                failureStage = "unity_mutation";
                 ComponentCrudCore.SetMemberValue(component, member, newValue);
+                mutationApplied = true;
                 EditorUtility.SetDirty(component);
+                EditorUtility.SetDirty(go);
+                failureStage = "scene_save";
+                var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
+                failureStage = "persisted_readback";
+                var readbackObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                    afterScene.Scene,
+                    goPath,
+                    "component property target");
+                var readbackComponent = ComponentCrudCore.ResolveComponent(
+                    readbackObject,
+                    type,
+                    componentIndex);
+                var readbackMember = ComponentCrudCore.ResolveMember(
+                    readbackComponent.GetType(),
+                    p.propertyPath);
+                var readbackValue = ComponentCrudCore.GetMemberValue(readbackComponent, readbackMember);
+                if (GlobalObjectId.GetGlobalObjectIdSlow(readbackObject).ToString() != objectId
+                    || !ComponentCrudCore.ValuesEqual(readbackValue, newValue)
+                    || afterScene.FileDigest == beforeScene.FileDigest)
+                {
+                    throw new InvalidOperationException("The component property persisted readback was not exact.");
+                }
+                Undo.CollapseUndoOperations(undoGroup);
 
                 var payload = new
                 {
                     action = "set_property",
                     preview = false,
+                    changed = true,
                     gameObjectPath = goPath,
                     componentType = component.GetType().FullName,
-                    componentIndex = p.componentIndex ?? 0,
+                    componentIndex,
                     propertyPath = p.propertyPath,
                     valueType = memberType.FullName,
                     oldValue = ComponentCrudCore.DescribeValue(oldValue),
-                    newValue = ComponentCrudCore.DescribeValue(ComponentCrudCore.GetMemberValue(component, member))
+                    newValue = ComponentCrudCore.DescribeValue(readbackValue),
+                    scenePath = afterScene.Path,
+                    sceneSaved = true,
+                    persistedReadback = true,
+                    mutationStarted = true,
+                    committed = true,
+                    commitState = "committed",
+                    checkpointRecoveryRequired = false
                 };
                 return VRCForgeToolResult.Completed(
                     $"Set {component.GetType().Name}.{p.propertyPath} on '{goPath}'.",
@@ -813,7 +1552,58 @@ namespace VRCForge.Editor
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Set property failed: {ex.Message}");
+                if (mutationStarted && beforeScene != null && undoGroup >= 0)
+                {
+                    var cleanup = ComponentCrudCore.RestoreFailedMutation(
+                        undoGroup,
+                        beforeScene,
+                        goPath,
+                        restoredObject =>
+                        {
+                            var restoredComponent = ComponentCrudCore.ResolveComponent(
+                                restoredObject,
+                                type,
+                                componentIndex);
+                            var restoredMember = ComponentCrudCore.ResolveMember(
+                                restoredComponent.GetType(),
+                                p.propertyPath);
+                            return ComponentCrudCore.ValuesEqual(
+                                ComponentCrudCore.GetMemberValue(restoredComponent, restoredMember),
+                                oldValue);
+                        });
+                    return ComponentCrudCore.FailedMutationResult(
+                        "component_property_failed_after_mutation",
+                        "set_property",
+                        failureStage,
+                        ex,
+                        beforeScene,
+                        cleanup,
+                        mutationApplied);
+                }
+                var selectedSceneIsDirty = ex.Message.IndexOf(
+                    "unsaved changes",
+                    StringComparison.OrdinalIgnoreCase) >= 0;
+                return VRCForgeToolResult.RejectedBeforeMutation(
+                    selectedSceneIsDirty
+                        ? "scene_unsaved_changes"
+                        : "component_property_rejected_before_mutation",
+                    $"Set property failed: {ex.Message}",
+                    "unity_editor_tool",
+                    selectedSceneIsDirty ? "scene_precondition" : failureStage,
+                    retryable: selectedSceneIsDirty,
+                    details: new
+                    {
+                        action = "set_property",
+                        gameObjectPath = p.gameObjectPath,
+                        componentType = p.componentType,
+                        componentIndex,
+                        propertyPath = p.propertyPath,
+                        exceptionType = ex.GetType().FullName,
+                        reason = ex.Message,
+                        recommendedAction = selectedSceneIsDirty
+                            ? "Save or revert the selected scene, then retry the exact same tool call."
+                            : "Correct the reported validation or precondition failure before retrying."
+                    });
             }
         }
     }

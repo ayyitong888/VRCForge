@@ -77,6 +77,73 @@ def test_apply_state_scans_current_inventory_and_ignores_caller_inventory(monkey
     assert state["coreArguments"]["changes"][0]["material_id"] == "live"
 
 
+def test_preview_shader_apply_uses_the_write_validator(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def prepare(request, *, allow_empty=False):
+        seen["request"] = request
+        seen["allow_empty"] = allow_empty
+        return {
+            **_state(),
+            "validatedChanges": [
+                {"material_id": "mat_skin", "semantic_property": "outline_width", "after": 0.0}
+            ],
+            "skippedChanges": [{"warning": "Unknown material_id: stale"}],
+            "warnings": ["Unknown material_id: stale"],
+            "coreArguments": {
+                "avatarPath": "Scene/A",
+                "changes": [
+                    {"material_id": "mat_skin", "semantic_property": "outline_width", "after": 0.0}
+                ],
+                "saveAssets": True,
+            },
+        }
+
+    monkeypatch.setattr(dashboard_server, "_prepare_shader_tuning_apply_state", prepare)
+    result = dashboard_server.preview_agent_shader_apply(
+        {
+            "avatar_path": "Scene/A",
+            "changes": [
+                {"material_id": "mat_skin", "semantic_property": "outline_width", "after": 0.0},
+                {"material_id": "stale", "semantic_property": "outline_width", "after": 0.0},
+            ],
+        }
+    )
+
+    assert seen["allow_empty"] is True
+    assert result["ok"] is True
+    assert result["requestedChangeCount"] == 2
+    assert result["changeCount"] == 1
+    assert result["skippedChanges"] == [{"warning": "Unknown material_id: stale"}]
+    assert result["applyPayload"]["params"] == prepare(None, allow_empty=True)["coreArguments"]
+
+
+def test_apply_state_reports_skipped_validation_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace())
+    monkeypatch.setattr(dashboard_server, "scan_shader_materials_direct", lambda _settings, _avatar: {"materials": []})
+    monkeypatch.setattr(dashboard_server, "load_shader_tuning_locks", lambda _avatar: {})
+    monkeypatch.setattr(dashboard_server, "apply_shader_category_overrides", lambda inventory, _overrides: inventory)
+    monkeypatch.setattr(
+        dashboard_server,
+        "validate_shader_material_tuning_plan",
+        lambda **_kwargs: {
+            "validatedChanges": [],
+            "skippedChanges": [{"warning": "Unknown material_id: mat_stale"}],
+            "warnings": ["Unknown material_id: mat_stale"],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="Unknown material_id: mat_stale"):
+        dashboard_server._prepare_shader_tuning_apply_state(
+            dashboard_server.ShaderMaterialApplyRequest(
+                avatar_path="Scene/A",
+                changes=[
+                    {"material_id": "mat_stale", "semantic_property": "outline_width", "after": 0.0}
+                ],
+            )
+        )
+
+
 def test_apply_rejects_live_validation_drift_before_core(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(dashboard_server, "_prepare_shader_tuning_apply_state", lambda _request: _state())
     prepared, _ = dashboard_server.prepare_shader_material_apply_request(_arguments(), None)

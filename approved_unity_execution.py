@@ -1,10 +1,15 @@
-"""Process-local, one-use authority for approved Unity Core writes.
+"""Process-local, one-use authority for managed Unity Core writes.
 
 The gateway owns construction and binding of :class:`ApprovedUnityExecutionPlan`.
 The JSON helpers deliberately serialize only an auditable *plan specification*;
 they never deserialize an arbitrary request dictionary into a ContextVar
 capability.  A bound capability is an in-memory object with a private lock and
 per-call execution identifiers, and may only advance in the frozen order.
+
+Internal Agent writes use the ``approved_write`` lane and bind an approval plus
+checkpoint. External MCP writes use the ``external_mcp_write`` lane and bind an
+operation id instead. Both lanes share only this exact Core-call capability;
+the external lane does not inherit the internal Agent approval transaction.
 """
 
 from __future__ import annotations
@@ -327,10 +332,18 @@ def _normalize_call(value: ApprovedUnityExecutionCall | Mapping[str, Any] | tupl
 
 
 def _validate_context(value: Any) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or value.get("lane") != "approved_write":
+    if not isinstance(value, Mapping):
         raise ValueError("approved Unity execution context is invalid.")
-    required_strings = ("approvalId", "checkpointId", "targetTool", "projectRoot")
     context = _json_copy(dict(value))
+    lane = context.get("lane")
+    if lane == "approved_write":
+        required_strings = ("approvalId", "checkpointId", "targetTool", "projectRoot")
+    elif lane == "external_mcp_write":
+        required_strings = ("operationId", "targetTool", "projectRoot")
+        if "approvalId" in context or "checkpointId" in context:
+            raise ValueError("approved Unity execution context is invalid.")
+    else:
+        raise ValueError("approved Unity execution context is invalid.")
     for key in required_strings:
         if not isinstance(context.get(key), str) or not context[key].strip():
             raise ValueError("approved Unity execution context is invalid.")

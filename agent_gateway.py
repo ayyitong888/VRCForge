@@ -77,6 +77,12 @@ from agent_task_loop import (
     prepare_sub_agent_task_continuation,
 )
 from agent_tool_result_contract import completion_gate_plan, normalize_agent_tool_result
+from external_tool_result_contract import (
+    build_external_tool_error,
+    external_exception_details,
+    external_exception_raw_result,
+    external_write_failure_view,
+)
 from agent_budget_policy import freeze_agent_budget_policy
 from agent_general_no_progress import general_read_observation_key
 from general_agent_tools import extract_explicit_local_roots
@@ -92,6 +98,7 @@ from approved_unity_execution import (
     validate_frozen_approved_unity_execution_plan,
 )
 from agent_mcp_2026 import Mcp2026Router, create_agent_mcp_2026_asgi_app
+from avatar_composition_workflow_skills import AVATAR_COMPOSITION_WORKFLOW_SKILLS
 from unity_mcp_core_client import capture_unity_mcp_core_call_audits
 
 
@@ -130,6 +137,7 @@ RUNTIME_CONTEXT_COMPACTION_SCHEMA = "vrcforge.runtime_context_compaction.v1"
 RUNTIME_CONTEXT_COMPACTION_TRIGGER_RATIO = 0.85
 RUNTIME_CONTEXT_COMPACTION_HARD_RATIO = 0.95
 RUNTIME_CONTEXT_COMPACTION_TARGET_RATIO = 0.50
+EXTERNAL_MCP_CONNECTION_IDLE_SECONDS = 90
 UNITY_PROJECT_CHECKPOINT_SCOPE = ("Assets", "Packages", "ProjectSettings")
 LOCAL_STATE_CHECKPOINT_SCOPE = ("skill-packages", "skills")
 PROJECT_CHAT_CHECKPOINT_TARGET = "vrcforge_repair_project_chat_store"
@@ -180,9 +188,45 @@ UNITY_RESTORE_PRESERVED_CACHE_DIRS = ("PackageCache",)
 
 
 class AgentGatewayError(RuntimeError):
-    def __init__(self, message: str, status_code: int = 400) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        *,
+        cause_code: str = "agent_gateway_rejected",
+        failure_layer: str = "unknown",
+        failure_phase: str = "",
+        operation_kind: str = "unknown",
+        tool: str = "",
+        tool_routing_started: bool | None = None,
+        mutation_started: bool | None = None,
+        committed: bool | None = None,
+        commit_state: str = "",
+        retryable: bool = False,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.cause_code = cause_code
+        self.failure_layer = failure_layer
+        self.failure_phase = failure_phase
+        self.retryable = retryable
+        self.external_error = build_external_tool_error(
+            error=message,
+            error_code=cause_code,
+            failure_layer=failure_layer,
+            failure_phase=failure_phase,
+            operation_kind=operation_kind,
+            tool=tool,
+            tool_routing_started=tool_routing_started,
+            mutation_started=mutation_started,
+            committed=committed,
+            commit_state=commit_state,
+            retryable=retryable,
+            checkpoint_recovery_required=(False if mutation_started is False else None),
+            temporary_cleanup_required=(False if mutation_started is False else None),
+            details=details,
+        )
 
 
 class AgentDesktopGatewayError(AgentGatewayError, DesktopActionBrokerError):
@@ -297,6 +341,12 @@ class AgentWriteHandler:
     # future approval rules narrowly tied to an explicitly reviewed tool.
     approval_category: str = ""
     allow_future_category: bool = False
+    external_mcp_capability: str = ""
+    # False only for handlers that own an atomic, receipt-backed rollback
+    # transaction outside an existing Unity project (for example, creation of
+    # a brand-new project at an absent path). Existing project writes keep the
+    # default checkpoint requirement.
+    pre_write_checkpoint_required: bool = True
 
 
 @dataclass
@@ -324,10 +374,24 @@ RUNTIME_BLOCKED_SKILLS = {
     "vrcforge_restore_last_backup",
 }
 EXTERNAL_AGENT_INTERNAL_TOOLS = {
+    "vrcforge_agent_message",
     "vrcforge_apply_approved",
     "vrcforge_execute_approved_shell",
     "vrcforge_vision_audit_multi",
 }
+EXTERNAL_MCP_INTERNAL_LOOP_TOOLS = EXTERNAL_AGENT_INTERNAL_TOOLS | {
+    "vrcforge_ask_user",
+    "vrcforge_classify_shell",
+    "vrcforge_create_goal",
+    "vrcforge_delegate_subagent",
+    "vrcforge_execute_shell",
+    "vrcforge_get_goal",
+    "vrcforge_request_apply",
+    "vrcforge_shell_process",
+    "vrcforge_tool_registry",
+    "vrcforge_update_goal",
+}
+EXTERNAL_MCP_CONFIRMATION_MAX_PENDING = 128
 USER_CONSTRAINTS_INLINE_CHARACTER_LIMIT = 4000
 USER_CONSTRAINTS_PREVIEW_CHARACTER_LIMIT = 240
 WRAPPER_ONLY_WRITE_TARGETS = {
@@ -338,6 +402,1309 @@ WRAPPER_ONLY_WRITE_TARGETS = {
     "vrcforge_repair_project_chat_store",
     "vrcforge_shell_execute",
 }
+# This handler already owns a typed no-write preparer that seals one vrc-get
+# binary, argv, package version, project identity, bounded process policy, and
+# post-install readback.  The external MCP facade may therefore use it as a
+# real tool while every generic/internal wrapper remains hidden.
+EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES = {
+    "vrcforge_install_vpm_package": "sealed_vrc_get_install_v1",
+}
+EXTERNAL_MCP_TYPED_WRAPPER_WRITES = frozenset(EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES)
+
+# External MCP is its own catalogue. Only explicitly mapped public handlers
+# enter it; chat, memory, generic file/Web access, planner controls, and
+# runtime-management tools remain internal-only.
+EXTERNAL_MCP_DEFAULT_TOOL_BLOCK = "core"
+EXTERNAL_MCP_TOOL_BLOCK_BRANCHES: dict[str, tuple[str, ...]] = {
+    "integrations": (
+        "integrations/modular-avatar",
+        "integrations/vrcfury",
+        "integrations/gesture-manager",
+    ),
+    "skills": ("skills/vsk",),
+}
+EXTERNAL_MCP_TOOL_BLOCK_ROOTS = (
+    "core",
+    "project",
+    "avatar",
+    "assets",
+    "materials",
+    "integrations",
+    "skills",
+    "optimization",
+    "checkpoint",
+    "diagnostics",
+    "encryption",
+)
+EXTERNAL_MCP_TOOL_BLOCKS = frozenset(
+    {
+        "core",
+        "project",
+        "avatar",
+        "assets",
+        "materials",
+        "integrations/modular-avatar",
+        "integrations/vrcfury",
+        "integrations/gesture-manager",
+        "skills/vsk",
+        "optimization",
+        "checkpoint",
+        "diagnostics",
+        "encryption",
+    }
+)
+EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
+    "core": frozenset(
+        {
+            "vrcforge_external_tool_blocks",
+            "vrcforge_health",
+            "vrcforge_unity_status",
+            "vrcforge_unity_tools",
+            "vrcforge_get_compile_errors",
+            "vrcforge_list_avatars",
+            "vrcforge_get_gameobject",
+            "vrcforge_get_property",
+        }
+    ),
+    "project": frozenset(
+        {
+            "vrcforge_diagnose_package_install_errors",
+            "vrcforge_core_upgrade_status",
+            "vrcforge_package_install_plan",
+            "vrcforge_package_manager_status",
+            "vrcforge_project_lifecycle_status",
+            "vrcforge_project_create_plan",
+            "vrcforge_project_catalog_registration_status",
+            "vrcforge_scan_project_index",
+        }
+    ),
+    "avatar": frozenset(
+        {
+            "vrcforge_plan_face_tuning",
+            "vrcforge_preview_blendshape_apply",
+            "vrcforge_preview_write_avatar_descriptor",
+            "vrcforge_read_avatar_descriptor",
+            "vrcforge_scan_avatar_controls",
+            "vrcforge_scan_avatar_items",
+            "vrcforge_scan_avatar_performance",
+            "vrcforge_scan_blendshapes",
+            "vrcforge_preview_atomic_reference_rename",
+            "vrcforge_preview_constraint_sources",
+            "vrcforge_preview_ensure_animator_state",
+            "vrcforge_preview_ensure_expression_menu_control",
+            "vrcforge_preview_ensure_expression_parameter",
+            "vrcforge_preview_manage_expression_menu",
+            "vrcforge_preview_manage_expression_parameters",
+            "vrcforge_preview_manage_fx_animator",
+            "vrcforge_preview_scene_object_duplicate",
+            "vrcforge_preview_write_animation_curve",
+            "vrcforge_inspect_skinned_mesh_bone_usage",
+            "vrcforge_scan_animation_bindings",
+            "vrcforge_scan_fx_animator",
+            "vrcforge_scan_inbound_reference_closure",
+            "vrcforge_scan_parameters",
+            "vrcforge_avatar_upload_readiness",
+            "vrcforge_get_avatar_upload_status",
+            "vrcforge_preview_unity_constraint_conversion",
+        }
+    ),
+    "assets": frozenset(
+        {
+            "vrcforge_get_unitypackage_import_status",
+            "vrcforge_inspect_outfit_package",
+            "vrcforge_plan_outfit_import",
+            "vrcforge_preview_add_outfit",
+            "vrcforge_preview_add_outfit_part",
+            "vrcforge_preview_add_wardrobe_outfit",
+            "vrcforge_preview_create_wardrobe",
+            "vrcforge_preview_manage_wardrobe",
+            "vrcforge_scan_wardrobe",
+            "vrcforge_find_assets",
+            "vrcforge_get_asset_info",
+            "vrcforge_preview_scene_object_prefab",
+            "vrcforge_preview_project_asset_duplicate",
+        }
+    ),
+    "materials": frozenset(
+        {
+            "vrcforge_plan_shader_tuning",
+            "vrcforge_preview_material_shader_assignment",
+            "vrcforge_preview_shader_apply",
+            "vrcforge_scan_materials",
+            "vrcforge_preview_texture_import_settings",
+        }
+    ),
+    "integrations/modular-avatar": frozenset(
+        {
+            "vrcforge_inspect_modular_avatar_component",
+            "vrcforge_preview_add_modular_avatar_component",
+            "vrcforge_preview_setup_outfit",
+            "vrcforge_scan_modular_avatar",
+        }
+    ),
+    "integrations/vrcfury": frozenset(
+        {
+            "vrcforge_preview_component_feature",
+            "vrcforge_scan_vrcfury",
+        }
+    ),
+    "integrations/gesture-manager": frozenset(
+        {
+            "vrcforge_gesture_manager_status",
+        }
+    ),
+    "skills/vsk": frozenset({"vrcforge_preflight_skill_package"}),
+    "optimization": frozenset(
+        {
+            "vrcforge_optimization_aao_hidden_body_cut_plan",
+            "vrcforge_optimization_aao_trace_plan",
+            "vrcforge_optimization_baseline_scan",
+            "vrcforge_optimization_dependency_doctor",
+            "vrcforge_optimization_lac_profile_plan",
+            "vrcforge_optimization_ma2bt_convertibility_plan",
+            "vrcforge_optimization_ma2bt_skipped_reasons",
+            "vrcforge_optimization_ma_responsive_layer_audit",
+            "vrcforge_optimization_material_slot_audit",
+            "vrcforge_optimization_mesh_triangle_audit",
+            "vrcforge_optimization_meshia_simplify_plan",
+            "vrcforge_optimization_parameter_animator_usage",
+            "vrcforge_optimization_parameter_behavior_regression",
+            "vrcforge_optimization_parameter_budget_audit",
+            "vrcforge_optimization_parameter_compressibility_plan",
+            "vrcforge_optimization_parameter_inventory",
+            "vrcforge_optimization_parameter_menu_map",
+            "vrcforge_optimization_parameter_path_to_skill",
+            "vrcforge_optimization_parameter_vrcfury_compressor_plan",
+            "vrcforge_optimization_performance_tools_report",
+            "vrcforge_optimization_physbone_audit",
+            "vrcforge_optimization_physbone_reduce_plan",
+            "vrcforge_optimization_plan",
+            "vrcforge_optimization_profile_diff",
+            "vrcforge_optimization_rollback_verify",
+            "vrcforge_optimization_shader_adapter_registry",
+            "vrcforge_scan_thry_avatar_performance",
+            "vrcforge_optimization_target_profile",
+            "vrcforge_optimization_texture_vram_audit",
+            "vrcforge_optimization_ttt_atlas_plan",
+            "vrcforge_optimization_upload_gate_audit",
+            "vrcforge_optimization_upload_gate_fix_plan",
+            "vrcforge_optimization_validation_delta",
+            "vrcforge_optimization_visual_regression_plan",
+            "vrcforge_optimization_vrcfury_compatibility_report",
+            "vrcforge_preview_parameter_bit_packing",
+        }
+    ),
+    "checkpoint": frozenset(
+        {
+            "vrcforge_list_checkpoints",
+            "vrcforge_preview_restore_backup",
+            "vrcforge_preview_restore_checkpoint",
+            "vrcforge_preview_interrupted_apply_recovery",
+            "vrcforge_export_interrupted_apply_incident_bundle",
+            "vrcforge_list_interrupted_apply_recoveries",
+        }
+    ),
+    "diagnostics": frozenset(
+        {
+            "vrcforge_build_test_readiness",
+            "vrcforge_capture_status",
+            "vrcforge_get_build_test_status",
+            "vrcforge_inspect_primitive_basis_fixture",
+            "vrcforge_read_vrchat_sdk_builder_alerts",
+            "vrcforge_read_recent_logs",
+            "vrcforge_run_validation_report",
+            "vrcforge_vision_audit",
+        }
+    ),
+    "encryption": frozenset(
+        {
+            "vrcforge_avatar_encryption_addon_status",
+            "vrcforge_avatar_encryption_plan",
+            "vrcforge_avatar_encryption_preview",
+            "vrcforge_avatar_encryption_research_report",
+            "vrcforge_avatar_encryption_scan",
+        }
+    ),
+}
+
+
+# The texture-import preview and apply endpoints are two views of the same
+# atomic operation. Keep one public schema so internal/external agents cannot
+# drift into guessing different field names for the shared Core handler.
+TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "projectPath",
+        "textureAssetPath",
+        "platform",
+        "maxTextureSize",
+        "format",
+        "compression",
+        "crunch",
+        "quality",
+    ],
+    "properties": {
+        "projectPath": {
+            "type": "string",
+            "description": "Exact existing Unity project root bound to this one-texture operation.",
+        },
+        "textureAssetPath": {
+            "type": "string",
+            "pattern": "^Assets/",
+            "description": "Exact persistent project-relative texture path under Assets/.",
+        },
+        "platform": {
+            "type": "string",
+            "enum": ["default", "standalone", "android", "ios"],
+            "description": "Exact TextureImporter platform settings to inspect or change.",
+        },
+        "maxTextureSize": {
+            "type": "integer",
+            "enum": [32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
+        },
+        "format": {
+            "type": "string",
+            "enum": [
+                "automatic",
+                "rgb24",
+                "rgba32",
+                "dxt1",
+                "dxt5",
+                "dxt1_crunched",
+                "dxt5_crunched",
+                "bc7",
+                "etc_rgb4",
+                "etc2_rgb4",
+                "etc2_rgba8",
+                "etc_rgb4_crunched",
+                "etc2_rgba8_crunched",
+                "astc_4x4",
+                "astc_6x6",
+                "astc_8x8",
+                "pvrtc_rgb4",
+                "pvrtc_rgba4",
+            ],
+        },
+        "compression": {
+            "type": "string",
+            "enum": ["uncompressed", "normal", "high", "low"],
+        },
+        "crunch": {"type": "boolean"},
+        "quality": {"type": "integer", "minimum": 0, "maximum": 100},
+    },
+}
+
+_PROJECT_PATH_PROPERTY = {
+    "type": "string",
+    "description": "Exact existing Unity project root bound to this tool call.",
+}
+_AVATAR_PATH_PROPERTY = {
+    "type": "string",
+    "description": "Exact loaded-scene avatar hierarchy path.",
+}
+
+SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "sourceScenePath", "sourceObjectPath"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "sourceScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$"},
+        "sourceObjectPath": {"type": "string"},
+        "targetParentScenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$"},
+        "targetParentPath": {"type": "string"},
+        "targetName": {"type": "string"},
+        "preserveWorldTransform": {"type": "boolean", "default": False},
+        "overwrite": {"type": "boolean", "const": False},
+    },
+}
+
+AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "avatarPath"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "avatarPath": _AVATAR_PATH_PROPERTY,
+        "viewPosition": {"type": "object", "additionalProperties": False, "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"}}},
+        "lipSync": {"type": "string"},
+        "visemeSkinnedMeshPath": {"type": "string"},
+        "visemeBlendShapes": {"type": "array", "items": {"type": "string"}},
+        "expressionParametersPath": {"type": "string", "pattern": "^Assets/"},
+        "expressionsMenuPath": {"type": "string", "pattern": "^Assets/"},
+        "baseAnimationLayers": {"type": "array", "items": {"type": "object"}},
+        "specialAnimationLayers": {"type": "array", "items": {"type": "object"}},
+        "eyeLookSettingsSourceAvatarPath": {"type": "string"},
+        "eyeLookEnabled": {"type": "boolean"},
+    },
+}
+
+ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "clipPath", "propertyName"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "action": {"type": "string", "enum": ["set_curve", "delete_curve", "retarget_curve"], "default": "set_curve"},
+        "clipPath": {"type": "string", "pattern": "^Assets/"},
+        "bindingPath": {"type": "string"},
+        "objectPath": {"type": "string"},
+        "componentType": {"type": "string", "default": "GameObject"},
+        "propertyName": {"type": "string"},
+        "sourceBindingPath": {"type": "string"},
+        "sourceComponentType": {"type": "string"},
+        "sourcePropertyName": {"type": "string"},
+        "deleteSource": {"type": "boolean", "default": True},
+        "overwriteExisting": {"type": "boolean", "default": False},
+        "keys": {"type": "array", "items": {"type": "object"}},
+        "constantFloat": {"type": "number"},
+    },
+}
+
+EXPRESSION_PARAMETERS_MANAGE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "avatarPath", "action"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "avatarPath": _AVATAR_PATH_PROPERTY,
+        "action": {"type": "string", "enum": ["update", "delete", "rename", "reorder"]},
+        "parameterName": {"type": "string"},
+        "newName": {"type": "string"},
+        "orderNames": {"type": "array", "items": {"type": "string"}},
+        "valueType": {"type": "string"},
+        "defaultValue": {"type": "number"},
+        "saved": {"type": "boolean"},
+        "networkSynced": {"type": "boolean"},
+    },
+}
+
+EXPRESSION_MENU_MANAGE_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "avatarPath", "action"],
+    "properties": {
+        "projectPath": _PROJECT_PATH_PROPERTY,
+        "avatarPath": _AVATAR_PATH_PROPERTY,
+        "action": {"type": "string", "enum": ["create", "update", "delete", "reorder"]},
+        "assetDir": {"type": "string", "pattern": "^Assets/"},
+        "menuPath": {"type": "string"},
+        "controlName": {"type": "string"},
+        "controlIndex": {"type": "integer", "minimum": 0},
+        "newName": {"type": "string"},
+        "controlType": {"type": "string"},
+        "controlFloat": {"type": "number"},
+        "value": {"type": "number"},
+        "parameterName": {"type": "string"},
+        "iconAssetPath": {"type": "string", "pattern": "^Assets/"},
+        "subMenuAssetPath": {"type": "string", "pattern": "^Assets/"},
+        "createSubMenu": {"type": "boolean"},
+        "subParameters": {"type": "array", "items": {"type": "string"}},
+        "orderNames": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["projectPath", "action"],
+    "properties": {
+        "projectPath": {"type": "string", "description": "Exact Unity project root."},
+        "avatarPath": {"type": "string", "description": "Avatar hierarchy path used to resolve its FX controller."},
+        "controllerPath": {"type": "string", "pattern": "^Assets/", "description": "Exact AnimatorController asset path; overrides avatar FX resolution."},
+        "fxControllerPath": {"type": "string", "pattern": "^Assets/", "description": "Compatibility alias for controllerPath."},
+        "action": {
+            "type": "string",
+            "enum": ["ensure_layer", "delete_layer", "ensure_state", "update_state", "delete_state", "ensure_transition", "delete_transition", "delete_parameter"],
+            "description": "One exact FX mutation. delete_parameter refuses parameters still referenced anywhere in the controller.",
+        },
+        "assetDir": {"type": "string", "pattern": "^Assets/"},
+        "layerName": {"type": "string"},
+        "stateName": {"type": "string"},
+        "destinationStateName": {"type": "string"},
+        "newName": {"type": "string"},
+        "writeDefaults": {"type": "boolean"},
+        "motionClipPath": {"type": "string", "pattern": "^Assets/"},
+        "speed": {"type": "number"},
+        "hasExitTime": {"type": "boolean"},
+        "exitTime": {"type": "number"},
+        "duration": {"type": "number", "minimum": 0},
+        "canTransitionToSelf": {"type": "boolean"},
+        "transitionIndex": {"type": "integer", "minimum": 0},
+        "conditions": {
+            "type": "array",
+            "maxItems": 64,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["parameterName", "mode", "threshold"],
+                "properties": {
+                    "parameterName": {"type": "string"},
+                    "mode": {"type": "string"},
+                    "threshold": {"type": "number"},
+                },
+            },
+        },
+        "parameterName": {"type": "string"},
+        "conditionMode": {"type": "string"},
+        "threshold": {"type": "number"},
+    },
+    "oneOf": [
+        {
+            "type": "object",
+            "required": ["action", "parameterName"],
+            "properties": {"action": {"type": "string", "const": "delete_parameter"}},
+        },
+        {
+            "type": "object",
+            "required": ["action"],
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["ensure_layer", "delete_layer", "ensure_state", "update_state", "delete_state", "ensure_transition", "delete_transition"],
+                }
+            },
+        },
+    ],
+}
+
+
+# Unity read schemas are shared by the internal and external tool catalogues.
+# Keeping only the task-disambiguating fields here makes lazy-loaded blocks
+# useful without inflating every agent turn with handler implementation detail.
+UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_build_test_readiness": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "avatarPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "avatarPath": _AVATAR_PATH_PROPERTY,
+            "includeQuest": {"type": "boolean", "default": True},
+            "maxErrors": {"type": "integer", "minimum": 1, "maximum": 500, "default": 50},
+        },
+    },
+    "vrcforge_capture_status": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "requirePlayMode": {"type": "boolean", "default": False},
+            "captureMode": {"type": "string", "enum": ["auto", "scene_view", "game_view"], "default": "auto"},
+        },
+    },
+    "vrcforge_get_gameobject": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string", "description": "Exact hierarchy path or unique scene GameObject name."},
+        },
+    },
+    "vrcforge_get_property": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath", "componentType", "propertyPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string"},
+            "componentType": {"type": "string"},
+            "propertyPath": {"type": "string"},
+            "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
+            "maxItems": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 50},
+        },
+    },
+    "vrcforge_preview_scene_object_duplicate": SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_preview_write_avatar_descriptor": AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_preview_write_animation_curve": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_preview_manage_expression_parameters": EXPRESSION_PARAMETERS_MANAGE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_preview_manage_expression_menu": EXPRESSION_MENU_MANAGE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_list_avatars": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "projectPath": {
+                "type": "string",
+                "description": "Optional exact Unity project root; omit only when the active project is authoritative.",
+            },
+        },
+    },
+    "vrcforge_read_avatar_descriptor": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "projectPath": {
+                "type": "string",
+                "description": "Optional exact Unity project root; omit only when the active project is authoritative.",
+            },
+            "avatarPath": {
+                "type": "string",
+                "description": "Optional exact loaded-scene Avatar Descriptor hierarchy path.",
+            },
+        },
+    },
+    "vrcforge_scan_blendshapes": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "projectPath": {
+                "type": "string",
+                "description": "Optional exact Unity project root; omit only when the active project is authoritative.",
+            },
+            "avatarPath": {
+                "type": "string",
+                "description": "Optional exact loaded-scene avatar hierarchy path.",
+            },
+        },
+    },
+    "vrcforge_scan_parameters": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "projectPath": {
+                "type": "string",
+                "description": "Optional exact Unity project root; omit only when the active project is authoritative.",
+            },
+            "avatarPath": {
+                "type": "string",
+                "description": "Optional exact loaded-scene avatar hierarchy path.",
+            },
+        },
+    },
+    "vrcforge_external_tool_blocks": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "block": {
+                "type": "string",
+                "enum": sorted(EXTERNAL_MCP_TOOL_BLOCKS),
+                "description": "Optional exact leaf block to expand with compact tool names and read/write modes.",
+            },
+        },
+    },
+    "vrcforge_preflight_skill_package": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["packagePath"],
+        "properties": {
+            "packagePath": {
+                "type": "string",
+                "description": "Exact local path to the existing .vsk package to inspect without importing it.",
+            },
+        },
+    },
+    "vrcforge_get_build_test_status": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "jobId"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact Unity project root that owns the existing Build & Test job."},
+            "jobId": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$", "description": "Exact jobId returned by vrcforge_build_test_avatar."},
+        },
+    },
+    "vrcforge_gesture_manager_status": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
+            "avatarPath": {"type": "string", "description": "Optional exact avatar hierarchy path when more than one Gesture Manager is connected."},
+            "includeParameters": {"type": "boolean", "default": False, "description": "Return every runtime parameter. Prefer parameterNames or parameterPrefix for a focused read."},
+            "parameterNames": {"type": "array", "items": {"type": "string"}, "maxItems": 128, "description": "Exact runtime parameter names to return while retaining total counts."},
+            "parameterPrefix": {"type": "string", "maxLength": 256, "description": "Return runtime parameters whose names start with this exact prefix."},
+        },
+    },
+    "vrcforge_read_vrchat_sdk_builder_alerts": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "avatarPath"],
+        "properties": {
+            "projectPath": {
+                "type": "string",
+                "description": "Exact Unity project root whose already-open SDK Builder cache will be inspected.",
+            },
+            "avatarPath": {
+                "type": "string",
+                "description": "Exact loaded-scene Avatar Descriptor hierarchy path that must match the SDK Builder selection.",
+            },
+        },
+    },
+    "vrcforge_preview_texture_import_settings": TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_preview_manage_fx_animator": MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_avatar_upload_readiness": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "avatarPath", "uploadMode", "buildType", "platforms", "metadata", "thumbnail"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root."},
+            "avatarPath": {"type": "string", "description": "Exact loaded-scene Avatar Descriptor hierarchy path."},
+            "uploadMode": {"type": "string", "enum": ["create", "update"]},
+            "buildType": {"type": "string", "const": "build_and_upload"},
+            "platforms": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"type": "string", "enum": ["StandaloneWindows64", "Android", "iOS"]}},
+            "metadata": {"$ref": "#/$defs/avatarUploadMetadata"},
+            "thumbnail": {"$ref": "#/$defs/avatarUploadThumbnail"},
+        },
+        "$defs": {
+            "avatarStyle": {
+                "type": ["object", "null"],
+                "additionalProperties": False,
+                "required": ["id", "name"],
+                "properties": {"id": {"type": "string"}, "name": {"type": "string"}},
+            },
+            "avatarUploadMetadata": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["mode"],
+                "properties": {
+                    "mode": {"type": "string", "enum": ["preserve_remote", "replace"]},
+                    "name": {"type": "string", "maxLength": 64},
+                    "description": {"type": "string", "maxLength": 256},
+                    "visibility": {"type": "string", "enum": ["private", "public"]},
+                    "primaryStyle": {"$ref": "#/$defs/avatarStyle"},
+                    "secondaryStyle": {"$ref": "#/$defs/avatarStyle"},
+                    "contentWarnings": {"type": "array", "maxItems": 5, "uniqueItems": True, "items": {"type": "string", "enum": ["content_sex", "content_adult", "content_violence", "content_gore", "content_horror"]}},
+                    "authorTags": {"type": "array", "maxItems": 10, "uniqueItems": True, "items": {"type": "string", "minLength": 1, "maxLength": 64}},
+                },
+            },
+            "avatarUploadThumbnail": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["mode"],
+                "properties": {"mode": {"type": "string", "enum": ["keep", "replace"]}, "path": {"type": "string"}, "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}},
+            },
+        },
+    },
+    "vrcforge_get_avatar_upload_status": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "jobId"],
+        "properties": {
+            "projectPath": {"type": "string"},
+            "jobId": {"type": "string", "pattern": "^[0-9a-fA-F]{32}$"},
+        },
+    },
+    "vrcforge_preview_unity_constraint_conversion": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "scenePath", "avatarPath", "gameObjectPath", "componentType", "componentIndex"],
+        "properties": {
+            "projectPath": {"type": "string"},
+            "scenePath": {"type": "string", "pattern": "^Assets/.*\\.unity$"},
+            "avatarPath": {"type": "string"},
+            "gameObjectPath": {"type": "string"},
+            "componentType": {"type": "string", "enum": ["UnityEngine.Animations.PositionConstraint", "UnityEngine.Animations.RotationConstraint", "UnityEngine.Animations.ScaleConstraint", "UnityEngine.Animations.ParentConstraint", "UnityEngine.Animations.AimConstraint", "UnityEngine.Animations.LookAtConstraint"]},
+            "componentIndex": {"type": "integer", "minimum": 0, "maximum": 31},
+        },
+    },
+    "vrcforge_scan_fx_animator": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
+            "avatarPath": {"type": "string", "description": "Scene hierarchy path of the avatar root."},
+            "controllerPath": {"type": "string", "description": "Project-relative AnimatorController asset path; overrides the avatar FX controller."},
+        },
+    },
+    "vrcforge_scan_animation_bindings": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
+            "avatarPath": {"type": "string", "description": "Scene hierarchy path of the avatar root."},
+            "controllerPath": {"type": "string", "description": "Project-relative AnimatorController asset path."},
+            "clipPaths": {"type": "array", "items": {"type": "string"}, "description": "Optional exact project-relative AnimationClip asset paths."},
+            "includeAllProjectClips": {"type": "boolean", "description": "Include unrelated project clips; normally leave false."},
+            "includeBindingDetails": {"type": "boolean", "description": "Return full per-binding arrays for a narrow clip selection."},
+            "maxClips": {"type": "integer", "minimum": 1, "description": "Maximum clips to scan."},
+        },
+    },
+    "vrcforge_scan_avatar_controls": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
+            "avatarPath": {"type": "string", "description": "Scene hierarchy path of the avatar root."},
+        },
+    },
+    "vrcforge_inspect_skinned_mesh_bone_usage": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["gameObjectPath"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
+            "gameObjectPath": {"type": "string", "description": "Exact scene hierarchy path of the SkinnedMeshRenderer GameObject."},
+            "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
+            "minimumWeight": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.000001},
+        },
+    },
+    "vrcforge_inspect_modular_avatar_component": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["gameObjectPath", "componentType"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
+            "avatarPath": {"type": "string", "description": "Optional scene hierarchy path of the containing avatar root."},
+            "gameObjectPath": {"type": "string", "description": "Exact scene hierarchy path of the component carrier."},
+            "componentType": {
+                "type": "string",
+                "enum": ["MergeArmature", "BoneProxy", "MenuInstaller", "MergeAnimator", "Parameters"],
+                "description": "Supported Modular Avatar component family to inspect.",
+            },
+        },
+    },
+    "vrcforge_scan_inbound_reference_closure": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["avatarPath"],
+        "anyOf": [
+            {"required": ["targetPaths"]},
+            {"required": ["targetComponentSelectors"]},
+        ],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Unity project root; omit for the active project."},
+            "avatarPath": {"type": "string", "description": "Exact scene hierarchy path of the avatar root."},
+            "targetPaths": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Exact GameObject roots being considered for deletion.",
+            },
+            "targetComponentSelectors": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["objectPath", "componentType"],
+                    "properties": {
+                        "objectPath": {"type": "string"},
+                        "componentType": {"type": "string"},
+                        "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
+                    },
+                },
+                "description": "Exact removable components; a GameObject path alone is not treated as a component reference.",
+            },
+            "includeProjectAssets": {"type": "boolean", "default": True},
+            "includeAnimationBindings": {"type": "boolean", "default": True},
+            "includeIndirectParameterEdges": {"type": "boolean", "default": True},
+            "maxResults": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 1000},
+        },
+    },
+}
+
+EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_duplicate_scene_object": SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_write_avatar_descriptor": AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_write_animation_curve": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_manage_expression_parameters": EXPRESSION_PARAMETERS_MANAGE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_manage_expression_menu": EXPRESSION_MENU_MANAGE_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_remove_component": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath", "componentType"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string"},
+            "componentType": {"type": "string"},
+            "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
+        },
+    },
+    "vrcforge_reparent_gameobject": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string"},
+            "newParentPath": {"type": "string"},
+            "worldPositionStays": {"type": "boolean", "default": True},
+        },
+    },
+    "vrcforge_set_gameobject_active": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath", "active"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string"},
+            "active": {"type": "boolean"},
+        },
+    },
+    "vrcforge_set_property": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath", "componentType", "propertyPath", "value"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string"},
+            "componentType": {"type": "string"},
+            "propertyPath": {"type": "string"},
+            "value": {"description": "Exact JSON value to assign to the field or property."},
+            "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
+        },
+    },
+    "vrcforge_save_current_scene": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {
+            "projectPath": {
+                "type": "string",
+                "description": "Exact existing Unity project root whose current saved scene must be dirty.",
+            },
+            "scenePath": {
+                "type": "string",
+                "pattern": "^Assets/.*\\.unity$",
+                "description": "Optional exact current Assets/... .unity path used as an identity check.",
+            },
+        },
+    },
+    "vrcforge_import_skill_package": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["packagePath"],
+        "properties": {
+            "packagePath": {"type": "string", "description": "Exact local path to the existing .vsk package."},
+            "source": {"type": "string", "maxLength": 160, "description": "Optional audit label for this local import."},
+            "projectToUserSkills": {"type": "boolean", "default": True, "description": "Project the installed package into the user Skill directory."},
+        },
+    },
+    "vrcforge_export_skill_package": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["skillName", "outputPath"],
+        "properties": {
+            "skillName": {"type": "string", "description": "Exact installed user Skill name to export."},
+            "outputPath": {"type": "string", "description": "Exact new local .vsk destination; it must not already exist."},
+            "release": {"type": "boolean", "default": False, "description": "Sign a release package instead of creating a development package."},
+            "privateKeyPath": {"type": "string", "description": "Local Ed25519 private-key file path required only for release export. Key material is never accepted inline."},
+        },
+    },
+    "vrcforge_set_texture_import_settings": TEXTURE_IMPORT_SETTINGS_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_manage_fx_animator": MANAGE_FX_ANIMATOR_PUBLIC_INPUT_SCHEMA,
+    "vrcforge_set_material_shader": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "rendererPath", "slotIndex", "shaderName"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this material write."},
+            "rendererPath": {"type": "string", "description": "Exact loaded-scene renderer hierarchy path used to resolve the material slot."},
+            "rendererComponentId": {"type": "string", "description": "Optional exact renderer identity returned by the preview."},
+            "materialAssetPath": {"type": "string", "description": "Optional exact Assets/... .mat path used to disambiguate the selected slot."},
+            "slotIndex": {"type": "integer", "minimum": 0, "description": "Zero-based material slot index on the selected renderer."},
+            "shaderName": {"type": "string", "description": "Exact installed Unity shader name to assign."},
+            "shaderAssetPath": {"type": "string", "description": "Optional exact Assets/... or Packages/... shader asset path used to bind the preview."},
+        },
+    },
+    "vrcforge_set_constraint_sources": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "scenePath", "gameObjectPath", "constraintKind", "componentIndex", "sources"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this scene write."},
+            "scenePath": {"type": "string", "description": "Exact Assets/... .unity scene containing the constraint."},
+            "gameObjectPath": {"type": "string", "description": "Exact hierarchy path of the GameObject carrying the constraint."},
+            "constraintKind": {"type": "string", "enum": ["position", "rotation", "scale", "parent", "aim", "look_at"]},
+            "componentIndex": {"type": "integer", "minimum": 0, "maximum": 31},
+            "sources": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["sourcePath", "weight"],
+                    "properties": {
+                        "sourcePath": {"type": "string", "description": "Exact source Transform hierarchy path."},
+                        "weight": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    },
+                },
+            },
+        },
+    },
+    "vrcforge_save_scene_object_as_prefab": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "sourceScenePath", "sourceObjectPath", "prefabAssetPath"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this create-new asset write."},
+            "sourceScenePath": {"type": "string", "description": "Exact Assets/... .unity scene containing the source object."},
+            "sourceObjectPath": {"type": "string", "description": "Exact hierarchy path of the source scene object."},
+            "prefabAssetPath": {"type": "string", "description": "Exact absent Assets/VRCForge/Generated/... .prefab destination."},
+        },
+    },
+    "vrcforge_build_parameter_bit_packed_clone": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "sourceScenePath", "sourceAvatarPath", "outputCloneName"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this source-preserving optimization."},
+            "sourceScenePath": {"type": "string", "description": "Exact Assets/... .unity scene containing the source Avatar."},
+            "sourceAvatarPath": {"type": "string", "description": "Exact source Avatar hierarchy path; the source is preserved."},
+            "outputCloneName": {"type": "string", "description": "Exact new sibling clone name for the packed result."},
+        },
+    },
+    "vrcforge_atomic_reference_rename": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "operationKind", "scenePath", "avatarPath"],
+        "oneOf": [
+            {"properties": {"operationKind": {"const": "game_object"}}, "required": ["targetObjectPath", "newName"]},
+            {"properties": {"operationKind": {"const": "parameter"}}, "required": ["oldParameterName", "newParameterName"]},
+        ],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this complete reference migration."},
+            "operationKind": {"type": "string", "enum": ["game_object", "parameter"]},
+            "scenePath": {"type": "string", "description": "Exact Assets/... .unity scene containing the Avatar."},
+            "avatarPath": {"type": "string", "description": "Exact Avatar root hierarchy path that bounds the migration."},
+            "targetObjectPath": {"type": "string", "description": "Exact descendant hierarchy path for a game_object migration."},
+            "newName": {"type": "string", "description": "New leaf GameObject name for a game_object migration."},
+            "oldParameterName": {"type": "string", "description": "Exact existing expression/Animator parameter name."},
+            "newParameterName": {"type": "string", "description": "Exact replacement parameter name."},
+        },
+    },
+    "vrcforge_delete_gameobject": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "anyOf": [
+            {"required": ["gameObjectPath"]},
+            {"required": ["globalObjectId"]},
+        ],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this external write call."},
+            "gameObjectPath": {"type": "string", "description": "Exact hierarchy path when it is unique."},
+            "globalObjectId": {"type": "string", "description": "Exact Unity GlobalObjectId; prefer this when hierarchy names are duplicated."},
+            "preview": {"type": "boolean", "default": False},
+        },
+    },
+    "vrcforge_instantiate_prefab": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "anyOf": [
+            {"required": ["assetPath"]},
+            {"required": ["guid"]},
+        ],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this external write call."},
+            "assetPath": {"type": "string", "description": "Exact project-relative prefab asset path, including Packages/... prefabs."},
+            "guid": {"type": "string", "description": "Exact prefab asset GUID when assetPath is omitted."},
+            "parentPath": {"type": "string", "description": "Optional exact hierarchy path of the parent. Omit or pass an empty string for the scene root."},
+            "name": {"type": "string", "description": "Optional exact instance name override."},
+            "worldPositionStays": {"type": "boolean", "default": True},
+            "preview": {"type": "boolean", "default": False},
+        },
+    },
+    "vrcforge_build_test_avatar": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "avatarPath"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this local build."},
+            "avatarPath": {"type": "string", "description": "Exact loaded-scene hierarchy path of the avatar to Build & Test locally."},
+        },
+    },
+    "vrcforge_build_and_upload_avatar": {
+        **UNITY_READ_TOOL_INPUT_SCHEMAS.get("vrcforge_avatar_upload_readiness", {}),
+        "required": [
+            "projectPath", "avatarPath", "uploadMode", "buildType", "platforms", "metadata", "thumbnail",
+            "expectedAvatarGlobalObjectId", "expectedCurrentPipelineId", "expectedSdkUserId", "expectedPlatform", "readinessDigest",
+        ],
+        "properties": {
+            **UNITY_READ_TOOL_INPUT_SCHEMAS.get("vrcforge_avatar_upload_readiness", {}).get("properties", {}),
+            "expectedAvatarGlobalObjectId": {"type": "string"},
+            "expectedCurrentPipelineId": {"type": "string"},
+            "expectedSdkUserId": {"type": "string"},
+            "expectedPlatform": {"type": "string"},
+            "readinessDigest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        },
+    },
+    "vrcforge_convert_unity_constraint": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "scenePath", "avatarPath", "gameObjectPath", "componentType", "componentIndex", "expectedSceneGuid", "expectedSceneFileDigest", "expectedAvatarGlobalObjectId", "expectedComponentGlobalObjectId", "expectedBeforeDigest"],
+        "properties": {
+            **UNITY_READ_TOOL_INPUT_SCHEMAS.get("vrcforge_preview_unity_constraint_conversion", {}).get("properties", {}),
+            "expectedSceneGuid": {"type": "string"},
+            "expectedSceneFileDigest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+            "expectedAvatarGlobalObjectId": {"type": "string"},
+            "expectedComponentGlobalObjectId": {"type": "string"},
+            "expectedBeforeDigest": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+        },
+    },
+    "vrcforge_install_unity_core": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {
+            "projectPath": {
+                "type": "string",
+                "description": "Exact existing Unity project root that will receive the Core bundled with this running VRCForge build.",
+            },
+        },
+    },
+    "vrcforge_gesture_manager_set_parameter": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "parameterName", "value"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this external write call."},
+            "avatarPath": {"type": "string", "description": "Optional exact avatar hierarchy path; required only when multiple managers are connected."},
+            "parameterName": {"type": "string", "description": "Exact existing Gesture Manager runtime parameter, for example VelocityZ or Grounded."},
+            "value": {"type": "number", "description": "Runtime value; the tool reads back the applied value."},
+        },
+    },
+    "vrcforge_gesture_manager_enter_play_mode": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this external editor-state call."},
+            "avatarPath": {"type": "string", "description": "Optional exact active avatar hierarchy path; required when multiple active avatars exist."},
+        },
+    },
+    "vrcforge_capture_screenshot": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this capture."},
+            "avatarPath": {"type": "string", "description": "Optional exact avatar hierarchy path; omit only when the active avatar is unambiguous."},
+            "angle": {
+                "type": "string",
+                "enum": ["front", "side_left", "side_right", "back"],
+                "description": "One fixed view angle. Call once per angle for a multi-angle audit.",
+            },
+            "framing": {
+                "type": "string",
+                "enum": ["face", "avatar"],
+                "description": "face frames the head; avatar frames the complete avatar including feet and tail. Named angles default to face for compatibility.",
+            },
+            "width": {"type": "integer", "minimum": 256, "maximum": 2048, "default": 960},
+            "height": {"type": "integer", "minimum": 256, "maximum": 2048, "default": 960},
+            "requirePlayMode": {"type": "boolean", "default": False},
+            "captureMode": {
+                "type": "string",
+                "enum": ["auto", "scene_view", "game_view"],
+                "default": "auto",
+                "description": "scene_view captures the Unity Scene view even during Gesture Manager Play Mode.",
+            },
+        },
+    },
+    "vrcforge_select_scene_object": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this external write call."},
+            "gameObjectPath": {"type": "string", "description": "Exact loaded-scene hierarchy path to select and show in Inspector."},
+        },
+    },
+    "vrcforge_set_play_mode": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "isPlaying"],
+        "properties": {
+            "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this external write call."},
+            "isPlaying": {"type": "boolean", "description": "True to enter Play Mode; false to exit Play Mode."},
+        },
+    },
+}
+
+
+def canonical_unity_read_tool_input_schema(tool_name: str) -> dict[str, Any]:
+    """Return the one model-facing schema shared by internal and external Agents."""
+
+    name = str(tool_name or "").strip()
+    registered = UNITY_READ_TOOL_INPUT_SCHEMAS.get(name)
+    if isinstance(registered, Mapping):
+        return dict(registered)
+    if name.startswith("vrcforge_preview_"):
+        write_name = "vrcforge_" + name.removeprefix("vrcforge_preview_")
+        paired = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.get(write_name)
+        if isinstance(paired, Mapping):
+            return dict(paired)
+    hinted = planner_policy.planner_tool_input_schema(name)
+    if hinted:
+        return dict(hinted)
+    return {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": True,
+    }
+
+
+def canonical_unity_write_tool_input_schema(tool_name: str) -> dict[str, Any]:
+    """Return the one write schema shared by the internal loop and external MCP."""
+
+    name = str(tool_name or "").strip()
+    registered = EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS.get(name)
+    if isinstance(registered, Mapping):
+        return dict(registered)
+    hinted = planner_policy.planner_tool_input_schema(name)
+    if hinted:
+        return dict(hinted)
+    return {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": True,
+    }
+
+EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
+    "project": frozenset(
+        {
+            "vrcforge_create_project",
+            "vrcforge_install_unity_core",
+            "vrcforge_restore_unity_core",
+            "vrcforge_install_vpm_package",
+            "vrcforge_refresh_asset_database",
+            "vrcforge_register_project",
+            "vrcforge_register_project_catalog",
+            "vrcforge_rollback_project_catalog_registration",
+            "vrcforge_rollback_project_lifecycle",
+            "vrcforge_select_project",
+            "vrcforge_set_play_mode",
+        }
+    ),
+    "avatar": frozenset(
+        {
+            "vrcforge_atomic_reference_rename",
+            "vrcforge_build_and_upload_avatar",
+            "vrcforge_apply_blendshapes",
+            "vrcforge_run_face_tuning",
+            "vrcforge_undo_blendshapes",
+            "vrcforge_write_avatar_descriptor",
+            "vrcforge_add_component",
+            "vrcforge_apply_clothing_fx",
+            "vrcforge_apply_tuning_preset",
+            "vrcforge_create_gameobject",
+            "vrcforge_delete_gameobject",
+            "vrcforge_duplicate_scene_object",
+            "vrcforge_ensure_animator_state",
+            "vrcforge_ensure_expression_menu_control",
+            "vrcforge_ensure_expression_parameter",
+            "vrcforge_export_vrm",
+            "vrcforge_manage_expression_menu",
+            "vrcforge_manage_expression_parameters",
+            "vrcforge_manage_fx_animator",
+            "vrcforge_reapply_tuning_history",
+            "vrcforge_remove_component",
+            "vrcforge_rename_gameobject",
+            "vrcforge_reparent_gameobject",
+            "vrcforge_rollback_parameters",
+            "vrcforge_save_current_scene",
+            "vrcforge_save_new_scene",
+            "vrcforge_select_scene_object",
+            "vrcforge_set_gameobject_active",
+            "vrcforge_set_constraint_sources",
+            "vrcforge_convert_unity_constraint",
+            "vrcforge_set_property",
+            "vrcforge_toggle_scene_object",
+            "vrcforge_write_animation_curve",
+        }
+    ),
+    "assets": frozenset(
+        {
+            "vrcforge_add_outfit",
+            "vrcforge_add_outfit_part",
+            "vrcforge_add_wardrobe_outfit",
+            "vrcforge_import_outfit_package",
+            "vrcforge_create_wardrobe",
+            "vrcforge_manage_wardrobe",
+            "vrcforge_instantiate_prefab",
+            "vrcforge_unpack_prefab",
+            "vrcforge_duplicate_project_asset",
+            "vrcforge_save_scene_object_as_prefab",
+        }
+    ),
+    "materials": frozenset(
+        {
+            "vrcforge_apply_shader_tuning",
+            "vrcforge_apply_shader_tuning_preset",
+            "vrcforge_reapply_shader_tuning_history",
+            "vrcforge_restore_shader_tuning",
+            "vrcforge_set_texture_import_settings",
+            "vrcforge_set_material_shader",
+        }
+    ),
+    "integrations/modular-avatar": frozenset(
+        {
+            "vrcforge_add_modular_avatar_component",
+            "vrcforge_setup_outfit",
+        }
+    ),
+    "integrations/vrcfury": frozenset({"vrcforge_create_component_feature"}),
+    "integrations/gesture-manager": frozenset(
+        {
+            "vrcforge_gesture_manager_enter_play_mode",
+            "vrcforge_gesture_manager_set_parameter",
+        }
+    ),
+    "skills/vsk": frozenset(
+        {
+            "vrcforge_import_skill_package",
+            "vrcforge_export_skill_package",
+        }
+    ),
+    "optimization": frozenset(
+        {
+            "vrcforge_apply_parameter_optimization",
+            "vrcforge_build_parameter_bit_packed_clone",
+        }
+    ),
+    "checkpoint": frozenset(
+        {
+            "vrcforge_create_safe_backup",
+            "vrcforge_restore_checkpoint",
+            "vrcforge_restore_safe_backup",
+            "vrcforge_resolve_interrupted_apply_recovery",
+        }
+    ),
+    "diagnostics": frozenset({"vrcforge_build_test_avatar", "vrcforge_capture_screenshot"}),
+}
+
+
+def _external_mcp_tool_block(name: str, *, write: bool) -> str:
+    catalogue = EXTERNAL_MCP_WRITE_TOOL_BLOCKS if write else EXTERNAL_MCP_READ_TOOL_BLOCKS
+    matches = [block for block, names in catalogue.items() if name in names]
+    if len(matches) > 1:
+        raise RuntimeError(f"External MCP tool is assigned to multiple blocks: {name}")
+    return matches[0] if matches else ""
+
+
+def normalize_external_mcp_tool_blocks(value: Any) -> frozenset[str]:
+    if value is None:
+        return frozenset({EXTERNAL_MCP_DEFAULT_TOOL_BLOCK})
+    if isinstance(value, str):
+        raw = [value]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        raw = list(value)
+    else:
+        raise AgentGatewayError("toolBlocks must be an array of block names.", status_code=400)
+    blocks = {str(item or "").strip().lower() for item in raw if str(item or "").strip()}
+    if "*" in blocks:
+        return EXTERNAL_MCP_TOOL_BLOCKS
+    known = EXTERNAL_MCP_TOOL_BLOCKS | frozenset(EXTERNAL_MCP_TOOL_BLOCK_BRANCHES)
+    unknown = blocks - known
+    if unknown:
+        raise AgentGatewayError(
+            f"Unknown external MCP tool block: {sorted(unknown)[0]}",
+            status_code=400,
+        )
+    expanded: set[str] = set()
+    for block in blocks or {EXTERNAL_MCP_DEFAULT_TOOL_BLOCK}:
+        expanded.update(EXTERNAL_MCP_TOOL_BLOCK_BRANCHES.get(block, (block,)))
+    return frozenset(expanded)
+
+
+def external_mcp_typed_wrapper_allowed(handler: AgentWriteHandler) -> bool:
+    required_capability = EXTERNAL_MCP_TYPED_WRAPPER_CAPABILITIES.get(handler.name, "")
+    return bool(
+        required_capability
+        and handler.external_mcp_capability == required_capability
+    )
 SCOPED_ALLOW_RULE_FORBIDDEN_TOKENS = (
     "delete",
     "remove",
@@ -528,8 +1895,8 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "none",
     },
     "vrcforge_capture_screenshot": {
-        "title": "Gesture/Game View Capture",
-        "inputs": ["Capture angle, dimensions, and optional avatar path."],
+        "title": "Scene/Game View Capture",
+        "inputs": ["Capture angle, face/avatar framing, dimensions, optional avatar path, and auto/scene_view/game_view mode."],
         "outputs": ["Screenshot path and capture diagnostics."],
         "sideEffects": "writes artifact image only",
     },
@@ -694,6 +2061,78 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "sideEffects": "none",
         "tags": ["validation", "build-test", "readiness"],
     },
+    "vrcforge_build_test_avatar": {
+        "title": "Local Avatar Build & Test",
+        "permissionMode": "controlled_write",
+        "inputs": ["Exact Unity project path and exact loaded avatar hierarchy path."],
+        "outputs": ["Local-only SDK job identity and authoritative Core start status."],
+        "sideEffects": "starts VRChat SDK BuildAndTest; may create a local bundle, launch a local test client, assign a local blueprint ID, and dirty the scene; never uploads or publishes",
+        "backupRestore": "pre-write checkpoint required; rollback is never automatic and remains user-approved",
+        "tags": ["validation", "build-test", "local-only", "write"],
+    },
+    "vrcforge_get_build_test_status": {
+        "title": "Local Build & Test Status",
+        "permissionMode": "read_only",
+        "inputs": ["Exact project path and existing Build & Test jobId."],
+        "outputs": ["Authoritative Core job status, progress, SDK errors, Console delta, write state, and local bundle facts."],
+        "sideEffects": "none; polls an existing job only",
+        "backupRestore": "not required; status polling never restores or retries",
+        "tags": ["validation", "build-test", "status", "read-only"],
+    },
+    "vrcforge_avatar_upload_readiness": {
+        "title": "Avatar Upload Readiness",
+        "permissionMode": "read_only",
+        "inputs": ["Exact avatar identity, create/update mode, current platform, requested private/public metadata, styles, warnings, tags, and thumbnail."],
+        "outputs": ["Bound readiness digest, account/platform state, metadata request, public-SDK capability coverage, and explicit unknown SDK-panel fields."],
+        "sideEffects": "none; never builds, uploads, changes metadata, or invokes SDK-panel Auto Fix",
+        "backupRestore": "not required; readiness is read-only",
+        "tags": ["avatar", "upload", "readiness", "metadata", "read-only"],
+    },
+    "vrcforge_read_vrchat_sdk_builder_alerts": {
+        "title": "VRChat SDK Builder Alerts",
+        "permissionMode": "read_only",
+        "inputs": ["Exact Unity project path and the exact Avatar Descriptor selected in an already-validated SDK Builder panel."],
+        "outputs": ["Cached Review Any Alerts entries with original SDK messages, scope, severity/blocker state, target identity, and Select/Auto Fix availability."],
+        "sideEffects": "none; never opens or refreshes the SDK panel, changes selection, invokes Select/Auto Fix, builds, or uploads",
+        "backupRestore": "not required; cached alert inspection is read-only and fails closed when the cache cannot be proven exact",
+        "tags": ["vrchat-sdk", "builder", "alerts", "upload-blocker", "read-only"],
+    },
+    "vrcforge_build_and_upload_avatar": {
+        "title": "Build And Upload Avatar",
+        "permissionMode": "manual_confirmation_required",
+        "inputs": ["Readiness-bound avatar/account/platform identity, create/update mode, explicit private/public metadata, style IDs and names, content warnings, tags, thumbnail mode/hash, and readiness digest."],
+        "outputs": ["Job identity, exact build/upload phase events, SDK errors, Console delta, bundle facts, remote metadata before/requested/after, and per-surface commit state."],
+        "sideEffects": "may create or update a remote VRChat avatar record, visibility, metadata, thumbnail, and bundle; never retries or rolls back remotely",
+        "backupRestore": "local checkpoint cannot undo remote changes; every call requires one exact manual confirmation",
+        "tags": ["avatar", "upload", "publish", "remote-write", "manual-confirmation"],
+    },
+    "vrcforge_get_avatar_upload_status": {
+        "title": "Avatar Upload Status",
+        "permissionMode": "read_only",
+        "inputs": ["Exact project path and existing upload jobId."],
+        "outputs": ["Authoritative Core job state, phase events, remote commit uncertainty, metadata readback, SDK errors, and Console delta."],
+        "sideEffects": "none; polls an existing job only",
+        "backupRestore": "not required; status polling never retries or restores",
+        "tags": ["avatar", "upload", "status", "read-only"],
+    },
+    "vrcforge_preview_unity_constraint_conversion": {
+        "title": "Unity Constraint Conversion Preview",
+        "permissionMode": "read_only",
+        "inputs": ["Exact saved scene, avatar, host path, Unity IConstraint type, and component index."],
+        "outputs": ["Bound scene/component identities, sources, weight, state, SDK replacement type, and before digest."],
+        "sideEffects": "none",
+        "backupRestore": "not required; preview is read-only",
+        "tags": ["avatar", "constraint", "vrchat-sdk", "preview"],
+    },
+    "vrcforge_convert_unity_constraint": {
+        "title": "Convert Unity Constraint",
+        "permissionMode": "controlled_write",
+        "inputs": ["One preview-bound Unity IConstraint and exact scene/avatar/component identities."],
+        "outputs": ["SDK-equivalent VRChat constraint readback, animation-rebinding coverage, Console delta, and commit state."],
+        "sideEffects": "replaces one Unity constraint, may rebind referenced animation curves, and saves the scene",
+        "backupRestore": "pre-write checkpoint required; no automatic rollback",
+        "tags": ["avatar", "constraint", "vrchat-sdk", "write"],
+    },
     "vrcforge_optimization_validation_delta": {
         "title": "Optimization Validation Delta",
         "inputs": ["Before, after, and optional rollback vrcforge.validation.v1 reports."],
@@ -808,23 +2247,23 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
     },
     "vrcforge_write_avatar_descriptor": {
         "title": "Write Avatar Descriptor",
-        "inputs": ["Avatar path and descriptor fields to change."],
+        "inputs": ["Avatar path, descriptor fields to change, and optional source avatar path for complete Eye Look settings migration."],
         "outputs": ["Updated VRCAvatarDescriptor fields."],
         "sideEffects": "updates avatar descriptor viewpoint, lip sync, visemes, expression assets, eye look flag, or playable layer controllers after approval",
         "tags": ["avatar-descriptor", "avatar-authoring", "write"],
     },
     "vrcforge_preview_write_animation_curve": {
         "title": "Write Animation Curve Preview",
-        "inputs": ["AnimationClip path, binding path, component type, property name, and curve keys or constant value."],
+        "inputs": ["AnimationClip target binding plus curve data, or source binding fields for one lossless retarget."],
         "outputs": ["Planned AnimationClip binding change; no writes."],
         "sideEffects": "none",
         "tags": ["animation", "curve", "preview"],
     },
     "vrcforge_write_animation_curve": {
         "title": "Write Animation Curve",
-        "inputs": ["AnimationClip path, binding path, component type, property name, and curve keys or constant value."],
-        "outputs": ["Created, replaced, or deleted one AnimationClip curve binding."],
-        "sideEffects": "creates or edits AnimationClip assets after approval",
+        "inputs": ["AnimationClip target binding plus curve data, or source binding fields for one lossless retarget."],
+        "outputs": ["Created, replaced, deleted, copied, or retargeted one AnimationClip curve binding."],
+        "sideEffects": "creates or edits one AnimationClip binding; destination overwrite is denied unless explicitly enabled",
         "tags": ["animation", "curve", "write"],
     },
     "vrcforge_preview_manage_expression_parameters": {
@@ -929,14 +2368,14 @@ BUILTIN_SKILL_OVERRIDES: dict[str, dict[str, Any]] = {
         "title": "VPM Package Install",
         "inputs": ["VPM package id, Unity project path, optional preferred package manager."],
         "outputs": ["Selected package-manager strategy, command result, and post-install package state."],
-        "sideEffects": "modifies project VPM manifest and Packages through VCC vpm/vrc-get after approval and checkpoint",
+        "sideEffects": "modifies project VPM state through the sealed vrc-get adapter after checkpoint safety; VCC/ALCOM remain UI handoffs",
         "tags": ["package", "vpm", "write"],
     },
     "vrcforge_package_install_plan": {
         "title": "VPM Package Install Plan",
         "permissionMode": "preview",
         "inputs": ["VPM package id, Unity project path, optional preferred package manager."],
-        "outputs": ["ALCOM/VCC UI handoff, VCC vpm/vrc-get command installer, or agent-managed fallback plan."],
+        "outputs": ["ALCOM/VCC UI handoff, sealed vrc-get command installer, or backend-neutral fallback plan."],
         "sideEffects": "none",
         "tags": ["package", "vpm", "preview"],
     },
@@ -1079,6 +2518,7 @@ for _optimization_apply_tool in STABLE_OPTIMIZATION_APPLY_REQUEST_GATEWAY_NAMES:
     }
 
 BUILTIN_SKILL_GROUPS: list[dict[str, Any]] = [
+    *AVATAR_COMPOSITION_WORKFLOW_SKILLS,
     {
         "name": "know-yourself",
         "title": "Know Yourself",
@@ -1740,7 +3180,21 @@ class AgentGateway:
         self.public_base_url = public_base_url.rstrip("/")
         self._tools: dict[str, AgentTool] = {}
         self._write_handlers: dict[str, AgentWriteHandler] = {}
+        # Explicit per-instance additions are used only when a host registers a
+        # reviewed Unity-facing handler that is not in the built-in external
+        # catalogue. Internal registration alone never exposes a tool.
+        self._external_mcp_tool_block_overrides: dict[tuple[str, bool], str] = {}
         self._approvals: dict[str, dict[str, Any]] = {}
+        # External MCP confirmation proposals are bounded to this gateway
+        # lifetime, protected by the gateway lock, authenticated by the MCP
+        # bearer boundary, and consumed exactly once.
+        self._external_mcp_write_confirmations: dict[str, dict[str, Any]] = {}
+        # MCP over HTTP has no durable socket. A successfully authenticated
+        # request marks the client connected for a bounded idle window; the
+        # desktop refreshes faster than this window, so the indicator turns on
+        # after a real client request and turns off after the client goes idle.
+        self._external_mcp_last_seen_epoch = 0.0
+        self._external_mcp_last_seen_at: str | None = None
         self._skill_package_write_lock_bound = skill_package_write_lock is not None
         self._skill_package_write_lock = skill_package_write_lock or nullcontext()
         self._lock = threading.RLock()
@@ -2584,6 +4038,21 @@ class AgentGateway:
             requires_user_activation=requires_user_activation,
         )
 
+    def register_external_mcp_unity_tool(self, name: str, block: str) -> None:
+        """Explicitly share one already-registered Unity handler with external MCP."""
+
+        normalized_name = str(name or "").strip()
+        normalized_block = str(block or "").strip().lower()
+        if normalized_block not in EXTERNAL_MCP_TOOL_BLOCKS:
+            raise ValueError(f"Unknown external MCP tool block: {normalized_block or 'missing'}")
+        has_read = normalized_name in self._tools
+        has_write = normalized_name in self._write_handlers
+        if has_read == has_write:
+            raise ValueError(
+                "External MCP sharing requires exactly one registered read tool or write handler."
+            )
+        self._external_mcp_tool_block_overrides[(normalized_name, has_write)] = normalized_block
+
     def ensure_config(self) -> AgentGatewayConfig:
         with self._lock:
             raw = self._read_config_payload()
@@ -2790,6 +4259,264 @@ class AgentGateway:
             "userConstraints": self._serialize_user_constraints(user_constraints),
         }
 
+    def build_external_mcp_tools(
+        self,
+        exposure_layer: str = EXPOSURE_LAYER_EXECUTION,
+        tool_blocks: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Return the independent, block-scoped external Unity tool surface."""
+
+        layer = normalize_exposure_layer(exposure_layer)
+        selected_blocks = normalize_external_mcp_tool_blocks(tool_blocks)
+        config = self.ensure_config()
+        tools: list[dict[str, Any]] = []
+        for tool in self._tools.values():
+            block = self._external_mcp_read_tool_block(tool, config)
+            if not block or block not in selected_blocks:
+                continue
+            serialized = self._serialize_tool(tool, config)
+            serialized["_meta"] = {
+                **dict(serialized.get("_meta") or {}),
+                "permission": "ReadOnly",
+                "toolBlock": block,
+            }
+            tools.append(serialized)
+        if layer == EXPOSURE_LAYER_EXECUTION and config.allow_write_requests:
+            for handler in self._write_handlers.values():
+                block = self._external_mcp_write_handler_block(handler, config)
+                if not block or block not in selected_blocks:
+                    continue
+                tools.append(self._serialize_external_mcp_write_handler(handler, block))
+        tools.sort(key=lambda item: str(item.get("name") or ""))
+        return tools
+
+    def external_mcp_tool_block_for_name(self, name: str, *, write: bool) -> str:
+        """Return the canonical external Unity block reused by the internal Unity tree."""
+
+        normalized = str(name or "").strip()
+        config = self.ensure_config()
+        if write:
+            handler = self._write_handlers.get(normalized)
+            return self._external_mcp_write_handler_block(handler, config) if handler else ""
+        tool = self._tools.get(normalized)
+        return self._external_mcp_read_tool_block(tool, config) if tool else ""
+
+    def external_mcp_tool_block_index(self, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Return a compact external-only tree; definitions stay lazy per block."""
+
+        descriptions = {
+            "core": "Connection, compile state, avatar roots, and tool-block discovery.",
+            "project": "Project lifecycle, manager catalogues, and package management.",
+            "avatar": "Hierarchy, components, descriptors, animation, parameters, and menus.",
+            "assets": "Assets, prefabs, outfit packages, and wardrobes.",
+            "materials": "Materials, shaders, textures, and tuning.",
+            "integrations": "Installed Unity plugin adapters; expand this branch before loading a family.",
+            "integrations/modular-avatar": "Modular Avatar inspection, Setup Outfit, and atomic component authoring.",
+            "integrations/vrcfury": "VRCFury inspection and public-API-backed Toggle or Armature Link authoring.",
+            "integrations/gesture-manager": "Gesture Manager Play Mode status, menu identity, and atomic runtime parameters.",
+            "skills": "User Skill package operations; expand this branch before loading a package format.",
+            "skills/vsk": "Read-only preflight and atomic import/export for local .vsk Skill packages.",
+            "optimization": "Avatar performance audits and optimization applies.",
+            "checkpoint": "Checkpoint, backup, recovery, and explicit restore tools.",
+            "diagnostics": "Screenshots, validation, logs, and runtime diagnostics.",
+            "encryption": "Optional private avatar-encryption compatibility tools.",
+        }
+        config = self.ensure_config()
+        requested_block = str((params or {}).get("block") or "").strip().casefold()
+        if requested_block and requested_block not in EXTERNAL_MCP_TOOL_BLOCKS:
+            raise AgentGatewayError(
+                f"Unknown external MCP tool block: {requested_block}",
+                status_code=400,
+            )
+
+        def counts(block: str) -> tuple[int, int]:
+            read_count = sum(
+                1
+                for tool in self._tools.values()
+                if self._external_mcp_read_tool_block(tool, config) == block
+            )
+            write_count = sum(
+                1
+                for handler in self._write_handlers.values()
+                if self._external_mcp_write_handler_block(handler, config) == block
+            )
+            return read_count, write_count
+
+        def compact_tools(block: str) -> list[dict[str, str]]:
+            items = [
+                {"name": tool.name, "shortName": tool.name.removeprefix("vrcforge_"), "mode": "read"}
+                for tool in self._tools.values()
+                if self._external_mcp_read_tool_block(tool, config) == block
+            ]
+            items.extend(
+                {"name": handler.name, "shortName": handler.name.removeprefix("vrcforge_"), "mode": "write"}
+                for handler in self._write_handlers.values()
+                if self._external_mcp_write_handler_block(handler, config) == block
+            )
+            return sorted(items, key=lambda item: item["name"])
+
+        children: list[dict[str, Any]] = []
+        for index, block in enumerate(EXTERNAL_MCP_TOOL_BLOCK_ROOTS, start=1):
+            descendants = EXTERNAL_MCP_TOOL_BLOCK_BRANCHES.get(block, ())
+            if descendants:
+                branch_children = []
+                total_read = 0
+                total_write = 0
+                for child_index, child in enumerate(descendants, start=1):
+                    read_count, write_count = counts(child)
+                    total_read += read_count
+                    total_write += write_count
+                    branch_children.append(
+                        {
+                            "index": f"external.{index}.{child_index}",
+                            "block": child,
+                            "description": descriptions[child],
+                            "readToolCount": read_count,
+                            "writeToolCount": write_count,
+                            "toolNames": [item["name"] for item in compact_tools(child)],
+                            **({"tools": compact_tools(child)} if requested_block == child else {}),
+                            "loadWith": {"method": "tools/list", "toolBlocks": [child]},
+                        }
+                    )
+                children.append(
+                    {
+                        "index": f"external.{index}",
+                        "block": block,
+                        "description": descriptions[block],
+                        "readToolCount": total_read,
+                        "writeToolCount": total_write,
+                        "children": branch_children,
+                    }
+                )
+                continue
+            read_count, write_count = counts(block)
+            children.append(
+                {
+                    "index": f"external.{index}",
+                    "block": block,
+                    "description": descriptions[block],
+                    "readToolCount": read_count,
+                    "writeToolCount": write_count,
+                    "toolNames": [item["name"] for item in compact_tools(block)],
+                    **({"tools": compact_tools(block)} if requested_block == block else {}),
+                    "loadWith": {"method": "tools/list", "toolBlocks": [block]},
+                }
+            )
+        return {
+            "ok": True,
+            "schema": "vrcforge.external_tool_blocks.v1",
+            "root": "external",
+            "definitionsLoaded": False,
+            "selectedBlock": requested_block,
+            "children": (
+                [item for item in children if item.get("block") == requested_block]
+                if requested_block
+                and not any(
+                    requested_block in descendants
+                    for descendants in EXTERNAL_MCP_TOOL_BLOCK_BRANCHES.values()
+                )
+                else [
+                    {
+                        **item,
+                        "children": (
+                            list(item.get("children", []))
+                            if not requested_block
+                            else [
+                                child
+                                for child in item.get("children", [])
+                                if child.get("block") == requested_block
+                            ]
+                        ),
+                    }
+                    for item in children
+                    if not requested_block or any(
+                        child.get("block") == requested_block
+                        for child in item.get("children", [])
+                    )
+                ]
+            ),
+        }
+
+    def _external_mcp_read_tool_block(
+        self,
+        tool: AgentTool,
+        config: AgentGatewayConfig,
+    ) -> str:
+        block = self._external_mcp_tool_block_overrides.get(
+            (tool.name, False),
+            _external_mcp_tool_block(tool.name, write=False),
+        )
+        if not block:
+            return ""
+        if tool.name in EXTERNAL_MCP_INTERNAL_LOOP_TOOLS:
+            return ""
+        if tool.name.startswith("vrcforge_progress_"):
+            return ""
+        if tool.name.endswith("_request"):
+            return ""
+        if tool.write or tool.advanced or tool.requires_user_activation:
+            return ""
+        return block
+
+    def _external_mcp_read_tool_visible(
+        self,
+        tool: AgentTool,
+        config: AgentGatewayConfig,
+    ) -> bool:
+        return bool(self._external_mcp_read_tool_block(tool, config))
+
+    def _external_mcp_write_handler_block(
+        self,
+        handler: AgentWriteHandler,
+        config: AgentGatewayConfig,
+    ) -> str:
+        del config
+        block = self._external_mcp_tool_block_overrides.get(
+            (handler.name, True),
+            _external_mcp_tool_block(handler.name, write=True),
+        )
+        if not block or handler.advanced:
+            return ""
+        if (
+            handler.name in WRAPPER_ONLY_WRITE_TARGETS
+            and not external_mcp_typed_wrapper_allowed(handler)
+        ):
+            return ""
+        return block
+
+    def _serialize_external_mcp_write_handler(
+        self,
+        handler: AgentWriteHandler,
+        block: str,
+    ) -> dict[str, Any]:
+        risk_level = normalize_risk_level(handler.risk_level)
+        return {
+            "name": handler.name,
+            "title": handler.name.replace("vrcforge_", "").replace("_", " ").title(),
+            "description": tool_usage_description(
+                handler.name,
+                handler.description,
+                write=True,
+            ),
+            "category": self._registry_category("supervised-write", handler.name),
+            "write": True,
+            "riskLevel": risk_level,
+            "requiresApproval": False,
+            "inputSchema": canonical_unity_write_tool_input_schema(handler.name),
+            "outputSchema": {"type": "object", "additionalProperties": True},
+            "_meta": {
+                "permission": "Write",
+                "toolBlock": block,
+                "confirmationPolicy": "risk_based",
+                "baseRiskLevel": risk_level,
+                "checkpointPolicy": (
+                    "required_before_mutation"
+                    if handler.pre_write_checkpoint_required
+                    else "handler_managed_atomic_receipt"
+                ),
+            },
+        }
+
     def build_tool_registry(
         self,
         config: AgentGatewayConfig | None = None,
@@ -2866,6 +4593,613 @@ class AgentGateway:
             },
             "runtimeSessions": self._runtime_session_state.session_count(),
         }
+
+    def mark_external_mcp_activity(self) -> None:
+        """Record a successful authentication at the existing MCP boundary."""
+
+        now_epoch = time.time()
+        now_iso = datetime.fromtimestamp(now_epoch, timezone.utc).isoformat()
+        with self._lock:
+            self._external_mcp_last_seen_epoch = now_epoch
+            self._external_mcp_last_seen_at = now_iso
+
+    def external_mcp_activity_status(self) -> dict[str, Any]:
+        """Return a truthful bounded connection signal for the desktop UI."""
+
+        config = self.ensure_config()
+        now_epoch = time.time()
+        with self._lock:
+            last_seen_epoch = self._external_mcp_last_seen_epoch
+            last_seen_at = self._external_mcp_last_seen_at
+        age_seconds = max(0.0, now_epoch - last_seen_epoch) if last_seen_epoch > 0 else None
+        connected = bool(
+            config.enabled
+            and age_seconds is not None
+            and age_seconds <= EXTERNAL_MCP_CONNECTION_IDLE_SECONDS
+        )
+        return {
+            "gatewayEnabled": config.enabled,
+            "connected": connected,
+            "lastSeenAt": last_seen_at,
+            "ageSeconds": age_seconds,
+            "idleTimeoutSeconds": EXTERNAL_MCP_CONNECTION_IDLE_SECONDS,
+        }
+
+    @staticmethod
+    def _external_mcp_visible_value(value: Any) -> Any:
+        forbidden = {
+            "approval",
+            "approvalId",
+            "approval_id",
+            "fullPermission",
+            "permissionLabel",
+            "permissionMode",
+            "plannerObservation",
+            "taskCompletion",
+            "taskContinuation",
+            "terminalPlan",
+        }
+        if isinstance(value, Mapping):
+            return {
+                str(key): AgentGateway._external_mcp_visible_value(item)
+                for key, item in value.items()
+                if str(key) not in forbidden
+            }
+        if isinstance(value, list):
+            return [AgentGateway._external_mcp_visible_value(item) for item in value]
+        return value
+
+    def _call_external_mcp_read_tool(
+        self,
+        tool: AgentTool,
+        params: dict[str, Any],
+        *,
+        agent_name: str,
+    ) -> dict[str, Any]:
+        """Call one external read tool with the same canonical outcome as the internal Agent."""
+
+        request_id = (
+            f"mcpread_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
+            f"{secrets.token_hex(4)}"
+        )
+        started_at = time.perf_counter()
+        params_summary = self._tool_params_audit(tool.name, params)
+        user_constraints = self.read_user_constraints()
+        tool_params = self._inject_user_constraints(params, tool, user_constraints)
+        core_call_audits: list[dict[str, Any]] = []
+        try:
+            with capture_unity_mcp_core_call_audits() as core_call_audits:
+                agent_token = self._tool_agent_context.set(agent_name)
+                owner_token = self._tool_owner_context.set(f"agent:{agent_name}")
+                try:
+                    raw_result = tool.handler(tool_params)
+                finally:
+                    self._tool_owner_context.reset(owner_token)
+                    self._tool_agent_context.reset(agent_token)
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+            request_trace = (
+                {"gatewayRequestId": request_id, "unityCoreCallAudits": core_call_audits}
+                if core_call_audits
+                else None
+            )
+            outcome = normalize_agent_tool_result(
+                raw_result,
+                fallback_summary=tool.description,
+                write=False,
+            )
+            outcome_status = str(outcome.get("status") or "failed")
+            explicit_failure = outcome_status == "failed"
+            status = "failed" if explicit_failure else outcome_status
+            result_summary = summarize_params(
+                raw_result if isinstance(raw_result, dict) else {"result": raw_result}
+            )
+            self.append_audit(
+                {
+                    "event": "external_mcp_tool_call",
+                    "requestId": request_id,
+                    "tool": tool.name,
+                    "agent": agent_name,
+                    "paramsSummary": params_summary,
+                    "resultSummary": result_summary,
+                    "durationMs": duration_ms,
+                    "status": status,
+                    **({"requestTrace": request_trace} if request_trace is not None else {}),
+                }
+            )
+            payload: dict[str, Any] = {
+                "ok": not explicit_failure,
+                "status": status,
+                "tool": tool.name,
+                "result": self._external_mcp_visible_value(raw_result),
+                "outcome": self._external_mcp_visible_value(outcome),
+                "gatewayContext": {
+                    "requestId": request_id,
+                    "durationMs": duration_ms,
+                    "redactionPolicy": "sensitive_fields_only",
+                    **({"requestTrace": request_trace} if request_trace is not None else {}),
+                },
+            }
+            if explicit_failure and isinstance(raw_result, Mapping):
+                error_value: Any = ""
+                for key in ("error", "message", "reason"):
+                    if key in raw_result:
+                        error_value = raw_result[key]
+                        break
+                error_object = build_external_tool_error(
+                    error=error_value,
+                    failure_layer="external_mcp_read_handler",
+                    failure_phase="tool_returned_rejection",
+                    operation_kind="read",
+                    tool=tool.name,
+                    tool_routing_started=True,
+                    mutation_started=False,
+                    committed=False,
+                    retryable=False,
+                    checkpoint_recovery_required=False,
+                    temporary_cleanup_required=False,
+                    raw_result=raw_result,
+                )
+                payload["error"] = self._external_mcp_visible_value(error_object["error"])
+                payload["errorDetails"] = self._external_mcp_visible_value(error_object)
+            return redact_sensitive(payload)
+        except Exception as exc:  # noqa: BLE001 - preserve the complete external error contract.
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 3)
+            request_trace = (
+                {"gatewayRequestId": request_id, "unityCoreCallAudits": core_call_audits}
+                if core_call_audits
+                else None
+            )
+            legacy_details = external_exception_details(exc)
+            raw_result = external_exception_raw_result(legacy_details)
+            error_object = build_external_tool_error(
+                exception=exc,
+                raw_result=raw_result,
+                failure_layer="external_mcp_read_handler",
+                failure_phase="tool_handler_exception",
+                operation_kind="read",
+                tool=tool.name,
+                tool_routing_started=None,
+                mutation_started=False,
+                committed=False,
+                checkpoint_recovery_required=False,
+                temporary_cleanup_required=False,
+            )
+            self.append_audit(
+                {
+                    "event": "external_mcp_tool_call",
+                    "requestId": request_id,
+                    "tool": tool.name,
+                    "agent": agent_name,
+                    "paramsSummary": params_summary,
+                    "resultSummary": {"status": "error"},
+                    "durationMs": duration_ms,
+                    "status": "error",
+                    "error": str(exc),
+                    **({"requestTrace": request_trace} if request_trace is not None else {}),
+                }
+            )
+            payload = {
+                "ok": False,
+                "status": "failed",
+                "tool": tool.name,
+                "result": self._external_mcp_visible_value(raw_result),
+                "error": self._external_mcp_visible_value(error_object["error"]),
+                "errorDetails": self._external_mcp_visible_value(error_object),
+                "gatewayContext": {
+                    "requestId": request_id,
+                    "durationMs": duration_ms,
+                    "redactionPolicy": "sensitive_fields_only",
+                    **({"requestTrace": request_trace} if request_trace is not None else {}),
+                },
+            }
+            payload["outcome"] = self._external_mcp_visible_value(
+                normalize_agent_tool_result(
+                    payload,
+                    fallback_summary=tool.description,
+                    write=False,
+                )
+            )
+            return redact_sensitive(payload)
+
+    def call_external_mcp_tool(
+        self,
+        name: str,
+        params: dict[str, Any] | None = None,
+        *,
+        agent_name: str = "mcp-agent",
+    ) -> dict[str, Any]:
+        """Dispatch a real external tool without running VRCForge's Agent loop."""
+
+        config = self.ensure_config()
+        if not config.enabled:
+            raise AgentGatewayError("Agent Gateway is disabled in config/agent_gateway.json.", status_code=403)
+        arguments = dict(params or {})
+        write_handler = self._write_handlers.get(name)
+        if write_handler is None:
+            tool = self._tools.get(name)
+            if tool is None or not self._external_mcp_read_tool_visible(tool, config):
+                raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
+            return self._call_external_mcp_read_tool(
+                tool,
+                arguments,
+                agent_name=agent_name,
+            )
+        if (
+            not self._external_mcp_write_handler_block(write_handler, config)
+            or not config.allow_write_requests
+        ):
+            raise AgentGatewayError(f"Unknown or unavailable MCP tool: {name}", status_code=404)
+
+        confirmation = arguments.pop("confirmation", None)
+        request_arguments_digest = stable_hash(
+            json.dumps(arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        )
+        if confirmation is not None:
+            if not isinstance(confirmation, Mapping):
+                return self._invalid_external_mcp_confirmation(
+                    name,
+                    "confirmation must be an object returned by the first tool call.",
+                )
+            return self._confirm_external_mcp_write(
+                name,
+                request_arguments_digest,
+                dict(confirmation),
+                agent_name=agent_name,
+            )
+
+        try:
+            prepared = self.approval_transactions.prepare_external_mcp_write(name, arguments)
+        except AgentGatewayError as exc:
+            return self._external_mcp_no_write_error(name, "write_preparation", exc)
+        except Exception as exc:  # noqa: BLE001 - preserve the redacted causal chain for the calling Agent.
+            return self._external_mcp_no_write_error(
+                name,
+                "write_preparation",
+                exc,
+            )
+        if prepared.get("requiresUserConfirmation"):
+            try:
+                return self._propose_external_mcp_write(
+                    prepared,
+                    request_arguments_digest=request_arguments_digest,
+                )
+            except AgentGatewayError as exc:
+                return self._external_mcp_no_write_error(
+                    name,
+                    "confirmation_proposal",
+                    exc,
+                )
+        try:
+            applied = self.approval_transactions.execute_prepared_external_mcp_write(
+                prepared,
+                agent_name=agent_name,
+            )
+        except AgentGatewayError as exc:
+            return self._external_mcp_no_write_error(name, "transaction_start", exc)
+        return self._external_mcp_write_result(name, applied)
+
+    def _propose_external_mcp_write(
+        self,
+        prepared: Mapping[str, Any],
+        *,
+        request_arguments_digest: str,
+    ) -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        config = self.ensure_config()
+        ttl_seconds = max(30, min(int(config.approval_timeout_seconds or 600), 900))
+        expires_at = now + timedelta(seconds=ttl_seconds)
+        operation_id = f"mcpop_{now.strftime('%Y%m%d_%H%M%S_%f')}_{secrets.token_hex(8)}"
+        record = {
+            "operationId": operation_id,
+            "targetTool": str(prepared.get("targetTool") or ""),
+            "argumentsDigest": request_arguments_digest,
+            "preparedArgumentsDigest": str(prepared.get("argumentsDigest") or ""),
+            "createdAt": now.isoformat(),
+            "createdEpoch": now.timestamp(),
+            "expiresAt": expires_at.isoformat(),
+            "expiresEpoch": expires_at.timestamp(),
+            "prepared": dict(prepared),
+        }
+        with self._lock:
+            self._prune_external_mcp_confirmations_locked(now.timestamp())
+            if len(self._external_mcp_write_confirmations) >= EXTERNAL_MCP_CONFIRMATION_MAX_PENDING:
+                raise AgentGatewayError(
+                    "Too many external MCP confirmations are pending. Let one expire or finish it first.",
+                    status_code=429,
+                )
+            self._external_mcp_write_confirmations[operation_id] = record
+        confirmation = {
+            "schema": "vrcforge.external_write_confirmation.v1",
+            "operationId": operation_id,
+            "targetTool": record["targetTool"],
+            "argumentsDigest": record["argumentsDigest"],
+            "expiresAt": record["expiresAt"],
+            "requiredDecision": ["approve", "reject"],
+            "decisionPlacement": "arguments.confirmation.decision",
+        }
+        self.append_audit(
+            {
+                "event": "external_mcp_confirmation_proposed",
+                "operation": confirmation,
+                "riskLevel": str(prepared.get("riskLevel") or ""),
+            }
+        )
+        return {
+            "ok": True,
+            "status": "user_confirmation_required",
+            "tool": record["targetTool"],
+            "riskLevel": str(prepared.get("riskLevel") or ""),
+            "reason": str(prepared.get("confirmationReason") or ""),
+            "preview": redact_sensitive(prepared.get("preview")),
+            "confirmation": confirmation,
+            "resubmit": {
+                "placement": "arguments.confirmation",
+                "decisionField": "arguments.confirmation.decision",
+                "preserveOtherArgumentsExactly": True,
+            },
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "message": (
+                "No write has started. The external Agent must show this risk to the user and "
+                "repeat the same tool call with all original arguments unchanged, add the returned "
+                "confirmation object at arguments.confirmation, and set "
+                "arguments.confirmation.decision to approve or reject."
+            ),
+        }
+
+    def _confirm_external_mcp_write(
+        self,
+        target_tool: str,
+        request_arguments_digest: str,
+        confirmation: Mapping[str, Any],
+        *,
+        agent_name: str,
+    ) -> dict[str, Any]:
+        operation_id = str(confirmation.get("operationId") or "").strip()
+        supplied_digest = str(confirmation.get("argumentsDigest") or "").strip()
+        decision = str(
+            confirmation.get("decision")
+            or confirmation.get("userDecision")
+            or ""
+        ).strip().casefold()
+        now_epoch = datetime.now(timezone.utc).timestamp()
+        with self._lock:
+            self._prune_external_mcp_confirmations_locked(now_epoch)
+            record = self._external_mcp_write_confirmations.get(operation_id)
+            if record is None:
+                return self._invalid_external_mcp_confirmation(
+                    target_tool,
+                    "The confirmation operation is missing, expired, or already consumed.",
+                )
+            expected_target = str(record.get("targetTool") or "")
+            expected_digest = str(record.get("argumentsDigest") or "")
+            actual_target = str(target_tool or "")
+            actual_digest = str(request_arguments_digest or "")
+            if (
+                not supplied_digest
+                or not hmac.compare_digest(supplied_digest, expected_digest)
+                or not hmac.compare_digest(actual_digest, expected_digest)
+                or actual_target != expected_target
+                or str(confirmation.get("targetTool") or expected_target) != expected_target
+            ):
+                return self._invalid_external_mcp_confirmation(
+                    actual_target,
+                    "The confirmation is not bound to these exact tool arguments.",
+                )
+            if decision not in {"approve", "reject"}:
+                return self._invalid_external_mcp_confirmation(
+                    actual_target,
+                    "The external Agent must return the user's decision as approve or reject.",
+                )
+            self._external_mcp_write_confirmations.pop(operation_id, None)
+
+        if decision == "reject":
+            self.append_audit(
+                {
+                    "event": "external_mcp_confirmation_rejected",
+                    "operationId": operation_id,
+                    "targetTool": expected_target,
+                    "argumentsDigest": supplied_digest,
+                }
+            )
+            return {
+                "ok": True,
+                "status": "rejected",
+                "tool": expected_target,
+                "operationId": operation_id,
+                "mutationStarted": False,
+                "committed": False,
+                "commitState": "not_started",
+                "message": "The user rejected the external MCP write. No mutation occurred.",
+            }
+
+        stored_prepared = ensure_dict(record.get("prepared"))
+        self.append_audit(
+            {
+                "event": "external_mcp_confirmation_accepted",
+                "operationId": operation_id,
+                "targetTool": str(stored_prepared.get("targetTool") or ""),
+                "argumentsDigest": supplied_digest,
+            }
+        )
+        try:
+            applied = self.approval_transactions.execute_prepared_external_mcp_write(
+                stored_prepared,
+                agent_name=agent_name,
+            )
+        except AgentGatewayError as exc:
+            result = self._external_mcp_no_write_error(
+                str(stored_prepared.get("targetTool") or ""),
+                "transaction_start",
+                exc,
+            )
+            result["operationId"] = operation_id
+            return result
+        result = self._external_mcp_write_result(
+            str(stored_prepared.get("targetTool") or ""),
+            applied,
+        )
+        result["operationId"] = operation_id
+        return result
+
+    def _prune_external_mcp_confirmations_locked(self, now_epoch: float) -> None:
+        expired = [
+            operation_id
+            for operation_id, record in self._external_mcp_write_confirmations.items()
+            if float(record.get("expiresEpoch") or 0) <= now_epoch
+        ]
+        for operation_id in expired:
+            self._external_mcp_write_confirmations.pop(operation_id, None)
+
+    def _invalid_external_mcp_confirmation(self, tool: str, error: str) -> dict[str, Any]:
+        error_object = build_external_tool_error(
+            error=error,
+            error_code="external_confirmation_invalid",
+            failure_layer="external_mcp_confirmation",
+            failure_phase="confirmation_validation",
+            operation_kind="write",
+            tool=tool,
+            tool_routing_started=False,
+            mutation_started=False,
+            committed=False,
+            commit_state="not_started",
+            retryable=False,
+            checkpoint_recovery_required=False,
+            temporary_cleanup_required=False,
+        )
+        payload = {
+            "ok": False,
+            "status": "invalid_confirmation",
+            "tool": tool,
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "error": error_object["error"],
+            "errorDetails": error_object,
+            "writeFailure": external_write_failure_view(error_object),
+        }
+        payload["outcome"] = normalize_agent_tool_result(
+            payload,
+            fallback_summary="External confirmation validation failed.",
+            write=True,
+        )
+        return payload
+
+    def _external_mcp_no_write_error(
+        self,
+        tool: str,
+        failure_layer: str,
+        error: str | BaseException,
+    ) -> dict[str, Any]:
+        exception = error if isinstance(error, BaseException) else None
+        error_text = str(error)
+        exception_code = ""
+        if exception is not None:
+            for attribute in ("cause_code", "error_code", "code"):
+                value = getattr(exception, attribute, None)
+                normalized_value = str(value or "").strip()
+                if normalized_value and normalized_value not in {
+                    "agent_gateway_rejected",
+                    "external_tool_rejected",
+                }:
+                    exception_code = normalized_value
+                    break
+        error_object = build_external_tool_error(
+            error=error_text,
+            error_code=exception_code or f"external_{failure_layer}_rejected",
+            failure_layer=failure_layer,
+            failure_phase="before_write_handler",
+            operation_kind="write",
+            tool=tool,
+            tool_routing_started=False,
+            mutation_started=False,
+            committed=False,
+            commit_state="not_started",
+            retryable=False,
+            checkpoint_recovery_required=False,
+            temporary_cleanup_required=False,
+            exception=exception,
+        )
+        payload = {
+            "ok": False,
+            "status": "failed",
+            "tool": tool,
+            "result": None,
+            "error": error_object["error"],
+            "errorDetails": error_object,
+            "writeFailure": external_write_failure_view(error_object),
+        }
+        payload["outcome"] = normalize_agent_tool_result(
+            payload,
+            fallback_summary="External write preparation failed.",
+            write=True,
+        )
+        return payload
+
+    def _external_mcp_write_result(
+        self,
+        tool: str,
+        applied: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        had_canonical_outcome = isinstance(applied.get("outcome"), Mapping)
+        outcome = (
+            dict(applied["outcome"])
+            if isinstance(applied.get("outcome"), Mapping)
+            else normalize_agent_tool_result(
+                applied,
+                fallback_summary=f"{tool} completed.",
+                write=True,
+            )
+        )
+        outcome_status = str(outcome.get("status") or "failed")
+        status = str(applied.get("status") or outcome_status)
+        if outcome_status == "failed" and not had_canonical_outcome:
+            status = "failed"
+        elif status == "applied":
+            status = "executed"
+        payload: dict[str, Any] = {
+            "ok": outcome_status != "failed",
+            "status": status,
+            "tool": tool,
+            "result": None,
+            "outcome": self._external_mcp_visible_value(outcome),
+        }
+        for key in (
+            "result",
+            "writeFailure",
+            "requestTrace",
+            "error",
+            "message",
+            "errorDetails",
+            "consoleVerification",
+        ):
+            if key in applied:
+                payload[key] = self._external_mcp_visible_value(applied[key])
+        if outcome_status == "failed" and "errorDetails" not in payload:
+            error_object = build_external_tool_error(
+                error=payload.get("error") or "External MCP write was rejected.",
+                failure_layer="external_mcp_write_execution",
+                failure_phase="write_result",
+                operation_kind="write",
+                tool=tool,
+                tool_routing_started=None,
+                raw_result=applied,
+            )
+            payload["errorDetails"] = self._external_mcp_visible_value(error_object)
+            payload.setdefault(
+                "writeFailure",
+                self._external_mcp_visible_value(external_write_failure_view(error_object)),
+            )
+        if outcome_status == "failed":
+            payload["outcome"] = self._external_mcp_visible_value(
+                normalize_agent_tool_result(
+                    payload,
+                    fallback_summary=f"{tool} failed.",
+                    write=True,
+                )
+            )
+        return redact_sensitive(payload)
 
     def call_tool(
         self,
@@ -2960,15 +5294,32 @@ class AgentGateway:
             if request_trace is not None:
                 audit_event["requestTrace"] = request_trace
             self.append_audit(audit_event)
+            error_object = build_external_tool_error(
+                exception=exc,
+                failure_layer="agent_tool_handler",
+                failure_phase="tool_handler_exception",
+                operation_kind="write" if tool.write else "read",
+                tool=name,
+                tool_routing_started=True,
+                mutation_started=None if tool.write else False,
+                committed=None if tool.write else False,
+            )
             response = {
                 "ok": False,
+                "status": "failed",
                 "requestId": request_id,
                 "tool": name,
                 "agent": agent_name,
                 "error": str(exc),
+                "errorDetails": error_object,
                 "resultSummary": {"status": "error"},
                 "durationMs": duration_ms,
             }
+            response["outcome"] = normalize_agent_tool_result(
+                response,
+                fallback_summary=tool.description,
+                write=tool.write,
+            )
             if request_trace is not None:
                 response["requestTrace"] = request_trace
             return response
@@ -4000,6 +6351,9 @@ class AgentGateway:
         # Optional model-turn limits support automation. Tool-call count is
         # telemetry only; normal turns end at the model's final response.
         for step_index in count():
+            params["_internalToolBlocks"] = sorted(
+                self._runtime_session_state.internal_tool_blocks(session_id)
+            )
             budget_decision = task_loop.budget_policy.check(
                 model_turns_used=task_loop.model_turns_used,
                 tool_calls_used=tool_calls_used,
@@ -4725,8 +7079,24 @@ class AgentGateway:
                         provider_request_count=prior_provider_request_count + int(context_usage.get("requestCount") or 0),
                         continue_after_approval=bool(plan.get("continueLoop")),
                     )
-                if step_tool == "vrcforge_agent_desktop_action" or step_tool.startswith("vrcforge_progress_") or step_tool == "vrcforge_ask_user":
+                if (
+                    step_tool == "vrcforge_agent_desktop_action"
+                    or step_tool.startswith("vrcforge_progress_")
+                    or step_tool == "vrcforge_ask_user"
+                    or step_tool in {
+                        "vrcforge_list_internal_tool_blocks",
+                        "vrcforge_load_internal_tool_block",
+                        "vrcforge_unload_internal_tool_block",
+                    }
+                ):
                     step_params.setdefault("sessionId", session_id)
+                    if step_tool in {
+                        "vrcforge_list_internal_tool_blocks",
+                        "vrcforge_load_internal_tool_block",
+                        "vrcforge_unload_internal_tool_block",
+                    }:
+                        step_params.setdefault("exposureLayer", runtime_exposure_layer)
+                        step_params.setdefault("projectContextActive", project_context_active)
                     if goal_delivery_id:
                         step_params.setdefault("goalDeliveryId", goal_delivery_id)
                     if project_root:
@@ -6328,7 +8698,7 @@ class AgentGateway:
 
     def _serialize_tool(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
         model_invocable = not tool.requires_user_activation or self._desktop.computer_use_model_invocable(config)
-        return {
+        serialized = {
             "name": tool.name,
             "description": tool_usage_description(tool.name, tool.description, write=tool.write),
             "category": tool.category,
@@ -6338,6 +8708,8 @@ class AgentGateway:
             "requiresUserActivation": tool.requires_user_activation,
             "modelInvocable": model_invocable,
         }
+        serialized["inputSchema"] = canonical_unity_read_tool_input_schema(tool.name)
+        return serialized
 
     def _serialize_tool_registry_entry(self, tool: AgentTool, config: AgentGatewayConfig) -> dict[str, Any]:
         available = self._tool_visible(tool, config)
@@ -6356,7 +8728,7 @@ class AgentGateway:
             "availableInDesktop": available,
             "availableInMcp": available,
             "availableInCli": available,
-            "inputsSchema": self._registry_object_schema(),
+            "inputsSchema": canonical_unity_read_tool_input_schema(tool.name),
             "outputsSchema": self._registry_object_schema(),
             "fallbacks": self._registry_fallbacks_for_tool(tool),
             "source": "gateway-tool",
@@ -6377,7 +8749,7 @@ class AgentGateway:
             "category": self._registry_category("supervised-write", handler.name),
             "risk": "advanced_write" if handler.advanced else "write_request",
             "requiresApproval": True,
-            "requiresCheckpoint": True,
+            "requiresCheckpoint": bool(handler.pre_write_checkpoint_required),
             "rollbackPolicy": self.approval_transactions._write_handler_rollback_policy(handler),
             "availableInDesktop": visible,
             "availableInMcp": available,
@@ -6498,35 +8870,26 @@ def create_agent_mcp_app(
 ):
     def list_tools(params: Mapping[str, Any]) -> list[dict[str, Any]]:
         exposure_layer = normalize_exposure_layer(params.get("exposureLayer"))
-        manifest = gateway.build_manifest(exposure_layer)
-        tools = manifest.get("tools")
-        if not isinstance(tools, list):
-            raise RuntimeError("Agent Gateway manifest did not return a tool list.")
-        return [dict(tool) for tool in tools if isinstance(tool, dict)]
+        return gateway.build_external_mcp_tools(
+            exposure_layer,
+            tool_blocks=params.get("toolBlocks"),
+        )
 
     def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        result = gateway.call_tool(name, arguments, agent_name="mcp-agent")
-        if name == "vrcforge_request_apply" and isinstance(result, dict):
-            request_result = ensure_dict(result.get("result"))
-            approval = ensure_dict(request_result.get("approval"))
-            if str(request_result.get("status") or approval.get("status") or "") == "pending" and on_pending_approval:
-                try:
-                    on_pending_approval(redact_sensitive(dict(approval)))
-                except Exception:
-                    # UI notification is advisory; it must not alter an MCP
-                    # response that has already durably created an approval.
-                    pass
-        return result
+        return gateway.call_external_mcp_tool(name, arguments, agent_name="mcp-agent")
 
     def validate_bearer(token: str) -> bool:
         config = gateway.ensure_config()
-        return bool(config.enabled and config.token and hmac.compare_digest(token, config.token))
+        authenticated = bool(config.enabled and config.token and hmac.compare_digest(token, config.token))
+        if authenticated:
+            gateway.mark_external_mcp_activity()
+        return authenticated
 
     router = Mcp2026Router(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.7.7",
+        server_version="1.7.8",
     )
     return create_agent_mcp_2026_asgi_app(
         router,

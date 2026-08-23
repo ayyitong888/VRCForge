@@ -221,6 +221,18 @@ def test_csharp_material_apply_accepts_signed_nonzero_scene_handles() -> None:
     assert "expectedRendererSceneHandle <= 0" not in source
 
 
+def test_csharp_material_apply_has_exact_failure_compensation_contract() -> None:
+    source = Path("Assets/VRCForge/Editor/MaterialShaderTool.cs").read_text(encoding="utf-8")
+
+    assert "Undo.RegisterCompleteObjectUndo" in source
+    assert "RestoreMaterialPreState" in source
+    assert "File.Replace(tempPath, evidence.filePath, null)" in source
+    assert "material_shader_rejected" in source
+    assert "material_shader_failed_after_mutation" in source
+    assert 'commitState = restored ? "rolled_back" : "unknown"' in source
+    assert "checkpointRecoveryRequired = !restored" in source
+
+
 @pytest.mark.parametrize(
     ("mutator"),
     [

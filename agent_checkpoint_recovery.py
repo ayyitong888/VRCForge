@@ -1189,8 +1189,26 @@ class AgentCheckpointRecoveryService:
             and (payload.get("ok") or restore_prepare.get("ok"))
         )
         if should_reload_unity:
+            checkpoint_prepare = ensure_dict(checkpoint.get("unityPrepare"))
+            original_scene_context: dict[str, Any] = {}
+            checkpoint_scenes = checkpoint_prepare.get("scenes")
+            if (
+                checkpoint_prepare.get("ok") is True
+                and isinstance(checkpoint_scenes, list)
+                and (
+                    "activeScenePath" in checkpoint_prepare
+                    or not checkpoint_scenes
+                )
+            ):
+                original_scene_context = {
+                    "scenes": ensure_string_list(checkpoint_scenes),
+                    "activeScenePath": str(
+                        checkpoint_prepare.get("activeScenePath") or ""
+                    ).strip(),
+                }
             reload_context = {
                 **restore_prepare,
+                **original_scene_context,
                 "restoredFiles": ensure_string_list(payload.get("restoredFiles")),
                 "deletedFiles": ensure_string_list(payload.get("deletedFiles")),
             }

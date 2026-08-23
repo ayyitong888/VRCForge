@@ -60,6 +60,51 @@ def test_console_verifier_accepts_stable_no_delta() -> None:
     assert result["consoleVerification"]["status"] == "passed"
 
 
+def test_console_verifier_accepts_asset_write_profile_without_scene_claims() -> None:
+    reads = [_payload(), _payload(), _payload()]
+    verifier = UnityConsoleCompletionVerifier(
+        lambda _params: reads.pop(0),
+        timeout_seconds=2,
+        poll_seconds=0.01,
+        sleep=lambda _seconds: None,
+    )
+
+    baseline = verifier.capture_baseline("unity_asset_write_console", {})
+    result = verifier.finalize(
+        "unity_asset_write_console",
+        {},
+        baseline,
+        {"ok": True},
+    )
+
+    assert result["consoleVerified"] is True
+    assert "sceneSaved" not in result
+    assert "persistedReadback" not in result
+
+
+def test_console_baseline_preserves_bounded_diagnostics_for_failure_continuation() -> None:
+    warning = {
+        "assembly": "Assembly-CSharp",
+        "file": "Assets/Existing.cs",
+        "line": 7,
+        "column": 2,
+        "message": "warning CS0219: existing warning",
+    }
+    verifier = UnityConsoleCompletionVerifier(lambda _params: _payload(warnings=[warning]))
+
+    baseline = verifier.capture_baseline("persisted_scene_write_console", {})
+
+    assert baseline["errorCount"] == 0
+    assert baseline["warningCount"] == 1
+    assert baseline["diagnostics"] == [
+        {
+            "severity": "warning",
+            **warning,
+            "id": baseline["diagnosticIds"][0],
+        }
+    ]
+
+
 def test_console_verifier_accepts_core_structured_content_diagnostics_shape() -> None:
     payload = _payload()
     result_shape = {
@@ -202,6 +247,22 @@ def test_console_verifier_fails_closed_on_malformed_diagnostics() -> None:
         assert "not stable" in str(exc)
     else:
         raise AssertionError("malformed diagnostics must not become a clean baseline")
+
+
+@pytest.mark.parametrize(
+    ("reader", "kind"),
+    [
+        (lambda _params: (_ for _ in ()).throw(ConnectionError("socket unavailable")), "read_exception"),
+        (lambda _params: {"ok": True}, "missing_payload"),
+        (lambda _params: _payload(errors=[{"line": "not-an-integer"}]), "normalization_failure"),
+    ],
+)
+def test_console_verifier_retains_bounded_read_failure_cause(reader, kind: str) -> None:
+    verifier = UnityConsoleCompletionVerifier(reader)
+    with pytest.raises(AgentCompletionVerificationError) as caught:
+        verifier.capture_baseline("persisted_scene_write_console", {})
+    assert caught.value.details["failure"]["kind"] == kind
+    assert len(caught.value.details["failure"]["message"]) <= 240
 
 
 def test_unity_compile_reader_captures_errors_warnings_and_completion_state() -> None:

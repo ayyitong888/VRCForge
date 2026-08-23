@@ -13,6 +13,16 @@ from typing import Any, Callable, Mapping
 from agent_command_safety import is_path_within, looks_like_absolute_path, normalize_filesystem_path
 from agent_task_loop import TASK_APPROVAL_CONTEXT_SCHEMA, approval_completion, approval_task_context
 from agent_tool_result_contract import normalize_agent_tool_result
+from external_tool_result_contract import (
+    build_external_tool_error,
+    external_exception_details,
+    external_exception_raw_result,
+    external_write_failure_view,
+)
+from prepared_unity_execution import (
+    PREPARED_EVIDENCE_KEY,
+    PREPARED_UNITY_EXECUTION_ARGUMENT_KEY,
+)
 from agent_gateway import (
     APPLY_RECOVERY_ACTIVE_STATUSES,
     APPLY_RECOVERY_EXEMPT_WRITE_TARGETS,
@@ -47,6 +57,7 @@ from agent_gateway import (
     create_approved_unity_execution_plan,
     ensure_dict,
     ensure_string_list,
+    external_mcp_typed_wrapper_allowed,
     extract_approval_id,
     extract_project_root,
     freeze_approved_unity_execution_plan,
@@ -67,6 +78,78 @@ from agent_gateway import (
 PENDING_APPROVAL_SNAPSHOT_SCHEMA = "vrcforge.pending-approvals.v1"
 PENDING_APPROVAL_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024
 PENDING_APPROVAL_SNAPSHOT_MAX_ITEMS = 128
+CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON = (
+    "Checkpoint restore always requires manual user approval because it can remove "
+    "or replace project files."
+)
+AVATAR_UPLOAD_MANUAL_APPROVAL_REASON = (
+    "VRChat avatar upload always requires one exact user confirmation because remote metadata, "
+    "visibility, thumbnail, or bundle changes cannot be undone by a local checkpoint."
+)
+def _write_failure_facts(
+    failure_result: Any,
+    *,
+    failure_layer: str,
+    verification_baseline: Mapping[str, Any],
+    checkpoint: Mapping[str, Any],
+    recovery: Mapping[str, Any],
+    no_write_conflict: bool,
+) -> dict[str, Any]:
+    """Compatibility projection from the one external error constructor."""
+
+    result = dict(failure_result) if isinstance(failure_result, Mapping) else {}
+    checkpoint_failed = checkpoint.get("ok") is False
+    clean_pre_write_failure = bool(
+        checkpoint_failed
+        or no_write_conflict
+        or (not checkpoint and failure_layer == "completion_verification_baseline")
+    )
+    after_console = result.get("consoleVerification")
+    after_console = (
+        redact_sensitive(dict(after_console)) if isinstance(after_console, Mapping) else {}
+    )
+    constructor_args: dict[str, Any] = {
+        "failure_layer": str(failure_layer or "approved_write")[:80],
+        "operation_kind": "write",
+        "raw_result": result,
+        "checkpoint_id": str(checkpoint.get("id") or "")[:180],
+        "recovery_id": str(recovery.get("id") or "")[:180],
+        "console_before": redact_sensitive(dict(verification_baseline)),
+        "console_after": after_console,
+    }
+    if clean_pre_write_failure:
+        constructor_args.update(
+            {
+                "tool_routing_started": False,
+                "mutation_started": False,
+                "committed": False,
+                "commit_state": "not_started",
+                "checkpoint_recovery_required": False,
+                "temporary_cleanup_required": False,
+            }
+        )
+    elif "checkpointRecoveryRequired" not in result:
+        constructor_args["checkpoint_recovery_required"] = bool(recovery)
+    error_object = build_external_tool_error(**constructor_args)
+    return external_write_failure_view(error_object)
+
+
+def _confirmed_no_write_failure(facts: Mapping[str, Any]) -> bool:
+    return bool(
+        facts.get("mutationStarted") is False
+        and facts.get("committed") is False
+        and facts.get("commitState") == "not_started"
+        and facts.get("checkpointRecoveryRequired") is False
+    )
+
+
+def _temporary_cleanup_only_failure(facts: Mapping[str, Any]) -> bool:
+    return bool(
+        facts.get("committed") is True
+        and facts.get("commitState") == "complete"
+        and facts.get("checkpointRecoveryRequired") is False
+        and facts.get("temporaryCleanupRequired") is True
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,6 +432,8 @@ class AgentApprovalTransactionService:
         approved_execution_plan_builder: ApprovedUnityExecutionPlanBuilder | None = None,
         approval_category: str = "",
         allow_future_category: bool = False,
+        external_mcp_capability: str = "",
+        pre_write_checkpoint_required: bool = True,
     ) -> None:
         bounded_verification_profile = str(verification_profile or "").strip()[:80]
         if bounded_verification_profile and (
@@ -372,6 +457,8 @@ class AgentApprovalTransactionService:
             approved_execution_plan_builder=approved_execution_plan_builder,
             approval_category=str(approval_category or "").strip(),
             allow_future_category=bool(allow_future_category),
+            external_mcp_capability=str(external_mcp_capability or "").strip(),
+            pre_write_checkpoint_required=bool(pre_write_checkpoint_required),
         )
 
     def registered_write_target_names(self) -> set[str]:
@@ -416,6 +503,8 @@ class AgentApprovalTransactionService:
         config = config or self._ports.ensure_config()
         mode = normalize_execution_mode(config.execution_mode)
         explicit_reason = str(approval.get("explicitApprovalReason") or "").strip()
+        if str(approval.get("targetTool") or "") == "vrcforge_restore_checkpoint":
+            return explicit_reason or CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
         if mode == "roslyn_full_auto":
             return ""
         if approval.get("requiresExplicitApproval"):
@@ -680,13 +769,23 @@ class AgentApprovalTransactionService:
         full_permission_auto = execution_mode == "roslyn_full_auto"
         permission_context = self.permission_audit_context(config)
         auto_policy_reason = self._write_auto_manual_approval_reason(target_tool, arguments, preview)
-        requires_explicit_for_mode = False if full_permission_auto else (
-            never_auto_approve
-            or requires_explicit_approval
-            or (execution_mode == "auto" and bool(auto_policy_reason or risk_escalation_reason))
+        always_manual_reason = (
+            CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+            if target_tool == "vrcforge_restore_checkpoint"
+            else AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
+            if target_tool == "vrcforge_build_and_upload_avatar"
+            else ""
+        )
+        requires_explicit_for_mode = bool(always_manual_reason) or (
+            False if full_permission_auto else (
+                never_auto_approve
+                or requires_explicit_approval
+                or (execution_mode == "auto" and bool(auto_policy_reason or risk_escalation_reason))
+            )
         )
         explicit_approval_reason = str(
-            mandatory_manual_approval_reason
+            always_manual_reason
+            or mandatory_manual_approval_reason
             or params.get("explicit_approval_reason")
             or params.get("explicitApprovalReason")
             or risk_escalation_reason
@@ -751,7 +850,7 @@ class AgentApprovalTransactionService:
                     separators=(",", ":"),
                 )
             )
-        if full_permission_auto and (
+        if full_permission_auto and not always_manual_reason and (
             never_auto_approve
             or requires_explicit_approval
             or auto_policy_reason
@@ -1111,6 +1210,7 @@ class AgentApprovalTransactionService:
         completion_outcome: dict[str, Any] = {}
         task_completion: dict[str, Any] | None = None
         verification_baseline: dict[str, Any] = {}
+        failure_layer = "approval_transaction"
         try:
             user_constraints = self._ports.read_user_constraints()
             arguments = self._inject_user_constraints_for_apply(
@@ -1130,13 +1230,15 @@ class AgentApprovalTransactionService:
                 # claims that handler execution may have mutated the project.
                 # A failed/unstable baseline is therefore a clean no-write
                 # failure, not an interrupted apply that blocks later writes.
+                failure_layer = "completion_verification_baseline"
                 verification_arguments = dict(arguments)
                 verification_arguments.pop("_vrcforge_approved_execution", None)
                 verification_baseline = ensure_dict(
                     write_handler.verification_prepare_handler(verification_arguments)
                 )
+            failure_layer = "checkpoint"
             classification = ensure_dict(arguments.get("classification_snapshot"))
-            requires_checkpoint = not (
+            requires_checkpoint = write_handler.pre_write_checkpoint_required and not (
                 target_tool == "vrcforge_shell_execute" and classification.get("readOnly") is True
             )
             if requires_checkpoint and target_tool == PROJECT_CHAT_CHECKPOINT_TARGET:
@@ -1169,6 +1271,7 @@ class AgentApprovalTransactionService:
                                 checkpoint=checkpoint,
                                 arguments_digest=handler_arguments_digest,
                             )
+                        failure_layer = "approved_write_execution"
                         with capture_unity_mcp_core_call_audits() as core_call_audits:
                             result = self._call_write_handler(
                                 write_handler,
@@ -1231,6 +1334,7 @@ class AgentApprovalTransactionService:
                                     checkpoint=checkpoint,
                                     arguments_digest=handler_arguments_digest,
                                 )
+                            failure_layer = "approved_write_execution"
                             with capture_unity_mcp_core_call_audits() as core_call_audits:
                                 result = self._call_write_handler(
                                     write_handler,
@@ -1271,6 +1375,7 @@ class AgentApprovalTransactionService:
                         checkpoint=checkpoint,
                         arguments_digest=handler_arguments_digest,
                     )
+                failure_layer = "approved_write_execution"
                 with capture_unity_mcp_core_call_audits() as core_call_audits:
                     result = self._call_write_handler(
                         write_handler,
@@ -1291,6 +1396,7 @@ class AgentApprovalTransactionService:
                     "unityCoreCallAudits": [dict(audit) for audit in core_call_audits],
                 }
             if isinstance(result, dict) and result.get("ok") is False:
+                failure_layer = str(result.get("failureLayer") or "write_handler")[:80]
                 no_write_conflict = bool(
                     target_tool == PROJECT_CHAT_CHECKPOINT_TARGET
                     and result.get("status") == "conflict"
@@ -1321,10 +1427,13 @@ class AgentApprovalTransactionService:
                 completion_outcome = ensure_dict(task_completion.get("outcome"))
             completion_status = str(completion_outcome["status"])
             if completion_status == "failed":
+                failure_layer = "result_verification"
                 raise AgentGatewayError(str(completion_outcome["summary"]))
+            failure_layer = "apply_lifecycle_observer"
             self._observe_apply_lifecycle(
                 "handler_returned", approval, checkpoint=checkpoint, result=result
             )
+            failure_layer = "approval_transaction_commit"
             with self._ports.state.shared_state_lock:
                 approval["status"] = "applied"
                 approval["appliedAt"] = utc_now_iso()
@@ -1425,6 +1534,19 @@ class AgentApprovalTransactionService:
                         "status": "failed",
                         "error": str(exc),
                     }
+            write_failure = _write_failure_facts(
+                failure_result,
+                failure_layer=failure_layer,
+                verification_baseline=verification_baseline,
+                checkpoint=ensure_dict(checkpoint),
+                recovery=ensure_dict(recovery),
+                no_write_conflict=no_write_conflict,
+            )
+            redacted_failure_result = redact_sensitive(
+                dict(failure_result)
+                if isinstance(failure_result, Mapping)
+                else {"error": str(exc)}
+            )
             if str(completion_outcome.get("status") or "").casefold() != "failed":
                 completion_outcome = ensure_dict(
                     redact_sensitive(
@@ -1452,11 +1574,18 @@ class AgentApprovalTransactionService:
                 approval["failedAt"] = utc_now_iso()
                 approval["error"] = str(exc)
                 approval["completionOutcome"] = completion_outcome
+                approval["writeFailure"] = write_failure
+                approval["resultSummary"] = summarize_params(redacted_failure_result)
                 if task_completion is not None:
                     approval["taskCompletion"] = task_completion
                 self._ports.state.approvals[approval_id] = approval
                 permission_context = self.permission_audit_context()
-                failed_audit = {"event": "approval_failed", "approval": approval, **permission_context}
+                failed_audit = {
+                    "event": "approval_failed",
+                    "approval": approval,
+                    "writeFailure": write_failure,
+                    **permission_context,
+                }
                 if request_trace is not None:
                     failed_audit["requestTrace"] = request_trace
                 self._ports.append_audit(failed_audit)
@@ -1473,21 +1602,41 @@ class AgentApprovalTransactionService:
                         "checkpointId": ensure_dict(checkpoint).get("id") if checkpoint else "",
                         "checkpointIds": [ensure_dict(checkpoint).get("id")] if checkpoint and ensure_dict(checkpoint).get("id") else [],
                         "error": str(exc),
+                        "writeFailure": write_failure,
                     }
                 )
             if recovery:
+                confirmed_no_write = _confirmed_no_write_failure(write_failure)
+                cleanup_only = _temporary_cleanup_only_failure(write_failure)
                 self._finish_apply_recovery(
                     recovery,
-                    status="not_applied" if no_write_conflict else "needs_recovery",
-                    resolution="no_write_snapshot_conflict" if no_write_conflict else "write_failed_after_checkpoint",
+                    status=(
+                        "not_applied"
+                        if confirmed_no_write
+                        else "applied"
+                        if cleanup_only
+                        else "needs_recovery"
+                    ),
+                    resolution=(
+                        "no_write_snapshot_conflict"
+                        if confirmed_no_write and no_write_conflict
+                        else "confirmed_no_write"
+                        if confirmed_no_write
+                        else "write_completed_cleanup_pending"
+                        if cleanup_only
+                        else "write_failed_after_checkpoint"
+                    ),
                     error=str(exc),
+                    write_failure=write_failure,
                 )
             payload = {
                 "ok": False,
                 "status": "failed",
                 "approval": approval,
+                "result": redacted_failure_result,
                 "error": str(exc),
                 "outcome": completion_outcome,
+                "writeFailure": write_failure,
             }
             if task_completion is not None:
                 payload["taskCompletion"] = task_completion
@@ -1717,7 +1866,10 @@ class AgentApprovalTransactionService:
         finally:
             if not execution_plan.consumed:
                 execution_plan.burn()
-        if not execution_plan.consumed:
+        if (
+            not execution_plan.consumed
+            and not (isinstance(result, dict) and result.get("ok") is False)
+        ):
             raise AgentGatewayError(
                 "The approved Unity execution plan was not consumed exactly.",
                 status_code=409,
@@ -2036,8 +2188,18 @@ class AgentApprovalTransactionService:
         error: str = "",
         note: str = "",
         result_summary: dict[str, Any] | None = None,
+        write_failure: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         text = " ".join([str(error or ""), str(note or ""), str(recovery.get("targetTool") or "")])
+        # incidentKind is the immutable first-failure classification.  Completion
+        # and manual-resolution notes are state transitions, not new evidence;
+        # never let them reclassify the original incident.
+        incident_kind = str(recovery.get("incidentKind") or "").strip()
+        if not incident_kind:
+            incident_kind = self._ports.checkpoint.classify_apply_recovery_incident(
+                text,
+                str(recovery.get("targetTool") or ""),
+            )
         record: dict[str, Any] = {
             "id": str(recovery.get("id") or ""),
             "status": status,
@@ -2049,7 +2211,7 @@ class AgentApprovalTransactionService:
             "avatarPath": str(recovery.get("avatarPath") or ""),
             "checkpointId": str(recovery.get("checkpointId") or ""),
             "checkpoint": ensure_dict(recovery.get("checkpoint")),
-            "incidentKind": self._ports.checkpoint.classify_apply_recovery_incident(text, str(recovery.get("targetTool") or "")),
+            "incidentKind": incident_kind,
             "restoreTool": "vrcforge_restore_checkpoint",
             "resolveTool": "vrcforge_resolve_interrupted_apply_recovery",
             "blockingWrites": status in APPLY_RECOVERY_ACTIVE_STATUSES,
@@ -2060,6 +2222,8 @@ class AgentApprovalTransactionService:
             record["note"] = note
         if result_summary is not None:
             record["resultSummary"] = result_summary
+        if write_failure is not None:
+            record["writeFailure"] = write_failure
         saved = self._ports.checkpoint.append_apply_recovery_entry(record)
         self._ports.append_audit({"event": "apply_recovery_updated", "recovery": saved})
         return saved
@@ -2108,6 +2272,133 @@ class AgentApprovalTransactionService:
         ]
 
     def _write_handler_rollback_policy(self, handler: AgentWriteHandler) -> dict[str, Any]:
+        if handler.name in {"vrcforge_create_project", "vrcforge_register_project"}:
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "handler_managed_atomic_receipt",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "vrcforge_rollback_project_lifecycle",
+                "coverageAudit": "vrcforge.project_lifecycle_receipt.v1",
+                "postRestoreValidationRequired": True,
+                "note": (
+                    "This handler writes only an absent project path or the VRCForge project "
+                    "catalogue, publishes atomically, and returns a bound rollback receipt."
+                ),
+            }
+        if handler.name == "vrcforge_register_project_catalog":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "manager_catalog_snapshot_receipt",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "vrcforge_rollback_project_catalog_registration",
+                "coverageAudit": "vrcforge.project_catalog_registration_receipt.v1",
+                "postRestoreValidationRequired": True,
+                "note": "The exact VCC, ALCOM, or Unity Hub catalogue bytes are receipt-bound before registration.",
+            }
+        if handler.name == "vrcforge_install_unity_core":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "retained_core_tree_receipt",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "vrcforge_restore_unity_core",
+                "coverageAudit": "vrcforge.unity_core_install.v1",
+                "postRestoreValidationRequired": True,
+                "note": (
+                    "The previous Core tree is retained under the exact project backup root. "
+                    "Restore is a separate receipt-bound high-risk write and is never automatic."
+                ),
+            }
+        if handler.name == "vrcforge_restore_unity_core":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": False,
+                "kind": "explicit_receipt_bound_rollback",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "",
+                "coverageAudit": "vrcforge.unity_core_restore.v1",
+                "postRestoreValidationRequired": True,
+                "note": (
+                    "This is itself an explicitly approved Core restore. The tool retains a pre-restore safety copy; "
+                    "no automatic user-level rollback is advertised."
+                ),
+            }
+        if handler.name == "vrcforge_select_project":
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "active_project_selection",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "vrcforge_select_project",
+                "coverageAudit": "vrcforge.project_select_result.v1",
+                "postRestoreValidationRequired": True,
+                "note": "The result returns previousProjectPath; reselect that validated project to reverse the selection.",
+            }
+        if handler.name in {
+            "vrcforge_gesture_manager_enter_play_mode",
+            "vrcforge_gesture_manager_set_parameter",
+            "vrcforge_select_scene_object",
+            "vrcforge_set_play_mode",
+        }:
+            restore_tool = (
+                "vrcforge_set_play_mode"
+                if handler.name == "vrcforge_gesture_manager_enter_play_mode"
+                else handler.name
+            )
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": True,
+                "kind": "ephemeral_editor_state_inverse",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": restore_tool,
+                "coverageAudit": "vrcforge.ephemeral_editor_state_result.v1",
+                "postRestoreValidationRequired": True,
+                "note": (
+                    "This operation changes only transient Unity Editor or Play Mode state. "
+                    "Its result reports the observed state, and the declared atomic restore tool can explicitly "
+                    "restore the prior value, selection, or Play Mode state; no project checkpoint or automatic "
+                    "rollback is claimed."
+                ),
+            }
+        if handler.name in {
+            "vrcforge_rollback_project_lifecycle",
+            "vrcforge_rollback_project_catalog_registration",
+        }:
+            return {
+                "schema": ROLLBACK_POLICY_SCHEMA,
+                "required": False,
+                "kind": "explicit_receipt_bound_rollback",
+                "approvalRequired": True,
+                "preWriteCheckpointRequired": False,
+                "checkpointScope": [],
+                "restoreTool": "",
+                "coverageAudit": (
+                    "vrcforge.project_lifecycle_rollback_result.v1"
+                    if handler.name == "vrcforge_rollback_project_lifecycle"
+                    else "vrcforge.project_catalog_registration_rollback_result.v1"
+                ),
+                "postRestoreValidationRequired": True,
+                "note": (
+                    "This is itself an explicitly approved rollback. Created projects are moved to a visible recovery directory; "
+                    "no automatic inverse rollback is advertised."
+                ),
+            }
+        if not handler.pre_write_checkpoint_required:
+            raise ValueError(f"Write handler {handler.name!r} has no truthful rollback policy.")
         if handler.name == "vrcforge_restore_checkpoint":
             return {
                 "schema": ROLLBACK_POLICY_SCHEMA,
@@ -2188,6 +2479,26 @@ class AgentApprovalTransactionService:
 
     def _write_auto_manual_approval_reason(self, target_tool: str, arguments: dict[str, Any], preview: Any = None) -> str:
         target_lower = str(target_tool or "").lower()
+
+        def is_read_source_path(key_lower: str) -> bool:
+            if target_lower == "vrcforge_import_outfit_package":
+                leaf = key_lower.split(".")[-1].replace("_", "")
+                return (
+                    leaf in {"packagepath", "unitypackagepath", "actualpackagepath"}
+                    or ".source." in key_lower
+                    or ".queue." in key_lower
+                    or ".materializations." in key_lower
+                )
+            if target_lower == "vrcforge_install_vpm_package":
+                sealed_cli_identity_path = (
+                    f"{PREPARED_UNITY_EXECUTION_ARGUMENT_KEY}."
+                    f"{PREPARED_EVIDENCE_KEY}.binary.identity.path"
+                ).lower()
+                # The fixed CLI executable is a hash-bound read source created
+                # by the trusted VPM preparer. It is not a project write target.
+                return key_lower == sealed_cli_identity_path
+            return False
+
         if target_lower == "vrcforge_export_vrm":
             return "VRM export requires manual confirmation of content rights in Auto Approve mode."
         if any(token in target_lower for token in AUTO_APPROVAL_MANUAL_WRITE_TOKENS):
@@ -2208,7 +2519,16 @@ class AgentApprovalTransactionService:
                 key_lower = key.lower()
                 if not any(marker in key_lower for marker in WRITE_PATH_KEY_MARKERS):
                     continue
+                if (
+                    target_lower == "vrcforge_create_project"
+                    and key_lower.split(".")[-1].replace("_", "") == "templatepath"
+                ):
+                    # The explicit template is a frozen read source. Only the
+                    # absent projectPath is a write target for project creation.
+                    continue
                 if key_lower.endswith("projectroot") or key_lower.endswith("project_root") or key_lower.endswith("projectpath"):
+                    continue
+                if is_read_source_path(key_lower):
                     continue
                 text_value = str(value or "").strip()
                 if looks_like_absolute_path(text_value) and not is_path_within(Path(text_value), project_root):
@@ -2220,6 +2540,13 @@ class AgentApprovalTransactionService:
                 for key, value in iter_param_leaf_values(preview):
                     key_lower = key.lower()
                     if not any(marker in key_lower for marker in WRITE_PATH_KEY_MARKERS):
+                        continue
+                    if (
+                        target_lower == "vrcforge_create_project"
+                        and key_lower.split(".")[-1].replace("_", "") == "templatepath"
+                    ):
+                        continue
+                    if is_read_source_path(key_lower):
                         continue
                     text_value = str(value or "").strip()
                     if looks_like_absolute_path(text_value) and not is_path_within(Path(text_value), preview_root):
@@ -2241,8 +2568,17 @@ class AgentApprovalTransactionService:
         approved_execution_plan: dict[str, Any] | None = None,
         allow_future_eligible: bool = False,
         task_context: Mapping[str, Any] | None = None,
+        initial_status: str = "pending",
+        approval_channel: str = "internal",
     ) -> dict[str, Any]:
-        self._ports.signal_background_activity("pending_approval")
+        normalized_status = str(initial_status or "pending").strip().casefold()
+        if normalized_status not in {"pending", "approved"}:
+            raise ValueError("initial approval status must be pending or approved")
+        normalized_channel = str(approval_channel or "internal").strip().casefold()
+        external_mcp = normalized_channel == "external_mcp"
+        self._ports.signal_background_activity(
+            "external_mcp_write" if external_mcp else "pending_approval"
+        )
         now = datetime.now(timezone.utc)
         permission_context = self.permission_audit_context()
         approval = {
@@ -2252,14 +2588,23 @@ class AgentApprovalTransactionService:
             "targetTool": target_tool,
             "reason": reason,
             "riskLevel": risk_level,
-            "status": "pending",
+            "status": normalized_status,
             "arguments": arguments,
             "paramsSummary": summarize_params(arguments),
             "preview": preview if preview is not None else summarize_params(arguments),
-            "permissionMode": permission_context["permissionMode"],
-            "fullPermission": permission_context["fullPermission"],
-            "permissionLabel": permission_context["permissionLabel"],
         }
+        if external_mcp:
+            approval["approvalChannel"] = "external_mcp"
+        else:
+            approval.update(
+                {
+                    "permissionMode": permission_context["permissionMode"],
+                    "fullPermission": permission_context["fullPermission"],
+                    "permissionLabel": permission_context["permissionLabel"],
+                }
+            )
+        if normalized_status == "approved":
+            approval["approvedAt"] = now.isoformat()
         if requires_explicit_approval:
             approval["requiresExplicitApproval"] = True
             approval["autoApprovalBlocked"] = True
@@ -2288,8 +2633,643 @@ class AgentApprovalTransactionService:
                     "Pending approval could not be persisted safely.",
                     status_code=500,
                 ) from exc
-            self._ports.append_audit({"event": "approval_requested", "approval": approval, **permission_context})
+            audit = {
+                "event": (
+                    "external_mcp_write_authorized"
+                    if external_mcp
+                    else "approval_requested"
+                ),
+                "approval": approval,
+            }
+            if not external_mcp:
+                audit.update(permission_context)
+            self._ports.append_audit(audit)
         return redact_sensitive(dict(approval))
+
+    def prepare_external_mcp_write(
+        self,
+        target_tool: str,
+        params: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Prepare one real MCP write without consulting the internal Agent mode."""
+
+        config = self._ports.ensure_config()
+        if not config.allow_write_requests:
+            raise AgentGatewayError("Agent Gateway write requests are disabled.", status_code=403)
+
+        normalized_target = str(target_tool or "").strip()
+        if not normalized_target:
+            raise AgentGatewayError("A write target is required.")
+        write_handler = self._ports.state.write_handlers.get(normalized_target)
+        if write_handler is None:
+            raise AgentGatewayError(
+                f"Unknown or unavailable write target: {normalized_target}",
+                status_code=404,
+            )
+        if (
+            normalized_target in WRAPPER_ONLY_WRITE_TARGETS
+            and not external_mcp_typed_wrapper_allowed(write_handler)
+        ):
+            raise AgentGatewayError(
+                f"{normalized_target} is not exposed as an external MCP write tool.",
+                status_code=403,
+            )
+
+        arguments = ensure_dict(params or {})
+        caller_requested_preview = arguments.get("preview") is True
+        user_constraints = self._ports.read_user_constraints()
+        arguments = self._inject_user_constraints_for_apply(arguments, user_constraints)
+        preview: Any = None
+        if write_handler.request_preparer is not None:
+            try:
+                prepared_arguments, preview = write_handler.request_preparer(dict(arguments), None)
+            except AgentGatewayError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - authoritative preparation fails closed.
+                detail = str(exc).strip()
+                suffix = f" Reason: {detail}" if detail else ""
+                raise AgentGatewayError(
+                    f"Could not prepare the external MCP write for {normalized_target}.{suffix}",
+                    status_code=500,
+                ) from exc
+            if not isinstance(prepared_arguments, dict):
+                raise AgentGatewayError(
+                    f"Write request preparation returned invalid arguments for {normalized_target}.",
+                    status_code=500,
+                )
+            arguments = prepared_arguments
+
+        authoritative_preview_only = bool(
+            caller_requested_preview
+            and write_handler.request_preparer is not None
+            and preview is not None
+        )
+
+        mandatory_confirmation_reason = ""
+        if write_handler.manual_approval_resolver is not None:
+            try:
+                mandatory_confirmation_reason = str(
+                    write_handler.manual_approval_resolver(dict(arguments), preview) or ""
+                ).strip()
+            except Exception as exc:  # noqa: BLE001 - safety policy failures fail closed.
+                raise AgentGatewayError(
+                    f"Could not determine the external confirmation policy for {normalized_target}.",
+                    status_code=500,
+                ) from exc
+
+        base_risk_level = normalize_risk_level(write_handler.risk_level)
+        effective_risk_level = base_risk_level
+        if write_handler.risk_level_resolver is not None:
+            try:
+                resolved_risk_level = str(
+                    write_handler.risk_level_resolver(dict(arguments)) or ""
+                ).strip().lower()
+            except Exception as exc:  # noqa: BLE001 - safety classification failures fail closed.
+                raise AgentGatewayError(
+                    f"Could not determine write risk for {normalized_target}: {exc}",
+                    status_code=500,
+                ) from exc
+            if resolved_risk_level not in {"low", "medium", "high", "critical"}:
+                raise AgentGatewayError(
+                    f"Write risk resolver returned an invalid level for {normalized_target}.",
+                    status_code=500,
+                )
+            risk_rank = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+            if risk_rank[resolved_risk_level] > risk_rank[base_risk_level]:
+                effective_risk_level = resolved_risk_level
+
+        destructive_reason = self._write_auto_manual_approval_reason(
+            normalized_target,
+            arguments,
+            preview,
+        )
+        confirmation_reason = str(
+            CHECKPOINT_RESTORE_MANUAL_APPROVAL_REASON
+            if normalized_target == "vrcforge_restore_checkpoint"
+            else AVATAR_UPLOAD_MANUAL_APPROVAL_REASON
+            if normalized_target == "vrcforge_build_and_upload_avatar"
+            else (
+                mandatory_confirmation_reason
+                or destructive_reason
+                or "This external MCP tool is declared high risk and requires user confirmation."
+            )
+            if effective_risk_level in {"high", "critical"}
+            else ""
+        ).strip()
+        if authoritative_preview_only:
+            confirmation_reason = ""
+
+        approved_execution_plan: dict[str, Any] | None = None
+        if (
+            write_handler.requires_approved_execution_context
+            and not authoritative_preview_only
+        ):
+            try:
+                approved_execution_plan = self._build_external_mcp_execution_plan(
+                    write_handler,
+                    arguments,
+                )
+            except AgentGatewayError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - malformed plans fail before any write.
+                raise AgentGatewayError(
+                    f"Could not freeze the exact Core execution plan for {normalized_target}.",
+                    status_code=409,
+                ) from exc
+
+        arguments_digest = stable_hash(
+            json.dumps(arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        )
+        return {
+            "targetTool": normalized_target,
+            "arguments": arguments,
+            "argumentsDigest": arguments_digest,
+            "preview": preview if preview is not None else summarize_params(arguments),
+            "riskLevel": effective_risk_level,
+            "requiresUserConfirmation": bool(confirmation_reason),
+            "confirmationReason": confirmation_reason,
+            "approvedUnityExecutionPlan": approved_execution_plan,
+            "authoritativePreviewOnly": authoritative_preview_only,
+            "userConstraints": user_constraints,
+        }
+
+    def _build_external_mcp_execution_plan(
+        self,
+        write_handler: AgentWriteHandler,
+        arguments: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Freeze the exact Core calls for the external handler invocation.
+
+        Internal approved-write builders intentionally canonicalize their plan
+        to the apply form (``preview=false``). External MCP may legitimately
+        invoke the same atomic tool with ``preview=true``. Preserve that
+        caller-selected no-write form without widening any other Core argument.
+        """
+
+        if write_handler.approved_execution_plan_builder is None:
+            raise AgentGatewayError(
+                f"Unity write target is not yet bound to an exact Core execution plan: {write_handler.name}",
+                status_code=409,
+                cause_code="external_mcp_execution_plan_missing",
+                failure_layer="external_mcp_write_preparation",
+                failure_phase="execution_plan_binding",
+                operation_kind="write",
+                tool=write_handler.name,
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
+            )
+        planned_calls = list(
+            write_handler.approved_execution_plan_builder(dict(arguments))
+        )
+        if arguments.get("preview") is True:
+            adjusted_calls: list[tuple[str, dict[str, Any]]] = []
+            for tool_name, core_arguments in planned_calls:
+                adjusted_arguments = dict(core_arguments)
+                if "preview" in adjusted_arguments:
+                    adjusted_arguments["preview"] = True
+                adjusted_calls.append((tool_name, adjusted_arguments))
+            planned_calls = adjusted_calls
+        return freeze_approved_unity_execution_plan(planned_calls)
+
+    def _call_external_mcp_write_handler(
+        self,
+        write_handler: AgentWriteHandler,
+        target_tool: str,
+        operation_id: str,
+        arguments: dict[str, Any],
+        handler_arguments_digest: str,
+        frozen_execution_plan: Mapping[str, Any],
+    ) -> Any:
+        """Run one external handler with only the shared exact Core authority."""
+
+        handler_arguments = dict(arguments)
+        handler_arguments.pop("_vrcforge_approved_execution", None)
+        if not write_handler.requires_approved_execution_context:
+            return write_handler.handler(handler_arguments)
+
+        project_root = extract_project_root(handler_arguments)
+        if project_root is None or not project_root.is_dir():
+            raise AgentGatewayError(
+                "The external Unity write is missing its exact project binding. Pass the exact existing Unity project root as arguments.projectPath on this tool call.",
+                status_code=409,
+                cause_code="external_mcp_project_binding_missing",
+                failure_layer="external_mcp_project_binding",
+                failure_phase="before_unity_core_call",
+                operation_kind="write",
+                tool=target_tool,
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
+                details={
+                    "requiredArgument": "projectPath",
+                    "acceptedAliases": ["projectPath", "projectRoot", "project_path", "project_root"],
+                    "selectedProjectIsNotAuthority": True,
+                },
+            )
+        try:
+            persisted_plan = validate_frozen_approved_unity_execution_plan(
+                frozen_execution_plan
+            )
+            recomputed_plan_json = self._build_external_mcp_execution_plan(
+                write_handler,
+                handler_arguments,
+            )
+            recomputed_plan = validate_frozen_approved_unity_execution_plan(
+                recomputed_plan_json
+            )
+        except AgentGatewayError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - plan loss/drift fails before Core mutation.
+            raise AgentGatewayError(
+                "The external Unity execution plan is unavailable or invalid.",
+                status_code=409,
+                cause_code="external_mcp_execution_plan_invalid",
+                failure_layer="external_mcp_execution_plan",
+                failure_phase="before_unity_core_call",
+                operation_kind="write",
+                tool=target_tool,
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
+            ) from exc
+        if persisted_plan.plan_digest != recomputed_plan.plan_digest:
+            raise AgentGatewayError(
+                "The external Unity execution plan drifted after preparation.",
+                status_code=409,
+                cause_code="external_mcp_execution_plan_drifted",
+                failure_layer="external_mcp_execution_plan",
+                failure_phase="before_unity_core_call",
+                operation_kind="write",
+                tool=target_tool,
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
+            )
+
+        now_ms = int(time.time() * 1000)
+        execution_plan = create_approved_unity_execution_plan(
+            {
+                "lane": "external_mcp_write",
+                "operationId": operation_id,
+                "targetTool": target_tool,
+                "projectRoot": str(project_root),
+                "handlerArgumentsSha256": handler_arguments_digest,
+                "issuedAtUnixMs": now_ms,
+                "expiresAtUnixMs": now_ms + 60_000,
+            },
+            frozen_execution_plan,
+        )
+        result: Any = None
+        try:
+            with bind_approved_unity_execution(execution_plan):
+                result = write_handler.handler(handler_arguments)
+        finally:
+            if not execution_plan.consumed:
+                execution_plan.burn()
+        if (
+            not execution_plan.consumed
+            and not (isinstance(result, dict) and result.get("ok") is False)
+        ):
+            raise AgentGatewayError(
+                "The external Unity execution plan was not consumed exactly.",
+                status_code=409,
+            )
+        return result
+
+    def execute_prepared_external_mcp_write(
+        self,
+        prepared: Mapping[str, Any],
+        *,
+        agent_name: str = "mcp-agent",
+    ) -> dict[str, Any]:
+        """Execute one prepared MCP operation without the internal Agent loop."""
+
+        target_tool = str(prepared.get("targetTool") or "").strip()
+        arguments = ensure_dict(prepared.get("arguments"))
+        if not target_tool or target_tool not in self._ports.state.write_handlers:
+            raise AgentGatewayError("The prepared external MCP write target is unavailable.", status_code=404)
+        expected_digest = str(prepared.get("argumentsDigest") or "").strip()
+        actual_digest = stable_hash(
+            json.dumps(arguments, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        )
+        if not expected_digest or not hmac.compare_digest(expected_digest, actual_digest):
+            raise AgentGatewayError(
+                "The prepared external MCP write arguments no longer match their binding.",
+                status_code=409,
+            )
+
+        if prepared.get("authoritativePreviewOnly") is True:
+            preview_value = prepared.get("preview")
+            preview_result = (
+                dict(preview_value)
+                if isinstance(preview_value, Mapping)
+                else {"data": preview_value}
+            )
+            preview_result.setdefault("ok", True)
+            preview_result.setdefault("preview", True)
+            self._ports.append_audit(
+                {
+                    "event": "external_mcp_preview_completed",
+                    "targetTool": target_tool,
+                    "agent": str(agent_name or "mcp-agent")[:120],
+                    "projectRoot": str(extract_project_root(arguments) or ""),
+                    "argumentsDigest": actual_digest,
+                }
+            )
+            return {
+                "ok": True,
+                "status": "preview",
+                "result": redact_sensitive(preview_result),
+            }
+
+        write_handler = self._ports.state.write_handlers[target_tool]
+        frozen_execution_plan = ensure_dict(prepared.get("approvedUnityExecutionPlan"))
+        operation_id = (
+            f"mcpwrite_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_"
+            f"{secrets.token_hex(4)}"
+        )
+        self._ports.signal_background_activity("external_mcp_write")
+        project_root = extract_project_root(arguments)
+
+        with self._ports.state.shared_state_lock:
+            if self._ports.state.background_project_read_leases:
+                raise AgentGatewayError(
+                    "A background project read is active. Retry this external write after it finishes.",
+                    status_code=409,
+                )
+            if self._ports.state.in_flight_apply_writes:
+                raise AgentGatewayError(
+                    "Another Unity write is active. Retry this external write after it finishes.",
+                    status_code=409,
+                )
+            self._ports.state.in_flight_apply_writes[operation_id] = {
+                "operationId": operation_id,
+                "targetTool": target_tool,
+                "projectRoot": str(project_root or ""),
+                "startedAt": utc_now_iso(),
+                "source": "external_mcp",
+            }
+
+        result: Any = None
+        source_tool_result: Any = None
+        verification_baseline: dict[str, Any] = {}
+        completion_outcome: dict[str, Any] = {}
+        request_trace: dict[str, Any] | None = None
+        core_call_audits: list[dict[str, Any]] = []
+        failure_layer = "external_mcp_transaction"
+        handler_started = False
+        try:
+            if write_handler.verification_prepare_handler is not None:
+                failure_layer = "completion_verification_baseline"
+                verification_arguments = dict(arguments)
+                verification_arguments.pop("_vrcforge_approved_execution", None)
+                verification_baseline = ensure_dict(
+                    write_handler.verification_prepare_handler(verification_arguments)
+                )
+
+            failure_layer = "external_mcp_write_execution"
+            handler_started = True
+            with capture_unity_mcp_core_call_audits() as core_call_audits:
+                result = self._call_external_mcp_write_handler(
+                    write_handler,
+                    target_tool,
+                    operation_id,
+                    arguments,
+                    actual_digest,
+                    frozen_execution_plan,
+                )
+            source_tool_result = result
+            if write_handler.verification_finalize_handler is not None:
+                failure_layer = "completion_verification_finalize"
+                verification_arguments = dict(arguments)
+                verification_arguments.pop("_vrcforge_approved_execution", None)
+                result = write_handler.verification_finalize_handler(
+                    verification_arguments,
+                    dict(verification_baseline),
+                    result,
+                )
+            if core_call_audits:
+                request_trace = {
+                    "operationId": operation_id,
+                    "targetTool": target_tool,
+                    "unityCoreCallAudits": [dict(audit) for audit in core_call_audits],
+                }
+            if isinstance(result, dict) and result.get("ok") is False:
+                failure_layer = str(result.get("failureLayer") or "write_handler")[:80]
+                message = (
+                    result.get("error")
+                    or result.get("message")
+                    or result.get("reason")
+                    or f"{target_tool} returned ok=false."
+                )
+                raise AgentGatewayError(str(message))
+
+            completion_outcome = ensure_dict(
+                redact_sensitive(
+                    normalize_agent_tool_result(
+                        result,
+                        fallback_summary=write_handler.description,
+                        write=True,
+                    )
+                )
+            )
+            if str(completion_outcome.get("status") or "").casefold() == "failed":
+                failure_layer = "result_verification"
+                raise AgentGatewayError(str(completion_outcome.get("summary") or "Write failed."))
+
+            payload: dict[str, Any] = {
+                "ok": True,
+                "status": (
+                    "needs_user_action"
+                    if completion_outcome.get("status") == "needs_user_action"
+                    else "applied"
+                ),
+                "result": redact_sensitive(source_tool_result),
+                "outcome": completion_outcome,
+            }
+            if isinstance(result, Mapping) and isinstance(
+                result.get("consoleVerification"), Mapping
+            ):
+                payload["consoleVerification"] = redact_sensitive(
+                    dict(result["consoleVerification"])
+                )
+            if request_trace is not None:
+                payload["requestTrace"] = request_trace
+            self._ports.append_audit(
+                {
+                    "event": "external_mcp_write_completed",
+                    "operationId": operation_id,
+                    "targetTool": target_tool,
+                    "agent": str(agent_name or "mcp-agent")[:120],
+                    "projectRoot": str(project_root or ""),
+                    "argumentsDigest": actual_digest,
+                    "resultSummary": summarize_params(
+                        result if isinstance(result, dict) else {"result": result}
+                    ),
+                    **({"requestTrace": request_trace} if request_trace is not None else {}),
+                }
+            )
+            return payload
+        except Exception as exc:  # noqa: BLE001 - return facts; the external Agent owns replanning.
+            if core_call_audits and request_trace is None:
+                request_trace = {
+                    "operationId": operation_id,
+                    "targetTool": target_tool,
+                    "unityCoreCallAudits": [dict(audit) for audit in core_call_audits],
+                }
+            exception_text = str(exc)
+            legacy_exception_details = external_exception_details(exc)
+            exception_raw_result = external_exception_raw_result(legacy_exception_details)
+            if isinstance(source_tool_result, Mapping):
+                # Preserve the Unity Core result as the external Agent's
+                # authoritative failure object.  The Gateway may derive an
+                # adjacent writeFailure/Console envelope, but must never
+                # rewrite the lower-level code, reason, or payload.
+                source_failure_result: dict[str, Any] = dict(source_tool_result)
+                failure_result: dict[str, Any] = (
+                    dict(result) if isinstance(result, Mapping) else dict(source_failure_result)
+                )
+                failure_result.setdefault("ok", False)
+                failure_result.setdefault("status", "failed")
+                failure_result.setdefault("error", exception_text)
+                if handler_started and not any(
+                    key in failure_result
+                    for key in ("commitState", "committed", "mutationStarted")
+                ):
+                    failure_result["commitState"] = "unknown"
+            elif isinstance(exception_raw_result, Mapping):
+                source_failure_result = dict(exception_raw_result)
+                failure_result = dict(source_failure_result)
+                failure_result.setdefault("ok", False)
+                failure_result.setdefault("status", "failed")
+                failure_result.setdefault("error", exception_text)
+                if handler_started and not any(
+                    key in failure_result
+                    for key in ("commitState", "committed", "mutationStarted")
+                ):
+                    failure_result["commitState"] = "unknown"
+            elif isinstance(result, Mapping):
+                source_failure_result = dict(result)
+                failure_result = dict(source_failure_result)
+                failure_result.setdefault("ok", False)
+                failure_result.setdefault("status", "failed")
+                failure_result.setdefault("error", exception_text)
+                if handler_started and not any(
+                    key in failure_result
+                    for key in ("commitState", "committed", "mutationStarted")
+                ):
+                    failure_result["commitState"] = "unknown"
+            else:
+                failure_result = {
+                    "ok": False,
+                    "status": "failed",
+                    "error": exception_text,
+                    "mutationStarted": False if not handler_started else None,
+                    "committed": False if not handler_started else None,
+                    "commitState": "not_started" if not handler_started else "unknown",
+                    "checkpointRecoveryRequired": False,
+                }
+                source_failure_result = dict(failure_result)
+            if (
+                write_handler.verification_finalize_handler is not None
+                and verification_baseline
+                and not isinstance(failure_result.get("consoleVerification"), Mapping)
+            ):
+                verification_arguments = dict(arguments)
+                verification_arguments.pop("_vrcforge_approved_execution", None)
+                try:
+                    failure_result = ensure_dict(
+                        write_handler.verification_finalize_handler(
+                            verification_arguments,
+                            dict(verification_baseline),
+                            failure_result,
+                        )
+                    )
+                except Exception as verification_exc:  # noqa: BLE001 - preserve the primary write failure.
+                    failure_result["consoleVerification"] = {
+                        "schema": "vrcforge.unity_console_verification.v1",
+                        "status": "failed",
+                        "code": "unity_console_after_capture_failed",
+                        "summary": str(verification_exc)[:400],
+                    }
+            console_after = failure_result.get("consoleVerification")
+            error_constructor_args: dict[str, Any] = {
+                "error": failure_result.get("error") or exception_text,
+                "failure_layer": failure_layer,
+                "failure_phase": "before_write_handler" if not handler_started else "",
+                "operation_kind": "write",
+                "tool": target_tool,
+                "tool_routing_started": False if not handler_started else None,
+                "raw_result": source_failure_result,
+                "exception": exc,
+                "console_before": verification_baseline,
+                "console_after": (
+                    console_after if isinstance(console_after, Mapping) else {}
+                ),
+            }
+            if not handler_started:
+                error_constructor_args.update(
+                    {
+                        "mutation_started": False,
+                        "committed": False,
+                        "commit_state": "not_started",
+                        "checkpoint_recovery_required": False,
+                        "temporary_cleanup_required": False,
+                    }
+                )
+            error_object = build_external_tool_error(**error_constructor_args)
+            write_failure = external_write_failure_view(error_object)
+            completion_outcome = ensure_dict(
+                redact_sensitive(
+                    normalize_agent_tool_result(
+                        failure_result,
+                        fallback_summary=f"{write_handler.description} failed.",
+                        write=True,
+                    )
+                )
+            )
+            if str(completion_outcome.get("status") or "").casefold() != "failed":
+                completion_outcome = {
+                    "status": "failed",
+                    "summary": f"{write_handler.description} failed.",
+                    "verification": {"state": "failed", "checks": []},
+                }
+            payload = {
+                "ok": False,
+                "status": "failed",
+                "result": redact_sensitive(source_failure_result),
+                "error": str(source_failure_result.get("error") or exception_text),
+                "outcome": completion_outcome,
+                "writeFailure": write_failure,
+                "errorDetails": redact_sensitive(error_object),
+            }
+            if isinstance(failure_result.get("consoleVerification"), Mapping):
+                payload["consoleVerification"] = redact_sensitive(
+                    dict(failure_result["consoleVerification"])
+                )
+            if request_trace is not None:
+                payload["requestTrace"] = request_trace
+            self._ports.append_audit(
+                {
+                    "event": "external_mcp_write_failed",
+                    "operationId": operation_id,
+                    "targetTool": target_tool,
+                    "agent": str(agent_name or "mcp-agent")[:120],
+                    "projectRoot": str(project_root or ""),
+                    "argumentsDigest": actual_digest,
+                    "writeFailure": write_failure,
+                    **({"requestTrace": request_trace} if request_trace is not None else {}),
+                }
+            )
+            return payload
+        finally:
+            with self._ports.state.shared_state_lock:
+                self._ports.state.in_flight_apply_writes.pop(operation_id, None)
 
     def _approval_project_root(self, approval: dict[str, Any]) -> str:
         arguments = ensure_dict(approval.get("arguments"))

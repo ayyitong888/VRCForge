@@ -8,6 +8,72 @@ from typing import Any, Callable
 from path_to_skill import CapturedSkillSource, build_path_to_skill_source
 
 
+_PATH_TO_SKILL_IDENTITY_PROPERTIES: dict[str, dict[str, Any]] = {
+    "summary": {
+        "type": "object",
+        "description": "Structured completed-work evidence to sanitize into one portable Skill source.",
+    },
+    "packageId": {"type": "string", "description": "Optional stable package id."},
+    "skillName": {"type": "string", "description": "Optional filesystem-safe Skill name."},
+    "title": {"type": "string", "description": "Optional user-facing Skill title."},
+    "version": {"type": "string", "default": "1.0.0"},
+    "author": {"type": "string", "default": "VRCForge User"},
+    "minVrcforgeVersion": {"type": "string"},
+}
+
+PATH_TO_SKILL_PREVIEW_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary"],
+    "properties": dict(_PATH_TO_SKILL_IDENTITY_PROPERTIES),
+}
+
+PATH_TO_SKILL_WRITE_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary"],
+    "properties": {
+        **_PATH_TO_SKILL_IDENTITY_PROPERTIES,
+        "outputPath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Exact new source directory; existing targets are rejected.",
+        },
+        "writeSource": {"type": "boolean", "default": False},
+        "useTempOutput": {"type": "boolean", "default": True},
+        "exportVsk": {
+            "type": "boolean",
+            "default": False,
+            "description": "Also export the captured source as a development .vsk package.",
+        },
+        "confirmExport": {
+            "type": "boolean",
+            "default": False,
+            "description": "Must be true when exportVsk is true; VRCForge approval is still required before execution.",
+        },
+        "packageOutputPath": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional exact new .vsk destination; existing files are rejected.",
+        },
+    },
+    "anyOf": [
+        {
+            "required": ["writeSource"],
+            "properties": {"writeSource": {"const": True}},
+        },
+        {"required": ["outputPath"]},
+        {
+            "required": ["exportVsk", "confirmExport"],
+            "properties": {
+                "exportVsk": {"const": True},
+                "confirmExport": {"const": True},
+            },
+        },
+    ],
+}
+
+
 class PathToSkillControllerError(ValueError):
     def __init__(self, message: str, *, status_code: int = 400) -> None:
         super().__init__(message)

@@ -26,14 +26,14 @@ def test_read_codex_cli_path_from_config_accepts_quoted_value(tmp_path: Path) ->
         "\n".join(
             [
                 "model = 'gpt-5'",
-                "CODEX_CLI_PATH = 'C:\\\\Users\\\\xiao123\\\\AppData\\\\Local\\\\OpenAI\\\\Codex\\\\bin\\\\abc\\\\codex.exe'",
+                "CODEX_CLI_PATH = 'C:\\\\Users\\\\fixture-user\\\\AppData\\\\Local\\\\OpenAI\\\\Codex\\\\bin\\\\abc\\\\codex.exe'",
                 "other = true",
             ]
         ),
         encoding="utf-8",
     )
 
-    assert smoke.read_codex_cli_path_from_config(config) == "C:\\\\Users\\\\xiao123\\\\AppData\\\\Local\\\\OpenAI\\\\Codex\\\\bin\\\\abc\\\\codex.exe"
+    assert smoke.read_codex_cli_path_from_config(config) == "C:\\\\Users\\\\fixture-user\\\\AppData\\\\Local\\\\OpenAI\\\\Codex\\\\bin\\\\abc\\\\codex.exe"
 
 
 def test_probe_codex_cli_prefers_codex_config_path(monkeypatch: Any, tmp_path: Path) -> None:
@@ -149,7 +149,7 @@ def test_stdio_mcp_tools_uses_explicit_gateway_config_env(monkeypatch: Any, tmp_
         seen_gateway_config = smoke.os.environ.get("VRCFORGE_AGENT_GATEWAY_CONFIG", "")
         return {
             "ok": True,
-            "hasRequestApply": True,
+            "hasBridgePreflight": True,
             "preflightCalled": True,
             "preflightOk": True,
             "directApplyListed": [],
@@ -174,7 +174,7 @@ def test_stdio_mcp_tools_fail_when_direct_execution_tool_is_listed(monkeypatch: 
         "run_stdio_mcp_handshake",
         lambda *_args, **_kwargs: {
             "ok": True,
-            "hasRequestApply": True,
+            "hasBridgePreflight": True,
             "directApplyListed": ["vrcforge_apply_approved"],
         },
     )
@@ -194,7 +194,7 @@ def test_smoke_run_uses_stdio_discovery_without_legacy_http_mcp_probe(monkeypatc
     monkeypatch.setattr(bridge, "check_runtime_health", lambda: {"ok": True})
     monkeypatch.setattr(bridge, "check_connector_config", lambda: {"ok": True})
     monkeypatch.setattr(bridge, "check_stdio_bridge_preflight", lambda: {"ok": True})
-    monkeypatch.setattr(bridge, "check_stdio_mcp_tools", lambda: {"ok": True, "hasRequestApply": True})
+    monkeypatch.setattr(bridge, "check_stdio_mcp_tools", lambda: {"ok": True, "hasBridgePreflight": True})
     monkeypatch.setattr(bridge, "check_manifest", lambda: {"ok": True})
 
     def fail_if_called(method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -216,29 +216,69 @@ def test_smoke_run_uses_stdio_discovery_without_legacy_http_mcp_probe(monkeypatc
     assert mcp_rpc_calls == []
 
 
-def test_smoke_run_fails_when_permission_cleanup_fails(monkeypatch: Any, tmp_path: Path) -> None:
+def test_manifest_check_reads_the_actual_http_mcp_surface(monkeypatch: Any, tmp_path: Path) -> None:
     smoke = load_smoke_module()
     bridge = make_bridge_smoke(smoke, tmp_path)
-    bridge.previous_permission = "approval"
+    calls: list[tuple[str, dict[str, Any]]] = []
 
+    def fake_mcp_rpc(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        calls.append((method, dict(params)))
+        tools = [
+            {"name": "vrcforge_get_compile_errors", "_meta": {"permission": "ReadOnly"}},
+        ]
+        if params["exposureLayer"] == "execution" and params.get("toolBlocks"):
+            tools.extend(
+                [
+                    {"name": "vrcforge_create_gameobject", "_meta": {"permission": "Write"}},
+                    {"name": "vrcforge_restore_checkpoint", "_meta": {"permission": "Write"}},
+                ]
+            )
+        return {"result": {"tools": tools}}
+
+    monkeypatch.setattr(bridge, "mcp_rpc", fake_mcp_rpc)
+    monkeypatch.setattr(
+        bridge,
+        "request_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("legacy REST manifest must not be used")
+        ),
+    )
+
+    result = bridge.check_manifest()
+
+    assert result["ok"] is True
+    assert result["defaultWriteTargetCount"] == 0
+    assert result["createGameObjectTarget"] is True
+    assert result["restoreCheckpointTarget"] is True
+    assert calls == [
+        ("tools/list", {"exposureLayer": "planning"}),
+        ("tools/list", {"exposureLayer": "execution"}),
+        (
+            "tools/list",
+            {"exposureLayer": "planning", "toolBlocks": ["avatar", "checkpoint"]},
+        ),
+        (
+            "tools/list",
+            {"exposureLayer": "execution", "toolBlocks": ["avatar", "checkpoint"]},
+        ),
+    ]
+
+
+def test_smoke_run_does_not_touch_internal_permission_state(monkeypatch: Any, tmp_path: Path) -> None:
+    smoke = load_smoke_module()
+    bridge = make_bridge_smoke(smoke, tmp_path)
     monkeypatch.setattr(bridge, "client_preflight", lambda: {})
     monkeypatch.setattr(bridge, "check_runtime_health", lambda: {"ok": True})
     monkeypatch.setattr(bridge, "check_connector_config", lambda: {"ok": True})
     monkeypatch.setattr(bridge, "check_stdio_bridge_preflight", lambda: {"ok": True})
     monkeypatch.setattr(bridge, "check_stdio_mcp_tools", lambda: {"ok": True})
     monkeypatch.setattr(bridge, "check_manifest", lambda: {"ok": True})
-    monkeypatch.setattr(
-        bridge,
-        "request_app_json",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("restore denied")),
-    )
+    monkeypatch.setattr(bridge, "request_app_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("App endpoint must not be used")))
 
     report = bridge.run()
 
-    assert report["ok"] is False
-    cleanup = next(step for step in report["steps"] if step["name"] == "cleanup.permission_restore")
-    assert cleanup["ok"] is False
-    assert "restore denied" in cleanup["error"]
+    assert report["ok"] is True
+    assert not any("permission" in step["name"] for step in report["steps"])
 
 
 def test_live_mcp_call_uses_strict_2026_http_contract_and_direct_tool_arguments(monkeypatch: Any, tmp_path: Path) -> None:
@@ -413,39 +453,43 @@ def test_live_write_rollback_binds_explicit_parent_and_scene_hashes(monkeypatch:
             }
         if tool_name == "vrcforge_run_validation_report":
             return {"schema": "vrcforge.validation.v1", "ok": True, "summary": {"errorCount": 0, "warningCount": 0}, "findings": []}
-        if tool_name == "vrcforge_request_apply":
-            if arguments["target_tool"] == "vrcforge_create_gameobject":
-                requested_create_arguments.update(arguments["arguments"])
-                return {"approval": {"id": "create-approval", "status": "pending", "targetTool": "vrcforge_create_gameobject"}}
-            return {"approval": {"id": "restore-approval", "status": "pending", "targetTool": "vrcforge_restore_checkpoint"}}
-        raise AssertionError(f"Unexpected MCP call: {tool_name} {arguments}")
-
-    def fake_app_request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        assert method == "POST"
-        assert payload == {}
-        if path.endswith("create-approval/approve"):
+        if tool_name == "vrcforge_create_gameobject":
+            requested_create_arguments.update(arguments)
             scene.write_bytes(b"after-create")
             return {
                 "ok": True,
-                "execution": {
-                    "status": "applied",
-                    "checkpoint": {"id": "checkpoint-1", "strategy": "scene"},
-                    "result": {
-                        "gameObjectPath": bridge.created_object_path,
-                        "parentPath": "Root/SmokeParent",
-                        "scenePath": "Assets/Smoke.unity",
-                        "sceneSaved": True,
-                        "persistedReadback": True,
-                    },
+                "status": "executed",
+                "tool": tool_name,
+                "checkpoint": {"id": "checkpoint-1", "strategy": "scene"},
+                "result": {
+                    "gameObjectPath": bridge.created_object_path,
+                    "parentPath": "Root/SmokeParent",
+                    "scenePath": "Assets/Smoke.unity",
+                    "sceneSaved": True,
+                    "persistedReadback": True,
                 },
             }
-        if path.endswith("restore-approval/approve"):
+        if tool_name == "vrcforge_restore_checkpoint":
+            if "confirmation" not in arguments:
+                return {
+                    "ok": True,
+                    "status": "user_confirmation_required",
+                    "tool": tool_name,
+                    "confirmation": {
+                        "operationId": "restore-operation",
+                        "targetTool": tool_name,
+                        "argumentsDigest": "restore-digest",
+                    },
+                    "mutationStarted": False,
+                    "committed": False,
+                    "commitState": "not_started",
+                }
             scene.write_bytes(original_scene_bytes)
-            return {"ok": True, "execution": {"status": "applied", "result": {"unityReload": {"ok": True}}}}
-        raise AssertionError(f"Unexpected app request: {path}")
+            return {"ok": True, "status": "executed", "tool": tool_name, "result": {"unityReload": {"ok": True}}}
+        raise AssertionError(f"Unexpected MCP call: {tool_name} {arguments}")
 
     monkeypatch.setattr(bridge, "mcp_call_tool", fake_mcp_call)
-    monkeypatch.setattr(bridge, "request_app_json", fake_app_request)
+    monkeypatch.setattr(bridge, "request_app_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("App approval endpoint must not be used")))
     monkeypatch.setattr(
         bridge,
         "wait_for_unity_core_ready",
@@ -466,6 +510,15 @@ def test_live_write_rollback_binds_explicit_parent_and_scene_hashes(monkeypatch:
         }:
             assert arguments["projectPath"] == str(project.resolve())
     evidence = {step["name"]: step for step in bridge.steps}
+    tool_names = [name for name, _ in scoped_calls]
+    assert "vrcforge_request_apply" not in tool_names
+    assert "vrcforge_create_gameobject" in tool_names
+    restore_calls = [arguments for name, arguments in scoped_calls if name == "vrcforge_restore_checkpoint"]
+    assert len(restore_calls) == 2
+    assert "confirmation" not in restore_calls[0]
+    assert restore_calls[1]["confirmation"]["operationId"] == "restore-operation"
+    assert restore_calls[1]["confirmation"]["argumentsDigest"] == "restore-digest"
+    assert restore_calls[1]["confirmation"]["decision"] == "approve"
     assert evidence["write.parent_preflight"]["ok"] is True
     assert evidence["write.verify_persisted_create"]["ok"] is True
     assert evidence["write.verify_persisted_create"]["sceneChangedAfterApply"] is True
@@ -474,7 +527,7 @@ def test_live_write_rollback_binds_explicit_parent_and_scene_hashes(monkeypatch:
     assert evidence["rollback.verify_scene_sha256"]["ok"] is True
 
 
-def test_run_pins_live_write_rollback_to_approval_mode(monkeypatch: Any, tmp_path: Path) -> None:
+def test_run_does_not_change_permission_for_live_write_rollback(monkeypatch: Any, tmp_path: Path) -> None:
     smoke = load_smoke_module()
     bridge = make_bridge_smoke(smoke, tmp_path)
     bridge.args.live_write_rollback = True
@@ -486,19 +539,15 @@ def test_run_pins_live_write_rollback_to_approval_mode(monkeypatch: Any, tmp_pat
     monkeypatch.setattr(bridge, "check_stdio_bridge_preflight", lambda: {"ok": True})
     monkeypatch.setattr(bridge, "check_stdio_mcp_tools", lambda: {"ok": True})
     monkeypatch.setattr(bridge, "check_manifest", lambda: {"ok": True})
-    monkeypatch.setattr(
-        bridge,
-        "set_execution_mode",
-        lambda mode: call_order.append(mode) or {"ok": mode == "approval", "executionMode": mode},
-    )
+    monkeypatch.setattr(bridge, "request_app_json", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("App approval endpoint must not be used")))
     monkeypatch.setattr(bridge, "live_write_rollback", lambda: call_order.append("live_write_rollback"))
     monkeypatch.setattr(bridge, "restore_previous_state", lambda: None)
 
     report = bridge.run()
 
     assert report["ok"] is True
-    assert call_order == ["approval", "live_write_rollback"]
-    assert any(step["name"] == "permission.set_for_live_write" for step in report["steps"])
+    assert call_order == ["live_write_rollback"]
+    assert not any("permission" in step["name"] for step in report["steps"])
 
 
 def test_live_write_rollback_requires_explicit_parent_path_before_project_resolution(monkeypatch: Any, tmp_path: Path) -> None:

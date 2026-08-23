@@ -22,6 +22,12 @@ def test_prefab_tools_support_exact_approval_receipts_without_renaming_tools():
         assert CRUD.count(field) >= 2
 
 
+def test_prefab_instantiation_rejects_duplicate_hierarchy_path_before_mutation():
+    assert "if (AssetPrefabCore.CountHierarchyPath(expectedResultPath, scene.handle) != 0)" in CRUD
+    preflight = CRUD.split("var instance = PrefabUtility.InstantiatePrefab(asset)", 1)[0]
+    assert "refusing to create an ambiguous duplicate" in preflight
+
+
 def test_wardrobe_readback_is_stable_and_writer_echoes_assigned_value():
     assert "ComputeStableFingerprint" in SCANNER
     assert "fingerprint" in SCANNER

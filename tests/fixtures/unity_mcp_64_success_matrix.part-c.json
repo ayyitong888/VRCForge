@@ -1,7 +1,7 @@
 {
-  "schema": "vrcforge.unity_mcp_64_success_matrix.part.v1",
+  "schema": "vrcforge.unity_mcp_78_success_matrix.part.v1",
   "part": "c",
-  "description": "Production-success matrix for the 22 remaining commands. Placeholders are bound only by the disposable acceptance runner after its read/preview evidence is available.",
+  "description": "Production-success matrix for the remaining commands. Placeholders are bound only by the disposable acceptance runner after its read/preview evidence is available.",
   "cases": [
     {
       "tool": "vrc_restore_safe_backup",
@@ -26,6 +26,24 @@
       "requiredFixtures": ["saved fixture scene", "existing source hierarchy", "previous preview result", "new absent target asset path"],
       "successFields": ["verified", "changed", "saved", "source.unchanged", "target.assetPath", "target.assetGuid", "target.readbackExact"],
       "cleanup": "Delete only the run-owned generated prefab and its meta through the checkpoint/fixture cleanup."
+    },
+    {
+      "tool": "vrc_save_new_scene",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "scenePath": "${NEW_SCENE_ASSET_PATH}", "preview": false, "${NEW_SCENE_PREVIEW_RECEIPT}": null },
+      "runtimeInjectedArguments": ["expectedProjectPath", "expectedSceneHandle", "expectedSceneName", "expectedSceneWasDirty", "expectedRootObjectCount", "expectedSceneHierarchyDigest", "expectedPreviewDigest"],
+      "requiredFixtures": ["fresh disposable Unity project with exactly one active unsaved scene", "previous authoritative CreateNew preview", "absent target .unity and .meta path"],
+      "successFields": ["verified", "changed", "saved", "commitState", "scenePath", "sceneGuid", "sceneFileDigest", "sceneMetaDigest"],
+      "cleanup": "Restore the pre-write checkpoint only after explicit approval; verify the created scene and metadata are absent."
+    },
+    {
+      "tool": "vrc_save_current_scene",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "scenePath": "${SAVED_SCENE_PATH}", "preview": false, "${CURRENT_SCENE_SAVE_PREVIEW_RECEIPT}": null },
+      "runtimeInjectedArguments": ["expectedProjectPath", "expectedSceneHandle", "expectedSceneName", "expectedSceneWasDirty", "expectedOpenSceneCount", "expectedRootObjectCount", "expectedSceneHierarchyDigest", "expectedSceneGuid", "expectedSceneFileDigestBefore", "expectedSceneFileIdentityBefore", "expectedSceneMetaDigestBefore", "expectedSceneMetaIdentityBefore", "expectedPreviewDigest"],
+      "requiredFixtures": ["disposable Unity project with exactly one active saved dirty scene", "previous authoritative current-scene preview", "explicit user approval because no pre-save checkpoint can capture dirty memory state"],
+      "successFields": ["verified", "changed", "saved", "commitState", "scenePath", "sceneGuid", "sceneIsDirty", "sceneFileDigestAfter", "sceneMetaDigestAfter"],
+      "cleanup": "Close and discard the disposable acceptance project after evidence capture; this tool never auto-restores pre-save in-memory state."
     },
     {
       "tool": "vrc_scan_animation_bindings",
@@ -84,6 +102,14 @@
       "cleanup": "None."
     },
     {
+      "tool": "vrc_scan_inbound_reference_closure",
+      "mode": "direct_read",
+      "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "targetPaths": ["${INBOUND_REFERENCE_TARGET_PATH}"], "targetComponentSelectors": [], "includeProjectAssets": true, "includeAnimationBindings": true, "includeIndirectParameterEdges": true, "maxResults": 1000 },
+      "requiredFixtures": ["saved clean avatar scene with one exact deletion-candidate subtree and known serialized/animation/framework reference edges"],
+      "successFields": ["proofStatus", "deletionSafe", "scope.scopeDigest", "references", "unresolved", "summary"],
+      "cleanup": "None."
+    },
+    {
       "tool": "vrc_scan_thry_avatar_performance",
       "mode": "direct_read",
       "minimalArguments": { "avatarPath": "${AVATAR_PATH}", "outputPath": "" },
@@ -98,6 +124,14 @@
       "requiredFixtures": ["VRChat SDK avatar with expression parameter, menu and FX int-exclusive wardrobe fixture"],
       "successFields": ["avatarPath", "wardrobes", "wardrobeCandidates", "looseControls"],
       "cleanup": "None."
+    },
+    {
+      "tool": "vrc_select_scene_object",
+      "mode": "approved_apply",
+      "minimalArguments": { "gameObjectPath": "${TARGET_GAMEOBJECT_PATH}" },
+      "requiredFixtures": ["loaded scene with a unique object at ${TARGET_GAMEOBJECT_PATH}"],
+      "successFields": ["gameObjectPath", "selectedBefore", "selectedAfter", "persistent", "sceneDirty", "committed", "commitState"],
+      "cleanup": "None; editor selection is non-persistent and does not dirty the scene."
     },
     {
       "tool": "vrc_set_constraint_sources",
@@ -122,6 +156,14 @@
       "requiredFixtures": ["persistent material in Assets", "resolvable shader", "previous exact preview evidence"],
       "successFields": ["verified", "changed", "saved", "materialAssetGuid", "afterShader", "materialFileDigestAfter", "sharedImpactDigest"],
       "cleanup": "Restore material from the run-owned backup/checkpoint."
+    },
+    {
+      "tool": "vrc_set_play_mode",
+      "mode": "approved_apply",
+      "minimalArguments": { "isPlaying": true },
+      "requiredFixtures": ["open Unity Editor outside Play Mode with no compilation, update, or pending Play Mode transition"],
+      "successFields": ["requested", "before", "transitionScheduled", "verificationRequired", "persistent", "sceneDirty", "mutationStarted", "committed", "commitState"],
+      "cleanup": "After status verifies Play Mode entry, request isPlaying=false and verify exit."
     },
     {
       "tool": "vrc_set_property",
@@ -178,6 +220,38 @@
       "requiredFixtures": ["VRChat SDK avatar descriptor"],
       "successFields": ["action", "avatarPath", "changedFields"],
       "cleanup": "Restore descriptor through checkpoint/backup."
+    },
+    {
+      "tool": "vrc_read_vrchat_sdk_builder_alerts",
+      "mode": "direct_read",
+      "minimalArguments": { "projectPath": "${PROJECT_PATH}", "avatarPath": "${AVATAR_PATH}" },
+      "requiredFixtures": ["VRChat SDK 3.10.4 Control Panel open on the exact selected avatar with an already-populated Builder Review Any Alerts cache"],
+      "successFields": ["available", "exact", "authoritativeForCurrentCachedPanelAlerts", "sdkReportedAvatarAlertCount", "avatarAlertCount", "returnedItemCount", "blockingAlertCount", "alerts"],
+      "cleanup": "None; this tool only reads the already-generated SDK Builder cache and must not refresh, fix, build, or upload."
+    },
+    {
+      "tool": "vrc_avatar_upload_readiness",
+      "mode": "read",
+      "minimalArguments": { "projectPath": "${PROJECT_PATH}", "avatarPath": "${AVATAR_PATH}", "uploadMode": "create", "buildType": "build_and_upload", "platforms": ["${ACTIVE_BUILD_TARGET}"], "metadata": { "mode": "replace", "name": "VRCForge acceptance avatar", "description": "Disposable upload-readiness fixture", "visibility": "private", "primaryStyle": null, "secondaryStyle": null, "contentWarnings": [], "authorTags": [] }, "thumbnail": { "mode": "replace", "path": "${UPLOAD_THUMBNAIL_PATH}", "sha256": "${UPLOAD_THUMBNAIL_SHA256}" } },
+      "requiredFixtures": ["one exact loaded avatar with an empty PipelineManager blueprint ID", "authenticated VRChat SDK user", "run-owned thumbnail with known SHA-256"],
+      "successFields": ["ready", "avatarGlobalObjectId", "currentPipelineId", "sdkUserId", "platform", "metadata", "thumbnail", "capabilities", "sdkPanel", "readinessDigest"],
+      "cleanup": "None; readiness is read-only and must not build or upload."
+    },
+    {
+      "tool": "vrc_build_and_upload_avatar",
+      "mode": "approved_async_apply",
+      "minimalArguments": { "projectPath": "${PROJECT_PATH}", "avatarPath": "${AVATAR_PATH}", "uploadMode": "create", "buildType": "build_and_upload", "platforms": ["${ACTIVE_BUILD_TARGET}"], "metadata": { "mode": "replace", "name": "VRCForge acceptance avatar", "description": "Disposable upload fixture", "visibility": "private", "primaryStyle": null, "secondaryStyle": null, "contentWarnings": [], "authorTags": [] }, "thumbnail": { "mode": "replace", "path": "${UPLOAD_THUMBNAIL_PATH}", "sha256": "${UPLOAD_THUMBNAIL_SHA256}" }, "expectedAvatarGlobalObjectId": "${UPLOAD_AVATAR_GLOBAL_OBJECT_ID}", "expectedCurrentPipelineId": "${UPLOAD_CURRENT_PIPELINE_ID}", "expectedSdkUserId": "${UPLOAD_SDK_USER_ID}", "expectedPlatform": "${ACTIVE_BUILD_TARGET}", "readinessDigest": "${UPLOAD_READINESS_DIGEST}" },
+      "requiredFixtures": ["one exact disposable avatar", "authenticated VRChat SDK user with upload permission", "previous exact upload-readiness result", "explicit user confirmation for remote publication"],
+      "successFields": ["jobId", "status", "uploadMode", "requestedVisibility", "remoteAvatarId", "bundlePath", "remoteMetadataRequested", "remoteMetadataAfter", "metadataCommitState", "committed", "commitState"],
+      "cleanup": "Poll the same jobId to completion; remote deletion or visibility changes require a separate explicit user-owned action."
+    },
+    {
+      "tool": "vrc_convert_unity_constraint",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "projectPath": "${PROJECT_PATH}", "scenePath": "${SAVED_SCENE_PATH}", "avatarPath": "${AVATAR_PATH}", "gameObjectPath": "${UNITY_CONSTRAINT_OBJECT_PATH}", "componentType": "UnityEngine.Animations.RotationConstraint", "componentIndex": 0, "preview": false, "saveScene": true, "expectedSceneGuid": "${CONSTRAINT_SCENE_GUID}", "expectedSceneFileDigest": "${CONSTRAINT_SCENE_FILE_DIGEST}", "expectedAvatarGlobalObjectId": "${CONSTRAINT_AVATAR_GLOBAL_OBJECT_ID}", "expectedComponentGlobalObjectId": "${UNITY_CONSTRAINT_GLOBAL_OBJECT_ID}", "expectedBeforeDigest": "${UNITY_CONSTRAINT_BEFORE_DIGEST}" },
+      "requiredFixtures": ["saved clean scene containing one exact Unity constraint on the avatar", "previous exact constraint-conversion preview"],
+      "successFields": ["scenePath", "gameObjectPath", "componentTypeBefore", "componentTypeAfter", "convertReferencedAnimationClips", "readback", "consoleDelta", "committed", "commitState"],
+      "cleanup": "Restore the fixture scene through the checkpoint/backup lane."
     }
   ]
 }

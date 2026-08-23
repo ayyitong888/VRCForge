@@ -1,4 +1,4 @@
-import { Box, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
+import { Bot, Box, Folder, ListChecks, Monitor, PanelRightClose, PlugZap, RefreshCw, Server, Wrench } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -9,7 +9,7 @@ import { AgentTodoPanel } from "./agent-todo-panel";
 import { RuntimeInfoRow, StatusDot } from "./runtime-sidebar-ui";
 import { ProjectWorkbenchSections, type UserAttachmentSource } from "./project-workbench-sections";
 
-type ComponentStatus = { status: string; message?: string } | null | undefined;
+type ComponentStatus = { status: string; message?: string; detail?: unknown } | null | undefined;
 
 function normalizedStatus(component: ComponentStatus): string {
   return component?.status || "unknown";
@@ -30,6 +30,7 @@ export function RightRuntimeSidebar({
   unityBridgeComponent,
   unityInstanceComponent,
   unityToolsComponent,
+  externalAgentComponent,
   agentProgress,
   projectWorkspace,
   subAgentPanel,
@@ -57,6 +58,7 @@ export function RightRuntimeSidebar({
   unityBridgeComponent: ComponentStatus;
   unityInstanceComponent: ComponentStatus;
   unityToolsComponent: ComponentStatus;
+  externalAgentComponent: ComponentStatus;
   agentProgress: AgentProgress[];
   projectWorkspace: boolean;
   subAgentPanel?: ReactNode;
@@ -130,6 +132,7 @@ export function RightRuntimeSidebar({
             unityBridgeComponent={unityBridgeComponent}
             unityInstanceComponent={unityInstanceComponent}
             unityToolsComponent={unityToolsComponent}
+            externalAgentComponent={externalAgentComponent}
             runtimeConnected={runtimeConnected}
             localizeHealthMessage={localizeHealthMessage}
             agentProgress={agentProgress}
@@ -163,6 +166,14 @@ export function RightRuntimeSidebar({
                   label={t("workspace.core")}
                   value={backendValue}
                   suffix={<StatusDot status={backendStatus} />}
+                />
+              </div>
+              <div data-vrcforge-status="external-agent">
+                <RuntimeInfoRow
+                  icon={<Bot className="h-4 w-4" />}
+                  label={t("workspace.externalAgent")}
+                  value={componentValueFromMessage(externalAgentComponent, localizeHealthMessage, t("workspace.externalAgentWaiting"))}
+                  suffix={<StatusDot status={normalizedStatus(externalAgentComponent)} />}
                 />
               </div>
               {workspaceProjectType === "unity" ? (

@@ -5,11 +5,10 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source and latest published stable release: `1.7.7` (`v1.7.7`). The
-1.7.7 package fixes external-Agent project binding, structured MCP result
-verification, ignored-project archive checkpoints, and scene-object persistence
-plus exact rollback readback. The published v1.7.6 tag and Release remain
-available and unchanged.
+Current source and latest published stable release: `1.7.8` (`v1.7.8`). The 1.7.8 package fixes
+Windows shortcut icon/working-directory binding, desktop browser-context-menu
+leakage, and external MCP tool/failure/project-lifecycle boundaries. The
+published v1.7.7 tag and Release remain available and unchanged.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
@@ -91,7 +90,7 @@ Paranoid 仍仅提供预览。
 | `.vsk` community skill packages | Signed import/preflight/trust, atomic projection/governance, Path-to-Skill capture, SDK scaffold/lock validation, and searchable package/runtime audit | Available; packaged lifecycle acceptance passed |
 | Parameter usage checks and suggestions | 参数占用检查与建议 | 已可用 / Available |
 | Screenshot and multi-view analysis | 截图分析与多视角检查 | 已可用 / Available |
-| Batch workflows | 批量工作流 | 计划中 / Planned |
+| Avatar composition workflows | 带面捕/无面捕换头与来源模型部件移植；只编排现有原子工具、检查点、读回和 GM 多视角验收 | Available |
 
 Wardrobe scan results are split deliberately:
 `wardrobes` are high-confidence FX Animator wardrobes that the add-outfit
@@ -334,7 +333,7 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- `v1.7.7` 的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 64 个声明的 Unity 工具
+- `v1.7.8` 的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 78 个声明的 Unity 工具
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 

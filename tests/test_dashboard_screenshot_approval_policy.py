@@ -6,12 +6,22 @@ from types import SimpleNamespace
 
 import pytest
 
+import agent_gateway
 import dashboard_server
 from prepared_unity_execution import PREPARED_UNITY_EXECUTION_ARGUMENT_KEY, prepared_call
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "dashboard_server.py").read_text(encoding="utf-8")
+
+
+def test_external_capture_schema_exposes_strict_face_or_avatar_framing() -> None:
+    schema = agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_capture_screenshot"]
+
+    assert schema["additionalProperties"] is False
+    assert schema["required"] == ["projectPath"]
+    assert schema["properties"]["framing"]["enum"] == ["face", "avatar"]
+    assert schema["properties"]["captureMode"]["enum"] == ["auto", "scene_view", "game_view"]
 
 
 def test_screenshot_tools_are_registered_as_approved_context_writes_not_direct_reads() -> None:
@@ -60,6 +70,101 @@ def test_single_capture_preparer_freezes_only_the_fixed_dashboard_output_path() 
     assert arguments["outputPath"] == expected_path
     assert arguments["setRotation"] is False
     assert preview["outputPaths"] == [expected_path]
+
+
+def test_single_capture_preparer_supports_one_named_atomic_angle() -> None:
+    prepared, preview = dashboard_server.prepare_capture_screenshot_request(
+        {"avatar_path": "Scene/Hero", "angle": "SIDE_LEFT"}, None
+    )
+    tool_name, arguments = prepared_call(prepared)
+
+    assert tool_name == "vrc_capture_scene_view"
+    assert arguments["setRotation"] is True
+    assert arguments["yaw"] == 90.0
+    assert arguments["captureScope"] == "face"
+    assert preview["angle"] == "side_left"
+
+
+def test_named_front_capture_is_eye_level_not_top_down() -> None:
+    prepared, preview = dashboard_server.prepare_capture_screenshot_request(
+        {"avatar_path": "Scene/Hero", "angle": "front"}, None
+    )
+    tool_name, arguments = prepared_call(prepared)
+
+    assert tool_name == "vrc_capture_scene_view"
+    assert arguments["setRotation"] is True
+    assert arguments["pitch"] == 0.0
+    assert arguments["yaw"] == 0.0
+    assert arguments["roll"] == 0.0
+    assert preview["angle"] == "front"
+
+
+def test_single_capture_preparer_allows_explicit_full_avatar_framing_for_named_angle() -> None:
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {"avatarPath": "Scene/Hero", "angle": "front", "framing": "avatar"}, None
+    )
+    _tool_name, arguments = prepared_call(prepared)
+
+    assert arguments["avatarPath"] == "Scene/Hero"
+    assert arguments["captureScope"] == "avatar"
+    assert prepared["framing"] == "avatar"
+
+
+def test_multi_capture_preparer_allows_explicit_full_avatar_framing() -> None:
+    prepared, _preview = dashboard_server.prepare_capture_multi_screenshot_request(
+        {"avatarPath": "Scene/Hero", "angles": ["front", "back"], "framing": "avatar"}, None
+    )
+
+    assert prepared["framing"] == "avatar"
+    for index in range(2):
+        _tool_name, arguments = prepared_call(prepared, index)
+        assert arguments["captureScope"] == "avatar"
+
+
+def test_capture_preparer_rejects_unknown_public_framing() -> None:
+    with pytest.raises(ValueError):
+        dashboard_server.prepare_capture_screenshot_request({"framing": "scene"}, None)
+
+
+def test_single_capture_preparer_preserves_scene_view_mode_during_play_mode() -> None:
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {
+            "avatarPath": "Scene/Hero",
+            "requirePlayMode": True,
+            "captureMode": "scene_view",
+        },
+        None,
+    )
+    _tool_name, arguments = prepared_call(prepared)
+
+    assert arguments["requirePlayMode"] is True
+    assert arguments["captureMode"] == "scene_view"
+
+
+@pytest.mark.parametrize("avatar_key", ["avatar_path", "avatarPath"])
+def test_single_capture_preparer_accepts_honest_avatar_path_aliases(avatar_key: str) -> None:
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {avatar_key: "Scene/Hero", "requirePlayMode": True}, None
+    )
+    _tool_name, arguments = prepared_call(prepared)
+
+    assert arguments["avatarPath"] == "Scene/Hero"
+    assert arguments["requirePlayMode"] is True
+
+
+@pytest.mark.parametrize("avatar_key", ["avatar_path", "avatarPath"])
+def test_multi_capture_preparer_accepts_honest_avatar_path_aliases(avatar_key: str) -> None:
+    prepared, _preview = dashboard_server.prepare_capture_multi_screenshot_request(
+        {avatar_key: "Scene/Hero", "angles": ["front"]}, None
+    )
+    _tool_name, arguments = prepared_call(prepared)
+
+    assert arguments["avatarPath"] == "Scene/Hero"
+
+
+def test_single_capture_preparer_rejects_unknown_named_angle() -> None:
+    with pytest.raises(RuntimeError, match="Unsupported screenshot capture angle"):
+        dashboard_server.prepare_capture_screenshot_request({"angle": "diagonal"}, None)
 
 
 def test_multi_capture_preparer_deduplicates_only_fixed_angles_and_freezes_each_call() -> None:
@@ -122,6 +227,44 @@ def test_single_capture_handler_accepts_windows_slash_normalization_and_requires
 
     assert result["ok"] is True
     assert Path(result["imagePath"]) == output_path.resolve()
+
+
+def test_single_capture_handler_propagates_core_failure_and_never_reuses_stale_image(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request({}, None)
+    output_path = tmp_path / "latest" / "vision_capture.png"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"stale-png")
+    failure = {
+        "success": False,
+        "errorCode": "unity_core_unhandled_exception",
+        "error": "NullReferenceException in capture routing",
+        "failureLayer": "unity_core_dispatch",
+        "failurePhase": "request_dispatch_exception",
+        "mutationStarted": None,
+        "committed": None,
+        "commitState": "unknown",
+    }
+
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace())
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        lambda _settings, _tool, _arguments: dashboard_server.McpResult(
+            exit_code=1,
+            stdout="core failure",
+            stderr="",
+            payload={"isError": True, "structuredContent": failure},
+        ),
+    )
+
+    result = dashboard_server.capture_avatar_screenshot_approved_sync(prepared)
+
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["errorCode"] == "unity_core_unhandled_exception"
+    assert result["failureLayer"] == "unity_core_dispatch"
+    assert "imagePath" not in result
 
 
 def test_multi_capture_handler_issues_one_task_owned_managed_receipt(tmp_path, monkeypatch) -> None:

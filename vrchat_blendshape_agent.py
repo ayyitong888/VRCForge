@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -30,8 +31,10 @@ from approved_unity_execution import (
     ApprovedUnityExecutionPlan,
     current_approved_unity_execution,
 )
-from unity_mcp_core_client import UnityMcpCoreClient, UnityMcpCoreError
+from external_tool_result_contract import build_external_tool_error
+from unity_mcp_core_client import APP_UNITYPACKAGE_IMPORT_POLL_LANE, UnityMcpCoreClient, UnityMcpCoreError
 from unity_mcp_tool_contract import READ_ONLY_TOOL_NAMES
+from unity_editor_window_probe import probe_unity_reload_dialog
 
 
 DEFAULT_SETTINGS_PATH = Path(".gemini/settings.json")
@@ -160,15 +163,71 @@ class UnityMcpError(RuntimeError):
         cause_code: str = "unity_request_invalid",
         retryable: bool = False,
         core_tool: str = "",
+        raw_result: dict[str, Any] | None = None,
+        failure_layer: str = "unity_mcp_client",
+        failure_phase: str = "",
+        operation_kind: str = "unknown",
+        tool_routing_started: bool | None = None,
+        mutation_started: bool | None = None,
+        committed: bool | None = None,
+        commit_state: str = "",
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.cause_code = cause_code
         self.retryable = retryable
         self.core_tool = core_tool
+        self.raw_result = dict(raw_result) if isinstance(raw_result, dict) else None
+        self.failure_layer = failure_layer
+        self.failure_phase = failure_phase
+        self.external_error = build_external_tool_error(
+            error=message,
+            error_code=cause_code,
+            failure_layer=failure_layer,
+            failure_phase=failure_phase,
+            operation_kind=operation_kind,
+            tool=core_tool,
+            tool_routing_started=tool_routing_started,
+            mutation_started=mutation_started,
+            committed=committed,
+            commit_state=commit_state,
+            retryable=retryable,
+            checkpoint_recovery_required=(False if mutation_started is False else None),
+            temporary_cleanup_required=(False if mutation_started is False else None),
+            raw_result=raw_result,
+            details=details,
+        )
 
 
 class _UnityMcpToolRejectedError(UnityMcpError):
     """A terminal Core response that must not enter the transport retry loop."""
+
+
+def _unity_mcp_pre_route_error(
+    message: str,
+    *,
+    cause_code: str,
+    core_tool: str,
+    failure_phase: str,
+    retryable: bool = False,
+    details: dict[str, Any] | None = None,
+) -> UnityMcpError:
+    """Build the one lossless no-mutation error shape for every pre-route refusal."""
+
+    return UnityMcpError(
+        message,
+        cause_code=cause_code,
+        retryable=retryable,
+        core_tool=core_tool,
+        failure_layer="unity_core_pre_route",
+        failure_phase=failure_phase,
+        operation_kind="read" if core_tool in READ_ONLY_TOOL_NAMES else "write",
+        tool_routing_started=False,
+        mutation_started=False,
+        committed=False,
+        commit_state="not_started",
+        details=details,
+    )
 
 
 def main() -> int:
@@ -1487,6 +1546,8 @@ def request_deepseek_responses_plan_with_metadata(
 
 
 def _responses_reasoning_effort(settings: Settings) -> str:
+    if normalize_provider_name(settings.llm_provider) != "deepseek":
+        return ""
     level = normalize_reasoning_effort(settings.gemini_thinking_level)
     supported = reasoning_effort_variants("deepseek", settings.llm_model, settings.llm_api_type)
     if level not in supported:
@@ -3171,17 +3232,87 @@ def mock_execute_payload(apply_payload: str, selected_avatar: SelectedAvatar, ex
     )
 
 
+_CORE_UPGRADE_PROOF_ASSET = "Assets/VRCForge/Editor/Generic/DuplicateProjectAssetTool.cs"
+_CORE_UPGRADE_REQUIRED_ASSETS = (
+    _CORE_UPGRADE_PROOF_ASSET,
+    "Assets/VRCForge/Editor/Generic/InboundReferenceClosureTool.cs",
+)
+
+
+def _is_previous_core_upgrade_call(
+    tool_name: str,
+    params: dict[str, Any],
+    execution_context: dict[str, Any],
+) -> bool:
+    """Allow only the exact previous Core to import/poll this Core upgrade."""
+
+    if tool_name == "vrc_refresh_asset_database":
+        return (
+            execution_context.get("lane") in {"approved_write", "external_mcp_write"}
+            and set(params) == {
+                "projectPath",
+                "resolvePackages",
+                "packageResolveTimeoutSeconds",
+            }
+            and isinstance(params.get("projectPath"), str)
+            and bool(params["projectPath"].strip())
+            and params.get("resolvePackages") is False
+            and isinstance(params.get("packageResolveTimeoutSeconds"), int)
+            and not isinstance(params.get("packageResolveTimeoutSeconds"), bool)
+            and 5 <= params["packageResolveTimeoutSeconds"] <= 300
+        )
+
+    if tool_name != "vrc_import_unitypackage":
+        return False
+    if execution_context.get("lane") == APP_UNITYPACKAGE_IMPORT_POLL_LANE:
+        return (
+            set(params) == {"jobId"}
+            and isinstance(params.get("jobId"), str)
+            and re.fullmatch(r"[0-9a-fA-F]{32}", params["jobId"]) is not None
+        )
+    if params.get("interactive") is not False:
+        return False
+    expected_paths = params.get("expectedAssetPaths")
+    if not isinstance(expected_paths, list) or any(
+        asset_path not in expected_paths for asset_path in _CORE_UPGRADE_REQUIRED_ASSETS
+    ):
+        return False
+    expected_digest = str(params.get("expectedSha256") or "").strip().lower()
+    expected_size = params.get("expectedSize")
+    if re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None \
+            or not isinstance(expected_size, int) or isinstance(expected_size, bool) or expected_size <= 0:
+        return False
+    try:
+        package_path = Path(str(params.get("unityPackagePath") or "")).resolve(strict=True)
+        if package_path.name.casefold() != "vrcforge.unitypackage" or not package_path.is_file():
+            return False
+        if package_path.stat().st_size != expected_size:
+            return False
+        digest = hashlib.sha256()
+        with package_path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest() == expected_digest
+    except OSError:
+        return False
+
+
 def invoke_unity_mcp(
     settings: Settings,
     tool_name: str,
     params: dict[str, Any],
     *,
     execution_context: dict[str, Any] | None = None,
-    preserve_tool_error: bool = False,
+    preserve_tool_error: bool = True,
 ) -> McpResult:
+    """Invoke Core with lossless tool-error results unless an internal caller opts out."""
+
     if isinstance(execution_context, dict) and execution_context.get("lane") == "approved_write":
-        raise UnityMcpError(
-            "Approved Unity writes require the gateway-bound execution capability; explicit contexts are rejected."
+        raise _unity_mcp_pre_route_error(
+            "Approved Unity writes require the gateway-bound execution capability; explicit contexts are rejected.",
+            cause_code="approved_execution_context_rejected",
+            core_tool=tool_name,
+            failure_phase="gateway_policy",
         )
     active_plan = current_approved_unity_execution()
     transport_context = execution_context
@@ -3207,20 +3338,45 @@ def invoke_unity_mcp(
     core_installed = bool(core_project and not missing_core_markers)
 
     if not core_project:
-        raise UnityMcpError(
+        raise _unity_mcp_pre_route_error(
             "No Unity project is selected for VRCForge MCP Core. "
             "Select the project that is currently open in Unity and retry.",
             cause_code="unity_project_not_selected",
             core_tool=tool_name,
+            failure_phase="project_selection",
+        )
+
+    editor_blocker = probe_unity_reload_dialog(core_project)
+    if isinstance(editor_blocker.get("probeError"), dict):
+        probe_error = editor_blocker["probeError"]
+        raise _unity_mcp_pre_route_error(
+            "VRCForge could not inspect the target Unity editor for a blocking Reload dialog. "
+            "No Core tool was called.",
+            cause_code=str(probe_error.get("code") or "unity_editor_window_probe_failed"),
+            core_tool=tool_name,
+            failure_phase="editor_window_probe",
+            details={"editorBlocker": editor_blocker},
+        )
+    if editor_blocker.get("blocked") is True:
+        raise _unity_mcp_pre_route_error(
+            "Unity is waiting for the Reload dialog to be resolved before editor tools can run. "
+            "Choose Reload in the target Unity window, then retry the same operation.",
+            cause_code="unity_editor_reload_dialog",
+            core_tool=tool_name,
+            failure_phase="domain_reload_confirmation",
+            retryable=True,
+            details={"editorBlocker": editor_blocker},
         )
     if core_descriptor is not None and not core_descriptor.is_file() and not core_installed:
         missing_names = ", ".join(Path(path).name for path in missing_core_markers)
-        raise UnityMcpError(
+        raise _unity_mcp_pre_route_error(
             f"The selected Unity project '{core_project}' does not contain a complete "
             f"VRCForge MCP2 package. Missing required files: {missing_names}. "
             "Select the project that is currently open in Unity or reimport VRCForge.unitypackage.",
             cause_code="unity_core_package_incomplete",
             core_tool=tool_name,
+            failure_phase="core_discovery",
+            details={"missingCoreFiles": [str(path) for path in missing_core_markers]},
         )
 
     if (
@@ -3231,30 +3387,94 @@ def invoke_unity_mcp(
         try:
             if core_descriptor is None or not core_descriptor.is_file():
                 if core_installed:
-                    raise UnityMcpError(
-                        f"VRCForge MCP Core is installed but not ready in the selected "
-                        f"Unity project '{core_project}'; its runtime descriptor is missing.",
-                        cause_code="unity_core_starting",
-                        retryable=True,
+                    # Domain reload can remove the descriptor after an approved
+                    # import completed but before the next exact plan entry is
+                    # claimed. Waiting here is safe: no one-use execution id or
+                    # Core transport attempt exists yet, so no write is replayed.
+                    attempts = max(1, int(settings.unity_mcp_retries or 1))
+                    backoff = max(0.0, float(settings.unity_mcp_retry_backoff_seconds or 0))
+                    for attempt in range(1, attempts):
+                        time.sleep(backoff * attempt)
+                        if core_descriptor.is_file():
+                            break
+                if core_descriptor is None or not core_descriptor.is_file():
+                    if core_installed:
+                        raise _unity_mcp_pre_route_error(
+                            f"VRCForge MCP Core is installed but not ready in the selected "
+                            f"Unity project '{core_project}'; its runtime descriptor is missing.",
+                            cause_code="unity_core_starting",
+                            retryable=True,
+                            core_tool=tool_name,
+                            failure_phase="domain_reload",
+                            details={"descriptorPresent": False, "coreSourcePresent": True},
+                        )
+                    raise _unity_mcp_pre_route_error(
+                        f"The selected Unity project '{core_project}' does not contain a complete "
+                        "VRCForge MCP2 package.",
+                        cause_code="unity_core_package_incomplete",
                         core_tool=tool_name,
+                        failure_phase="core_discovery",
+                        details={"missingCoreFiles": [str(path) for path in missing_core_markers]},
                     )
-                raise UnityMcpError(
-                    f"The selected Unity project '{core_project}' does not contain a complete "
-                    "VRCForge MCP2 package."
-                )
             claim = active_plan.claim(tool_name, params, core_project)
         except ApprovedUnityExecutionError as exc:
-            raise UnityMcpError(str(exc)) from exc
+            raise _unity_mcp_pre_route_error(
+                str(exc),
+                cause_code="approved_execution_claim_rejected",
+                core_tool=tool_name,
+                failure_phase="approved_execution_claim",
+            ) from exc
+
+        claim_context = dict(claim.execution_context)
+        allow_previous_contract = _is_previous_core_upgrade_call(
+            tool_name,
+            params,
+            claim_context,
+        )
+        try:
+            core_client_kwargs: dict[str, Any] = {
+                "timeout_seconds": max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
+            }
+            if allow_previous_contract:
+                core_client_kwargs["allow_previous_contract"] = True
+            core_client = UnityMcpCoreClient(core_project, **core_client_kwargs)
+            if allow_previous_contract and core_client.uses_previous_contract:
+                core_client.list_tools(exposure_layer="execution")
+        except UnityMcpCoreError as exc:
+            claim.uncertain()
+            raise UnityMcpError(
+                str(exc),
+                cause_code=exc.cause_code,
+                retryable=exc.retryable,
+                core_tool=tool_name,
+                failure_layer="unity_core_pre_route",
+                failure_phase="core_handshake",
+                operation_kind="write",
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
+            ) from exc
+        except Exception as exc:  # noqa: BLE001 - the managed write tool was not routed.
+            claim.uncertain()
+            raise UnityMcpError(
+                "The managed Unity write could not prepare its Core connection.",
+                cause_code="unity_request_failed",
+                core_tool=tool_name,
+                failure_layer="unity_core_pre_route",
+                failure_phase="core_handshake",
+                operation_kind="write",
+                tool_routing_started=False,
+                mutation_started=False,
+                committed=False,
+                commit_state="not_started",
+            ) from exc
 
         try:
-            core_client = UnityMcpCoreClient(
-                core_project,
-                timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
-            )
             core_result = core_client.call_tool(
                 tool_name,
                 params,
-                execution_context=dict(claim.execution_context),
+                execution_context=claim_context,
             )
             # A response, including a rejected tool result, makes the one-use
             # identifier terminal.  Only an exception leaves transport outcome
@@ -3263,26 +3483,46 @@ def invoke_unity_mcp(
         except UnityMcpCoreError as exc:
             claim.uncertain()
             raise UnityMcpError(
-                "The approved Unity write could not complete its single transport attempt.",
+                "The managed Unity write could not complete its single transport attempt.",
                 cause_code=exc.cause_code,
                 retryable=exc.retryable,
                 core_tool=tool_name,
+                failure_layer="unity_core_transport",
+                failure_phase="tool_dispatch_or_response",
+                operation_kind="write",
+                tool_routing_started=None,
+                mutation_started=None,
+                committed=None,
             ) from exc
         except Exception as exc:  # noqa: BLE001 - unknown transport outcome fails closed.
             claim.uncertain()
             raise UnityMcpError(
-                "The approved Unity write could not complete its single transport attempt.",
+                "The managed Unity write could not complete its single transport attempt.",
                 cause_code="unity_request_failed",
                 core_tool=tool_name,
+                failure_layer="unity_core_transport",
+                failure_phase="tool_dispatch_or_response",
+                operation_kind="write",
+                tool_routing_started=None,
+                mutation_started=None,
+                committed=None,
             ) from exc
         serialized = json.dumps(core_result, ensure_ascii=False, separators=(",", ":"))
         if core_result.get("isError") is True:
+            if preserve_tool_error:
+                return McpResult(
+                    exit_code=1,
+                    stdout=serialized,
+                    stderr="",
+                    payload=core_result,
+                )
             detail = summarize_unity_mcp_core_rejection(core_result)
             suffix = f" Reason code: {detail}." if detail else ""
             raise UnityMcpError(
-                f"Unity MCP Core rejected the approved tool execution.{suffix}",
+                f"Unity MCP Core rejected the managed tool execution.{suffix}",
                 cause_code="unity_core_tool_rejected",
                 core_tool=tool_name,
+                raw_result=core_result,
             )
         return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
 
@@ -3291,10 +3531,27 @@ def invoke_unity_mcp(
     for attempt in range(1, settings.unity_mcp_retries + 1):
         try:
             if core_descriptor is not None and core_descriptor.is_file():
-                core_client = UnityMcpCoreClient(
-                    core_project,
-                    timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
-                )
+                try:
+                    core_client = UnityMcpCoreClient(
+                        core_project,
+                        timeout_seconds=max(1, min(int(settings.unity_mcp_timeout_seconds or 30), 600)),
+                    )
+                except UnityMcpCoreError as exc:
+                    raise UnityMcpError(
+                        str(exc),
+                        cause_code=exc.cause_code,
+                        retryable=exc.retryable,
+                        core_tool=tool_name,
+                        failure_layer="unity_core_pre_route",
+                        failure_phase="core_handshake",
+                        operation_kind=(
+                            "read" if tool_name in READ_ONLY_TOOL_NAMES else "write"
+                        ),
+                        tool_routing_started=False,
+                        mutation_started=False,
+                        committed=False,
+                        commit_state="not_started",
+                    ) from exc
                 core_result = (
                     core_client.call_tool(tool_name, params)
                     if transport_context is None
@@ -3319,6 +3576,7 @@ def invoke_unity_mcp(
                         f"Unity MCP Core rejected the tool execution.{suffix}",
                         cause_code="unity_core_tool_rejected",
                         core_tool=tool_name,
+                        raw_result=core_result,
                     )
                 return McpResult(exit_code=0, stdout=serialized, stderr="", payload=core_result)
             if core_installed:
@@ -3348,6 +3606,14 @@ def invoke_unity_mcp(
                     str(exc),
                     cause_code=exc.cause_code,
                     core_tool=tool_name,
+                    failure_layer="unity_core_transport",
+                    failure_phase="tool_dispatch_or_response",
+                    operation_kind=(
+                        "read" if tool_name in READ_ONLY_TOOL_NAMES else "write"
+                    ),
+                    tool_routing_started=None,
+                    mutation_started=(False if tool_name in READ_ONLY_TOOL_NAMES else None),
+                    committed=(False if tool_name in READ_ONLY_TOOL_NAMES else None),
                 ) from exc
             last_error = exc
             if attempt >= settings.unity_mcp_retries:

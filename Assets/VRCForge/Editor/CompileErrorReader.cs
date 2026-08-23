@@ -23,12 +23,15 @@ namespace VRCForge.Editor
         private const string SessionKey = "VRCForge.CompileErrors";
         private const string SessionTimestampKey = "VRCForge.CompileErrors.Timestamp";
         private const string SessionCompletedKey = "VRCForge.CompileErrors.Completed";
+        private static readonly object SnapshotGate = new object();
+        private static JObject coreInfoSnapshot = new JObject();
 
         static CompileErrorMonitor()
         {
             CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
             CompilationPipeline.compilationFinished += OnCompilationFinished;
+            RefreshCoreInfoSnapshot(EditorApplication.isCompiling);
         }
 
         internal static string CapturedAt => SessionState.GetString(SessionTimestampKey, string.Empty);
@@ -39,6 +42,7 @@ namespace VRCForge.Editor
             SessionState.SetString(SessionKey, "[]");
             SessionState.SetString(SessionTimestampKey, DateTime.UtcNow.ToString("o"));
             SessionState.SetBool(SessionCompletedKey, false);
+            RefreshCoreInfoSnapshot(true);
         }
 
         private static void OnAssemblyCompilationFinished(string assemblyPath, CompilerMessage[] messages)
@@ -66,6 +70,7 @@ namespace VRCForge.Editor
 
                 SessionState.SetString(SessionKey, new JArray(entries).ToString(Formatting.None));
                 SessionState.SetString(SessionTimestampKey, DateTime.UtcNow.ToString("o"));
+                RefreshCoreInfoSnapshot(true);
             }
             catch
             {
@@ -77,6 +82,55 @@ namespace VRCForge.Editor
         {
             SessionState.SetBool(SessionCompletedKey, true);
             SessionState.SetString(SessionTimestampKey, DateTime.UtcNow.ToString("o"));
+            RefreshCoreInfoSnapshot(false);
+        }
+
+        private static void RefreshCoreInfoSnapshot(bool isCompiling)
+        {
+            var diagnostics = LoadEntries();
+            var errors = diagnostics.Where(item =>
+                !string.Equals(item.Value<string>("severity"), "warning", StringComparison.OrdinalIgnoreCase)
+            ).ToList();
+            var warnings = diagnostics.Where(item =>
+                string.Equals(item.Value<string>("severity"), "warning", StringComparison.OrdinalIgnoreCase)
+            ).ToList();
+            var snapshot = new JObject
+            {
+                ["isCompiling"] = isCompiling,
+                ["captureComplete"] = CaptureComplete,
+                ["hasErrors"] = errors.Count > 0,
+                ["hasWarnings"] = warnings.Count > 0,
+                ["errorCount"] = errors.Count,
+                ["warningCount"] = warnings.Count,
+                ["truncated"] = false,
+                ["source"] = "compilation_pipeline",
+                ["capturedAt"] = CapturedAt,
+                ["errors"] = new JArray(errors),
+                ["warnings"] = new JArray(warnings),
+            };
+            lock (SnapshotGate)
+            {
+                coreInfoSnapshot = snapshot;
+            }
+        }
+
+        internal static JObject ReadCoreInfoSnapshot(int maxEntries)
+        {
+            JObject snapshot;
+            lock (SnapshotGate)
+            {
+                snapshot = (JObject)coreInfoSnapshot.DeepClone();
+            }
+            var limit = Math.Max(1, Math.Min(maxEntries, 200));
+            var errors = snapshot["errors"] as JArray ?? new JArray();
+            var warnings = snapshot["warnings"] as JArray ?? new JArray();
+            var returnedErrors = new JArray(errors.Take(limit));
+            var remaining = Math.Max(0, limit - returnedErrors.Count);
+            var returnedWarnings = new JArray(warnings.Take(remaining));
+            snapshot["errors"] = returnedErrors;
+            snapshot["warnings"] = returnedWarnings;
+            snapshot["truncated"] = errors.Count + warnings.Count > limit;
+            return snapshot;
         }
 
         internal static List<JObject> LoadEntries()
@@ -90,6 +144,135 @@ namespace VRCForge.Editor
             {
                 return new List<JObject>();
             }
+        }
+    }
+
+    /// <summary>
+    /// Bounded, read-only Unity Console snapshot shared by tools that must
+    /// report the exact editor evidence surrounding an operation. Unity does
+    /// not expose Console entries through a public API, so this follows the
+    /// same best-effort reflection boundary already used by CompileErrorReader.
+    /// </summary>
+    internal static class UnityConsoleSnapshotReader
+    {
+        private const int DefaultMaxEntries = 100;
+        private const int MaximumEntries = 200;
+        private const int MaximumMessageCharacters = 8000;
+
+        internal static JObject Capture(int maxEntries = DefaultMaxEntries)
+        {
+            var limit = Math.Max(1, Math.Min(maxEntries, MaximumEntries));
+            var snapshot = new JObject
+            {
+                ["schema"] = "vrcforge.unity_console_snapshot.v1",
+                ["capturedAt"] = DateTime.UtcNow.ToString("o"),
+                ["readable"] = false,
+                ["totalEntryCount"] = 0,
+                ["returnedEntryCount"] = 0,
+                ["truncated"] = false,
+                ["entries"] = new JArray(),
+            };
+            try
+            {
+                var editorAssembly = typeof(EditorApplication).Assembly;
+                var logEntriesType = editorAssembly.GetType("UnityEditor.LogEntries");
+                var logEntryType = editorAssembly.GetType("UnityEditor.LogEntry");
+                if (logEntriesType == null || logEntryType == null)
+                {
+                    snapshot["unavailableReason"] = "unity_console_types_unavailable";
+                    return snapshot;
+                }
+
+                var start = logEntriesType.GetMethod("StartGettingEntries", BindingFlags.Public | BindingFlags.Static);
+                var end = logEntriesType.GetMethod("EndGettingEntries", BindingFlags.Public | BindingFlags.Static);
+                var getEntry = logEntriesType.GetMethod("GetEntryInternal", BindingFlags.Public | BindingFlags.Static);
+                if (start == null || end == null || getEntry == null)
+                {
+                    snapshot["unavailableReason"] = "unity_console_methods_unavailable";
+                    return snapshot;
+                }
+
+                var messageField = logEntryType.GetField("message") ?? logEntryType.GetField("condition");
+                var fileField = logEntryType.GetField("file");
+                var lineField = logEntryType.GetField("line");
+                var modeField = logEntryType.GetField("mode");
+                var count = (int)start.Invoke(null, null);
+                snapshot["readable"] = true;
+                snapshot["totalEntryCount"] = count;
+                snapshot["truncated"] = count > limit;
+                var entries = new JArray();
+                try
+                {
+                    var firstIndex = Math.Max(0, count - limit);
+                    var entry = Activator.CreateInstance(logEntryType);
+                    for (var index = firstIndex; index < count; index++)
+                    {
+                        getEntry.Invoke(null, new[] { (object)index, entry });
+                        var rawMessage = messageField?.GetValue(entry)?.ToString() ?? string.Empty;
+                        var message = rawMessage.Length <= MaximumMessageCharacters
+                            ? rawMessage
+                            : rawMessage.Substring(0, MaximumMessageCharacters);
+                        var rawMode = modeField?.GetValue(entry);
+                        var mode = ToInt(rawMode);
+                        var modeText = rawMode?.ToString() ?? string.Empty;
+                        entries.Add(new JObject
+                        {
+                            ["consoleIndex"] = index,
+                            ["severity"] = Severity(mode, modeText),
+                            ["mode"] = mode,
+                            ["modeText"] = modeText,
+                            ["file"] = fileField?.GetValue(entry)?.ToString() ?? string.Empty,
+                            ["line"] = ToInt(lineField?.GetValue(entry)),
+                            ["message"] = message,
+                            ["messageTruncated"] = rawMessage.Length > MaximumMessageCharacters,
+                        });
+                    }
+                }
+                finally
+                {
+                    end.Invoke(null, null);
+                }
+                snapshot["entries"] = entries;
+                snapshot["returnedEntryCount"] = entries.Count;
+            }
+            catch (Exception exception)
+            {
+                snapshot["readable"] = false;
+                snapshot["unavailableReason"] = "unity_console_snapshot_failed";
+                snapshot["exceptionType"] = exception.GetType().FullName ?? exception.GetType().Name;
+                snapshot["exceptionMessage"] = exception.Message ?? string.Empty;
+            }
+            return snapshot;
+        }
+
+        private static int ToInt(object value)
+        {
+            try
+            {
+                return Convert.ToInt32(value ?? 0);
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static string Severity(int mode, string modeText)
+        {
+            var normalized = modeText ?? string.Empty;
+            if (normalized.IndexOf("Error", StringComparison.OrdinalIgnoreCase) >= 0
+                || normalized.IndexOf("Exception", StringComparison.OrdinalIgnoreCase) >= 0
+                || normalized.IndexOf("Assert", StringComparison.OrdinalIgnoreCase) >= 0
+                || (mode & (1 | 2 | 16 | 64 | 256 | 2048)) != 0)
+            {
+                return "error";
+            }
+            if (normalized.IndexOf("Warning", StringComparison.OrdinalIgnoreCase) >= 0
+                || (mode & (128 | 512 | 4096)) != 0)
+            {
+                return "warning";
+            }
+            return "log";
         }
     }
 

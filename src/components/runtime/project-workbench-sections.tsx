@@ -10,6 +10,7 @@ import { AgentTodoPanelEmbedded } from "./agent-todo-panel";
 import { RuntimeDiffFileRow, RuntimeInfoRow, RuntimeSection, StatusDot } from "./runtime-sidebar-ui";
 import {
   Box,
+  Bot,
   Database,
   FileText,
   Folder,
@@ -19,7 +20,7 @@ import {
   Server,
 } from "lucide-react";
 
-type ComponentStatus = { status: string; message?: string } | null | undefined;
+type ComponentStatus = { status: string; message?: string; detail?: unknown } | null | undefined;
 
 export type UserAttachmentSource = {
   id: string;
@@ -121,6 +122,7 @@ export function ProjectWorkbenchSections({
   unityBridgeComponent,
   unityInstanceComponent,
   unityToolsComponent,
+  externalAgentComponent,
   runtimeConnected,
   localizeHealthMessage,
   agentProgress,
@@ -144,6 +146,7 @@ export function ProjectWorkbenchSections({
   unityBridgeComponent: ComponentStatus;
   unityInstanceComponent: ComponentStatus;
   unityToolsComponent: ComponentStatus;
+  externalAgentComponent: ComponentStatus;
   runtimeConnected: boolean;
   localizeHealthMessage: (message?: string) => string;
   agentProgress: AgentProgress[];
@@ -333,6 +336,14 @@ export function ProjectWorkbenchSections({
                     label={t("workspace.core")}
                     value={backendValue}
                     suffix={<StatusDot status={backendStatus} />}
+                  />
+                </div>
+                <div data-vrcforge-status="external-agent">
+                  <RuntimeInfoRow
+                    icon={<Bot className="h-4 w-4" />}
+                    label={t("workspace.externalAgent")}
+                    value={componentValue(externalAgentComponent)}
+                    suffix={<StatusDot status={normalizedStatus(externalAgentComponent)} />}
                   />
                 </div>
                 <div data-vrcforge-status="mcp-core">

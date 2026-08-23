@@ -85,7 +85,7 @@ EXCLUDED_PACKAGE_ROOTS = (
     "Assets/VRCForge/Generated",
 )
 
-GUID_MANIFEST_SHA256 = "6bb92d68a99d648e3179a8de74320c8ae89b333a1a56105588d5edfde6734cbe"
+GUID_MANIFEST_SHA256 = "ef4a1102439197d740f4bc76442b63e0212ce5d753d1ae6872d01ec58e87cb1a"
 
 
 def test_non_editor_csharp_cannot_leak_unityeditor_references() -> None:
@@ -129,7 +129,7 @@ def test_public_guid_manifest_pins_the_published_1_3_6_common_paths() -> None:
     assert manifest["schema"] == "vrcforge.unitypackage-guid-manifest.v1"
     entries = manifest["entries"]
     entry_map = {entry["path"]: entry["guid"] for entry in entries}
-    assert len(entries) == 73
+    assert len(entries) == 82
     assert {path: entry_map[path] for path in PUBLISHED_1_3_6_COMMON_GUIDS} == PUBLISHED_1_3_6_COMMON_GUIDS
     assert {path: entry_map[path] for path in FROZEN_SOURCE_META_GUIDS} == FROZEN_SOURCE_META_GUIDS
     assert {path: entry_map[path] for path in RELEASE_PAIRING_ASSET_GUIDS} == RELEASE_PAIRING_ASSET_GUIDS
@@ -155,6 +155,7 @@ def test_unitypackage_builder_does_not_write_asset_for_folders(tmp_path: Path) -
     empty_private.mkdir(parents=True)
     (source / "Generated").mkdir()
     output = tmp_path / "VRCForge.unitypackage"
+    portable_root_meta = source.parent / "VRCForge.meta"
 
     subprocess.run(
         [
@@ -168,6 +169,8 @@ def test_unitypackage_builder_does_not_write_asset_for_folders(tmp_path: Path) -
             str(source),
             "-OutputPath",
             str(output),
+            "-RootMetaOutputPath",
+            str(portable_root_meta),
         ],
         cwd=repo_root,
         check=True,
@@ -179,6 +182,13 @@ def test_unitypackage_builder_does_not_write_asset_for_folders(tmp_path: Path) -
     unpacked.mkdir()
     with tarfile.open(output, mode="r:gz") as archive:
         archive.extractall(unpacked)
+
+    packaged_root_entry = unpacked / PUBLISHED_1_3_6_COMMON_GUIDS["Assets/VRCForge"]
+    assert portable_root_meta.read_bytes() == (packaged_root_entry / "asset.meta").read_bytes()
+    assert (
+        f'guid: {PUBLISHED_1_3_6_COMMON_GUIDS["Assets/VRCForge"]}'
+        in portable_root_meta.read_text(encoding="utf-8")
+    )
 
     folder_entries = []
     file_entries = []
@@ -468,8 +478,8 @@ def test_real_unitypackage_bundles_first_party_core_and_all_product_sources(tmp_
     manifest = json.loads((repo_root / "packaging" / "unitypackage_guid_manifest.json").read_text(encoding="utf-8"))
     manifest_guids = {entry["path"]: entry["guid"] for entry in manifest["entries"]}
     assert packaged_guids == manifest_guids
-    assert len(packaged_paths) == 73
-    assert len(file_paths) == 66
+    assert len(packaged_paths) == 82
+    assert len(file_paths) == 75
     assert len(directory_paths) == 7
     assert not any(
         path == excluded or path.startswith(f"{excluded}/")

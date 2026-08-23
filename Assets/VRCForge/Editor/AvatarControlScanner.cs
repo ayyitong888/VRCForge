@@ -53,7 +53,6 @@ namespace VRCForge.Editor
                     .Select(group => group.First())
                     .OrderBy(item => SourceRank(item.source))
                     .ThenBy(item => item.displayName, StringComparer.OrdinalIgnoreCase)
-                    .Take(120)
                     .ToList();
                 var outputPath = (@params?["outputPath"]?.ToString() ?? string.Empty).Trim();
                 var payload = new
@@ -144,21 +143,9 @@ namespace VRCForge.Editor
         private static List<ControlItem> ReadExpressionMenuItems(Component descriptor, Dictionary<string, ParameterInfo> parameterMap)
         {
             var allControls = new List<ControlItem>();
-            var filtered = new List<ControlItem>();
             var rootMenu = GetMemberValue(descriptor, "expressionsMenu");
             TraverseMenu(rootMenu, "", parameterMap, allControls, new HashSet<int>(), 0);
-
-            foreach (var item in allControls)
-            {
-                if (IsWardrobeCandidate(item.displayName, item.parameterName, item.menuPath))
-                {
-                    filtered.Add(item);
-                }
-            }
-
-            return filtered.Count > 0
-                ? filtered
-                : allControls.Where(item => !string.IsNullOrWhiteSpace(item.parameterName)).Take(60).ToList();
+            return allControls;
         }
 
         private static void TraverseMenu(
@@ -191,6 +178,7 @@ namespace VRCForge.Editor
                 var name = Convert.ToString(GetMemberValue(control, "name"), CultureInfo.InvariantCulture) ?? "";
                 var type = Convert.ToString(GetMemberValue(control, "type"), CultureInfo.InvariantCulture) ?? "";
                 var parameterName = ReadControlParameterName(control);
+                var subParameters = ReadControlSubParameterNames(control);
                 var menuPath = string.IsNullOrWhiteSpace(parentPath) ? name : $"{parentPath}/{name}";
                 var parameter = !string.IsNullOrWhiteSpace(parameterName) && parameterMap.TryGetValue(parameterName, out var info)
                     ? info
@@ -208,6 +196,7 @@ namespace VRCForge.Editor
                         active = parameter != null && parameter.defaultValue >= 0.5f,
                         canToggleSceneObject = false,
                         parameterName = parameterName,
+                        subParameters = subParameters,
                         controlType = type,
                         valueType = parameter?.valueType ?? "",
                         defaultValue = parameter?.defaultValue ?? 0f,
@@ -289,6 +278,22 @@ namespace VRCForge.Editor
             }
 
             return Convert.ToString(GetMemberValue(parameter, "name"), CultureInfo.InvariantCulture) ?? "";
+        }
+
+        private static string[] ReadControlSubParameterNames(object control)
+        {
+            var subParameters = GetMemberValue(control, "subParameters") as IEnumerable;
+            if (subParameters == null)
+            {
+                return Array.Empty<string>();
+            }
+
+            return subParameters
+                .Cast<object>()
+                .Select(item => Convert.ToString(GetMemberValue(item, "name"), CultureInfo.InvariantCulture) ?? "")
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
         }
 
         private static bool IsWardrobeCandidate(params string[] values)
@@ -466,6 +471,7 @@ namespace VRCForge.Editor
             public bool active;
             public bool canToggleSceneObject;
             public string parameterName;
+            public string[] subParameters = Array.Empty<string>();
             public string controlType;
             public string valueType;
             public float defaultValue;

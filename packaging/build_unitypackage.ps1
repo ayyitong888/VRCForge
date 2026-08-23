@@ -1,6 +1,7 @@
 param(
     [string]$SourceAssetsPath = "Assets\VRCForge",
-    [string]$OutputPath = "dist\release\VRCForge.unitypackage"
+    [string]$OutputPath = "dist\release\VRCForge.unitypackage",
+    [string]$RootMetaOutputPath = ""
 )
 
 Set-StrictMode -Version Latest
@@ -16,6 +17,13 @@ $resolvedOutput = if ([System.IO.Path]::IsPathRooted($OutputPath)) {
     $OutputPath
 } else {
     Join-Path $repoRoot $OutputPath
+}
+$resolvedRootMetaOutput = if ([string]::IsNullOrWhiteSpace($RootMetaOutputPath)) {
+    $null
+} elseif ([System.IO.Path]::IsPathRooted($RootMetaOutputPath)) {
+    $RootMetaOutputPath
+} else {
+    Join-Path $repoRoot $RootMetaOutputPath
 }
 
 if (-not (Test-Path -LiteralPath $resolvedSource)) {
@@ -295,6 +303,20 @@ try {
             -SourcePath $documentationEntries[$documentationPath] `
             -IsDirectory:$false `
             -UseSourceMeta:$false
+    }
+
+    if ($null -ne $resolvedRootMetaOutput) {
+        $packagedRootMeta = Join-Path `
+            (Join-Path $tempRoot (Get-PackageAssetGuid "Assets/VRCForge")) `
+            "asset.meta"
+        $rootMetaParent = Split-Path -Parent $resolvedRootMetaOutput
+        if (-not [string]::IsNullOrWhiteSpace($rootMetaParent)) {
+            New-Item -ItemType Directory -Force -Path $rootMetaParent | Out-Null
+        }
+        Copy-Item -LiteralPath $packagedRootMeta -Destination $resolvedRootMetaOutput -Force
+        if ((Get-FileSha256Hex $resolvedRootMetaOutput) -cne (Get-FileSha256Hex $packagedRootMeta)) {
+            throw "Portable Unity Core root meta does not match the Unity package root meta."
+        }
     }
 
     $seenGuids = @{}

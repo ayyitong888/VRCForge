@@ -15,6 +15,7 @@ from package_install_workflow_service import (
     resolve_project_path,
     select_sealed_vpm_version,
 )
+from prepared_unity_execution import install_prepared_calls
 
 
 ROOT = Path(__file__).parents[1]
@@ -84,6 +85,55 @@ def test_public_project_path_resolution_preserves_explicit_path_priority() -> No
     assert resolve_project_path({"projectPath": "E:/explicit"}, "E:/selected") == "E:/explicit"
     assert resolve_project_path({"project_path": "E:/snake"}, "E:/selected") == "E:/snake"
     assert resolve_project_path({}, "E:/selected") == "E:/selected"
+
+
+def test_sealed_vpm_cli_identity_is_a_read_source_not_an_outside_project_write(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "UnityProject"
+    project.mkdir()
+    cli = tmp_path / "managed-tools" / "vrc-get.exe"
+    cli.parent.mkdir()
+    cli.write_bytes(b"sealed-cli")
+    arguments = install_prepared_calls(
+        {
+            "projectRoot": str(project),
+            "projectPath": str(project),
+            "packageId": "nadena.dev.modular-avatar",
+        },
+        [
+            (
+                "external.vpm.install",
+                {
+                    "argv": [str(cli), "install", "-p", str(project)],
+                    "cwd": str(project),
+                    "timeoutSeconds": 300,
+                },
+            )
+        ],
+        {
+            "binary": {
+                "identity": {"path": str(cli), "size": cli.stat().st_size},
+                "sha256": "fixed-test-digest",
+            },
+            "project": {"path": str(project)},
+        },
+    )
+
+    reason = dashboard_server.AGENT_GATEWAY.approval_transactions._write_auto_manual_approval_reason(  # noqa: SLF001
+        "vrcforge_install_vpm_package",
+        arguments,
+        {"projectPath": str(project)},
+    )
+
+    assert reason == ""
+    assert "outside the selected project" in (
+        dashboard_server.AGENT_GATEWAY.approval_transactions._write_auto_manual_approval_reason(  # noqa: SLF001
+            "vrcforge_install_vpm_package",
+            {**arguments, "outputPath": str(tmp_path / "outside.asset")},
+            {"projectPath": str(project)},
+        )
+    )
 
 
 def test_vpm_semver_selection_preserves_stable_and_exact_prerelease_policy() -> None:

@@ -199,7 +199,7 @@ def run_matrix(
     elif not evidence_valid or not trusted_receipt_source:
         not_accepted_reason = "one-use Dashboard provider receipts were missing or invalid"
     elif require_production_tools and not production_snapshot_valid:
-        not_accepted_reason = "the visible tool snapshot was not the exact 64-tool Dashboard/Core contract"
+        not_accepted_reason = "the visible tool snapshot was not the exact 65-tool Dashboard/Core contract"
     else:
         not_accepted_reason = ""
     return {

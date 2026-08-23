@@ -188,6 +188,8 @@ def test_manager_discovery_preserves_priority_shape_and_never_starts_a_process(
     ]
     assert managers[0]["source"] == "vrcforge-managed"
     assert managers[0]["supportsCommandInstall"] is True
+    assert managers[1]["name"] == "vpm"
+    assert managers[1]["supportsCommandInstall"] is False
     assert managers[-1]["supportsUiHandoff"] is True
     assert all("\\" not in item["path"] for item in managers)
 

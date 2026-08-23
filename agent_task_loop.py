@@ -49,6 +49,7 @@ _VERIFICATION_PROFILES: dict[str, tuple[tuple[str, Any], ...]] = {
         ("sceneSaved", True),
         ("consoleVerified", True),
     ),
+    "unity_asset_write_console": (("consoleVerified", True),),
     "multi_angle_visual": (
         ("visualVerified", True),
         ("coverageComplete", True),
@@ -201,7 +202,7 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
                 bounded_error[key] = text
         if isinstance(error.get("retainImages"), bool):
             bounded_error["retainImages"] = error["retainImages"]
-    return {
+    result = {
         "status": _bounded_text(value.get("status"), 40),
         "summary": _bounded_text(value.get("summary"), 600),
         "error": bounded_error,
@@ -230,6 +231,57 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
             else {"state": "not_required", "checks": []}
         ),
     }
+    diagnostics = value.get("diagnostics")
+    source_error = (
+        diagnostics.get("sourceError")
+        if isinstance(diagnostics, Mapping)
+        and isinstance(diagnostics.get("sourceError"), Mapping)
+        else None
+    )
+    if isinstance(source_error, Mapping):
+        bounded_source: dict[str, Any] = {}
+        for key in (
+            "schema",
+            "tool",
+            "operationKind",
+            "errorCode",
+            "error",
+            "failureLayer",
+            "failurePhase",
+            "toolRoutingStarted",
+            "mutationStarted",
+            "committed",
+            "commitState",
+            "commitStateKnown",
+            "retryable",
+            "checkpointRecoveryRequired",
+            "temporaryCleanupRequired",
+            "checkpointId",
+            "recoveryId",
+        ):
+            item = source_error.get(key)
+            if isinstance(item, str):
+                bounded_source[key] = _bounded_text(item, 600)
+            elif item is None or isinstance(item, (bool, int, float)):
+                bounded_source[key] = item
+        result["diagnostics"] = {
+            "schema": "vrcforge.internal_tool_diagnostics.v1",
+            "sourceError": bounded_source,
+        }
+    cause = value.get("cause")
+    if isinstance(cause, Mapping):
+        bounded_cause = {
+            key: (_bounded_text(item, 600) if isinstance(item, str) else item)
+            for key, item in cause.items()
+            if key in {
+                "layer", "phase", "category", "code", "message",
+                "mutationStarted", "committed", "commitState",
+            }
+            and (isinstance(item, (str, bool, int, float)) or item is None)
+        }
+        if bounded_cause:
+            result["cause"] = bounded_cause
+    return result
 
 
 def _bounded_action(value: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -753,6 +805,41 @@ def prepare_approval_task_continuation(
         "execution": dict(execution),
         "terminalPlan": terminal_plan,
     }
+    if task_status == "failed" and not revision_requested:
+        execution_result = execution.get("result")
+        execution_result = execution_result if isinstance(execution_result, Mapping) else {}
+        write_failure = execution.get("writeFailure")
+        write_failure = write_failure if isinstance(write_failure, Mapping) else {}
+        checkpoint = execution.get("checkpoint")
+        checkpoint = checkpoint if isinstance(checkpoint, Mapping) else {}
+        failure_result: dict[str, Any] = {}
+        for key in (
+            "status",
+            "error",
+            "code",
+            "failureLayer",
+            "mutationStarted",
+            "committed",
+            "commitState",
+            "checkpointRecoveryRequired",
+            "temporaryCleanupRequired",
+        ):
+            value = execution_result.get(key)
+            if isinstance(value, str):
+                failure_result[key] = _bounded_text(value, 600)
+            elif value is None or isinstance(value, (bool, int, float, Mapping)):
+                failure_result[key] = value
+        if "error" not in failure_result:
+            failure_result["error"] = _bounded_text(execution.get("error"), 600)
+        task_continuation["plannerObservation"] = {
+            "tool": _bounded_text(context.get("tool"), 160),
+            "kind": "write_failure_diagnosis",
+            "status": "failed",
+            "result": failure_result,
+            "writeFailure": dict(write_failure),
+            "checkpointId": _bounded_text(checkpoint.get("id"), 180),
+            "outcome": _bounded_outcome(outcome),
+        }
     if revision_requested:
         task_continuation["plannerObservation"] = {
             "tool": _bounded_text(context.get("tool"), 160),

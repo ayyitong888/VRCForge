@@ -20,8 +20,11 @@ from runtime_planner_service import (
     PlannerTurnMetadata,
     RuntimePlannerService,
     latest_loop_step_needs_model_correction,
+    parse_llm_plan_response,
     planner_tool_input_schema,
+    planner_tool_schema_prompt,
     planner_safe_tool_result_fields,
+    bounded_planner_tool_schema,
     validate_planner_tool_arguments,
 )
 
@@ -257,6 +260,85 @@ def test_model_observation_includes_bounded_canonical_tool_outcome() -> None:
     assert "nextActions=Wait for compilation" in observation
     assert "retryable=True" in observation
     assert "privateDump" not in observation
+
+
+def test_model_observation_includes_precise_internal_failure_facts_without_raw_dump() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_get_compile_errors",
+            "status": "failed",
+            "result": {"privateDump": "must-not-enter-model-context"},
+            "outcome": {
+                "status": "failed",
+                "summary": "Core descriptor is invalid.",
+                "verification": {"state": "not_required"},
+                "error": {
+                    "type": "tool",
+                    "code": "unity_core_contract_invalid",
+                    "retryable": False,
+                },
+                "diagnostics": {
+                    "schema": "vrcforge.internal_tool_diagnostics.v1",
+                    "sourceError": {
+                        "failureLayer": "unity_core_pre_route",
+                        "failurePhase": "core_handshake",
+                        "toolRoutingStarted": False,
+                        "mutationStarted": False,
+                        "committed": False,
+                        "commitState": "not_started",
+                        "checkpointRecoveryRequired": False,
+                        "temporaryCleanupRequired": False,
+                        "rawResult": {"privateDump": "must-not-enter-model-context"},
+                    },
+                },
+            },
+        }
+    )
+
+    assert "errorCode=unity_core_contract_invalid" in observation
+    assert "failureLayer=unity_core_pre_route" in observation
+    assert "failurePhase=core_handshake" in observation
+    assert "toolRoutingStarted=False" in observation
+    assert "mutationStarted=False" in observation
+    assert "committed=False" in observation
+    assert "commitState=not_started" in observation
+    assert "privateDump" not in observation
+
+
+def test_internal_tool_block_observation_keeps_compact_indices_without_schemas() -> None:
+    observation = service()._llm_loop_step_observation(
+        {
+            "tool": "vrcforge_list_internal_tool_blocks",
+            "status": "executed",
+            "result": {
+                "ok": True,
+                "loadedBlocks": ["core"],
+                "tree": {
+                    "children": [
+                        {"index": "1", "name": "core", "loaded": True},
+                        {"index": "8", "name": "unity", "expandable": True},
+                    ]
+                },
+                "blocks": [
+                    {
+                        "index": "8.9",
+                        "name": "unity/diagnostics",
+                        "toolNames": ["vrcforge_get_compile_errors", "vrcforge_unity_status"],
+                    }
+                ],
+                "privateSchema": {"must": "not enter model context"},
+            },
+            "outcome": {"status": "ok", "summary": "Listed internal tool blocks."},
+        }
+    )
+
+    assert "loadedBlocks=core" in observation
+    assert "toolBlockTree=1:core(loaded) | 8:unity(expand)" in observation
+    assert "8.9:unity/diagnostics[vrcforge_get_compile_errors,vrcforge_unity_status]" in observation
+    assert "skill_tool=load_internal_tool_block" in observation
+    assert "skill_params={\"block\":\"<exact block name>\"}" in observation
+    assert "privateSchema" not in observation
+    assert len(observation) <= 8_000
 
 
 def test_model_observation_keeps_bounded_know_yourself_guidance() -> None:
@@ -556,6 +638,68 @@ def test_shallow_tool_schema_validates_required_type_enum_and_closed_extras() ->
     )
 
 
+def test_bounded_schema_preserves_array_items_and_discriminated_required_branches() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["operationKind", "sources"],
+        "oneOf": [
+            {
+                "properties": {"operationKind": {"const": "game_object"}},
+                "required": ["targetObjectPath", "newName"],
+            },
+            {
+                "properties": {"operationKind": {"const": "parameter"}},
+                "required": ["oldParameterName", "newParameterName"],
+            },
+        ],
+        "properties": {
+            "operationKind": {"type": "string", "enum": ["game_object", "parameter"]},
+            "sources": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["sourcePath", "weight"],
+                    "properties": {
+                        "sourcePath": {"type": "string"},
+                        "weight": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    },
+                },
+            },
+            "targetObjectPath": {"type": "string"},
+            "newName": {"type": "string"},
+            "oldParameterName": {"type": "string"},
+            "newParameterName": {"type": "string"},
+        },
+    }
+
+    bounded = bounded_planner_tool_schema(schema)
+    assert bounded["properties"]["sources"]["items"]["required"] == ["sourcePath", "weight"]
+    assert bounded["oneOf"][0]["properties"]["operationKind"]["const"] == "game_object"
+    assert validate_planner_tool_arguments(
+        bounded,
+        {
+            "operationKind": "game_object",
+            "sources": [{"sourcePath": "Avatar/Head", "weight": 0.5}],
+            "targetObjectPath": "Avatar/Old",
+            "newName": "New",
+        },
+    )["ok"] is True
+    assert validate_planner_tool_arguments(
+        bounded,
+        {"operationKind": "game_object", "sources": [{"wrong": 1}]},
+    )["ok"] is False
+    assert validate_planner_tool_arguments(
+        bounded,
+        {"operationKind": "game_object", "sources": []},
+    )["ok"] is False
+    prompt = planner_tool_schema_prompt(bounded)
+    assert "sources:array<{sourcePath:string,weight:number}>" in prompt
+    assert "operationKind=game_object=>targetObjectPath+newName" in prompt
+
+
 def test_shallow_schema_allows_unknown_fields_unless_explicitly_closed() -> None:
     schema = {
         "type": "object",
@@ -617,6 +761,49 @@ def test_llm_tool_schema_failure_returns_a_correctable_non_execution_plan() -> N
     assert plan["argumentValidation"]["issues"][0]["code"] == "enum"
     assert "mode:string[enum=safe|force]" in model.prompts[0]
     assert "additionalProperties=false" in model.prompts[0]
+
+
+def test_internal_planner_prompt_only_expands_loaded_tool_blocks() -> None:
+    core_tool = PlannerTool(
+        name="list_internal_tool_blocks",
+        description="List the indexed internal tool tree.",
+        category="read/debug",
+        block="core",
+    )
+    file_tool = PlannerTool(
+        name="read_text_file",
+        description="Read one text file.",
+        category="read/debug",
+        block="files",
+    )
+    unity_tool = PlannerTool(
+        name="unity_scan_vrcfury",
+        description="Scan VRCFury.",
+        category="read/debug",
+        block="unity/integrations",
+    )
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(core_tool, file_tool, unity_tool),
+            routable_tools=(core_tool, file_tool, unity_tool),
+        )
+    )
+    model = FakeModel(PlannerModelResult('{"action":"reply","reply":"ok"}'))
+
+    service(catalog=catalog, model=model).plan_agent_turn(
+        "inspect",
+        {"_internalToolBlocks": ["core", "files"]},
+        {},
+    )
+
+    prompt = model.prompts[0]
+    assert "list_internal_tool_blocks" in prompt
+    assert "read_text_file" in prompt
+    assert "unity_scan_vrcfury" not in prompt
+    assert "loaded internal tool blocks: core, files" in prompt
+    assert "call it with action=skill" in prompt
+    assert "never in action" in prompt
+    assert "action 只能是 skill、shell、reply 或 enter_execution" in prompt
 
 
 
@@ -1227,15 +1414,185 @@ def test_invalid_model_actions_fail_closed_instead_of_claiming_success(response_
     assert plan is not None
     assert plan["planner"] == "llm"
     assert plan["plannerFailed"] is True
-    assert plan["plannerFailure"] == {
-        "code": "planner_invalid_response",
-        "phase": "initial",
-        "retryable": True,
-    }
+    failure = plan["plannerFailure"]
+    assert failure["code"] == "planner_invalid_response"
+    assert failure["phase"] == "initial"
+    assert failure["retryable"] is True
+    if response_text:
+        assert failure["invalidResponse"]["preview"] == response_text
+        assert failure["invalidResponse"]["stage"] == (
+            "json_object_parse" if response_text in {"not-json", "[]"} else "action_validation"
+        )
+    else:
+        assert "invalidResponse" not in failure
     assert plan["nextStep"] == "planner_failed"
     assert plan["skillNeeded"] is False
     assert plan["shellNeeded"] is False
     assert "done" not in str(plan.get("reply") or "")
+
+
+def test_registered_tool_name_in_action_is_refed_as_one_precise_correction() -> None:
+    block_tool = PlannerTool(
+        name="vrcforge_load_internal_tool_block",
+        description="Load one indexed internal tool block.",
+        category="read/debug",
+        input_schema={
+            "type": "object",
+            "properties": {"block": {"type": "string"}},
+            "required": ["block"],
+            "additionalProperties": False,
+        },
+    )
+    catalog = FakeCatalog(
+        planning=PlannerCatalogSnapshot(
+            visible_tools=(block_tool,),
+            routable_tools=(block_tool,),
+        )
+    )
+    planner = service(
+        catalog=catalog,
+        model=FakeModel(
+            PlannerModelResult(
+                json.dumps(
+                    {
+                        "action": "load_internal_tool_block",
+                        "skill_tool": "load_internal_tool_block",
+                        "skill_params": {"block_index": 8},
+                    }
+                )
+            )
+        ),
+    )
+
+    plan = planner._llm_plan_agent_turn("inspect", {}, [])
+
+    assert plan is not None
+    assert plan["continueLoop"] is True
+    assert plan["nextStep"] == "planner_invalid_response"
+    validation = plan["argumentValidation"]
+    assert validation["tool"] == "vrcforge_load_internal_tool_block"
+    assert validation["actionKind"] == "skill"
+    assert {item["path"] for item in validation["issues"]} >= {
+        "action",
+        "skill_tool",
+        "block",
+        "block_index",
+    }
+
+
+def test_provider_native_tool_call_uses_existing_skill_validation_path() -> None:
+    block_tool = PlannerTool(
+        name="vrcforge_load_internal_tool_block",
+        description="Load one indexed internal tool block.",
+        category="read/debug",
+        input_schema={
+            "type": "object",
+            "properties": {"block": {"type": "string"}},
+            "required": ["block"],
+            "additionalProperties": False,
+        },
+    )
+    planner = service(
+        catalog=FakeCatalog(
+            planning=PlannerCatalogSnapshot(
+                visible_tools=(block_tool,),
+                routable_tools=(block_tool,),
+            )
+        ),
+        model=FakeModel(
+            result=PlannerModelResult(
+                text=(
+                    "<tool_call><function=vrcforge_load_internal_tool_block>"
+                    "<parameter=block>\"unity/diagnostics\"</parameter>"
+                    "</function></tool_call>"
+                )
+            )
+        ),
+    )
+
+    plan = planner._llm_plan_agent_turn("inspect compile errors", {}, [])
+
+    assert plan is not None
+    assert plan["nextStep"] == "call_skill"
+    assert plan["skillTool"] == "vrcforge_load_internal_tool_block"
+    assert plan["skillParams"] == {"block": "unity/diagnostics"}
+
+
+def test_provider_native_tool_call_allows_plain_prose_around_one_call() -> None:
+    payload = parse_llm_plan_response(
+        "好的，我先加载工具。<tool_call><function=load_internal_tool_block>"
+        "<parameter=block>unity/diagnostics</parameter></function></tool_call>继续。"
+    )
+
+    assert payload == {
+        "action": "skill",
+        "skill_tool": "load_internal_tool_block",
+        "skill_params": {"block": "unity/diagnostics"},
+    }
+
+
+def test_provider_native_skill_selector_wrapper_uses_existing_skill_validation_path() -> None:
+    block_tool = PlannerTool(
+        name="vrcforge_load_internal_tool_block",
+        description="Load one indexed internal tool block.",
+        category="read/debug",
+        input_schema={
+            "type": "object",
+            "properties": {"block": {"type": "string"}},
+            "required": ["block"],
+            "additionalProperties": False,
+        },
+    )
+    planner = service(
+        catalog=FakeCatalog(
+            planning=PlannerCatalogSnapshot(
+                visible_tools=(block_tool,),
+                routable_tools=(block_tool,),
+            )
+        ),
+        model=FakeModel(
+            result=PlannerModelResult(
+                text=(
+                    "<tool_call><function=skill_tool_selector>"
+                    "<parameter=skill_tool>vrcforge_load_internal_tool_block</parameter>"
+                    "<parameter=skill_params>{\"block\":\"unity/diagnostics\"}</parameter>"
+                    "<parameter=summary>Load the exact diagnostics leaf.</parameter>"
+                    "</function></tool_call>"
+                )
+            )
+        ),
+    )
+
+    plan = planner._llm_plan_agent_turn("inspect compile errors", {}, [])
+
+    assert plan is not None
+    assert plan["nextStep"] == "call_skill"
+    assert plan["skillTool"] == "vrcforge_load_internal_tool_block"
+    assert plan["skillParams"] == {"block": "unity/diagnostics"}
+
+
+@pytest.mark.parametrize(
+    "response_text",
+    [
+        (
+            "<tool_call><function=vrcforge_load_internal_tool_block>"
+            "<parameter=block>unity/diagnostics</parameter></function></tool_call>"
+            "<tool_call><function=vrcforge_get_goal></function></tool_call>"
+        ),
+        (
+            "<tool_call><function=vrcforge_load_internal_tool_block>"
+            "<parameter=block>files</parameter><parameter=block>unity/diagnostics</parameter>"
+            "</function></tool_call>"
+        ),
+        (
+            "<tool_call><function=vrcforge_load_internal_tool_block>"
+            "<parameter=block><nested>unity/diagnostics</nested></parameter>"
+            "</function></tool_call>"
+        ),
+    ],
+)
+def test_provider_native_tool_call_rejects_ambiguous_or_nested_payloads(response_text: str) -> None:
+    assert parse_llm_plan_response(response_text) is None
 
 
 def test_llm_shell_plan_preserves_bounded_process_options_and_documents_them() -> None:
@@ -1301,6 +1658,10 @@ def test_post_tool_provider_failure_preserves_result_context_without_fake_discon
         "code": "provider_connection_failed",
         "phase": "post_tool",
         "retryable": True,
+        "providerError": {
+            "type": "RuntimeError",
+            "message": "upstream stream ended token=<redacted>",
+        },
     }
     assert plan["providerConnected"] is True
     assert plan["nextStep"] == "planner_failed"

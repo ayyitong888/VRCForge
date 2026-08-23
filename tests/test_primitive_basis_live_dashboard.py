@@ -11,6 +11,14 @@ from fastapi.testclient import TestClient
 
 import dashboard_server
 import primitive_basis_live_runtime as live_runtime
+from unity_mcp_core_client import MODERN_PROTOCOL_VERSION, TRANSPORT_SCHEMA
+from unity_mcp_tool_contract import (
+    CORE_IDENTITY,
+    EXPECTED_TOOL_COUNT,
+    HANDSHAKE_PROTOCOL,
+    PRODUCT_VERSION,
+    TOOL_CONTRACT_VERSION,
+)
 
 
 def configure_state(monkeypatch, project: Path, settings_path: Path) -> None:
@@ -20,10 +28,16 @@ def configure_state(monkeypatch, project: Path, settings_path: Path) -> None:
     descriptor_path.write_text(
         json.dumps(
             {
-                "schema": "vrcforge.mcp.transport.v2",
+                "schema": TRANSPORT_SCHEMA,
                 "transport": "tcp-newline-jsonrpc",
-                "protocolVersion": "2026-07-28",
-                "supportedProtocolVersions": ["2026-07-28"],
+                "protocolVersion": MODERN_PROTOCOL_VERSION,
+                "supportedProtocolVersions": [MODERN_PROTOCOL_VERSION],
+                "minimumProtocolVersion": MODERN_PROTOCOL_VERSION,
+                "maximumProtocolVersion": MODERN_PROTOCOL_VERSION,
+                "coreIdentity": CORE_IDENTITY,
+                "handshakeProtocol": HANDSHAKE_PROTOCOL,
+                "productVersion": PRODUCT_VERSION,
+                "toolContractVersion": TOOL_CONTRACT_VERSION,
                 "authMode": "bearer-per-request",
                 "executionPolicy": "read-direct-app-process-approved-writes",
                 "host": "127.0.0.1",
@@ -32,8 +46,9 @@ def configure_state(monkeypatch, project: Path, settings_path: Path) -> None:
                 "instanceId": "core-instance-1",
                 "processId": 12345,
                 "projectPath": raw_project_path,
-                "projectHash": hashlib.sha256(raw_project_path.encode("utf-8")).hexdigest(),
-                "toolCount": 64,
+                "projectId": hashlib.sha256(raw_project_path.encode("utf-8")).hexdigest(),
+                "projectIdSource": "normalized_project_path_sha256",
+                "toolCount": EXPECTED_TOOL_COUNT,
             }
         ),
         encoding="utf-8",

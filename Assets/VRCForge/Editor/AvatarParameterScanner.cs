@@ -38,20 +38,28 @@ namespace VRCForge.Editor
                 var floatCount = parameters.Count(item => string.Equals(item.valueType, "Float", StringComparison.OrdinalIgnoreCase));
                 var totalCost = parameters.Sum(item =>
                     string.Equals(item.valueType, "Bool", StringComparison.OrdinalIgnoreCase) ? 1 : 8);
+                var mergedParameterUsage = NdmfParameterUsageBridge.Inspect(descriptor.gameObject);
                 var outputPath = (@params?["outputPath"]?.ToString() ?? string.Empty).Trim();
                 var payload = new
                 {
                     avatarPath = GetTransformPath(descriptor.transform),
                     avatarName = descriptor.name,
-                    boolCount,
-                    intCount,
-                    floatCount,
-                    totalParameters = parameters.Count,
-                    totalEstimatedCost = totalCost,
-                    parameterNames = parameters,
+                    inspectionStage = "ndmf_parameter_introspection",
+                    sourceDescriptorUsage = new
+                    {
+                        boolCount,
+                        intCount,
+                        floatCount,
+                        totalParameters = parameters.Count,
+                        totalBitUsage = totalCost,
+                        parameterNames = parameters
+                    },
+                    mergedParameterUsage,
                     suggestionCount = suggestions.Count,
                     suggestions,
-                    note = "Suggestions are heuristic only. Review animator conditions and menu bindings before changing parameter types."
+                    note = mergedParameterUsage.available
+                        ? "Merged usage uses the same NDMF ParameterInfo.ForUI calculation as MA Information. Final build verification remains a separate check."
+                        : "Merged parameter usage is unavailable; source Descriptor values must not be presented as the final merged total."
                 };
                 var jsonPath = WriteJsonIfRequested(outputPath, payload);
                 var response = JObject.FromObject(payload);
@@ -61,7 +69,9 @@ namespace VRCForge.Editor
                 }
 
                 return VRCForgeToolResult.Completed(
-                    $"Scanned {parameters.Count} avatar parameter(s).",
+                    mergedParameterUsage.available
+                        ? $"Scanned {parameters.Count} source parameter(s) and {mergedParameterUsage.totalParameters} merged parameter declaration(s)."
+                        : $"Scanned {parameters.Count} source parameter(s); merged usage is unavailable.",
                     response);
             }
             catch (Exception ex)

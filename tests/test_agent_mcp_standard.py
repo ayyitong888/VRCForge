@@ -53,7 +53,13 @@ def test_deepseek_harness_sdk_initialize_list_and_call() -> None:
     called = router.handle(
         {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "echo", "arguments": {"value": "ok"}}}
     )
-    assert called["result"]["structuredContent"] == {"ok": True, "name": "echo", "arguments": {"value": "ok"}}
+    structured = called["result"]["structuredContent"]
+    assert {key: structured[key] for key in ("ok", "name", "arguments")} == {
+        "ok": True,
+        "name": "echo",
+        "arguments": {"value": "ok"},
+    }
+    assert structured["outcome"]["status"] == "ok"
     assert called["result"]["isError"] is False
 
 
@@ -79,10 +85,46 @@ def test_standard_stdio_ignores_initialized_notification_and_survives_bad_input(
     assert output[2]["result"] == {}
 
 
+def test_standard_stdio_notifies_client_when_tool_blocks_change() -> None:
+    revision = {"value": 0}
+
+    def call_tool(name, _arguments):
+        assert name == "load_block"
+        revision["value"] += 1
+        return {"ok": True, "toolListChanged": True}
+
+    router = McpStandardRouter(
+        lambda: [{"name": "load_block"}],
+        call_tool,
+        tool_list_revision=lambda: revision["value"],
+    )
+    source = io.StringIO(
+        "\n".join(
+            [
+                json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": LATEST_PROTOCOL_VERSION, "capabilities": {}, "clientInfo": {"name": "blocks", "version": "1"}}}),
+                json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}),
+                json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "load_block", "arguments": {}}}),
+                "",
+            ]
+        )
+    )
+    sink = io.StringIO()
+
+    assert run_standard_stdio_loop(router, input_stream=source, output_stream=sink) == 0
+    output = [json.loads(line) for line in sink.getvalue().splitlines()]
+    assert output[0]["result"]["capabilities"] == {"tools": {"listChanged": True}}
+    assert output[1]["result"]["structuredContent"]["toolListChanged"] is True
+    assert output[2] == {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+
+
 def test_standard_profile_is_explicit_and_fails_closed() -> None:
     router = _router()
     before_initialize = router.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
     assert before_initialize["error"]["code"] == -32002
+    assert before_initialize["error"]["data"]["schema"] == "vrcforge.external_tool_error.v1"
+    assert before_initialize["error"]["data"]["failureLayer"] == "external_mcp_protocol"
+    assert before_initialize["error"]["data"]["mutationStarted"] is False
+    assert before_initialize["error"]["data"]["protocolProfile"] == "mcp-1x"
 
     unsupported = router.handle(
         {
@@ -93,6 +135,8 @@ def test_standard_profile_is_explicit_and_fails_closed() -> None:
         }
     )
     assert unsupported["error"]["code"] == -32602
+    assert unsupported["error"]["data"]["schema"] == "vrcforge.external_tool_error.v1"
+    assert unsupported["error"]["data"]["requested"] == "2026-07-28"
     assert unsupported["error"]["data"]["supported"] == [
         "2025-11-25",
         "2025-06-18",
@@ -120,6 +164,8 @@ def test_unknown_or_unlisted_tool_never_reaches_callback() -> None:
         {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "write", "arguments": {}}}
     )
     assert response["error"]["code"] == -32602
+    assert response["error"]["data"]["schema"] == "vrcforge.external_tool_error.v1"
+    assert response["error"]["data"]["toolRoutingStarted"] is False
     assert calls == []
 
 
@@ -160,3 +206,35 @@ def test_auto_profile_selects_vrcforge_2026_when_client_advertises_it() -> None:
     response = json.loads(sink.getvalue())
     assert response["result"]["supportedVersions"] == [PROTOCOL_VERSION]
     assert json.loads(diagnostics.getvalue())["selectedProfile"] == "vrcforge-2026"
+
+
+def test_auto_profile_rejection_reports_exact_v2_metadata_location_without_routing() -> None:
+    custom = Mcp2026Router(lambda _params: [], lambda _name, _arguments: {})
+    standard = _router()
+    source = io.StringIO(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "server/discover",
+                "params": {"protocolVersion": PROTOCOL_VERSION},
+            }
+        )
+        + "\n"
+    )
+    sink = io.StringIO()
+
+    assert run_negotiated_stdio_loop(custom, standard, input_stream=source, output_stream=sink) == 0
+    error = json.loads(sink.getvalue())["error"]
+    data = error["data"]
+    assert error["code"] == -32022
+    assert data["protocolProfile"] == "unnegotiated"
+    assert data["protocolNamespace"] == "io.modelcontextprotocol/protocolVersion"
+    assert data["protocolMetadataLocation"] == "params._meta"
+    assert data["protocolVersion"] == PROTOCOL_VERSION
+    assert data["fallbackProtocolNamespace"] == "initialize.params.protocolVersion"
+    assert data["receivedMethod"] == "server/discover"
+    assert data["receivedProtocolVersion"] is None
+    assert data["toolRoutingStarted"] is False
+    assert data["mutationStarted"] is False
+    assert data["commitState"] == "not_started"

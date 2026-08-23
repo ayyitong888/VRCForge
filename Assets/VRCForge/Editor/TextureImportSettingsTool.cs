@@ -429,9 +429,16 @@ namespace VRCForge.Editor
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception exception)
             {
-                return VRCForgeToolResult.Failed("Texture importer settings operation failed.");
+                return VRCForgeToolResult.RejectedBeforeMutation(
+                    "texture_import_settings_rejected",
+                    exception.Message,
+                    "unity_core_tool",
+                    "pre_mutation_validation",
+                    false,
+                    new { exceptionType = exception.GetType().Name }
+                );
             }
         }
 

@@ -17,8 +17,42 @@ from unity_mcp_core_client import (
     TRANSPORT_SCHEMA,
     UnityMcpCoreClient,
     UnityMcpCoreError,
+    canonical_arguments_sha256,
+    probe_unity_mcp_core_diagnostics,
 )
-from unity_mcp_tool_contract import EXPECTED_TOOL_COUNT, EXPECTED_TOOL_NAMES, PLANNING_TOOL_NAMES, READ_ONLY_TOOL_NAMES
+from unity_mcp_tool_contract import (
+    CORE_IDENTITY,
+    EXPECTED_TOOL_COUNT,
+    EXPECTED_TOOL_NAMES,
+    HANDSHAKE_PROTOCOL,
+    PLANNING_TOOL_NAMES,
+    PREVIOUS_CORE_TOOL_CONTRACT_VERSION,
+    PREVIOUS_CORE_TOOL_COUNT,
+    PREVIOUS_CORE_TOOL_NAMES,
+    PRODUCT_VERSION,
+    READ_ONLY_TOOL_NAMES,
+    TOOL_CONTRACT_VERSION,
+)
+
+
+def test_canonical_argument_hash_is_ordered_and_type_preserving() -> None:
+    first = {"z": [0.0, -0.0, 1e-6], "a": "汉字", "i": 1}
+    reordered = {"i": 1, "a": "汉字", "z": [0.0, -0.0, 1e-6]}
+
+    assert canonical_arguments_sha256(first) == canonical_arguments_sha256(reordered)
+    assert canonical_arguments_sha256({"value": 0.0}) == canonical_arguments_sha256({"value": -0.0})
+    assert canonical_arguments_sha256({"value": 1}) != canonical_arguments_sha256({"value": 1.0})
+    with pytest.raises(ValueError, match="JSON-compatible"):
+        canonical_arguments_sha256({"value": float("nan")})
+
+
+def test_canonical_argument_hash_normalizes_negative_zero_inside_quaternion() -> None:
+    quaternion = {"x": -0.0, "y": 0.7071067811865476, "z": 1e-7, "w": 0.7071067811865476}
+    wire_observable = {**quaternion, "x": 0.0}
+
+    assert canonical_arguments_sha256({"value": quaternion}) == canonical_arguments_sha256(
+        {"value": wire_observable}
+    )
 
 
 def _read_line(connection: socket.socket) -> dict:
@@ -111,6 +145,12 @@ def core_files(tmp_path: Path):
         "transport": "tcp-newline-jsonrpc",
         "protocolVersion": MODERN_PROTOCOL_VERSION,
         "supportedProtocolVersions": [MODERN_PROTOCOL_VERSION],
+        "minimumProtocolVersion": MODERN_PROTOCOL_VERSION,
+        "maximumProtocolVersion": MODERN_PROTOCOL_VERSION,
+        "coreIdentity": CORE_IDENTITY,
+        "handshakeProtocol": HANDSHAKE_PROTOCOL,
+        "productVersion": PRODUCT_VERSION,
+        "toolContractVersion": TOOL_CONTRACT_VERSION,
         "authMode": "bearer-per-request",
         "executionPolicy": "read-direct-app-process-approved-writes",
         "host": "127.0.0.1",
@@ -119,7 +159,8 @@ def core_files(tmp_path: Path):
         "instanceId": "instance-1",
         "processId": 123,
         "projectPath": raw_project_path,
-        "projectHash": hashlib.sha256(raw_project_path.encode("utf-8")).hexdigest(),
+        "projectId": hashlib.sha256(raw_project_path.encode("utf-8")).hexdigest(),
+        "projectIdSource": "normalized_project_path_sha256",
         "toolCount": EXPECTED_TOOL_COUNT,
     }
     return project, descriptor_dir / "mcp-core.json", descriptor
@@ -130,12 +171,28 @@ def _write_descriptor(path: Path, descriptor: dict, port: int) -> None:
     path.write_text(json.dumps(descriptor), encoding="utf-8")
 
 
+def _discovery_result(discover: dict, *, tool_contract_version: str = TOOL_CONTRACT_VERSION) -> dict:
+    binding = discover["message"]["params"]["_meta"]["io.vrcforge/projectBinding"]
+    return {
+        "resultType": "complete",
+        "supportedVersions": [MODERN_PROTOCOL_VERSION],
+        "coreIdentity": CORE_IDENTITY,
+        "handshakeProtocol": HANDSHAKE_PROTOCOL,
+        "productVersion": PRODUCT_VERSION,
+        "toolContractVersion": tool_contract_version,
+        "instanceId": binding["instanceId"],
+        "projectId": binding["projectId"],
+        "protocolRange": {
+            "minimum": MODERN_PROTOCOL_VERSION,
+            "maximum": MODERN_PROTOCOL_VERSION,
+        },
+    }
+
+
 def _modern_handler(connection, seen):
     discover = _read_line(connection)
     seen.append(discover)
-    _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 1, "result": {
-        "resultType": "complete", "supportedVersions": [MODERN_PROTOCOL_VERSION],
-    }}})
+    _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 1, "result": _discovery_result(discover)}})
     request = _read_line(connection)
     seen.append(request)
     params = request["message"]["params"]
@@ -148,6 +205,20 @@ def _modern_handler(connection, seen):
     else:
         result = _successful_tool_result()
     _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": request["message"]["id"], "result": result}})
+
+
+def _previous_contract_handler(connection, seen):
+    discover = _read_line(connection)
+    seen.append(discover)
+    _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 1, "result": _discovery_result(discover, tool_contract_version=PREVIOUS_CORE_TOOL_CONTRACT_VERSION)}})
+    request = _read_line(connection)
+    seen.append(request)
+    params = request["message"]["params"]
+    names = PLANNING_TOOL_NAMES if params.get("exposureLayer") == "planning" else PREVIOUS_CORE_TOOL_NAMES
+    _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": request["message"]["id"], "result": {
+        "resultType": "complete",
+        "tools": [_tool_entry(name) for name in sorted(names)],
+    }}})
 
 
 def test_modern_default_discovers_and_sends_metadata_and_bearer_every_request(core_files):
@@ -164,8 +235,88 @@ def test_modern_default_discovers_and_sends_metadata_and_bearer_every_request(co
         metadata = envelope["message"]["params"]["_meta"]
         assert metadata["io.modelcontextprotocol/protocolVersion"] == MODERN_PROTOCOL_VERSION
         assert metadata["io.modelcontextprotocol/clientCapabilities"] == {}
-        assert metadata["io.modelcontextprotocol/clientInfo"]["name"] == "VRCForge FastAPI"
+        assert metadata["io.modelcontextprotocol/clientInfo"] == {
+            "name": "VRCForge FastAPI",
+            "version": PRODUCT_VERSION,
+        }
+        assert metadata["io.vrcforge/projectBinding"] == {
+            "projectId": descriptor["projectId"],
+            "instanceId": descriptor["instanceId"],
+        }
     assert server.seen[1]["message"]["params"]["exposureLayer"] == "planning"
+
+
+def test_pre_handshake_diagnostics_returns_compiled_identity_and_compile_failure(core_files):
+    project, descriptor_path, descriptor = core_files
+
+    def diagnostic_handler(connection, seen):
+        core_info = _read_line(connection)
+        seen.append(core_info)
+        _write_line(
+            connection,
+            {
+                "schema": TRANSPORT_SCHEMA,
+                "message": {
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "result": {
+                        "schema": "vrcforge.core_info.v1",
+                        "coreIdentity": CORE_IDENTITY,
+                        "coreVersion": "1.7.7",
+                        "versionSource": "compiled_constant",
+                        "protocolRange": {
+                            "minimum": "2026-01-26",
+                            "maximum": "2026-01-26",
+                        },
+                        "toolContractVersion": "68",
+                        "instanceId": descriptor["instanceId"],
+                        "projectId": descriptor["projectId"],
+                        "projectIdSource": "normalized_project_path_sha256",
+                        "compileSnapshot": {
+                            "isCompiling": False,
+                            "captureComplete": True,
+                            "errorCount": 1,
+                            "warningCount": 0,
+                            "capturedAt": "2026-08-22T00:00:01+00:00",
+                            "errors": [{"message": "error CS0165"}],
+                            "warnings": [],
+                        },
+                    },
+                },
+            },
+        )
+        discover = _read_line(connection)
+        seen.append(discover)
+        _write_line(
+            connection,
+            {
+                "schema": TRANSPORT_SCHEMA,
+                "message": {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": -32022,
+                        "message": "No compatible MCP protocol version was negotiated.",
+                    },
+                },
+            },
+        )
+
+    server = FakeCore(diagnostic_handler)
+    _write_descriptor(descriptor_path, descriptor, server.port)
+    try:
+        result = probe_unity_mcp_core_diagnostics(project)
+    finally:
+        server.close()
+
+    assert [entry["message"]["method"] for entry in server.seen] == [
+        "server/core-info",
+        "server/discover",
+    ]
+    assert result["coreInfo"]["coreVersion"] == "1.7.7"
+    assert result["coreInfo"]["versionSource"] == "compiled_constant"
+    assert result["compileResult"]["structuredContent"]["data"]["errorCount"] == 1
+    assert result["handshakeError"]["code"] == -32022
 
 
 def test_execution_exposure_returns_the_exact_fixed_64(core_files):
@@ -178,6 +329,21 @@ def test_execution_exposure_returns_the_exact_fixed_64(core_files):
     finally:
         server.close()
     assert server.seen[1]["message"]["params"]["exposureLayer"] == "execution"
+
+
+def test_previous_core_contract_uses_protocol_compatibility_without_a_second_version_gate(core_files):
+    project, descriptor_path, descriptor = core_files
+    descriptor["toolCount"] = PREVIOUS_CORE_TOOL_COUNT
+    descriptor["toolContractVersion"] = PREVIOUS_CORE_TOOL_CONTRACT_VERSION
+    server = FakeCore(_previous_contract_handler)
+    _write_descriptor(descriptor_path, descriptor, server.port)
+    try:
+        client = UnityMcpCoreClient(project)
+        assert client.uses_previous_contract is True
+        tools = client.list_tools(exposure_layer="execution")
+        assert {tool["name"] for tool in tools} == PREVIOUS_CORE_TOOL_NAMES
+    finally:
+        server.close()
 
 
 def test_modern_call_keeps_execution_context_out_of_arguments(core_files):
@@ -194,7 +360,7 @@ def test_modern_call_keeps_execution_context_out_of_arguments(core_files):
     approved = params["_meta"]["io.vrcforge/approvedExecution"]
     assert approved["approvalId"] == "a1"
     assert approved["clientProcessId"] == os.getpid()
-    assert approved["projectHash"] == descriptor["projectHash"]
+    assert approved["projectId"] == descriptor["projectId"]
     assert approved["instanceId"] == descriptor["instanceId"]
     audit = result["_meta"]["io.vrcforge/callAudit"]
     assert audit["requestId"] == server.seen[1]["message"]["id"]
@@ -402,6 +568,31 @@ def test_unitypackage_import_poll_lane_requires_exact_job_id_shape(core_files, m
     assert result["_meta"]["io.vrcforge/callAudit"]["resultSummary"] == "complete"
 
 
+def test_build_test_poll_lane_requires_exact_job_id_shape(core_files, monkeypatch):
+    project, descriptor_path, descriptor = core_files
+    _write_descriptor(descriptor_path, descriptor, 1)
+    client = UnityMcpCoreClient(project)
+    monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: _successful_tool_result())
+    context = {"lane": "app_build_test_poll"}
+
+    for name, arguments in (
+        ("vrc_build_test_avatar", {}),
+        ("vrc_build_test_avatar", {"jobId": "a" * 32, "avatarPath": "Avatar"}),
+        ("vrc_build_test_avatar", {"jobId": "not-a-guid"}),
+        ("vrc_set_play_mode", {"jobId": "a" * 32}),
+    ):
+        with pytest.raises(ValueError, match="exact jobId"):
+            client.call_tool(name, arguments, execution_context=context)
+
+    result = client.call_tool(
+        "vrc_build_test_avatar",
+        {"jobId": "a" * 32},
+        execution_context=context,
+    )
+    assert result["resultType"] == "complete"
+    assert result["_meta"]["io.vrcforge/callAudit"]["resultSummary"] == "complete"
+
+
 def test_new_client_reconnects_after_core_descriptor_moves_to_a_new_listener(core_files):
     project, descriptor_path, descriptor = core_files
     first = FakeCore(_modern_handler)
@@ -439,10 +630,14 @@ def test_modern_requires_complete_result_and_descriptor_bindings(core_files):
         UnityMcpCoreClient(project)
     descriptor["protocolVersion"] = MODERN_PROTOCOL_VERSION
 
+    descriptor["productVersion"] = "0.0.0"
+    _write_descriptor(descriptor_path, descriptor, 1)
+    assert UnityMcpCoreClient(project)._connection.product_version == "0.0.0"  # noqa: SLF001
+    descriptor["productVersion"] = PRODUCT_VERSION
+
     descriptor["toolCount"] = EXPECTED_TOOL_COUNT - 1
     _write_descriptor(descriptor_path, descriptor, 1)
-    with pytest.raises(UnityMcpCoreError, match="tool contract"):
-        UnityMcpCoreClient(project)
+    assert UnityMcpCoreClient(project)._connection.tool_count == EXPECTED_TOOL_COUNT - 1  # noqa: SLF001
     descriptor["toolCount"] = EXPECTED_TOOL_COUNT
 
     def incomplete_handler(connection, _seen):
@@ -464,7 +659,7 @@ def test_descriptor_bound_to_another_project_is_rejected(core_files, tmp_path: P
     other_project.mkdir()
     other_path = str(other_project.resolve())
     descriptor["projectPath"] = other_path
-    descriptor["projectHash"] = hashlib.sha256(other_path.encode("utf-8")).hexdigest()
+    descriptor["projectId"] = hashlib.sha256(other_path.encode("utf-8")).hexdigest()
     _write_descriptor(descriptor_path, descriptor, 1)
 
     with pytest.raises(UnityMcpCoreError, match="different project"):
@@ -492,14 +687,12 @@ def test_stale_descriptor_with_dead_listener_fails_closed_without_fallback(core_
         ["vrc_add_component"] * EXPECTED_TOOL_COUNT,
     ],
 )
-def test_tools_list_requires_the_exact_fixed_64_name_contract(core_files, tool_names: list[str]):
+def test_tools_list_requires_the_exact_fixed_name_contract(core_files, tool_names: list[str]):
     project, descriptor_path, descriptor = core_files
 
     def handler(connection, _seen):
-        _read_line(connection)
-        _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 1, "result": {
-            "resultType": "complete", "supportedVersions": [MODERN_PROTOCOL_VERSION],
-        }}})
+        discover = _read_line(connection)
+        _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 1, "result": _discovery_result(discover)}})
         _read_line(connection)
         _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 2, "result": {
             "resultType": "complete", "tools": [_tool_entry(name) for name in tool_names],
@@ -525,10 +718,8 @@ def test_tools_list_rejects_permission_or_schema_drift(core_files, field: str):
         target.pop(field)
 
     def handler(connection, _seen):
-        _read_line(connection)
-        _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 1, "result": {
-            "resultType": "complete", "supportedVersions": [MODERN_PROTOCOL_VERSION],
-        }}})
+        discover = _read_line(connection)
+        _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 1, "result": _discovery_result(discover)}})
         _read_line(connection)
         _write_line(connection, {"schema": TRANSPORT_SCHEMA, "message": {"jsonrpc": "2.0", "id": 2, "result": {
             "resultType": "complete", "tools": entries,
@@ -557,3 +748,30 @@ def test_oversized_modern_line_fails_closed(core_files):
             UnityMcpCoreClient(project).list_tools()
     finally:
         server.close()
+
+
+def test_json_rpc_error_preserves_bounded_code_message_and_data() -> None:
+    envelope = {
+        "schema": TRANSPORT_SCHEMA,
+        "message": {
+            "jsonrpc": "2.0", "id": 7,
+            "error": {"code": -32001, "message": "rejected", "data": {"phase": "checkpoint"}},
+        },
+    }
+    with pytest.raises(UnityMcpCoreError) as caught:
+        UnityMcpCoreClient._validate_response(envelope, 7, require_complete=False)
+    assert caught.value.cause_code == "unity_core_jsonrpc_error"
+    assert caught.value.details == {
+        "kind": "json_rpc_error", "code": -32001, "message": "rejected", "data": {"phase": "checkpoint"},
+    }
+
+
+def test_invalid_modern_result_shape_retains_actual_type() -> None:
+    envelope = {
+        "schema": TRANSPORT_SCHEMA,
+        "message": {"jsonrpc": "2.0", "id": 7, "result": {"resultType": "partial"}},
+    }
+    with pytest.raises(UnityMcpCoreError) as caught:
+        UnityMcpCoreClient._validate_response(envelope, 7, require_complete=True)
+    assert caught.value.cause_code == "unity_core_invalid_result_shape"
+    assert caught.value.details["resultType"] == "partial"

@@ -133,6 +133,104 @@ def test_completed_sub_agent_with_failed_result_is_not_completion_evidence() -> 
     assert continuation["terminalPlan"] is None
 
 
+def test_failed_approved_write_returns_to_planner_with_failure_diagnosis() -> None:
+    arguments = {"projectRoot": "D:/Unity/Avatar", "packagePath": "Sapphy.unitypackage"}
+    loop = AgentTaskLoop(
+        "import Sapphy and continue the avatar build",
+        session_id="session-approval-failure",
+        client_turn_id="turn-approval-failure",
+    )
+    context = approval_task_context(
+        loop.approval_seed(
+            requested_tool="vrcforge_import_prepared_outfit",
+            requested_arguments=arguments,
+            continue_after_approval=True,
+        ),
+        tool="vrcforge_import_prepared_outfit",
+        arguments=arguments,
+    )
+    assert context is not None
+    write_failure = {
+        "schema": "vrcforge.write_failure.v1",
+        "failureLayer": "write_handler",
+        "mutationStarted": True,
+        "committed": True,
+        "commitState": "unknown",
+        "commitStateKnown": False,
+        "checkpointRecoveryRequired": True,
+        "temporaryCleanupRequired": False,
+        "console": {
+            "before": {"warningCount": 1, "diagnostics": [{"message": "existing"}]},
+            "after": {"code": "unity_console_unstable", "newErrors": []},
+        },
+    }
+    raw_result = {
+        "ok": False,
+        "committed": True,
+        "commitState": "unknown",
+        "checkpointRecoveryRequired": True,
+        "error": "Unity receipt readback was interrupted.",
+    }
+    completion = approval_completion(
+        context,
+        raw_result=raw_result,
+        outcome={
+            "status": "failed",
+            "summary": raw_result["error"],
+            "verification": {"state": "failed", "checks": []},
+            "diagnostics": {
+                "schema": "vrcforge.internal_tool_diagnostics.v1",
+                "sourceError": {
+                    "schema": "vrcforge.external_tool_error.v1",
+                    "errorCode": "unity_receipt_interrupted",
+                    "error": raw_result["error"],
+                    "failureLayer": "unity_core_receipt",
+                    "failurePhase": "receipt_readback",
+                    "toolRoutingStarted": True,
+                    "mutationStarted": True,
+                    "committed": None,
+                    "commitState": "unknown",
+                    "checkpointRecoveryRequired": True,
+                    "temporaryCleanupRequired": False,
+                    "rawResult": {"privateDump": "must-not-enter-planner-observation"},
+                },
+            },
+        },
+    )
+    assert completion is not None
+
+    prepared = prepare_approval_task_continuation(
+        {"id": "approval-failed", "taskContext": context},
+        {
+            "status": "failed",
+            "taskCompletion": completion,
+            "result": raw_result,
+            "error": raw_result["error"],
+            "writeFailure": write_failure,
+            "checkpoint": {"id": "checkpoint-before-import"},
+        },
+    )
+
+    assert prepared is not None
+    continuation = prepared["taskContinuation"]
+    assert continuation["terminalPlan"]["nextStep"] == "tool_failed"
+    assert continuation["terminalPlan"]["completionGate"]["status"] == "failed"
+    observation = continuation["plannerObservation"]
+    assert observation["kind"] == "write_failure_diagnosis"
+    assert observation["status"] == "failed"
+    assert observation["result"]["error"] == raw_result["error"]
+    assert observation["result"]["commitState"] == "unknown"
+    assert observation["writeFailure"] == write_failure
+    assert observation["checkpointId"] == "checkpoint-before-import"
+    source_error = observation["outcome"]["diagnostics"]["sourceError"]
+    assert source_error["failureLayer"] == "unity_core_receipt"
+    assert source_error["failurePhase"] == "receipt_readback"
+    assert source_error["mutationStarted"] is True
+    assert source_error["commitState"] == "unknown"
+    assert "privateDump" not in str(observation)
+    assert continuation["arguments"] == arguments
+
+
 def test_async_task_seed_preserves_bounded_parent_history_for_resampling() -> None:
     loop = AgentTaskLoop(
         "continue the referenced task",
