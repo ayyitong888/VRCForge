@@ -76,6 +76,10 @@ def test_release_payload_keeps_external_stdio_protocol_dependencies_and_smokes_i
         '(Join-Path $payloadRoot "agent_mcp_standard.py") -Force'
     ) in source
     assert (
+        'Copy-Item -LiteralPath .\\agent_tool_result_contract.py -Destination '
+        '(Join-Path $payloadRoot "agent_tool_result_contract.py") -Force'
+    ) in source
+    assert (
         'Copy-Item -LiteralPath .\\external_tool_result_contract.py -Destination '
         '(Join-Path $payloadRoot "external_tool_result_contract.py") -Force'
     ) in source
