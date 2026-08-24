@@ -1350,6 +1350,10 @@ class VisionCaptureRequest(ConnectionRequest):
     avatar_path: str | None = Field(default=None, alias="avatarPath")
     angle: str | None = None
     framing: Literal["face", "avatar"] | None = None
+    capture_scope: Literal["face", "avatar"] | None = Field(default=None, alias="captureScope")
+    pitch: float | None = Field(default=None, ge=-180.0, le=180.0)
+    yaw: float | None = Field(default=None, ge=-180.0, le=180.0)
+    roll: float | None = Field(default=None, ge=-180.0, le=180.0)
     width: int = Field(default=960, ge=256, le=2048)
     height: int = Field(default=960, ge=256, le=2048)
     require_play_mode: bool = Field(default=False, alias="requirePlayMode")
@@ -14326,8 +14330,8 @@ def dedupe_strings(values: list[str]) -> list[str]:
 
 _VISION_CAPTURE_RESERVED_ARGUMENTS = {
     PREPARED_UNITY_EXECUTION_ARGUMENT_KEY,
-    "outputPath", "output_path", "imagePath", "image_path", "captureScope", "capture_scope",
-    "setRotation", "set_rotation", "restoreView", "restore_view", "pitch", "yaw", "roll",
+    "outputPath", "output_path", "imagePath", "image_path", "capture_scope",
+    "setRotation", "set_rotation", "restoreView", "restore_view",
     "statusOnly", "status_only", "preview",
 }
 
@@ -14354,8 +14358,8 @@ def _normalize_capture_angles(raw_angles: Any) -> list[str]:
             raise RuntimeError(f"Unsupported screenshot capture angle: {angle or '<empty>'}.")
         if angle not in normalized:
             normalized.append(angle)
-    if len(normalized) > 4:
-        raise RuntimeError("Screenshot capture supports at most four unique angles.")
+    if len(normalized) > 5:
+        raise RuntimeError("Screenshot capture supports at most five unique angles.")
     return normalized
 
 
@@ -14376,8 +14380,23 @@ def _scene_view_capture_call(
     *,
     angle: str | None = None,
 ) -> dict[str, Any]:
-    pitch, yaw, roll = _ANGLE_CAMERA_ROTATIONS.get(angle or "", (0.0, 0.0, 0.0))
-    capture_scope = request.framing or ("face" if angle else "avatar")
+    request_pitch = getattr(request, "pitch", None)
+    request_yaw = getattr(request, "yaw", None)
+    request_roll = getattr(request, "roll", None)
+    request_capture_scope = getattr(request, "capture_scope", None)
+    explicit_rotation = any(value is not None for value in (request_pitch, request_yaw, request_roll))
+    if angle and explicit_rotation:
+        raise ValueError("Screenshot angle cannot be combined with explicit pitch, yaw, or roll.")
+    if request.framing and request_capture_scope and request.framing != request_capture_scope:
+        raise ValueError("Screenshot framing and captureScope must match when both are supplied.")
+    if angle:
+        pitch, yaw, roll = _ANGLE_CAMERA_ROTATIONS[angle]
+    else:
+        pitch = float(request_pitch or 0.0)
+        yaw = float(request_yaw or 0.0)
+        roll = float(request_roll or 0.0)
+    capture_scope = request_capture_scope or request.framing or ("face" if angle else "avatar")
+    set_rotation = bool(angle or explicit_rotation or request_capture_scope or request.framing)
     return {
         "outputPath": str(output_path),
         "width": request.width,
@@ -14385,7 +14404,7 @@ def _scene_view_capture_call(
         "pitch": pitch,
         "yaw": yaw,
         "roll": roll,
-        "setRotation": bool(angle),
+        "setRotation": set_rotation,
         "restoreView": True,
         "avatarPath": request.avatar_path or "",
         "captureScope": capture_scope,
@@ -14395,7 +14414,7 @@ def _scene_view_capture_call(
 
 
 def _prepared_capture_base(request: VisionCaptureRequest | VisionCaptureMultiRequest) -> dict[str, Any]:
-    prepared = {
+    prepared: dict[str, Any] = {
         "settings_path": request.settings_path,
         "unity_host": request.unity_host,
         "unity_port": request.unity_port,
@@ -14409,7 +14428,13 @@ def _prepared_capture_base(request: VisionCaptureRequest | VisionCaptureMultiReq
         "capture_mode": request.capture_mode,
     }
     if isinstance(request, VisionCaptureRequest):
-        prepared["angle"] = request.angle
+        prepared.update({
+            "angle": request.angle,
+            "capture_scope": request.capture_scope,
+            "pitch": request.pitch,
+            "yaw": request.yaw,
+            "roll": request.roll,
+        })
     return prepared
 
 
@@ -14419,8 +14444,10 @@ def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) 
     angle = _normalize_capture_angles([request.angle])[0] if request.angle else None
     output_path = _vision_capture_output_path("vision_capture.png")
     call = _scene_view_capture_call(request, output_path, angle=angle)
+    prepared_base = _prepared_capture_base(request)
+    prepared_base["rotation"] = {key: call[key] for key in ("pitch", "yaw", "roll")}
     prepared = install_prepared_calls(
-        _prepared_capture_base(request),
+        prepared_base,
         [("vrc_capture_scene_view", call)],
         {"outputPaths": [str(output_path)], "captureKind": "single"},
     )
@@ -14428,6 +14455,8 @@ def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) 
         "ok": True,
         "captureKind": "single",
         "angle": angle,
+        "rotation": prepared_base["rotation"],
+        "captureScope": call["captureScope"],
         "outputPaths": [str(output_path)],
         "calls": [call],
     }
@@ -14480,11 +14509,26 @@ def _execute_prepared_scene_view_capture(
         if not approved_path.is_file() or approved_path.stat().st_size <= 0:
             raise RuntimeError("Unity did not create the approved screenshot artifact.")
         image_path = str(approved_path)
-        capture = {"imagePath": image_path, "imageUrl": to_artifact_url(image_path), "capture": payload}
+        reported_rotation: dict[str, float] = {}
+        for field in ("pitch", "yaw", "roll"):
+            expected_value = float(expected_arguments[field])
+            reported_value = float(payload.get(field, expected_value))
+            if not math.isclose(reported_value, expected_value, rel_tol=0.0, abs_tol=0.0001):
+                raise RuntimeError(f"Unity returned screenshot {field} outside the approved capture plan.")
+            reported_rotation[field] = reported_value
+        reported_scope = str(payload.get("captureScope") or expected_arguments["captureScope"]).strip().lower()
+        if reported_scope != expected_arguments["captureScope"]:
+            raise RuntimeError("Unity returned a screenshot scope outside the approved capture plan.")
+        capture = {
+            "imagePath": image_path,
+            "imageUrl": to_artifact_url(image_path),
+            "capture": payload,
+            "rotation": reported_rotation,
+            "captureScope": reported_scope,
+        }
         if angles:
             angle = angles[index]
-            pitch, yaw, roll = _ANGLE_CAMERA_ROTATIONS[angle]
-            capture.update({"angle": angle, "rotation": {"pitch": pitch, "yaw": yaw, "roll": roll}})
+            capture["angle"] = angle
         captures.append(capture)
     if not captures:
         raise RuntimeError("Prepared screenshot plan contains no Core calls.")
@@ -14777,6 +14821,7 @@ _ANGLE_CAMERA_ROTATIONS: dict[str, tuple[float, float, float]] = {
     "side_left":  (10.0,  90.0,  0.0),
     "side_right": (10.0, -90.0,  0.0),
     "back":       (10.0, 180.0,  0.0),
+    "bottom":    (-90.0,   0.0,  0.0),
 }
 
 
@@ -19450,12 +19495,141 @@ def get_build_test_status_sync(params: dict[str, Any]) -> dict[str, Any]:
 def avatar_upload_readiness_sync(params: dict[str, Any]) -> dict[str, Any]:
     request = _avatar_upload_core_request(params)
     settings = load_dashboard_settings(build_agent_connection_request(params or {}))
-    return ensure_dict_payload(
+    result = ensure_dict_payload(
         extract_tool_result_payload(
             invoke_unity_mcp(settings, "vrc_avatar_upload_readiness", request)
         ),
         "VRChat avatar upload readiness",
     )
+    return _with_avatar_upload_readiness_cause(result, request=request)
+
+
+def _with_avatar_upload_readiness_cause(
+    payload: dict[str, Any],
+    *,
+    request: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Expose exact domain readiness facts to both internal and external agents."""
+
+    result = dict(payload or {})
+    ready = result.get("ready") is True
+    blockers = [
+        str(item).strip()
+        for item in result.get("blockingReasons", [])
+        if str(item).strip()
+    ] if isinstance(result.get("blockingReasons"), list) else []
+    sdk_user_id = str(result.get("sdkUserId") or "").strip()
+    platform = str(result.get("platform") or "").strip()
+    request_platforms = (request or {}).get("platforms")
+    requested_platforms = (
+        list(request_platforms)
+        if isinstance(request_platforms, (list, tuple))
+        else []
+    )
+    play_mode_stopped = "Unity Play Mode must be stopped before upload." not in blockers
+    platform_matches = (
+        len(requested_platforms) == 1
+        and isinstance(requested_platforms[0], str)
+        and requested_platforms[0].strip() == platform
+    )
+    sdk_user_authenticated = bool(sdk_user_id)
+
+    result["observed"] = {
+        "ready": ready,
+        "playModeStopped": play_mode_stopped,
+        "sdkUserAuthenticated": sdk_user_authenticated,
+        "sdkUserId": sdk_user_id,
+        "canPublishAvatars": result.get("canPublishAvatars") is True,
+        "activePlatform": platform,
+        "requestedPlatforms": requested_platforms,
+        "platformRequestMatchesActiveTarget": platform_matches,
+        "builderAvailable": result.get("builderAvailable") is True,
+        "builderBuildState": str(result.get("builderBuildState") or ""),
+        "builderUploadState": str(result.get("builderUploadState") or ""),
+    }
+    result["expected"] = {
+        "ready": True,
+        "blockingReasons": [],
+        "playModeStopped": True,
+        "sdkUserAuthenticated": True,
+        "canPublishAvatars": True,
+        "requestedPlatforms": [platform] if platform else [],
+        "platformRequestMatchesActiveTarget": True,
+    }
+    result["delta"] = {
+        "blockingReasonCount": len(blockers),
+        "blockingReasons": blockers,
+        "playModeMustStop": not play_mode_stopped,
+        "sdkUserAuthenticationMissing": not sdk_user_authenticated,
+        "publishPermissionMissing": result.get("canPublishAvatars") is not True,
+        "platformRequestMismatch": not platform_matches,
+        "actualRequestedPlatforms": requested_platforms,
+        "expectedRequestedPlatforms": [platform] if platform else [],
+    }
+    digest = str(result.get("readinessDigest") or "").strip().lower()
+    if len(digest) == 64 and all(character in "0123456789abcdef" for character in digest):
+        result["evidence"] = [
+            {
+                "ref": f"avatar-upload-readiness:{digest}",
+                "kind": "vrchat_avatar_upload_readiness",
+                "sha256": digest,
+            }
+        ]
+    result["recovery"] = {
+        "required": False,
+        "reason": "Readiness inspection is read-only; no build or upload mutation started.",
+    }
+
+    if ready:
+        result["nextAction"] = (
+            "Bind this exact readinessDigest, avatar identity, SDK user, and platform "
+            "into the separately approved build-and-upload call."
+        )
+        return result
+
+    next_actions: list[str] = []
+    for blocker in blockers:
+        if blocker == "Unity Play Mode must be stopped before upload.":
+            action = "Stop Unity Play Mode, then rerun upload readiness."
+        elif blocker == "The VRChat SDK has no authenticated current user.":
+            action = "Authenticate the intended avatar owner in the VRChat SDK, then rerun upload readiness."
+        elif blocker == "The requested platform must equal Unity's current active build target.":
+            target = platform or "the reported active Unity build target"
+            action = f"Set platforms to the active Unity build target ({target}), then rerun upload readiness."
+        elif blocker == "The VRChat SDK builder or uploader is not idle.":
+            action = "Wait for the VRChat SDK builder and uploader to become Idle, then rerun readiness."
+        elif blocker == "Unity is compiling or updating the AssetDatabase.":
+            action = "Wait for Unity compilation and AssetDatabase updates to finish, then rerun readiness."
+        else:
+            action = f"Resolve readiness blocker: {blocker}"
+        if action not in next_actions:
+            next_actions.append(action)
+
+    result["failureLayer"] = "vrchat_sdk_upload_readiness"
+    result["failurePhase"] = "inspect"
+    result["failureCause"] = {
+        "code": "avatar_upload_readiness_blocked",
+        "message": (
+            "; ".join(blocker.rstrip(".") for blocker in blockers) + "."
+            if blockers
+            else "Avatar upload readiness returned ready=false."
+        ),
+        "reasons": blockers,
+    }
+    result["rootCause"] = {
+        "code": "avatar_upload_readiness_blocked",
+        "blockingReasons": blockers,
+    }
+    result["causeChain"] = [
+        {
+            "order": index + 1,
+            "cause": blocker,
+            "effect": "Upload readiness remains false; build and upload mutation is not authorized.",
+        }
+        for index, blocker in enumerate(blockers)
+    ]
+    result["nextAction"] = next_actions
+    return result
 
 
 def read_vrchat_sdk_builder_alerts_sync(params: dict[str, Any]) -> dict[str, Any]:

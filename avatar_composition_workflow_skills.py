@@ -57,7 +57,7 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
                 ],
             },
             {
-                "goal": "In GM Play Mode, hide hair/collar; capture named front 0/0/0, sides yaw +90/-90°, back yaw 180°, plus manual Bottom with the full shoulder-neck visible; repeat during motion, face tracking, and gestures.",
+                "goal": "In GM Play Mode, hide hair/collar; capture named Front (0,0,0), Side Left (10,+90,0), Side Right (10,-90,0), Back (10,180,0), and true Bottom (-90,0,0) with the full shoulder-neck visible; repeat during motion, face tracking, and gestures.",
                 "tools": [
                     "vrcforge_gesture_manager_enter_play_mode",
                     "vrcforge_gesture_manager_set_parameter",
@@ -74,6 +74,7 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
         "pitfalls": [
             "Do not scale the target body to solve a donor-head mismatch; fit the imported head and accessories locally.",
             "Transforms, Build, labels, and receipts do not prove closure: receipts prove requests, pixels prove geometry; unnamed capture can echo 0/0/0 without setting the view.",
+            "A static world-pose match can still hide a duplicated inner Neck/Head inheritance chain; inspect the neck-weighted bone target and prove it during GM motion.",
             "Do not delete the old head or accessories until inbound references and weighted-bone use are closed.",
         ],
     },
@@ -262,7 +263,7 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
                 ],
             },
             {
-                "goal": "Run final merged GM/Build face, gesture fallback, body, wardrobe, and neck Back/Bottom acceptance before old-head removal.",
+                "goal": "Run final merged GM/Build face, gesture fallback, body, wardrobe, and neck views: Front (0,0,0), Side Left (10,+90,0), Side Right (10,-90,0), Back (10,180,0), Bottom (-90,0,0), before old-head removal.",
                 "tools": [
                     "vrcforge_gesture_manager_enter_play_mode",
                     "vrcforge_gesture_manager_set_parameter",
@@ -280,6 +281,7 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
         "pitfalls": [
             "Do not replace body controllers wholesale or copy one of the four face assets without the other three.",
             "Do not delete gesture fallback merely because face tracking is present.",
+            "Static alignment does not prove dynamic Neck/Head inheritance; verify the neck-weighted bone target while GM motion is active.",
             "Do not remove the old head before reference, GM, and visible-geometry acceptance closes.",
         ],
     },
@@ -330,7 +332,7 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
                 ],
             },
             {
-                "goal": "Run GM left/right gestures, body, wardrobe, and neck Back/Bottom motion acceptance before old-head removal.",
+                "goal": "Run GM left/right gestures, body, wardrobe, and neck views: Front (0,0,0), Side Left (10,+90,0), Side Right (10,-90,0), Back (10,180,0), Bottom (-90,0,0), before old-head removal.",
                 "tools": [
                     "vrcforge_gesture_manager_enter_play_mode",
                     "vrcforge_gesture_manager_set_parameter",
@@ -347,6 +349,7 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
         "pitfalls": [
             "Do not invent face tracking from similarly named BlendShapes or copy a partial face controller.",
             "Do not replace target body FX or Parameters merely to obtain source gestures.",
+            "Static alignment does not prove dynamic Neck/Head inheritance; verify the neck-weighted bone target while GM motion is active.",
             "Do not accept a front pose or Build result without visible Back/Bottom seam proof.",
         ],
     },
@@ -398,7 +401,7 @@ AVATAR_COMPOSITION_WORKFLOW_SKILLS: tuple[dict[str, Any], ...] = (
                 ],
             },
             {
-                "goal": "Enable, rescan, and capture static plus GM motion before any separate old-part extraction.",
+                "goal": "Enable, rescan, then capture exact attachment views (Front (0,0,0), Side Left (10,+90,0), Side Right (10,-90,0), Back (10,180,0), and Bottom (-90,0,0) when underside-dependent) at rest and during GM motion before any separate old-part extraction.",
                 "tools": [
                     "vrcforge_set_gameobject_active", "vrcforge_scan_inbound_reference_closure",
                     "vrcforge_gesture_manager_enter_play_mode",
@@ -436,14 +439,17 @@ def _render_instructions(skill: dict[str, Any]) -> str:
     )
 
 
-_COMMIT_PROOF_PITFALL = (
-    "A write proposal/timeout is not commit proof; require mutationStarted, committed, "
-    "sceneSaved and persistedReadback, or per-target readback."
+_CAUSE_AND_COMMIT_TRUTH_PITFALL = (
+    "Call success=true/status=ok does not imply domain ready=true; preserve ready, blockingReasons, "
+    "failureLayer/failurePhase/failureCause, rootCause/causeChain, observed/expected/delta, "
+    "mutationStarted, committed, commitState, sceneSaved, persistedReadback, evidence, recovery, "
+    "and nextAction. A write proposal/timeout is not commit proof; unknown commit blocks retry "
+    "until per-target readback, and a missing cause blocks diagnosis."
 )
 
 
 for _skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS:
-    _skill["pitfalls"].append(_COMMIT_PROOF_PITFALL)
+    _skill["pitfalls"].append(_CAUSE_AND_COMMIT_TRUTH_PITFALL)
     _skill["allowedTools"] = list(
         dict.fromkeys(
             str(tool)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from external_tool_result_contract import (
     build_external_tool_error,
+    canonical_result_facts,
     external_write_failure_view,
 )
 
@@ -121,3 +122,85 @@ def test_exception_canonical_raw_result_is_preserved_once() -> None:
     assert error["failureLayer"] == "external_gateway_http"
     assert error["rawResult"] == {"ok": False, "error": "Gateway disabled."}
     assert "rawResult" not in error["exception"]
+
+
+def test_external_error_exposes_shared_cause_facts_without_dropping_raw_result() -> None:
+    raw = {
+        "ok": False,
+        "errorCode": "upload_failed",
+        "error": "Upload failed after readback.",
+        "failureLayer": "vrchat_sdk_upload",
+        "failurePhase": "upload",
+        "observed": {"remoteId": "new"},
+        "expected": {"visibility": "private"},
+        "delta": {"visibility": ["public", "private"]},
+        "evidence": [{"ref": "upload-job-1", "kind": "sdk_job"}],
+        "causeChain": [{"code": "sdk_rejected"}],
+        "nextAction": "Inspect the SDK error.",
+        "recovery": {"manual": True},
+    }
+    error = build_external_tool_error(raw_result=raw, operation_kind="write")
+    assert error["success"] is False
+    assert error["status"] == "failed"
+    assert error["failureLayer"] == "vrchat_sdk_upload"
+    assert error["failurePhase"] == "upload"
+    assert error["observed"] == raw["observed"]
+    assert error["expected"] == raw["expected"]
+    assert error["delta"] == raw["delta"]
+    assert error["evidence"] == raw["evidence"]
+    assert error["causeChain"] == raw["causeChain"]
+    assert error["nextAction"] == raw["nextAction"]
+    assert error["recovery"] == raw["recovery"]
+    assert error["rawResult"] == raw
+    write_failure = external_write_failure_view(error)
+    assert write_failure["success"] is False
+    assert write_failure["status"] == "failed"
+    assert write_failure["failureCause"] == error["failureCause"]
+    assert write_failure["rootCause"] == error["rootCause"]
+
+
+def test_successful_gameobject_layer_is_not_misclassified_as_failure_layer() -> None:
+    facts = canonical_result_facts(
+        [
+            {
+                "ok": True,
+                "name": "Avatar",
+                "layer": 0,
+                "layerName": "Default",
+                "phase": "inspection_complete",
+                "message": "The GameObject was inspected.",
+            }
+        ],
+        success=True,
+        status="ok",
+    )
+
+    assert facts == {"success": True, "status": "ok"}
+
+
+def test_nested_details_keep_explicit_failure_cause_fields() -> None:
+    facts = canonical_result_facts(
+        [
+            {
+                "ok": False,
+                "errorCode": "fixture_read_failed",
+                "error": "The exact Unity read failed.",
+                "details": {
+                    "failureLayer": "unity_read",
+                    "failurePhase": "descriptor_normalization",
+                },
+            }
+        ],
+        success=False,
+        status="failed",
+    )
+
+    assert facts["failureLayer"] == "unity_read"
+    assert facts["failurePhase"] == "descriptor_normalization"
+    assert facts["failureCause"] == {
+        "code": "fixture_read_failed",
+        "message": "The exact Unity read failed.",
+        "failureLayer": "unity_read",
+        "failurePhase": "descriptor_normalization",
+    }
+    assert facts["rootCause"] == facts["failureCause"]

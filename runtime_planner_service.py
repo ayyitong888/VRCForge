@@ -31,11 +31,36 @@ RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_FIELDS = 8
 # ceiling; individual fields use the same ceiling so one oversized summary
 # cannot consume the entire prompt budget before the final join/truncation.
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS = 600
+RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS = 6_000
 RUNTIME_PLANNER_TOOL_INDEX_OBSERVATION_MAX_CHARS = 8_000
 RUNTIME_PLANNER_TOOL_OBSERVATION_TEXT_MAX_CHARS = 600
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_DEPTH = 2
 RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_ITEMS = 12
 RUNTIME_VISION_ANALYSIS_MAX_CHARS = 4_000
+RECURSIVE_SENSITIVE_FIELDS = frozenset(
+    {
+        "token",
+        "app_token",
+        "artifact_sig",
+        "artifact_signature",
+        "artifact_token",
+        "authorization",
+        "api_key",
+        "apikey",
+        "access_token",
+        "approval_token",
+        "control_token",
+        "controltoken",
+        "refresh_token",
+        "password",
+        "client_secret",
+        "clientsecret",
+        "secret",
+        "user_constraints",
+        "userconstraints",
+        "_vrcforge_user_constraints",
+    }
+)
 _PLANNER_TOOL_SCHEMA_MAX_PROPERTIES = 24
 _PLANNER_TOOL_SCHEMA_MAX_ENUM_ITEMS = 16
 _PLANNER_TOOL_SCHEMA_MAX_BRANCHES = 8
@@ -1215,23 +1240,7 @@ def redact_sensitive(value: object) -> object:
         result: dict[str, object] = {}
         for key, item in value.items():
             lowered = str(key).lower()
-            if lowered in {
-                "token",
-                "app_token",
-                "artifact_sig",
-                "artifact_signature",
-                "artifact_token",
-                "authorization",
-                "api_key",
-                "apikey",
-                "access_token",
-                "approval_token",
-                "refresh_token",
-                "secret",
-                "user_constraints",
-                "userconstraints",
-                "_vrcforge_user_constraints",
-            }:
+            if lowered in RECURSIVE_SENSITIVE_FIELDS:
                 result[str(key)] = "<redacted>"
             elif lowered in {"arguments"} and isinstance(item, dict):
                 result[str(key)] = summarize_params(item)
@@ -2359,6 +2368,7 @@ class RuntimePlannerService:
     ) -> str:
             result = step.get("result")
             fields: list[str] = []
+            canonical_outcome: dict[str, object] = {}
             action_id = str(step.get("actionId") or "").strip()
             if action_id:
                 fields.append("actionId=" + sanitize_planner_observation_text(action_id, 80))
@@ -2484,6 +2494,44 @@ class RuntimePlannerService:
                                 f"{label}="
                                 + sanitize_planner_observation_text(source_error.get(key), 120)
                             )
+                for key in (
+                    "success",
+                    "status",
+                    "ready",
+                    "blockingReasons",
+                    "errorCode",
+                    "failureLayer",
+                    "failurePhase",
+                    "failureCause",
+                    "rootCause",
+                    "observed",
+                    "expected",
+                    "delta",
+                    "evidence",
+                    "causeChain",
+                    "nextAction",
+                    "recovery",
+                    "mutationStarted",
+                    "committed",
+                    "commitState",
+                    "commitStateKnown",
+                    "safeToRetry",
+                ):
+                    if key in outcome:
+                        canonical_outcome[key] = redact_sensitive(outcome[key])
+                if canonical_outcome:
+                    fields.append(
+                        "canonicalOutcome="
+                        + sanitize_planner_observation_text(
+                            json.dumps(
+                                canonical_outcome,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                                default=str,
+                            ),
+                            RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS - 400,
+                        )
+                    )
             skill_context = ensure_dict(step.get("skillContext"))
             if skill_context:
                 fields.append(
@@ -2614,6 +2662,8 @@ class RuntimePlannerService:
             observation_limit = (
                 RUNTIME_PLANNER_TOOL_INDEX_OBSERVATION_MAX_CHARS
                 if tool_name == "vrcforge_list_internal_tool_blocks"
+                else RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS
+                if canonical_outcome
                 else RUNTIME_PLANNER_TOOL_OBSERVATION_MAX_CHARS
             )
             return summarize_text("; ".join(fields), observation_limit)

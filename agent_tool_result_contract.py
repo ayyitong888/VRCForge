@@ -11,6 +11,11 @@ from collections.abc import Mapping
 import math
 from typing import Any
 
+from external_tool_result_contract import (
+    canonical_result_facts,
+    prioritize_result_sources,
+)
+
 
 TOOL_RESULT_SCHEMA = "vrcforge.tool_result.v1"
 INTERNAL_TOOL_DIAGNOSTICS_SCHEMA = "vrcforge.internal_tool_diagnostics.v1"
@@ -279,11 +284,36 @@ def _canonical_cause(views: list[Mapping[str, Any]]) -> dict[str, Any] | None:
     """Project the exact bounded failure cause shared by every transport."""
     source: Mapping[str, Any] | None = None
     for view in views:
-        for key in ("cause", "errorDetails", "exception", "error"):
+        for key in ("failureCause", "cause"):
             candidate = view.get(key)
             if isinstance(candidate, Mapping):
                 source = candidate
                 break
+        if source is None and (
+            any(
+                view.get(key) not in (None, "")
+                for key in (
+                    "failureLayer",
+                    "failurePhase",
+                    "category",
+                    "code",
+                    "causeCode",
+                    "errorCode",
+                    "reason",
+                )
+            )
+            or (
+                isinstance(view.get("error"), str)
+                and bool(str(view.get("error") or "").strip())
+            )
+        ):
+            source = view
+        if source is None:
+            for key in ("errorDetails", "exception", "error"):
+                candidate = view.get(key)
+                if isinstance(candidate, Mapping):
+                    source = candidate
+                    break
         if source is not None:
             break
     if source is None:
@@ -361,6 +391,7 @@ def normalize_agent_tool_result(
     """Return one bounded semantic envelope without copying arbitrary dumps."""
 
     views = _views(value)
+    causal_views = prioritize_result_sources(views)
     verification, verification_needs_action = _verification(views, write=write)
 
     failed_view: Mapping[str, Any] | None = None
@@ -398,8 +429,12 @@ def normalize_agent_tool_result(
 
     if failed_view is not None:
         status = "failed"
-        projected_error = _structured_error([failed_view, *views])
-        summary = _first_text([failed_view, *views], ("error", "reason", "message", "summary"))
+        failure_views = prioritize_result_sources([failed_view, *causal_views])
+        projected_error = _structured_error(failure_views)
+        summary = _first_text(
+            failure_views,
+            ("error", "reason", "message", "summary"),
+        )
         if failed_view.get("isError") is True and not summary:
             content = failed_view.get("content")
             if isinstance(content, (list, tuple)):
@@ -410,7 +445,7 @@ def normalize_agent_tool_result(
         summary = summary or projected_error["summary"]
         summary = summary or str(fallback_summary or "Tool execution failed.").strip()
         code = projected_error["code"] or _first_text(
-            [failed_view, *views], ("code", "errorCode", "reason")
+            failure_views, ("code", "errorCode", "reason")
         )
         error: dict[str, Any] | None = {
             "type": projected_error["type"] or "tool",
@@ -426,7 +461,7 @@ def normalize_agent_tool_result(
         }
     elif needs_action:
         status = "needs_user_action"
-        projected_error = _structured_error(views)
+        projected_error = _structured_error(causal_views)
         if verification_needs_action:
             summary = (
                 "The tool action was not accepted as complete because required verification "
@@ -434,7 +469,7 @@ def normalize_agent_tool_result(
             )
         else:
             summary = (
-                _first_text(views, ("error", "reason", "message", "summary"))
+                _first_text(causal_views, ("error", "reason", "message", "summary"))
                 or projected_error["summary"]
                 or (
                 "The tool action needs user input before it can continue."
@@ -474,6 +509,7 @@ def normalize_agent_tool_result(
 
     result = {
         "schema": TOOL_RESULT_SCHEMA,
+        "success": status == "ok",
         "status": status,
         "summary": summary[:600],
         "data": data,
@@ -481,8 +517,23 @@ def normalize_agent_tool_result(
         "evidence": _evidence_refs(views),
         "verification": verification,
     }
-    cause = _canonical_cause(views) if status == "failed" else None
+    canonical_facts = canonical_result_facts(
+        causal_views,
+        success=status == "ok",
+        status="ok" if status == "ok" else "failed",
+    )
+    canonical_status = canonical_facts.pop("status", None)
+    result.update(canonical_facts)
+    # Preserve the historical needs_user_action status while exposing the
+    # shared binary execution status for cross-surface consumers.
+    if status not in {"ok", "failed"} and canonical_status:
+        result["canonicalStatus"] = canonical_status
+    cause = _canonical_cause(causal_views) if status == "failed" else None
     if cause is not None:
+        for key in ("mutationStarted", "committed", "commitState"):
+            value = result.get(key)
+            if key not in cause and isinstance(value, (bool, str)):
+                cause[key] = value
         result["cause"] = cause
     diagnostics = _internal_failure_diagnostics(views) if status == "failed" else None
     if diagnostics is not None:

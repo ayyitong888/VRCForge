@@ -35,7 +35,7 @@ def test_composition_workflows_are_six_compact_vrcforge_skills() -> None:
         assert skill["pitfalls"]
         assert "checkpoint" in skill["backupRestore"].lower()
         assert "separately approved" in skill["backupRestore"].lower()
-        assert len(skill["instructions"]) < 2_500
+        assert len(skill["instructions"]) < 3_000
         assert skill["allowedTools"] == list(dict.fromkeys(skill["allowedTools"]))
         assert all(name.startswith("vrcforge_") for name in skill["allowedTools"])
         assert not {
@@ -166,11 +166,12 @@ def test_head_swap_branches_before_face_tracking_merge_and_removal_closes_refere
     assert "face-tracking-four-piece-merge" in head["steps"][2]["goal"]
     neck_step = head["steps"][3]["goal"]
     assert "GM Play Mode" in neck_step
-    assert "front 0/0/0" in neck_step
+    assert "Front (0,0,0)" in neck_step
     assert "hide hair/collar" in neck_step
-    assert "sides yaw +90/-90" in neck_step
-    assert "back yaw 180" in neck_step
-    assert "manual Bottom" in neck_step
+    assert "Side Left (10,+90,0)" in neck_step
+    assert "Side Right (10,-90,0)" in neck_step
+    assert "Back (10,180,0)" in neck_step
+    assert "true Bottom (-90,0,0)" in neck_step
     assert "full shoulder-neck visible" in neck_step
     neck_acceptance = " ".join(head["acceptance"])
     assert "open rim" in neck_acceptance
@@ -187,7 +188,7 @@ def test_head_swap_branches_before_face_tracking_merge_and_removal_closes_refere
         "vrcforge_capture_screenshot"
     ]["properties"]["angle"]["enum"]
     assert "back" in capture_angle_enum
-    assert "bottom" not in capture_angle_enum
+    assert "bottom" in capture_angle_enum
 
     face = by_name["face-tracking-four-piece-merge"]
     assert "Mesh, FX, Parameters, and Menu" in face["problemBreakdown"][0]
@@ -260,6 +261,14 @@ def test_workflow_evidence_language_distinguishes_proof_plans_and_commits() -> N
         assert "sceneSaved" in workflow_text
         assert "persistedReadback" in workflow_text
         assert "per-target readback" in workflow_text
+        assert "success=true/status=ok does not imply domain ready=true" in workflow_text
+        assert "blockingReasons" in workflow_text
+        assert "failureLayer/failurePhase/failureCause" in workflow_text
+        assert "rootCause/causeChain" in workflow_text
+        assert "observed/expected/delta" in workflow_text
+        assert "commitState" in workflow_text
+        assert "unknown commit blocks retry" in workflow_text
+        assert "missing cause blocks diagnosis" in workflow_text
 
     face_tracked = by_name["avatar-head-swap-face-tracked"]
     face_text = " ".join(
@@ -302,3 +311,28 @@ def test_part_transplant_copies_only_live_dependencies_and_requires_readback() -
     assert "closure complete" in text
     assert "non-truncated" in text
     assert "donor" in text
+    assert "Side Left (10,+90,0)" in text
+    assert "Side Right (10,-90,0)" in text
+    assert "Bottom (-90,0,0)" in text
+
+
+def test_head_workflows_reject_static_only_neck_bone_proof() -> None:
+    by_name = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
+    for name in (
+        "avatar-head-swap",
+        "avatar-head-swap-face-tracked",
+        "avatar-head-swap-gesture-only",
+    ):
+        text = " ".join(
+            [
+                *(step["goal"] for step in by_name[name]["steps"]),
+                *by_name[name]["acceptance"],
+                *by_name[name]["pitfalls"],
+            ]
+        )
+        assert "Neck/Head inheritance" in text
+        assert "neck-weighted bone target" in text
+        assert "GM motion" in text
+        assert "Side Left (10,+90,0)" in text
+        assert "Side Right (10,-90,0)" in text
+        assert "Bottom (-90,0,0)" in text

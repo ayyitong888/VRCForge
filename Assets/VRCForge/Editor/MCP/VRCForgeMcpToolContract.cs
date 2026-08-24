@@ -14,7 +14,7 @@ namespace VRCForge.Editor
     {
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
-        internal const string ProductVersion = "1.7.8";
+        internal const string ProductVersion = "1.7.9";
         internal const string ToolContractVersion = "78";
         internal const int ToolCount = 78;
 

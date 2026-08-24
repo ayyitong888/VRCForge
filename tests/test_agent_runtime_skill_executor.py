@@ -128,6 +128,7 @@ def test_direct_tool_allowlist_injection_audit_and_failure_shapes() -> None:
         "result": {"redacted": "secret-result"},
         "outcome": {
             "schema": "vrcforge.tool_result.v1",
+            "success": True,
             "status": "ok",
             "summary": "Tool description",
             "data": {},

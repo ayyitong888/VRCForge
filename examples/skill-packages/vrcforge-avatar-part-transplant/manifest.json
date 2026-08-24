@@ -1,0 +1,22 @@
+{
+  "id": "com.vrcforge.workflows.avatar_part_transplant",
+  "name": "VRCForge Avatar Part Transplant",
+  "skill_name": "vrcforge-avatar-part-transplant",
+  "version": "1.0.0",
+  "author": "VRCForge",
+  "description": "Approval-gated workflow for transplanting one bounded part between VRChat avatars with dependency and motion proof.",
+  "min_vrcforge_version": "1.7.9",
+  "permissions": [
+    "read_project",
+    "unity_scan_scene",
+    "unity_modify_prefab",
+    "unity_modify_components",
+    "unity_run_validation",
+    "write_project_files"
+  ],
+  "entrypoints": {
+    "skill": "SKILL.md",
+    "workflow": "workflows/avatar-part-transplant.json",
+    "guide": "references/workflow.md"
+  }
+}

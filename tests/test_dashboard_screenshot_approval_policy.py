@@ -20,7 +20,12 @@ def test_external_capture_schema_exposes_strict_face_or_avatar_framing() -> None
 
     assert schema["additionalProperties"] is False
     assert schema["required"] == ["projectPath"]
+    assert schema["properties"]["angle"]["enum"] == ["front", "side_left", "side_right", "back", "bottom"]
     assert schema["properties"]["framing"]["enum"] == ["face", "avatar"]
+    assert schema["properties"]["captureScope"]["enum"] == ["face", "avatar"]
+    for field in ("pitch", "yaw", "roll"):
+        assert schema["properties"][field]["minimum"] == -180.0
+        assert schema["properties"][field]["maximum"] == 180.0
     assert schema["properties"]["captureMode"]["enum"] == ["auto", "scene_view", "game_view"]
 
 
@@ -97,6 +102,62 @@ def test_named_front_capture_is_eye_level_not_top_down() -> None:
     assert arguments["yaw"] == 0.0
     assert arguments["roll"] == 0.0
     assert preview["angle"] == "front"
+
+
+def test_named_bottom_capture_is_a_true_underneath_view() -> None:
+    prepared, preview = dashboard_server.prepare_capture_screenshot_request(
+        {"avatar_path": "Scene/Hero", "angle": "bottom", "captureScope": "face"}, None
+    )
+    tool_name, arguments = prepared_call(prepared)
+
+    assert tool_name == "vrc_capture_scene_view"
+    assert arguments["setRotation"] is True
+    assert arguments["pitch"] == -90.0
+    assert arguments["yaw"] == 0.0
+    assert arguments["roll"] == 0.0
+    assert arguments["captureScope"] == "face"
+    assert preview["angle"] == "bottom"
+    assert preview["rotation"] == {"pitch": -90.0, "yaw": 0.0, "roll": 0.0}
+    assert preview["captureScope"] == "face"
+
+
+def test_single_capture_preparer_forwards_explicit_rotation_and_scope() -> None:
+    prepared, preview = dashboard_server.prepare_capture_screenshot_request(
+        {
+            "avatarPath": "Scene/Hero",
+            "pitch": -82.5,
+            "yaw": 12.25,
+            "roll": -3.0,
+            "captureScope": "face",
+        },
+        None,
+    )
+    tool_name, arguments = prepared_call(prepared)
+
+    assert tool_name == "vrc_capture_scene_view"
+    assert arguments["setRotation"] is True
+    assert arguments["pitch"] == -82.5
+    assert arguments["yaw"] == 12.25
+    assert arguments["roll"] == -3.0
+    assert arguments["captureScope"] == "face"
+    assert prepared["rotation"] == {"pitch": -82.5, "yaw": 12.25, "roll": -3.0}
+    assert preview["rotation"] == prepared["rotation"]
+    assert preview["captureScope"] == "face"
+
+
+def test_single_capture_preparer_rejects_ambiguous_or_unsafe_rotation() -> None:
+    with pytest.raises(ValueError, match="angle cannot be combined"):
+        dashboard_server.prepare_capture_screenshot_request(
+            {"angle": "bottom", "pitch": -90.0}, None
+        )
+
+    with pytest.raises(ValueError):
+        dashboard_server.prepare_capture_screenshot_request({"pitch": -181.0}, None)
+
+    with pytest.raises(ValueError, match="framing and captureScope"):
+        dashboard_server.prepare_capture_screenshot_request(
+            {"framing": "avatar", "captureScope": "face"}, None
+        )
 
 
 def test_single_capture_preparer_allows_explicit_full_avatar_framing_for_named_angle() -> None:
@@ -227,6 +288,49 @@ def test_single_capture_handler_accepts_windows_slash_normalization_and_requires
 
     assert result["ok"] is True
     assert Path(result["imagePath"]) == output_path.resolve()
+
+
+def test_single_capture_handler_reads_back_frozen_rotation_and_scope(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {
+            "avatarPath": "Scene/Hero",
+            "pitch": -90.0,
+            "yaw": 0.0,
+            "roll": 0.0,
+            "captureScope": "face",
+        },
+        None,
+    )
+    output_path = tmp_path / "latest" / "vision_capture.png"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"png")
+
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace())
+    monkeypatch.setattr(
+        dashboard_server,
+        "invoke_unity_mcp",
+        lambda _settings, _tool, arguments: dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={
+                "data": {
+                    "imagePath": arguments["outputPath"],
+                    "pitch": arguments["pitch"],
+                    "yaw": arguments["yaw"],
+                    "roll": arguments["roll"],
+                    "captureScope": arguments["captureScope"],
+                }
+            },
+        ),
+    )
+
+    result = dashboard_server.capture_avatar_screenshot_approved_sync(prepared)
+
+    assert result["ok"] is True
+    assert result["rotation"] == {"pitch": -90.0, "yaw": 0.0, "roll": 0.0}
+    assert result["captureScope"] == "face"
 
 
 def test_single_capture_handler_propagates_core_failure_and_never_reuses_stale_image(tmp_path, monkeypatch) -> None:

@@ -1472,13 +1472,36 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "avatarPath": {"type": "string", "description": "Optional exact avatar hierarchy path; omit only when the active avatar is unambiguous."},
             "angle": {
                 "type": "string",
-                "enum": ["front", "side_left", "side_right", "back"],
-                "description": "One fixed view angle. Call once per angle for a multi-angle audit.",
+                "enum": ["front", "side_left", "side_right", "back", "bottom"],
+                "description": "One fixed view angle. bottom is a true underneath view. Do not combine a named angle with pitch, yaw, or roll.",
             },
             "framing": {
                 "type": "string",
                 "enum": ["face", "avatar"],
                 "description": "face frames the head; avatar frames the complete avatar including feet and tail. Named angles default to face for compatibility.",
+            },
+            "captureScope": {
+                "type": "string",
+                "enum": ["face", "avatar"],
+                "description": "Exact Core capture scope. It is an alias of framing and must match framing when both are supplied.",
+            },
+            "pitch": {
+                "type": "number",
+                "minimum": -180.0,
+                "maximum": 180.0,
+                "description": "Explicit camera pitch in degrees. Do not combine with angle.",
+            },
+            "yaw": {
+                "type": "number",
+                "minimum": -180.0,
+                "maximum": 180.0,
+                "description": "Explicit camera yaw in degrees. Do not combine with angle.",
+            },
+            "roll": {
+                "type": "number",
+                "minimum": -180.0,
+                "maximum": 180.0,
+                "description": "Explicit camera roll in degrees. Do not combine with angle.",
             },
             "width": {"type": "integer", "minimum": 256, "maximum": 2048, "default": 960},
             "height": {"type": "integer", "minimum": 256, "maximum": 2048, "default": 960},
@@ -8889,7 +8912,7 @@ def create_agent_mcp_app(
         list_tools,
         call_tool,
         server_name="VRCForge Agent Gateway",
-        server_version="1.7.8",
+        server_version="1.7.9",
     )
     return create_agent_mcp_2026_asgi_app(
         router,
@@ -9749,25 +9772,7 @@ def redact_sensitive(value: Any) -> Any:
         result: dict[str, Any] = {}
         for key, item in value.items():
             lowered = str(key).lower()
-            if lowered in {
-                "token",
-                "app_token",
-                "artifact_sig",
-                "artifact_signature",
-                "artifact_token",
-                "authorization",
-                "api_key",
-                "apikey",
-                "access_token",
-                "approval_token",
-                "control_token",
-                "controltoken",
-                "refresh_token",
-                "secret",
-                "user_constraints",
-                "userconstraints",
-                "_vrcforge_user_constraints",
-            }:
+            if lowered in planner_policy.RECURSIVE_SENSITIVE_FIELDS:
                 result[str(key)] = "<redacted>"
             elif lowered in {"arguments"} and isinstance(item, dict):
                 result[str(key)] = summarize_params(item)
@@ -9776,6 +9781,12 @@ def redact_sensitive(value: Any) -> Any:
         return result
     if isinstance(value, list):
         return [redact_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return re.sub(
+            r"(?i)\bbearer\s+[a-z0-9._~+/-]+",
+            "Bearer <redacted>",
+            value,
+        )
     return value
 
 

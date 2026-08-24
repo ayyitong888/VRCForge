@@ -225,9 +225,9 @@ Each item ends with its version history in this exact form:
   tool/invocation sequence, duplicate/no-progress suppression, bounded failures,
   final Runtime status/reason, total duration and Unity-tool count. It does not
   compare or display chain-of-thought.
-- The same acceptance pass presents VRCForge and the current Codex reference UI
-  for user-attested live manual review in equivalent active, collapsed-batch,
-  expanded-batch and terminal states.
+- The same acceptance pass presents VRCForge for user-attested live manual
+  review in equivalent active, collapsed-batch, expanded-batch and terminal
+  states.
   Review is behavioral rather than pixel-perfect: chronology, one invocation
   per call/result pair, batch disclosure, one major duration, no per-event
   timestamps, visible progress/error detail and right-rail placement must match
@@ -442,7 +442,7 @@ Each item ends with its version history in this exact form:
 
 ### UX-001 — Exact project right-rail composition
 
-- Contract: the right rail follows the compact Codex/Claude Cowork information
+- Contract: the right rail follows VRCForge's compact project information
   hierarchy rather than exposing product-management cards. A General project
   contains, in order, `Progress`, `Sub Agents`, the named workspace, and a
   direct `Sources` section only while the current chat has user attachments;
@@ -468,7 +468,7 @@ Each item ends with its version history in this exact form:
 - Acceptance: `tests/test_general_cowork_right_rail_ui.mjs` and
   `tests/test_162_product_regression_ui.mjs` freeze composition and exclusions;
   the user manually compares equivalent General/Unity states in the launched
-  build with the approved Codex/Claude Cowork references.
+  build against this VRCForge contract.
 - [首次实现: 1.5.1] [强化/修复: 1.6.2] [最近验证: 1.6.2]
 
 ### UX-002 — Agent-owned Progress/TODO presentation
@@ -1090,7 +1090,7 @@ Each item ends with its version history in this exact form:
   failure, and write-exception preservation; default-preserve/explicit-compress
   Unity transport behavior; explicit pre-route no-write facts; unknown-outcome
   honesty; and live post-import compile-time identity plus Console readback.
-- [首次实现: 1.3.0] [强化/修复: 1.7.8] [最近验证: 1.7.8 source]
+- [首次实现: 1.3.0] [强化/修复: 1.7.9] [最近验证: 1.7.9 source]
 
 ### CMP-002 — DeepSeek Harness and host-side multi-MCP compatibility
 

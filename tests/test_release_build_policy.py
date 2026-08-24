@@ -754,7 +754,11 @@ def test_packaged_public_docs_track_current_release_identity() -> None:
     if "status-release--ready" in readme:
         assert candidate_identity in readme
         assert candidate_identity in user_manual
-        assert f"current source / target release is `{version}`" in packaging_guide
+        assert f"current source / target package is `{version}`" in packaging_guide
+        assert f"Latest published stable release: `{version}`" not in readme
+        assert f"Latest published stable release: `{version}`" not in user_manual
+        assert f"`{version}` remains the latest published stable package" not in packaging_guide
+        assert "remains the latest published stable package" in packaging_guide
     else:
         assert "status-released" in readme
         assert published_identity in readme

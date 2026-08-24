@@ -1,0 +1,178 @@
+{
+  "schema": "vrcforge.skill-package.workflow.v1",
+  "mode": "approval_required",
+  "requires": {
+    "minVRCForgeVersion": "1.7.9",
+    "capabilities": [
+      "capture_screenshot.angle.bottom",
+      "causal_result_contract.v1"
+    ],
+    "onMissing": "blocked_not_ready"
+  },
+  "causeContract": {
+    "callAndDomainStatusAreIndependent": true,
+    "alwaysRequired": [
+      "success",
+      "status"
+    ],
+    "preserveWhenPresent": [
+      "ready",
+      "blockingReasons",
+      "failureLayer",
+      "failurePhase",
+      "failureCause",
+      "rootCause",
+      "causeChain",
+      "observed",
+      "expected",
+      "delta",
+      "mutationStarted",
+      "committed",
+      "commitState",
+      "sceneSaved",
+      "persistedReadback",
+      "evidence",
+      "recovery",
+      "nextAction"
+    ],
+    "requiredWhenReadyFalse": [
+      "ready",
+      "blockingReasons"
+    ],
+    "blockedCauseRequired": {
+      "anyOf": ["failureCause", "rootCause", "causeChain", "delta"],
+      "onMissing": "block_and_report_contract_failure"
+    },
+    "requiredForWrites": [
+      "mutationStarted",
+      "committed",
+      "commitState",
+      "sceneSaved",
+      "persistedReadback"
+    ],
+    "requiredForUnknownCommit": [
+      "commitState",
+      "persistedReadback",
+      "recovery",
+      "nextAction"
+    ],
+    "unknownCommitAction": "read_back_before_retry",
+    "missingCauseAction": "block_and_report_contract_failure"
+  },
+  "branchSelector": {
+    "decision": "face_tracking_contract",
+    "branches": [
+      "gesture-only",
+      "face-tracked"
+    ],
+    "faceTrackedRequires": [
+      "mesh_blendshapes",
+      "fx_and_gesture_animation",
+      "expression_parameters",
+      "expressions_menu"
+    ]
+  },
+  "steps": [
+    {
+      "name": "inventory_and_select_branch",
+      "tool": "vrcforge_read_avatar_descriptor",
+      "tools": [
+        "vrcforge_list_avatars",
+        "vrcforge_read_avatar_descriptor",
+        "vrcforge_scan_blendshapes",
+        "vrcforge_scan_avatar_controls",
+        "vrcforge_scan_parameters",
+        "vrcforge_scan_fx_animator",
+        "vrcforge_scan_animation_bindings"
+      ],
+      "writes": false
+    },
+    {
+      "name": "inspect_neck_and_renderer_dependencies",
+      "tool": "vrcforge_inspect_skinned_mesh_bone_usage",
+      "tools": [
+        "vrcforge_get_gameobject",
+        "vrcforge_get_property",
+        "vrcforge_scan_inbound_reference_closure",
+        "vrcforge_inspect_skinned_mesh_bone_usage"
+      ],
+      "writes": false
+    },
+    {
+      "name": "preview_staged_head_copy",
+      "tool": "vrcforge_preview_scene_object_duplicate",
+      "writes": false
+    },
+    {
+      "name": "run_approved_exact_atomic_head_writes",
+      "tool": "vrcforge_duplicate_scene_object",
+      "tools": [
+        "vrcforge_duplicate_scene_object",
+        "vrcforge_reparent_gameobject",
+        "vrcforge_set_property",
+        "vrcforge_set_gameobject_active",
+        "vrcforge_atomic_reference_rename",
+        "vrcforge_manage_expression_parameters",
+        "vrcforge_manage_expression_menu",
+        "vrcforge_manage_fx_animator",
+        "vrcforge_write_avatar_descriptor"
+      ],
+      "writes": true,
+      "runtimeApprovalRequired": true,
+      "onePreviewBoundMutationPerApproval": true
+    },
+    {
+      "name": "gesture_manager_dynamic_acceptance",
+      "tool": "vrcforge_gesture_manager_enter_play_mode",
+      "tools": [
+        "vrcforge_gesture_manager_enter_play_mode",
+        "vrcforge_gesture_manager_set_parameter",
+        "vrcforge_capture_status",
+        "vrcforge_capture_screenshot"
+      ],
+      "writes": false
+    },
+    {
+      "name": "local_build_test_after_visual_acceptance",
+      "tool": "vrcforge_build_test_readiness",
+      "tools": [
+        "vrcforge_build_test_readiness",
+        "vrcforge_build_test_avatar"
+      ],
+      "writes": true,
+      "runtimeApprovalRequired": true
+    }
+  ],
+  "acceptanceViews": [
+    {"angle": "front", "rotation": [0, 0, 0]},
+    {"angle": "side_left", "rotation": [10, 90, 0]},
+    {"angle": "side_right", "rotation": [10, -90, 0]},
+    {"angle": "back", "rotation": [10, 180, 0]},
+    {"angle": "bottom", "rotation": [-90, 0, 0]}
+  ],
+  "acceptanceRequires": [
+    "static_pixels",
+    "gesture_manager_motion",
+    "neck_weighted_bone_target_readback",
+    "dynamic_neck_head_inheritance"
+  ],
+  "approval": {
+    "required": true,
+    "owner": "runtime_supervision_layer",
+    "reason": "Every scene or asset mutation must be bound to the accepted atomic preview and exact target."
+  },
+  "checkpoint": {
+    "required": true,
+    "boundaries": [
+      "before_staged_head_duplication",
+      "before_bone_or_transform_rebinding",
+      "before_fx_parameters_menu_or_descriptor_changes",
+      "before_old_head_removal"
+    ]
+  },
+  "rollback": {
+    "required": true,
+    "requiresSeparateApproval": true,
+    "reason": "Restore only the exact checkpoint whose current-state consequences and failure reason were shown to the user."
+  }
+}

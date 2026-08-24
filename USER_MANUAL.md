@@ -5,10 +5,11 @@ VRCForge 是一个面向 VRChat Avatar 编辑的本地桌面 Agent 工作区。
 
 This manual explains the public workflow and feature status without project-specific paths or private configuration details.
 
-Current source and latest published stable release: `1.7.8` (`v1.7.8`). The 1.7.8 package fixes
-Windows shortcut icon/working-directory binding, desktop browser-context-menu
-leakage, and external MCP tool/failure/project-lifecycle boundaries. The
-published v1.7.7 tag and Release remain available and unchanged.
+Current source / target release: `1.7.9` (`v1.7.9`). Latest published stable release: `1.7.8`
+(`v1.7.8`). The 1.7.9 target keeps internal Agent and external MCP tool results
+causally equivalent, reports the exact reason when a successful inspection is
+still not ready, and adds a true Bottom Scene-view capture for neck-seam review.
+The published v1.7.8 tag and Release remain available and unchanged until formal publication.
 The Avatar Encryption / Anti-Rip addon remains a connector preview
 for lilToon and Poiyomi with scan/plan/preview
 plus request-only interfaces for a separately installed private addon module.
@@ -333,7 +334,7 @@ Preserve `%LOCALAPPDATA%\VRCForge\agentic-app`, configured API keys, user-owned
 - VRChat SDK3 Avatar 工程
 - Windows x64 安装器用户不需要 Python、Git、uv 或手动 `pip install`
 - 源码/调试用户需要 Python、Node.js、Rust/Tauri 工具链和项目依赖
-- `v1.7.8` 的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 78 个声明的 Unity 工具
+- `v1.7.9` 的 `VRCForge.unitypackage`，包含 VRCForge 自有 MCP 2.0 Core（`2026-07-28`）和 78 个声明的 Unity 工具
 - 用于 AI 辅助功能的模型服务账号
 - 完整依赖清单：[DEPENDENCIES.md](DEPENDENCIES.md)
 

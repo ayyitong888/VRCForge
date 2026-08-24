@@ -4,6 +4,39 @@ from agent_tool_result_contract import (
     completion_gate_plan,
     normalize_agent_tool_result,
 )
+from agent_task_loop import _bounded_outcome
+from external_tool_result_contract import build_external_tool_error
+from runtime_planner_service import (
+    RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS,
+    RuntimePlannerService,
+)
+
+
+def test_internal_and_external_outcomes_project_the_same_cause_facts() -> None:
+    raw = {
+        "ok": False,
+        "status": "failed",
+        "errorCode": "readback_mismatch",
+        "error": "The observed value differs from the approved value.",
+        "failureLayer": "unity_tool_handler",
+        "failurePhase": "readback",
+        "failureCause": {"code": "readback_mismatch", "message": "Value differs."},
+        "rootCause": "source asset drift",
+        "observed": {"value": 1},
+        "expected": {"value": 0},
+        "delta": {"value": 1},
+        "evidence": [{"ref": "readback-1", "kind": "unity_readback"}],
+        "causeChain": [{"code": "source_asset_changed"}],
+        "nextAction": "Re-run preview.",
+        "recovery": {"required": True},
+    }
+    internal = normalize_agent_tool_result(raw, fallback_summary="Readback failed.", write=True)
+    external = build_external_tool_error(raw_result=raw, operation_kind="write")
+    shared = (
+        "success", "status", "failureLayer", "failurePhase", "failureCause", "rootCause",
+        "observed", "expected", "delta", "evidence", "causeChain", "nextAction", "recovery",
+    )
+    assert {key: internal.get(key) for key in shared} == {key: external.get(key) for key in shared}
 
 
 def test_nested_tool_failure_cannot_be_wrapped_as_success() -> None:
@@ -191,6 +224,7 @@ def test_verified_or_read_only_results_stay_lightweight() -> None:
     )
     assert verified == {
         "schema": "vrcforge.tool_result.v1",
+        "success": True,
         "status": "ok",
         "summary": "Applied and verified.",
         "data": {},
@@ -298,3 +332,197 @@ def test_top_level_pending_approval_requires_action_without_misreading_nested_pr
     assert pending["status"] == "needs_user_action"
     assert completion_gate_plan({"nextStep": "done"}, pending)["nextStep"] == "needs_user_action"
     assert nested_progress["status"] == "ok"
+
+
+def test_unknown_commit_facts_are_shared_and_forbid_blind_retry() -> None:
+    raw = {
+        "ok": False,
+        "status": "failed",
+        "errorCode": "write_response_timeout",
+        "error": "The write response timed out after dispatch.",
+        "failureLayer": "unity_core_transport",
+        "failurePhase": "write_response",
+        "mutationStarted": None,
+        "committed": None,
+        "commitState": "unknown",
+        "commitStateKnown": False,
+    }
+
+    internal = normalize_agent_tool_result(
+        raw,
+        fallback_summary="Write failed.",
+        write=True,
+    )
+    external = build_external_tool_error(raw_result=raw, operation_kind="write")
+    shared = (
+        "success",
+        "status",
+        "errorCode",
+        "failureLayer",
+        "failurePhase",
+        "mutationStarted",
+        "committed",
+        "commitState",
+        "commitStateKnown",
+        "safeToRetry",
+        "nextAction",
+        "recovery",
+    )
+
+    assert {key: internal.get(key) for key in shared} == {
+        key: external.get(key) for key in shared
+    }
+    assert internal["commitState"] == "unknown"
+    assert internal["commitStateKnown"] is False
+    assert internal["safeToRetry"] is False
+    assert "Read back the exact target state" in internal["nextAction"]
+    assert internal["recovery"]["required"] is True
+    observation = RuntimePlannerService._llm_loop_step_observation(
+        object(),
+        {
+            "tool": "vrcforge_fixture_write",
+            "status": internal["status"],
+            "result": raw,
+            "outcome": internal,
+        },
+    )
+    assert '"commitState":"unknown"' in observation
+    assert '"commitStateKnown":false' in observation
+    assert '"safeToRetry":false' in observation
+    assert "Read back the exact target state before retrying the write." in observation
+
+
+def test_nested_precise_error_beats_generic_wrapper_and_wrapper_remains_traceable() -> None:
+    raw = {
+        "ok": False,
+        "status": "failed",
+        "error": "Wrapper could not complete the call.",
+        "errorCode": "external_tool_rejected",
+        "failureLayer": "unknown",
+        "failurePhase": "wrapper",
+        "errorDetails": {
+            "schema": "vrcforge.external_tool_error.v1",
+            "success": False,
+            "status": "failed",
+            "error": "Core rejected before tool routing.",
+            "errorCode": "core_pre_route_rejected",
+            "failureLayer": "unity_core_pre_route",
+            "failurePhase": "before_tool_routing",
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "commitStateKnown": True,
+        },
+    }
+
+    internal = normalize_agent_tool_result(
+        raw,
+        fallback_summary="Write failed.",
+        write=True,
+    )
+    external = build_external_tool_error(raw_result=raw, operation_kind="write")
+
+    assert internal["errorCode"] == "core_pre_route_rejected"
+    assert internal["error"]["code"] == "core_pre_route_rejected"
+    assert internal["summary"] == "Core rejected before tool routing."
+    assert internal["failureLayer"] == "unity_core_pre_route"
+    assert internal["failurePhase"] == "before_tool_routing"
+    assert external["errorCode"] == internal["errorCode"]
+    assert external["failureLayer"] == internal["failureLayer"]
+    assert external["failurePhase"] == internal["failurePhase"]
+    assert {
+        "kind": "wrapper",
+        "code": "external_tool_rejected",
+        "message": "Wrapper could not complete the call.",
+        "failureLayer": "unknown",
+        "failurePhase": "wrapper",
+    } in internal["causeChain"]
+    assert internal["causeChain"] == external["causeChain"]
+
+
+def test_internal_planner_observation_keeps_domain_cause_and_commit_facts() -> None:
+    raw = {
+        "ok": True,
+        "status": "completed",
+        "ready": False,
+        "blockingReasons": ["Unity Play Mode must be stopped before upload."],
+        "failureLayer": "vrchat_sdk_upload_readiness",
+        "failurePhase": "inspect",
+        "failureCause": {
+            "code": "avatar_upload_readiness_blocked",
+            "password": "planner-password-sentinel",
+            "control_token": "planner-control-token-sentinel",
+            "controltoken": "planner-controltoken-sentinel",
+            "client_secret": "planner-client-secret-sentinel",
+        },
+        "rootCause": {"blockingReasons": ["Unity Play Mode must be stopped before upload."]},
+        "observed": {"ready": False, "playModeStopped": False},
+        "expected": {"ready": True, "playModeStopped": True},
+        "delta": {"playModeMustStop": True},
+        "evidence": [{"ref": "avatar-upload-readiness:test", "kind": "readiness"}],
+        "causeChain": [{"cause": "Play Mode is active."}],
+        "nextAction": ["Stop Play Mode, then rerun readiness."],
+        "recovery": {"required": False},
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+        "commitStateKnown": True,
+    }
+    outcome = normalize_agent_tool_result(
+        raw,
+        fallback_summary="Inspect avatar upload readiness.",
+        write=False,
+    )
+    bounded = _bounded_outcome(outcome)
+    observation = RuntimePlannerService._llm_loop_step_observation(
+        object(),
+        {
+            "tool": "vrcforge_avatar_upload_readiness",
+            "status": outcome["status"],
+            "result": raw,
+            "outcome": outcome,
+        },
+    )
+
+    for key in (
+        "success",
+        "ready",
+        "blockingReasons",
+        "failureLayer",
+        "failurePhase",
+        "failureCause",
+        "rootCause",
+        "observed",
+        "expected",
+        "delta",
+        "evidence",
+        "causeChain",
+        "nextAction",
+        "recovery",
+        "mutationStarted",
+        "committed",
+        "commitState",
+        "commitStateKnown",
+    ):
+        assert bounded[key] == outcome[key]
+    assert '"success":true' in observation
+    assert '"ready":false' in observation
+    assert '"blockingReasons":["Unity Play Mode must be stopped before upload."]' in observation
+    assert '"observed":{"ready":false,"playModeStopped":false}' in observation
+    assert '"expected":{"ready":true,"playModeStopped":true}' in observation
+    assert '"delta":{"playModeMustStop":true}' in observation
+    assert '"causeChain":[{"cause":"Play Mode is active."}]' in observation
+    assert '"nextAction":["Stop Play Mode, then rerun readiness."]' in observation
+    assert '"recovery":{"required":false}' in observation
+    assert '"commitState":"not_started"' in observation
+    assert '"commitStateKnown":true' in observation
+    for sentinel in (
+        "planner-password-sentinel",
+        "planner-control-token-sentinel",
+        "planner-controltoken-sentinel",
+        "planner-client-secret-sentinel",
+    ):
+        assert sentinel not in observation
+    assert observation.count('"<redacted>"') >= 4
+    assert '"code":"avatar_upload_readiness_blocked"' in observation
+    assert len(observation) <= RUNTIME_PLANNER_CAUSAL_OBSERVATION_MAX_CHARS

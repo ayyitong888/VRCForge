@@ -242,6 +242,57 @@ def test_external_read_returns_raw_result_and_same_normalized_outcome_as_interna
     assert "resultSummary" in internal
 
 
+def test_successful_gameobject_layer_and_phase_are_not_failure_cause_fields(
+    tmp_path: Path,
+) -> None:
+    gateway = _external_gateway(tmp_path)
+    raw = {
+        "ok": True,
+        "status": "complete",
+        "name": "Avatar",
+        "layer": 0,
+        "layerName": "Default",
+        "phase": "inspection_complete",
+        "message": "The GameObject was inspected.",
+    }
+    gateway.register_tool(
+        "vrcforge_external_gameobject_read",
+        "Read one exact GameObject result.",
+        "unity",
+        lambda _args: raw,
+    )
+    gateway.register_external_mcp_unity_tool(
+        "vrcforge_external_gameobject_read",
+        "diagnostics",
+    )
+
+    external = _external_mcp_call(
+        create_agent_mcp_app(gateway),
+        "tools/call",
+        {"name": "vrcforge_external_gameobject_read", "arguments": {}},
+        bearer=gateway.ensure_config().token,
+    )["result"]["structuredContent"]
+    internal = gateway.call_tool(
+        "vrcforge_external_gameobject_read",
+        {},
+        agent_name="internal-runtime",
+    )
+
+    assert external["result"] == raw
+    assert internal["result"] == raw
+    assert external["outcome"] == internal["outcome"]
+    assert external["outcome"]["success"] is True
+    assert external["outcome"]["status"] == "ok"
+    for field in (
+        "failureLayer",
+        "failurePhase",
+        "failureCause",
+        "rootCause",
+        "causeChain",
+    ):
+        assert field not in external["outcome"]
+
+
 def test_external_read_returns_exact_failure_result_and_reason(tmp_path: Path) -> None:
     gateway = _external_gateway(tmp_path)
     raw = {
@@ -372,6 +423,79 @@ def test_external_read_exception_preserves_raw_core_result_and_cause_chain(tmp_p
     assert result["errorDetails"]["exception"]["causes"] == []
     assert result["errorDetails"]["rawResult"] == raw_core_result
     assert result["outcome"]["cause"]["code"] == "core_fixture_rejected"
+    assert {
+        "kind": "wrapper",
+        "code": "unity_core_tool_rejected",
+        "message": "Exact Unity transport reason.",
+        "failureLayer": "unity_mcp_client",
+    } in result["outcome"]["causeChain"]
+
+
+def test_external_read_structured_content_recursively_redacts_causal_secrets(
+    tmp_path: Path,
+) -> None:
+    gateway = _external_gateway(tmp_path)
+    raw_result = {
+        "ok": False,
+        "status": "failed",
+        "error": "The exact non-sensitive domain rejection remains visible.",
+        "failureCause": {
+            "code": "precise_domain_rejection",
+            "message": "The exact non-sensitive cause remains visible.",
+            "password": "gateway-password-sentinel",
+            "client_secret": "gateway-client-secret-sentinel",
+            "control_token": "gateway-control-token-sentinel",
+            "controltoken": "gateway-controltoken-sentinel",
+            "api_key": "gateway-api-key-sentinel",
+            "token": "gateway-token-sentinel",
+            "authorization": "Bearer gateway-authorization-sentinel",
+            "transportTrace": "Bearer gateway-free-bearer-sentinel",
+        },
+    }
+    gateway.register_tool(
+        "vrcforge_external_sensitive_read",
+        "Return one structured rejection containing secret sentinels.",
+        "unity",
+        lambda _args: raw_result,
+    )
+    gateway.register_external_mcp_unity_tool(
+        "vrcforge_external_sensitive_read",
+        "diagnostics",
+    )
+
+    result = _external_mcp_call(
+        create_agent_mcp_app(gateway),
+        "tools/call",
+        {"name": "vrcforge_external_sensitive_read", "arguments": {}},
+        bearer=gateway.ensure_config().token,
+    )["result"]["structuredContent"]
+
+    serialized = json.dumps(result, ensure_ascii=False)
+    for sentinel in (
+        "gateway-password-sentinel",
+        "gateway-client-secret-sentinel",
+        "gateway-control-token-sentinel",
+        "gateway-controltoken-sentinel",
+        "gateway-api-key-sentinel",
+        "gateway-token-sentinel",
+        "gateway-authorization-sentinel",
+        "gateway-free-bearer-sentinel",
+    ):
+        assert sentinel not in serialized
+    visible_cause = result["result"]["failureCause"]
+    assert visible_cause["code"] == "precise_domain_rejection"
+    assert visible_cause["message"] == "The exact non-sensitive cause remains visible."
+    for key in (
+        "password",
+        "client_secret",
+        "control_token",
+        "controltoken",
+        "api_key",
+        "token",
+        "authorization",
+    ):
+        assert visible_cause[key] == "<redacted>"
+    assert visible_cause["transportTrace"] == "Bearer <redacted>"
 
 
 def test_external_catalogue_shares_only_explicit_unity_tools_and_blocks(tmp_path: Path) -> None:
@@ -682,6 +806,12 @@ def test_external_write_exception_preserves_raw_core_result_and_exact_reason(
     assert result["outcome"]["status"] == "failed"
     assert result["outcome"]["cause"]["code"] == "exact_write_rejection"
     assert result["errorDetails"]["exception"]["errorCode"] == "unity_core_tool_rejected"
+    assert {
+        "kind": "wrapper",
+        "code": "unity_core_tool_rejected",
+        "message": "Exact managed write transport reason.",
+        "failureLayer": "unity_mcp_client",
+    } in result["outcome"]["causeChain"]
     assert result["outcome"]["cause"]["mutationStarted"] is False
     assert result["outcome"]["cause"]["committed"] is False
 
@@ -1218,6 +1348,7 @@ def test_external_write_preparation_and_handler_failures_return_structured_facts
     assert preparation["ok"] is False
     assert preparation["result"] is None
     assert preparation["errorDetails"]["schema"] == "vrcforge.external_tool_error.v1"
+    assert preparation["errorDetails"]["failureLayer"] == "write_preparation"
     assert preparation["writeFailure"]["failureLayer"] == "write_preparation"
     assert "Prepared preview rejected the arguments." in preparation["error"]
     assert "Prepared preview rejected the arguments." in preparation["writeFailure"]["error"]

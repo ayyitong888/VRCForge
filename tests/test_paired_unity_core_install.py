@@ -24,7 +24,7 @@ def _write_verified_payload(root: Path, *, integrity_valid: bool = True) -> Path
     (mcp_root / "VRCForgeMcpToolContract.cs").write_text(
         'internal const string CoreIdentity = "vrcforge.unity-core";\n'
         'internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";\n'
-        'internal const string ProductVersion = "1.7.8";\n'
+        'internal const string ProductVersion = "1.7.9";\n'
         'internal const string ToolContractVersion = "73";\n',
         encoding="utf-8",
     )
@@ -341,9 +341,9 @@ def test_manual_core_restore_is_one_high_risk_external_project_write() -> None:
 @pytest.mark.parametrize(
     ("runtime_version", "is_compiling", "error_count", "expected_status"),
     [
-        ("1.7.8", False, 0, "ready"),
-        ("1.7.7", True, 0, "compiling"),
-        ("1.7.7", False, 1, "compile_failed_old_assembly_retained"),
+        ("1.7.9", False, 0, "ready"),
+        ("1.7.8", True, 0, "compiling"),
+        ("1.7.8", False, 1, "compile_failed_old_assembly_retained"),
     ],
 )
 def test_core_upgrade_status_distinguishes_reload_wait_from_compile_failure(
@@ -360,7 +360,7 @@ def test_core_upgrade_status_distinguishes_reload_wait_from_compile_failure(
     descriptor.write_text("{}", encoding="utf-8")
     expected = {
         "coreIdentity": "vrcforge.unity-core",
-        "coreVersion": "1.7.8",
+        "coreVersion": "1.7.9",
         "handshakeProtocol": "vrcforge.core-handshake.v1",
         "toolContractVersion": "73",
         "protocolRange": {"minimum": "2026-07-28", "maximum": "2026-07-28"},
@@ -412,7 +412,7 @@ def test_core_upgrade_status_distinguishes_reload_wait_from_compile_failure(
 
     assert result["status"] == expected_status
     assert result["ready"] is (expected_status == "ready")
-    assert result["runtimeIdentityMatchesTarget"] is (runtime_version == "1.7.8")
+    assert result["runtimeIdentityMatchesTarget"] is (runtime_version == "1.7.9")
     assert result["consoleErrorCount"] == error_count
 
 
@@ -423,7 +423,7 @@ def test_core_upgrade_status_reports_descriptor_missing_without_throwing(
     project = _write_project(tmp_path / "project")
     expected = {
         "coreIdentity": "vrcforge.unity-core",
-        "coreVersion": "1.7.8",
+        "coreVersion": "1.7.9",
         "handshakeProtocol": "vrcforge.core-handshake.v1",
         "toolContractVersion": "73",
         "protocolRange": {"minimum": "2026-07-28", "maximum": "2026-07-28"},

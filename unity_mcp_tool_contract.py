@@ -4,7 +4,7 @@ from __future__ import annotations
 
 CORE_IDENTITY = "vrcforge.unity-core"
 HANDSHAKE_PROTOCOL = "vrcforge.core-handshake.v1"
-PRODUCT_VERSION = "1.7.8"
+PRODUCT_VERSION = "1.7.9"
 TOOL_CONTRACT_VERSION = "78"
 PREVIOUS_CORE_TOOL_CONTRACT_VERSION = "77"
 

@@ -161,6 +161,26 @@ def _field_value(value: Any, field_name: str) -> Any:
     return _FIELD_MISSING
 
 
+def _bounded_contract_fact(value: Any, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _bounded_text(value, 600)
+    if depth >= 3:
+        return "[bounded]"
+    if isinstance(value, Mapping):
+        return {
+            _bounded_text(key, 120): _bounded_contract_fact(item, depth=depth + 1)
+            for key, item in list(value.items())[:24]
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _bounded_contract_fact(item, depth=depth + 1)
+            for item in list(value)[:24]
+        ]
+    return _bounded_text(value, 600)
+
+
 def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
     verification = value.get("verification")
     error = value.get("error")
@@ -231,6 +251,29 @@ def _bounded_outcome(value: Mapping[str, Any]) -> dict[str, Any]:
             else {"state": "not_required", "checks": []}
         ),
     }
+    for key in (
+        "success",
+        "ready",
+        "blockingReasons",
+        "errorCode",
+        "failureLayer",
+        "failurePhase",
+        "failureCause",
+        "rootCause",
+        "observed",
+        "expected",
+        "delta",
+        "causeChain",
+        "nextAction",
+        "recovery",
+        "mutationStarted",
+        "committed",
+        "commitState",
+        "commitStateKnown",
+        "safeToRetry",
+    ):
+        if key in value:
+            result[key] = _bounded_contract_fact(value[key])
     diagnostics = value.get("diagnostics")
     source_error = (
         diagnostics.get("sourceError")

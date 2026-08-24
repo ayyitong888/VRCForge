@@ -549,7 +549,7 @@ class VRCForgeBridge:
             "io.modelcontextprotocol/clientCapabilities": {},
             "io.modelcontextprotocol/clientInfo": {
                 "name": "vrcforge-agent-stdio-bridge",
-                "version": "1.7.8",
+                "version": "1.7.9",
             },
         }
         payload = {
@@ -1038,7 +1038,7 @@ def run_stdio_server(
         lambda: list_tools({"exposureLayer": exposure_layer}),
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.7.8",
+        server_version="1.7.9",
         tool_list_revision=lambda: tool_list_revision,
     )
     if protocol_profile == "mcp-1x":
@@ -1049,7 +1049,7 @@ def run_stdio_server(
         list_tools,
         call_tool,
         server_name=DEFAULT_SERVER_NAME,
-        server_version="1.7.8",
+        server_version="1.7.9",
         tool_list_revision=lambda: tool_list_revision,
     )
     if protocol_profile == "vrcforge-2026":
