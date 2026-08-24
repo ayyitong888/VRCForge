@@ -1418,12 +1418,14 @@ namespace VRCForge.Editor
                 var result = descriptor.Handler.Invoke(null, new object[] { pending.Arguments });
                 pending.Response = ToolResult(result, pending.Modern);
             }
-            catch (Exception)
+            catch (Exception exception)
             {
                 pending.Response = ToolError(
                     "tool_handler_exception",
-                    "VRCForge tool execution failed.",
-                    pending.Modern);
+                    "VRCForge tool execution failed in the Unity tool handler.",
+                    pending.Modern,
+                    false,
+                    exception);
             }
             finally
             {
@@ -1940,7 +1942,8 @@ namespace VRCForge.Editor
             string code,
             string message,
             bool modern,
-            bool noWriteProven = false)
+            bool noWriteProven = false,
+            Exception exception = null)
         {
             var structured = new JObject
             {
@@ -1958,6 +1961,45 @@ namespace VRCForge.Editor
                 ["checkpointRecoveryRequired"] = false,
                 ["temporaryCleanupRequired"] = false,
             };
+            if (exception != null)
+            {
+                // Keep the handler's exact failure facts available to both
+                // internal and external agents.  The bounded chain is enough
+                // to diagnose reflection/TargetInvocationException wrappers
+                // without returning an unbounded Unity stack trace.
+                var chain = new JArray();
+                var current = exception;
+                var depth = 0;
+                while (current != null && depth++ < 6)
+                {
+                    chain.Add(new JObject
+                    {
+                        ["type"] = current.GetType().FullName ?? current.GetType().Name,
+                        ["message"] = (current.Message ?? string.Empty).Substring(0, Math.Min(800, (current.Message ?? string.Empty).Length)),
+                    });
+                    current = current.InnerException;
+                }
+                structured["handlerException"] = new JObject
+                {
+                    ["type"] = exception.GetType().FullName ?? exception.GetType().Name,
+                    ["message"] = (exception.Message ?? string.Empty).Substring(0, Math.Min(800, (exception.Message ?? string.Empty).Length)),
+                    ["innerChain"] = chain,
+                };
+                structured["diagnostics"] = new JObject
+                {
+                    ["schema"] = "vrcforge.unity_tool_handler_diagnostics.v1",
+                    ["handlerException"] = structured["handlerException"].DeepClone(),
+                };
+                structured["failureCause"] = new JObject
+                {
+                    ["code"] = code,
+                    ["message"] = (exception.Message ?? message).Substring(0, Math.Min(800, (exception.Message ?? message).Length)),
+                    ["failureLayer"] = "unity_tool_handler",
+                    ["failurePhase"] = "tool_handler_exception",
+                };
+                structured["rootCause"] = structured["failureCause"].DeepClone();
+                structured["failedStep"] = "unity_tool_handler";
+            }
             var result = new JObject
             {
                 ["content"] = new JArray

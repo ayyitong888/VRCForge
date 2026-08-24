@@ -27,6 +27,7 @@ SCENE_EXECUTION_PLAN_TARGETS = frozenset(
         "vrcforge_duplicate_scene_object",
         "vrcforge_unpack_prefab",
         "vrcforge_toggle_scene_object",
+        "vrcforge_remap_skinned_mesh_bone",
         "vrcforge_ensure_expression_parameter",
         "vrcforge_ensure_expression_menu_control",
         "vrcforge_ensure_animator_state",
@@ -167,6 +168,16 @@ def build_scene_execution_plan(target_name: str, arguments: dict[str, Any]) -> l
         return [("vrc_duplicate_scene_object", request)]
     if target_name == "vrcforge_toggle_scene_object":
         return [("vrc_toggle_scene_object", {"objectPath": _text(params.get("object_path") or params.get("objectPath")), "active": bool(params.get("active")), "saveAssets": True})]
+    if target_name == "vrcforge_remap_skinned_mesh_bone":
+        return [("vrc_remap_skinned_mesh_bone", {
+            "gameObjectPath": _gameobject_target(params),
+            "componentIndex": int(params.get("component_index", params.get("componentIndex", 0)) or 0),
+            "boneIndex": int(params.get("bone_index", params.get("boneIndex", 0)) or 0),
+            "expectedCurrentBonePath": _text(params.get("expected_current_bone_path") or params.get("expectedCurrentBonePath")),
+            "targetBonePath": _text(params.get("target_bone_path") or params.get("targetBonePath")),
+            "expectedMeshName": _text(params.get("expected_mesh_name") or params.get("expectedMeshName")),
+            "preview": False,
+        })]
 
     if target_name == "vrcforge_ensure_expression_parameter":
         request = {"avatarPath": _text(params.get("avatar_path") or params.get("avatarPath")), "parameterName": _text(params.get("parameter_name") or params.get("parameterName")), "valueType": _text(params.get("value_type") or params.get("valueType") or "Int") or "Int", "defaultValue": float(params.get("default_value", params.get("defaultValue", 0)) or 0), "saved": _bool(params.get("saved"), True), "networkSynced": _bool(params.get("network_synced", params.get("networkSynced")), True), "preview": False}

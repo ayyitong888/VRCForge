@@ -43,6 +43,7 @@ _SUCCESSFUL_EXECUTION_STATUSES = frozenset(
 _KNOWN_NESTED_KEYS = (
     "structuredContent",
     "result",
+    "rawResult",
     "entrypoint",
     "toolResult",
     "errorDetails",
@@ -364,6 +365,15 @@ def _canonical_cause(views: list[Mapping[str, Any]]) -> dict[str, Any] | None:
 
 
 def _internal_failure_diagnostics(views: list[Mapping[str, Any]]) -> dict[str, Any] | None:
+    # A domain result may already carry the authoritative diagnostics (for
+    # example Unity exception type/message/innerChain).  Preserve that exact
+    # projection across transports instead of replacing it with a wrapper
+    # error snapshot merely because one boundary also emits errorDetails.
+    for view in views:
+        explicit = view.get("diagnostics")
+        if isinstance(explicit, Mapping):
+            bounded = _bounded_value(explicit)
+            return bounded if isinstance(bounded, dict) else None
     source: Mapping[str, Any] | None = None
     for view in views:
         candidate = view.get("errorDetails")
@@ -524,6 +534,15 @@ def normalize_agent_tool_result(
     )
     canonical_status = canonical_facts.pop("status", None)
     result.update(canonical_facts)
+    # These are deliberately shared diagnostic facts, not transport-only
+    # decorations.  Keep them in the normalized outcome so the internal loop
+    # and the external MCP boundary expose the same failed step and evidence
+    # without forcing the planner to parse the raw result again.
+    for key in ("failedStep", "diagnostics"):
+        for view in causal_views:
+            if key in view and view[key] not in (None, ""):
+                result[key] = _bounded_value(view[key])
+                break
     # Preserve the historical needs_user_action status while exposing the
     # shared binary execution status for cross-surface consumers.
     if status not in {"ok", "failed"} and canonical_status:

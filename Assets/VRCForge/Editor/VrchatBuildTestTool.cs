@@ -689,7 +689,7 @@ namespace VRCForge.Editor
         {
             try
             {
-                var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(
+                var package = global::UnityEditor.PackageManager.PackageInfo.FindForAssembly(
                     typeof(IVRCSdkAvatarBuilderApi).Assembly);
                 return package == null ? string.Empty : package.version ?? string.Empty;
             }
@@ -1016,9 +1016,12 @@ namespace VRCForge.Editor
             result.CanPublishAvatars = user != null && user.canPublishAvatars;
 
             IVRCSdkAvatarBuilderApi builder = null;
-            result.BuilderAvailable = VRCSdkControlPanel.window != null
-                && VRCSdkControlPanel.TryGetBuilder(out builder)
-                && builder != null;
+            result.BuilderAvailable = false;
+            if (VRCSdkControlPanel.window != null)
+            {
+                result.BuilderAvailable = VRCSdkControlPanel.TryGetBuilder(out builder)
+                    && builder != null;
+            }
             if (result.BuilderAvailable)
             {
                 result.BuilderBuildState = builder.BuildState.ToString();
@@ -1179,7 +1182,7 @@ namespace VRCForge.Editor
         {
             try
             {
-                var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(
+                var package = global::UnityEditor.PackageManager.PackageInfo.FindForAssembly(
                     typeof(IVRCSdkAvatarBuilderApi).Assembly);
                 return package == null ? string.Empty : package.version ?? string.Empty;
             }

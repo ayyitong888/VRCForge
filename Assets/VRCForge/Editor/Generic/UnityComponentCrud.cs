@@ -958,6 +958,421 @@ namespace VRCForge.Editor
     }
 
     [VRCForgeCommand(
+        toolId: "vrc_inspect_skinned_mesh_deformation",
+        Summary = "Bake a SkinnedMeshRenderer in memory and report finite deformation/AABB/outlier metrics (read-only).",
+        Access = VRCForgeCommandAccess.ReadOnly
+    )]
+    public static class InspectSkinnedMeshDeformationTool
+    {
+        public const string ToolName = "vrc_inspect_skinned_mesh_deformation";
+
+        public class InspectSkinnedMeshDeformationParameters
+        {
+            [VRCForgeInput("Full hierarchy path or unique name of the GameObject with a SkinnedMeshRenderer.", IsRequired = true)]
+            public string gameObjectPath { get; set; } = "";
+
+            [VRCForgeInput("Which SkinnedMeshRenderer instance to inspect when several exist (default 0).", IsRequired = false)]
+            public int? componentIndex { get; set; } = 0;
+        }
+
+        private static bool Finite(Vector3 value)
+        {
+            return IsFinite(value.x) && IsFinite(value.y) && IsFinite(value.z);
+        }
+
+        private static bool IsFinite(float value)
+        {
+            return !float.IsNaN(value) && !float.IsInfinity(value);
+        }
+
+        private static object VectorPayload(Vector3 value)
+        {
+            return new { x = value.x, y = value.y, z = value.z };
+        }
+
+        private static object Aabb(Vector3[] vertices, Matrix4x4 transform, out int finiteCount, out float[] distances)
+        {
+            var finite = new List<Vector3>();
+            for (var i = 0; i < (vertices ?? new Vector3[0]).Length; i++)
+            {
+                if (Finite(vertices[i])) finite.Add(vertices[i]);
+            }
+            finiteCount = finite.Count;
+            if (finite.Count == 0)
+            {
+                distances = new float[0];
+                return new { min = new { x = 0f, y = 0f, z = 0f }, max = new { x = 0f, y = 0f, z = 0f }, center = new { x = 0f, y = 0f, z = 0f }, size = new { x = 0f, y = 0f, z = 0f } };
+            }
+            var min = finite[0];
+            var max = finite[0];
+            var centroid = Vector3.zero;
+            foreach (var vertex in finite)
+            {
+                min = Vector3.Min(min, vertex);
+                max = Vector3.Max(max, vertex);
+                centroid += vertex;
+            }
+            centroid /= finite.Count;
+            distances = finite.Select(vertex => Vector3.Distance(vertex, centroid)).OrderBy(value => value).ToArray();
+            return new
+            {
+                min = VectorPayload(min),
+                max = VectorPayload(max),
+                center = VectorPayload((min + max) * 0.5f),
+                size = VectorPayload(max - min),
+                centroid = VectorPayload(centroid)
+            };
+        }
+
+        private static object DistanceSummary(float[] distances)
+        {
+            if (distances == null || distances.Length == 0)
+            {
+                return new { p50 = 0f, p95 = 0f, p99 = 0f, max = 0f };
+            }
+            float At(double percentile)
+            {
+                var index = Mathf.Clamp((int)Math.Ceiling(percentile * distances.Length) - 1, 0, distances.Length - 1);
+                return distances[index];
+            }
+            return new { p50 = At(0.50), p95 = At(0.95), p99 = At(0.99), max = distances[distances.Length - 1] };
+        }
+
+        private static float[] RowMajor(Matrix4x4 matrix)
+        {
+            var values = new float[16];
+            for (var row = 0; row < 4; row++)
+                for (var column = 0; column < 4; column++)
+                    values[row * 4 + column] = matrix[row, column];
+            return values;
+        }
+
+        private static float MaxAbsDeviationFromIdentity(Matrix4x4 matrix)
+        {
+            var max = 0f;
+            for (var row = 0; row < 4; row++)
+                for (var column = 0; column < 4; column++)
+                    max = Mathf.Max(max, Mathf.Abs(matrix[row, column] - (row == column ? 1f : 0f)));
+            return max;
+        }
+
+        public static object HandleCommand(JObject @params)
+        {
+            var p = (@params ?? new JObject()).ToObject<InspectSkinnedMeshDeformationParameters>()
+                ?? new InspectSkinnedMeshDeformationParameters();
+            Mesh baked = null;
+            try
+            {
+                var go = ComponentCrudCore.ResolveGameObject(p.gameObjectPath);
+                var componentIndex = p.componentIndex ?? 0;
+                var renderer = ComponentCrudCore.ResolveComponent(go, typeof(SkinnedMeshRenderer), componentIndex) as SkinnedMeshRenderer;
+                if (renderer == null) throw new InvalidOperationException("The requested component is not a SkinnedMeshRenderer.");
+                if (renderer.sharedMesh == null) throw new InvalidOperationException("The SkinnedMeshRenderer has no shared mesh.");
+                baked = new Mesh { name = "VRCForge_DeformationReadback_Temporary" };
+                renderer.BakeMesh(baked, false);
+                var restVertices = renderer.sharedMesh.vertices ?? new Vector3[0];
+                var playVertices = baked.vertices ?? new Vector3[0];
+                int restFiniteCount, playFiniteCount, worldFiniteCount;
+                float[] restDistances, playDistances, worldDistances;
+                var restAabb = Aabb(restVertices, Matrix4x4.identity, out restFiniteCount, out restDistances);
+                var playAabb = Aabb(playVertices, Matrix4x4.identity, out playFiniteCount, out playDistances);
+                var worldVertices = playVertices.Select(renderer.transform.localToWorldMatrix.MultiplyPoint3x4).ToArray();
+                var worldAabb = Aabb(worldVertices, Matrix4x4.identity, out worldFiniteCount, out worldDistances);
+                var rendererBones = renderer.bones ?? new Transform[0];
+                var bindposes = renderer.sharedMesh.bindposes ?? new Matrix4x4[0];
+                var translations = new List<float>();
+                var deviations = new List<float>();
+                var determinants = new List<float>();
+                for (var i = 0; i < rendererBones.Length && i < bindposes.Length; i++)
+                {
+                    var bone = rendererBones[i];
+                    if (bone == null) continue;
+                    var reconstructed = renderer.transform.worldToLocalMatrix * bone.localToWorldMatrix * bindposes[i];
+                    translations.Add(new Vector3(reconstructed.m03, reconstructed.m13, reconstructed.m23).magnitude);
+                    deviations.Add(MaxAbsDeviationFromIdentity(reconstructed));
+                    determinants.Add(reconstructed.determinant);
+                }
+                var metricCount = translations.Count;
+                return VRCForgeToolResult.Completed(
+                    $"Baked deformation metrics for '{renderer.sharedMesh.name}' without modifying assets.",
+                    new
+                    {
+                        action = "inspect_skinned_mesh_deformation",
+                        gameObjectPath = ComponentCrudCore.GetHierarchyPath(go.transform),
+                        componentIndex,
+                        meshName = renderer.sharedMesh.name,
+                        currentPlayMode = Application.isPlaying,
+                        rest = new { vertexCount = restVertices.Length, finiteVertexCount = restFiniteCount, aabb = restAabb, distanceSummary = DistanceSummary(restDistances) },
+                        play = new { vertexCount = playVertices.Length, finiteVertexCount = playFiniteCount, aabb = playAabb, distanceSummary = DistanceSummary(playDistances) },
+                        world = new { finiteVertexCount = worldFiniteCount, aabb = worldAabb, distanceSummary = DistanceSummary(worldDistances) },
+                        usedBoneReconstructedSkinMatrix = new
+                        {
+                            sampleCount = metricCount,
+                            maxTranslationMagnitude = translations.Count == 0 ? 0f : translations.Max(),
+                            maxAbsDeviation = deviations.Count == 0 ? 0f : deviations.Max(),
+                            determinantMin = determinants.Count == 0 ? 1f : determinants.Min(),
+                            determinantMax = determinants.Count == 0 ? 1f : determinants.Max()
+                        }
+                    });
+            }
+            catch (Exception ex)
+            {
+                return VRCForgeToolResult.FailedWithCode("skinned_mesh_deformation_inspection_failed", $"Inspect skinned mesh deformation failed: {ex.Message}");
+            }
+            finally
+            {
+                if (baked != null) UnityEngine.Object.DestroyImmediate(baked);
+            }
+        }
+    }
+
+    [VRCForgeCommand(
+        toolId: "vrc_remap_skinned_mesh_bone",
+        Summary = "Replace one explicitly weighted SkinnedMeshRenderer bone slot with an exact target Transform; preserves mesh, bindposes, and rootBone.")]
+    public static class RemapSkinnedMeshBoneTool
+    {
+        public const string ToolName = "vrc_remap_skinned_mesh_bone";
+
+        public class Parameters
+        {
+            [VRCForgeInput("Full hierarchy path of the GameObject with the SkinnedMeshRenderer.", IsRequired = true)] public string gameObjectPath { get; set; } = "";
+            [VRCForgeInput("Renderer component index (default 0).", IsRequired = false)] public int? componentIndex { get; set; } = 0;
+            [VRCForgeInput("Exact zero-based renderer bones[] index to replace.", IsRequired = true)] public int? boneIndex { get; set; }
+            [VRCForgeInput("Exact sharedMesh.name expected on the renderer before replacement.", IsRequired = true)] public string expectedMeshName { get; set; } = "";
+            [VRCForgeInput("Exact current bone hierarchy path required before replacement.", IsRequired = true)] public string expectedCurrentBonePath { get; set; } = "";
+            [VRCForgeInput("Exact target Transform hierarchy path.", IsRequired = true)] public string targetBonePath { get; set; } = "";
+            [VRCForgeInput("Only validate and return the planned replacement.", IsRequired = false)] public bool? preview { get; set; } = false;
+        }
+
+        private static bool HasPositiveWeightAt(Mesh mesh, int boneIndex)
+        {
+            var bonesPerVertex = mesh.GetBonesPerVertex();
+            var weights = mesh.GetAllBoneWeights();
+            try
+            {
+                var cursor = 0;
+                for (var vertex = 0; vertex < bonesPerVertex.Length; vertex++)
+                {
+                    for (var influence = 0; influence < bonesPerVertex[vertex]; influence++)
+                    {
+                        var weight = weights[cursor++];
+                        if (weight.boneIndex == boneIndex && weight.weight > 0f) return true;
+                    }
+                }
+                return false;
+            }
+            finally
+            {
+                if (bonesPerVertex.IsCreated) bonesPerVertex.Dispose();
+                if (weights.IsCreated) weights.Dispose();
+            }
+        }
+
+        private static bool MatricesExactlyEqual(Matrix4x4[] left, Matrix4x4[] right)
+        {
+            if (left == null || right == null || left.Length != right.Length) return left == right;
+            for (var index = 0; index < left.Length; index++)
+            {
+                for (var row = 0; row < 4; row++)
+                {
+                    for (var column = 0; column < 4; column++)
+                    {
+                        if (left[index][row, column] != right[index][row, column]) return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static string ObjectId(UnityEngine.Object value)
+        {
+            return value == null ? string.Empty : GlobalObjectId.GetGlobalObjectIdSlow(value).ToString();
+        }
+
+        private static float[] RowMajor(Matrix4x4 matrix)
+        {
+            var values = new float[16];
+            for (var row = 0; row < 4; row++)
+            {
+                for (var column = 0; column < 4; column++)
+                {
+                    values[row * 4 + column] = matrix[row, column];
+                }
+            }
+            return values;
+        }
+
+        private static float MaxAbsDeviationFromIdentity(Matrix4x4 matrix)
+        {
+            var max = 0f;
+            for (var row = 0; row < 4; row++)
+            {
+                for (var column = 0; column < 4; column++)
+                {
+                    max = Mathf.Max(max, Mathf.Abs(matrix[row, column] - (row == column ? 1f : 0f)));
+                }
+            }
+            return max;
+        }
+
+        private static object SkinningMetrics(SkinnedMeshRenderer renderer, Transform bone, Matrix4x4 bindpose)
+        {
+            var reconstructed = renderer.transform.worldToLocalMatrix * bone.localToWorldMatrix * bindpose;
+            var maxAbsDeviation = MaxAbsDeviationFromIdentity(reconstructed);
+            return new
+            {
+                rendererWorldToLocal = RowMajor(renderer.transform.worldToLocalMatrix),
+                boneLocalToWorld = RowMajor(bone.localToWorldMatrix),
+                bindpose = RowMajor(bindpose),
+                reconstructedSkinMatrix = RowMajor(reconstructed),
+                translationMagnitude = new Vector3(reconstructed.m03, reconstructed.m13, reconstructed.m23).magnitude,
+                maxAbsDeviation,
+                determinant = reconstructed.determinant,
+                nearIdentity = maxAbsDeviation <= 0.001f
+            };
+        }
+
+        public static object HandleCommand(JObject @params)
+        {
+            var p = (@params ?? new JObject()).ToObject<Parameters>() ?? new Parameters();
+            SavedSceneSnapshot beforeScene = null;
+            var undoGroup = -1;
+            var mutationStarted = false;
+            var mutationApplied = false;
+            var failureStage = "validation";
+            var rendererPath = string.Empty;
+            SkinnedMeshRenderer renderer = null;
+            Transform oldBone = null;
+            Transform targetBone = null;
+            Matrix4x4[] originalBindposes = null;
+            Transform originalRootBone = null;
+            Mesh originalMesh = null;
+            try
+            {
+                rendererPath = ComponentCrudCore.NormalizePath(p.gameObjectPath);
+                if (string.IsNullOrWhiteSpace(rendererPath) || string.IsNullOrWhiteSpace(p.expectedMeshName) || string.IsNullOrWhiteSpace(p.expectedCurrentBonePath) || string.IsNullOrWhiteSpace(p.targetBonePath))
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation("skinned_bone_remap_argument_missing", "gameObjectPath, expectedMeshName, expectedCurrentBonePath, and targetBonePath are required.", "unity_editor_tool", "validation");
+                }
+                var index = p.boneIndex ?? -1;
+                var componentIndex = p.componentIndex ?? 0;
+                if (index < 0 || componentIndex < 0) return VRCForgeToolResult.RejectedBeforeMutation("skinned_bone_remap_index_invalid", "boneIndex and componentIndex must be non-negative.", "unity_editor_tool", "validation");
+                var go = ComponentCrudCore.ResolveGameObject(rendererPath);
+                if (!string.Equals(ComponentCrudCore.GetHierarchyPath(go.transform), rendererPath, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("gameObjectPath must be the exact full hierarchy path; leaf-name fallback is not allowed.");
+                }
+                renderer = ComponentCrudCore.ResolveComponent(go, typeof(SkinnedMeshRenderer), componentIndex) as SkinnedMeshRenderer;
+                if (renderer == null) throw new InvalidOperationException("The requested component is not a SkinnedMeshRenderer.");
+                var mesh = renderer.sharedMesh;
+                if (mesh == null) throw new InvalidOperationException("The SkinnedMeshRenderer has no shared mesh.");
+                if (!string.Equals(mesh.name, p.expectedMeshName.Trim(), StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException($"expectedMeshName did not match the live sharedMesh.name ('{mesh.name}').");
+                }
+                var bones = renderer.bones ?? Array.Empty<Transform>();
+                var bindposes = mesh.bindposes ?? Array.Empty<Matrix4x4>();
+                if (index >= bones.Length) throw new InvalidOperationException($"boneIndex {index} is outside renderer bones[] length {bones.Length}.");
+                if (index >= bindposes.Length) throw new InvalidOperationException($"boneIndex {index} has no corresponding bindpose.");
+                if (!HasPositiveWeightAt(mesh, index)) throw new InvalidOperationException($"boneIndex {index} has no positive mesh weight; refusing an unused-slot remap.");
+                oldBone = bones[index];
+                var expectedPath = ComponentCrudCore.NormalizePath(p.expectedCurrentBonePath);
+                if (oldBone == null || !string.Equals(ComponentCrudCore.GetHierarchyPath(oldBone), expectedPath, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException($"expectedCurrentBonePath did not match the live bone at index {index}.");
+                }
+                var targetPath = ComponentCrudCore.NormalizePath(p.targetBonePath);
+                targetBone = ComponentCrudCore.ResolveGameObject(targetPath).transform;
+                if (!string.Equals(ComponentCrudCore.GetHierarchyPath(targetBone), targetPath, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("targetBonePath must be the exact full hierarchy path; leaf-name fallback is not allowed.");
+                }
+                if (targetBone.gameObject.scene != go.scene)
+                {
+                    throw new InvalidOperationException("targetBonePath must resolve inside the renderer's loaded scene.");
+                }
+                if (targetBone == null || targetBone == oldBone) throw new InvalidOperationException("targetBonePath must resolve to a different Transform.");
+                beforeScene = ComponentCrudCore.ResolveSavedSceneFor(go);
+                originalBindposes = bindposes.ToArray();
+                originalRootBone = renderer.rootBone;
+                originalMesh = mesh;
+                if (p.preview ?? false)
+                {
+                    return VRCForgeToolResult.Completed("Preview: validated one positively weighted SkinnedMeshRenderer bone remap.", new
+                    {
+                        action = "remap_skinned_mesh_bone", preview = true, gameObjectPath = rendererPath, componentIndex,
+                        boneIndex = index, expectedMeshName = p.expectedMeshName.Trim(), expectedCurrentBonePath = expectedPath, targetBonePath = ComponentCrudCore.GetHierarchyPath(targetBone),
+                        meshName = mesh.name, bindposeCount = bindposes.Length, rendererBoneCount = bones.Length,
+                        currentSkinningMetrics = SkinningMetrics(renderer, oldBone, bindposes[index]),
+                        targetSkinningMetrics = SkinningMetrics(renderer, targetBone, bindposes[index]),
+                        preservesMesh = true, preservesBindposes = true, preservesRootBone = true
+                    });
+                }
+
+                Undo.IncrementCurrentGroup();
+                undoGroup = Undo.GetCurrentGroup();
+                Undo.SetCurrentGroupName("Remap VRCForge SkinnedMeshRenderer bone");
+                Undo.RecordObject(renderer, "Remap VRCForge SkinnedMeshRenderer bone");
+                mutationStarted = true;
+                failureStage = "unity_mutation";
+                var replacement = bones.ToArray();
+                replacement[index] = targetBone;
+                renderer.bones = replacement;
+                mutationApplied = true;
+                EditorUtility.SetDirty(renderer);
+                EditorUtility.SetDirty(go);
+                failureStage = "scene_save";
+                var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
+                failureStage = "persisted_readback";
+                var readbackObject = SceneObjectCopyCore.ResolveUniqueGameObject(afterScene.Scene, rendererPath, "skinned mesh bone remap target");
+                var readbackRenderer = ComponentCrudCore.ResolveComponent(readbackObject, typeof(SkinnedMeshRenderer), componentIndex) as SkinnedMeshRenderer;
+                var readbackBones = readbackRenderer.bones ?? Array.Empty<Transform>();
+                if (readbackBones.Length != bones.Length
+                    || ObjectId(readbackBones[index]) != ObjectId(targetBone)
+                    || ObjectId(readbackRenderer.rootBone) != ObjectId(originalRootBone)
+                    || ObjectId(readbackRenderer.sharedMesh) != ObjectId(originalMesh)
+                    || !MatricesExactlyEqual(readbackRenderer.sharedMesh.bindposes, originalBindposes)
+                    || afterScene.FileDigest == beforeScene.FileDigest)
+                {
+                    throw new InvalidOperationException("The remapped bone did not pass exact persisted readback or an invariant changed.");
+                }
+                Undo.CollapseUndoOperations(undoGroup);
+                return VRCForgeToolResult.Completed("Remapped one positively weighted SkinnedMeshRenderer bone slot.", new
+                {
+                    action = "remap_skinned_mesh_bone", preview = false, changed = true, gameObjectPath = rendererPath, componentIndex,
+                     boneIndex = index, expectedMeshName = p.expectedMeshName.Trim(), expectedCurrentBonePath = expectedPath, targetBonePath = ComponentCrudCore.GetHierarchyPath(targetBone),
+                     meshName = originalMesh.name, bindposeCount = originalBindposes.Length, rendererBoneCount = readbackBones.Length,
+                     currentSkinningMetrics = SkinningMetrics(renderer, oldBone, originalBindposes[index]),
+                     targetSkinningMetrics = SkinningMetrics(readbackRenderer, readbackBones[index], originalBindposes[index]),
+                     preservesMesh = true, preservesBindposes = true, preservesRootBone = true, scenePath = afterScene.Path,
+                    sceneSaved = true, persistedReadback = true, mutationStarted = true, committed = true, commitState = "committed",
+                    checkpointRecoveryRequired = false
+                });
+            }
+            catch (Exception ex)
+            {
+                if (mutationStarted && beforeScene != null && undoGroup >= 0)
+                {
+                    var cleanup = ComponentCrudCore.RestoreFailedMutation(
+                        undoGroup, beforeScene, rendererPath,
+                        restoredObject =>
+                        {
+                            var restored = ComponentCrudCore.ResolveComponent(restoredObject, typeof(SkinnedMeshRenderer), p.componentIndex ?? 0) as SkinnedMeshRenderer;
+                            var restoredBones = restored.bones ?? Array.Empty<Transform>();
+                            return restoredBones.Length > (p.boneIndex ?? -1)
+                                && ObjectId(restoredBones[p.boneIndex ?? -1]) == ObjectId(oldBone)
+                                && ObjectId(restored.rootBone) == ObjectId(originalRootBone)
+                                && ObjectId(restored.sharedMesh) == ObjectId(originalMesh)
+                                && MatricesExactlyEqual(restored.sharedMesh.bindposes, originalBindposes);
+                        });
+                    return ComponentCrudCore.FailedMutationResult("skinned_bone_remap_failed_after_mutation", "remap_skinned_mesh_bone", failureStage, ex, beforeScene, cleanup, mutationApplied);
+                }
+                return VRCForgeToolResult.RejectedBeforeMutation("skinned_bone_remap_rejected_before_mutation", $"Skinned mesh bone remap failed: {ex.Message}", "unity_editor_tool", failureStage);
+            }
+        }
+    }
+
+    [VRCForgeCommand(
         toolId: "vrc_inspect_skinned_mesh_bone_usage",
         Summary = "Inspect which SkinnedMeshRenderer bone-array indices are referenced by non-zero mesh weights (read-only).",
         Access = VRCForgeCommandAccess.ReadOnly
@@ -983,6 +1398,32 @@ namespace VRCForge.Editor
             public int InfluenceCount;
             public double TotalWeight;
             public float MaxWeight;
+        }
+
+        private static float[] RowMajor(Matrix4x4 matrix)
+        {
+            var values = new float[16];
+            for (var row = 0; row < 4; row++)
+            {
+                for (var column = 0; column < 4; column++)
+                {
+                    values[row * 4 + column] = matrix[row, column];
+                }
+            }
+            return values;
+        }
+
+        private static float MaxAbsDeviationFromIdentity(Matrix4x4 matrix)
+        {
+            var max = 0f;
+            for (var row = 0; row < 4; row++)
+            {
+                for (var column = 0; column < 4; column++)
+                {
+                    max = Mathf.Max(max, Mathf.Abs(matrix[row, column] - (row == column ? 1f : 0f)));
+                }
+            }
+            return max;
         }
 
         public static object HandleCommand(JObject @params)
@@ -1072,6 +1513,12 @@ namespace VRCForge.Editor
                     .Select(item =>
                     {
                         var bone = rendererBones[item.Key];
+                        var bindposes = mesh.bindposes ?? new Matrix4x4[0];
+                        var bindposeExists = item.Key < bindposes.Length;
+                        var bindpose = bindposeExists ? bindposes[item.Key] : Matrix4x4.identity;
+                        var rendererWorldToLocal = renderer.transform.worldToLocalMatrix;
+                        var boneLocalToWorld = bone != null ? bone.localToWorldMatrix : Matrix4x4.identity;
+                        var reconstructed = rendererWorldToLocal * boneLocalToWorld * bindpose;
                         return new
                         {
                             index = item.Key,
@@ -1082,6 +1529,16 @@ namespace VRCForge.Editor
                             influenceCount = item.Value.InfluenceCount,
                             totalWeight = item.Value.TotalWeight,
                             maxWeight = item.Value.MaxWeight
+                            ,bindposeExists
+                            ,bindpose = RowMajor(bindpose)
+                            ,rendererLocalToWorld = RowMajor(renderer.transform.localToWorldMatrix)
+                            ,rendererWorldToLocal = RowMajor(rendererWorldToLocal)
+                            ,boneLocalToWorld = RowMajor(boneLocalToWorld)
+                            ,reconstructedSkinMatrix = RowMajor(reconstructed)
+                            ,translationMagnitude = new Vector3(reconstructed.m03, reconstructed.m13, reconstructed.m23).magnitude
+                            ,maxAbsDeviation = MaxAbsDeviationFromIdentity(reconstructed)
+                            ,determinant = reconstructed.determinant
+                            ,nearIdentity = bindposeExists && bone != null && MaxAbsDeviationFromIdentity(reconstructed) <= 0.001f
                         };
                     })
                     .ToArray();
@@ -1091,6 +1548,10 @@ namespace VRCForge.Editor
                     .Count(item => item.bone != null && !usedIndices.Contains(item.index));
                 var nullBoneCount = rendererBones.Count(bone => bone == null);
                 var rootBone = renderer.rootBone;
+                var bindposeCount = mesh.bindposes != null ? mesh.bindposes.Length : 0;
+                var usedNullBoneCount = usedBones.Count(item => item.missingTransform);
+                var allUsedBonesResolved = usedNullBoneCount == 0;
+                var allUsedBindposesResolved = usage.Keys.All(index => index >= 0 && index < bindposeCount);
                 var payload = new
                 {
                     action = "inspect_skinned_mesh_bone_usage",
@@ -1099,8 +1560,39 @@ namespace VRCForge.Editor
                     meshName = mesh.name,
                     vertexCount = mesh.vertexCount,
                     rendererBoneCount = rendererBones.Length,
-                    bindposeCount = mesh.bindposes != null ? mesh.bindposes.Length : 0,
+                    bindposeCount,
+                    rendererLocalToWorld = RowMajor(renderer.transform.localToWorldMatrix),
+                    rendererWorldToLocal = RowMajor(renderer.transform.worldToLocalMatrix),
+                    capability = new
+                    {
+                        complete = rendererBones.Length == bindposeCount
+                            && rendererBones.All(bone => bone != null)
+                            && outOfRangeWeightCount == 0,
+                        bonesPresent = rendererBones.Length > 0,
+                        bindposesPresent = bindposeCount > 0,
+                        boneBindposeCountParity = rendererBones.Length == bindposeCount,
+                        allRendererBonesResolved = rendererBones.All(bone => bone != null),
+                        noOutOfRangeWeights = outOfRangeWeightCount == 0,
+                        usedNullBoneCount,
+                        allUsedBonesResolved,
+                        allUsedBindposesResolved,
+                        mixedChainClosure = rootBone != null
+                            && usedBones.All(item => !item.missingTransform
+                                && rendererBones[item.index] != null
+                                && (rendererBones[item.index] == rootBone || rendererBones[item.index].IsChildOf(rootBone)))
+                        ,safeForWeightedRemap = rendererBones.Length == bindposeCount
+                            && bindposeCount > 0
+                            && allUsedBonesResolved
+                            && allUsedBindposesResolved
+                            && outOfRangeWeightCount == 0
+                            && rootBone != null
+                            && usedBones.All(item => !item.missingTransform
+                                && (rendererBones[item.index] == rootBone || rendererBones[item.index].IsChildOf(rootBone)))
+                    },
                     usedBoneCount = usedBones.Length,
+                    usedNullBoneCount,
+                    allUsedBonesResolved,
+                    allUsedBindposesResolved,
                     unusedBoundBoneCount,
                     nullBoneCount,
                     outOfRangeWeightCount,

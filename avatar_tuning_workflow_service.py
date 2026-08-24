@@ -758,6 +758,56 @@ def _locked_target_set(
     }
 
 
+def _unity_result_failure(result: Any, serialized: Any) -> dict[str, Any] | None:
+    """Project a failed Core envelope without turning it into a write success."""
+
+    exit_code = getattr(result, "exit_code", None)
+    envelope = serialized.get("payload") if isinstance(serialized, dict) else None
+    envelope = envelope if isinstance(envelope, dict) else {}
+    structured = envelope.get("structuredContent")
+    structured = structured if isinstance(structured, dict) else {}
+    data = structured.get("data")
+    data = data if isinstance(data, dict) else {}
+    direct_failure = serialized if isinstance(serialized, dict) else {}
+    failed = bool(
+        (isinstance(exit_code, int) and exit_code != 0)
+        or envelope.get("isError") is True
+        or structured.get("success") is False
+        or direct_failure.get("ok") is False
+        or direct_failure.get("success") is False
+    )
+    if not failed:
+        return None
+    fields: dict[str, Any] = {}
+    for key in (
+        "schema", "operation", "failureLayer", "failurePhase", "mutationStarted",
+        "committed", "commitState", "requestMayHaveCommitted",
+        "checkpointRecoveryRequired",
+    ):
+        value = data.get(key, structured.get(key, direct_failure.get(key)))
+        if value is not None:
+            fields[key] = value
+    code = str(
+        data.get("errorCode")
+        or data.get("code")
+        or structured.get("errorCode")
+        or structured.get("code")
+        or direct_failure.get("errorCode")
+        or direct_failure.get("code")
+        or "unity_tool_failed"
+    ).strip()
+    error = str(
+        data.get("message")
+        or data.get("error")
+        or structured.get("message")
+        or structured.get("error")
+        or direct_failure.get("message")
+        or direct_failure.get("error")
+        or "The approved Unity Blendshape apply failed."
+    ).strip()
+    return {**fields, "errorCode": code, "error": error}
+
+
 class AvatarTuningPreparedService:
     """Own prepared tuning seals, drift checks and approved Unity calls.
 
@@ -861,6 +911,10 @@ class AvatarTuningPreparedService:
                 "avatarPath": context.avatar_path,
                 "targetFacts": target_facts,
                 "locksSha256": blendshape_evidence_sha256(locked),
+                # Seal the read-side avatar snapshot before approval. The
+                # approved call must not perform a second Unity export.
+                "selectedAvatar": self._ports.serialize_avatar(context),
+                "skippedAdjustments": skipped,
             },
         }
 
@@ -910,19 +964,13 @@ class AvatarTuningPreparedService:
         evidence = prepared_evidence(arguments)
         if not isinstance(evidence, dict):
             raise RuntimeError("Prepared Blendshape evidence is invalid.")
-        state = self._manual_state(arguments)
-        for key in ("avatarPath", "targetFacts", "locksSha256"):
+        for key in ("avatarPath", "targetFacts", "locksSha256", "selectedAvatar"):
             if key not in evidence:
                 raise RuntimeError("Prepared Blendshape evidence is incomplete.")
-            require_exact_blendshape_evidence(
-                evidence[key],
-                state["evidence"][key],
-                key,
-            )
         tool_name, tool_arguments = prepared_call(arguments)
         expected = {
             "avatarPath": evidence["avatarPath"],
-            "adjustments": state["validatedAdjustments"],
+            "adjustments": tool_arguments.get("adjustments"),
             "saveAssets": True,
         }
         if tool_name != "vrc_apply_blendshapes":
@@ -932,12 +980,71 @@ class AvatarTuningPreparedService:
             expected,
             "Core arguments",
         )
-        context = state["context"]
+        target_facts = evidence["targetFacts"]
+        if not isinstance(target_facts, list):
+            raise RuntimeError("Prepared Blendshape target facts are invalid.")
+        allowed_targets: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in target_facts:
+            if not isinstance(item, dict):
+                raise RuntimeError("Prepared Blendshape target facts are invalid.")
+            renderer_path = item.get("rendererPath")
+            blendshape_name = item.get("blendshapeName")
+            if not isinstance(renderer_path, str) or not isinstance(blendshape_name, str):
+                raise RuntimeError("Prepared Blendshape target facts are invalid.")
+            try:
+                current_weight = float(item["currentWeight"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError("Prepared Blendshape target facts are invalid.") from exc
+            if not math.isfinite(current_weight) or not 0.0 <= current_weight <= 100.0:
+                raise RuntimeError("Prepared Blendshape target facts are invalid.")
+            allowed_targets[(renderer_path, blendshape_name)] = {"currentWeight": current_weight}
+        selected_avatar = evidence["selectedAvatar"]
+        if not isinstance(selected_avatar, dict):
+            raise RuntimeError("Prepared Blendshape selected avatar evidence is invalid.")
+        avatar_path = evidence["avatarPath"]
+        if not isinstance(avatar_path, str) or not avatar_path.strip():
+            raise RuntimeError("Prepared Blendshape avatar evidence is invalid.")
+        if str(selected_avatar.get("avatarPath") or "") != avatar_path:
+            raise RuntimeError("Prepared Blendshape selected avatar evidence drifted.")
+        context = AvatarTuningLiveContext(
+            settings=self._ports.resolve_write_settings(
+                {**arguments, "avatar_path": avatar_path}
+            ),
+            avatar_name=str(selected_avatar.get("avatarName") or "<unknown>"),
+            avatar_path=avatar_path,
+            allowed_targets=allowed_targets,
+            locked_blendshapes=[],
+            using_mock_execute=False,
+            selected_avatar=selected_avatar,
+        )
         result = self._ports.invoke_unity(
             context.settings,
             tool_name,
             tool_arguments,
         )
+        serialized_result = self._ports.serialize_result(result)
+        failure = _unity_result_failure(result, serialized_result)
+        if failure is not None:
+            return {
+                "ok": False,
+                "selectedAvatar": selected_avatar,
+                "executionMode": "live-unity",
+                "result": serialized_result,
+                **failure,
+            }
+        change_preview = [
+            {
+                "rendererPath": item["rendererPath"],
+                "blendshapeName": item["blendshapeName"],
+                "previousWeight": item["currentWeight"],
+                "targetWeight": adjustment["targetWeight"],
+            }
+            for adjustment in tool_arguments["adjustments"]
+            for item in target_facts
+            if item["rendererPath"] == adjustment["rendererPath"]
+            and item["blendshapeName"] == adjustment["blendshapeName"]
+        ]
+        verified_changes = self._ports.verify_live_changes(context, change_preview)
         undo_items = evidence.get("undoItems")
         if not isinstance(undo_items, list):
             raise RuntimeError("Prepared Blendshape undo evidence is invalid.")
@@ -945,13 +1052,14 @@ class AvatarTuningPreparedService:
         self._ports.remember_avatar(context.avatar_name, context.avatar_path)
         return {
             "ok": True,
-            "selectedAvatar": self._ports.serialize_avatar(context),
+            "selectedAvatar": selected_avatar,
             "executionMode": (
                 "mock" if context.using_mock_execute else "live-unity"
             ),
-            "result": self._ports.serialize_result(result),
-            "appliedAdjustments": state["validatedAdjustments"],
-            "skippedAdjustments": state["skippedAdjustments"],
+            "result": serialized_result,
+            "appliedAdjustments": tool_arguments["adjustments"],
+            "skippedAdjustments": list(evidence.get("skippedAdjustments") or []),
+            "verifiedChanges": verified_changes,
             "undoDepth": undo_depth,
         }
 

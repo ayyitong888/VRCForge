@@ -350,6 +350,11 @@ def test_pre_mutation_rejections_report_known_no_write_state() -> None:
 
 
 def test_core_error_diagnostics_use_only_fixed_machine_codes() -> None:
+    assert 'catch (Exception exception)' in SERVER
+    assert '"handlerException"' in SERVER
+    assert '"innerChain"' in SERVER
+    assert '"vrcforge.unity_tool_handler_diagnostics.v1"' in SERVER
+    assert '"failedStep"' in SERVER
     assert '["structuredContent"] = structured' in SERVER
     assert '["failureLayer"] = noWriteProven ? "unity_core_pre_route" : "unity_tool_handler"' in SERVER
     assert '["failurePhase"] = noWriteProven ? "before_tool_routing" : "tool_handler_exception"' in SERVER
@@ -605,9 +610,9 @@ def test_uninstall_menu_stops_core_clears_only_owned_preference_and_removes_prod
     assert lifecycle.count("EditorPrefs.DeleteKey(") == 1
 
 
-def test_core_has_a_fixed_78_tool_contract_and_never_rediscoveres_at_invoke_time() -> None:
-    assert "ToolCount = 78" in CONTRACT
-    assert CONTRACT.count('{ "vrc_') == 78
+def test_core_has_a_fixed_80_tool_contract_and_never_rediscoveres_at_invoke_time() -> None:
+    assert "ToolCount = 80" in CONTRACT
+    assert CONTRACT.count('{ "vrc_') == 80
     assert "SnapshotExact" in SERVER
     assert "var registry = VRCForgeToolRegistry.DiscoverLoadedAssemblies();" not in SERVER
     assert "ApprovedAppCoreTools" in SERVER
@@ -620,7 +625,7 @@ def test_core_has_a_fixed_78_tool_contract_and_never_rediscoveres_at_invoke_time
     assert '"vrcforge_apply_blendshapes"' not in SERVER
 
 
-def test_csharp_contract_exactly_matches_the_78_owned_tool_declarations() -> None:
+def test_csharp_contract_exactly_matches_the_80_owned_tool_declarations() -> None:
     contract = dict(re.findall(r'\{ "(vrc_[^"]+)", "([^"]+)" \}', CONTRACT))
     declared: dict[str, str] = {}
     for path in (ROOT / "Assets" / "VRCForge" / "Editor").rglob("*.cs"):
@@ -632,7 +637,7 @@ def test_csharp_contract_exactly_matches_the_78_owned_tool_declarations() -> Non
             source,
         ):
             declared[match.group(1)] = f"{namespace.group(1)}.{match.group(2)}"
-    assert len(contract) == 78
+    assert len(contract) == 80
     assert set(contract) == EXPECTED_TOOL_NAMES
     assert contract == declared
 

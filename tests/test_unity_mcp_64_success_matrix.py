@@ -24,10 +24,10 @@ def load_validator():
     return module
 
 
-def test_catalog_covers_exact_78_tools_once_with_real_success_contracts() -> None:
+def test_catalog_covers_exact_80_tools_once_with_real_success_contracts() -> None:
     validator = load_validator()
     cases = validator.load_catalog()
-    assert len(cases) == 78
+    assert len(cases) == 80
     assert {case["tool"] for case in cases} == EXPECTED_TOOL_NAMES
     assert all(case["arguments"] is not None for case in cases)
     assert all(case["requiredFixtures"] for case in cases)
@@ -91,7 +91,7 @@ def test_live_schema_gate_rejects_empty_or_missing_catalog_parameters() -> None:
                 },
             }
         )
-    assert validator.validate_tool_schemas(cases, tools)["toolCount"] == 78
+    assert validator.validate_tool_schemas(cases, tools)["toolCount"] == 80
 
     broken = [dict(item) for item in tools]
     broken[0] = {

@@ -220,7 +220,7 @@ def test_core_and_external_registry_include_only_the_atomic_copy_surface() -> No
     gateway = (root / "agent_gateway.py").read_text(encoding="utf-8")
     tool = (root / "Assets/VRCForge/Editor/Generic/DuplicateProjectAssetTool.cs").read_text(encoding="utf-8")
 
-    assert 'internal const int ToolCount = 78;' in contract
+    assert 'internal const int ToolCount = 80;' in contract
     assert f'{{ "{TOOL_NAME}", "VRCForge.Editor.DuplicateProjectAssetTool" }}' in contract
     assert f'"{TOOL_NAME}",' in server
     assert '"vrcforge_duplicate_project_asset"' in dashboard

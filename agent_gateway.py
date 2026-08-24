@@ -464,6 +464,7 @@ EXTERNAL_MCP_READ_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_list_avatars",
             "vrcforge_get_gameobject",
             "vrcforge_get_property",
+            "vrcforge_inspect_skinned_mesh_deformation",
         }
     ),
     "project": frozenset(
@@ -917,6 +918,16 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
             "maxItems": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 50},
         },
     },
+    "vrcforge_inspect_skinned_mesh_deformation": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath", "componentIndex"],
+        "properties": {
+            "projectPath": _PROJECT_PATH_PROPERTY,
+            "gameObjectPath": {"type": "string"},
+            "componentIndex": {"type": "integer", "minimum": 0, "default": 0},
+        },
+    },
     "vrcforge_preview_scene_object_duplicate": SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_write_avatar_descriptor": AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_preview_write_animation_curve": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
@@ -1193,6 +1204,21 @@ UNITY_READ_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "vrcforge_remap_skinned_mesh_bone": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath", "gameObjectPath", "componentIndex", "boneIndex", "expectedCurrentBonePath", "targetBonePath", "expectedMeshName", "preview"],
+        "properties": {
+            "projectPath": {"type": "string"},
+            "gameObjectPath": {"type": "string"},
+            "componentIndex": {"type": "integer", "minimum": 0},
+            "boneIndex": {"type": "integer", "minimum": 0},
+            "expectedCurrentBonePath": {"type": "string"},
+            "targetBonePath": {"type": "string"},
+            "expectedMeshName": {"type": "string"},
+            "preview": {"type": "boolean"},
+        },
+    },
     "vrcforge_duplicate_scene_object": SCENE_OBJECT_DUPLICATE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_write_avatar_descriptor": AVATAR_DESCRIPTOR_WRITE_PUBLIC_INPUT_SCHEMA,
     "vrcforge_write_animation_curve": ANIMATION_CURVE_WRITE_PUBLIC_INPUT_SCHEMA,
@@ -1470,6 +1496,13 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         "properties": {
             "projectPath": {"type": "string", "description": "Exact existing Unity project root bound to this capture."},
             "avatarPath": {"type": "string", "description": "Optional exact avatar hierarchy path; omit only when the active avatar is unambiguous."},
+            "cameraMode": {"type": "string", "enum": ["framed", "free"], "default": "framed"},
+            "cameraPosition": {"$ref": "#/$defs/vector3"},
+            "targetPosition": {"$ref": "#/$defs/vector3"},
+            "upVector": {"$ref": "#/$defs/vector3"},
+            "projection": {"type": "string", "enum": ["perspective", "orthographic"]},
+            "orthographicSize": {"type": "number", "exclusiveMinimum": 0},
+            "fieldOfView": {"type": "number", "exclusiveMinimum": 0, "maximum": 179},
             "angle": {
                 "type": "string",
                 "enum": ["front", "side_left", "side_right", "back", "bottom"],
@@ -1512,6 +1545,33 @@ EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "default": "auto",
                 "description": "scene_view captures the Unity Scene view even during Gesture Manager Play Mode.",
             },
+        },
+        "$defs": {"vector3": {"type": "object", "additionalProperties": False, "required": ["x", "y", "z"], "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"}}}},
+        "allOf": [
+            {"if": {"properties": {"cameraMode": {"const": "free"}}}, "then": {"required": ["cameraMode", "cameraPosition", "targetPosition", "upVector", "projection"], "oneOf": [{"properties": {"projection": {"const": "perspective"}}, "required": ["fieldOfView"], "not": {"required": ["orthographicSize"]}}, {"properties": {"projection": {"const": "orthographic"}}, "required": ["orthographicSize"], "not": {"required": ["fieldOfView"]}}]}},
+            {"if": {"properties": {"cameraMode": {"const": "framed"}}}, "then": {"not": {"anyOf": [{"required": ["cameraPosition"]}, {"required": ["targetPosition"]}, {"required": ["upVector"]}, {"required": ["projection"]}, {"required": ["orthographicSize"]}, {"required": ["fieldOfView"]}]}}}
+        ],
+    },
+    "vrcforge_capture_multi_screenshot": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["projectPath"],
+        "properties": {
+            "projectPath": {"type": "string"},
+            "avatarPath": {"type": "string"},
+            "angles": {
+                "type": "array",
+                "items": {"type": "string", "enum": ["front", "side_left", "side_right", "back", "bottom"]},
+                "default": ["front", "side_left", "side_right", "back", "bottom"],
+                "minItems": 1,
+                "maxItems": 5,
+                "uniqueItems": True,
+            },
+            "framing": {"type": "string", "enum": ["face", "avatar"]},
+            "width": {"type": "integer", "minimum": 256, "maximum": 2048, "default": 960},
+            "height": {"type": "integer", "minimum": 256, "maximum": 2048, "default": 960},
+            "requirePlayMode": {"type": "boolean", "default": False},
+            "captureMode": {"type": "string", "enum": ["auto", "scene_view", "game_view"], "default": "auto"},
         },
     },
     "vrcforge_select_scene_object": {
@@ -1625,6 +1685,8 @@ EXTERNAL_MCP_WRITE_TOOL_BLOCKS: dict[str, frozenset[str]] = {
             "vrcforge_convert_unity_constraint",
             "vrcforge_set_property",
             "vrcforge_toggle_scene_object",
+            "vrcforge_remap_skinned_mesh_bone",
+            "vrcforge_capture_multi_screenshot",
             "vrcforge_write_animation_curve",
         }
     ),
@@ -5165,19 +5227,21 @@ class AgentGateway:
         tool: str,
         applied: Mapping[str, Any],
     ) -> dict[str, Any]:
-        had_canonical_outcome = isinstance(applied.get("outcome"), Mapping)
-        outcome = (
-            dict(applied["outcome"])
-            if isinstance(applied.get("outcome"), Mapping)
-            else normalize_agent_tool_result(
-                applied,
-                fallback_summary=f"{tool} completed.",
-                write=True,
-            )
+        # Re-normalize the complete transaction envelope even when the
+        # approval layer supplied an ``outcome`` projection.  That projection
+        # can contain only the generic gateway rejection while ``result`` (or
+        # ``rawResult``) carries the exact post-mutation Unity diagnosis.
+        # ``normalize_agent_tool_result`` ranks those nested domain sources
+        # ahead of wrapper summaries and therefore keeps internal call_tool
+        # and external MCP on the same causal result.
+        outcome = normalize_agent_tool_result(
+            applied,
+            fallback_summary=f"{tool} completed.",
+            write=True,
         )
         outcome_status = str(outcome.get("status") or "failed")
         status = str(applied.get("status") or outcome_status)
-        if outcome_status == "failed" and not had_canonical_outcome:
+        if outcome_status == "failed":
             status = "failed"
         elif status == "applied":
             status = "executed"
@@ -5202,8 +5266,10 @@ class AgentGateway:
         if outcome_status == "failed" and "errorDetails" not in payload:
             error_object = build_external_tool_error(
                 error=payload.get("error") or "External MCP write was rejected.",
-                failure_layer="external_mcp_write_execution",
-                failure_phase="write_result",
+                # Match the internal call_tool rejection boundary so its
+                # diagnostics projection remains transport-independent.
+                failure_layer="agent_tool_result",
+                failure_phase="tool_returned_rejection",
                 operation_kind="write",
                 tool=tool,
                 tool_routing_started=None,
@@ -5293,6 +5359,28 @@ class AgentGateway:
             }
             if outcome_status == "failed":
                 response["error"] = outcome["summary"]
+                if isinstance(result, Mapping):
+                    # Project the same lossless rejection facts that the
+                    # external MCP boundary exposes, while retaining the
+                    # handler's original result verbatim.
+                    error_object = build_external_tool_error(
+                        error=result.get("error") or result.get("message") or outcome["summary"],
+                        failure_layer="agent_tool_result",
+                        failure_phase="tool_returned_rejection",
+                        operation_kind="write" if tool.write else "read",
+                        tool=name,
+                        tool_routing_started=True,
+                        mutation_started=(None if tool.write else False),
+                        committed=(None if tool.write else False),
+                        raw_result=result,
+                    )
+                    response["errorDetails"] = error_object
+                    for key in (
+                        "errorCode", "failureLayer", "failurePhase", "causeChain",
+                        "mutationStarted", "committed", "commitState",
+                    ):
+                        if key in error_object:
+                            response[key] = error_object[key]
             if request_trace is not None:
                 response["requestTrace"] = request_trace
             return response
@@ -6777,10 +6865,30 @@ class AgentGateway:
                 if action_kind == "skill"
                 else {"command": command, **shell_step_params}
             )
+            # Internal Agent turns already carry a bound Unity project in the
+            # runtime/session context.  Keep the model's action identity based
+            # on its submitted arguments, but inject that bound project only
+            # into the validated/executed call.  The external MCP boundary
+            # remains strict and still requires an explicit projectPath.
+            execution_arguments = dict(planned_arguments)
+            if action_kind in {"write", "skill"} and project_root:
+                schema_tool = (
+                    planned_tool
+                    if planned_tool.startswith("vrcforge_")
+                    else f"vrcforge_{planned_tool}"
+                )
+                schema = (
+                    canonical_unity_write_tool_input_schema(schema_tool)
+                    if action_kind == "write"
+                    else canonical_unity_read_tool_input_schema(schema_tool)
+                )
+                required_fields = ensure_list(schema.get("required"))
+                if "projectPath" in required_fields:
+                    execution_arguments.setdefault("projectPath", project_root)
             if action_kind in {"skill", "write"}:
                 execution_argument_validation = self.runtime_planner.validate_tool_arguments(
                     planned_tool,
-                    planned_arguments,
+                    execution_arguments,
                     exposure_layer=runtime_exposure_layer,
                 )
                 if execution_argument_validation.get("ok") is not True:
@@ -7029,7 +7137,7 @@ class AgentGateway:
                 )
             elif action_kind == "write":
                 step_tool = str(plan.get("writeTool") or "")
-                action_arguments = dict(planned_arguments)
+                action_arguments = dict(execution_arguments)
                 if step_tool in {
                     "vrcforge_edit_file",
                     "vrcforge_write_file",
@@ -7064,8 +7172,8 @@ class AgentGateway:
                 )
             else:  # skill
                 step_tool = str(plan.get("skillTool") or "")
-                step_params = dict(planned_arguments)
-                action_arguments = dict(planned_arguments)
+                step_params = dict(execution_arguments)
+                action_arguments = dict(execution_arguments)
                 if step_tool in {
                     "vrcforge_list_directory",
                     "vrcforge_read_text_file",

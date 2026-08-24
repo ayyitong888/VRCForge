@@ -1,5 +1,5 @@
 {
-  "schema": "vrcforge.unity_mcp_78_success_matrix.part.v1",
+  "schema": "vrcforge.unity_mcp_80_success_matrix.part.v1",
   "part": "c",
   "description": "Production-success matrix for the remaining commands. Placeholders are bound only by the disposable acceptance runner after its read/preview evidence is available.",
   "cases": [
@@ -244,6 +244,22 @@
       "requiredFixtures": ["one exact disposable avatar", "authenticated VRChat SDK user with upload permission", "previous exact upload-readiness result", "explicit user confirmation for remote publication"],
       "successFields": ["jobId", "status", "uploadMode", "requestedVisibility", "remoteAvatarId", "bundlePath", "remoteMetadataRequested", "remoteMetadataAfter", "metadataCommitState", "committed", "commitState"],
       "cleanup": "Poll the same jobId to completion; remote deletion or visibility changes require a separate explicit user-owned action."
+    },
+    {
+      "tool": "vrc_inspect_skinned_mesh_deformation",
+      "mode": "direct_read",
+      "minimalArguments": { "gameObjectPath": "${SKINNED_RENDERER_PATH}", "componentIndex": 0 },
+      "requiredFixtures": ["${SKINNED_RENDERER_PATH} has a readable SkinnedMeshRenderer with a finite shared mesh and bones."],
+      "successFields": ["action", "gameObjectPath", "meshName", "currentPlayMode", "rest.vertexCount", "rest.finiteVertexCount", "play.vertexCount", "play.finiteVertexCount", "world.finiteVertexCount", "usedBoneReconstructedSkinMatrix.sampleCount", "usedBoneReconstructedSkinMatrix.determinantMin", "usedBoneReconstructedSkinMatrix.determinantMax"],
+      "cleanup": "None; this is an in-memory read-only deformation bake."
+    },
+    {
+      "tool": "vrc_remap_skinned_mesh_bone",
+      "mode": "approved_apply_after_preview",
+      "minimalArguments": { "gameObjectPath": "${SKINNED_RENDERER_PATH}", "componentIndex": 0, "boneIndex": "${SKINNED_BONE_INDEX}", "expectedMeshName": "${SKINNED_MESH_NAME}", "expectedCurrentBonePath": "${SKINNED_CURRENT_BONE_PATH}", "targetBonePath": "${SKINNED_TARGET_BONE_PATH}", "preview": false, "${SKINNED_BONE_REMAP_PREVIEW_RECEIPT}": null },
+      "requiredFixtures": ["saved scene with a positively weighted SkinnedMeshRenderer bone slot", "exact current bone path and target bone path in the same scene", "previous authoritative remap preview"],
+      "successFields": ["action", "changed", "gameObjectPath", "boneIndex", "expectedCurrentBonePath", "targetBonePath", "meshName", "bindposeCount", "rendererBoneCount", "preservesMesh", "preservesBindposes", "preservesRootBone", "scenePath", "sceneSaved", "persistedReadback", "committed", "commitState"],
+      "cleanup": "Restore the fixture scene through the checkpoint/backup lane; never perform a second unapproved remap."
     },
     {
       "tool": "vrc_convert_unity_constraint",

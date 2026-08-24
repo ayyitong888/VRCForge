@@ -39,7 +39,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from bounded_process import BoundedProcessResult, run_bounded_process
 from app_update_service import AppUpdateService
@@ -737,6 +737,8 @@ VRCFORGE_UNITY_TOOL_REGISTRY = (
     "vrc_set_play_mode",
     "vrc_import_unitypackage",
     "vrc_inspect_skinned_mesh_bone_usage",
+    "vrc_inspect_skinned_mesh_deformation",
+    "vrc_remap_skinned_mesh_bone",
     "vrc_inspect_modular_avatar_component",
     "vrc_inspect_primitive_basis_fixture",
     "vrc_instantiate_prefab",
@@ -845,6 +847,7 @@ VRCFORGE_UNITY_MCP_BACKED_WRITE_TARGETS = frozenset(
         "vrcforge_unity_mcp_write",
         "vrcforge_export_vrm",
         "vrcforge_toggle_scene_object",
+        "vrcforge_remap_skinned_mesh_bone",
     }
 )
 VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
@@ -867,6 +870,7 @@ VRCFORGE_UNITY_MCP_WRITE_ALLOWLIST = frozenset(
         PARAMETER_BIT_PACKING_TOOL,
         ATOMIC_REFERENCE_RENAME_TOOL,
         "vrc_toggle_scene_object",
+        "vrc_remap_skinned_mesh_bone",
         "vrc_setup_outfit",
         "vrc_add_wardrobe_outfit",
         "vrc_manage_wardrobe",
@@ -1346,7 +1350,30 @@ class ClothingToggleRequest(ConnectionRequest):
     active: bool
 
 
+class CameraVector3(BaseModel):
+    """Finite Unity camera vector; unknown fields are deliberately rejected."""
+
+    x: float
+    y: float
+    z: float
+
+    model_config = {"extra": "forbid"}
+
+    @model_validator(mode="after")
+    def finite(self) -> "CameraVector3":
+        if not all(math.isfinite(value) for value in (self.x, self.y, self.z)):
+            raise ValueError("camera vectors must contain finite values")
+        return self
+
+
 class VisionCaptureRequest(ConnectionRequest):
+    camera_mode: Literal["framed", "free"] = Field(default="framed", alias="cameraMode")
+    camera_position: CameraVector3 | None = Field(default=None, alias="cameraPosition")
+    target_position: CameraVector3 | None = Field(default=None, alias="targetPosition")
+    up_vector: CameraVector3 | None = Field(default=None, alias="upVector")
+    projection: Literal["perspective", "orthographic"] | None = None
+    orthographic_size: float | None = Field(default=None, alias="orthographicSize", gt=0)
+    field_of_view: float | None = Field(default=None, alias="fieldOfView", gt=0, le=179)
     avatar_path: str | None = Field(default=None, alias="avatarPath")
     angle: str | None = None
     framing: Literal["face", "avatar"] | None = None
@@ -1359,7 +1386,28 @@ class VisionCaptureRequest(ConnectionRequest):
     require_play_mode: bool = Field(default=False, alias="requirePlayMode")
     capture_mode: Literal["auto", "scene_view", "game_view"] = Field(default="auto", alias="captureMode")
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    @model_validator(mode="after")
+    def validate_camera_contract(self) -> "VisionCaptureRequest":
+        camera_fields = (self.camera_position, self.target_position, self.up_vector)
+        if self.camera_mode == "free":
+            if self.angle or any(value is not None for value in (self.pitch, self.yaw, self.roll)):
+                raise ValueError("free cameraMode excludes named angles and framed pitch/yaw/roll")
+            if self.framing not in (None, "avatar") or self.capture_scope not in (None, "avatar"):
+                raise ValueError("free cameraMode requires avatar framing/captureScope")
+            if any(value is None for value in camera_fields):
+                raise ValueError("free cameraMode requires cameraPosition, targetPosition, and upVector")
+            if self.projection is None:
+                raise ValueError("free cameraMode requires projection")
+            if self.projection == "orthographic":
+                if self.orthographic_size is None or self.field_of_view is not None:
+                    raise ValueError("orthographic free camera requires orthographicSize and excludes fieldOfView")
+            elif self.field_of_view is None or self.orthographic_size is not None:
+                raise ValueError("perspective free camera requires fieldOfView and excludes orthographicSize")
+        elif any(value is not None for value in (*camera_fields, self.projection, self.orthographic_size, self.field_of_view)):
+            raise ValueError("cameraPosition, targetPosition, upVector, projection, size and fov are free-camera-only")
+        return self
 
 
 class VisionCaptureStatusRequest(ConnectionRequest):
@@ -1392,7 +1440,7 @@ class ParameterRollbackRequest(AvatarScopedConnectionRequest):
 
 class VisionCaptureMultiRequest(ConnectionRequest):
     avatar_path: str | None = Field(default=None, alias="avatarPath")
-    angles: list[str] = Field(default_factory=lambda: ["front", "side_left", "side_right", "back"])
+    angles: list[str] = Field(default_factory=lambda: ["front", "side_left", "side_right", "back", "bottom"])
     framing: Literal["face", "avatar"] | None = None
     width: int = Field(default=960, ge=256, le=2048)
     height: int = Field(default=960, ge=256, le=2048)
@@ -1404,7 +1452,7 @@ class VisionCaptureMultiRequest(ConnectionRequest):
 
 class VisionAuditMultiRequest(BaseModel):
     image_paths: list[str] = Field(default_factory=list, alias="imagePaths")
-    angles: list[str] = Field(default_factory=list)
+    angles: list[str] = Field(default_factory=lambda: ["front", "side_left", "side_right", "back", "bottom"])
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
@@ -14397,20 +14445,28 @@ def _scene_view_capture_call(
         roll = float(request_roll or 0.0)
     capture_scope = request_capture_scope or request.framing or ("face" if angle else "avatar")
     set_rotation = bool(angle or explicit_rotation or request_capture_scope or request.framing)
-    return {
+    call = {
         "outputPath": str(output_path),
         "width": request.width,
         "height": request.height,
-        "pitch": pitch,
-        "yaw": yaw,
-        "roll": roll,
-        "setRotation": set_rotation,
         "restoreView": True,
         "avatarPath": request.avatar_path or "",
-        "captureScope": capture_scope,
+        "captureScope": "avatar" if getattr(request, "camera_mode", "framed") == "free" else capture_scope,
         "requirePlayMode": request.require_play_mode,
         "captureMode": request.capture_mode,
+        "cameraMode": getattr(request, "camera_mode", "framed"),
+        **({
+            "cameraPosition": request.camera_position.model_dump(),
+            "targetPosition": request.target_position.model_dump(),
+            "upVector": request.up_vector.model_dump(),
+            "projection": request.projection,
+            **({"orthographicSize": request.orthographic_size} if request.orthographic_size is not None else {}),
+            **({"fieldOfView": request.field_of_view} if request.field_of_view is not None else {}),
+        } if getattr(request, "camera_mode", "framed") == "free" else {}),
     }
+    if getattr(request, "camera_mode", "framed") != "free":
+        call.update({"pitch": pitch, "yaw": yaw, "roll": roll, "setRotation": set_rotation})
+    return call
 
 
 def _prepared_capture_base(request: VisionCaptureRequest | VisionCaptureMultiRequest) -> dict[str, Any]:
@@ -14426,6 +14482,13 @@ def _prepared_capture_base(request: VisionCaptureRequest | VisionCaptureMultiReq
         "height": request.height,
         "require_play_mode": request.require_play_mode,
         "capture_mode": request.capture_mode,
+        "camera_mode": getattr(request, "camera_mode", "framed"),
+        "camera_position": getattr(request, "camera_position", None).model_dump() if getattr(request, "camera_position", None) else None,
+        "target_position": getattr(request, "target_position", None).model_dump() if getattr(request, "target_position", None) else None,
+        "up_vector": getattr(request, "up_vector", None).model_dump() if getattr(request, "up_vector", None) else None,
+        "projection": getattr(request, "projection", None),
+        "orthographic_size": getattr(request, "orthographic_size", None),
+        "field_of_view": getattr(request, "field_of_view", None),
     }
     if isinstance(request, VisionCaptureRequest):
         prepared.update({
@@ -14438,6 +14501,104 @@ def _prepared_capture_base(request: VisionCaptureRequest | VisionCaptureMultiReq
     return prepared
 
 
+def _finite_camera_value(value: Any, label: str) -> Any:
+    if isinstance(value, (int, float)):
+        if not math.isfinite(float(value)):
+            raise RuntimeError(f"Unity returned non-finite camera evidence: {label}.")
+        return value
+    if isinstance(value, list):
+        return [_finite_camera_value(item, label) for item in value]
+    if isinstance(value, dict):
+        return {key: _finite_camera_value(item, f"{label}.{key}") for key, item in value.items()}
+    if isinstance(value, str) and value:
+        return value
+    raise RuntimeError(f"Unity returned invalid camera evidence: {label}.")
+
+
+def _camera_vector(evidence: Mapping[str, Any], key: str, *, dimensions: int = 3) -> list[float]:
+    value = evidence.get(key)
+    if not isinstance(value, Mapping):
+        raise RuntimeError(f"Unity camera evidence {key} must be an object.")
+    fields = ("x", "y", "z", "w")[:dimensions]
+    result: list[float] = []
+    for field in fields:
+        item = value.get(field)
+        if not isinstance(item, (int, float)) or not math.isfinite(float(item)):
+            raise RuntimeError(f"Unity camera evidence {key}.{field} must be finite.")
+        result.append(float(item))
+    return result
+
+
+def _camera_values_close(observed: list[float], expected: Mapping[str, Any], label: str) -> None:
+    expected_values = [float(expected[field]) for field in ("x", "y", "z")]
+    if any(not math.isclose(actual, wanted, rel_tol=0.0, abs_tol=0.0001) for actual, wanted in zip(observed, expected_values, strict=True)):
+        raise RuntimeError(f"Unity returned {label} outside the approved free-camera plan.")
+
+
+def _require_camera_evidence(payload: Mapping[str, Any], expected: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Require the Core's post-capture camera snapshot for free-camera calls.
+
+    The evidence is intentionally read back from Core rather than reconstructed
+    from the request. Framed calls remain compatible with older Core payloads,
+    but if they provide an evidence object it is validated just as strictly.
+    """
+    evidence = payload.get("cameraEvidence") or payload.get("camera")
+    if evidence is None:
+        if expected.get("cameraMode") == "free":
+            raise RuntimeError("Unity did not return real camera evidence for free capture.")
+        return None
+    if not isinstance(evidence, Mapping):
+        raise RuntimeError("Unity returned invalid camera evidence.")
+    required = ("position", "target", "basis", "quaternion", "projection", "matrix")
+    missing = [key for key in required if key not in evidence]
+    if missing:
+        raise RuntimeError("Unity camera evidence is missing: " + ", ".join(missing))
+    projection = str(evidence.get("projection") or "")
+    if projection not in {"perspective", "orthographic"}:
+        raise RuntimeError("Unity returned an invalid camera projection evidence value.")
+    if projection == "perspective" and "fieldOfView" not in evidence:
+        raise RuntimeError("Unity perspective evidence is missing fieldOfView.")
+    if projection == "orthographic" and "orthographicSize" not in evidence:
+        raise RuntimeError("Unity orthographic evidence is missing orthographicSize.")
+    _camera_vector(evidence, "position")
+    _camera_vector(evidence, "target")
+    _camera_vector(evidence, "quaternion", dimensions=4)
+    basis = evidence.get("basis")
+    if not isinstance(basis, Mapping):
+        raise RuntimeError("Unity camera evidence basis must be an object.")
+    for axis in ("right", "up", "forward"):
+        _camera_vector(basis, axis)
+    matrices = evidence.get("matrix")
+    if not isinstance(matrices, Mapping):
+        raise RuntimeError("Unity camera evidence matrix must be an object.")
+    for matrix_name in ("cameraToWorld", "worldToCamera", "projection", "gpuProjection", "viewProjection"):
+        values = matrices.get(matrix_name)
+        if not isinstance(values, list) or len(values) != 16:
+            raise RuntimeError(f"Unity camera evidence matrix.{matrix_name} must contain 16 values.")
+        _finite_camera_value(values, f"cameraEvidence.matrix.{matrix_name}")
+    if evidence.get("matrixOrder") != "row_major" or evidence.get("coordinateSpace") != "unity_world":
+        raise RuntimeError("Unity camera evidence matrix metadata is invalid.")
+    if expected.get("cameraMode") == "free":
+        _camera_values_close(_camera_vector(evidence, "position"), expected["cameraPosition"], "camera position")
+        _camera_values_close(_camera_vector(evidence, "target"), expected["targetPosition"], "camera target")
+        _camera_values_close(_camera_vector(basis, "up"), expected["upVector"], "camera up vector")
+        if projection != expected.get("projection"):
+            raise RuntimeError("Unity returned camera projection outside the approved free-camera plan.")
+        optics_name = "orthographicSize" if projection == "orthographic" else "fieldOfView"
+        if not math.isclose(float(evidence[optics_name]), float(expected[optics_name]), rel_tol=0.0, abs_tol=0.0001):
+            raise RuntimeError(f"Unity returned {optics_name} outside the approved free-camera plan.")
+        expected_aspect = float(expected["width"]) / float(expected["height"])
+        if not math.isclose(float(evidence.get("aspect", 0.0)), expected_aspect, rel_tol=0.0, abs_tol=0.0001):
+            raise RuntimeError("Unity returned camera aspect outside the approved free-camera plan.")
+    checked = _finite_camera_value(dict(evidence), "cameraEvidence")
+    if not isinstance(checked, dict):
+        raise RuntimeError("Unity returned invalid camera evidence.")
+    expected_projection = expected.get("projection")
+    if expected_projection and projection != expected_projection:
+        raise RuntimeError("Unity returned camera projection outside the approved capture plan.")
+    return checked
+
+
 def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     _reject_capture_reserved_arguments(arguments)
     request = VisionCaptureRequest(**arguments)
@@ -14445,7 +14606,8 @@ def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) 
     output_path = _vision_capture_output_path("vision_capture.png")
     call = _scene_view_capture_call(request, output_path, angle=angle)
     prepared_base = _prepared_capture_base(request)
-    prepared_base["rotation"] = {key: call[key] for key in ("pitch", "yaw", "roll")}
+    if request.camera_mode != "free":
+        prepared_base["rotation"] = {key: call[key] for key in ("pitch", "yaw", "roll")}
     prepared = install_prepared_calls(
         prepared_base,
         [("vrc_capture_scene_view", call)],
@@ -14455,7 +14617,7 @@ def prepare_capture_screenshot_request(arguments: dict[str, Any], preview: Any) 
         "ok": True,
         "captureKind": "single",
         "angle": angle,
-        "rotation": prepared_base["rotation"],
+            "rotation": prepared_base.get("rotation", {}),
         "captureScope": call["captureScope"],
         "outputPaths": [str(output_path)],
         "calls": [call],
@@ -14491,16 +14653,27 @@ def _execute_prepared_scene_view_capture(
 ) -> dict[str, Any]:
     settings = load_dashboard_settings(request)
     captures: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    first_failure: dict[str, Any] | None = None
     for index, (expected_tool, expected_arguments) in enumerate(expected_calls):
         tool_name, tool_arguments = prepared_call(arguments, index)
         if tool_name != expected_tool or tool_arguments != expected_arguments:
             raise RuntimeError("Prepared screenshot Core call drifted after approval.")
-        result = invoke_unity_mcp(settings, tool_name, tool_arguments)
+        result = invoke_unity_mcp(settings, tool_name, tool_arguments, preserve_tool_error=True)
         payload = ensure_dict_payload(extract_tool_result_payload(result), "vision capture")
         if result.exit_code != 0 or payload.get("ok") is False or payload.get("success") is False:
             payload.setdefault("ok", False)
             payload.setdefault("status", "failed")
-            return payload
+            failure_angle = angles[index] if angles else None
+            failure_record = {
+                "index": index,
+                **({"angle": failure_angle} if failure_angle else {}),
+                "result": payload,
+            }
+            failures.append(failure_record)
+            if first_failure is None:
+                first_failure = payload
+            continue
         image_path = str(payload.get("imagePath") or expected_arguments["outputPath"])
         approved_path = Path(expected_arguments["outputPath"]).resolve()
         returned_path = Path(image_path).resolve()
@@ -14510,15 +14683,17 @@ def _execute_prepared_scene_view_capture(
             raise RuntimeError("Unity did not create the approved screenshot artifact.")
         image_path = str(approved_path)
         reported_rotation: dict[str, float] = {}
-        for field in ("pitch", "yaw", "roll"):
-            expected_value = float(expected_arguments[field])
-            reported_value = float(payload.get(field, expected_value))
-            if not math.isclose(reported_value, expected_value, rel_tol=0.0, abs_tol=0.0001):
-                raise RuntimeError(f"Unity returned screenshot {field} outside the approved capture plan.")
-            reported_rotation[field] = reported_value
+        if expected_arguments.get("cameraMode") != "free":
+            for field in ("pitch", "yaw", "roll"):
+                expected_value = float(expected_arguments[field])
+                reported_value = float(payload.get(field, expected_value))
+                if not math.isclose(reported_value, expected_value, rel_tol=0.0, abs_tol=0.0001):
+                    raise RuntimeError(f"Unity returned screenshot {field} outside the approved capture plan.")
+                reported_rotation[field] = reported_value
         reported_scope = str(payload.get("captureScope") or expected_arguments["captureScope"]).strip().lower()
         if reported_scope != expected_arguments["captureScope"]:
             raise RuntimeError("Unity returned a screenshot scope outside the approved capture plan.")
+        camera_evidence = _require_camera_evidence(payload, expected_arguments)
         capture = {
             "imagePath": image_path,
             "imageUrl": to_artifact_url(image_path),
@@ -14526,10 +14701,19 @@ def _execute_prepared_scene_view_capture(
             "rotation": reported_rotation,
             "captureScope": reported_scope,
         }
+        if camera_evidence is not None:
+            capture["cameraEvidence"] = camera_evidence
         if angles:
             angle = angles[index]
             capture["angle"] = angle
         captures.append(capture)
+    if first_failure is not None:
+        failure = dict(first_failure)
+        failure["captures"] = captures
+        failure["failures"] = failures
+        failure["completedCount"] = len(captures)
+        failure["failedCount"] = len(failures)
+        return failure
     if not captures:
         raise RuntimeError("Prepared screenshot plan contains no Core calls.")
     DASHBOARD_RUNTIME.latest_screenshot_path = captures[0]["imagePath"]
@@ -14538,7 +14722,8 @@ def _execute_prepared_scene_view_capture(
 
 
 def capture_avatar_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    request = VisionCaptureRequest(**arguments)
+    request_arguments = {key: value for key, value in arguments.items() if key != "rotation" and not key.startswith("_vrcforge_")}
+    request = VisionCaptureRequest(**request_arguments)
     angle = _normalize_capture_angles([request.angle])[0] if request.angle else None
     expected = _scene_view_capture_call(
         request,
@@ -14559,7 +14744,8 @@ def capture_avatar_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[s
 
 
 def capture_avatar_multi_screenshot_approved_sync(arguments: dict[str, Any]) -> dict[str, Any]:
-    request = VisionCaptureMultiRequest(**arguments)
+    request_arguments = {key: value for key, value in arguments.items() if not key.startswith("_vrcforge_")}
+    request = VisionCaptureMultiRequest(**request_arguments)
     angles = _normalize_capture_angles(request.angles)
     expected_calls = [
         ("vrc_capture_scene_view", _scene_view_capture_call(request, _vision_capture_output_path(f"vision_{angle}.png"), angle=angle))
@@ -14818,9 +15004,9 @@ def rollback_parameter_optimization_sync(arguments: dict[str, Any]) -> dict[str,
 
 _ANGLE_CAMERA_ROTATIONS: dict[str, tuple[float, float, float]] = {
     "front":      ( 0.0,   0.0,  0.0),
-    "side_left":  (10.0,  90.0,  0.0),
-    "side_right": (10.0, -90.0,  0.0),
-    "back":       (10.0, 180.0,  0.0),
+    "side_left":  ( 0.0,  90.0,  0.0),
+    "side_right": ( 0.0, -90.0,  0.0),
+    "back":       ( 0.0, 180.0,  0.0),
     "bottom":    (-90.0,   0.0,  0.0),
 }
 
@@ -14978,8 +15164,8 @@ def audit_avatar_multi_screenshot_sync(request: VisionAuditMultiRequest) -> dict
             raise RuntimeError("No image paths provided for multi-image audit.")
         if any(not path for path in image_paths):
             raise RuntimeError("Multi-image audit paths must be non-empty strings.")
-        if len(image_paths) > 4:
-            raise RuntimeError("Multi-image audit supports at most four frozen image paths.")
+        if len(image_paths) > 5:
+            raise RuntimeError("Multi-image audit supports at most five frozen image paths.")
         raw_angles = list(request.angles)
         angles = tuple(_normalize_capture_angles(raw_angles))
         if len(angles) != len(raw_angles):
@@ -23358,6 +23544,160 @@ def inspect_skinned_mesh_bone_usage_sync(params: dict[str, Any]) -> dict[str, An
     return payload
 
 
+def inspect_skinned_mesh_deformation_sync(params: dict[str, Any]) -> dict[str, Any]:
+    params = params or {}
+    project_path = str(params.get("projectPath") or params.get("project_path") or "").strip()
+    go_path = build_gameobject_target(params)
+    if not project_path or not go_path:
+        return {
+            "ok": False,
+            "errorCode": "skinned_mesh_deformation_arguments_missing",
+            "error": "projectPath and gameObjectPath are required.",
+            "failureLayer": "external_tool_arguments",
+            "failurePhase": "argument_validation",
+            "causeChain": [],
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "commitStateKnown": True,
+            "toolRoutingStarted": False,
+        }
+    try:
+        component_index = int(params.get("componentIndex", params.get("component_index", 0)))
+    except (TypeError, ValueError):
+        return {
+            "ok": False,
+            "errorCode": "skinned_mesh_deformation_component_index_invalid",
+            "error": "componentIndex must be an integer.",
+            "failureLayer": "external_tool_arguments",
+            "failurePhase": "argument_validation",
+            "causeChain": [],
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "commitStateKnown": True,
+            "toolRoutingStarted": False,
+        }
+    if component_index < 0:
+        return {
+            "ok": False,
+            "errorCode": "skinned_mesh_deformation_component_index_invalid",
+            "error": "componentIndex must be zero or greater.",
+            "failureLayer": "external_tool_arguments",
+            "failurePhase": "argument_validation",
+            "causeChain": [],
+            "mutationStarted": False,
+            "committed": False,
+            "commitState": "not_started",
+            "commitStateKnown": True,
+            "toolRoutingStarted": False,
+        }
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(
+            invoke_unity_mcp(
+                settings,
+                "vrc_inspect_skinned_mesh_deformation",
+                {"gameObjectPath": go_path, "componentIndex": component_index},
+                preserve_tool_error=True,
+            )
+        ),
+        "inspect skinned mesh deformation",
+    )
+    payload.setdefault("ok", payload.get("success") is not False)
+    return payload
+
+
+def _canonical_remap_failure(
+    *,
+    error_code: str,
+    error: str,
+    failure_layer: str,
+    failure_phase: str,
+    cause_chain: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Return the stable failure envelope used by both routing layers."""
+    return {
+        "ok": False,
+        "errorCode": error_code,
+        "error": error,
+        "failureLayer": failure_layer,
+        "failurePhase": failure_phase,
+        "causeChain": list(cause_chain or []),
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+        "commitStateKnown": True,
+        "toolRoutingStarted": False,
+    }
+
+
+def remap_skinned_mesh_bone_sync(params: dict[str, Any]) -> dict[str, Any]:
+    """Forward one exact bone-slot remap to the same Unity atomic Core tool."""
+    params = params or {}
+    required = (
+        "projectPath", "gameObjectPath", "componentIndex", "boneIndex",
+        "expectedCurrentBonePath", "targetBonePath", "expectedMeshName", "preview",
+    )
+    missing = [key for key in required if key not in params]
+    if missing:
+        return _canonical_remap_failure(
+            error_code="remap_skinned_mesh_bone_arguments_missing",
+            error="Missing required fields: " + ", ".join(missing),
+            failure_layer="external_tool_arguments",
+            failure_phase="argument_validation",
+        )
+    if any(
+        isinstance(params[key], bool) or not isinstance(params[key], int)
+        for key in ("componentIndex", "boneIndex")
+    ):
+        return _canonical_remap_failure(
+            error_code="remap_skinned_mesh_bone_index_invalid",
+            error="componentIndex and boneIndex must be integers.",
+            failure_layer="external_tool_arguments",
+            failure_phase="argument_validation",
+        )
+    component_index = params["componentIndex"]
+    bone_index = params["boneIndex"]
+    if component_index < 0 or bone_index < 0:
+        return _canonical_remap_failure(
+            error_code="remap_skinned_mesh_bone_index_invalid",
+            error="componentIndex and boneIndex must be zero or greater.",
+            failure_layer="external_tool_arguments",
+            failure_phase="argument_validation",
+        )
+    request = {
+        "gameObjectPath": str(params["gameObjectPath"]).strip(),
+        "componentIndex": component_index,
+        "boneIndex": bone_index,
+        "expectedCurrentBonePath": str(params["expectedCurrentBonePath"]).strip(),
+        "targetBonePath": str(params["targetBonePath"]).strip(),
+        "expectedMeshName": str(params["expectedMeshName"]).strip(),
+        "preview": bool(params["preview"]),
+    }
+    settings = load_dashboard_settings(build_agent_connection_request(params))
+    payload = ensure_dict_payload(
+        extract_tool_result_payload(
+            invoke_unity_mcp(settings, "vrc_remap_skinned_mesh_bone", request, preserve_tool_error=True)
+        ),
+        "remap skinned mesh bone",
+    )
+    payload.setdefault("ok", payload.get("success") is not False)
+    if payload.get("ok") is False:
+        # Preserve every Core-provided value while filling only absent fields.
+        payload.setdefault("errorCode", "vrc_remap_skinned_mesh_bone_failed")
+        payload.setdefault("error", "Unity remap skinned mesh bone failed.")
+        payload.setdefault("failureLayer", "unity_core")
+        payload.setdefault("failurePhase", "tool_execution")
+        payload.setdefault("causeChain", [])
+        payload.setdefault("mutationStarted", False)
+        payload.setdefault("committed", False)
+        payload.setdefault("commitState", "unknown")
+        payload.setdefault("commitStateKnown", payload.get("commitState") != "unknown")
+        payload.setdefault("toolRoutingStarted", True)
+    return payload
+
+
 def add_component_sync(params: dict[str, Any]) -> dict[str, Any]:
     params = params or {}
     go_path, comp_type = build_component_target(params)
@@ -24757,6 +25097,12 @@ def register_agent_gateway_tools() -> None:
         "read/debug",
         inspect_skinned_mesh_bone_usage_sync,
     )
+    AGENT_GATEWAY.register_tool(
+        "vrcforge_inspect_skinned_mesh_deformation",
+        "When to use: read one SkinnedMeshRenderer's in-memory Rest/Play deformation, finite-vertex, AABB, percentile-distance, and reconstructed skin-matrix metrics before dynamic avatar-part acceptance. When NOT to use: do not use for mesh export, renderer replacement, or any asset/scene write. Negative example: do not call it to repair a deformed mesh.",
+        "read/debug",
+        inspect_skinned_mesh_deformation_sync,
+    )
     AGENT_GATEWAY.register_tool("vrcforge_get_gameobject", "Describe a scene GameObject: path, active state, tag/layer, parent, children, and components.", "read/debug", get_gameobject_sync)
     AGENT_GATEWAY.register_tool("vrcforge_find_assets", "Search the project for assets by query/type/folder.", "read/debug", find_assets_sync)
     AGENT_GATEWAY.register_tool("vrcforge_get_asset_info", "Describe a project asset: path, GUID, type, importer, and prefab details.", "read/debug", get_asset_info_sync)
@@ -25500,6 +25846,12 @@ def register_agent_gateway_tools() -> None:
         "Toggle a scene object's active state (for example wardrobe items) through VRCForge.",
         "medium",
         toggle_scene_object_sync,
+    )
+    register_write_handler(
+        "vrcforge_remap_skinned_mesh_bone",
+        "When to use: remap one exact SkinnedMeshRenderer bone slot after checking the expected current bone and mesh identity. When NOT to use: do not bulk-remap bones, guess a slot, or bypass the Unity atomic readback. Negative example: do not call this without a confirmed expectedCurrentBonePath and expectedMeshName.",
+        "high",
+        remap_skinned_mesh_bone_sync,
     )
     register_write_handler(
         "vrcforge_shell_execute",

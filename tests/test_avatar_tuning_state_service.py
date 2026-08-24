@@ -267,6 +267,7 @@ def _prepared_service(
         "history_artifacts": None,
         "context_calls": 0,
         "unity_error": None,
+        "unity_result": {"status": "ok"},
         "omit_current_weight": False,
         "remember_calls": [],
     }
@@ -300,7 +301,7 @@ def _prepared_service(
         live["unity_calls"].append((settings, tool_name, arguments))
         if live["unity_error"]:
             raise RuntimeError(str(live["unity_error"]))
-        return {"status": "ok"}
+        return live["unity_result"]
 
     def parse_manual_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
         parsed = dict(arguments)
@@ -451,7 +452,7 @@ def test_manual_apply_binds_live_weight_locks_and_pushes_undo_after_fake_unity(
     assert evidence["undoDepth"] == 1
 
 
-def test_manual_apply_drift_and_undo_cas_fail_before_fake_unity(tmp_path: Path) -> None:
+def test_manual_apply_consumes_sealed_snapshot_and_undo_cas_fails_before_fake_unity(tmp_path: Path) -> None:
     service, _stores_service, undo, live = _prepared_service(tmp_path)
     arguments = {
         "adjustments": [
@@ -464,9 +465,11 @@ def test_manual_apply_drift_and_undo_cas_fail_before_fake_unity(tmp_path: Path) 
     }
     prepared, _preview = service.prepare_manual_apply(arguments, None)
     live["weight"] = 11.0
-    with pytest.raises(RuntimeError, match="targetFacts"):
-        service.execute_manual_apply(prepared)
-    assert live["unity_calls"] == []
+    # Approval execution must not re-export under the frozen apply claim; the
+    # target facts were sealed during preparation and are consumed as-is.
+    service.execute_manual_apply(prepared)
+    assert live["context_calls"] == 1
+    assert len(live["unity_calls"]) == 1
 
     live["weight"] = 10.0
     service.execute_manual_apply(prepared)
@@ -545,6 +548,50 @@ def test_manual_apply_drift_and_undo_cas_fail_before_fake_unity(tmp_path: Path) 
         )
     assert len(live["unity_calls"]) == call_count + 1
 
+
+def test_manual_apply_core_rejection_is_returned_without_undo_or_success_claim(
+    tmp_path: Path,
+) -> None:
+    service, _stores_service, undo, live = _prepared_service(tmp_path)
+    prepared, _preview = service.prepare_manual_apply(
+        {
+            "adjustments": [
+                {
+                    "renderer_path": "Face",
+                    "blendshape_name": "Smile",
+                    "target_weight": 45.0,
+                }
+            ]
+        },
+        None,
+    )
+    live["unity_result"] = {
+        "exitCode": 1,
+        "payload": {
+            "isError": True,
+            "structuredContent": {
+                "success": False,
+                "code": "managed_peer_ineligible",
+                "message": "The selected Unity peer is not eligible for managed writes.",
+                "data": {
+                    "mutationStarted": False,
+                    "committed": False,
+                    "commitState": "not_started",
+                },
+            },
+        },
+    }
+
+    result = service.execute_manual_apply(prepared)
+
+    assert result["ok"] is False
+    assert result["errorCode"] == "managed_peer_ineligible"
+    assert result["mutationStarted"] is False
+    assert result["committed"] is False
+    assert result["commitState"] == "not_started"
+    assert "appliedAdjustments" not in result
+    assert "undoDepth" not in result
+    assert undo.depth("Avatar/Path") == 0
 
 def test_manual_prepare_fails_closed_when_live_weight_is_missing(
     tmp_path: Path,

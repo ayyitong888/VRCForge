@@ -26,7 +26,7 @@ def _arguments() -> dict:
     }
 
 
-def test_manual_owner_freezes_live_weight_and_rejects_drift(tmp_path: Path) -> None:
+def test_manual_owner_freezes_live_weight_without_second_export(tmp_path: Path) -> None:
     service, _stores, undo, live = _prepared_service(tmp_path)
     prepared, _preview = service.prepare_manual_apply(_arguments(), None)
 
@@ -49,11 +49,11 @@ def test_manual_owner_freezes_live_weight_and_rejects_drift(tmp_path: Path) -> N
     assert prepared_evidence(prepared)["undoItems"][0]["targetWeight"] == 10.0
 
     live["weight"] = 11.0
-    with pytest.raises(RuntimeError, match="targetFacts"):
-        service.execute_manual_apply(prepared)
-    assert live["unity_calls"] == []
-    with pytest.raises(RuntimeError, match="no manual blendshape action"):
-        undo.capture("Avatar/Path")
+    service.execute_manual_apply(prepared)
+    assert live["context_calls"] == 1
+    assert len(live["unity_calls"]) == 1
+    undo_items, _undo_evidence = undo.capture("Avatar/Path")
+    assert undo_items[0]["targetWeight"] == 10.0
 
 
 def test_manual_owner_rejects_reserved_and_mock_input(tmp_path: Path) -> None:

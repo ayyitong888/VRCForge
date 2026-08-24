@@ -463,6 +463,7 @@ def build_external_tool_error(
     nested_details = raw.get("details")
     nested_structured = raw.get("structuredContent")
     nested_result = raw.get("result")
+    nested_raw_result = raw.get("rawResult")
     nested_result_structured = (
         nested_result.get("structuredContent")
         if isinstance(nested_result, Mapping)
@@ -483,11 +484,42 @@ def build_external_tool_error(
             nested_details if isinstance(nested_details, Mapping) else None,
             nested_structured if isinstance(nested_structured, Mapping) else None,
             nested_result if isinstance(nested_result, Mapping) else None,
+            nested_raw_result if isinstance(nested_raw_result, Mapping) else None,
             nested_result_details if isinstance(nested_result_details, Mapping) else None,
             nested_result_structured if isinstance(nested_result_structured, Mapping) else None,
         )
         if isinstance(source, Mapping)
     ]
+    # Facts established by the current boundary must remain an authoritative
+    # cause source even when an exception carries an older generic
+    # agent_gateway_rejected external_error projection.
+    boundary_source = {
+        key: value
+        for key, value in (
+            ("errorCode", error_code),
+            ("failureLayer", failure_layer),
+            ("failurePhase", failure_phase),
+            ("error", error),
+        )
+        if value not in (None, "")
+    }
+    # A boundary without an explicit code is only a transport fallback; do
+    # not let its generic layer/message outrank an exact raw Core result.
+    if error_code and failure_phase == "before_write_handler" and boundary_source:
+        boundary_cause = {
+            key: value
+            for key, value in (
+                ("code", error_code),
+                ("message", error),
+                ("failureLayer", failure_layer),
+                ("failurePhase", failure_phase),
+            )
+            if value not in (None, "")
+        }
+        if boundary_cause:
+            boundary_source["failureCause"] = boundary_cause
+            boundary_source["rootCause"] = boundary_cause
+        sources.append(boundary_source)
 
     exception_details = external_exception_details(exception) if exception is not None else None
     if isinstance(exception_details, dict):

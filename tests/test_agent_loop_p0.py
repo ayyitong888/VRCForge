@@ -2516,6 +2516,7 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         prompts: list[str] = []
         angles = ["front", "side_left", "side_right", "back"]
+        project = self._unity_project()
         responses = iter(
             [
                 SimpleNamespace(
@@ -2544,7 +2545,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                         {
                             "action": "write",
                             "write_tool": "capture_multi_screenshot",
-                            "write_params": {"angles": angles},
+                            "write_params": {"angles": angles, "projectPath": str(project)},
                         }
                     ),
                     usage={},
@@ -2557,7 +2558,6 @@ class AgentLoopP0Tests(unittest.TestCase):
             prompts.append(str(args[1]))
             return next(responses)
 
-        project = self._unity_project()
         with patch(
             "dashboard_server.request_llm_plan_with_metadata",
             side_effect=fake_llm,
@@ -2645,12 +2645,12 @@ class AgentLoopP0Tests(unittest.TestCase):
         )
         project = self._unity_project()
         message = "Capture front and back views, then run a visual audit."
-        capture_arguments: dict[str, object] = {}
+        capture_arguments: dict[str, object] = {"projectPath": str(project)}
         audit_arguments = {"captureReceipt": "managed-visual-receipt"}
         capture_action_id = canonical_action_id(
             "write",
             "vrcforge_capture_multi_screenshot",
-            capture_arguments,
+            {**capture_arguments, "projectPath": str(project)},
         )
         audit_action_id = canonical_action_id(
             "skill",
@@ -2906,7 +2906,7 @@ class AgentLoopP0Tests(unittest.TestCase):
                 payload = {
                     "action": "write",
                     "write_tool": "capture_multi_screenshot",
-                    "write_params": {},
+                    "write_params": {"projectPath": str(project)},
                     "summary": "Capture the approved fixed-angle views.",
                 }
             else:

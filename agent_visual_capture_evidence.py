@@ -19,7 +19,7 @@ import time
 from typing import Any, Callable, Mapping, Sequence
 
 
-_ALLOWED_ANGLES = frozenset({"front", "side_left", "side_right", "back"})
+_ALLOWED_ANGLES = frozenset({"front", "side_left", "side_right", "back", "bottom"})
 
 
 class ManagedVisualCaptureError(RuntimeError):
@@ -217,8 +217,8 @@ class ManagedVisualCaptureAuthority:
     ) -> dict[str, Any]:
         if not isinstance(captures, Sequence) or isinstance(captures, (str, bytes)):
             raise ManagedVisualCaptureError("Managed visual evidence needs a capture list.")
-        if not 1 <= len(captures) <= 4:
-            raise ManagedVisualCaptureError("Managed visual evidence needs one to four captures.")
+        if not 1 <= len(captures) <= 5:
+            raise ManagedVisualCaptureError("Managed visual evidence needs one to five captures.")
         images = tuple(
             self._read_image(capture.get("imagePath"), capture.get("angle"))[0]
             for capture in captures

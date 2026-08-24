@@ -11,7 +11,7 @@ namespace VRCForge.Editor
 {
     [VRCForgeCommand(
         toolId: "vrc_capture_scene_view",
-        Summary = "Capture Unity Scene View or Game View to a PNG via a predefined VRCForge tool; scene_view remains available while Gesture Manager is running in Play Mode."
+        Summary = "when-to-use: capture a verified Unity Scene/Game View image for visual review, including fixed front/side/back/bottom avatar angles. when-NOT-to-use: do not use for arbitrary image editing or to replace explicit free-camera positioning. Named-angle negatives: do not combine angle with pitch, yaw, roll, or cameraMode=free."
     )]
     public static class SceneViewCaptureTool
     {
@@ -23,6 +23,13 @@ namespace VRCForge.Editor
 
         public class Parameters
         {
+            [VRCForgeInput("Camera mode: framed (avatar/scene framing) or free (explicit basis).", IsRequired = false)] public string cameraMode { get; set; } = "framed";
+            [VRCForgeInput("Explicit free-camera world position {x,y,z}.", IsRequired = false)] public object cameraPosition { get; set; }
+            [VRCForgeInput("Explicit free-camera world target {x,y,z}.", IsRequired = false)] public object targetPosition { get; set; }
+            [VRCForgeInput("Explicit free-camera world up vector {x,y,z}.", IsRequired = false)] public object upVector { get; set; }
+            [VRCForgeInput("Free-camera projection: orthographic or perspective.", IsRequired = false)] public string projection { get; set; } = "perspective";
+            [VRCForgeInput("Free-camera orthographic size (>0).", IsRequired = false)] public float? orthographicSize { get; set; }
+            [VRCForgeInput("Free-camera field of view in degrees (0,180).", IsRequired = false)] public float? fieldOfView { get; set; }
             [VRCForgeInput("Return capture readiness without writing an image.", IsRequired = false)] public bool? statusOnly { get; set; } = false;
             [VRCForgeInput("Require Play Mode before capture.", IsRequired = false)] public bool? requirePlayMode { get; set; } = false;
             [VRCForgeInput("Capture mode: auto, scene_view, or game_view.", IsRequired = false)] public string captureMode { get; set; } = "auto";
@@ -34,6 +41,7 @@ namespace VRCForge.Editor
             [VRCForgeInput("Scene view pitch in degrees.", IsRequired = false)] public float? pitch { get; set; } = 0f;
             [VRCForgeInput("Scene view yaw in degrees.", IsRequired = false)] public float? yaw { get; set; } = 0f;
             [VRCForgeInput("Scene view roll in degrees.", IsRequired = false)] public float? roll { get; set; } = 0f;
+            [VRCForgeInput("Named deterministic framed angle: front, side_left, side_right, back, or bottom (true underneath view). Do not combine with pitch/yaw/roll or free camera.", IsRequired = false)] public string angle { get; set; } = "";
             [VRCForgeInput("Optional avatar hierarchy path used for avatar-scoped capture.", IsRequired = false)] public string avatarPath { get; set; } = "";
             [VRCForgeInput("Capture scope: avatar or scene.", IsRequired = false)] public string captureScope { get; set; } = "avatar";
             [VRCForgeInput("Include all Gesture Manager runtime parameters in capture status.", IsRequired = false)] public bool? includeGestureManagerParameters { get; set; } = false;
@@ -60,8 +68,24 @@ namespace VRCForge.Editor
                 var pitch = @params?["pitch"]?.Value<float?>() ?? 0f;
                 var yaw = @params?["yaw"]?.Value<float?>() ?? 0f;
                 var roll = @params?["roll"]?.Value<float?>() ?? 0f;
+                var requestedAngle = (@params?["angle"]?.ToString() ?? string.Empty).Trim().ToLowerInvariant();
+                var hasExplicitEuler = @params?["pitch"] != null || @params?["yaw"] != null || @params?["roll"] != null;
+                if (!string.IsNullOrEmpty(requestedAngle)
+                    && requestedAngle != "front" && requestedAngle != "side_left" && requestedAngle != "side_right"
+                    && requestedAngle != "back" && requestedAngle != "bottom")
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation("capture_angle_invalid", "angle must be front, side_left, side_right, back, or bottom.", "unity_capture", "argument_validation");
+                }
+                if (!string.IsNullOrEmpty(requestedAngle) && hasExplicitEuler)
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation("capture_angle_conflict", "Named angle is mutually exclusive with explicit pitch, yaw, and roll.", "unity_capture", "argument_validation");
+                }
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
                 var captureScope = (@params?["captureScope"]?.ToString() ?? "avatar").Trim().ToLowerInvariant();
+                if (captureScope != "avatar" && captureScope != "face" && captureScope != "scene")
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation("capture_scope_invalid", "captureScope must be avatar, face, or scene.", "unity_capture", "argument_validation");
+                }
                 var includeGestureManagerParameters = @params?["includeGestureManagerParameters"]?.Value<bool?>() ?? false;
                 var gestureManagerParameterNames = (@params?["gestureManagerParameterNames"] as JArray)?
                     .Values<string>()
@@ -72,6 +96,50 @@ namespace VRCForge.Editor
                     .ToArray() ?? Array.Empty<string>();
                 var gestureManagerParameterPrefix = (@params?["gestureManagerParameterPrefix"]?.ToString() ?? string.Empty).Trim();
                 var requestedCaptureMode = (@params?["captureMode"]?.ToString() ?? "auto").Trim().ToLowerInvariant();
+                var cameraMode = (@params?["cameraMode"]?.ToString() ?? "framed").Trim().ToLowerInvariant();
+                if (cameraMode != "framed" && cameraMode != "free")
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation("camera_mode_invalid", "cameraMode must be framed or free.", "unity_capture", "argument_validation");
+                }
+                var freeCamera = default(FreeCameraSpec);
+                if (cameraMode == "free")
+                {
+                    if (!string.IsNullOrEmpty(requestedAngle))
+                    {
+                        return VRCForgeToolResult.RejectedBeforeMutation("free_camera_angle_conflict", "Named angles require cameraMode=framed; free camera accepts explicit position/target/up only.", "unity_capture", "argument_validation");
+                    }
+                    var freeError = TryParseFreeCamera(@params, out freeCamera);
+                    if (!string.IsNullOrEmpty(freeError))
+                    {
+                        return VRCForgeToolResult.RejectedBeforeMutation("free_camera_invalid", freeError, "unity_capture", "argument_validation");
+                    }
+                    if (setRotation || captureScope != "avatar")
+                    {
+                        return VRCForgeToolResult.RejectedBeforeMutation("free_camera_parameters_conflict", "cameraMode=free is mutually exclusive with setRotation and non-avatar captureScope.", "unity_capture", "argument_validation");
+                    }
+                }
+                else if (@params?["cameraPosition"] != null || @params?["targetPosition"] != null || @params?["upVector"] != null
+                    || @params?["projection"] != null || @params?["orthographicSize"] != null || @params?["fieldOfView"] != null)
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation("framed_camera_parameters_conflict", "Explicit free-camera parameters require cameraMode=free.", "unity_capture", "argument_validation");
+                }
+                if (cameraMode == "framed" && !string.IsNullOrEmpty(avatarPath)
+                    && !TryResolveCaptureTarget(avatarPath, captureScope, out _, out _, out _))
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation("capture_target_not_found", "The requested avatarPath could not be resolved; capture refused without fallback.", "unity_capture", "capture_precondition");
+                }
+                if (!string.IsNullOrEmpty(requestedAngle))
+                {
+                    if (captureScope == "scene")
+                    {
+                        return VRCForgeToolResult.RejectedBeforeMutation("capture_angle_scope_conflict", "Named angles require avatar or face captureScope.", "unity_capture", "argument_validation");
+                    }
+                    ApplyNamedAngle(requestedAngle, ref setRotation, ref pitch, ref yaw, ref roll);
+                    if (!TryResolveCaptureTarget(avatarPath, captureScope, out _, out _, out _))
+                    {
+                        return VRCForgeToolResult.RejectedBeforeMutation("capture_target_not_found", "Named-angle capture requires an unambiguous avatarPath target; capture refused without fallback.", "unity_capture", "capture_precondition");
+                    }
+                }
                 if (requestedCaptureMode != "auto"
                     && requestedCaptureMode != "scene_view"
                     && requestedCaptureMode != "game_view")
@@ -116,6 +184,8 @@ namespace VRCForge.Editor
                         {
                             isPlayMode,
                             requestedCaptureMode,
+                            cameraMode,
+                            angle = requestedAngle,
                             captureMode,
                             requirePlayMode,
                             canCapture = !playModeNeeded || isPlayMode,
@@ -136,6 +206,10 @@ namespace VRCForge.Editor
                         "unity_capture",
                         "capture_precondition");
                 }
+                if (!string.IsNullOrEmpty(requestedAngle) && captureMode == "game_view" && activeGameCamera == null)
+                {
+                    return VRCForgeToolResult.RejectedBeforeMutation("capture_camera_unavailable", "Named-angle Game View capture requires an active Game camera; capture refused without screen fallback.", "unity_capture", "capture_precondition");
+                }
 
                 var absolutePath = ResolveToAbsolutePath(outputPath);
                 var directory = Path.GetDirectoryName(absolutePath);
@@ -153,8 +227,21 @@ namespace VRCForge.Editor
                     var playTargetCenter = Vector3.zero;
                     var playCameraPosition = Vector3.zero;
                     var playOrthographicSize = 0f;
+                    CameraObservation playCameraObservation = null;
 
                     TryShowGameView();
+                    if (cameraMode == "free")
+                    {
+                        var freeObservation = CaptureFreeCamera(activeGameCamera, absolutePath, width, height, freeCamera);
+                        return VRCForgeToolResult.Completed($"Captured Game View screenshot: {absolutePath}", new
+                        {
+                            imagePath = absolutePath.Replace("\\", "/"), width, height, cameraMode, projection = freeCamera.ProjectionName,
+                            cameraPosition = ToObject(freeCamera.Position), targetPosition = ToObject(freeCamera.Target), upVector = ToObject(freeCamera.Up),
+                            cameraBasis = freeObservation.Basis, cameraQuaternion = ToObject(freeObservation.Rotation), projectionMatrix = FlattenRowMajor(freeObservation.Projection),
+                            viewMatrix = FlattenRowMajor(freeObservation.View), cameraEvidence = BuildCameraEvidence(freeObservation),
+                            warnings = warnings.ToArray(), captureMode, isPlayMode
+                        });
+                    }
                     if (setRotation
                         && activeGameCamera != null
                         && TryResolveCaptureTarget(
@@ -164,7 +251,7 @@ namespace VRCForge.Editor
                             out var playBaseRotation,
                             out playResolvedAvatarPath))
                     {
-                        CaptureOrbitCamera(
+                        playCameraObservation = CaptureOrbitCamera(
                             sceneCamera: activeGameCamera,
                             absolutePath: absolutePath,
                             width: width,
@@ -203,6 +290,8 @@ namespace VRCForge.Editor
                             setRotation,
                             avatarPath,
                             requestedCaptureMode,
+                            cameraMode,
+                            angle = requestedAngle,
                             resolvedAvatarPath = playResolvedAvatarPath,
                             usedOrbitCamera = playUsedOrbitCamera,
                             captureMode,
@@ -215,7 +304,15 @@ namespace VRCForge.Editor
                             warnings = warnings.ToArray(),
                             targetCenter = new { x = playTargetCenter.x, y = playTargetCenter.y, z = playTargetCenter.z },
                             cameraPosition = new { x = playCameraPosition.x, y = playCameraPosition.y, z = playCameraPosition.z },
-                            orthographicSize = playOrthographicSize
+                            targetPosition = new { x = playTargetCenter.x, y = playTargetCenter.y, z = playTargetCenter.z },
+                            upVector = playCameraObservation != null ? ToObject(playCameraObservation.Up) : null,
+                            cameraBasis = playCameraObservation != null ? playCameraObservation.Basis : null,
+                            projection = playCameraObservation != null ? playCameraObservation.ProjectionName : string.Empty,
+                            cameraQuaternion = playCameraObservation != null ? ToObject(playCameraObservation.Rotation) : null,
+                            projectionMatrix = playCameraObservation != null ? FlattenRowMajor(playCameraObservation.Projection) : null,
+                            viewMatrix = playCameraObservation != null ? FlattenRowMajor(playCameraObservation.View) : null,
+                            orthographicSize = playOrthographicSize,
+                            cameraEvidence = playCameraObservation != null ? BuildCameraEvidence(playCameraObservation) : null
                         });
                 }
 
@@ -233,15 +330,29 @@ namespace VRCForge.Editor
 
                 sceneView.Show();
 
+                if (cameraMode == "free")
+                {
+                    var freeObservation = CaptureFreeCamera(camera, absolutePath, width, height, freeCamera);
+                    return VRCForgeToolResult.Completed($"Captured SceneView screenshot: {absolutePath}", new
+                    {
+                        imagePath = absolutePath.Replace("\\", "/"), width, height, cameraMode, projection = freeCamera.ProjectionName,
+                        cameraPosition = ToObject(freeCamera.Position), targetPosition = ToObject(freeCamera.Target), upVector = ToObject(freeCamera.Up),
+                        cameraBasis = freeObservation.Basis, cameraQuaternion = ToObject(freeObservation.Rotation), projectionMatrix = FlattenRowMajor(freeObservation.Projection),
+                        viewMatrix = FlattenRowMajor(freeObservation.View), cameraEvidence = BuildCameraEvidence(freeObservation),
+                        warnings = warnings.ToArray(), captureMode, isPlayMode
+                    });
+                }
+
                 var usedOrbitCamera = false;
                 var resolvedAvatarPath = string.Empty;
                 var targetCenter = Vector3.zero;
                 var cameraPosition = Vector3.zero;
                 var orthographicSize = 0f;
+                CameraObservation cameraObservation = null;
 
                 if (setRotation && TryResolveCaptureTarget(avatarPath, captureScope, out var bounds, out var baseRotation, out resolvedAvatarPath))
                 {
-                    CaptureOrbitCamera(
+                    cameraObservation = CaptureOrbitCamera(
                         sceneCamera: camera,
                         absolutePath: absolutePath,
                         width: width,
@@ -293,6 +404,8 @@ namespace VRCForge.Editor
                         setRotation,
                         avatarPath,
                         requestedCaptureMode,
+                        cameraMode,
+                        angle = requestedAngle,
                         resolvedAvatarPath,
                         usedOrbitCamera,
                         captureMode,
@@ -301,7 +414,15 @@ namespace VRCForge.Editor
                         warnings = warnings.ToArray(),
                         targetCenter = new { x = targetCenter.x, y = targetCenter.y, z = targetCenter.z },
                         cameraPosition = new { x = cameraPosition.x, y = cameraPosition.y, z = cameraPosition.z },
-                        orthographicSize
+                        targetPosition = new { x = targetCenter.x, y = targetCenter.y, z = targetCenter.z },
+                        upVector = cameraObservation != null ? ToObject(cameraObservation.Up) : null,
+                        cameraBasis = cameraObservation != null ? cameraObservation.Basis : null,
+                        projection = cameraObservation != null ? cameraObservation.ProjectionName : string.Empty,
+                        cameraQuaternion = cameraObservation != null ? ToObject(cameraObservation.Rotation) : null,
+                        projectionMatrix = cameraObservation != null ? FlattenRowMajor(cameraObservation.Projection) : null,
+                        viewMatrix = cameraObservation != null ? FlattenRowMajor(cameraObservation.View) : null,
+                        orthographicSize,
+                        cameraEvidence = cameraObservation != null ? BuildCameraEvidence(cameraObservation) : null
                     });
             }
             catch (Exception ex)
@@ -542,7 +663,174 @@ namespace VRCForge.Editor
                 && text.IndexOf(term, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private static void CaptureOrbitCamera(
+        private sealed class FreeCameraSpec
+        {
+            public Vector3 Position;
+            public Vector3 Target;
+            public Vector3 Up;
+            public string ProjectionName;
+            public float OrthographicSize;
+            public float FieldOfView;
+        }
+
+        private sealed class CameraObservation
+        {
+            public Vector3 Position;
+            public Vector3 Target;
+            public Quaternion Rotation;
+            public string ProjectionName;
+            public float OrthographicSize;
+            public float FieldOfView;
+            public float Aspect;
+            public float NearClip;
+            public float FarClip;
+            public Matrix4x4 CameraToWorld;
+            public Matrix4x4 View;
+            public Matrix4x4 Projection;
+            public Matrix4x4 GpuProjection;
+            public Matrix4x4 ViewProjection;
+            public object Basis;
+            public Vector3 Up;
+        }
+
+        private static string TryParseFreeCamera(JObject parameters, out FreeCameraSpec spec)
+        {
+            spec = null;
+            Vector3 position, target, up;
+            string error;
+            if (!TryReadVector3(parameters?["cameraPosition"], "cameraPosition", out position, out error)) return error;
+            if (!TryReadVector3(parameters?["targetPosition"], "targetPosition", out target, out error)) return error;
+            if (!TryReadVector3(parameters?["upVector"], "upVector", out up, out error)) return error;
+            var direction = target - position;
+            if (direction.sqrMagnitude < 1e-8f) return "cameraPosition and targetPosition must differ.";
+            if (up.sqrMagnitude < 1e-8f) return "upVector must be non-zero.";
+            if (Vector3.Cross(direction, up).sqrMagnitude < 1e-8f) return "upVector must not be collinear with cameraPosition-targetPosition.";
+            var projection = (parameters?["projection"]?.ToString() ?? "perspective").Trim().ToLowerInvariant();
+            if (projection != "orthographic" && projection != "perspective") return "projection must be orthographic or perspective.";
+            var hasOrtho = parameters?["orthographicSize"] != null;
+            var hasFov = parameters?["fieldOfView"] != null;
+            if (hasOrtho == hasFov) return "Free camera requires exactly one of orthographicSize or fieldOfView.";
+            var ortho = parameters?["orthographicSize"]?.Value<float>() ?? 0f;
+            var fov = parameters?["fieldOfView"]?.Value<float>() ?? 0f;
+            if (projection == "orthographic" && !hasOrtho) return "orthographic projection requires orthographicSize.";
+            if (projection == "perspective" && !hasFov) return "perspective projection requires fieldOfView.";
+            if (projection == "orthographic" && (hasFov || !IsFinitePositive(ortho))) return "orthographicSize must be finite and > 0, and fieldOfView must be omitted.";
+            if (projection == "perspective" && (hasOrtho || !IsFinite(fov) || fov <= 0f || fov >= 180f)) return "fieldOfView must be finite and in (0,180), and orthographicSize must be omitted.";
+            spec = new FreeCameraSpec { Position = position, Target = target, Up = up, ProjectionName = projection, OrthographicSize = ortho, FieldOfView = fov };
+            return string.Empty;
+        }
+
+        private static bool TryReadVector3(JToken token, string name, out Vector3 value, out string error)
+        {
+            value = Vector3.zero;
+            error = string.Empty;
+            if (token == null) { error = $"{name} is required for cameraMode=free."; return false; }
+            try
+            {
+                float x, y, z;
+                if (token.Type == JTokenType.Array && token.Count() == 3)
+                {
+                    x = token[0].Value<float>(); y = token[1].Value<float>(); z = token[2].Value<float>();
+                }
+                else if (token.Type == JTokenType.Object)
+                {
+                    x = token["x"].Value<float>(); y = token["y"].Value<float>(); z = token["z"].Value<float>();
+                }
+                else { error = $"{name} must be an object with finite x,y,z or a 3-item array."; return false; }
+                if (!IsFinite(x) || !IsFinite(y) || !IsFinite(z)) { error = $"{name} must contain finite x,y,z values."; return false; }
+                value = new Vector3(x, y, z); return true;
+            }
+            catch { error = $"{name} must be an object with finite x,y,z or a 3-item array."; return false; }
+        }
+
+        private static bool IsFinite(float value) { return !float.IsNaN(value) && !float.IsInfinity(value); }
+        private static bool IsFinitePositive(float value) { return IsFinite(value) && value > 0f; }
+        private static object ToObject(Vector3 v) { return new { x = v.x, y = v.y, z = v.z }; }
+        private static object ToObject(Quaternion q) { return new { x = q.x, y = q.y, z = q.z, w = q.w }; }
+        private static float[] FlattenRowMajor(Matrix4x4 m)
+        {
+            var result = new float[16];
+            for (var row = 0; row < 4; row++) for (var col = 0; col < 4; col++) result[row * 4 + col] = m[row, col];
+            return result;
+        }
+
+        private static Dictionary<string, object> BuildCameraEvidence(CameraObservation observation)
+        {
+            var evidence = new Dictionary<string, object>(StringComparer.Ordinal)
+            {
+                ["position"] = ToObject(observation.Position),
+                ["target"] = ToObject(observation.Target),
+                ["basis"] = observation.Basis,
+                ["quaternion"] = ToObject(observation.Rotation),
+                ["projection"] = observation.ProjectionName,
+                ["aspect"] = observation.Aspect,
+                ["nearClip"] = observation.NearClip,
+                ["farClip"] = observation.FarClip,
+                ["matrix"] = new Dictionary<string, object>(StringComparer.Ordinal)
+                {
+                    ["cameraToWorld"] = FlattenRowMajor(observation.CameraToWorld),
+                    ["worldToCamera"] = FlattenRowMajor(observation.View),
+                    ["projection"] = FlattenRowMajor(observation.Projection),
+                    ["gpuProjection"] = FlattenRowMajor(observation.GpuProjection),
+                    ["viewProjection"] = FlattenRowMajor(observation.ViewProjection),
+                },
+                ["matrixOrder"] = "row_major",
+                ["coordinateSpace"] = "unity_world",
+            };
+            if (observation.ProjectionName == "orthographic")
+            {
+                evidence["orthographicSize"] = observation.OrthographicSize;
+            }
+            else
+            {
+                evidence["fieldOfView"] = observation.FieldOfView;
+            }
+            return evidence;
+        }
+
+        private static CameraObservation CaptureFreeCamera(Camera source, string absolutePath, int width, int height, FreeCameraSpec spec)
+        {
+            var go = new GameObject("VRCForge_FreeCaptureCamera") { hideFlags = HideFlags.HideAndDontSave };
+            var camera = go.AddComponent<Camera>();
+            try
+            {
+                if (source != null)
+                {
+                    camera.CopyFrom(source);
+                }
+                var rotation = Quaternion.LookRotation((spec.Target - spec.Position).normalized, spec.Up.normalized);
+                camera.transform.SetPositionAndRotation(spec.Position, rotation);
+                camera.aspect = width / (float)height;
+                camera.orthographic = spec.ProjectionName == "orthographic";
+                if (camera.orthographic) camera.orthographicSize = spec.OrthographicSize; else camera.fieldOfView = spec.FieldOfView;
+                camera.nearClipPlane = 0.01f;
+                camera.farClipPlane = Mathf.Max(camera.farClipPlane, 1000f);
+                CaptureCameraToPng(camera, absolutePath, width, height);
+                var gpuProjection = GL.GetGPUProjectionMatrix(camera.projectionMatrix, true);
+                return new CameraObservation
+                {
+                    Position = spec.Position,
+                    Target = spec.Target,
+                    Rotation = rotation,
+                    ProjectionName = spec.ProjectionName,
+                    OrthographicSize = camera.orthographicSize,
+                    FieldOfView = camera.fieldOfView,
+                    Aspect = camera.aspect,
+                    NearClip = camera.nearClipPlane,
+                    FarClip = camera.farClipPlane,
+                    CameraToWorld = camera.cameraToWorldMatrix,
+                    View = camera.worldToCameraMatrix,
+                    Projection = camera.projectionMatrix,
+                    GpuProjection = gpuProjection,
+                    ViewProjection = gpuProjection * camera.worldToCameraMatrix,
+                    Basis = new { right = ToObject(camera.transform.right), up = ToObject(camera.transform.up), forward = ToObject(camera.transform.forward) },
+                    Up = camera.transform.up
+                };
+            }
+            finally { UnityEngine.Object.DestroyImmediate(go); }
+        }
+
+        private static CameraObservation CaptureOrbitCamera(
             Camera sceneCamera,
             string absolutePath,
             int width,
@@ -576,12 +864,33 @@ namespace VRCForge.Editor
                 captureCamera.CopyFrom(sceneCamera);
                 captureCamera.transform.position = cameraPosition;
                 captureCamera.transform.rotation = rotation;
+                captureCamera.aspect = width / (float)height;
                 captureCamera.orthographic = true;
                 captureCamera.orthographicSize = orthographicSize;
                 captureCamera.nearClipPlane = 0.01f;
                 captureCamera.farClipPlane = Mathf.Max(distance + bounds.size.magnitude * 2.0f, 10.0f);
                 captureCamera.targetTexture = null;
                 CaptureCameraToPng(captureCamera, absolutePath, width, height);
+                var gpuProjection = GL.GetGPUProjectionMatrix(captureCamera.projectionMatrix, true);
+                return new CameraObservation
+                {
+                    Position = cameraPosition,
+                    Target = targetCenter,
+                    Rotation = rotation,
+                    ProjectionName = "orthographic",
+                    OrthographicSize = captureCamera.orthographicSize,
+                    FieldOfView = captureCamera.fieldOfView,
+                    Aspect = captureCamera.aspect,
+                    NearClip = captureCamera.nearClipPlane,
+                    FarClip = captureCamera.farClipPlane,
+                    CameraToWorld = captureCamera.cameraToWorldMatrix,
+                    View = captureCamera.worldToCameraMatrix,
+                    Projection = captureCamera.projectionMatrix,
+                    GpuProjection = gpuProjection,
+                    ViewProjection = gpuProjection * captureCamera.worldToCameraMatrix,
+                    Basis = new { right = ToObject(captureCamera.transform.right), up = ToObject(captureCamera.transform.up), forward = ToObject(captureCamera.transform.forward) },
+                    Up = captureCamera.transform.up
+                };
             }
             finally
             {
@@ -611,6 +920,24 @@ namespace VRCForge.Editor
                 RenderTexture.active = previousActive;
                 UnityEngine.Object.DestroyImmediate(renderTexture);
                 UnityEngine.Object.DestroyImmediate(texture);
+            }
+        }
+
+        private static void ApplyNamedAngle(string angle, ref bool setRotation, ref float pitch, ref float yaw, ref float roll)
+        {
+            setRotation = true;
+            pitch = 0f;
+            yaw = 0f;
+            roll = 0f;
+            switch (angle)
+            {
+                case "front": break;
+                case "side_left": yaw = 90f; break;
+                case "side_right": yaw = -90f; break;
+                case "back": yaw = 180f; break;
+                // Positive X looks downward in Unity; -90 is the true underneath view.
+                case "bottom": pitch = -90f; break;
+                default: throw new ArgumentOutOfRangeException(nameof(angle), angle, "Unsupported named capture angle.");
             }
         }
 
@@ -663,7 +990,12 @@ namespace VRCForge.Editor
                 bounds = BuildFaceFocusBounds(target, avatarBounds, renderers);
             }
 
-            var forward = target.forward;
+            // Named captures must be deterministic under Gesture Manager animation:
+            // use the avatar root's horizontal heading, never an animated Neck/Head
+            // transform that may be supplied as avatarPath.
+            var orientationRoot = FindAvatarOrientationRoot(target);
+            var forward = orientationRoot.forward;
+            forward.y = 0f;
             if (forward.sqrMagnitude < 0.0001f)
             {
                 forward = Vector3.forward;
@@ -672,6 +1004,22 @@ namespace VRCForge.Editor
 
             resolvedAvatarPath = GetTransformPath(target);
             return true;
+        }
+
+        private static Transform FindAvatarOrientationRoot(Transform target)
+        {
+            for (var current = target; current != null; current = current.parent)
+            {
+                foreach (var component in current.GetComponents<Component>())
+                {
+                    var typeName = component != null ? component.GetType().FullName : string.Empty;
+                    if (string.Equals(typeName, "VRC.SDK3.Avatars.Components.VRCAvatarDescriptor", StringComparison.Ordinal))
+                    {
+                        return current;
+                    }
+                }
+            }
+            return target.root != null ? target.root : target;
         }
 
         private static Bounds BuildFaceFocusBounds(Transform avatarRoot, Bounds avatarBounds, Renderer[] renderers)
@@ -767,8 +1115,9 @@ namespace VRCForge.Editor
         private static Transform ResolveTransform(string avatarPath)
         {
             var requested = NormalizeTransformPath(avatarPath);
-            Transform nameFallback = null;
             Transform firstSceneRendererRoot = null;
+            var exactMatches = new List<Transform>();
+            var fallbackMatches = new List<Transform>();
 
             foreach (var transform in Resources.FindObjectsOfTypeAll<Transform>())
             {
@@ -794,18 +1143,29 @@ namespace VRCForge.Editor
 
                 var fullPath = NormalizeTransformPath(GetTransformPath(transform));
                 var name = NormalizeTransformPath(transform.name);
-                if (fullPath == requested || name == requested || fullPath.EndsWith("/" + requested, StringComparison.Ordinal))
+                if (fullPath == requested)
                 {
-                    return transform;
+                    exactMatches.Add(transform);
                 }
-
-                if (nameFallback == null && name == requested)
+                else if (name == requested || fullPath.EndsWith("/" + requested, StringComparison.Ordinal))
                 {
-                    nameFallback = transform;
+                    fallbackMatches.Add(transform);
                 }
             }
 
-            return nameFallback ?? firstSceneRendererRoot;
+            if (!string.IsNullOrEmpty(requested))
+            {
+                if (exactMatches.Count == 1)
+                {
+                    return exactMatches[0];
+                }
+                if (exactMatches.Count == 0 && fallbackMatches.Count == 1)
+                {
+                    return fallbackMatches[0];
+                }
+                return null;
+            }
+            return firstSceneRendererRoot;
         }
 
         private static string NormalizeTransformPath(string value)

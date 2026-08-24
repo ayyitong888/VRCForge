@@ -8,6 +8,8 @@ import httpx
 
 from agent_gateway import AgentGateway, create_agent_mcp_app
 from agent_mcp_2026 import PROTOCOL_VERSION
+from agent_tool_result_contract import normalize_agent_tool_result
+from external_tool_result_contract import build_external_tool_error
 
 
 TOOL_NAME = "vrcforge_result_parity_fixture"
@@ -116,6 +118,8 @@ def test_internal_agent_and_external_mcp_2026_keep_identical_canonical_results(
         ],
         "nextAction": "Keep the exact readiness binding for the approved action.",
         "recovery": {"required": False},
+        "failedStep": "none",
+        "diagnostics": {"schema": "synthetic.v1", "checks": ["rest", "play"]},
     }
     failure_payload = {
         "ok": False,
@@ -185,6 +189,8 @@ def test_internal_agent_and_external_mcp_2026_keep_identical_canonical_results(
         "commitState": "not_started",
         "commitStateKnown": True,
         "safeToRetry": False,
+        "failedStep": "inspect_neck_seam",
+        "diagnostics": {"schema": "synthetic.v1", "cause": "bone binding"},
     }
     readiness_blocked_payload = {
         "ok": True,
@@ -263,6 +269,10 @@ def test_internal_agent_and_external_mcp_2026_keep_identical_canonical_results(
         assert external["outcome"] == internal["outcome"]
         for field, internal_value in internal["outcome"].items():
             assert external["outcome"][field] == internal_value
+        for field in ("failedStep", "diagnostics"):
+            if field in raw_payload:
+                assert internal["outcome"][field] == raw_payload[field]
+                assert external["outcome"][field] == raw_payload[field]
         results[case] = (internal, external)
 
     internal_success, external_success = results["success"]
@@ -309,3 +319,119 @@ def test_internal_agent_and_external_mcp_2026_keep_identical_canonical_results(
         assert field in internal_blocked["outcome"]
         assert external_blocked["outcome"][field] == internal_blocked["outcome"][field]
         assert internal_blocked["outcome"][field] == readiness_blocked_payload[field]
+
+
+def test_external_write_re_normalizes_precise_nested_rejection(tmp_path: Path) -> None:
+    """A generic approval wrapper must not hide the exact Unity write failure."""
+
+    exact = {
+        "ok": False,
+        "status": "failed",
+        "errorCode": "component_property_failed_after_mutation",
+        "error": "Unity persisted readback did not match the requested property.",
+        "failureLayer": "unity_editor_tool",
+        "failurePhase": "persisted_readback",
+        "failureCause": {
+            "code": "component_property_failed_after_mutation",
+            "message": "The property value differed after persisted readback.",
+        },
+        "rootCause": {"component": "SkinnedMeshRenderer", "property": "bones[3]"},
+        "causeChain": [
+            {"type": "UnityException", "message": "Serialized property mismatch."},
+            {"type": "InvalidOperationException", "message": "Readback failed."},
+        ],
+        "failedStep": "persisted_readback",
+        "diagnostics": {
+            "exception": {
+                "type": "UnityException",
+                "message": "Serialized property mismatch.",
+                "innerChain": [{"type": "InvalidOperationException", "message": "Readback failed."}],
+            }
+        },
+        "mutationStarted": True,
+        "committed": False,
+        "commitState": "partial",
+    }
+    applied = {
+        "ok": False,
+        "status": "failed",
+        "outcome": {
+            "success": False,
+            "status": "failed",
+            "errorCode": "agent_gateway_rejected",
+            "failureLayer": "unknown",
+            "failurePhase": "wrapper",
+            "error": "The write was rejected by the gateway.",
+        },
+        "result": exact,
+        "rawResult": exact,
+    }
+
+    gateway = _gateway(tmp_path)
+    external = gateway._external_mcp_write_result(TOOL_NAME, applied)
+    internal = {
+        "outcome": normalize_agent_tool_result(
+            {
+                **exact,
+                "errorDetails": build_external_tool_error(
+                    error=exact["error"],
+                    failure_layer="agent_tool_result",
+                    failure_phase="tool_returned_rejection",
+                    operation_kind="write",
+                    tool=TOOL_NAME,
+                    tool_routing_started=True,
+                    raw_result=exact,
+                ),
+            },
+            fallback_summary=f"{TOOL_NAME} failed.",
+            write=True,
+        )
+    }
+    mcp_structured = normalize_agent_tool_result(
+        external,
+        fallback_summary=f"{TOOL_NAME} completed.",
+        write=True,
+    )
+
+    for field in (
+        "success", "status", "errorCode", "failureLayer", "failurePhase",
+        "failureCause", "rootCause", "causeChain", "failedStep", "diagnostics",
+        "mutationStarted", "committed", "commitState",
+    ):
+        assert internal["outcome"].get(field) == mcp_structured.get(field)
+    for field in (
+        "errorCode", "failureLayer", "failurePhase", "failureCause",
+        "rootCause", "causeChain", "failedStep", "mutationStarted",
+        "committed", "commitState",
+    ):
+        assert internal["outcome"].get(field) == exact.get(field)
+
+
+def test_write_preparation_rejection_keeps_boundary_cause_over_exception_wrapper(
+    tmp_path: Path,
+) -> None:
+    gateway = _gateway(tmp_path)
+    error = RuntimeError(
+        r"source_mode default could not find examples\\mvp_blendshapes_export.json"
+    )
+    error.cause_code = "agent_gateway_rejected"
+
+    external = gateway._external_mcp_no_write_error(
+        "vrcforge_apply_blendshapes",
+        "write_preparation",
+        error,
+    )
+    outcome = external["outcome"]
+    assert external["errorDetails"]["errorCode"] == "external_write_preparation_rejected"
+    for view in (external["errorDetails"], outcome):
+        assert view["failureCause"]["code"] == "external_write_preparation_rejected"
+        assert view["failureCause"]["failureLayer"] == "write_preparation"
+        assert view["failureCause"]["failurePhase"] == "before_write_handler"
+        assert view["rootCause"] == view["failureCause"]
+        assert view["causeChain"][0]["code"] == "agent_gateway_rejected"
+    assert "RuntimeError" in str(external["errorDetails"]["exception"])
+    assert normalize_agent_tool_result(
+        external,
+        fallback_summary="External write preparation failed.",
+        write=True,
+    ) == outcome

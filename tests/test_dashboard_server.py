@@ -4861,7 +4861,7 @@ class DashboardServerTests(unittest.TestCase):
         self.assertTrue(status["connected"])
         self.assertTrue(status["selectedInstanceMatched"])
         self.assertEqual(status["missingRequiredVrcForgeTools"], [])
-        self.assertEqual(status["tools"]["vrcForgeToolsCount"], 78)
+        self.assertEqual(status["tools"]["vrcForgeToolsCount"], 80)
         self.assertEqual(status["mcpHealth"]["protocolVersion"], "2026-07-28")
 
     def test_core_only_repair_never_starts_or_registers_an_external_connector(self) -> None:
@@ -13303,7 +13303,7 @@ class DashboardServerTests(unittest.TestCase):
         ):
             self.assertIn(f'toolId: "{tool_name}"', source)
         self.assertIn("[VRCForgeCommand(", source)
-        self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 5)
+        self.assertEqual(source.count("public static object HandleCommand(JObject @params)"), 7)
         # Write tools must register Undo entries so the checkpoint timeline can roll them back.
         self.assertIn("Undo.AddComponent", source)
         self.assertIn("Undo.DestroyObjectImmediate", source)
@@ -14698,7 +14698,7 @@ class DashboardServerTests(unittest.TestCase):
         ).read_text(encoding="utf-8-sig")
         contract_names = set(re.findall(r'\{\s*"(vrc_[a-z0-9_]+)"\s*,\s*"VRCForge\.', contract_text))
         self.assertEqual(contract_names, set(dashboard_server.VRCFORGE_UNITY_TOOL_REGISTRY))
-        self.assertEqual(len(contract_names), 78)
+        self.assertEqual(len(contract_names), 80)
         legacy_hits = [
             path for path in (repo_root / "Assets" / "VRCForge").rglob("*.cs")
             if "McpForUnityTool" in path.read_text(encoding="utf-8-sig")

@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.7.9";
-        internal const string ToolContractVersion = "78";
-        internal const int ToolCount = 78;
+        internal const string ToolContractVersion = "82";
+        internal const int ToolCount = 80;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -56,6 +56,7 @@ namespace VRCForge.Editor
                 { "vrc_gesture_manager_set_parameter", "VRCForge.Editor.GestureManagerRuntimeParameterTool" },
                 { "vrc_import_unitypackage", "VRCForge.Editor.UnityPackageImporterTool" },
                 { "vrc_inspect_skinned_mesh_bone_usage", "VRCForge.Editor.InspectSkinnedMeshBoneUsageTool" },
+                { "vrc_inspect_skinned_mesh_deformation", "VRCForge.Editor.InspectSkinnedMeshDeformationTool" },
                 { "vrc_inspect_modular_avatar_component", "VRCForge.Editor.MAComponentInspector" },
                 { "vrc_inspect_primitive_basis_fixture", "VRCForge.Editor.PrimitiveBasisFixtureInspector" },
                 { "vrc_instantiate_prefab", "VRCForge.Editor.InstantiatePrefabTool" },
@@ -66,6 +67,7 @@ namespace VRCForge.Editor
                 { "vrc_prepare_checkpoint", "VRCForge.Editor.CheckpointPrepareTool" },
                 { "vrc_read_avatar_descriptor", "VRCForge.Editor.ReadAvatarDescriptorTool" },
                 { "vrc_read_vrchat_sdk_builder_alerts", "VRCForge.Editor.VrchatSdkBuilderAlertsTool" },
+                { "vrc_remap_skinned_mesh_bone", "VRCForge.Editor.RemapSkinnedMeshBoneTool" },
                 { "vrc_refresh_asset_database", "VRCForge.Editor.AssetDatabaseRefreshTool" },
                 { "vrc_reload_after_checkpoint_restore", "VRCForge.Editor.CheckpointReloadTool" },
                 { "vrc_reload_primitive_basis_fixture", "VRCForge.Editor.PrimitiveBasisFixtureReloader" },
@@ -110,6 +112,7 @@ namespace VRCForge.Editor
                 "vrc_get_gameobject",
                 "vrc_get_property",
                 "vrc_inspect_skinned_mesh_bone_usage",
+                "vrc_inspect_skinned_mesh_deformation",
                 "vrc_inspect_modular_avatar_component",
                 "vrc_inspect_primitive_basis_fixture",
                 "vrc_read_avatar_descriptor",

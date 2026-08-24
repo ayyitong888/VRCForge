@@ -1,5 +1,5 @@
 {
-  "schema": "vrcforge.unity_mcp_78_success_matrix.part.v1",
+  "schema": "vrcforge.unity_mcp_80_success_matrix.part.v1",
   "part": "a",
   "cases": [
     {"tool":"vrc_add_component","mode":"preview","arguments":{"gameObjectPath":"${SCENE_ROOT}","componentType":"BoxCollider","preview":true},"requiredFixtures":["saved_scene","unique_scene_root"],"successFields":["preview","gameObjectPath","componentType","existingCount"],"cleanup":"none"},

@@ -182,6 +182,18 @@ def test_multi_capture_preparer_allows_explicit_full_avatar_framing() -> None:
         assert arguments["captureScope"] == "avatar"
 
 
+def test_multi_capture_defaults_to_five_level_named_angles() -> None:
+    prepared, preview = dashboard_server.prepare_capture_multi_screenshot_request({}, None)
+
+    expected = ["front", "side_left", "side_right", "back", "bottom"]
+    assert preview["angles"] == expected
+    assert [Path(prepared_call(prepared, index)[1]["outputPath"]).stem.removeprefix("vision_") for index in range(5)] == expected
+    assert dashboard_server.VisionAuditMultiRequest(imagePaths=[]).angles == expected
+    schema = agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_capture_multi_screenshot"]
+    assert schema["properties"]["angles"]["default"] == expected
+    assert schema["properties"]["angles"]["maxItems"] == 5
+
+
 def test_capture_preparer_rejects_unknown_public_framing() -> None:
     with pytest.raises(ValueError):
         dashboard_server.prepare_capture_screenshot_request({"framing": "scene"}, None)
@@ -276,7 +288,7 @@ def test_single_capture_handler_accepts_windows_slash_normalization_and_requires
     monkeypatch.setattr(
         dashboard_server,
         "invoke_unity_mcp",
-        lambda _settings, _tool, _arguments: dashboard_server.McpResult(
+        lambda _settings, _tool, _arguments, preserve_tool_error=False: dashboard_server.McpResult(
             exit_code=0,
             stdout="ok",
             stderr="",
@@ -310,7 +322,7 @@ def test_single_capture_handler_reads_back_frozen_rotation_and_scope(tmp_path, m
     monkeypatch.setattr(
         dashboard_server,
         "invoke_unity_mcp",
-        lambda _settings, _tool, arguments: dashboard_server.McpResult(
+        lambda _settings, _tool, arguments, preserve_tool_error=False: dashboard_server.McpResult(
             exit_code=0,
             stdout="ok",
             stderr="",
@@ -354,7 +366,7 @@ def test_single_capture_handler_propagates_core_failure_and_never_reuses_stale_i
     monkeypatch.setattr(
         dashboard_server,
         "invoke_unity_mcp",
-        lambda _settings, _tool, _arguments: dashboard_server.McpResult(
+        lambda _settings, _tool, _arguments, preserve_tool_error=False: dashboard_server.McpResult(
             exit_code=1,
             stdout="core failure",
             stderr="",
@@ -402,7 +414,7 @@ def test_multi_capture_handler_issues_one_task_owned_managed_receipt(tmp_path, m
     monkeypatch.setattr(
         dashboard_server,
         "invoke_unity_mcp",
-        lambda _settings, _tool, arguments: dashboard_server.McpResult(
+        lambda _settings, _tool, arguments, preserve_tool_error=False: dashboard_server.McpResult(
             exit_code=0,
             stdout="ok",
             stderr="",
@@ -419,6 +431,64 @@ def test_multi_capture_handler_issues_one_task_owned_managed_receipt(tmp_path, m
     assert result["evidence"] == consumed["evidence"]
 
 
+def test_multi_capture_runs_each_angle_and_preserves_first_core_failure(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
+    prepared, _preview = dashboard_server.prepare_capture_multi_screenshot_request({}, None)
+    monkeypatch.setattr(
+        dashboard_server,
+        "load_dashboard_settings",
+        lambda _request: SimpleNamespace(unity_project_path="D:/Unity/Project"),
+    )
+    calls: list[str] = []
+    failure = {
+        "success": False,
+        "errorCode": "camera_readback_failed",
+        "error": "free camera evidence was not returned",
+        "failureLayer": "unity_core_dispatch",
+        "failurePhase": "camera_evidence_readback",
+        "causeChain": [{"code": "missing_camera_evidence", "message": "cameraEvidence missing"}],
+        "mutationStarted": True,
+        "committed": False,
+        "commitState": "rolled_back",
+    }
+
+    def invoke(_settings, _tool, arguments, preserve_tool_error=False):
+        angle = Path(arguments["outputPath"]).stem.removeprefix("vision_")
+        calls.append(angle)
+        output_path = Path(arguments["outputPath"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if angle == "side_left":
+            return dashboard_server.McpResult(
+                exit_code=1,
+                stdout="core failure",
+                stderr="",
+                payload={"isError": True, "structuredContent": failure},
+            )
+        output_path.write_bytes(angle.encode("ascii"))
+        return dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"imagePath": str(output_path)}},
+        )
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    result = dashboard_server.capture_avatar_multi_screenshot_approved_sync(prepared)
+
+    assert calls == ["front", "side_left", "side_right", "back", "bottom"]
+    assert result["ok"] is False
+    assert result["errorCode"] == failure["errorCode"]
+    assert result["failureLayer"] == failure["failureLayer"]
+    assert result["failurePhase"] == failure["failurePhase"]
+    assert result["causeChain"] == failure["causeChain"]
+    assert result["mutationStarted"] is True
+    assert result["committed"] is False
+    assert result["commitState"] == "rolled_back"
+    assert result["failedCount"] == 1
+    assert result["completedCount"] == 4
+    assert result["failures"][0]["angle"] == "side_left"
+
+
 def test_dashboard_multi_audit_sends_exact_angles_with_managed_paths() -> None:
     dashboard_source = (ROOT / "dashboard" / "app.js").read_text(encoding="utf-8")
     audit_source = dashboard_source[
@@ -433,3 +503,139 @@ def test_dashboard_multi_audit_sends_exact_angles_with_managed_paths() -> None:
 def test_capture_dimensions_match_core_bounds(dimension: int) -> None:
     with pytest.raises(ValueError):
         dashboard_server.prepare_capture_screenshot_request({"width": dimension}, None)
+
+
+def test_free_camera_contract_requires_finite_vectors_and_projection_specific_optics() -> None:
+    base = {
+        "cameraMode": "free",
+        "cameraPosition": {"x": 0.0, "y": 1.0, "z": 2.0},
+        "targetPosition": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "upVector": {"x": 0.0, "y": 1.0, "z": 0.0},
+        "projection": "perspective",
+        "fieldOfView": 55.0,
+    }
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(base, None)
+    assert prepared["_vrcforge_prepared_unity_execution"]["calls"][0]["arguments"]["cameraMode"] == "free"
+    with pytest.raises(ValueError, match="free cameraMode requires"):
+        dashboard_server.prepare_capture_screenshot_request({"cameraMode": "free"}, None)
+    with pytest.raises(ValueError, match="excludes fieldOfView"):
+        dashboard_server.prepare_capture_screenshot_request({**base, "projection": "orthographic", "orthographicSize": 2.0}, None)
+    with pytest.raises(ValueError, match="finite"):
+        dashboard_server.prepare_capture_screenshot_request({**base, "cameraPosition": {"x": float("nan"), "y": 1.0, "z": 2.0}}, None)
+
+
+def test_free_capture_core_call_omits_all_framed_rotation_arguments() -> None:
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {
+            "cameraMode": "free",
+            "cameraPosition": {"x": 0.0, "y": 1.0, "z": 2.0},
+            "targetPosition": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "upVector": {"x": 0.0, "y": 1.0, "z": 0.0},
+            "projection": "orthographic",
+            "orthographicSize": 2.0,
+        },
+        None,
+    )
+    call = prepared["_vrcforge_prepared_unity_execution"]["calls"][0]["arguments"]
+    assert call["cameraMode"] == "free"
+    assert call["captureScope"] == "avatar"
+    assert not ({"setRotation", "pitch", "yaw", "roll"} & set(call))
+
+
+def test_named_angles_are_level_and_external_schema_has_strict_free_camera_branch() -> None:
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request({"angle": "back"}, None)
+    call = prepared["_vrcforge_prepared_unity_execution"]["calls"][0]["arguments"]
+    assert call["pitch"] == 0.0
+    schema = agent_gateway.EXTERNAL_MCP_WRITE_TOOL_INPUT_SCHEMAS["vrcforge_capture_screenshot"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["cameraPosition"]["$ref"] == "#/$defs/vector3"
+
+
+def _free_camera_evidence(arguments: dict[str, object]) -> dict[str, object]:
+    identity = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    return {
+        "position": arguments["cameraPosition"],
+        "target": arguments["targetPosition"],
+        "basis": {
+            "right": {"x": 1.0, "y": 0.0, "z": 0.0},
+            "up": {"x": 0.0, "y": 1.0, "z": 0.0},
+            "forward": {"x": 0.0, "y": 0.0, "z": -1.0},
+        },
+        "quaternion": {"x": 0.0, "y": 1.0, "z": 0.0, "w": 0.0},
+        "projection": arguments["projection"],
+        "fieldOfView": arguments["fieldOfView"],
+        "aspect": float(arguments["width"]) / float(arguments["height"]),
+        "nearClip": 0.01,
+        "farClip": 1000.0,
+        "matrix": {
+            "cameraToWorld": identity,
+            "worldToCamera": identity,
+            "projection": identity,
+            "gpuProjection": identity,
+            "viewProjection": identity,
+        },
+        "matrixOrder": "row_major",
+        "coordinateSpace": "unity_world",
+    }
+
+
+def test_free_capture_requires_and_returns_strict_real_camera_evidence(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {
+            "cameraMode": "free",
+            "cameraPosition": {"x": 0.0, "y": 1.0, "z": 2.0},
+            "targetPosition": {"x": 0.0, "y": 1.0, "z": 0.0},
+            "upVector": {"x": 0.0, "y": 1.0, "z": 0.0},
+            "projection": "perspective",
+            "fieldOfView": 40.0,
+            "width": 800,
+            "height": 400,
+        },
+        None,
+    )
+    output_path = tmp_path / "latest" / "vision_capture.png"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"png")
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace())
+
+    def invoke(_settings, _tool, arguments, preserve_tool_error=False):
+        return dashboard_server.McpResult(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            payload={"data": {"imagePath": arguments["outputPath"], "cameraEvidence": _free_camera_evidence(arguments)}},
+        )
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    result = dashboard_server.capture_avatar_screenshot_approved_sync(prepared)
+    assert result["cameraEvidence"]["position"] == {"x": 0.0, "y": 1.0, "z": 2.0}
+    assert result["cameraEvidence"]["matrixOrder"] == "row_major"
+
+
+def test_free_capture_rejects_camera_readback_drift(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(dashboard_server, "DASHBOARD_ARTIFACTS_DIR", tmp_path)
+    prepared, _preview = dashboard_server.prepare_capture_screenshot_request(
+        {
+            "cameraMode": "free",
+            "cameraPosition": {"x": 0.0, "y": 1.0, "z": 2.0},
+            "targetPosition": {"x": 0.0, "y": 1.0, "z": 0.0},
+            "upVector": {"x": 0.0, "y": 1.0, "z": 0.0},
+            "projection": "perspective",
+            "fieldOfView": 40.0,
+        },
+        None,
+    )
+    output_path = tmp_path / "latest" / "vision_capture.png"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"png")
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: SimpleNamespace())
+
+    def invoke(_settings, _tool, arguments, preserve_tool_error=False):
+        evidence = _free_camera_evidence(arguments)
+        evidence["position"] = {"x": 9.0, "y": 1.0, "z": 2.0}
+        return dashboard_server.McpResult(exit_code=0, stdout="ok", stderr="", payload={"data": {"imagePath": arguments["outputPath"], "cameraEvidence": evidence}})
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+    with pytest.raises(RuntimeError, match="position outside"):
+        dashboard_server.capture_avatar_screenshot_approved_sync(prepared)

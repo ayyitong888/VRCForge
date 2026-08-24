@@ -163,14 +163,14 @@ def test_head_swap_branches_before_face_tracking_merge_and_removal_closes_refere
     by_name = {skill["name"]: skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS}
     head = by_name["avatar-head-swap"]
     assert "Detect face tracking first" in head["problemBreakdown"][0]
-    assert "face-tracking-four-piece-merge" in head["steps"][2]["goal"]
-    neck_step = head["steps"][3]["goal"]
+    assert any("face-tracking-four-piece-merge" in step["goal"] for step in head["steps"])
+    neck_step = next(step["goal"] for step in head["steps"] if "cameraEvidence" in step["goal"])
     assert "GM Play Mode" in neck_step
     assert "Front (0,0,0)" in neck_step
     assert "hide hair/collar" in neck_step
-    assert "Side Left (10,+90,0)" in neck_step
-    assert "Side Right (10,-90,0)" in neck_step
-    assert "Back (10,180,0)" in neck_step
+    assert "Side Left (0,+90,0)" in neck_step
+    assert "Side Right (0,-90,0)" in neck_step
+    assert "Back (0,180,0)" in neck_step
     assert "true Bottom (-90,0,0)" in neck_step
     assert "full shoulder-neck visible" in neck_step
     neck_acceptance = " ".join(head["acceptance"])
@@ -311,8 +311,8 @@ def test_part_transplant_copies_only_live_dependencies_and_requires_readback() -
     assert "closure complete" in text
     assert "non-truncated" in text
     assert "donor" in text
-    assert "Side Left (10,+90,0)" in text
-    assert "Side Right (10,-90,0)" in text
+    assert "Side Left (0,+90,0)" in text
+    assert "Side Right (0,-90,0)" in text
     assert "Bottom (-90,0,0)" in text
 
 
@@ -333,6 +333,156 @@ def test_head_workflows_reject_static_only_neck_bone_proof() -> None:
         assert "Neck/Head inheritance" in text
         assert "neck-weighted bone target" in text
         assert "GM motion" in text
-        assert "Side Left (10,+90,0)" in text
-        assert "Side Right (10,-90,0)" in text
+        assert "Side Left (0,+90,0)" in text
+        assert "Side Right (0,-90,0)" in text
         assert "Bottom (-90,0,0)" in text
+
+
+def test_56_sol_contract_preserves_routes_skinning_sweep_and_capability_gap() -> None:
+    from avatar_composition_workflow_skills import (
+        FAILURE_ETIOLOGY_FIELDS,
+        POSE_SWEEP,
+        TRANSPLANT_MODES,
+    )
+
+    assert {mode["id"] for mode in TRANSPLANT_MODES} == {
+        "rigid", "same_skeleton_smr", "foreign_skeleton_smr",
+        "independent_skeleton_physbone", "animator_menu",
+    }
+    assert set(POSE_SWEEP) >= {
+        "Rest", "AFK", "Upright", "VelocityZ", "AngularY",
+        "body-size-min", "body-size-max", "face-tracking-min", "face-tracking-max",
+    }
+    required = {"renderer.bones", "renderer.rootBone", "renderer.bindposes", "allUsedBonesResolved", "allUsedBindposesResolved", "noOutOfRangeWeights", "mixedChainClosure", "safeForWeightedRemap"}
+    for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS:
+        assert required <= set(skill["skinningContract"]["required"])
+        assert required <= set(skill["skinningContract"]["required"])
+        assert {"success", "status", "error", "failedStep", "diagnostics", "capabilityGap", "needsDccRerig"} <= set(skill["failureEtiologyFields"])
+        assert set(FAILURE_ETIOLOGY_FIELDS) <= set(skill["failureEtiologyFields"])
+        assert skill["capabilityGapContract"]["onMissing"] == "blocked_not_ready"
+        assert len(skill["pitfallMatrix"]) >= 5
+        assert set(skill["geometryAlignmentContract"]["required"]) >= {"neckRingCenter", "neckRingNormal", "neckRingRadius", "pivot", "boneRoll"}
+        assert skill["geometryAlignmentContract"]["onUnreconciled"]["needsDccRerig"] is True
+        assert set(skill["rigAndShapeContract"]["required"]) >= {"bindposeReadback", "localWeightTransfer", "blendShapeOrder", "arkitNames"}
+        assert skill["physboneAbContract"]["isolation"][-1] == "readback_restoration"
+
+
+def test_transplants_gate_rest_delta_single_slot_remap_and_cat_ear_physbone_isolation() -> None:
+    for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS:
+        if skill["name"] not in {"avatar-head-swap", "source-avatar-part-transplant"}:
+            continue
+        assert skill["singleSlotRemapContract"]["capability"] == "vrcforge_remap_skinned_mesh_bone"
+        assert skill["singleSlotRemapContract"]["bulkRemap"] == "forbidden"
+        assert skill["singleSlotRemapContract"]["onMissing"]["capabilityGap"] is True
+        assert skill["singleSlotRemapContract"]["onMissing"]["ready"] is False
+        gate = skill["singleSlotRemapContract"]["predictedMetricGate"]
+        assert set(gate["required"]) == {"current", "target", "donorChainBaseline"}
+        assert "materially closer" in gate["executeOnlyWhen"]
+        text = " ".join(step["goal"] for step in skill["steps"])
+        assert "Rest skinning delta" in text
+        assert "single-slot" in text
+        assert "PhysBone A/B" in text
+        assert "no paired morph" in text or "needsDccRerig" in text
+        assert skill["dynamicAcceptance"]["unobstructed"] is True
+        assert skill["dynamicAcceptance"]["orthogonalBasis"] is True
+        assert skill["dynamicAcceptance"]["obliqueAuxiliaryViewsCountTowardsAcceptance"] is False
+        assert skill["dynamicAcceptance"]["cameraEvidence"]
+        assert skill["dynamicAcceptance"]["baselineContract"] == {
+            "recordBeforePoseSweep": True,
+            "readBackAfterEachPose": True,
+            "restoreAfterSweep": True,
+            "blockIfRestoreReadbackFails": True,
+        }
+        diagnostics = skill["catEarDeformationDiagnosticsContract"]
+        assert diagnostics["tool"] == "vrcforge_inspect_skinned_mesh_deformation"
+        assert diagnostics["diagnosticOnly"] is True
+        assert diagnostics["perPose"] == ["Rest", "AFK", "HeadDown", "HeadTurnLeft", "HeadTurnRight"]
+        assert diagnostics["sameCameraRestMotionPairs"] is True
+        assert {"ear_root_shifts_from_head", "ear_root_gap_or_seam_changes_size_between_poses"} <= set(diagnostics["failIf"])
+
+
+def test_part_transplant_routes_rigid_physbone_and_weighted_smr_without_cross_wiring() -> None:
+    from avatar_composition_workflow_skills import TRANSPLANT_MODES
+
+    part = next(
+        skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS
+        if skill["name"] == "source-avatar-part-transplant"
+    )
+    modes = {mode["id"]: mode for mode in TRANSPLANT_MODES}
+
+    assert set(modes) == {
+        "rigid", "same_skeleton_smr", "foreign_skeleton_smr",
+        "independent_skeleton_physbone", "animator_menu",
+    }
+    assert {"setup_outfit", "merge_armature"} <= set(modes["rigid"]["forbidden"])
+    assert "MA Bone Proxy" in " ".join(modes["rigid"]["steps"])
+    assert "local TRS" in " ".join(modes["rigid"]["steps"])
+    assert "clothing or close-fitting weighted accessory" in modes["same_skeleton_smr"]["when"]
+    assert "clothing or close-fitting weighted accessory" in modes["foreign_skeleton_smr"]["when"]
+    assert "armature merge" in " ".join(modes["same_skeleton_smr"]["steps"])
+    assert "armature merge" in " ".join(modes["foreign_skeleton_smr"]["steps"])
+
+    physbone = part["partRoutingContract"]["independentPhysBoneAccessory"]
+    assert physbone["defaultRootScale"] == [1.0, 1.0, 1.0]
+    assert physbone["skinningPolicy"].startswith("preserve_internal_mesh_to_sway_chain_binding")
+    assert {"completeBoundedBoneChain", "physBoneRootTransform", "consumedColliderReferences", "rendererUsedBoneClosure", "restAndPerPoseDeformationReadback"} <= set(physbone["required"])
+    assert "uniform whole-prefab/container scale" in physbone["unitySizeFit"]
+    assert physbone["deformationReadbackTool"] == "vrcforge_inspect_skinned_mesh_deformation"
+    assert "stable_aabb_and_skin_matrix_metrics" in physbone["acceptance"]
+    assert {"setup_outfit", "merge_armature", "partial_chain_copy"} <= set(physbone["forbidden"])
+    assert "armature merge" in part["partRoutingContract"]["weightedSmr"]["requiredOperation"]
+
+    rigid = part["partRoutingContract"]["rigidAccessory"]
+    assert rigid["attachment"] == ["direct_reparent", "ma_bone_proxy"]
+    assert set(rigid["requiredReadback"]) == {
+        "targetBoneOrProxyTarget", "localPosition", "localRotation", "localScale",
+    }
+    assert {"vrcforge_preview_add_modular_avatar_component", "vrcforge_add_modular_avatar_component"} <= set(part["allowedTools"])
+    assert "vrcforge_inspect_skinned_mesh_deformation" in part["allowedTools"]
+    assert "vrcforge_setup_outfit" not in part["allowedTools"]
+    remap_gate = next(step for step in part["steps"] if step.get("requiredAtomicCapability") == "vrcforge_remap_skinned_mesh_bone")
+    assert remap_gate["conditionalRoutes"] == ["same_skeleton_smr", "foreign_skeleton_smr"]
+
+
+def test_part_transplant_reports_external_preprocessing_and_atomic_step_causes() -> None:
+    part = next(
+        skill for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS
+        if skill["name"] == "source-avatar-part-transplant"
+    )
+
+    preprocessing = part["externalPreprocessingContract"]
+    assert preprocessing["moduleCreator"]["internalAtomicCapability"] is None
+    assert preprocessing["moduleCreator"]["whenRequired"] == {
+        "capabilityGap": True,
+        "ready": False,
+        "failureCause": "module_creator_export_atom_unavailable",
+    }
+    assert set(preprocessing["dccEscalationOnlyWhen"]) == {
+        "mesh_shape_or_mesh_level_size_requires_editing",
+        "close_fitting_part_retains_donor_body_specific_weights",
+    }
+    assert "physbone_root_or_collider_reference_rebind" in preprocessing["notDccReasons"]
+
+    result_contract = part["atomicCompositionResultContract"]
+    assert result_contract["stopOnFailedStep"] is True
+    assert result_contract["failedStepRequiredOnFailure"] is True
+    assert result_contract["surfaces"] == ["internal_agent_loop", "external_mcp_agent"]
+    assert result_contract["surfaceParityRequired"] is True
+    assert {"step", "tool", "result", "success", "status", "error", "failureCause", "rootCause", "causeChain", "failedStep", "diagnostics"} <= set(result_contract["preserveEachStep"])
+    assert result_contract["preserveNestedResultUnchanged"] is True
+    assert set(result_contract["failureDiagnosisRequired"]["required"]) == {"success", "status", "failedStep"}
+
+
+def test_head_branches_and_part_share_diagnostic_result_parity_contract() -> None:
+    names = {
+        "avatar-head-swap", "avatar-head-swap-face-tracked",
+        "avatar-head-swap-gesture-only", "source-avatar-part-transplant",
+    }
+    for skill in AVATAR_COMPOSITION_WORKFLOW_SKILLS:
+        if skill["name"] not in names:
+            continue
+        result_contract = skill["atomicCompositionResultContract"]
+        assert result_contract["surfaceParityRequired"] is True
+        assert set(result_contract["surfaces"]) == {"internal_agent_loop", "external_mcp_agent"}
+        assert {"success", "status", "error", "failureCause", "rootCause", "causeChain", "failedStep", "diagnostics"} <= set(result_contract["preserveEachStep"])
+        assert "vrcforge_inspect_skinned_mesh_deformation" in skill["allowedTools"]

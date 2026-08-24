@@ -325,6 +325,54 @@ def test_external_read_returns_exact_failure_result_and_reason(tmp_path: Path) -
     assert result["outcome"]["cause"]["code"] == "fixture_read_failed"
 
 
+def test_internal_read_failure_projects_the_same_canonical_envelope_as_external(
+    tmp_path: Path,
+) -> None:
+    gateway = _external_gateway(tmp_path)
+    raw = {
+        "ok": False,
+        "status": "failed",
+        "errorCode": "skinned_mesh_bone_usage_arguments_missing",
+        "error": "gameObjectPath is required.",
+        "failureLayer": "external_tool_arguments",
+        "failurePhase": "argument_validation",
+        "causeChain": [{"code": "missing_game_object_path"}],
+        "mutationStarted": False,
+        "committed": False,
+        "commitState": "not_started",
+    }
+    gateway.register_tool(
+        "vrcforge_inspect_skinned_mesh_bone_usage",
+        "Inspect one exact skinned mesh bone usage result.",
+        "unity",
+        lambda _args: raw,
+    )
+    gateway.register_external_mcp_unity_tool(
+        "vrcforge_inspect_skinned_mesh_bone_usage", "avatar"
+    )
+
+    external = _external_mcp_call(
+        create_agent_mcp_app(gateway),
+        "tools/call",
+        {"name": "vrcforge_inspect_skinned_mesh_bone_usage", "arguments": {}},
+        bearer=gateway.ensure_config().token,
+    )["result"]["structuredContent"]
+    internal = gateway.call_tool(
+        "vrcforge_inspect_skinned_mesh_bone_usage", {}, agent_name="internal-runtime"
+    )
+
+    assert external["ok"] is False
+    assert external["result"] == raw
+    assert external["errorDetails"]["errorCode"] == raw["errorCode"]
+    assert external["errorDetails"]["causeChain"] == raw["causeChain"]
+    for key in (
+        "errorCode", "failureLayer", "failurePhase", "causeChain",
+        "mutationStarted", "committed", "commitState",
+    ):
+        assert internal["errorDetails"][key] == raw[key]
+        assert internal[key] == raw[key]
+
+
 def test_nested_read_failure_has_identical_internal_and_external_outcome(tmp_path: Path) -> None:
     gateway = _external_gateway(tmp_path)
     raw = {

@@ -5,9 +5,151 @@
     "minVRCForgeVersion": "1.7.9",
     "capabilities": [
       "capture_screenshot.angle.bottom",
-      "causal_result_contract.v1"
+      "causal_result_contract.v1",
+      "inspect_skinned_mesh_deformation.v1"
     ],
     "onMissing": "blocked_not_ready"
+  },
+  "capabilityGapContract": {
+    "missingFields": ["capabilityGap", "needsDccRerig"],
+    "onMissing": "blocked_not_ready",
+    "mustNotClaim": "ready_or_pass",
+    "freeCameraFields": ["angle", "rotation", "scope", "returnedRotation", "unobstructed", "evidence"]
+  },
+  "transplantModes": [
+    {"id": "rigid", "when": "accessory_without_donor_body_skin", "steps": ["inventory", "inactive_stage", "target_bone_parent_or_ma_bone_proxy", "local_trs_readback", "optional_toggle_acceptance"], "forbidden": ["setup_outfit", "merge_armature", "copy_donor_armature"]},
+    {"id": "same_skeleton_smr", "when": "clothing_or_weighted_accessory_on_target_compatible_skeleton", "steps": ["non_zero_weights", "target_compatible_armature_merge_or_explicit_used_bone_remap", "bones_rootBone_bindposes", "index_count_parity", "dynamic_sweep"]},
+    {"id": "foreign_skeleton_smr", "when": "clothing_or_weighted_accessory_on_incompatible_donor_skeleton", "steps": ["minimal_weighted_chain", "armature_merge_or_explicit_used_bone_map", "reject_mixed_unresolved_chain", "deformation_readback"]},
+    {"id": "independent_skeleton_physbone", "when": "accessory_with_bounded_local_sway_chain", "steps": ["whole_prefab_and_complete_bounded_root_to_tip_chain", "attach_uniform_fit_container_to_target_bone", "keep_sway_chain_root_scale_one", "explicitly_rebind_physbone_root_colliders_probe_anchors", "renderer_used_bone_closure", "same_camera_rest_afk_head_down_head_turn_motion_collision_sweep"], "forbidden": ["setup_outfit", "merge_armature", "partial_chain_copy", "donor_only_collider_reference"]},
+    {"id": "animator_menu", "steps": ["inbound_consumers", "exact_path_parameter_remap", "retain_target_controls", "menu_parameter_acceptance"]}
+  ],
+  "sizeMismatchPriority": ["measure_attachment_space", "first_fit_whole_prefab_container_with_uniform_scale_and_position_in_unity", "keep_independent_sway_chain_root_scale_one_and_internal_trs", "diagnose_used_bone_bindpose_and_skin_matrix_metrics", "needsDccRerig_only_for_real_mesh_shape_aperture_or_donor_specific_weights", "never_scale_target_body_or_armature"],
+  "partRoutingContract": {
+    "classifyBeforeWrite": true,
+    "rigidAccessory": {
+      "attachment": ["direct_reparent", "ma_bone_proxy"],
+      "requiredReadback": ["targetBoneOrProxyTarget", "localPosition", "localRotation", "localScale"],
+      "optionalToggle": "compose_parameter_animator_menu_atoms_only_when_complete",
+      "forbidden": ["setup_outfit", "merge_armature"]
+    },
+    "independentPhysBoneAccessory": {
+      "examples": ["cat_ears", "tail"],
+      "required": ["completeBoundedBoneChain", "targetAttachmentBone", "rootScale", "physBoneRootTransform", "consumedColliderReferences", "rendererUsedBoneClosure", "restAndPerPoseDeformationReadback"],
+      "defaultRootScale": [1.0, 1.0, 1.0],
+      "unitySizeFit": "uniform_whole_prefab_or_container_scale_and_position_only_keep_sway_chain_root_localScale_one_preserve_internal_chain_trs",
+      "skinningPolicy": "preserve_internal_mesh_to_sway_chain_binding; do_not_remap_to_target_armature_unless_reclassified_as_weighted_smr",
+      "deformationReadbackTool": "vrcforge_inspect_skinned_mesh_deformation",
+      "acceptance": ["rest_attachment_pixels", "gesture_manager_motion", "no_root_shift", "physbone_motion_and_collision", "finite_vertices_all_poses", "stable_aabb_and_skin_matrix_metrics"],
+      "forbidden": ["setup_outfit", "merge_armature", "partial_chain_copy", "donor_only_collider_reference"]
+    },
+    "weightedSmr": {
+      "routes": ["same_skeleton_smr", "foreign_skeleton_smr"],
+      "appliesTo": ["clothing", "close_fitting_weighted_accessory", "donor_body_weighted_part"],
+      "requiredOperation": "target-compatible armature merge or explicit used-bone/rootBone/bindpose remap"
+    }
+  },
+  "externalPreprocessingContract": {
+    "moduleCreator": {
+      "role": "optional_external_manual_prefab_export_before_vrcforge_transplant",
+      "internalAtomicCapability": null,
+      "whenRequired": {"capabilityGap": true, "ready": false, "failureCause": "module_creator_export_atom_unavailable"},
+      "mustNotClaim": "module_created_prefab_or_export_success"
+    },
+    "dccEscalationOnlyWhen": ["mesh_shape_or_mesh_level_size_requires_editing", "close_fitting_part_retains_donor_body_specific_weights"],
+    "notDccReasons": ["rigid_accessory_target_bone_attachment", "physbone_root_or_collider_reference_rebind", "independent_accessory_root_scale_normalization"]
+  },
+  "atomicCompositionResultContract": {
+    "stopOnFailedStep": true,
+    "failedStepRequiredOnFailure": true,
+    "surfaces": ["internal_agent_loop", "external_mcp_agent"],
+    "surfaceParityRequired": true,
+    "preserveEachStep": ["step", "tool", "result", "success", "status", "ready", "error", "failureCause", "rootCause", "causeChain", "failedStep", "diagnostics"],
+    "preserveNestedResultUnchanged": true,
+    "failureDiagnosisRequired": {
+      "required": ["success", "status", "failedStep"],
+      "atLeastOneOf": ["error", "failureCause", "rootCause", "causeChain", "diagnostics"],
+      "onMissing": "block_and_report_contract_failure"
+    },
+    "mustNot": ["collapse_tool_error_to_false", "drop_failed_step", "drop_handler_diagnostics", "replace_specific_cause_with_generic_failure", "continue_after_failed_write"]
+  },
+  "skinningContract": {
+    "required": ["renderer.bones", "renderer.rootBone", "renderer.bindposes", "allUsedBonesResolved", "allUsedBindposesResolved", "noOutOfRangeWeights", "mixedChainClosure", "safeForWeightedRemap"],
+    "informational": ["nullBoneCount", "unusedBoundBoneCount"],
+    "rejectIf": ["truncated_scan", "unresolved_used_bone", "unresolved_used_bindpose", "no_out_of_range_weights_false", "mixed_chain_closure_false", "safe_for_weighted_remap_false"]
+  },
+  "geometryAlignmentContract": {
+    "required": ["attachmentFrame", "neckRingCenter", "neckRingNormal", "neckRingRadius", "pivot", "boneRoll"],
+    "measureIn": "target_neck_rest_frame",
+    "order": ["measure_source_and_target", "align_center_and_normal", "fit_uniform_local_scale", "check_gap_and_overlap"],
+    "allowedMutation": "imported_part_local_transform_only",
+    "forbidden": ["scale_target_body_or_armature", "occlusion_as_geometry_fix", "bulk_remesh_when_blendshapes_must_survive"],
+    "onUnreconciled": {"needsDccRerig": true, "ready": false, "failureCauseRequired": true}
+  },
+  "rigAndShapeContract": {
+    "required": ["targetRestPose", "boneRollReadback", "bindposeReadback", "localWeightTransfer", "blendShapeOrder", "arkitNames"],
+    "bindpose": "diagnose_and_prove_target_rest_inverse_bind_matrices; raw_matrix_editing_is_not_a_routine_unity_user_step; use_clothing_armature_remap_or_dcc_rerig_when_unreconciled",
+    "weights": "transfer_only_minimal_used_chain; normalize_non_zero_weights; bulk_remap_forbidden",
+    "blendShapes": "preserve_basis_vertex_order_and_all_source_shape_keys; arkit_names_exact",
+    "onFailure": {"needsDccRerig": true, "ready": false, "failureCauseRequired": true, "mustNotClaim": "Build_success"}
+  },
+  "physboneAbContract": {
+    "required": ["enabledBefore", "rootTransform", "bonePath", "colliderAndProbeReferences", "enabledAfter"],
+    "isolation": ["record_state", "disable_A_and_B_temporarily", "capture_rest_and_dynamic", "restore_state", "readback_restoration"],
+    "restoreFailure": {"ready": false, "failureCause": "physbone_baseline_restore_failed"}
+  },
+  "catEarDeformationDiagnosticsContract": {
+    "route": "independent_skeleton_physbone",
+    "attachment": {
+      "targetBone": "Head_or_exact_requested_target_bone",
+      "rootLocalScale": [1.0, 1.0, 1.0],
+      "requiredReadback": ["completeBoundedBoneChain", "targetAttachmentBone", "rootLocalScale", "physBoneRootTransform", "consumedColliderReferences"]
+    },
+    "tool": "vrcforge_inspect_skinned_mesh_deformation",
+    "diagnosticOnly": true,
+    "restRequired": ["rest.vertexCount", "rest.finiteVertexCount", "rest.aabb", "play.vertexCount", "play.finiteVertexCount", "world.aabb", "world.distanceSummary", "usedBoneReconstructedSkinMatrix"],
+    "skinMatrixMetrics": ["sampleCount", "maxTranslationMagnitude", "maxAbsDeviation", "determinantMin", "determinantMax"],
+    "restSkinMatrixGate": {"maxAbsDeviation": 0.001, "determinantRange": [0.999, 1.001], "unless": "source_fbx_rest_baseline_proves_a_different_finite_value"},
+    "perPose": ["Rest", "AFK", "HeadDown", "HeadTurnLeft", "HeadTurnRight"],
+    "perPoseRequired": ["allVerticesFinite", "worldAabb", "distanceP95AndMax", "skinMatrixMetrics", "sameCloseRootFiveViewPixels"],
+    "comparisonBaseline": "accepted_rest_and_same_pose_source_or_pre_migration_metrics",
+    "sameCameraRestMotionPairs": true,
+    "failIf": ["finite_vertex_count_changes", "aabb_inflates_collapses_or_translates_beyond_declared_baseline_tolerance", "skin_matrix_scale_or_translation_jumps_beyond_declared_baseline_tolerance", "ear_root_shifts_from_head", "ear_root_gap_or_seam_changes_size_between_poses", "ear_size_or_attachment_changes_between_rest_and_motion"],
+    "views": ["front", "side_left", "side_right", "back", "bottom"],
+    "unobstructedCloseRootView": true
+  },
+  "poseSweep": ["Rest", "AFK", "Upright", "VelocityZ", "AngularY", "body-size-min", "body-size-max", "face-tracking-min", "face-tracking-max"],
+  "pitfallMatrix": [
+    {"symptom": "floating_or_exploding_mesh", "rootCause": "wrong_parent_or_bindpose_or_mixed_chain", "check": "weights_bones_rootBone_bindposes", "forbidden": "scale_target_body_or_accept_build", "reversibleFix": "disable_staged_copy_restore_checkpoint_remap_chain", "dynamicAcceptance": "full_pose_sweep_no_detachment"},
+    {"symptom": "motion_only_attachment_seam", "rootCause": "wrong_target_chain_or_transform", "check": "weighted_target_and_world_local_readback", "forbidden": "trust_transform_receipt_only", "reversibleFix": "disable_staged_copy_restore_checkpoint_refit", "dynamicAcceptance": "five_views_rest_and_motion"},
+    {"symptom": "physbone_jump_or_inert_collider", "rootCause": "donor_root_collider_probe_closure", "check": "component_target_readback", "forbidden": "copy_component_without_consumers", "reversibleFix": "disable_staged_branch_rebind_target_refs", "dynamicAcceptance": "velocityz_angulary_collision_sweep"},
+    {"symptom": "animator_or_menu_silent", "rootCause": "partial_path_parameter_contract", "check": "inbound_consumers_and_build_projection", "forbidden": "replace_target_controls_wholesale", "reversibleFix": "restore_checkpoint_remap_exact_paths", "dynamicAcceptance": "face_body_wardrobe_gesture_extremes"},
+    {"symptom": "empty_scan_with_references", "rootCause": "truncated_or_unavailable_capability", "check": "ready_blockers_capability_gap_dcc_rerig", "forbidden": "treat_zero_as_closure", "reversibleFix": "stop_before_write_request_atom_or_dcc_rerig", "dynamicAcceptance": "ready_false_no_fake_pass"}
+  ],
+  "buildProjection": {"order": ["visual_and_motion_acceptance", "build_test_readiness", "build_test_avatar"], "buildCannotOverride": ["visible_overlap", "missing_dynamic_control", "capabilityGap"]},
+  "failureEtiologyFields": ["success", "status", "error", "failedStep", "diagnostics", "failureLayer", "failurePhase", "failureCause", "rootCause", "causeChain", "observed", "expected", "delta", "blockingReasons", "capabilityGap", "needsDccRerig", "mutationStarted", "committed", "commitState", "sceneSaved", "persistedReadback", "evidence", "recovery", "nextAction"],
+  "singleSlotRemapContract": {
+    "capability": "vrcforge_remap_skinned_mesh_bone",
+    "order": ["inspectUsedBoneIndices", "readRestSkinningDelta", "previewOneSlot", "comparePredictedSkinningMetrics", "approvedExecuteOneSlot", "readbackBonesRootBoneBindposes"],
+    "bulkRemap": "forbidden",
+    "predictedMetricGate": {
+      "required": ["current", "target", "donorChainBaseline"],
+      "compare": ["translationMagnitude", "maxAbsDeviation", "nearIdentity", "mixedChainClosure"],
+      "executeOnlyWhen": "target is materially closer to donorChainBaseline than current and allUsedBonesResolved/allUsedBindposesResolved/noOutOfRangeWeights/mixedChainClosure/safeForWeightedRemap remain true",
+      "otherwise": {"needsDccRerig": true, "ready": false, "capabilityGap": false}
+    },
+    "onMissing": {"capabilityGap": true, "ready": false, "needsDccRerig": "when_no_paired_morph_or_bindpose_reconciliation"}
+  },
+  "dynamicAcceptance": {
+    "poses": ["Rest", "AFK", "Upright", "VelocityZ", "AngularY"],
+    "optionalExtremes": ["body-size-min", "body-size-max", "face-tracking-min", "face-tracking-max"],
+    "views": ["front", "side_left", "side_right", "back", "bottom"],
+    "unobstructed": true,
+    "cameraEvidence": ["position", "target", "basis", "quaternion", "projection", "matrix"],
+    "orthogonalBasis": true,
+    "obliqueAuxiliaryViewsAllowed": true,
+    "obliqueAuxiliaryViewsCountTowardsAcceptance": false,
+    "thresholds": ["returnedRotationMatchesRequest", "artifactNonEmpty", "noCropOrOccluder", "restoreBaselineParameters"],
+    "baselineContract": {"recordBeforePoseSweep": true, "readBackAfterEachPose": true, "restoreAfterSweep": true, "blockIfRestoreReadbackFails": true}
   },
   "causeContract": {
     "callAndDomainStatusAreIndependent": true,
@@ -16,6 +158,9 @@
       "status"
     ],
     "preserveWhenPresent": [
+      "error",
+      "failedStep",
+      "diagnostics",
       "ready",
       "blockingReasons",
       "failureLayer",
@@ -77,12 +222,30 @@
       "tools": [
         "vrcforge_scan_inbound_reference_closure",
         "vrcforge_inspect_skinned_mesh_bone_usage",
+        "vrcforge_inspect_skinned_mesh_deformation",
         "vrcforge_scan_animation_bindings",
         "vrcforge_scan_avatar_controls",
         "vrcforge_scan_parameters",
         "vrcforge_scan_fx_animator"
       ],
       "writes": false
+    },
+    {
+      "name": "classify_part_route_before_write",
+      "tool": "vrcforge_get_property",
+      "tools": ["vrcforge_get_gameobject", "vrcforge_get_property", "vrcforge_inspect_skinned_mesh_bone_usage", "vrcforge_scan_inbound_reference_closure"],
+      "writes": false,
+      "routeIds": ["rigid", "same_skeleton_smr", "foreign_skeleton_smr", "independent_skeleton_physbone", "animator_menu"],
+      "mustChooseAttachmentRoute": true
+    },
+    {
+      "name": "read_rest_delta_and_gate_single_slot_remap",
+      "tool": "vrcforge_inspect_skinned_mesh_bone_usage",
+      "tools": ["vrcforge_inspect_skinned_mesh_bone_usage", "vrcforge_get_property"],
+      "writes": false,
+      "requiredAtomicCapability": "vrcforge_remap_skinned_mesh_bone",
+      "conditionalRoutes": ["same_skeleton_smr", "foreign_skeleton_smr"],
+      "onMissing": {"capabilityGap": true, "ready": false, "needsDccRerig": "when_no_paired_morph_or_bindpose_reconciliation"}
     },
     {
       "name": "preview_inactive_target_copy",
@@ -95,6 +258,8 @@
       "tools": [
         "vrcforge_duplicate_scene_object",
         "vrcforge_reparent_gameobject",
+        "vrcforge_preview_add_modular_avatar_component",
+        "vrcforge_add_modular_avatar_component",
         "vrcforge_set_property",
         "vrcforge_set_gameobject_active",
         "vrcforge_atomic_reference_rename"
@@ -104,11 +269,51 @@
       "onePreviewBoundMutationPerApproval": true
     },
     {
+      "name": "rebind_independent_physbone_accessory",
+      "tool": "vrcforge_set_property",
+      "tools": ["vrcforge_get_property", "vrcforge_inspect_skinned_mesh_bone_usage", "vrcforge_inspect_skinned_mesh_deformation", "vrcforge_reparent_gameobject", "vrcforge_preview_add_modular_avatar_component", "vrcforge_add_modular_avatar_component", "vrcforge_set_property", "vrcforge_scan_inbound_reference_closure"],
+      "writes": true,
+      "runtimeApprovalRequired": true,
+      "conditional": "independent_skeleton_physbone",
+      "required": ["complete_bounded_bone_chain", "target_attachment_bone", "root_scale_one", "physbone_root_transform", "consumed_collider_references", "rest_aabb_skin_matrix_baseline"],
+      "forbidden": ["setup_outfit", "merge_armature", "partial_chain_copy", "donor_only_collider_reference"]
+    },
+    {
+      "name": "cat_ear_physbone_ab_isolation",
+      "tool": "vrcforge_set_property",
+      "tools": ["vrcforge_get_property", "vrcforge_inspect_skinned_mesh_bone_usage", "vrcforge_inspect_skinned_mesh_deformation", "vrcforge_set_property"],
+      "writes": true,
+      "runtimeApprovalRequired": true,
+      "conditional": "cat_ears",
+      "checkpointRequired": true,
+      "sequence": ["verify_head_attachment_chain_root_scale_and_explicit_references", "record_rest_aabb_and_skin_matrix_baseline", "disable_physbone_a_b", "read_root_bindpose_scale_rest_delta", "restore_previous_enabled_state"],
+      "preconditions": ["complete_bounded_bone_chain", "attached_to_head_or_exact_target_bone", "attachment_root_scale_one", "target_side_root_and_collider_closure"],
+      "requiredReadback": ["rootScale", "physBoneRootTransform", "colliderReferences", "restAabb", "restSkinMatrixMetrics", "enabledAfter"]
+    },
+    {
+      "name": "optional_accessory_toggle",
+      "tool": "vrcforge_ensure_expression_parameter",
+      "tools": [
+        "vrcforge_preview_ensure_expression_parameter",
+        "vrcforge_preview_ensure_animator_state",
+        "vrcforge_preview_ensure_expression_menu_control",
+        "vrcforge_ensure_expression_parameter",
+        "vrcforge_ensure_animator_state",
+        "vrcforge_ensure_expression_menu_control"
+      ],
+      "writes": true,
+      "runtimeApprovalRequired": true,
+      "conditional": "optional_toggle",
+      "acceptance": ["off_state_readback_and_pixels", "on_state_readback_and_pixels"],
+      "onUnsupportedMaToggleControl": {"capabilityGap": true, "ready": false, "failureCause": "ma_toggle_control_atom_unavailable"}
+    },
+    {
       "name": "static_and_dynamic_attachment_acceptance",
       "tool": "vrcforge_gesture_manager_enter_play_mode",
       "tools": [
         "vrcforge_gesture_manager_enter_play_mode",
         "vrcforge_gesture_manager_set_parameter",
+        "vrcforge_inspect_skinned_mesh_deformation",
         "vrcforge_capture_status",
         "vrcforge_capture_screenshot"
       ],
@@ -128,17 +333,21 @@
   "acceptanceViews": {
     "default": [
       {"angle": "front", "rotation": [0, 0, 0]},
-      {"angle": "side_left", "rotation": [10, 90, 0]},
-      {"angle": "side_right", "rotation": [10, -90, 0]},
-      {"angle": "back", "rotation": [10, 180, 0]}
+      {"angle": "side_left", "rotation": [0, 90, 0]},
+      {"angle": "side_right", "rotation": [0, -90, 0]},
+      {"angle": "back", "rotation": [0, 180, 0]}
     ],
     "undersideDependent": {"angle": "bottom", "rotation": [-90, 0, 0]}
   },
+  "acceptanceViewContract": {"count": 5, "requiredAngles": ["front", "side_left", "side_right", "back", "bottom"], "unobstructed": true, "requiresReturnedRotation": true, "basis": "orthogonal", "obliqueViewsCountTowardsAcceptance": false},
   "acceptanceRequires": [
     "static_attachment_pixels",
     "gesture_manager_motion",
     "target_dependency_readback",
-    "source_unchanged_readback"
+    "source_unchanged_readback",
+    "cat_ear_aabb_skin_matrix_diagnostics_when_present",
+    "complete_pose_sweep",
+    "unobstructed_five_views"
   ],
   "approval": {
     "required": true,

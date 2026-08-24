@@ -19,14 +19,33 @@ publication of this version.
   bounded evidence, and retry/recovery guidance instead of leaving an Agent to
   infer the reason from a wrapper message.
 
-## Deterministic neck-seam capture
+## Head and part transplant workflows
 
-- Screenshot requests support a true Bottom Scene-view angle for inspecting the
-  head-to-neck join from below, with the returned camera rotation and capture
-  scope checked against the request.
-- Advanced capture can supply explicit pitch, yaw, and roll. Named angles and
-  explicit rotation are mutually exclusive, and face/avatar framing must agree
-  with capture scope.
+- Two built-in workflow skills now cover avatar head transplantation (with or
+  without face tracking) and cross-avatar part transplantation. Each workflow
+  separates inspection, approved atomic writes, rollback points, and visual
+  acceptance instead of treating a successful tool call as proof of a usable
+  avatar.
+- Rigid accessories, dynamic accessories, and clothes follow different paths:
+  rigid accessories use a target bone and local transform; dynamic accessories
+  additionally preserve their complete bone chain, PhysBone root, colliders,
+  and unit root scale; clothes use armature/bone remapping and deformation
+  checks.
+- Head and dynamic-part acceptance requires unobstructed Rest and Gesture
+  Manager motion evidence from the same local camera frame. Front, back, both
+  sides, and top/bottom close-ups must reject open seams, scale changes,
+  floating roots, clipping, or pose-dependent drift.
+
+## Deterministic free-camera and deformation inspection
+
+- Screenshot requests support a true free Scene-view camera with explicit
+  camera position, target, up vector, perspective/orthographic projection, and
+  orthographic size. Named angles and free-camera coordinates are mutually
+  exclusive, and returned camera facts are checked against the approved request.
+- The built-in SkinnedMeshRenderer diagnostics report finite Rest/Play/world
+  vertices, AABBs, distance percentiles, and reconstructed used-bone skin
+  matrices. Exact used-bone remapping and reference closure are available as
+  separate inspected/approved atoms for diagnosing pose-dependent deformation.
 - Head-swap acceptance still requires front, both sides, back, and Bottom
   evidence. An open rim, visible gap, overlap, or geometric offset at the neck
   is a hard visual failure even when other readiness checks pass.
@@ -44,7 +63,7 @@ publication of this version.
 
 ## Packaging and compatibility
 
-- Unity Core product identity is `1.7.9`; the fixed public contract remains 78
+- Unity Core product identity is `1.7.9`; contract 82 exposes 80
   VRCForge-owned Unity tools through MCP 2.0 (`2026-07-28`).
 - The Windows payload remains self-contained and must pass the clean import,
   compile/load, provenance, paired-Core, result-parity, and stable-readiness
