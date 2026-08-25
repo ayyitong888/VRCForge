@@ -168,3 +168,23 @@ def test_scan_avatar_materials_returns_fresh_file_readback() -> None:
     assert "after = afterSnapshot" in block
     assert "items = new[] { payload.outputPath }" in block
     assert "handle = payload.outputPath" in block
+
+
+def test_manage_expression_menu_returns_reimported_state() -> None:
+    source = (
+        ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs"
+    ).read_text(encoding="utf-8")
+    block = _tool_block(
+        source,
+        "ManageExpressionMenuTool",
+        "public static class ManageFxAnimatorTool",
+    )
+
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
+    readback_index = block.index("LoadAssetAtPath<VRCExpressionsMenu>")
+    assert save_index < import_index < readback_index
+    assert "var before = DescribeMenu" in block
+    assert "var after = DescribeMenu" in block
+    assert "items = affectedPaths.Take(20).ToArray()" in block
+    assert "handle = AssetDatabase.AssetPathToGUID(rootAssetPath)" in block

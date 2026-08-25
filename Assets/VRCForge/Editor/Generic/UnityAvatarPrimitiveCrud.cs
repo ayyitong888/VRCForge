@@ -1187,31 +1187,60 @@ namespace VRCForge.Editor
                 var descriptor = AvatarPrimitiveCrudCore.ResolveAvatarDescriptor(@params["avatarPath"]?.ToString() ?? "");
                 var assetDir = AvatarPrimitiveCrudCore.NormalizeAssetDir(@params["assetDir"]?.ToString() ?? "");
                 var root = descriptor.expressionsMenu;
+                var normalizedMenuPath = AvatarPrimitiveCrudCore.NormalizePath(@params["menuPath"]?.ToString() ?? "");
                 var plan = BuildPlan(action, descriptor, root, @params);
                 if (preview)
                 {
                     return VRCForgeToolResult.Completed($"Preview: would manage expression menu ({action}).", new { ok = true, preview = true, plan });
                 }
 
+                var beforeAssetPaths = CollectMenuAssetPaths(root);
+                var before = DescribeMenu(TryResolveMenu(root, normalizedMenuPath));
+
                 if (root == null)
                 {
                     root = AvatarAuthoringCrudCore.EnsureRootMenuAsset(descriptor, assetDir);
                 }
-                var target = ResolveMenu(root, AvatarPrimitiveCrudCore.NormalizePath(@params["menuPath"]?.ToString() ?? ""), create: action == "create", assetDir: assetDir);
+                var target = ResolveMenu(root, normalizedMenuPath, create: action == "create", assetDir: assetDir);
                 Undo.RegisterCompleteObjectUndo(target, "Manage expression menu");
                 Apply(action, target, @params, assetDir);
                 EditorUtility.SetDirty(target);
                 EditorUtility.SetDirty(root);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
+                var rootAssetPath = AssetDatabase.GetAssetPath(root);
+                AssetDatabase.ImportAsset(rootAssetPath, ImportAssetOptions.ForceSynchronousImport);
+                var readbackRoot = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(rootAssetPath);
+                if (readbackRoot == null)
+                {
+                    throw new InvalidOperationException($"Expression menu readback failed: {rootAssetPath}");
+                }
+                var readbackTarget = ResolveMenu(readbackRoot, normalizedMenuPath, create: false, assetDir: assetDir);
+                var after = DescribeMenu(readbackTarget);
+                var afterAssetPaths = CollectMenuAssetPaths(readbackRoot);
+                var affectedPaths = afterAssetPaths
+                    .Where(path => !beforeAssetPaths.Contains(path))
+                    .Concat(new[] { AssetDatabase.GetAssetPath(readbackTarget) })
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
                 return VRCForgeToolResult.Completed($"Expression menu action '{action}' completed.", new
                 {
                     ok = true,
                     preview = false,
                     action,
-                    rootMenuPath = AssetDatabase.GetAssetPath(root),
+                    rootMenuPath = rootAssetPath,
                     menuPath = @params["menuPath"]?.ToString() ?? "",
-                    controlCount = target.controls?.Count ?? 0
+                    controlCount = readbackTarget.controls?.Count ?? 0,
+                    before,
+                    after,
+                    affected = new
+                    {
+                        count = affectedPaths.Count,
+                        items = affectedPaths.Take(20).ToArray(),
+                        handle = AssetDatabase.AssetPathToGUID(rootAssetPath)
+                    }
                 });
             }
             catch (Exception ex)
@@ -1284,6 +1313,76 @@ namespace VRCForge.Editor
                 current = sub;
             }
             return current;
+        }
+
+        private static VRCExpressionsMenu TryResolveMenu(VRCExpressionsMenu root, string menuPath)
+        {
+            var current = root;
+            if (current == null)
+            {
+                return null;
+            }
+            foreach (var raw in menuPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var part = raw.Trim();
+                var control = current.controls?.FirstOrDefault(item =>
+                    item != null
+                    && item.type == VRCExpressionsMenu.Control.ControlType.SubMenu
+                    && item.name == part
+                    && item.subMenu != null);
+                if (control == null)
+                {
+                    return null;
+                }
+                current = control.subMenu;
+            }
+            return current;
+        }
+
+        private static JToken DescribeMenu(VRCExpressionsMenu menu)
+        {
+            if (menu == null)
+            {
+                return new JObject { ["exists"] = false };
+            }
+            return new JObject
+            {
+                ["exists"] = true,
+                ["assetPath"] = AssetDatabase.GetAssetPath(menu),
+                ["value"] = JToken.Parse(EditorJsonUtility.ToJson(menu))
+            };
+        }
+
+        private static HashSet<string> CollectMenuAssetPaths(VRCExpressionsMenu root)
+        {
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var visited = new HashSet<int>();
+            var pending = new Stack<VRCExpressionsMenu>();
+            if (root != null)
+            {
+                pending.Push(root);
+            }
+            while (pending.Count > 0)
+            {
+                var menu = pending.Pop();
+                if (menu == null || !visited.Add(menu.GetInstanceID()))
+                {
+                    continue;
+                }
+                var path = AssetDatabase.GetAssetPath(menu);
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    paths.Add(path);
+                }
+                foreach (var control in menu.controls ?? new List<VRCExpressionsMenu.Control>())
+                {
+                    if (control?.subMenu != null)
+                    {
+                        pending.Push(control.subMenu);
+                    }
+                }
+            }
+            return paths;
         }
 
         private static void Apply(string action, VRCExpressionsMenu menu, JObject @params, string assetDir)
