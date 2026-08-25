@@ -39,7 +39,7 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Failed("Missing required parameter: adjustments");
                 }
 
-                var applied = new List<object>();
+                var applied = new List<BlendshapeChangeReceipt>();
                 foreach (var token in adjustments.OfType<JObject>())
                 {
                     var rendererPath = (token["rendererPath"]?.ToString() ?? string.Empty).Trim();
@@ -67,15 +67,17 @@ namespace VRCForge.Editor
                     var clampedWeight = Mathf.Clamp(targetWeight, 0f, 100f);
                     Undo.RecordObject(renderer, "Apply VRCForge blendshape weight");
                     renderer.SetBlendShapeWeight(blendshapeIndex, clampedWeight);
+                    var currentWeight = renderer.GetBlendShapeWeight(blendshapeIndex);
                     EditorUtility.SetDirty(renderer);
                     EditorUtility.SetDirty(renderer.gameObject);
                     EditorSceneManager.MarkSceneDirty(renderer.gameObject.scene);
-                    applied.Add(new
+                    applied.Add(new BlendshapeChangeReceipt
                     {
-                        rendererPath,
-                        blendshapeName,
-                        previousWeight,
-                        targetWeight = clampedWeight
+                        rendererPath = rendererPath,
+                        blendshapeName = blendshapeName,
+                        previousWeight = previousWeight,
+                        targetWeight = clampedWeight,
+                        currentWeight = currentWeight
                     });
                 }
 
@@ -92,13 +94,36 @@ namespace VRCForge.Editor
                         avatarPath,
                         appliedCount = applied.Count,
                         applied,
-                        saved = saveAssets
+                        saved = saveAssets,
+                        before = applied.Select(item => new
+                        {
+                            item.rendererPath,
+                            item.blendshapeName,
+                            weight = item.previousWeight
+                        }).ToArray(),
+                        after = applied.Select(item => new
+                        {
+                            item.rendererPath,
+                            item.blendshapeName,
+                            weight = item.currentWeight
+                        }).ToArray(),
+                        pending = !saveAssets,
+                        note = saveAssets ? "已修改并落盘" : "已修改，尚未落盘"
                     });
             }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Blendshape apply failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private sealed class BlendshapeChangeReceipt
+        {
+            public string rendererPath;
+            public string blendshapeName;
+            public float previousWeight;
+            public float targetWeight;
+            public float currentWeight;
         }
 
         private static SkinnedMeshRenderer ResolveRenderer(string avatarPath, string rendererPath)
