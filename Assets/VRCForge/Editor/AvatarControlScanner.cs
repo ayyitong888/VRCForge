@@ -514,7 +514,9 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Failed($"Scene object not found: {objectPath}");
                 }
 
+                var beforeActive = target.gameObject.activeSelf;
                 target.gameObject.SetActive(active);
+                var afterActive = target.gameObject.activeSelf;
                 EditorUtility.SetDirty(target.gameObject);
                 EditorSceneManager.MarkSceneDirty(target.gameObject.scene);
                 if (saveAssets)
@@ -528,8 +530,12 @@ namespace VRCForge.Editor
                     new
                     {
                         objectPath,
-                        active = target.gameObject.activeSelf,
-                        saved = saveAssets
+                        active = afterActive,
+                        saved = saveAssets,
+                        before = beforeActive,
+                        after = afterActive,
+                        pending = !saveAssets,
+                        note = saveAssets ? "已修改并落盘" : "已修改，尚未落盘"
                     });
             }
             catch (Exception ex)
