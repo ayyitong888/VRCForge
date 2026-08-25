@@ -197,6 +197,10 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed("Avatar has no VRCExpressionParameters asset.");
                 }
+                var beforeParameters = (parametersAsset.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>())
+                    .Where(parameter => parameter != null)
+                    .ToArray();
+                var before = beforeParameters.Select(DescribeParameter).ToList();
 
                 var restored = new List<VRCExpressionParameters.Parameter>();
                 foreach (var item in parameterItems.OfType<JObject>())
@@ -221,6 +225,26 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(parametersAsset);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
+                var assetPath = AssetDatabase.GetAssetPath(parametersAsset);
+                AssetDatabase.ImportAsset(
+                    assetPath,
+                    ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
+                if (readbackAsset == null || readbackAsset.parameters == null)
+                {
+                    throw new InvalidOperationException("Parameter rollback asset readback failed.");
+                }
+                var after = readbackAsset.parameters
+                    .Where(parameter => parameter != null)
+                    .Select(DescribeParameter)
+                    .ToList();
+                var affectedNames = beforeParameters
+                    .Concat(readbackAsset.parameters.Where(parameter => parameter != null))
+                    .Select(parameter => parameter.name)
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .ToArray();
 
                 return VRCForgeToolResult.Completed(
                     $"Restored {restored.Count} avatar parameter(s).",
@@ -228,13 +252,33 @@ namespace VRCForge.Editor
                     {
                         ok = true,
                         restoredCount = restored.Count,
-                        assetPath = AssetDatabase.GetAssetPath(parametersAsset)
+                        assetPath,
+                        before,
+                        after,
+                        affected = new
+                        {
+                            count = affectedNames.Length,
+                            items = affectedNames.Take(20).ToArray(),
+                            handle = AssetDatabase.AssetPathToGUID(assetPath)
+                        }
                     });
             }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Parameter rollback failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private static object DescribeParameter(VRCExpressionParameters.Parameter parameter)
+        {
+            return new
+            {
+                name = parameter.name,
+                valueType = parameter.valueType.ToString(),
+                parameter.defaultValue,
+                parameter.saved,
+                parameter.networkSynced
+            };
         }
 
         private static VRCExpressionParameters.ValueType ParseValueType(string value)

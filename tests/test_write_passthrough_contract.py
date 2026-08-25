@@ -78,3 +78,19 @@ def test_parameter_optimization_returns_reimported_before_after() -> None:
     assert "after," in block
     assert "items = after.Take(20).ToArray()" in block
     assert "handle = AssetDatabase.AssetPathToGUID(assetPath)" in block
+
+
+def test_parameter_rollback_returns_reimported_before_after() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/AvatarParameterWriter.cs").read_text(
+        encoding="utf-8"
+    )
+    block = _tool_block(source, "AvatarParameterRollbackTool")
+
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
+    readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>")
+    assert save_index < import_index < readback_index
+    assert "var before =" in block
+    assert "var after = readbackAsset.parameters" in block
+    assert "items = affectedNames.Take(20).ToArray()" in block
+    assert "handle = AssetDatabase.AssetPathToGUID(assetPath)" in block
