@@ -151,3 +151,20 @@ def test_export_blendshapes_returns_fresh_file_readback() -> None:
     assert "after," in block
     assert "items = new[] { exportResult.outputPath }" in block
     assert "handle = exportResult.outputPath" in block
+
+
+def test_scan_avatar_materials_returns_fresh_file_readback() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/ShaderMaterialScanner.cs").read_text(
+        encoding="utf-8"
+    )
+    block = _tool_block(source, "ShaderMaterialScanner")
+
+    write_index = block.index("File.WriteAllText")
+    save_index = block.index("AssetDatabase.SaveAssets();", write_index)
+    readback_index = block.index("var after = ReadFileSnapshot", save_index)
+    assert write_index < save_index < readback_index
+    assert "var before = ReadFileSnapshot" in block
+    assert "before = beforeSnapshot" in block
+    assert "after = afterSnapshot" in block
+    assert "items = new[] { payload.outputPath }" in block
+    assert "handle = payload.outputPath" in block

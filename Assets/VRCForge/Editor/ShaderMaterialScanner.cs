@@ -37,7 +37,7 @@ namespace VRCForge.Editor
         public static void ScanFromMenu()
         {
             var payload = BuildPayload("");
-            WritePayload(DefaultOutputPath, payload, true);
+            WritePayload(DefaultOutputPath, payload, true, out _, out _);
             Debug.Log($"[{ToolName}] Material scan complete: {DefaultOutputPath}");
         }
 
@@ -51,9 +51,22 @@ namespace VRCForge.Editor
                 var requestedPath = parameters.outputPath ?? "";
                 if (!string.IsNullOrWhiteSpace(requestedPath))
                 {
-                    var absolutePath = WritePayload(requestedPath, payload, parameters.refreshAssets ?? true);
+                    var absolutePath = WritePayload(
+                        requestedPath,
+                        payload,
+                        parameters.refreshAssets ?? true,
+                        out var beforeSnapshot,
+                        out var afterSnapshot);
                     payload.outputPath = ToAssetRelativePath(absolutePath);
                     payload.absoluteOutputPath = absolutePath.Replace("\\", "/");
+                    payload.before = beforeSnapshot;
+                    payload.after = afterSnapshot;
+                    payload.affected = new
+                    {
+                        count = 1,
+                        items = new[] { payload.outputPath },
+                        handle = payload.outputPath
+                    };
                 }
 
                 return VRCForgeToolResult.Completed(
@@ -230,7 +243,12 @@ namespace VRCForge.Editor
                 .ToList();
         }
 
-        private static string WritePayload(string requestedPath, MaterialInventoryPayload payload, bool refreshAssets)
+        private static string WritePayload(
+            string requestedPath,
+            MaterialInventoryPayload payload,
+            bool refreshAssets,
+            out JObject beforeSnapshot,
+            out JObject afterSnapshot)
         {
             var absolutePath = ResolveToAbsolutePath(requestedPath);
             var parentDirectory = Path.GetDirectoryName(absolutePath);
@@ -240,7 +258,12 @@ namespace VRCForge.Editor
             }
 
             Directory.CreateDirectory(parentDirectory);
+            var before = ReadFileSnapshot(absolutePath);
             File.WriteAllText(absolutePath, JsonConvert.SerializeObject(payload, Formatting.Indented), Encoding.UTF8);
+            AssetDatabase.SaveAssets();
+            var after = ReadFileSnapshot(absolutePath);
+            beforeSnapshot = before;
+            afterSnapshot = after;
 
             if (refreshAssets)
             {
@@ -248,6 +271,37 @@ namespace VRCForge.Editor
             }
 
             return absolutePath;
+        }
+
+        private static JObject ReadFileSnapshot(string absolutePath)
+        {
+            if (!File.Exists(absolutePath))
+            {
+                return new JObject
+                {
+                    ["exists"] = false,
+                    ["absolutePath"] = absolutePath.Replace("\\", "/")
+                };
+            }
+
+            var text = File.ReadAllText(absolutePath, Encoding.UTF8);
+            JToken content;
+            try
+            {
+                content = JToken.Parse(text);
+            }
+            catch (JsonReaderException)
+            {
+                content = new JValue(text);
+            }
+
+            return new JObject
+            {
+                ["exists"] = true,
+                ["absolutePath"] = absolutePath.Replace("\\", "/"),
+                ["length"] = new FileInfo(absolutePath).Length,
+                ["content"] = content
+            };
         }
 
         private static List<Transform> ResolveAvatarRoots(string normalizedAvatarPath)
@@ -432,6 +486,9 @@ namespace VRCForge.Editor
         public MaterialInventorySummary summary;
         public string outputPath;
         public string absoluteOutputPath;
+        public object before;
+        public object after;
+        public object affected;
     }
 
     [Serializable]
