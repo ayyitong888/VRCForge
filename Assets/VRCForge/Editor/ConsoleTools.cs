@@ -59,6 +59,10 @@ namespace VRCForge.Editor
                     $"Created safe backup with {payload.summary.fileCount} file(s): {payload.backup_id}",
                     payload);
             }
+            catch (SafeBackupTransactionException ex)
+            {
+                return VRCForgeToolResult.Failed($"Safe backup creation failed: {ex.Message}", ex.Payload);
+            }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Safe backup creation failed: {ex.Message}\n{ex.StackTrace}");
@@ -72,6 +76,7 @@ namespace VRCForge.Editor
             var backupId = $"vrcforge_backup_{DateTime.UtcNow:yyyyMMdd_HHmmss}";
             var backupPath = Path.Combine(backupRoot, backupId).Replace("\\", "/");
             var filesRoot = Path.Combine(backupPath, "files").Replace("\\", "/");
+            var manifestPath = Path.Combine(backupPath, "backup.json").Replace("\\", "/");
             var warnings = new List<string>();
             var requestedAssets = ResolveRequestedAssetPaths(parameters, warnings);
             var fileMap = new Dictionary<string, BackupFileItem>(StringComparer.OrdinalIgnoreCase);
@@ -97,9 +102,27 @@ namespace VRCForge.Editor
                     Directory.CreateDirectory(parent);
                 }
 
-                File.Copy(sourceFullPath, backupFullPath, true);
-                item.sha256 = ComputeSha256(sourceFullPath);
-                item.byte_count = new FileInfo(sourceFullPath).Length;
+                item.before_exists = File.Exists(backupFullPath);
+                item.before_sha256 = item.before_exists ? ComputeSha256(backupFullPath) : "";
+                try
+                {
+                    File.Copy(sourceFullPath, backupFullPath, true);
+                    item.sha256 = ComputeSha256(sourceFullPath);
+                    item.byte_count = new FileInfo(sourceFullPath).Length;
+                    item.after_exists = File.Exists(backupFullPath);
+                    item.after_sha256 = ComputeSha256(backupFullPath);
+                    item.status = "succeeded";
+                }
+                catch (Exception ex)
+                {
+                    item.after_exists = File.Exists(backupFullPath);
+                    item.after_sha256 = item.after_exists ? ComputeSha256(backupFullPath) : "";
+                    item.status = "failed";
+                    item.error = ex.Message;
+                    throw new SafeBackupTransactionException(
+                        $"Failed while copying '{item.project_relative_path}': {ex.Message}",
+                        new { transaction = BuildTransaction(fileMap.Values, manifestPath, false, false, "", false, "", "") });
+                }
             }
 
             var payload = new SafeBackupPayload
@@ -130,10 +153,23 @@ namespace VRCForge.Editor
                 }
             };
 
+            var manifestBeforeExists = File.Exists(manifestPath);
+            var manifestBeforeSha = manifestBeforeExists ? ComputeSha256(manifestPath) : "";
             File.WriteAllText(
-                Path.Combine(backupPath, "backup.json"),
+                manifestPath,
                 JsonConvert.SerializeObject(payload, Formatting.Indented),
                 Encoding.UTF8);
+            var manifestAfterExists = File.Exists(manifestPath);
+            var manifestAfterSha = ComputeSha256(manifestPath);
+            payload.transaction = BuildTransaction(
+                fileMap.Values,
+                manifestPath,
+                true,
+                manifestBeforeExists,
+                manifestBeforeSha,
+                manifestAfterExists,
+                manifestAfterSha,
+                "succeeded");
 
             if ((parameters.refreshAssets ?? false) && IsInside(Application.dataPath, backupRoot))
             {
@@ -141,6 +177,48 @@ namespace VRCForge.Editor
             }
 
             return payload;
+        }
+
+        private static object BuildTransaction(
+            IEnumerable<BackupFileItem> files,
+            string manifestPath,
+            bool includeManifest,
+            bool manifestBeforeExists,
+            string manifestBeforeSha,
+            bool manifestAfterExists,
+            string manifestAfterSha,
+            string manifestStatus)
+        {
+            var transactionItems = files
+                .Where(item => item.status != "not_attempted")
+                .Select(item => (object)new
+                {
+                    asset = item.backup_relative_path,
+                    before = new { exists = item.before_exists, sha256 = item.before_sha256 },
+                    after = new { exists = item.after_exists, sha256 = item.after_sha256 },
+                    item.status,
+                    item.error,
+                    rolled_back = false
+                })
+                .ToList();
+            if (includeManifest)
+            {
+                transactionItems.Add(new
+                {
+                    asset = "backup.json",
+                    before = new { exists = manifestBeforeExists, sha256 = manifestBeforeSha },
+                    after = new { exists = manifestAfterExists, sha256 = manifestAfterSha },
+                    status = manifestStatus,
+                    error = "",
+                    rolled_back = false
+                });
+            }
+            return new
+            {
+                assets_touched = transactionItems.Count,
+                items = transactionItems.Take(20).ToArray(),
+                handle = manifestPath
+            };
         }
 
         private static List<string> ResolveRequestedAssetPaths(CreateSafeBackupParameters parameters, List<string> warnings)
@@ -420,6 +498,7 @@ namespace VRCForge.Editor
             public List<string> warnings;
             public List<string> restore_hints;
             public SafeBackupSummary summary;
+            public object transaction;
         }
 
         [Serializable]
@@ -439,6 +518,12 @@ namespace VRCForge.Editor
             public bool is_meta;
             public string sha256;
             public long byte_count;
+            public bool before_exists;
+            public string before_sha256 = "";
+            public bool after_exists;
+            public string after_sha256 = "";
+            public string status = "not_attempted";
+            public string error = "";
         }
 
         [Serializable]
@@ -448,6 +533,17 @@ namespace VRCForge.Editor
             public int fileCount;
             public int warningCount;
             public long totalBytes;
+        }
+
+        private sealed class SafeBackupTransactionException : Exception
+        {
+            public SafeBackupTransactionException(string message, object payload)
+                : base(message)
+            {
+                Payload = payload;
+            }
+
+            public object Payload { get; }
         }
     }
 }
