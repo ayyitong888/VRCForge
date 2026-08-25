@@ -35,7 +35,7 @@ namespace VRCForge.Editor
         [MenuItem("VRCForge/Export Blendshapes")]
         public static void ExportFromMenu()
         {
-            ExportToDisk(DefaultOutputPath, true);
+            ExportToDisk(DefaultOutputPath, true, out _, out _);
             Debug.Log($"[{ToolName}] Export complete: {DefaultOutputPath}");
         }
 
@@ -54,7 +54,9 @@ namespace VRCForge.Editor
                 }
                 var exportResult = ExportToDisk(
                     string.IsNullOrWhiteSpace(parameters.outputPath) ? DefaultOutputPath : parameters.outputPath,
-                    parameters.refreshAssets ?? true);
+                    parameters.refreshAssets ?? true,
+                    out var before,
+                    out var after);
 
                 return VRCForgeToolResult.Completed(
                     $"Exported {exportResult.summary.blendshapeCount} blendshapes from {exportResult.summary.rendererCount} renderers.",
@@ -63,7 +65,15 @@ namespace VRCForge.Editor
                         exportResult.generatedAtUtc,
                         exportResult.summary,
                         exportResult.outputPath,
-                        exportResult.absoluteOutputPath
+                        exportResult.absoluteOutputPath,
+                        before,
+                        after,
+                        affected = new
+                        {
+                            count = 1,
+                            items = new[] { exportResult.outputPath },
+                            handle = exportResult.outputPath
+                        }
                     });
             }
             catch (Exception ex)
@@ -72,7 +82,11 @@ namespace VRCForge.Editor
             }
         }
 
-        private static ExportPayload ExportToDisk(string requestedPath, bool refreshAssets)
+        private static ExportPayload ExportToDisk(
+            string requestedPath,
+            bool refreshAssets,
+            out JObject beforeSnapshot,
+            out JObject afterSnapshot)
         {
             var payload = BuildPayload();
             var absolutePath = ResolveToAbsolutePath(requestedPath);
@@ -84,7 +98,12 @@ namespace VRCForge.Editor
             }
 
             Directory.CreateDirectory(parentDirectory);
+            var before = ReadFileSnapshot(absolutePath);
             File.WriteAllText(absolutePath, JsonConvert.SerializeObject(payload, Formatting.Indented));
+            AssetDatabase.SaveAssets();
+            var after = ReadFileSnapshot(absolutePath);
+            beforeSnapshot = before;
+            afterSnapshot = after;
 
             if (refreshAssets)
             {
@@ -94,6 +113,37 @@ namespace VRCForge.Editor
             payload.outputPath = ToAssetRelativePath(absolutePath);
             payload.absoluteOutputPath = absolutePath.Replace("\\", "/");
             return payload;
+        }
+
+        private static JObject ReadFileSnapshot(string absolutePath)
+        {
+            if (!File.Exists(absolutePath))
+            {
+                return new JObject
+                {
+                    ["exists"] = false,
+                    ["absolutePath"] = absolutePath.Replace("\\", "/")
+                };
+            }
+
+            var text = File.ReadAllText(absolutePath);
+            JToken content;
+            try
+            {
+                content = JToken.Parse(text);
+            }
+            catch (JsonReaderException)
+            {
+                content = new JValue(text);
+            }
+
+            return new JObject
+            {
+                ["exists"] = true,
+                ["absolutePath"] = absolutePath.Replace("\\", "/"),
+                ["length"] = new FileInfo(absolutePath).Length,
+                ["content"] = content
+            };
         }
 
         private static ExportPayload BuildPayload()

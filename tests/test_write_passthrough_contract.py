@@ -134,3 +134,20 @@ def test_write_avatar_descriptor_returns_persisted_descriptor_state() -> None:
     assert "after = JToken.Parse(unchangedJson)" in block
     assert "items = plan.changedFields.Take(20).ToArray()" in block
     assert "handle = descriptorGlobalObjectId" in block
+
+
+def test_export_blendshapes_returns_fresh_file_readback() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/BlendshapeExporter.cs").read_text(
+        encoding="utf-8"
+    )
+    block = _tool_block(source, "BlendshapeExporter")
+
+    write_index = block.index("File.WriteAllText")
+    save_index = block.index("AssetDatabase.SaveAssets();", write_index)
+    readback_index = block.index("var after = ReadFileSnapshot", save_index)
+    assert write_index < save_index < readback_index
+    assert "var before = ReadFileSnapshot" in block
+    assert "before," in block
+    assert "after," in block
+    assert "items = new[] { exportResult.outputPath }" in block
+    assert "handle = exportResult.outputPath" in block
