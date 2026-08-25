@@ -57,3 +57,24 @@ def test_material_shader_returns_disk_readback_and_renderer_impact() -> None:
     assert "count = sharedImpact.loadedRendererSlotCount" in block
     assert "items = sharedImpact.loadedRendererSlots.Take(20).ToArray()" in block
     assert "handle = materialEvidence.assetGuid" in block
+
+
+def test_parameter_optimization_returns_reimported_before_after() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/AvatarParameterWriter.cs").read_text(
+        encoding="utf-8"
+    )
+    block = _tool_block(
+        source,
+        "AvatarParameterOptimizationApplier",
+        "public static class AvatarParameterRollbackTool",
+    )
+
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
+    readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>")
+    assert save_index < import_index < readback_index
+    assert "before.Add(DescribeParameter(parameter))" in block
+    assert "before," in block
+    assert "after," in block
+    assert "items = after.Take(20).ToArray()" in block
+    assert "handle = AssetDatabase.AssetPathToGUID(assetPath)" in block

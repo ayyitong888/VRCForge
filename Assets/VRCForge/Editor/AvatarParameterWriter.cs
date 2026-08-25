@@ -49,6 +49,7 @@ namespace VRCForge.Editor
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var parameters = parametersAsset.parameters;
                 var applied = new List<object>();
+                var before = new List<object>();
 
                 for (var i = 0; i < parameters.Length; i++)
                 {
@@ -59,6 +60,7 @@ namespace VRCForge.Editor
                     }
 
                     var previousType = parameter.valueType.ToString();
+                    before.Add(DescribeParameter(parameter));
                     parameter.valueType = VRCExpressionParameters.ValueType.Bool;
                     parameters[i] = parameter;
                     applied.Add(new
@@ -73,6 +75,19 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(parametersAsset);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
+                var assetPath = AssetDatabase.GetAssetPath(parametersAsset);
+                AssetDatabase.ImportAsset(
+                    assetPath,
+                    ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
+                if (readbackAsset == null || readbackAsset.parameters == null)
+                {
+                    throw new InvalidOperationException("Parameter optimization asset readback failed.");
+                }
+                var after = readbackAsset.parameters
+                    .Where(parameter => parameter != null && requestedNames.Contains(parameter.name))
+                    .Select(DescribeParameter)
+                    .ToList();
 
                 return VRCForgeToolResult.Completed(
                     $"Applied {applied.Count} parameter optimization(s).",
@@ -81,13 +96,33 @@ namespace VRCForge.Editor
                         ok = true,
                         appliedCount = applied.Count,
                         applied,
-                        assetPath = AssetDatabase.GetAssetPath(parametersAsset)
+                        assetPath,
+                        before,
+                        after,
+                        affected = new
+                        {
+                            count = after.Count,
+                            items = after.Take(20).ToArray(),
+                            handle = AssetDatabase.AssetPathToGUID(assetPath)
+                        }
                     });
             }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Parameter optimization apply failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private static object DescribeParameter(VRCExpressionParameters.Parameter parameter)
+        {
+            return new
+            {
+                name = parameter.name,
+                valueType = parameter.valueType.ToString(),
+                parameter.defaultValue,
+                parameter.saved,
+                parameter.networkSynced
+            };
         }
 
         private static VRCAvatarDescriptor ResolveAvatarDescriptor(string avatarPath)
