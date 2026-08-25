@@ -241,6 +241,8 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var receipts = new List<TransactionReceipt>();
+            var transactionHandle = "";
             try
             {
                 @params = @params ?? new JObject();
@@ -280,7 +282,32 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed($"Preview: would ensure expression parameter '{parameterName}'.", new { ok = true, preview = true, plan });
                 }
 
+                var assetWasMissing = asset == null;
+                var assetReceipt = new TransactionReceipt
+                {
+                    Asset = asset != null ? AssetDatabase.GetAssetPath(asset) : "expression_parameters",
+                    Before = DescribeParameter(existing)
+                };
+                receipts.Add(assetReceipt);
+                TransactionReceipt descriptorReceipt = null;
+                if (assetWasMissing)
+                {
+                    descriptorReceipt = new TransactionReceipt
+                    {
+                        Asset = "avatar_descriptor.expressionParameters",
+                        Before = new { assetPath = "" }
+                    };
+                    receipts.Add(descriptorReceipt);
+                }
                 asset = AvatarAuthoringCrudCore.EnsureExpressionParametersAsset(descriptor, assetDir);
+                var assetPath = AssetDatabase.GetAssetPath(asset);
+                transactionHandle = assetPath;
+                assetReceipt.Asset = assetPath;
+                if (descriptorReceipt != null)
+                {
+                    descriptorReceipt.After = new { assetPath = AssetDatabase.GetAssetPath(descriptor.expressionParameters) };
+                    descriptorReceipt.Status = "succeeded";
+                }
                 var parameters = asset.parameters?.Where(parameter => parameter != null).ToList() ?? new List<VRCExpressionParameters.Parameter>();
                 var index = parameters.FindIndex(parameter => parameter.name == parameterName);
                 Undo.RegisterCompleteObjectUndo(asset, "Ensure expression parameter");
@@ -304,6 +331,14 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(asset);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
+                var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
+                if (readbackAsset == null)
+                {
+                    throw new InvalidOperationException($"Expression parameter asset readback failed: {assetPath}");
+                }
+                var readbackParameter = readbackAsset.parameters?.FirstOrDefault(parameter => parameter != null && parameter.name == parameterName);
+                assetReceipt.After = DescribeParameter(readbackParameter);
+                assetReceipt.Status = "succeeded";
                 return VRCForgeToolResult.Completed($"Ensured expression parameter '{parameterName}'.", new
                 {
                     ok = true,
@@ -312,13 +347,69 @@ namespace VRCForge.Editor
                     parameterName,
                     valueType = type.ToString(),
                     parameterCreated = created,
-                    assetPath = AssetDatabase.GetAssetPath(asset)
+                    assetPath,
+                    transaction = BuildTransaction(receipts, transactionHandle)
                 });
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Ensure expression parameter failed: {ex.Message}\n{ex.StackTrace}");
+                var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
+                if (failed != null)
+                {
+                    failed.Status = "failed";
+                    failed.Error = ex.Message;
+                }
+                return VRCForgeToolResult.Failed(
+                    $"Ensure expression parameter failed: {ex.Message}\n{ex.StackTrace}",
+                    new { transaction = BuildTransaction(receipts, transactionHandle) });
             }
+        }
+
+        private static object DescribeParameter(VRCExpressionParameters.Parameter parameter)
+        {
+            return parameter == null
+                ? (object)new { exists = false }
+                : new
+                {
+                    exists = true,
+                    parameter.name,
+                    valueType = parameter.valueType.ToString(),
+                    parameter.defaultValue,
+                    parameter.saved,
+                    parameter.networkSynced
+                };
+        }
+
+        private static object BuildTransaction(List<TransactionReceipt> receipts, string transactionHandle)
+        {
+            var transactionItems = receipts
+                .Where(item => item.Status != "not_attempted")
+                .Select(item => new
+                {
+                    asset = item.Asset,
+                    before = item.Before,
+                    after = item.After,
+                    status = item.Status,
+                    error = item.Error,
+                    rolled_back = item.RolledBack
+                })
+                .ToList();
+            return new
+            {
+                assets_touched = transactionItems.Count,
+                items = transactionItems.Take(20).ToArray(),
+                handle = transactionHandle
+            };
+        }
+
+        private sealed class TransactionReceipt
+        {
+            public string Asset = "";
+            public object Before;
+            public object After;
+            public string Status = "not_attempted";
+            public string Error = "";
+            public bool RolledBack = false;
         }
     }
 
