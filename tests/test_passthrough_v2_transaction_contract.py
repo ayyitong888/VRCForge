@@ -139,3 +139,19 @@ def test_prepare_checkpoint_reports_scene_and_dirty_asset_transaction_readback()
     assert 'Status = "succeeded"' in block
     assert 'Status = "failed"' in block
     assert "RolledBack = false" in block
+
+
+def test_checkpoint_reload_reports_bounded_scene_transaction_and_compensation() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/CheckpointRecoveryTool.cs").read_text(
+        encoding="utf-8"
+    )
+    block = source[source.index("public static class CheckpointReloadTool") :]
+    assert "ReadSceneAfter" in block
+    assert "BuildSceneTransaction" in block
+    assert "assets_touched = transactionItems.Count" in block
+    assert "items = transactionItems.Take(20).ToArray()" in block
+    assert "handle = transactionHandle" in block
+    assert 'Status = "succeeded"' in block
+    assert 'Status = "failed"' in block
+    assert "RolledBack = true" in block
+    assert "RolledBack = false" in block

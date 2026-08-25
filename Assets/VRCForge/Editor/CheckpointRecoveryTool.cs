@@ -359,12 +359,17 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var receipts = new List<SceneTransactionReceipt>();
+            var transactionHandle = "";
+            var recoveryPhase = "reload";
+            var mutationStarted = false;
             try
             {
                 var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
                 CheckpointPrepareTool.ValidateProject(@params);
                 CheckpointPrepareTool.EnsureEditorReady();
                 var phase = (@params?["phase"]?.ToString() ?? "reload").Trim();
+                recoveryPhase = phase;
                 if (string.Equals(phase, "prepare_restore", StringComparison.Ordinal))
                 {
                     var loaded = CheckpointPrepareTool.LoadedScenes()
@@ -411,10 +416,17 @@ namespace VRCForge.Editor
                             new { phase, blocking = true });
                     }
                     var prepareScenes = loaded.Select(scene => scene.path).Distinct().ToList();
+                    transactionHandle = $"{CheckpointPrepareTool.ProjectRoot()}|{phase}";
+                    receipts.AddRange(prepareScenes.Select(path => new SceneTransactionReceipt
+                    {
+                        Asset = path,
+                        Before = DescribeScene(path)
+                    }));
                     var closedScenes = new List<string>();
                     Scene scratch = default;
                     try
                     {
+                        mutationStarted = true;
                         if (prepareScenes.Count > 0)
                         {
                             scratch = EditorSceneManager.NewScene(
@@ -430,6 +442,9 @@ namespace VRCForge.Editor
                                         $"Could not close scene without saving: {path}");
                                 }
                                 closedScenes.Add(path);
+                                var receipt = receipts.First(item => item.Asset == path);
+                                receipt.After = DescribeScene(path);
+                                receipt.Status = "succeeded";
                             }
                         }
                     }
@@ -457,6 +472,22 @@ namespace VRCForge.Editor
                         {
                             EditorSceneManager.CloseScene(scratch, true);
                         }
+                        ReadSceneAfter(receipts);
+                        foreach (var receipt in receipts.Where(item => closedScenes.Contains(item.Asset)))
+                        {
+                            var restored = SceneManager.GetSceneByPath(receipt.Asset);
+                            if (restored.IsValid() && restored.isLoaded)
+                            {
+                                receipt.Status = "rolled_back";
+                                receipt.RolledBack = true;
+                            }
+                            else
+                            {
+                                receipt.Status = "failed";
+                                receipt.Error = closeError.Message;
+                                receipt.RolledBack = false;
+                            }
+                        }
                         return VRCForgeToolResult.Failed(
                             "Checkpoint restore could not safely close all project scenes.",
                             new
@@ -465,9 +496,11 @@ namespace VRCForge.Editor
                                 blocking = true,
                                 closedScenes,
                                 reopenErrors,
-                                error = closeError.Message
+                                error = closeError.Message,
+                                transaction = BuildSceneTransaction(receipts, transactionHandle)
                             });
                     }
+                    ReadSceneAfter(receipts);
                     return VRCForgeToolResult.Completed(
                         "Closed project scenes before checkpoint file recovery.",
                         new
@@ -480,7 +513,8 @@ namespace VRCForge.Editor
                             unityProcessId = identity?.ProcessId,
                             unityProcessStartedAtUtc = identity?.StartedAtUtc,
                             unityExecutableDigest = identity?.ExecutableDigest,
-                            projectPathDigest = identity?.ProjectPathDigest
+                            projectPathDigest = identity?.ProjectPathDigest,
+                            transaction = BuildSceneTransaction(receipts, transactionHandle)
                         });
                 }
                 if (!string.Equals(phase, "reload", StringComparison.Ordinal))
@@ -527,6 +561,14 @@ namespace VRCForge.Editor
                     }
                 }
 
+                transactionHandle = $"{CheckpointPrepareTool.ProjectRoot()}|{phase}";
+                receipts.AddRange(scenes.Select(path => new SceneTransactionReceipt
+                {
+                    Asset = path,
+                    Before = DescribeScene(path)
+                }));
+                mutationStarted = true;
+
                 var scratchScenes = CheckpointPrepareTool.LoadedScenes()
                     .Where(scene => string.IsNullOrWhiteSpace(scene.path))
                     .ToList();
@@ -551,6 +593,9 @@ namespace VRCForge.Editor
                                 $"Could not close scene before restored reload: {path}");
                         }
                         closedBeforeReload.Add(path);
+                        var receipt = receipts.First(item => item.Asset == path);
+                        receipt.After = DescribeScene(path);
+                        receipt.Status = "succeeded";
                     }
                 }
                 catch (Exception closeError)
@@ -567,6 +612,22 @@ namespace VRCForge.Editor
                             reopenErrors.Add($"{path}: {reopenError.Message}");
                         }
                     }
+                    ReadSceneAfter(receipts);
+                    foreach (var receipt in receipts.Where(item => closedBeforeReload.Contains(item.Asset)))
+                    {
+                        var restored = SceneManager.GetSceneByPath(receipt.Asset);
+                        if (restored.IsValid() && restored.isLoaded)
+                        {
+                            receipt.Status = "rolled_back";
+                            receipt.RolledBack = true;
+                        }
+                        else
+                        {
+                            receipt.Status = "failed";
+                            receipt.Error = closeError.Message;
+                            receipt.RolledBack = false;
+                        }
+                    }
                     return VRCForgeToolResult.Failed(
                         "Checkpoint files were restored, but Unity could not close stale scene state before reload.",
                         new
@@ -578,7 +639,8 @@ namespace VRCForge.Editor
                             activeScenePath,
                             closedScenes = closedBeforeReload,
                             reopenErrors,
-                            error = closeError.Message
+                            error = closeError.Message,
+                            transaction = BuildSceneTransaction(receipts, transactionHandle)
                         });
                 }
 
@@ -587,7 +649,11 @@ namespace VRCForge.Editor
                 {
                     foreach (var path in scenes)
                     {
-                        restoredScenes.Add(EditorSceneManager.OpenScene(path, OpenSceneMode.Additive));
+                        var restored = EditorSceneManager.OpenScene(path, OpenSceneMode.Additive);
+                        restoredScenes.Add(restored);
+                        var receipt = receipts.First(item => item.Asset == path);
+                        receipt.After = DescribeScene(path);
+                        receipt.Status = "succeeded";
                     }
                 }
                 catch (Exception reopenError)
@@ -595,6 +661,20 @@ namespace VRCForge.Editor
                     foreach (var restored in restoredScenes.Where(scene => scene.IsValid() && scene.isLoaded))
                     {
                         EditorSceneManager.CloseScene(restored, true);
+                    }
+                    ReadSceneAfter(receipts);
+                    foreach (var restored in restoredScenes)
+                    {
+                        var receipt = receipts.First(item => item.Asset == restored.path);
+                        receipt.Status = "rolled_back";
+                        receipt.RolledBack = true;
+                    }
+                    var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
+                    if (failed != null)
+                    {
+                        failed.Status = "failed";
+                        failed.Error = reopenError.Message;
+                        failed.RolledBack = false;
                     }
                     return VRCForgeToolResult.Failed(
                         "Checkpoint files were restored, but Unity could not reopen every scene.",
@@ -605,7 +685,8 @@ namespace VRCForge.Editor
                             recoveryRequired = true,
                             scenes,
                             activeScenePath,
-                            error = reopenError.Message
+                            error = reopenError.Message,
+                            transaction = BuildSceneTransaction(receipts, transactionHandle)
                         });
                 }
                 if (restoredScenes.Count > 0)
@@ -624,7 +705,19 @@ namespace VRCForge.Editor
                         }
                         return VRCForgeToolResult.Failed(
                             "Checkpoint files were restored, but Unity could not reactivate the original scene.",
-                            new { phase, blocking = true, recoveryRequired = true, scenes, activeScenePath });
+                            new
+                            {
+                                phase,
+                                blocking = true,
+                                recoveryRequired = true,
+                                scenes,
+                                activeScenePath,
+                                transaction = BuildFailedSceneTransaction(
+                                    receipts,
+                                    transactionHandle,
+                                    "active_scene",
+                                    "Could not reactivate the original scene.")
+                            });
                     }
                     foreach (var scratch in scratchScenes.Where(scene => scene.IsValid() && scene.isLoaded))
                     {
@@ -636,6 +729,7 @@ namespace VRCForge.Editor
                     AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
                 }
                 VRCForgeMcpCoreServer.ScheduleInvocationPumpRegistration();
+                ReadSceneAfter(receipts);
                 return VRCForgeToolResult.Completed(
                     "Reloaded restored scenes and refreshed project assets.",
                     new
@@ -648,13 +742,96 @@ namespace VRCForge.Editor
                         unityProcessId = identity?.ProcessId,
                         unityProcessStartedAtUtc = identity?.StartedAtUtc,
                         unityExecutableDigest = identity?.ExecutableDigest,
-                        projectPathDigest = identity?.ProjectPathDigest
+                        projectPathDigest = identity?.ProjectPathDigest,
+                        transaction = BuildSceneTransaction(receipts, transactionHandle)
                     });
             }
             catch (Exception ex)
             {
+                if (mutationStarted)
+                {
+                    ReadSceneAfter(receipts);
+                    return VRCForgeToolResult.Failed($"Checkpoint reload failed: {ex.Message}", new
+                    {
+                        phase = recoveryPhase,
+                        transaction = BuildFailedSceneTransaction(
+                            receipts,
+                            transactionHandle,
+                            "transaction",
+                            ex.Message)
+                    });
+                }
                 return VRCForgeToolResult.Failed($"Checkpoint reload failed: {ex.Message}");
             }
+        }
+
+        private static object DescribeScene(string path)
+        {
+            var scene = SceneManager.GetSceneByPath(path);
+            return new
+            {
+                path,
+                loaded = scene.IsValid() && scene.isLoaded,
+                active = scene.IsValid() && scene == SceneManager.GetActiveScene(),
+                dirty = scene.IsValid() && scene.isDirty
+            };
+        }
+
+        private static void ReadSceneAfter(IEnumerable<SceneTransactionReceipt> receipts)
+        {
+            foreach (var receipt in receipts)
+            {
+                receipt.After = DescribeScene(receipt.Asset);
+            }
+        }
+
+        private static object BuildFailedSceneTransaction(
+            List<SceneTransactionReceipt> receipts,
+            string transactionHandle,
+            string asset,
+            string error)
+        {
+            receipts.Add(new SceneTransactionReceipt
+            {
+                Asset = asset,
+                Before = new { started = true },
+                After = new { completed = false },
+                Status = "failed",
+                Error = error,
+                RolledBack = false
+            });
+            return BuildSceneTransaction(receipts, transactionHandle);
+        }
+
+        private static object BuildSceneTransaction(
+            List<SceneTransactionReceipt> receipts,
+            string transactionHandle)
+        {
+            var transactionItems = receipts.Select(item => new
+            {
+                asset = item.Asset,
+                before = item.Before,
+                after = item.After ?? item.Before,
+                status = item.Status,
+                error = item.Error,
+                rolled_back = item.RolledBack
+            }).ToList();
+            return new
+            {
+                assets_touched = transactionItems.Count,
+                items = transactionItems.Take(20).ToArray(),
+                handle = transactionHandle
+            };
+        }
+
+        private sealed class SceneTransactionReceipt
+        {
+            public string Asset = "";
+            public object Before;
+            public object After;
+            public string Status = "not_attempted";
+            public string Error = "";
+            public bool RolledBack = false;
         }
     }
 }
