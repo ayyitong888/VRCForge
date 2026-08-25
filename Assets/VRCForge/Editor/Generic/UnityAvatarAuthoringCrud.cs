@@ -433,6 +433,10 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var beforeGraph = new Dictionary<string, JToken>(StringComparer.OrdinalIgnoreCase);
+            VRCExpressionsMenu trackedRoot = null;
+            var rootWasMissing = false;
+            var transactionHandle = "";
             try
             {
                 @params = @params ?? new JObject();
@@ -472,7 +476,11 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed($"Preview: would ensure menu control '{controlName}'.", new { ok = true, preview = true, plan });
                 }
 
+                rootWasMissing = root == null;
+                beforeGraph = CaptureMenuGraph(root);
                 root = AvatarAuthoringCrudCore.EnsureRootMenuAsset(descriptor, assetDir);
+                trackedRoot = root;
+                transactionHandle = AssetDatabase.GetAssetPath(root);
                 var target = EnsureMenuPath(root, menuPath, assetDir);
                 Undo.RegisterCompleteObjectUndo(target, "Ensure expression menu control");
                 var created = false;
@@ -507,6 +515,17 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(target);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
+                var readbackRoot = AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(transactionHandle);
+                if (readbackRoot == null)
+                {
+                    throw new InvalidOperationException($"Expression menu readback failed: {transactionHandle}");
+                }
+                var transaction = BuildMenuTransaction(
+                    beforeGraph,
+                    CaptureMenuGraph(readbackRoot),
+                    transactionHandle,
+                    rootWasMissing,
+                    null);
                 return VRCForgeToolResult.Completed($"Ensured menu control '{controlName}'.", new
                 {
                     ok = true,
@@ -518,13 +537,98 @@ namespace VRCForge.Editor
                     parameterName,
                     controlFloat = controlValue,
                     controlCreated = created,
-                    rootMenuPath = AssetDatabase.GetAssetPath(root)
+                    rootMenuPath = transactionHandle,
+                    transaction
                 });
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Ensure expression menu control failed: {ex.Message}\n{ex.StackTrace}");
+                return VRCForgeToolResult.Failed(
+                    $"Ensure expression menu control failed: {ex.Message}\n{ex.StackTrace}",
+                    new
+                    {
+                        transaction = BuildMenuTransaction(
+                            beforeGraph,
+                            CaptureMenuGraph(trackedRoot),
+                            transactionHandle,
+                            rootWasMissing,
+                            ex.Message)
+                    });
             }
+        }
+
+        private static Dictionary<string, JToken> CaptureMenuGraph(VRCExpressionsMenu root)
+        {
+            var graph = new Dictionary<string, JToken>(StringComparer.OrdinalIgnoreCase);
+            var visited = new HashSet<int>();
+            var pending = new Stack<VRCExpressionsMenu>();
+            if (root != null) pending.Push(root);
+            while (pending.Count > 0)
+            {
+                var menu = pending.Pop();
+                if (menu == null || !visited.Add(menu.GetInstanceID())) continue;
+                var path = AssetDatabase.GetAssetPath(menu);
+                if (string.IsNullOrWhiteSpace(path)) path = $"instance:{menu.GetInstanceID()}";
+                graph[path] = new JObject
+                {
+                    ["exists"] = true,
+                    ["value"] = JToken.Parse(EditorJsonUtility.ToJson(menu))
+                };
+                foreach (var control in menu.controls ?? new List<VRCExpressionsMenu.Control>())
+                {
+                    if (control?.subMenu != null) pending.Push(control.subMenu);
+                }
+            }
+            return graph;
+        }
+
+        private static object BuildMenuTransaction(
+            Dictionary<string, JToken> beforeGraph,
+            Dictionary<string, JToken> afterGraph,
+            string transactionHandle,
+            bool rootWasMissing,
+            string failure)
+        {
+            var missing = new JObject { ["exists"] = false };
+            var transactionItems = beforeGraph.Keys
+                .Union(afterGraph.Keys, StringComparer.OrdinalIgnoreCase)
+                .Select(path => new
+                {
+                    path,
+                    before = beforeGraph.TryGetValue(path, out var before) ? before : missing,
+                    after = afterGraph.TryGetValue(path, out var after) ? after : missing
+                })
+                .Where(item => !JToken.DeepEquals(item.before, item.after))
+                .Select(item => (object)new
+                {
+                    asset = item.path,
+                    item.before,
+                    item.after,
+                    status = failure == null ? "succeeded" : "failed",
+                    error = failure ?? "",
+                    rolled_back = false
+                })
+                .ToList();
+            if (rootWasMissing)
+            {
+                transactionItems.Insert(0, new
+                {
+                    asset = "avatar_descriptor.expressionsMenu",
+                    before = (JToken)missing,
+                    after = string.IsNullOrWhiteSpace(transactionHandle)
+                        ? missing
+                        : new JObject { ["exists"] = true, ["assetPath"] = transactionHandle },
+                    status = failure == null ? "succeeded" : "failed",
+                    error = failure ?? "",
+                    rolled_back = false
+                });
+            }
+            return new
+            {
+                assets_touched = transactionItems.Count,
+                items = transactionItems.Take(20).ToArray(),
+                handle = transactionHandle
+            };
         }
 
         private static VRCExpressionsMenu.Control.ControlType ParseMenuControlType(string value)

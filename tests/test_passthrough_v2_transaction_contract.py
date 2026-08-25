@@ -69,3 +69,21 @@ def test_ensure_animator_state_returns_transaction_from_controller_readback() ->
     assert "DescribeAnimatorState" in block
     assert 'Status = "succeeded"' in block
     assert 'Status = "failed"' in block
+
+
+def test_ensure_expression_menu_control_returns_changed_asset_transaction() -> None:
+    source = (
+        ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs"
+    ).read_text(encoding="utf-8")
+    block = source[
+        source.index("public static class EnsureExpressionMenuControlTool") :
+        source.index("public static class EnsureAnimatorStateTool")
+    ]
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    readback_index = block.index("LoadAssetAtPath<VRCExpressionsMenu>", save_index)
+    assert save_index < readback_index
+    assert "CaptureMenuGraph(root)" in block
+    assert "assets_touched = transactionItems.Count" in block
+    assert "items = transactionItems.Take(20).ToArray()" in block
+    assert "handle = transactionHandle" in block
+    assert 'status = failure == null ? "succeeded" : "failed"' in block
