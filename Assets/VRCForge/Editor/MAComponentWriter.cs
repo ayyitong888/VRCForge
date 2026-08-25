@@ -220,6 +220,7 @@ namespace VRCForge.Editor
                 }
 
                 // ---- APPLY -------------------------------------------------------
+                var before = DescribeComponents(target, componentType);
                 var targetScene = target.scene;
                 var sceneWasDirty = targetScene.IsValid() && targetScene.isDirty;
                 Undo.IncrementCurrentGroup();
@@ -283,6 +284,12 @@ namespace VRCForge.Editor
                 }
 
                 Undo.CollapseUndoOperations(undoGroup);
+                target = ResolveSceneObject(targetPath, avatarRoot);
+                if (target == null)
+                {
+                    throw new InvalidOperationException($"Could not re-read target GameObject after adding {componentType.Name}: '{targetPath}'.");
+                }
+                var after = DescribeComponents(target, componentType);
 
                 return VRCForgeToolResult.Completed(
                     $"Added {componentType.Name} to '{target.name}'.",
@@ -300,13 +307,31 @@ namespace VRCForge.Editor
                         sceneDirty = targetScene.IsValid() && targetScene.isDirty,
                         references = appliedRefs,
                         fields = appliedFields,
-                        warnings
+                        warnings,
+                        before,
+                        after,
+                        pending = !sceneSaved,
+                        note = sceneSaved ? "已修改并落盘" : "已修改，尚未落盘"
                     });
             }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Add Modular Avatar component failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private static JObject DescribeComponents(GameObject target, Type componentType)
+        {
+            var components = target.GetComponents(componentType)
+                .Where(component => component != null)
+                .Select(component => JToken.Parse(EditorJsonUtility.ToJson(component)))
+                .ToArray();
+            return new JObject
+            {
+                ["componentType"] = componentType.FullName,
+                ["count"] = components.Length,
+                ["items"] = new JArray(components)
+            };
         }
 
         internal static object HandleInspectCommand(JObject @params)

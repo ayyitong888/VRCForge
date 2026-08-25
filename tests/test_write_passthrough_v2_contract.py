@@ -47,3 +47,18 @@ def test_material_tuning_reports_adapter_memory_readback_without_changing_save_b
     assert "after = afterValues" in source
     assert "pending = !saveAssets" in source
     assert 'note = saveAssets ? "已修改并落盘" : "已修改，尚未落盘"' in source
+
+
+def test_add_modular_avatar_component_reports_memory_state_without_adding_saveassets() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/MAComponentWriter.cs").read_text(
+        encoding="utf-8"
+    )
+    write_index = source.index("var component = Undo.AddComponent")
+    readback_index = source.index("var after = DescribeComponents(target, componentType);", write_index)
+    assert write_index < readback_index
+    assert "AssetDatabase.SaveAssets();" not in source
+    assert "var before = DescribeComponents(target, componentType);" in source
+    assert "before," in source
+    assert "after," in source
+    assert "pending = !sceneSaved" in source
+    assert 'note = sceneSaved ? "已修改并落盘" : "已修改，尚未落盘"' in source
