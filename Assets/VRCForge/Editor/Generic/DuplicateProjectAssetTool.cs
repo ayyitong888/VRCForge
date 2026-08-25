@@ -219,6 +219,35 @@ namespace VRCForge.Editor
                 failurePhase = "source_unchanged_readback";
                 VerifySourceUnchanged(snapshot);
 
+                var beforePayload = new
+                {
+                    source = SourcePayload(snapshot),
+                    target = new
+                    {
+                        assetPath = snapshot.DestinationPath,
+                        exists = false
+                    }
+                };
+                var afterPayload = new
+                {
+                    assetPath = snapshot.DestinationPath,
+                    guid = createdEvidence.Guid,
+                    fileDigest = createdEvidence.File.Digest,
+                    fileIdentity = createdEvidence.File.Identity,
+                    metaDigest = createdEvidence.Meta.Digest,
+                    metaIdentity = createdEvidence.Meta.Identity,
+                    mainAssetType = snapshot.SourceMainAssetType,
+                    objectLayoutDigest = destinationObjectLayoutDigest,
+                    bytesIdenticalToSource = createdEvidence.File.Digest == snapshot.SourceEvidence.File.Digest,
+                    generatedRootPath = GeneratedRoot,
+                    generatedRootCreated,
+                    createNew = true,
+                    readbackVerified = true,
+                };
+                var affectedItems = generatedRootCreated
+                    ? new[] { snapshot.DestinationPath, GeneratedRoot }
+                    : new[] { snapshot.DestinationPath };
+
                 return VRCForgeToolResult.Completed(
                     "Created and verified one independent Unity authoring asset copy.",
                     new
@@ -232,21 +261,14 @@ namespace VRCForge.Editor
                         saved = true,
                         mutationCount = generatedRootCreated ? 2 : 1,
                         source = SourcePayload(snapshot),
-                        target = new
+                        target = afterPayload,
+                        before = beforePayload,
+                        after = afterPayload,
+                        affected = new
                         {
-                            assetPath = snapshot.DestinationPath,
-                            guid = createdEvidence.Guid,
-                            fileDigest = createdEvidence.File.Digest,
-                            fileIdentity = createdEvidence.File.Identity,
-                            metaDigest = createdEvidence.Meta.Digest,
-                            metaIdentity = createdEvidence.Meta.Identity,
-                            mainAssetType = snapshot.SourceMainAssetType,
-                            objectLayoutDigest = destinationObjectLayoutDigest,
-                            bytesIdenticalToSource = createdEvidence.File.Digest == snapshot.SourceEvidence.File.Digest,
-                            generatedRootPath = GeneratedRoot,
-                            generatedRootCreated,
-                            createNew = true,
-                            readbackVerified = true,
+                            count = affectedItems.Length,
+                            items = affectedItems.Take(20).ToArray(),
+                            handle = createdEvidence.Guid
                         },
                         previewDigest = snapshot.PreviewDigest,
                         cleanupRequired = false,

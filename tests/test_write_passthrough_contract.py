@@ -24,3 +24,19 @@ def test_set_property_returns_persisted_before_after_and_bounded_affected() -> N
     assert "after = ComponentCrudCore.DescribeValue(unchangedReadbackValue)" in block
     assert "items = new[] { goPath }" in block
     assert "handle = objectId" in block
+
+
+def test_duplicate_project_asset_returns_fresh_readback_and_bounded_affected() -> None:
+    source = (
+        ROOT / "Assets/VRCForge/Editor/Generic/DuplicateProjectAssetTool.cs"
+    ).read_text(encoding="utf-8")
+    block = _tool_block(source, "DuplicateProjectAssetTool")
+
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    readback_index = block.index("createdEvidence = ReadCreatedEvidenceWithRetry")
+    assert save_index < readback_index
+    assert "before = beforePayload" in block
+    assert "after = afterPayload" in block
+    assert "fileDigest = createdEvidence.File.Digest" in block
+    assert "items = affectedItems.Take(20).ToArray()" in block
+    assert "handle = createdEvidence.Guid" in block
