@@ -79,6 +79,8 @@ namespace VRCForge.Editor
             var recoveryAvatarPath = "";
             var recoveryParameterName = "";
             var recoveryClipPath = "";
+            var receipts = new List<TransactionReceipt>();
+            var transactionHandle = "";
             try
             {
                 @params = @params ?? new JObject();
@@ -326,6 +328,45 @@ namespace VRCForge.Editor
                 }
 
                 // ---- APPLY -------------------------------------------------------
+                transactionHandle = $"{avatarRootPath}|{parameterName}";
+                var sceneReceipts = new Dictionary<string, TransactionReceipt>(StringComparer.Ordinal);
+                if (setObjectsDefaultOff)
+                {
+                    foreach (var targetTransform in resolvedTargets.Where(item => item.gameObject.activeSelf))
+                    {
+                        var targetPath = GetTransformPath(targetTransform);
+                        var receipt = new TransactionReceipt
+                        {
+                            Asset = $"scene:{targetPath}",
+                            Before = new { activeSelf = targetTransform.gameObject.activeSelf }
+                        };
+                        receipts.Add(receipt);
+                        sceneReceipts[targetPath] = receipt;
+                    }
+                }
+                var clipReceipt = new TransactionReceipt
+                {
+                    Asset = clipPath,
+                    Before = new { exists = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipPath) != null }
+                };
+                receipts.Add(clipReceipt);
+                var controllerReceipt = new TransactionReceipt
+                {
+                    Asset = fxControllerPath,
+                    Before = DescribeAsset(fxController)
+                };
+                receipts.Add(controllerReceipt);
+                TransactionReceipt menuReceipt = null;
+                var rootMenuPath = AssetDatabase.GetAssetPath(descriptor.expressionsMenu);
+                if (addMenuToggle && descriptor.expressionsMenu != null)
+                {
+                    menuReceipt = new TransactionReceipt
+                    {
+                        Asset = rootMenuPath,
+                        Before = DescribeAsset(descriptor.expressionsMenu)
+                    };
+                    receipts.Add(menuReceipt);
+                }
                 if (!string.IsNullOrWhiteSpace(approvedObjectReceiptNonce))
                 {
                     if (resolvedTargets.Count != 1)
@@ -354,6 +395,12 @@ namespace VRCForge.Editor
                         {
                             go.SetActive(false);
                         }
+                        var objectPath = GetTransformPath(t);
+                        if (sceneReceipts.TryGetValue(objectPath, out var sceneReceipt))
+                        {
+                            sceneReceipt.After = new { activeSelf = go.activeSelf };
+                            sceneReceipt.Status = "succeeded";
+                        }
                         EditorUtility.SetDirty(go);
                     }
                 }
@@ -376,6 +423,9 @@ namespace VRCForge.Editor
                 }
                 AssetDatabase.CreateAsset(clip, AssetDatabase.GenerateUniqueAssetPath(clipPath));
                 var createdClipPath = AssetDatabase.GetAssetPath(clip);
+                clipReceipt.Asset = createdClipPath;
+                clipReceipt.After = DescribeAsset(clip);
+                clipReceipt.Status = "succeeded";
 
                 // c. Add the FX state + Any State -> state Equals N.
                 Undo.RegisterCompleteObjectUndo(fxController, "Add wardrobe FX state");
@@ -392,6 +442,8 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(fxController);
                 EditorUtility.SetDirty(wardrobeMachine);
                 EditorUtility.SetDirty(newState);
+                controllerReceipt.After = DescribeAsset(fxController);
+                controllerReceipt.Status = "succeeded";
 
                 // d. Add the menu toggle (overflow into a nested SubMenu when needed).
                 string appliedMenuPath = "";
@@ -416,6 +468,11 @@ namespace VRCForge.Editor
                         });
                         EditorUtility.SetDirty(target);
                         menuToggleAdded = true;
+                        if (menuReceipt != null)
+                        {
+                            menuReceipt.After = DescribeAsset(descriptor.expressionsMenu);
+                            menuReceipt.Status = "succeeded";
+                        }
                     }
                 }
 
@@ -427,6 +484,14 @@ namespace VRCForge.Editor
                     || string.Equals(postWardrobeFingerprint, expectedWardrobeFingerprint, StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException("Wardrobe write readback fingerprint did not advance.");
+                }
+                var readbackController = AssetDatabase.LoadAssetAtPath<AnimatorController>(fxControllerPath);
+                controllerReceipt.After = DescribeAsset(readbackController);
+                var readbackClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(createdClipPath);
+                clipReceipt.After = DescribeAsset(readbackClip);
+                if (menuReceipt != null)
+                {
+                    menuReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(rootMenuPath));
                 }
 
                 return VRCForgeToolResult.Completed(
@@ -455,13 +520,20 @@ namespace VRCForge.Editor
                         menuToggleAdded,
                         menuPath = appliedMenuPath,
                         continuationConsumed,
-                        warnings
+                        warnings,
+                        transaction = BuildTransaction(receipts, transactionHandle)
                     });
             }
             catch (Exception ex)
             {
                 if (mutationStarted)
                 {
+                    var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
+                    if (failed != null)
+                    {
+                        failed.Status = "failed";
+                        failed.Error = ex.Message;
+                    }
                     return VRCForgeToolResult.Failed($"Add wardrobe outfit failed after mutation: {ex.Message}", new
                     {
                         ok = false,
@@ -472,10 +544,55 @@ namespace VRCForge.Editor
                         parameterName = recoveryParameterName,
                         clipPath = recoveryClipPath,
                         continuationConsumed,
+                        transaction = BuildTransaction(receipts, transactionHandle)
                     });
                 }
                 return VRCForgeToolResult.Failed($"Add wardrobe outfit failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private static object DescribeAsset(UnityEngine.Object asset)
+        {
+            return asset == null
+                ? (object)new { exists = false }
+                : new
+                {
+                    exists = true,
+                    assetPath = AssetDatabase.GetAssetPath(asset),
+                    value = JToken.Parse(EditorJsonUtility.ToJson(asset))
+                };
+        }
+
+        private static object BuildTransaction(List<TransactionReceipt> receipts, string transactionHandle)
+        {
+            var transactionItems = receipts
+                .Where(item => item.Status != "not_attempted")
+                .Select(item => new
+                {
+                    asset = item.Asset,
+                    before = item.Before,
+                    after = item.After,
+                    status = item.Status,
+                    error = item.Error,
+                    rolled_back = item.RolledBack
+                })
+                .ToList();
+            return new
+            {
+                assets_touched = transactionItems.Count,
+                items = transactionItems.Take(20).ToArray(),
+                handle = transactionHandle
+            };
+        }
+
+        private sealed class TransactionReceipt
+        {
+            public string Asset = "";
+            public object Before;
+            public object After;
+            public string Status = "not_attempted";
+            public string Error = "";
+            public bool RolledBack = false;
         }
 
         // --- FX reconciliation -------------------------------------------------------

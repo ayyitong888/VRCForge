@@ -87,3 +87,20 @@ def test_ensure_expression_menu_control_returns_changed_asset_transaction() -> N
     assert "items = transactionItems.Take(20).ToArray()" in block
     assert "handle = transactionHandle" in block
     assert 'status = failure == null ? "succeeded" : "failed"' in block
+
+
+def test_add_wardrobe_outfit_returns_bounded_multi_asset_transaction() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/WardrobeOutfitWriter.cs").read_text(
+        encoding="utf-8"
+    )
+    save_index = source.index("AssetDatabase.SaveAssets();")
+    controller_readback = source.index("LoadAssetAtPath<AnimatorController>", save_index)
+    clip_readback = source.index("LoadAssetAtPath<AnimationClip>", save_index)
+    assert save_index < controller_readback
+    assert save_index < clip_readback
+    assert "assets_touched = transactionItems.Count" in source
+    assert "items = transactionItems.Take(20).ToArray()" in source
+    assert "handle = transactionHandle" in source
+    assert 'Status = "succeeded"' in source
+    assert 'Status = "failed"' in source
+    assert "RolledBack = false" in source
