@@ -114,3 +114,23 @@ def test_manage_expression_parameters_returns_reimported_state() -> None:
     assert "var after = DescribeParameters(readbackAsset)" in block
     assert "items = affectedNames.Take(20).ToArray()" in block
     assert "handle = AssetDatabase.AssetPathToGUID(assetPath)" in block
+
+
+def test_write_avatar_descriptor_returns_persisted_descriptor_state() -> None:
+    source = (
+        ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs"
+    ).read_text(encoding="utf-8")
+    block = _tool_block(
+        source,
+        "WriteAvatarDescriptorTool",
+        "public static class WriteAnimationCurveTool",
+    )
+
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    readback_index = block.index("var readbackDescriptor =")
+    assert save_index < readback_index
+    assert "before = JToken.Parse(beforeJson)" in block
+    assert "after = JToken.Parse(EditorJsonUtility.ToJson(readbackDescriptor))" in block
+    assert "after = JToken.Parse(unchangedJson)" in block
+    assert "items = plan.changedFields.Take(20).ToArray()" in block
+    assert "handle = descriptorGlobalObjectId" in block

@@ -429,6 +429,16 @@ namespace VRCForge.Editor
                 {
                     Undo.RevertAllDownToGroup(undoGroup);
                     mutationStarted = false;
+                    var unchangedScene = SceneObjectCopyCore.ResolveSavedScene(
+                        beforeScene.Path,
+                        "unchanged avatar descriptor readback");
+                    var unchangedObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                        unchangedScene.Scene,
+                        avatarPath,
+                        "unchanged avatar descriptor target");
+                    var unchangedDescriptor = unchangedObject.GetComponent<VRCAvatarDescriptor>()
+                        ?? throw new InvalidOperationException("Avatar descriptor unchanged readback failed.");
+                    var unchangedJson = EditorJsonUtility.ToJson(unchangedDescriptor);
                     return VRCForgeToolResult.Completed("Avatar descriptor already has the requested values.", new
                     {
                         ok = true,
@@ -437,6 +447,14 @@ namespace VRCForge.Editor
                         action = "write_avatar_descriptor",
                         avatarPath,
                         changedFields = plan.changedFields,
+                        before = JToken.Parse(beforeJson),
+                        after = JToken.Parse(unchangedJson),
+                        affected = new
+                        {
+                            count = plan.changedFields.Length,
+                            items = plan.changedFields.Take(20).ToArray(),
+                            handle = descriptorGlobalObjectId
+                        },
                         scenePath = beforeScene.Path,
                         sceneSaved = true,
                         persistedReadback = true,
@@ -449,6 +467,7 @@ namespace VRCForge.Editor
 
                 EditorUtility.SetDirty(descriptor);
                 EditorUtility.SetDirty(descriptor.gameObject);
+                AssetDatabase.SaveAssets();
                 failureStage = "scene_save";
                 var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
                 failureStage = "persisted_readback";
@@ -476,6 +495,14 @@ namespace VRCForge.Editor
                     action = "write_avatar_descriptor",
                     avatarPath,
                     changedFields = plan.changedFields,
+                    before = JToken.Parse(beforeJson),
+                    after = JToken.Parse(EditorJsonUtility.ToJson(readbackDescriptor)),
+                    affected = new
+                    {
+                        count = plan.changedFields.Length,
+                        items = plan.changedFields.Take(20).ToArray(),
+                        handle = descriptorGlobalObjectId
+                    },
                     scenePath = afterScene.Path,
                     sceneSaved = true,
                     persistedReadback = true,
