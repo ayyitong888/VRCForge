@@ -967,25 +967,74 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Completed($"Preview: would manage expression parameters ({action}).", new { ok = true, preview = true, plan });
                 }
+                var before = DescribeParameters(asset);
 
                 Undo.RegisterCompleteObjectUndo(asset, "Manage expression parameters");
                 Apply(action, asset, @params);
                 EditorUtility.SetDirty(asset);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
+                var assetPath = AssetDatabase.GetAssetPath(asset);
+                AssetDatabase.ImportAsset(
+                    assetPath,
+                    ImportAssetOptions.ForceSynchronousImport | ImportAssetOptions.ForceUpdate);
+                var readbackAsset = AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(assetPath);
+                if (readbackAsset == null)
+                {
+                    throw new InvalidOperationException("Expression parameter asset readback failed.");
+                }
+                var after = DescribeParameters(readbackAsset);
+                var affectedNames = before
+                    .Select(item => item.name)
+                    .Concat(after.Select(item => item.name))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .ToArray();
                 return VRCForgeToolResult.Completed($"Expression parameter action '{action}' completed.", new
                 {
                     ok = true,
                     preview = false,
                     action,
-                    assetPath = AssetDatabase.GetAssetPath(asset),
-                    parameterCount = asset.parameters?.Length ?? 0
+                    assetPath,
+                    parameterCount = after.Count,
+                    before,
+                    after,
+                    affected = new
+                    {
+                        count = affectedNames.Length,
+                        items = affectedNames.Take(20).ToArray(),
+                        handle = AssetDatabase.AssetPathToGUID(assetPath)
+                    }
                 });
             }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Manage expression parameters failed: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private sealed class ParameterState
+        {
+            public string name;
+            public string valueType;
+            public float defaultValue;
+            public bool saved;
+            public bool networkSynced;
+        }
+
+        private static List<ParameterState> DescribeParameters(VRCExpressionParameters asset)
+        {
+            return (asset.parameters ?? Array.Empty<VRCExpressionParameters.Parameter>())
+                .Where(parameter => parameter != null)
+                .Select(parameter => new ParameterState
+                {
+                    name = parameter.name,
+                    valueType = parameter.valueType.ToString(),
+                    defaultValue = parameter.defaultValue,
+                    saved = parameter.saved,
+                    networkSynced = parameter.networkSynced
+                })
+                .ToList();
         }
 
         private static string NormalizeAction(string value)

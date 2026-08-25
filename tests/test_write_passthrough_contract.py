@@ -94,3 +94,23 @@ def test_parameter_rollback_returns_reimported_before_after() -> None:
     assert "var after = readbackAsset.parameters" in block
     assert "items = affectedNames.Take(20).ToArray()" in block
     assert "handle = AssetDatabase.AssetPathToGUID(assetPath)" in block
+
+
+def test_manage_expression_parameters_returns_reimported_state() -> None:
+    source = (
+        ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarPrimitiveCrud.cs"
+    ).read_text(encoding="utf-8")
+    block = _tool_block(
+        source,
+        "ManageExpressionParametersTool",
+        "public static class ManageExpressionMenuTool",
+    )
+
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    import_index = block.index("ImportAssetOptions.ForceSynchronousImport")
+    readback_index = block.index("LoadAssetAtPath<VRCExpressionParameters>")
+    assert save_index < import_index < readback_index
+    assert "var before = DescribeParameters(asset)" in block
+    assert "var after = DescribeParameters(readbackAsset)" in block
+    assert "items = affectedNames.Take(20).ToArray()" in block
+    assert "handle = AssetDatabase.AssetPathToGUID(assetPath)" in block
