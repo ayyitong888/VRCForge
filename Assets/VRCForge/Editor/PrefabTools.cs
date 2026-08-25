@@ -60,6 +60,10 @@ namespace VRCForge.Editor
                     $"{action} safe backup '{payload.backup_id}': {payload.summary.restoredCount} restored, {payload.summary.skippedCount} skipped.",
                     payload);
             }
+            catch (RestoreTransactionException ex)
+            {
+                return VRCForgeToolResult.Failed($"Safe backup restore failed: {ex.Message}", ex.Payload);
+            }
             catch (Exception ex)
             {
                 return VRCForgeToolResult.Failed($"Safe backup restore failed: {ex.Message}\n{ex.StackTrace}");
@@ -197,8 +201,24 @@ namespace VRCForge.Editor
                         Directory.CreateDirectory(directory);
                     }
 
-                    File.Copy(backupFilePath, targetPath, true);
-                    restored.Add(item);
+                    try
+                    {
+                        File.Copy(backupFilePath, targetPath, true);
+                        item.after_exists = File.Exists(targetPath);
+                        item.after_sha256 = ComputeSha256(targetPath);
+                        item.status = "succeeded";
+                        restored.Add(item);
+                    }
+                    catch (Exception ex)
+                    {
+                        item.after_exists = File.Exists(targetPath);
+                        item.after_sha256 = item.after_exists ? ComputeSha256(targetPath) : "";
+                        item.status = "failed";
+                        item.error = ex.Message;
+                        throw new RestoreTransactionException(
+                            $"Failed while restoring '{item.project_relative_path}': {ex.Message}",
+                            BuildPayload(manifest, manifestPath, backupPath, projectMatches, confirmed, planned, restored, skipped, warnings));
+                    }
                 }
 
                 if (parameters.refreshAssets ?? true)
@@ -211,6 +231,31 @@ namespace VRCForge.Editor
                 warnings.Add("Restore preview only. Set confirmRestore=true to copy the planned files.");
             }
 
+            return BuildPayload(manifest, manifestPath, backupPath, projectMatches, confirmed, planned, restored, skipped, warnings);
+        }
+
+        private static RestorePayload BuildPayload(
+            JObject manifest,
+            string manifestPath,
+            string backupPath,
+            bool projectMatches,
+            bool confirmed,
+            List<RestorePlanItem> planned,
+            List<RestorePlanItem> restored,
+            List<RestoreSkippedItem> skipped,
+            List<string> warnings)
+        {
+            var transactionItems = planned.Select(item => new
+            {
+                asset = item.project_relative_path,
+                before = new { exists = item.target_exists, sha256 = item.current_sha256 },
+                after = item.status == "not_attempted"
+                    ? null
+                    : new { exists = item.after_exists, sha256 = item.after_sha256 },
+                item.status,
+                item.error,
+                rolled_back = false
+            }).ToList();
             return new RestorePayload
             {
                 type = "vrcforge_safe_backup_restore",
@@ -224,6 +269,12 @@ namespace VRCForge.Editor
                 restored = restored,
                 skipped = skipped,
                 warnings = warnings,
+                transaction = new
+                {
+                    assets_touched = planned.Count(item => item.status == "succeeded" || item.status == "failed"),
+                    items = transactionItems.Take(20).ToArray(),
+                    handle = manifestPath
+                },
                 summary = new RestoreSummary
                 {
                     plannedCount = planned.Count,
@@ -392,6 +443,7 @@ namespace VRCForge.Editor
             public List<RestoreSkippedItem> skipped;
             public List<string> warnings;
             public RestoreSummary summary;
+            public object transaction;
         }
 
         [Serializable]
@@ -403,6 +455,10 @@ namespace VRCForge.Editor
             public bool changed_since_backup;
             public string current_sha256;
             public string backup_sha256;
+            public bool after_exists;
+            public string after_sha256 = "";
+            public string status = "not_attempted";
+            public string error = "";
         }
 
         [Serializable]
@@ -419,6 +475,17 @@ namespace VRCForge.Editor
             public int restoredCount;
             public int skippedCount;
             public int warningCount;
+        }
+
+        private sealed class RestoreTransactionException : Exception
+        {
+            public RestoreTransactionException(string message, RestorePayload payload)
+                : base(message)
+            {
+                Payload = payload;
+            }
+
+            public RestorePayload Payload { get; }
         }
     }
 }
