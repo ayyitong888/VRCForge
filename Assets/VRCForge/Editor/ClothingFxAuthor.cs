@@ -30,6 +30,7 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var receipts = new List<TransactionReceipt>();
             try
             {
                 var avatarPath = (@params?["avatarPath"]?.ToString() ?? string.Empty).Trim();
@@ -59,6 +60,15 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed("No VRCExpressionsMenu found on the avatar.");
                 }
+                var fxControllerPath = AssetDatabase.GetAssetPath(fxController);
+                var parametersPath = AssetDatabase.GetAssetPath(parametersAsset);
+                var menuPath = AssetDatabase.GetAssetPath(menuAsset);
+                var controllerReceipt = new TransactionReceipt { Asset = fxControllerPath, Before = DescribeAsset(fxController) };
+                var parametersReceipt = new TransactionReceipt { Asset = parametersPath, Before = DescribeAsset(parametersAsset) };
+                var menuReceipt = new TransactionReceipt { Asset = menuPath, Before = DescribeAsset(menuAsset) };
+                receipts.Add(controllerReceipt);
+                receipts.Add(parametersReceipt);
+                receipts.Add(menuReceipt);
 
                 EnsureAssetFolder(AssetDir);
                 var created = new List<object>();
@@ -87,15 +97,31 @@ namespace VRCForge.Editor
                         continue;
                     }
 
-                    var clipOn = LoadOrCreateClip($"{AssetDir}/{clipName}_ON.anim", clipName + "_ON");
-                    var clipOff = LoadOrCreateClip($"{AssetDir}/{clipName}_OFF.anim", clipName + "_OFF");
+                    var clipOnPath = $"{AssetDir}/{clipName}_ON.anim";
+                    var clipOffPath = $"{AssetDir}/{clipName}_OFF.anim";
+                    var clipOnReceipt = new TransactionReceipt { Asset = clipOnPath, Before = DescribeAsset(AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOnPath)) };
+                    var clipOffReceipt = new TransactionReceipt { Asset = clipOffPath, Before = DescribeAsset(AssetDatabase.LoadAssetAtPath<AnimationClip>(clipOffPath)) };
+                    receipts.Add(clipOnReceipt);
+                    receipts.Add(clipOffReceipt);
+                    var clipOn = LoadOrCreateClip(clipOnPath, clipName + "_ON");
+                    var clipOff = LoadOrCreateClip(clipOffPath, clipName + "_OFF");
                     var binding = new EditorCurveBinding { path = objectPath, type = typeof(GameObject), propertyName = "m_IsActive" };
                     AnimationUtility.SetEditorCurve(clipOn, binding, AnimationCurve.Constant(0f, 0f, 1f));
                     AnimationUtility.SetEditorCurve(clipOff, binding, AnimationCurve.Constant(0f, 0f, 0f));
+                    clipOnReceipt.After = DescribeAsset(clipOn);
+                    clipOnReceipt.Status = "succeeded";
+                    clipOffReceipt.After = DescribeAsset(clipOff);
+                    clipOffReceipt.Status = "succeeded";
 
                     EnsureFxLayer(fxController, displayName, paramName, clipOn, clipOff);
                     EnsureExpressionParameter(parametersAsset, paramName);
                     EnsureMenuToggle(menuAsset, displayName, paramName);
+                    controllerReceipt.After = DescribeAsset(fxController);
+                    controllerReceipt.Status = "succeeded";
+                    parametersReceipt.After = DescribeAsset(parametersAsset);
+                    parametersReceipt.Status = "succeeded";
+                    menuReceipt.After = DescribeAsset(menuAsset);
+                    menuReceipt.Status = "succeeded";
                     created.Add(new { displayName, parameterName = paramName, sampleObjectPath = objectPath });
                 }
 
@@ -104,6 +130,9 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(menuAsset);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
+                controllerReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<AnimatorController>(fxControllerPath));
+                parametersReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<VRCExpressionParameters>(parametersPath));
+                menuReceipt.After = DescribeAsset(AssetDatabase.LoadAssetAtPath<VRCExpressionsMenu>(menuPath));
 
                 return VRCForgeToolResult.Completed(
                     $"Authored {created.Count} clothing FX item(s).",
@@ -114,13 +143,66 @@ namespace VRCForge.Editor
                         skippedCount = skipped.Count,
                         created,
                         skipped,
-                        assetDir = AssetDir
+                        assetDir = AssetDir,
+                        transaction = BuildTransaction(receipts)
                     });
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Clothing FX authoring failed: {ex.Message}\n{ex.StackTrace}");
+                var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
+                if (failed != null)
+                {
+                    failed.Status = "failed";
+                    failed.Error = ex.Message;
+                }
+                return VRCForgeToolResult.Failed(
+                    $"Clothing FX authoring failed: {ex.Message}\n{ex.StackTrace}",
+                    new { transaction = BuildTransaction(receipts) });
             }
+        }
+
+        private static object DescribeAsset(UnityEngine.Object asset)
+        {
+            return asset == null
+                ? (object)new { exists = false }
+                : new
+                {
+                    exists = true,
+                    assetPath = AssetDatabase.GetAssetPath(asset),
+                    value = JToken.Parse(EditorJsonUtility.ToJson(asset))
+                };
+        }
+
+        private static object BuildTransaction(List<TransactionReceipt> receipts)
+        {
+            var transactionItems = receipts
+                .Where(item => item.Status != "not_attempted")
+                .Select(item => new
+                {
+                    asset = item.Asset,
+                    before = item.Before,
+                    after = item.After,
+                    status = item.Status,
+                    error = item.Error,
+                    rolled_back = item.RolledBack
+                })
+                .ToList();
+            return new
+            {
+                assets_touched = transactionItems.Count,
+                items = transactionItems.Take(20).ToArray(),
+                handle = AssetDir
+            };
+        }
+
+        private sealed class TransactionReceipt
+        {
+            public string Asset = "";
+            public object Before;
+            public object After;
+            public string Status = "not_attempted";
+            public string Error = "";
+            public bool RolledBack = false;
         }
 
         private static AnimationClip LoadOrCreateClip(string path, string clipName)

@@ -104,3 +104,18 @@ def test_add_wardrobe_outfit_returns_bounded_multi_asset_transaction() -> None:
     assert 'Status = "succeeded"' in source
     assert 'Status = "failed"' in source
     assert "RolledBack = false" in source
+
+
+def test_apply_clothing_fx_returns_bounded_multi_asset_transaction() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/ClothingFxAuthor.cs").read_text(
+        encoding="utf-8"
+    )
+    save_index = source.index("AssetDatabase.SaveAssets();")
+    controller_readback = source.index("LoadAssetAtPath<AnimatorController>", save_index)
+    assert save_index < controller_readback
+    assert "assets_touched = transactionItems.Count" in source
+    assert "items = transactionItems.Take(20).ToArray()" in source
+    assert "handle = AssetDir" in source
+    assert 'Status = "succeeded"' in source
+    assert 'Status = "failed"' in source
+    assert "RolledBack = false" in source
