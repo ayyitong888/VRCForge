@@ -634,16 +634,34 @@ namespace VRCForge.Editor
                     continuationConsumed = true;
                 }
 
+                var before = new
+                {
+                    gameObjectPath = goPath,
+                    globalObjectId,
+                    prefabPath,
+                    prefabGuid,
+                    isPartOfAnyPrefab = PrefabUtility.IsPartOfAnyPrefab(go)
+                };
                 PrefabUtility.UnpackPrefabInstance(go, unpackMode, InteractionMode.UserAction);
                 mutationStarted = true;
                 EditorUtility.SetDirty(go);
-                var readbackGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(go).ToString();
-                var readbackPrefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(go);
-                var unpacked = string.IsNullOrEmpty(readbackPrefabPath) && !PrefabUtility.IsPartOfAnyPrefab(go);
+                var readbackObject = ComponentCrudCore.ResolveGameObject(goPath);
+                var readbackGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(readbackObject).ToString();
+                var readbackPrefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(readbackObject);
+                var readbackIsPartOfAnyPrefab = PrefabUtility.IsPartOfAnyPrefab(readbackObject);
+                var unpacked = string.IsNullOrEmpty(readbackPrefabPath) && !readbackIsPartOfAnyPrefab;
                 if (!unpacked)
                 {
                     return CommittedFailure("Prefab unpack readback still reports a prefab instance.", mutatedPath, mutatedGlobalObjectId);
                 }
+                var after = new
+                {
+                    gameObjectPath = ComponentCrudCore.GetHierarchyPath(readbackObject.transform),
+                    globalObjectId = readbackGlobalObjectId,
+                    prefabPath = readbackPrefabPath,
+                    isPartOfAnyPrefab = readbackIsPartOfAnyPrefab,
+                    unpacked
+                };
 
                 var payload = new
                 {
@@ -658,6 +676,10 @@ namespace VRCForge.Editor
                     , scenePath
                     , unpacked
                     , continuationConsumed
+                    , before
+                    , after
+                    , pending = true
+                    , note = "已修改，尚未落盘"
                 };
                 return VRCForgeToolResult.Completed($"Unpacked prefab instance '{goPath}' ({modeLabel}).", payload);
             }

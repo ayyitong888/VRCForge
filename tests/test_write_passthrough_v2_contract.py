@@ -80,3 +80,18 @@ def test_instantiate_prefab_reports_fresh_scene_memory_state_without_saving() ->
     assert "after = new" in block
     assert "pending = true" in block
     assert 'note = "已修改，尚未落盘"' in block
+
+
+def test_unpack_prefab_reports_fresh_scene_memory_state_without_saving() -> None:
+    source = (
+        ROOT / "Assets/VRCForge/Editor/Generic/UnityAssetPrefabCrud.cs"
+    ).read_text(encoding="utf-8")
+    block = source[source.index("public static class UnpackPrefabTool") :]
+    write_index = block.index("PrefabUtility.UnpackPrefabInstance")
+    readback_index = block.index("var readbackObject = ComponentCrudCore.ResolveGameObject(goPath);", write_index)
+    assert write_index < readback_index
+    assert "AssetDatabase.SaveAssets();" not in block
+    assert "before = new" in block
+    assert "after = new" in block
+    assert "pending = true" in block
+    assert 'note = "已修改，尚未落盘"' in block
