@@ -62,3 +62,21 @@ def test_add_modular_avatar_component_reports_memory_state_without_adding_saveas
     assert "after," in source
     assert "pending = !sceneSaved" in source
     assert 'note = sceneSaved ? "已修改并落盘" : "已修改，尚未落盘"' in source
+
+
+def test_instantiate_prefab_reports_fresh_scene_memory_state_without_saving() -> None:
+    source = (
+        ROOT / "Assets/VRCForge/Editor/Generic/UnityAssetPrefabCrud.cs"
+    ).read_text(encoding="utf-8")
+    block = source[
+        source.index("public static class InstantiatePrefabTool") :
+        source.index("public static class UnpackPrefabTool")
+    ]
+    write_index = block.index("PrefabUtility.InstantiatePrefab")
+    readback_index = block.index("var readbackInstance = ComponentCrudCore.ResolveGameObject(goPath);", write_index)
+    assert write_index < readback_index
+    assert "AssetDatabase.SaveAssets();" not in block
+    assert "before = new" in block
+    assert "after = new" in block
+    assert "pending = true" in block
+    assert 'note = "已修改，尚未落盘"' in block

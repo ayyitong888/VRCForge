@@ -376,6 +376,12 @@ namespace VRCForge.Editor
                 {
                     return VRCForgeToolResult.Failed($"Prefab result path '{expectedResultPath}' already exists; refusing to create an ambiguous duplicate.");
                 }
+                var before = new
+                {
+                    gameObjectPath = expectedResultPath,
+                    exists = false,
+                    scenePath
+                };
                 var worldPositionStays = p.worldPositionStays ?? true;
 
                 if (p.preview ?? false)
@@ -459,22 +465,40 @@ namespace VRCForge.Editor
                         return CommittedFailure("Instantiated prefab continuation identity did not match its readback.", mutatedPath, mutatedGlobalObjectId);
                     }
                 }
+                var readbackInstance = ComponentCrudCore.ResolveGameObject(goPath);
+                var readbackGlobalObjectId = GlobalObjectId.GetGlobalObjectIdSlow(readbackInstance).ToString();
+                var finalPrefabPath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(readbackInstance);
+                var finalPrefabGuid = string.IsNullOrEmpty(finalPrefabPath) ? "" : AssetDatabase.AssetPathToGUID(finalPrefabPath);
+                var after = new
+                {
+                    gameObjectPath = ComponentCrudCore.GetHierarchyPath(readbackInstance.transform),
+                    exists = true,
+                    name = readbackInstance.name,
+                    globalObjectId = readbackGlobalObjectId,
+                    prefabPath = finalPrefabPath,
+                    prefabGuid = finalPrefabGuid,
+                    activeSelf = readbackInstance.activeSelf
+                };
                 var payload = new
                 {
                     action = "instantiate_prefab",
                     preview = false,
                     assetPath = path,
                     gameObjectPath = goPath,
-                    name = instance.name,
+                    name = readbackInstance.name,
                     parentPath = resolvedParentPath,
-                    instanceId = instance.GetInstanceID(),
+                    instanceId = readbackInstance.GetInstanceID(),
                     prefabGuid,
                     dependencyHash,
                     scenePath,
                     parentGlobalObjectId,
-                    globalObjectId,
+                    globalObjectId = readbackGlobalObjectId,
                     continuationRegistered = continuationCount > 0,
-                    continuationCount
+                    continuationCount,
+                    before,
+                    after,
+                    pending = true,
+                    note = "已修改，尚未落盘"
                 };
                 return VRCForgeToolResult.Completed($"Instantiated '{path}' as '{goPath}'.", payload);
             }
