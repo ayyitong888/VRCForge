@@ -31,6 +31,9 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var receipts = new List<TransactionReceipt>();
+            var transactionHandle = "";
+            var mutationStarted = false;
             try
             {
                 var identity = PrimitiveBasisLiveGuard.RequireBoundRequest(@params);
@@ -83,10 +86,47 @@ namespace VRCForge.Editor
                         });
                 }
 
+                transactionHandle = $"checkpoint:{ProjectRoot()}";
                 foreach (var scene in loadedScenes)
                 {
+                    receipts.Add(new TransactionReceipt
+                    {
+                        Asset = $"scene:{scene.path}",
+                        Before = DescribeSceneState(scene.path)
+                    });
+                }
+                var loadedScenePaths = new HashSet<string>(
+                    loadedScenes.Select(scene => scene.path),
+                    StringComparer.Ordinal);
+                var dirtyAssetPaths = Resources.FindObjectsOfTypeAll<UnityEngine.Object>()
+                    .Where(asset => asset != null
+                        && EditorUtility.IsPersistent(asset)
+                        && EditorUtility.IsDirty(asset))
+                    .Select(AssetDatabase.GetAssetPath)
+                    .Where(path => !string.IsNullOrWhiteSpace(path)
+                        && path.StartsWith("Assets/", StringComparison.Ordinal)
+                        && !loadedScenePaths.Contains(path))
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(path => path, StringComparer.Ordinal)
+                    .ToList();
+                foreach (var assetPath in dirtyAssetPaths)
+                {
+                    receipts.Add(new TransactionReceipt
+                    {
+                        Asset = assetPath,
+                        Before = DescribeAssetState(assetPath)
+                    });
+                }
+
+                mutationStarted = true;
+                foreach (var scene in loadedScenes)
+                {
+                    var receipt = receipts.First(item => item.Asset == $"scene:{scene.path}");
                     if (!EditorSceneManager.SaveScene(scene))
                     {
+                        receipt.After = DescribeSceneState(scene.path);
+                        receipt.Status = "failed";
+                        receipt.Error = "Unity returned false from EditorSceneManager.SaveScene.";
                         return VRCForgeToolResult.Failed(
                             "scene_save_failed",
                             new
@@ -94,11 +134,19 @@ namespace VRCForge.Editor
                                 message = $"Unity could not save the open scene '{scene.path}' before checkpointing.",
                                 blocking = true,
                                 recoverable = false,
-                                scene = scene.path
+                                scene = scene.path,
+                                transaction = BuildTransaction(receipts, transactionHandle)
                             });
                     }
+                    receipt.After = DescribeSceneState(scene.path);
+                    receipt.Status = "succeeded";
                 }
                 AssetDatabase.SaveAssets();
+                foreach (var receipt in receipts.Where(item => !item.Asset.StartsWith("scene:", StringComparison.Ordinal)))
+                {
+                    receipt.After = ReadAssetAfter(receipt.Asset);
+                    receipt.Status = "succeeded";
+                }
                 var scenes = loadedScenes.Select(scene => scene.path).ToList();
                 var activeScene = SceneManager.GetActiveScene();
                 var activeScenePath = loadedScenes.Any(scene => scene == activeScene)
@@ -116,13 +164,111 @@ namespace VRCForge.Editor
                         unityProcessId = identity?.ProcessId,
                         unityProcessStartedAtUtc = identity?.StartedAtUtc,
                         unityExecutableDigest = identity?.ExecutableDigest,
-                        projectPathDigest = identity?.ProjectPathDigest
+                        projectPathDigest = identity?.ProjectPathDigest,
+                        transaction = BuildTransaction(receipts, transactionHandle)
                     });
             }
             catch (Exception ex)
             {
+                if (mutationStarted)
+                {
+                    foreach (var receipt in receipts)
+                    {
+                        receipt.After = receipt.Asset.StartsWith("scene:", StringComparison.Ordinal)
+                            ? DescribeSceneState(receipt.Asset.Substring("scene:".Length))
+                            : ReadAssetAfter(receipt.Asset);
+                    }
+                    var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
+                    if (failed != null)
+                    {
+                        failed.Status = "failed";
+                        failed.Error = ex.Message;
+                    }
+                    else
+                    {
+                        receipts.Add(new TransactionReceipt
+                        {
+                            Asset = $"transaction:{transactionHandle}",
+                            Before = new { started = true },
+                            After = new { completed = false },
+                            Status = "failed",
+                            Error = ex.Message
+                        });
+                    }
+                    return VRCForgeToolResult.Failed($"Checkpoint preparation failed: {ex.Message}", new
+                    {
+                        transaction = BuildTransaction(receipts, transactionHandle)
+                    });
+                }
                 return VRCForgeToolResult.Failed($"Checkpoint preparation failed: {ex.Message}");
             }
+        }
+
+        private static object DescribeSceneState(string scenePath)
+        {
+            var scene = SceneManager.GetSceneByPath(scenePath);
+            return new
+            {
+                loaded = scene.IsValid() && scene.isLoaded,
+                dirty = scene.IsValid() && scene.isDirty,
+                file = DescribeProjectFile(scenePath)
+            };
+        }
+
+        private static object DescribeAssetState(string assetPath)
+        {
+            var loaded = AssetDatabase.LoadAllAssetsAtPath(assetPath);
+            return new
+            {
+                dirty = loaded.Any(asset => asset != null && EditorUtility.IsDirty(asset)),
+                file = DescribeProjectFile(assetPath)
+            };
+        }
+
+        private static object ReadAssetAfter(string assetPath)
+        {
+            return DescribeAssetState(assetPath);
+        }
+
+        private static object DescribeProjectFile(string projectRelativePath)
+        {
+            var fullPath = Path.Combine(ProjectRoot(), projectRelativePath);
+            var file = new FileInfo(fullPath);
+            return new
+            {
+                exists = file.Exists,
+                length = file.Exists ? file.Length : 0L,
+                lastWriteTimeUtc = file.Exists ? file.LastWriteTimeUtc.ToString("O") : ""
+            };
+        }
+
+        private static object BuildTransaction(List<TransactionReceipt> receipts, string transactionHandle)
+        {
+            var transactionItems = receipts.Select(item => new
+            {
+                asset = item.Asset,
+                before = item.Before,
+                after = item.After ?? item.Before,
+                status = item.Status,
+                error = item.Error,
+                rolled_back = item.RolledBack
+            }).ToList();
+            return new
+            {
+                assets_touched = transactionItems.Count,
+                items = transactionItems.Take(20).ToArray(),
+                handle = transactionHandle
+            };
+        }
+
+        private sealed class TransactionReceipt
+        {
+            public string Asset = "";
+            public object Before;
+            public object After;
+            public string Status = "not_attempted";
+            public string Error = "";
+            public bool RolledBack = false;
         }
 
         internal static void ValidateProject(JObject @params)

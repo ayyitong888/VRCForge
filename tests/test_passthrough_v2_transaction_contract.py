@@ -119,3 +119,23 @@ def test_apply_clothing_fx_returns_bounded_multi_asset_transaction() -> None:
     assert 'Status = "succeeded"' in source
     assert 'Status = "failed"' in source
     assert "RolledBack = false" in source
+
+
+def test_prepare_checkpoint_reports_scene_and_dirty_asset_transaction_readback() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/CheckpointRecoveryTool.cs").read_text(
+        encoding="utf-8"
+    )
+    block = source[
+        source.index("public static class CheckpointPrepareTool") :
+        source.index("public static class CheckpointReloadTool")
+    ]
+    assert "Resources.FindObjectsOfTypeAll<UnityEngine.Object>()" in block
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    readback_index = block.index("ReadAssetAfter", save_index)
+    assert save_index < readback_index
+    assert "assets_touched = transactionItems.Count" in block
+    assert "items = transactionItems.Take(20).ToArray()" in block
+    assert "handle = transactionHandle" in block
+    assert 'Status = "succeeded"' in block
+    assert 'Status = "failed"' in block
+    assert "RolledBack = false" in block
