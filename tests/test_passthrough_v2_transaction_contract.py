@@ -53,3 +53,19 @@ def test_ensure_expression_parameter_returns_transaction_from_persisted_readback
     assert 'Status = "succeeded"' in block
     assert 'Status = "failed"' in block
     assert "RolledBack = false" in block
+
+
+def test_ensure_animator_state_returns_transaction_from_controller_readback() -> None:
+    source = (
+        ROOT / "Assets/VRCForge/Editor/Generic/UnityAvatarAuthoringCrud.cs"
+    ).read_text(encoding="utf-8")
+    block = source[source.index("public static class EnsureAnimatorStateTool") :]
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    readback_index = block.index("LoadAssetAtPath<AnimatorController>", save_index)
+    assert save_index < readback_index
+    assert "assets_touched = transactionItems.Count" in block
+    assert "items = transactionItems.Take(20).ToArray()" in block
+    assert "handle = transactionHandle" in block
+    assert "DescribeAnimatorState" in block
+    assert 'Status = "succeeded"' in block
+    assert 'Status = "failed"' in block

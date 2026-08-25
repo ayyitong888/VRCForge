@@ -695,6 +695,8 @@ namespace VRCForge.Editor
 
         public static object HandleCommand(JObject @params)
         {
+            var receipts = new List<AnimatorTransactionReceipt>();
+            var transactionHandle = "";
             try
             {
                 @params = @params ?? new JObject();
@@ -738,12 +740,38 @@ namespace VRCForge.Editor
                     return VRCForgeToolResult.Completed($"Preview: would ensure animator state '{stateName}'.", new { ok = true, preview = true, plan });
                 }
 
+                var controllerWasMissing = controller == null;
+                var controllerReceipt = new AnimatorTransactionReceipt
+                {
+                    Asset = controller != null ? AssetDatabase.GetAssetPath(controller) : "fx_controller",
+                    Before = DescribeAnimatorState(controller, layerName, stateName, parameterName)
+                };
+                receipts.Add(controllerReceipt);
+                AnimatorTransactionReceipt descriptorReceipt = null;
+                if (controllerWasMissing)
+                {
+                    descriptorReceipt = new AnimatorTransactionReceipt
+                    {
+                        Asset = "avatar_descriptor.fxController",
+                        Before = new { assetPath = "" }
+                    };
+                    receipts.Add(descriptorReceipt);
+                }
                 controller = AvatarAuthoringCrudCore.EnsureFxController(descriptor, assetDir);
+                var controllerPath = AssetDatabase.GetAssetPath(controller);
+                transactionHandle = controllerPath;
+                controllerReceipt.Asset = controllerPath;
+                if (descriptorReceipt != null)
+                {
+                    descriptorReceipt.After = new { assetPath = controllerPath };
+                    descriptorReceipt.Status = "succeeded";
+                }
                 Undo.RegisterCompleteObjectUndo(controller, "Ensure animator state");
                 var parameterCreated = EnsureControllerParameter(controller, parameterName, parameterType);
                 var layer = EnsureLayer(controller, layerName);
                 var state = FindState(layer.stateMachine, stateName);
                 var stateCreated = false;
+                AnimatorTransactionReceipt clipReceipt = null;
                 if (state == null)
                 {
                     state = layer.stateMachine.AddState(stateName);
@@ -752,8 +780,15 @@ namespace VRCForge.Editor
                 state.writeDefaultValues = writeDefaults;
                 if (state.motion == null)
                 {
+                    clipReceipt = new AnimatorTransactionReceipt
+                    {
+                        Asset = "animation_clip",
+                        Before = new { exists = false }
+                    };
+                    receipts.Add(clipReceipt);
                     var clip = CreateEmptyClip(assetDir, descriptor.name, layerName, stateName);
                     state.motion = clip;
+                    clipReceipt.Asset = AssetDatabase.GetAssetPath(clip);
                 }
                 var transitionCreated = EnsureAnyStateTransition(layer.stateMachine, state, parameterName, conditionMode, threshold);
                 EditorUtility.SetDirty(controller);
@@ -761,12 +796,28 @@ namespace VRCForge.Editor
                 EditorUtility.SetDirty(state);
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
+                var readbackController = AssetDatabase.LoadAssetAtPath<AnimatorController>(controllerPath);
+                if (readbackController == null)
+                {
+                    throw new InvalidOperationException($"FX controller readback failed: {controllerPath}");
+                }
+                controllerReceipt.After = DescribeAnimatorState(readbackController, layerName, stateName, parameterName);
+                controllerReceipt.Status = "succeeded";
+                if (clipReceipt != null)
+                {
+                    var readbackClip = AssetDatabase.LoadAssetAtPath<AnimationClip>(clipReceipt.Asset);
+                    clipReceipt.After = readbackClip == null
+                        ? (object)new { exists = false }
+                        : new { exists = true, assetPath = clipReceipt.Asset, name = readbackClip.name };
+                    clipReceipt.Status = readbackClip != null ? "succeeded" : "failed";
+                    if (readbackClip == null) clipReceipt.Error = "Animation clip readback failed.";
+                }
                 return VRCForgeToolResult.Completed($"Ensured animator state '{stateName}'.", new
                 {
                     ok = true,
                     preview = false,
                     action = "ensure_animator_state",
-                    fxControllerPath = AssetDatabase.GetAssetPath(controller),
+                    fxControllerPath = controllerPath,
                     layerName,
                     stateName,
                     parameterName,
@@ -774,13 +825,78 @@ namespace VRCForge.Editor
                     parameterCreated,
                     stateCreated,
                     transitionCreated,
-                    writeDefaults
+                    writeDefaults,
+                    transaction = BuildAnimatorTransaction(receipts, transactionHandle)
                 });
             }
             catch (Exception ex)
             {
-                return VRCForgeToolResult.Failed($"Ensure animator state failed: {ex.Message}\n{ex.StackTrace}");
+                var failed = receipts.FirstOrDefault(item => item.Status == "not_attempted");
+                if (failed != null)
+                {
+                    failed.Status = "failed";
+                    failed.Error = ex.Message;
+                }
+                return VRCForgeToolResult.Failed(
+                    $"Ensure animator state failed: {ex.Message}\n{ex.StackTrace}",
+                    new { transaction = BuildAnimatorTransaction(receipts, transactionHandle) });
             }
+        }
+
+        private static object DescribeAnimatorState(AnimatorController controller, string layerName, string stateName, string parameterName)
+        {
+            if (controller == null)
+            {
+                return new { exists = false };
+            }
+            var layer = controller.layers.FirstOrDefault(item => item.name == layerName);
+            var state = layer != null ? FindState(layer.stateMachine, stateName) : null;
+            var parameter = controller.parameters.FirstOrDefault(item => item.name == parameterName);
+            return new
+            {
+                exists = true,
+                assetPath = AssetDatabase.GetAssetPath(controller),
+                parameter = parameter == null ? null : new { parameter.name, type = parameter.type.ToString() },
+                layer = layer == null ? null : new { layer.name, layer.defaultWeight },
+                state = state == null ? null : new
+                {
+                    state.name,
+                    state.writeDefaultValues,
+                    motionPath = AssetDatabase.GetAssetPath(state.motion)
+                }
+            };
+        }
+
+        private static object BuildAnimatorTransaction(List<AnimatorTransactionReceipt> receipts, string transactionHandle)
+        {
+            var transactionItems = receipts
+                .Where(item => item.Status != "not_attempted")
+                .Select(item => new
+                {
+                    asset = item.Asset,
+                    before = item.Before,
+                    after = item.After,
+                    status = item.Status,
+                    error = item.Error,
+                    rolled_back = item.RolledBack
+                })
+                .ToList();
+            return new
+            {
+                assets_touched = transactionItems.Count,
+                items = transactionItems.Take(20).ToArray(),
+                handle = transactionHandle
+            };
+        }
+
+        private sealed class AnimatorTransactionReceipt
+        {
+            public string Asset = "";
+            public object Before;
+            public object After;
+            public string Status = "not_attempted";
+            public string Error = "";
+            public bool RolledBack = false;
         }
 
         private static bool EnsureControllerParameter(AnimatorController controller, string parameterName, AnimatorControllerParameterType parameterType)
