@@ -40,3 +40,20 @@ def test_duplicate_project_asset_returns_fresh_readback_and_bounded_affected() -
     assert "fileDigest = createdEvidence.File.Digest" in block
     assert "items = affectedItems.Take(20).ToArray()" in block
     assert "handle = createdEvidence.Guid" in block
+
+
+def test_material_shader_returns_disk_readback_and_renderer_impact() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/MaterialShaderTool.cs").read_text(
+        encoding="utf-8"
+    )
+    block = _tool_block(source, "MaterialShaderTool", "public static class MaterialTextureTool")
+
+    save_index = block.index("AssetDatabase.SaveAssets();")
+    readback_index = block.index("AssetDatabase.LoadAssetAtPath<Material>")
+    assert save_index < readback_index
+    assert "before = beforePayload" in block
+    assert "after = afterPayload" in block
+    assert "shader = readbackShader" in block
+    assert "count = sharedImpact.loadedRendererSlotCount" in block
+    assert "items = sharedImpact.loadedRendererSlots.Take(20).ToArray()" in block
+    assert "handle = materialEvidence.assetGuid" in block

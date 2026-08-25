@@ -222,6 +222,7 @@ namespace VRCForge.Editor
                     EditorUtility.SetDirty(target.material);
                     failurePhase = "asset_save";
                     AssetDatabase.SaveAssetIfDirty(target.material);
+                    AssetDatabase.SaveAssets();
                     if (EditorUtility.IsDirty(target.material))
                     {
                         throw new InvalidOperationException("Material asset remained dirty after save.");
@@ -253,6 +254,28 @@ namespace VRCForge.Editor
                 {
                     Undo.CollapseUndoOperations(undoGroup);
                 }
+
+                var readbackShaderObject = readback != null ? readback.shader : null;
+                var readbackShaderAssetPath = readbackShaderObject != null
+                    ? NormalizeResolvedShaderAssetPath(AssetDatabase.GetAssetPath(readbackShaderObject))
+                    : string.Empty;
+                var readbackShaderAssetGuid = string.IsNullOrWhiteSpace(readbackShaderAssetPath)
+                    ? string.Empty
+                    : NormalizeHex(AssetDatabase.AssetPathToGUID(readbackShaderAssetPath), 32, allowEmpty: false);
+                var beforePayload = new
+                {
+                    shader = beforeShader,
+                    shaderAssetPath = beforeShaderAssetPath,
+                    shaderAssetGuid = beforeShaderAssetGuid,
+                    materialFileDigest = materialEvidence.fileDigest
+                };
+                var afterPayload = new
+                {
+                    shader = readbackShader,
+                    shaderAssetPath = readbackShaderAssetPath,
+                    shaderAssetGuid = readbackShaderAssetGuid,
+                    materialFileDigest = materialFileDigestAfter
+                };
 
                 return VRCForgeToolResult.Completed(
                     preview ? "Material shader preview completed." : "Material shader assignment applied.",
@@ -295,7 +318,15 @@ namespace VRCForge.Editor
                         sharedImpactDigestSchema = "vrcforge.material_shader_impact.v2",
                         sharedImpactDigest,
                         sharedImpactDisplayDigest,
-                        sharedImpactTailDigest
+                        sharedImpactTailDigest,
+                        before = beforePayload,
+                        after = afterPayload,
+                        affected = new
+                        {
+                            count = sharedImpact.loadedRendererSlotCount,
+                            items = sharedImpact.loadedRendererSlots.Take(20).ToArray(),
+                            handle = materialEvidence.assetGuid
+                        }
                     });
             }
             catch (Exception ex)
