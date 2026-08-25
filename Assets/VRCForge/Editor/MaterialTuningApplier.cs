@@ -41,6 +41,8 @@ namespace VRCForge.Editor
                 var materialIndex = BuildMaterialIndex(avatarPath);
                 var applied = new List<object>();
                 var skipped = new List<object>();
+                var beforeValues = new List<object>();
+                var afterValues = new List<object>();
 
                 foreach (var token in changes.OfType<JObject>())
                 {
@@ -73,7 +75,25 @@ namespace VRCForge.Editor
                         continue;
                     }
 
+                    var memoryProperties = adapter.ReadSupportedProperties(target.material);
+                    if (!memoryProperties.TryGetValue(semanticProperty, out var memoryValue))
+                    {
+                        throw new InvalidOperationException($"Material memory readback failed for semantic property: {semanticProperty}");
+                    }
+                    var currentValue = memoryValue.value;
                     EditorUtility.SetDirty(target.material);
+                    beforeValues.Add(new
+                    {
+                        material_id = materialId,
+                        semantic_property = semanticProperty,
+                        value = previousValue
+                    });
+                    afterValues.Add(new
+                    {
+                        material_id = materialId,
+                        semantic_property = semanticProperty,
+                        value = currentValue
+                    });
                     applied.Add(new
                     {
                         material_id = materialId,
@@ -83,7 +103,7 @@ namespace VRCForge.Editor
                         shader_family = adapter.ShaderFamily,
                         semantic_property = semanticProperty,
                         before = previousValue,
-                        after = appliedValue
+                        after = currentValue
                     });
                 }
 
@@ -102,7 +122,11 @@ namespace VRCForge.Editor
                         skippedCount = skipped.Count,
                         applied,
                         skipped,
-                        saved = saveAssets
+                        saved = saveAssets,
+                        before = beforeValues,
+                        after = afterValues,
+                        pending = !saveAssets,
+                        note = saveAssets ? "已修改并落盘" : "已修改，尚未落盘"
                     });
             }
             catch (Exception ex)

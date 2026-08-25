@@ -33,3 +33,17 @@ def test_toggle_scene_object_reports_memory_readback_without_changing_save_behav
     assert "after = afterActive" in block
     assert "pending = !saveAssets" in block
     assert 'note = saveAssets ? "已修改并落盘" : "已修改，尚未落盘"' in block
+
+
+def test_material_tuning_reports_adapter_memory_readback_without_changing_save_behavior() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/MaterialTuningApplier.cs").read_text(
+        encoding="utf-8"
+    )
+    apply_index = source.index("adapter.TryApplyChange")
+    readback_index = source.index("adapter.ReadSupportedProperties(target.material)", apply_index)
+    assert apply_index < readback_index
+    assert source.count("AssetDatabase.SaveAssets();") == 1
+    assert "before = beforeValues" in source
+    assert "after = afterValues" in source
+    assert "pending = !saveAssets" in source
+    assert 'note = saveAssets ? "已修改并落盘" : "已修改，尚未落盘"' in source
