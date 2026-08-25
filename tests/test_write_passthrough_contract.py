@@ -203,3 +203,17 @@ def test_scan_animation_bindings_returns_fresh_file_readback() -> None:
     assert "payload.after = afterSnapshot" in block
     assert "items = new[] { payload.outputPath }" in block
     assert "handle = payload.outputPath" in block
+
+
+def test_scan_avatar_items_returns_fresh_file_readback() -> None:
+    source = (ROOT / "Assets/VRCForge/Editor/GameObjectTools.cs").read_text(encoding="utf-8")
+    block = _tool_block(source, "GameObjectTools")
+    write_index = block.index("File.WriteAllText")
+    save_index = block.index("AssetDatabase.SaveAssets();", write_index)
+    readback_index = block.index("var after = ReadFileSnapshot", save_index)
+    assert write_index < save_index < readback_index
+    assert "var before = ReadFileSnapshot" in block
+    assert "payload.before = beforeSnapshot" in block
+    assert "payload.after = afterSnapshot" in block
+    assert "items = new[] { payload.outputPath }" in block
+    assert "handle = payload.outputPath" in block
