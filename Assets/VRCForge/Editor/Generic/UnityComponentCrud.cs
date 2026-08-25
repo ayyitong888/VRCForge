@@ -1961,6 +1961,23 @@ namespace VRCForge.Editor
 
                 if (ComponentCrudCore.ValuesExactlyEqual(oldValue, newValue))
                 {
+                    var unchangedScene = SceneObjectCopyCore.ResolveSavedScene(
+                        beforeScene.Path,
+                        "unchanged component property readback");
+                    var unchangedObject = SceneObjectCopyCore.ResolveUniqueGameObject(
+                        unchangedScene.Scene,
+                        goPath,
+                        "unchanged component property target");
+                    var unchangedComponent = ComponentCrudCore.ResolveComponent(
+                        unchangedObject,
+                        type,
+                        componentIndex);
+                    var unchangedMember = ComponentCrudCore.ResolveMember(
+                        unchangedComponent.GetType(),
+                        p.propertyPath);
+                    var unchangedReadbackValue = ComponentCrudCore.GetMemberValue(
+                        unchangedComponent,
+                        unchangedMember);
                     return VRCForgeToolResult.Completed(
                         $"{component.GetType().Name}.{p.propertyPath} already has the requested value on '{goPath}'.",
                         new
@@ -1974,7 +1991,15 @@ namespace VRCForge.Editor
                             propertyPath = p.propertyPath,
                             valueType = memberType.FullName,
                             oldValue = ComponentCrudCore.DescribeValue(oldValue),
-                            newValue = ComponentCrudCore.DescribeValue(oldValue),
+                            newValue = ComponentCrudCore.DescribeValue(unchangedReadbackValue),
+                            before = ComponentCrudCore.DescribeValue(oldValue),
+                            after = ComponentCrudCore.DescribeValue(unchangedReadbackValue),
+                            affected = new
+                            {
+                                count = 1,
+                                items = new[] { goPath },
+                                handle = objectId
+                            },
                             scenePath = beforeScene.Path,
                             sceneSaved = true,
                             persistedReadback = true,
@@ -1995,6 +2020,7 @@ namespace VRCForge.Editor
                 mutationApplied = true;
                 EditorUtility.SetDirty(component);
                 EditorUtility.SetDirty(go);
+                AssetDatabase.SaveAssets();
                 failureStage = "scene_save";
                 var afterScene = ComponentCrudCore.SaveAndResolveScene(beforeScene);
                 failureStage = "persisted_readback";
@@ -2030,6 +2056,14 @@ namespace VRCForge.Editor
                     valueType = memberType.FullName,
                     oldValue = ComponentCrudCore.DescribeValue(oldValue),
                     newValue = ComponentCrudCore.DescribeValue(readbackValue),
+                    before = ComponentCrudCore.DescribeValue(oldValue),
+                    after = ComponentCrudCore.DescribeValue(readbackValue),
+                    affected = new
+                    {
+                        count = 1,
+                        items = new[] { goPath },
+                        handle = objectId
+                    },
                     scenePath = afterScene.Path,
                     sceneSaved = true,
                     persistedReadback = true,
