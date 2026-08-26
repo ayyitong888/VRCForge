@@ -1083,7 +1083,7 @@ class DoctorFixRequest(BaseModel):
 
 
 class ApiConfigRequest(BaseModel):
-    provider: str = DEFAULT_LLM_PROVIDER
+    provider: str = "gemini"
     api_key: str = ""
     base_url: str | None = None
     model: str | None = None
@@ -1102,7 +1102,7 @@ class ApiModelListRequest(ApiConfigRequest):
 
 
 class ReasoningVariantsRequest(BaseModel):
-    provider: str = DEFAULT_LLM_PROVIDER
+    provider: str = "gemini"
     model: str = ""
     # Omitted remains a legacy request, preserving the historical transport.
     api_type: str | None = None
@@ -1262,13 +1262,13 @@ class AvatarEncryptionScanRequest(AvatarScopedConnectionRequest):
 
 class AvatarEncryptionPlanRequest(AvatarEncryptionScanRequest):
     target_shader_families: list[str] = Field(
-        default_factory=lambda: list(AVATAR_ENCRYPTION_PRIMARY_SHADER_FAMILIES),
+        default_factory=lambda: ["liltoon", "poiyomi"],
         alias="targetShaderFamilies",
     )
     material_ids: list[str] = Field(default_factory=list, alias="materialIds")
     renderer_paths: list[str] = Field(default_factory=list, alias="rendererPaths")
     targets: list[dict[str, Any]] = Field(default_factory=list)
-    profile: str = AVATAR_ENCRYPTION_RECOMMENDED_PROFILE
+    profile: str = "standard"
     protection_profile: str | None = Field(default=None, alias="protectionProfile")
     platform: str = "pc"
     target_platform: str | None = Field(default=None, alias="targetPlatform")
