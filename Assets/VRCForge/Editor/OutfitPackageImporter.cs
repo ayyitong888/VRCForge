@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
+using System.Text;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
 using UnityEditor.PackageManager;
@@ -632,16 +633,45 @@ namespace VRCForge.Editor
         }
     }
 
+    [InitializeOnLoad]
     [VRCForgeCommand(
         toolId: "vrc_refresh_asset_database",
-        Summary = "Refresh Unity AssetDatabase after VRCForge copied supervised outfit assets."
+        Summary = "Refresh Unity AssetDatabase after VRCForge copied supervised outfit assets and return a pollable completion job.",
+        UsesContinuation = true,
+        ContinuationAction = "vrc_poll_job",
+        ContinuationTimeoutSeconds = 300
     )]
     public static class AssetDatabaseRefreshTool
     {
+        internal const string ToolName = "vrc_refresh_asset_database";
         private const double RefreshResponseGraceSeconds = 0.25d;
         private static bool refreshScheduled;
         private static double refreshNotBefore;
         private static string scheduledRequestId = string.Empty;
+
+        static AssetDatabaseRefreshTool()
+        {
+            var jobId = UnityAsyncJobRegistry.GetActive(ToolName);
+            if (string.IsNullOrEmpty(jobId))
+            {
+                return;
+            }
+            var current = UnityAsyncJobRegistry.Poll(jobId);
+            var status = current?.Value<string>("status") ?? string.Empty;
+            if (status == "queued")
+            {
+                refreshScheduled = true;
+                refreshNotBefore = EditorApplication.timeSinceStartup + RefreshResponseGraceSeconds;
+                scheduledRequestId = jobId;
+                EditorApplication.update -= RunScheduledRefresh;
+                EditorApplication.update += RunScheduledRefresh;
+            }
+            else if (status == "running")
+            {
+                EditorApplication.update -= TryCompleteScheduledRefresh;
+                EditorApplication.update += TryCompleteScheduledRefresh;
+            }
+        }
 
         public class Parameters
         {
@@ -676,26 +706,52 @@ namespace VRCForge.Editor
                     };
                 }
 
-                if (!refreshScheduled)
+                var existingJobId = UnityAsyncJobRegistry.GetActive(ToolName);
+                if (!string.IsNullOrEmpty(existingJobId))
                 {
-                    refreshScheduled = true;
-                    refreshNotBefore = EditorApplication.timeSinceStartup + RefreshResponseGraceSeconds;
-                    scheduledRequestId = Guid.NewGuid().ToString("N");
-                    EditorApplication.update -= RunScheduledRefresh;
-                    EditorApplication.update += RunScheduledRefresh;
+                    return VRCForgeToolResult.RejectedBeforeMutation(
+                        "asset_database_refresh_already_running",
+                        "Another AssetDatabase refresh job is already active.",
+                        "unity_asset_database",
+                        "refresh_precondition",
+                        true,
+                        new { job_id = existingJobId });
                 }
-                return VRCForgeToolResult.Completed(
-                    "Scheduled a Unity AssetDatabase refresh after the tool response is released.",
-                    new
+
+                var job = UnityAsyncJobRegistry.Create(
+                    ToolName,
+                    CheckpointPrepareTool.ProjectRoot(),
+                    ReadSnapshot(),
+                    new JObject
                     {
-                        ok = true,
-                        status = "scheduled",
-                        requestId = scheduledRequestId,
-                        projectPath = CheckpointPrepareTool.ProjectRoot(),
-                        packageResolve,
-                        completionKnown = false,
-                        verificationTool = "vrc_get_compile_errors"
-                    });
+                        ["resolve_packages"] = resolvePackages,
+                        ["package_resolve_timeout_seconds"] = packageResolveTimeoutSeconds,
+                    },
+                    TimeSpan.FromSeconds(300));
+                var jobId = job.Value<string>("job_id");
+                UnityAsyncJobRegistry.SetActive(ToolName, jobId);
+                refreshScheduled = true;
+                refreshNotBefore = EditorApplication.timeSinceStartup + RefreshResponseGraceSeconds;
+                scheduledRequestId = jobId;
+                EditorApplication.update -= RunScheduledRefresh;
+                EditorApplication.update += RunScheduledRefresh;
+
+                var scheduled = new
+                {
+                    status = "scheduled",
+                    completionKnown = false,
+                    verificationTool = "vrc_get_compile_errors"
+                };
+                job["requestId"] = jobId;
+                job["projectPath"] = CheckpointPrepareTool.ProjectRoot();
+                job["packageResolve"] = JToken.FromObject(packageResolve);
+                job["scheduledStatus"] = scheduled.status;
+                job["completionKnown"] = scheduled.completionKnown;
+                job["verificationTool"] = scheduled.verificationTool;
+                return VRCForgeToolResult.Waiting(
+                    "Scheduled a Unity AssetDatabase refresh after the tool response is released.",
+                    RefreshResponseGraceSeconds,
+                    job);
             }
             catch (Exception ex)
             {
@@ -717,19 +773,73 @@ namespace VRCForge.Editor
             scheduledRequestId = string.Empty;
             try
             {
+                UnityAsyncJobRegistry.MarkRunning(requestId);
                 // A refresh may compile and domain-reload this same Core. It must
                 // therefore run only after the MCP response has been released;
                 // otherwise the caller and Unity can wait on each other forever.
                 AssetDatabase.SaveAssets();
                 AssetDatabase.Refresh();
                 UnityEngine.Debug.Log($"[VRCForge] Scheduled AssetDatabase refresh completed ({requestId}).");
+                EditorApplication.update -= TryCompleteScheduledRefresh;
+                EditorApplication.update += TryCompleteScheduledRefresh;
             }
             catch (Exception ex)
             {
+                UnityAsyncJobRegistry.Fail(
+                    requestId,
+                    "asset_database_refresh_failed",
+                    ex.Message,
+                    false,
+                    ReadSnapshot);
                 UnityEngine.Debug.LogError(
                     $"[VRCForge] Scheduled AssetDatabase refresh failed ({requestId}): "
                     + $"{ex.GetType().FullName}: {ex.Message}\n{ex.StackTrace}");
             }
+        }
+
+        private static void TryCompleteScheduledRefresh()
+        {
+            EditorApplication.update -= TryCompleteScheduledRefresh;
+            var jobId = UnityAsyncJobRegistry.GetActive(ToolName);
+            if (string.IsNullOrEmpty(jobId))
+            {
+                return;
+            }
+            var current = UnityAsyncJobRegistry.Poll(jobId);
+            if (current == null || current.Value<string>("status") == "expired")
+            {
+                UnityAsyncJobRegistry.ClearActive(ToolName, jobId);
+                return;
+            }
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
+            {
+                EditorApplication.update += TryCompleteScheduledRefresh;
+                return;
+            }
+            UnityAsyncJobRegistry.Complete(jobId, ReadSnapshot);
+        }
+
+        internal static JObject ReadSnapshot()
+        {
+            var assetPaths = AssetDatabase.GetAllAssetPaths() ?? new string[0];
+            Array.Sort(assetPaths, StringComparer.Ordinal);
+            string digest;
+            using (var sha256 = SHA256.Create())
+            {
+                digest = BitConverter.ToString(
+                        sha256.ComputeHash(Encoding.UTF8.GetBytes(string.Join("\n", assetPaths))))
+                    .Replace("-", string.Empty)
+                    .ToLowerInvariant();
+            }
+            return new JObject
+            {
+                ["project_path"] = CheckpointPrepareTool.ProjectRoot(),
+                ["is_compiling"] = EditorApplication.isCompiling,
+                ["is_updating"] = EditorApplication.isUpdating,
+                ["asset_path_count"] = assetPaths.Length,
+                ["asset_path_digest"] = digest,
+                ["compile"] = CompileErrorMonitor.ReadCoreInfoSnapshot(120),
+            };
         }
     }
 }

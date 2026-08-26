@@ -63,3 +63,85 @@ def test_unknown_job_has_canonical_non_retrying_failure_envelope() -> None:
     assert '["code"] = "job_not_found"' in poll_tool
     assert '["retryable"] = false' in poll_tool
     assert "Create(" not in poll_tool
+
+
+def test_refresh_keeps_response_release_order_and_completes_from_fresh_readback() -> None:
+    importer = (ROOT / "Assets" / "VRCForge" / "Editor" / "OutfitPackageImporter.cs").read_text(
+        encoding="utf-8-sig"
+    )
+    refresh = importer[importer.index("public static class AssetDatabaseRefreshTool") :]
+    handler = refresh[
+        refresh.index("public static object HandleCommand") : refresh.index(
+            "private static void RunScheduledRefresh"
+        )
+    ]
+    runner = refresh[
+        refresh.index("private static void RunScheduledRefresh") : refresh.index(
+            "private static void TryCompleteScheduledRefresh"
+        )
+    ]
+
+    assert "UnityAsyncJobRegistry.Create(" in handler
+    assert "EditorApplication.update += RunScheduledRefresh;" in handler
+    assert "AssetDatabase.Refresh" not in handler
+    assert runner.index("UnityAsyncJobRegistry.MarkRunning(requestId);") < runner.index(
+        "AssetDatabase.Refresh();"
+    )
+    assert "UnityAsyncJobRegistry.Complete(jobId, ReadSnapshot);" in refresh
+    assert "AssetDatabase.GetAllAssetPaths()" in refresh
+    assert "asset_path_digest" in refresh
+
+
+def test_dashboard_refresh_starts_then_polls_the_same_job(monkeypatch) -> None:
+    import dashboard_server
+
+    calls: list[tuple[str, dict[str, object]]] = []
+    job_id = "b" * 32
+
+    class Settings:
+        unity_mcp_timeout_seconds = 30
+
+    monkeypatch.setattr(dashboard_server, "load_dashboard_settings", lambda _request: Settings())
+    monkeypatch.setattr(dashboard_server, "build_agent_connection_request", lambda _params: {})
+
+    def invoke(_settings, tool_name, arguments, **_kwargs):
+        calls.append((tool_name, dict(arguments)))
+        payload = (
+            {
+                "job_id": job_id,
+                "before": {"asset_path_digest": "before"},
+                "after": None,
+                "status": "queued",
+                "requestId": job_id,
+            }
+            if tool_name == "vrc_refresh_asset_database"
+            else {
+                "job_id": job_id,
+                "before": {"asset_path_digest": "before"},
+                "after": {"asset_path_digest": "after"},
+                "status": "done",
+            }
+        )
+        return dashboard_server.McpResult(0, "", "", payload)
+
+    monkeypatch.setattr(dashboard_server, "invoke_unity_mcp", invoke)
+
+    result = dashboard_server.refresh_asset_database_sync(
+        {"projectPath": "D:/isolated", "resolvePackages": False}
+    )
+
+    assert calls == [
+        (
+            "vrc_refresh_asset_database",
+            {
+                "projectPath": "D:/isolated",
+                "resolvePackages": False,
+                "packageResolveTimeoutSeconds": 120,
+            },
+        ),
+        ("vrc_poll_job", {"job_id": job_id}),
+    ]
+    assert result["before"] == {"asset_path_digest": "before"}
+    assert result["after"] == {"asset_path_digest": "after"}
+    assert result["status"] == "done"
+    assert result["ok"] is True

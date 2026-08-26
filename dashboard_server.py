@@ -24257,6 +24257,66 @@ def build_refresh_asset_database_execution_plan(
     ]
 
 
+UNITY_ASYNC_JOB_POLL_SECONDS = 0.25
+
+
+def poll_unity_async_job_sync(
+    settings: Settings,
+    initial: dict[str, Any],
+    *,
+    label: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    current = dict(initial)
+    status = str(current.get("status") or "").strip().lower()
+    if status not in {"queued", "running"}:
+        return current
+    job_id = str(current.get("job_id") or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", job_id):
+        return {
+            **current,
+            "ok": False,
+            "status": "failed",
+            "error": {
+                "code": "async_job_id_missing",
+                "message": f"{label} returned no valid job_id.",
+                "retryable": False,
+            },
+        }
+
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+    last = current
+    while time.monotonic() <= deadline:
+        polled = ensure_dict_payload(
+            extract_tool_result_payload(
+                invoke_unity_mcp(
+                    settings,
+                    "vrc_poll_job",
+                    {"job_id": job_id},
+                    preserve_tool_error=True,
+                )
+            ),
+            f"{label} async job poll",
+        )
+        last = {**current, **polled}
+        status = str(last.get("status") or "").strip().lower()
+        if status not in {"queued", "running"}:
+            last["ok"] = status == "done"
+            return last
+        time.sleep(UNITY_ASYNC_JOB_POLL_SECONDS)
+
+    return {
+        **last,
+        "ok": False,
+        "status": "failed",
+        "error": {
+            "code": "async_job_poll_timeout",
+            "message": f"{label} did not reach a terminal state before the bounded wait expired.",
+            "retryable": True,
+        },
+    }
+
+
 def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
     tool_name, arguments = build_refresh_asset_database_execution_plan(params)[0]
     package_resolve_timeout = int(arguments["packageResolveTimeoutSeconds"])
@@ -24266,8 +24326,14 @@ def refresh_asset_database_sync(params: dict[str, Any]) -> dict[str, Any]:
         extract_tool_result_payload(invoke_unity_mcp(settings, tool_name, arguments)),
         "refresh asset database",
     )
-    payload.setdefault("ok", True)
-    return payload
+    result = poll_unity_async_job_sync(
+        settings,
+        payload,
+        label="refresh asset database",
+        timeout_seconds=300.0,
+    )
+    result.setdefault("ok", True)
+    return result
 
 
 def _resolve_unity_project_root_for_import(params: dict[str, Any], plan_payload: dict[str, Any]) -> Path:
