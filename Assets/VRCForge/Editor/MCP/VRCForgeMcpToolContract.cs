@@ -15,8 +15,8 @@ namespace VRCForge.Editor
         internal const string CoreIdentity = "vrcforge.unity-core";
         internal const string HandshakeProtocol = "vrcforge.core-handshake.v1";
         internal const string ProductVersion = "1.7.9";
-        internal const string ToolContractVersion = "82";
-        internal const int ToolCount = 80;
+        internal const string ToolContractVersion = "83";
+        internal const int ToolCount = 81;
 
         private static readonly Dictionary<string, string> ExpectedTypes =
             new Dictionary<string, string>(StringComparer.Ordinal)
@@ -65,6 +65,7 @@ namespace VRCForge.Editor
                 { "vrc_manage_fx_animator", "VRCForge.Editor.ManageFxAnimatorTool" },
                 { "vrc_manage_wardrobe", "VRCForge.Editor.WardrobeManagerWriter" },
                 { "vrc_prepare_checkpoint", "VRCForge.Editor.CheckpointPrepareTool" },
+                { "vrc_poll_job", "VRCForge.Editor.AsyncJobPollTool" },
                 { "vrc_read_avatar_descriptor", "VRCForge.Editor.ReadAvatarDescriptorTool" },
                 { "vrc_read_vrchat_sdk_builder_alerts", "VRCForge.Editor.VrchatSdkBuilderAlertsTool" },
                 { "vrc_remap_skinned_mesh_bone", "VRCForge.Editor.RemapSkinnedMeshBoneTool" },
@@ -115,6 +116,7 @@ namespace VRCForge.Editor
                 "vrc_inspect_skinned_mesh_deformation",
                 "vrc_inspect_modular_avatar_component",
                 "vrc_inspect_primitive_basis_fixture",
+                "vrc_poll_job",
                 "vrc_read_avatar_descriptor",
                 "vrc_read_vrchat_sdk_builder_alerts",
                 "vrc_avatar_upload_readiness",

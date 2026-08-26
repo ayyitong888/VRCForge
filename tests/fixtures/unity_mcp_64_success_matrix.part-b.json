@@ -156,6 +156,15 @@
       "cleanup": ["none"]
     },
     {
+      "id": "poll-unknown-async-job",
+      "tool": "vrc_poll_job",
+      "mode": "read_only",
+      "minimalArguments": { "job_id": "00000000000000000000000000000001" },
+      "requiredFixtures": ["No async job exists with the fixed non-secret fixture id in this disposable Editor session."],
+      "successFields": ["job_id", "before", "after", "status", "error.code"],
+      "cleanup": ["none"]
+    },
+    {
       "id": "read-avatar-descriptor",
       "tool": "vrc_read_avatar_descriptor",
       "mode": "read_only",

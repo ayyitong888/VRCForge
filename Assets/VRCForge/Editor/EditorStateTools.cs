@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using Newtonsoft.Json.Linq;
@@ -378,6 +380,433 @@ namespace VRCForge.Editor
                 committed = false,
                 commitState = "not_started"
             };
+        }
+    }
+
+    [InitializeOnLoad]
+    internal static class UnityAsyncJobRegistry
+    {
+        private const string Schema = "vrcforge.async-job.v1";
+        private const string IndexKey = "VRCForge.AsyncJob.Index.v1";
+        private const string RecordPrefix = "VRCForge.AsyncJob.Record.v1.";
+        private const string ActivePrefix = "VRCForge.AsyncJob.Active.v1.";
+        private static readonly TimeSpan TerminalRetention = TimeSpan.FromMinutes(15);
+        private static readonly object Sync = new object();
+
+        static UnityAsyncJobRegistry()
+        {
+            Sweep(DateTime.UtcNow);
+        }
+
+        internal static JObject Create(
+            string toolName,
+            string projectPath,
+            JObject before,
+            JObject operation,
+            TimeSpan timeout)
+        {
+            if (string.IsNullOrWhiteSpace(toolName))
+            {
+                throw new ArgumentException("toolName is required.", nameof(toolName));
+            }
+            if (before == null)
+            {
+                throw new ArgumentNullException(nameof(before));
+            }
+            if (timeout <= TimeSpan.Zero)
+            {
+                throw new ArgumentOutOfRangeException(nameof(timeout));
+            }
+
+            lock (Sync)
+            {
+                SweepLocked(DateTime.UtcNow);
+                string jobId = null;
+                for (var attempt = 0; attempt < 3; attempt += 1)
+                {
+                    var candidate = Guid.NewGuid().ToString("N").ToLowerInvariant();
+                    if (LoadRecordLocked(candidate) == null)
+                    {
+                        jobId = candidate;
+                        break;
+                    }
+                }
+                if (string.IsNullOrEmpty(jobId))
+                {
+                    throw new InvalidOperationException("Unable to allocate a unique async job id.");
+                }
+
+                var now = DateTime.UtcNow;
+                var record = new JObject
+                {
+                    ["schema"] = Schema,
+                    ["job_id"] = jobId,
+                    ["tool"] = toolName,
+                    ["project_path"] = projectPath ?? string.Empty,
+                    ["status"] = "queued",
+                    ["before"] = before.DeepClone(),
+                    ["after"] = JValue.CreateNull(),
+                    ["error"] = JValue.CreateNull(),
+                    ["created_utc"] = now.ToString("O"),
+                    ["started_utc"] = JValue.CreateNull(),
+                    ["completed_utc"] = JValue.CreateNull(),
+                    ["expires_utc"] = now.Add(timeout).ToString("O"),
+                    ["purge_after_utc"] = JValue.CreateNull(),
+                    ["operation"] = operation == null ? new JObject() : operation.DeepClone(),
+                };
+                SaveRecordLocked(record);
+                return PublicPayload(record);
+            }
+        }
+
+        internal static JObject MarkRunning(string jobId)
+        {
+            lock (Sync)
+            {
+                var record = LoadRequiredMutableLocked(jobId);
+                if (IsTerminal(record.Value<string>("status")))
+                {
+                    return PublicPayload(record);
+                }
+                if (string.Equals(record.Value<string>("status"), "queued", StringComparison.Ordinal))
+                {
+                    record["status"] = "running";
+                    record["started_utc"] = DateTime.UtcNow.ToString("O");
+                    SaveRecordLocked(record);
+                }
+                return PublicPayload(record);
+            }
+        }
+
+        internal static JObject Complete(string jobId, Func<JObject> readAfter)
+        {
+            if (readAfter == null)
+            {
+                throw new ArgumentNullException(nameof(readAfter));
+            }
+            var after = readAfter();
+            if (after == null)
+            {
+                throw new InvalidOperationException("Async job after readback returned null.");
+            }
+            return SetTerminal(jobId, "done", after, null);
+        }
+
+        internal static JObject Fail(
+            string jobId,
+            string code,
+            string message,
+            bool retryable,
+            Func<JObject> readAfter = null)
+        {
+            JObject after = null;
+            if (readAfter != null)
+            {
+                try
+                {
+                    after = readAfter();
+                }
+                catch
+                {
+                    after = null;
+                }
+            }
+            var error = new JObject
+            {
+                ["code"] = string.IsNullOrWhiteSpace(code) ? "async_job_failed" : code,
+                ["message"] = message ?? string.Empty,
+                ["retryable"] = retryable,
+            };
+            return SetTerminal(jobId, "failed", after, error);
+        }
+
+        internal static JObject Poll(string jobId)
+        {
+            lock (Sync)
+            {
+                SweepLocked(DateTime.UtcNow);
+                var record = LoadRecordLocked(NormalizeJobId(jobId));
+                return record == null ? null : PublicPayload(record);
+            }
+        }
+
+        internal static JObject ReadOperation(string jobId)
+        {
+            lock (Sync)
+            {
+                var record = LoadRecordLocked(NormalizeJobId(jobId));
+                return record?["operation"] is JObject operation
+                    ? (JObject)operation.DeepClone()
+                    : null;
+            }
+        }
+
+        internal static void SetActive(string toolName, string jobId)
+        {
+            SessionState.SetString(ActivePrefix + toolName, NormalizeJobId(jobId));
+        }
+
+        internal static string GetActive(string toolName)
+        {
+            return NormalizeJobId(SessionState.GetString(ActivePrefix + toolName, string.Empty));
+        }
+
+        internal static void ClearActive(string toolName, string jobId)
+        {
+            var key = ActivePrefix + toolName;
+            if (string.Equals(SessionState.GetString(key, string.Empty), NormalizeJobId(jobId), StringComparison.Ordinal))
+            {
+                SessionState.EraseString(key);
+            }
+        }
+
+        internal static void Sweep(DateTime utcNow)
+        {
+            lock (Sync)
+            {
+                SweepLocked(utcNow);
+            }
+        }
+
+        internal static bool IsValidJobId(string value)
+        {
+            Guid parsed;
+            return !string.IsNullOrWhiteSpace(value)
+                && Guid.TryParseExact(value.Trim(), "N", out parsed);
+        }
+
+        private static JObject SetTerminal(string jobId, string status, JObject after, JObject error)
+        {
+            lock (Sync)
+            {
+                var record = LoadRequiredMutableLocked(jobId);
+                if (IsTerminal(record.Value<string>("status")))
+                {
+                    return PublicPayload(record);
+                }
+                var now = DateTime.UtcNow;
+                record["status"] = status;
+                record["after"] = after == null ? JValue.CreateNull() : after.DeepClone();
+                record["error"] = error == null ? JValue.CreateNull() : error.DeepClone();
+                record["completed_utc"] = now.ToString("O");
+                record["purge_after_utc"] = now.Add(TerminalRetention).ToString("O");
+                SaveRecordLocked(record);
+                ClearActive(record.Value<string>("tool"), record.Value<string>("job_id"));
+                return PublicPayload(record);
+            }
+        }
+
+        private static JObject LoadRequiredMutableLocked(string jobId)
+        {
+            var normalized = NormalizeJobId(jobId);
+            var record = LoadRecordLocked(normalized);
+            if (record == null)
+            {
+                throw new InvalidOperationException("Async job was not found: " + normalized);
+            }
+            return record;
+        }
+
+        private static void SweepLocked(DateTime utcNow)
+        {
+            var retained = new List<string>();
+            foreach (var jobId in LoadIndexLocked())
+            {
+                var record = LoadRecordLocked(jobId);
+                if (record == null)
+                {
+                    continue;
+                }
+                var status = record.Value<string>("status") ?? string.Empty;
+                if (!IsTerminal(status)
+                    && TryReadUtc(record.Value<string>("expires_utc"), out var deadline)
+                    && utcNow >= deadline)
+                {
+                    record["status"] = "expired";
+                    record["after"] = JValue.CreateNull();
+                    record["error"] = new JObject
+                    {
+                        ["code"] = "job_expired",
+                        ["message"] = "Async job exceeded its bounded execution window.",
+                        ["retryable"] = false,
+                    };
+                    record["completed_utc"] = utcNow.ToString("O");
+                    record["purge_after_utc"] = utcNow.Add(TerminalRetention).ToString("O");
+                    SaveRecordValue(record);
+                    ClearActive(record.Value<string>("tool"), jobId);
+                    status = "expired";
+                }
+                if (IsTerminal(status)
+                    && TryReadUtc(record.Value<string>("purge_after_utc"), out var purgeAfter)
+                    && utcNow >= purgeAfter)
+                {
+                    SessionState.EraseString(RecordPrefix + jobId);
+                    continue;
+                }
+                retained.Add(jobId);
+            }
+            SaveIndexLocked(retained);
+        }
+
+        private static JObject LoadRecordLocked(string jobId)
+        {
+            if (!IsValidJobId(jobId))
+            {
+                return null;
+            }
+            var raw = SessionState.GetString(RecordPrefix + jobId, string.Empty);
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+            try
+            {
+                var record = JObject.Parse(raw);
+                var status = record.Value<string>("status") ?? string.Empty;
+                return string.Equals(record.Value<string>("schema"), Schema, StringComparison.Ordinal)
+                    && string.Equals(record.Value<string>("job_id"), jobId, StringComparison.Ordinal)
+                    && (status == "queued" || status == "running" || IsTerminal(status))
+                    ? record
+                    : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void SaveRecordLocked(JObject record)
+        {
+            SaveRecordValue(record);
+            var jobId = record.Value<string>("job_id");
+            var index = LoadIndexLocked();
+            if (!index.Contains(jobId))
+            {
+                index.Add(jobId);
+                SaveIndexLocked(index);
+            }
+        }
+
+        private static void SaveRecordValue(JObject record)
+        {
+            SessionState.SetString(
+                RecordPrefix + record.Value<string>("job_id"),
+                record.ToString(Newtonsoft.Json.Formatting.None));
+        }
+
+        private static List<string> LoadIndexLocked()
+        {
+            var raw = SessionState.GetString(IndexKey, string.Empty);
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return new List<string>();
+            }
+            try
+            {
+                return JArray.Parse(raw)
+                    .Values<string>()
+                    .Select(NormalizeJobId)
+                    .Where(IsValidJobId)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+            }
+            catch
+            {
+                SessionState.EraseString(IndexKey);
+                return new List<string>();
+            }
+        }
+
+        private static void SaveIndexLocked(IEnumerable<string> jobIds)
+        {
+            var retained = jobIds.Where(IsValidJobId).Distinct(StringComparer.Ordinal).ToArray();
+            if (retained.Length == 0)
+            {
+                SessionState.EraseString(IndexKey);
+                return;
+            }
+            SessionState.SetString(IndexKey, JArray.FromObject(retained).ToString(Newtonsoft.Json.Formatting.None));
+        }
+
+        private static JObject PublicPayload(JObject record)
+        {
+            var payload = new JObject
+            {
+                ["job_id"] = record["job_id"]?.DeepClone() ?? JValue.CreateNull(),
+                ["before"] = record["before"]?.DeepClone() ?? new JObject(),
+                ["after"] = record["after"]?.DeepClone() ?? JValue.CreateNull(),
+                ["status"] = record["status"]?.DeepClone() ?? new JValue("failed"),
+            };
+            if (record["error"] != null && record["error"].Type != JTokenType.Null)
+            {
+                payload["error"] = record["error"].DeepClone();
+            }
+            return payload;
+        }
+
+        private static bool IsTerminal(string status)
+        {
+            return status == "done" || status == "failed" || status == "expired";
+        }
+
+        private static string NormalizeJobId(string value)
+        {
+            return (value ?? string.Empty).Trim().ToLowerInvariant();
+        }
+
+        private static bool TryReadUtc(string value, out DateTime parsed)
+        {
+            return DateTime.TryParse(
+                value,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.RoundtripKind,
+                out parsed);
+        }
+    }
+
+    [VRCForgeCommand(
+        toolId: "vrc_poll_job",
+        Summary = "When to use: poll a job_id returned by an asynchronous VRCForge Unity tool. When NOT to use: do not start or retry writes, and do not treat a missing job after Editor restart as completion.",
+        Access = VRCForgeCommandAccess.ReadOnly,
+        Category = "diagnostics"
+    )]
+    public static class AsyncJobPollTool
+    {
+        public class Parameters
+        {
+            [VRCForgeInput("Exact async job id returned by the initiating tool.")]
+            public string job_id { get; set; } = string.Empty;
+        }
+
+        public static object HandleCommand(JObject @params)
+        {
+            var jobId = (@params?["job_id"]?.ToString() ?? string.Empty).Trim().ToLowerInvariant();
+            if (!UnityAsyncJobRegistry.IsValidJobId(jobId))
+            {
+                return VRCForgeToolResult.FailedWithCode(
+                    "job_id_invalid",
+                    "job_id must be exactly 32 hexadecimal characters.",
+                    new { job_id = jobId });
+            }
+
+            var payload = UnityAsyncJobRegistry.Poll(jobId);
+            if (payload == null)
+            {
+                payload = new JObject
+                {
+                    ["job_id"] = jobId,
+                    ["before"] = JValue.CreateNull(),
+                    ["after"] = JValue.CreateNull(),
+                    ["status"] = "failed",
+                    ["error"] = new JObject
+                    {
+                        ["code"] = "job_not_found",
+                        ["message"] = "Async job was not found in this Unity Editor session.",
+                        ["retryable"] = false,
+                    },
+                };
+            }
+            return VRCForgeToolResult.Completed("Read async Unity job state.", payload);
         }
     }
 }
